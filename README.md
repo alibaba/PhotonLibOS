@@ -2,9 +2,9 @@
 
 ## Overview
 
-Photon is a high-efficiency app framework, based on a set of carefully selected C++ libs.
+Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
-Our goal is to make programs run as fast and lightweight as the photon particle, which exactly is the name came from.
+By connecting user apps and the operating system, it helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the name came from.
 
 ## Features
 * Coroutine lib (support multi-core)
@@ -28,11 +28,11 @@ Compare Photon and fio when reading an NVMe raw device.
 
 Note that fio only enables 1 job (process).
 
-|        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO |   QPS    | Throughput | CPU util |
-|:------:|:---------:|:---------:|:-------:|:--------:|:--------:|:--------:|:----------:|:--------:|
-| Photon | io_uring  | Rand-read |   4KB   |   128    |   Yes    | **433K** | **1.73GB** |   100%   |
-| Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | **346K** | **1.38GB** |   100%   |
-|  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | **279K** | **1.11GB** |   100%   |
+|        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO | QPS  | Throughput | CPU util |
+|:------:|:---------:|:---------:|:-------:|:--------:|:--------:|:----:|:----------:|:--------:|
+| Photon | io_uring  | Rand-read |   4KB   |   128    |   Yes    | 433K |   1.73GB   |   100%   |
+| Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 346K |   1.38GB   |   100%   |
+|  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K |   1.11GB   |   100%   |
 
 Conclusion: Photon is faster than fio under this circumstance.
 
@@ -44,11 +44,11 @@ Compare Photon and boost::asio when running as TCP echo servers.
 
 Set up 16 clients, with 16 connections per client, to give the maximum stress.
 
-|                            |     Concurrency Model     | Buffer Size |   QPS    | Bandwidth  | CPU util |
-|:--------------------------:|:-------------------------:|:-----------:|:--------:|:----------:|:--------:|
-|           Photon           | Photon Stackful Coroutine |     4KB     | **502K** | **15.3Gb** |   100%   |
-| boost::asio + async_simple | C++20 Stackless Coroutine |     4KB     | **201K** | **6.4Gb**  |   100%   |
-|        boost::asio         |     Async + Callback      |     4KB     | **269K** | **6.8Gb**  |   100%   |
+|                            |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
+|:--------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
+|           Photon           | Photon Stackful Coroutine |     4KB     | 502K |  15.3Gb   |   100%   |
+| boost::asio + async_simple | C++20 Stackless Coroutine |     4KB     | 201K |   6.4Gb   |   100%   |
+|        boost::asio         |     Async + Callback      |     4KB     | 269K |   6.8Gb   |   100%   |
 
 Note:
 - boost::asio is a typical async + callback framework, which means you are not able to write sync style code.
@@ -61,10 +61,10 @@ Compare Photon and Nginx when serving static files, using Apache Bench(ab) as cl
 
 Note that Nginx only enables 1 worker (process).
 
-|        | File Size |   QPS    | CPU util |
-|:------:|:---------:|:--------:|:--------:|
-| Photon |    4KB    | **114K** |   100%   |
-| Nginx  |    4KB    | **97K**  |   100%   |
+|        | File Size | QPS  | CPU util |
+|:------:|:---------:|:----:|:--------:|
+| Photon |    4KB    | 114K |   100%   |
+| Nginx  |    4KB    | 97K  |   100%   |
 
 Conclusion: Photon is faster than Nginx under this circumstance.
 
