@@ -1,0 +1,25 @@
+# build
+/build/
+
+# vscode
+/.vscode/
+
+# clion
+/.idea/
+/cmake-build-debug/
+
+# clangd
+/.clang_complete
+/.ccls*
+/.cquery*
+
+# alimake
+/.dep_create/
+
+# ctags / gtags
+/tags
+/TAGS
+/GTAGS
+/GRTAGS
+/GSYMS
+/GPATH

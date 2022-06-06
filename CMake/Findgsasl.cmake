@@ -1,0 +1,8 @@
+find_path(GSASL_INCLUDE_DIR gsasl.h)
+
+find_library(GSASL_LIBRARIES gsasl)
+
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(gsasl DEFAULT_MSG GSASL_LIBRARIES GSASL_INCLUDE_DIR)
+
+mark_as_advanced(GSASL_INCLUDE_DIR GSASL_LIBRARIES)
