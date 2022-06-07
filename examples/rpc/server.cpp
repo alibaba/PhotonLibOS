@@ -79,7 +79,7 @@ int ExampleServer::do_rpc_service(ReadBuffer::Request* req,
 int ExampleServer::do_rpc_service(WriteBuffer::Request* req,
                                   WriteBuffer::Response* resp, IOVector* iov,
                                   IStream*) {
-    auto fd = ::open(req->fn.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
+    auto fd = ::open(req->fn.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
         resp->ret = -errno;
         return 0;
