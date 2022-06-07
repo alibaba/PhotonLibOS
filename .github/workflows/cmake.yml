@@ -32,7 +32,7 @@ jobs:
     - name: Build
       working-directory: ${{github.workspace}}/build    
       shell: bash
-      run: make
+      run: make VERBOSE=1
 
     - name: Test
       working-directory: ${{github.workspace}}/build
