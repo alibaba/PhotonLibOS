@@ -103,6 +103,11 @@ namespace net
     {
     public:
         virtual ~ISocket() = default;
+        int get_underlay_fd() {
+            auto ret = get_underlay_object(-1);
+            return ret ? (int)(uint64_t)ret : -1;
+        }
+        virtual Object* get_underlay_object(int i = 0) = 0;
 
         virtual int setsockopt(int level, int option_name,
                 const void *option_value, socklen_t option_len) = 0;
@@ -192,6 +197,7 @@ namespace net
     extern "C" ISocketServer* new_socket_server_iouring();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
+    extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration=-1UL);
 }
 }
 

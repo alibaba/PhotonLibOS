@@ -59,6 +59,10 @@ ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
 
 ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, uint64_t timeout = -1);
 
+ssize_t send2(int fd, const void *buf, size_t count, int flag, uint64_t timeout =-1);
+
+ssize_t sendv2(int fd, const struct iovec *iov, int iovcnt, int flag, uint64_t timeout =-1);
+
 ssize_t send2_n(int fd, const void *buf, size_t count, int flag, uint64_t timeout =-1);
 
 ssize_t sendv2_n(int fd, struct iovec *iov, int iovcnt, int flag, uint64_t timeout =-1);

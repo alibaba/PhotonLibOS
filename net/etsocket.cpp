@@ -195,6 +195,7 @@ public:
         fd = -1;
         return ret;
     }
+    virtual Object* get_underlay_object(int) override { return (Object*)(uint64_t)fd; }
     typedef int (*Getter)(int sockfd, struct sockaddr* addr,
                           socklen_t* addrlen);
 
@@ -305,7 +306,7 @@ public:
     virtual ~ETKernelSocketStream() {
         if (fd > 0) shutdown(ShutdownHow::ReadWrite);
     }
-
+    virtual Object* get_underlay_object(int) override { return (Object*)(uint64_t)fd; }
     virtual ssize_t read(void* buf, size_t count) override {
         photon::scoped_lock lock(m_rmutex);
         auto b = buf;
@@ -420,7 +421,7 @@ public:
                            socklen_t option_len) override {
         return opts.put_opt(level, option_name, option_value, option_len);
     }
-
+    virtual Object* get_underlay_object(int) override { return (Object*)-1UL; }
     ETKernelSocket* create_socket() {
         auto sock = new ETKernelSocketStream(m_socket_family, m_autoremove);
         if (sock->fd < 0)
@@ -537,6 +538,7 @@ public:
 
     virtual uint64_t timeout() override { return m_timeout; }
     virtual void timeout(uint64_t tm) override { m_timeout = tm; }
+    virtual Object* get_underlay_object(int) override { return (Object*)(uint64_t)fd; }
 
     virtual int start_loop(bool block) override {
         if (workth) LOG_ERROR_RETURN(EALREADY, -1, "Already listening");

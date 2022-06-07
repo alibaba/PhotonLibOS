@@ -408,6 +408,9 @@ public:
     }
     virtual uint64_t timeout() override { return underlay_stream->timeout(); }
     virtual void timeout(uint64_t tm) override { underlay_stream->timeout(tm); }
+    virtual Object* get_underlay_object(int level) override {
+        return level ? underlay_stream->get_underlay_object(level - 1) : nullptr;
+    }
 };
 
 net::ISocketStream* new_tls_stream(TLSContext* ctx, net::ISocketStream* base,
@@ -432,6 +435,9 @@ public:
         if (ownership) {
             delete underlay;
         }
+    }
+    virtual Object* get_underlay_object(int level) override {
+        return level ? underlay->get_underlay_object(level - 1) : nullptr;
     }
     virtual net::ISocketStream* connect(const net::EndPoint& ep) override {
         return new_tls_stream(ctx, underlay->connect(ep), SecurityRole::Client,
@@ -490,6 +496,9 @@ public:
         if (ownership) {
             delete underlay;
         }
+    }
+    virtual Object* get_underlay_object(int level) override {
+        return level ? underlay->get_underlay_object(level - 1) : nullptr;
     }
     virtual net::ISocketStream* accept() override {
         return new_tls_stream(ctx, underlay->accept(), SecurityRole::Server,

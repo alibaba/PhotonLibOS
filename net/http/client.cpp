@@ -37,83 +37,31 @@ static constexpr char USERAGENT[] = "EASE/0.21.6";
 static constexpr size_t SKIP_LIMIT = 4 * 1024;
 static constexpr size_t LINE_BUFFER_SIZE = 4 * 1024;
 
-class PooledSocketStream;
-class StreamList {
-public:
-    std::queue<std::unique_ptr<ISocketStream>> m_list;
-    ISocketStream* release_back(){
-        auto sock = m_list.front().release();
-        m_list.pop();
-        return sock;
-    }
-    bool empty() { return m_list.empty(); }
-    void emplace_back(ISocketStream* sock) {
-        m_list.emplace(sock);
-    }
-    size_t size() { return m_list.size(); }
-};
-
-static StreamList* StreamList_ctor(){
-            return new StreamList;
-        };
 class PooledDialer {
 public:
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
 
-    ObjectCache<EndPoint, StreamList*> pool;
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
     PooledDialer()
-        : tcpsock(new_tcp_socket_client()),
-          tlssock(new_tls_socket_client()),
-          pool(kMinimalStreamLife) {
-          }
-    PooledSocketStream* dial(std::string_view host, uint16_t port, bool secure,
-                             bool &is_new_connection, uint64_t timeout = -1UL);
+        : tcpsock(new_tcp_socket_pool(new_tcp_socket_client())),
+          tlssock(new_tcp_socket_pool(new_tls_socket_client())) {}
+    ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
+                             uint64_t timeout = -1UL);
 
     template <typename T>
-    PooledSocketStream* dial(T x, bool &is_new_connection, uint64_t timeout = -1UL) {
-        return dial(x.host(), x.port(), x.secure(), is_new_connection, timeout);
+    ISocketStream* dial(T x, uint64_t timeout = -1UL) {
+        return dial(x.host(), x.port(), x.secure(), timeout);
     }
-
-    void release(const EndPoint& ep, ISocketStream* sock) {
-        auto lsock = pool.acquire(ep, StreamList_ctor);
-        lsock->emplace_back(sock);
-        pool.release(ep);
-    }
-};
-
-class PooledSocketStream {
-public:
-    EndPoint ep;
-    ISocketStream* sock;
-    PooledDialer* dialer;
-    bool closed = false;
-    explicit PooledSocketStream(EndPoint ep, ISocketStream* sock,
-                                PooledDialer* pool)
-        : ep(ep), sock(sock), dialer(pool) {}
-    ~PooledSocketStream() {
-        LOG_DEBUG("Release connection to ` `", ep, VALUE(closed));
-        if (!closed) {
-            dialer->release(ep, sock);
-        } else {
-            delete sock;
-        }
-    }
-    int close() {
-        closed = true;
-        return 0;
-    }
-    void timeout(uint64_t tm) { sock->timeout(tm); }
 };
 
 class ResponseStream : public IStream {
 public:
-    PooledSocketStream *m_stream;
+    ISocketStream *m_stream;
     char* m_partial_body_buf;
     size_t m_partial_body_remain, m_body_remain;
     bool m_abandon = false;
-    ResponseStream(PooledSocketStream *stream, std::string_view body,
+    ResponseStream(ISocketStream *stream, std::string_view body,
                    size_t body_remain, bool abandon) : m_stream(stream),
                    m_partial_body_buf((char*)body.data()),
                    m_partial_body_remain(body.size()),
@@ -121,7 +69,7 @@ public:
     ~ResponseStream() {
         auto stream_remain = m_body_remain - m_partial_body_remain;
         if (stream_remain > SKIP_LIMIT || m_abandon) m_stream->close();
-        if (!m_stream->closed && stream_remain && !m_stream->sock->skip_read(stream_remain)) m_stream->close();
+        if (stream_remain && !m_stream->skip_read(stream_remain)) m_stream->close();
         delete m_stream;
     }
     int close() override {
@@ -141,7 +89,7 @@ public:
             ret += read_from_remain;
         }
         if (count > 0) {
-            auto r = m_stream->sock->read(buf, count);
+            auto r = m_stream->read(buf, count);
             if (r < 0)
                 return r;
             m_body_remain -= r;
@@ -170,7 +118,7 @@ public:
     char *m_get_line_buf;
     size_t m_chunked_remain = 0, m_line_size = 0, m_cursor = 0;
     bool m_finish = false;
-    ChunkedResponseStream(PooledSocketStream *stream, std::string_view body,
+    ChunkedResponseStream(ISocketStream *stream, std::string_view body,
                    size_t body_remain, bool abandon = false) :
                    ResponseStream(stream, body, body_remain, abandon) {
         m_line_size = body.size();
@@ -199,7 +147,7 @@ public:
         if (body_remain > 0) {
             char tmp_buf[4];
             auto ret =
-                m_stream->sock->read(tmp_buf, body_remain);
+                m_stream->read(tmp_buf, body_remain);
             if (ret != (ssize_t)body_remain) m_stream->close();
         }
         return true;
@@ -232,7 +180,7 @@ public:
     }
     ssize_t read_from_stream(void* &buf, size_t &count) {
         auto read_from_chunked_cnt = std::min(count, m_chunked_remain);
-        auto r = m_stream->sock->read(buf, read_from_chunked_cnt);
+        auto r = m_stream->read(buf, read_from_chunked_cnt);
         if (r < 0) return r;
         buf = (char*)buf + r;
         m_chunked_remain -= r;
@@ -243,7 +191,7 @@ public:
         bool get_line_finish = false;
         while (!get_line_finish && !m_finish) {
             assert(m_line_size != LINE_BUFFER_SIZE);
-            auto r = m_stream->sock->recv(m_get_line_buf + m_line_size,
+            auto r = m_stream->recv(m_get_line_buf + m_line_size,
                                             LINE_BUFFER_SIZE - m_line_size);
             if (r < 0) return r;
             m_line_size += r;
@@ -270,7 +218,7 @@ public:
         return ret;
     }
 };
-PooledSocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, bool &is_new_connection, uint64_t timeout) {
+ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
     LOG_DEBUG("Dial to `", host);
     std::string strhost(host);
     std::vector<IPAddr> hosts;
@@ -281,9 +229,6 @@ PooledSocketStream* PooledDialer::dial(std::string_view host, uint16_t port, boo
         auto h = hosts[idx];
         EndPoint ep(h, port);
         LOG_DEBUG("Connecting ` ssl: `", ep, secure);
-        auto lsock = pool.acquire(ep, StreamList_ctor);
-        DEFER(pool.release(ep));
-        if (lsock->empty()) {
             ISocketStream* sock = nullptr;
             if (secure) {
                 tlssock->timeout(timeout);
@@ -294,19 +239,9 @@ PooledSocketStream* PooledDialer::dial(std::string_view host, uint16_t port, boo
             }
             if (sock) {
                 LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
-                is_new_connection = true;
-                return new PooledSocketStream(ep, sock, this);
+                return sock;
             }
             LOG_DEBUG("connect ssl : ` ep : `  host : ` failed, try others", secure, ep, host);
-        }
-        if (!lsock->empty()) {
-            auto sock = lsock->release_back();
-            if (sock) {
-                is_new_connection = false;
-                LOG_DEBUG("Get connection ` for request to `", sock, host);
-                return new PooledSocketStream(ep, sock, this);
-            }
-        }
     }
     LOG_DEBUG("No connectable resolve result");
     return nullptr;
@@ -337,18 +272,19 @@ public:
     ICookieJar *m_cookie_jar;
     Client_impl(ICookieJar *cookie_jar) :
         m_cookie_jar(cookie_jar) {}
-    struct deleter {
-        void operator() (PooledSocketStream *s) {
-            s->close();
-            delete s;
-        }
-    };
-    using PooledSocketStream_ptr = std::unique_ptr<PooledSocketStream, deleter>;
+    // struct deleter {
+    //     void operator() (ISocketStream *s) {
+    //         s->close();
+    //         delete s;
+    //     }
+    // };
+    using PooledSocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op, PooledSocketStream_ptr &sock) {
         auto stream_remain = op->resp.content_length() - op->resp.partial_body().size();
         if (!op->resp["Content-Length"].empty() &&
-                stream_remain <= SKIP_LIMIT && sock->sock->skip_read(stream_remain)) {
-            delete sock.release(); // put it back to pool, by not closing it
+                stream_remain <= SKIP_LIMIT && sock->skip_read(stream_remain)) {
+            // delete sock.release(); // put it back to pool, by not closing it
+            sock.reset();
         }
 
         auto location = op->resp["Location"];
@@ -383,10 +319,9 @@ public:
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
-        bool is_new_connection;
         auto s = (m_proxy && !m_proxy_url.empty())
-                     ? m_dialer.dial(m_proxy_url, is_new_connection, tmo.timeout())
-                     : m_dialer.dial(req, is_new_connection, tmo.timeout());
+                     ? m_dialer.dial(m_proxy_url, tmo.timeout())
+                     : m_dialer.dial(req, tmo.timeout());
         if (!s) LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
         PooledSocketStream_ptr sock(s);
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
@@ -394,17 +329,15 @@ public:
         auto whole = req.whole();
         // LOG_DEBUG(VALUE(whole));
         auto req_size = whole.size();
-        if (sock->sock->write(whole.data(), req_size) != (ssize_t)req_size) {
-            if (is_new_connection) {
-                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
-            } else {
-                LOG_DEBUG("abondon reseted connection, force retry");
-                return ROUNDTRIP_FORCE_RETRY;
-            }
+        if (sock->write(whole.data(), req_size) != (ssize_t)req_size) {
+            sock->close();
+            LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
         }
         sock->timeout(tmo.timeout());
-        if (op->req_body_writer(sock->sock) < 0)
+        if (op->req_body_writer(sock.get()) < 0) {
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "ReqBodyCallback failed");
+            sock->close();
+        }
         LOG_DEBUG("Request sent, wait for response ` `", req.verb(),
                   req.target());
         auto space = req.get_remain_space();
@@ -417,12 +350,9 @@ public:
         }
         while (1) {
             sock->timeout(tmo.timeout());
-            auto ret = resp.append_bytes(sock->sock);
+            auto ret = resp.append_bytes(sock.get());
             if (ret < 0) {
-                if ((errno == ECONNRESET) && !is_new_connection) {
-                    LOG_DEBUG("abondon reseted connection, force retry");
-                    return ROUNDTRIP_FORCE_RETRY;
-                }
+                sock->close();
                 LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY,
                                  "read response header failed");
             }
@@ -442,6 +372,7 @@ public:
         }
         if (resp["Transfer-Encoding"] == "chunked") {
             if (resp.space_remain() < LINE_BUFFER_SIZE) {
+                sock->close();
                 LOG_ERROR_RETURN(ENOBUFS, ROUNDTRIP_FAILED, "run out of buffer");
             }
             op->resp_body.reset(new ChunkedResponseStream(sock.release(), resp.partial_body(),

@@ -301,6 +301,9 @@ public:
     virtual ~TLSSocketImpl() override {
         close();
     }
+    virtual Object* get_underlay_object(int) override {
+        return (Object*)(uint64_t)fd;
+    }
     virtual int close() override {
         if (m_ssl) {
             SSL_shutdown(m_ssl);
@@ -505,6 +508,10 @@ public:
     TLSSocketServer() : TLSSocketImpl(), workth(nullptr) {}
     virtual ~TLSSocketServer() { terminate(); }
 
+    virtual Object* get_underlay_object(int) override {
+        return (Object*)(uint64_t)fd;
+    }
+
     virtual int start_loop(bool block) override {
         if (workth) LOG_ERROR_RETURN(EALREADY, -1, "Already listening");
         if (block) return accept_loop();
@@ -567,7 +574,9 @@ public:
                            socklen_t option_len) override {
         return opts.put_opt(level, option_name, option_value, option_len);
     }
-
+    virtual Object* get_underlay_object(int) override {
+        return (Object*)-1UL;
+    }
     TLSSocketImpl* create_socket() {
         auto sock = new TLSSocketImpl();
         if (sock->fd < 0 || sock->m_ssl == nullptr) {

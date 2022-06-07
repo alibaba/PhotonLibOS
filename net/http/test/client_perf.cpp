@@ -83,17 +83,17 @@ inline uint64_t GetSteadyTimeUs() {
         .count() / 1000;
 }
 void curl_thread_entry(result* res) {
-    std::unique_ptr<net::cURL> client(new net::cURL());
-    std::unique_ptr<StringStream> buffer(new StringStream());
-    client->set_redirect(0);
+    net::cURL client;
+    StringStream buffer;
+    client.set_redirect(0);
     std::string target = "http://" + FLAGS_ip + ":" + std::to_string(FLAGS_port);
     for (uint64_t i = 0; i < FLAGS_count; i++) {
         auto t_begin = GetSteadyTimeUs();
-        buffer->clean();
-        client->GET(target.c_str(), buffer.get());
+        buffer.clean();
+        client.GET(target.c_str(), &buffer);
         auto t_end = GetSteadyTimeUs();
-        if (buffer->ptr != FLAGS_body_size) {
-            LOG_ERROR(VALUE(buffer->ptr), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
+        if (buffer.ptr != FLAGS_body_size) {
+            LOG_ERROR(VALUE(buffer.ptr), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
             res->failed = true;
         }
         res->sum_throuput += FLAGS_body_size;
