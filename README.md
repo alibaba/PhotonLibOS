@@ -7,7 +7,7 @@ Photon is a high-efficiency LibOS framework, based on a set of carefully selecte
 By connecting user apps and the operating system, it helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the name came from.
 
 ## Features
-* Coroutine lib (support multi-core)
+* Coroutine library (support multi-core)
 * Async event engine, natively integrated into coroutine scheduling (support epoll or io_uring)
 * Multiple I/O engines: psync, posix_aio, libaio, io_uring
 * Multiple socket implementations: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
