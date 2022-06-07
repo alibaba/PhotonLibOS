@@ -30,9 +30,7 @@ jobs:
       run: cmake -B ${{github.workspace}}/build -D BUILD_TESTING=1 -D CMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
 
     - name: Build
-      working-directory: ${{github.workspace}}/build    
-      shell: bash
-      run: make VERBOSE=1
+      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
     - name: Test
       working-directory: ${{github.workspace}}/build
