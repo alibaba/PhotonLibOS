@@ -58,7 +58,7 @@ int ExampleServer::do_rpc_service(Heartbeat::Request* req,
 int ExampleServer::do_rpc_service(ReadBuffer::Request* req,
                                   ReadBuffer::Response* resp, IOVector* iov,
                                   IStream*) {
-    auto fd = ::open(req->fn.c_str(), O_RDONLY);
+    auto fd = ::open(req->fn.c_str(), O_RDONLY, 0644);
     if (fd < 0) {
         resp->ret = -errno;
         return 0;
