@@ -22,6 +22,9 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/PMF.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+
 struct Delegate_Base { };
 
 // This is a functor class that represents either a plain function of
@@ -162,3 +165,5 @@ inline int __Examples_of_Callback(void*, int, double, long)
 
     return 0;
 }
+
+#pragma GCC diagnostic pop

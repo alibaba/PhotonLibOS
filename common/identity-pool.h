@@ -22,6 +22,9 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/thread/list.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+
 class IdentityPoolBase: public intrusive_list_node<IdentityPoolBase> {
 public:
     typedef Callback<void**> Constructor;
@@ -142,7 +145,6 @@ void delete_identity_pool(IdentityPool0<T>* p)
 {
     IdentityPool0<T>::delete_identity_pool(p);
 }
-
 inline void __example_of_identity_pool__()
 {
     IdentityPool<int, 32> pool;
@@ -150,3 +152,4 @@ inline void __example_of_identity_pool__()
     pool.put(x);
 }
 
+#pragma GCC diagnostic pop
