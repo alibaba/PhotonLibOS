@@ -37,9 +37,6 @@ if (${CMAKE_VERSION} VERSION_LESS 3.14)
     endmacro()
 endif ()
 
-add_subdirectory(examples)
-add_subdirectory(third_party)
-
 # Find packages either from cmake-modules or external packages
 find_package(ZLIB REQUIRED)
 find_package(CURL REQUIRED)
@@ -49,7 +46,6 @@ find_package(aio REQUIRED)
 find_package(fuse REQUIRED)
 find_package(krb5 REQUIRED)
 find_package(gsasl REQUIRED)
-find_package(gflags REQUIRED)
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -110,9 +106,9 @@ target_include_directories(photon_obj PUBLIC include ${liburing_include_dir} ${b
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 target_compile_options(photon_obj PRIVATE -Wall)
 
-# Make virtual interface for third-party dynamic libs
-add_library(third_party INTERFACE)
-target_link_libraries(third_party INTERFACE
+# Make virtual interface for external dynamic libs
+add_library(external_lib INTERFACE)
+target_link_libraries(external_lib INTERFACE
         ZLIB::ZLIB
         CURL::libcurl
         OpenSSL::SSL
@@ -133,23 +129,26 @@ target_link_libraries(
         uring
         easy_weak
         -Wl,--no-whole-archive
-        third_party
+        external_lib
 )
+
+add_subdirectory(third_party)
 
 # Build test cases
 if (BUILD_TESTING)
-    enable_testing()
     include(CTest)
 
     find_package(GTest REQUIRED)
     find_package(gmock REQUIRED)
+    find_package(gflags REQUIRED)
 
     set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
 
+    add_subdirectory(examples)
+    add_subdirectory(fs/test)
     add_subdirectory(io/test)
-    add_subdirectory(thread/test)
-    add_subdirectory(rpc/test)
     add_subdirectory(net/test)
     add_subdirectory(net/http/test)
-    add_subdirectory(fs/test)
+    add_subdirectory(rpc/test)
+    add_subdirectory(thread/test)
 endif ()
