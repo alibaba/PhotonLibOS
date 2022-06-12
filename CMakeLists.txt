@@ -10,9 +10,14 @@ project(
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED on)
 set(CMAKE_CXX_EXTENSIONS off)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32 -msse4.2 -fPIC")
+set(CMAKE_CXX_FLAGS "-mcrc32 -msse4.2 -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+
+set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
+set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
+set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
@@ -37,15 +42,17 @@ if (${CMAKE_VERSION} VERSION_LESS 3.14)
     endmacro()
 endif ()
 
-# Find packages either from cmake-modules or external packages
+# Find packages either from cmake-modules or external packages(in CMake dir)
+find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(CURL REQUIRED)
-find_package(OpenSSL REQUIRED)
-
 find_package(aio REQUIRED)
-find_package(fuse REQUIRED)
-find_package(krb5 REQUIRED)
-find_package(gsasl REQUIRED)
+if (ENABLE_FUSE)
+    find_package(fuse REQUIRED)
+endif ()
+if (ENABLE_SASL)
+    find_package(gsasl REQUIRED)
+endif ()
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -83,24 +90,42 @@ FetchContent_MakeAvailable(boost)
 set(boost_include_dir ${boost_SOURCE_DIR})
 
 # Compile photon objects
-file(
-        GLOB PHOTON_SRC
+file(GLOB PHOTON_SRC
         photon.cpp
         common/*.cpp
         common/checksum/*.cpp
         common/executor/*.cpp
         common/memory-stream/*.cpp
         common/stream-messenger/*.cpp
-        fs/*.cpp
+        fs/aligned-file.cpp
+        fs/async_filesystem.cpp
+        fs/exportfs.cpp
+        fs/filecopy.cpp
+        fs/localfs.cpp
+        fs/path.cpp
+        fs/subfs.cpp
+        fs/throttled-file.cpp
+        fs/virtual-file.cpp
+        fs/xfile.cpp
         fs/httpfs/*.cpp
-        io/*.cpp
+        io/aio-wrapper.cpp
+        io/epoll.cpp
+        io/iouring-wrapper.cpp
+        io/signalfd.cpp
         net/*.cpp
         net/http/*.cpp
-        net/security-context/*.cpp
+        net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
         thread/switch_context_${ARCH}.s
-)
+        )
+if (ENABLE_FUSE)
+    list(APPEND io/fuse-adaptor.cpp ${PHOTON_SRC})
+endif ()
+if (ENABLE_SASL)
+    list(APPEND net/security-context/sasl-stream.cpp ${PHOTON_SRC})
+endif ()
+
 add_library(photon_obj OBJECT ${PHOTON_SRC})
 target_include_directories(photon_obj PUBLIC include ${liburing_include_dir} ${boost_include_dir})
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
@@ -108,18 +133,22 @@ target_compile_options(photon_obj PRIVATE -Wall)
 
 # Make virtual interface for external dynamic libs
 add_library(external_lib INTERFACE)
-target_link_libraries(external_lib INTERFACE
+set(EXTERNAL_LIB_ARGS
         ZLIB::ZLIB
-        CURL::libcurl
         OpenSSL::SSL
         OpenSSL::Crypto
+        CURL::libcurl
         ${AIO_LIBRARIES}
-        ${FUSE_LIBRARIES}
-        ${KRB5_LIBRARIES}
-        ${GSASL_LIBRARIES}
         -lrt
         -lpthread
         )
+if (ENABLE_FUSE)
+    list(APPEND ${FUSE_LIBRARIES} ${EXTERNAL_LIB_ARGS})
+endif ()
+if (ENABLE_SASL)
+    list(APPEND ${GSASL_LIBRARIES} ${EXTERNAL_LIB_ARGS})
+endif ()
+target_link_libraries(external_lib INTERFACE ${EXTERNAL_LIB_ARGS})
 
 # Link photon lib
 add_library(photon SHARED $<TARGET_OBJECTS:photon_obj>)
@@ -137,6 +166,10 @@ add_subdirectory(third_party)
 # Build test cases
 if (BUILD_TESTING)
     include(CTest)
+
+    if (NOT ENABLE_FUSE OR NOT ENABLE_SASL)
+        message(FATAL_ERROR "BUILD_TESTING requires to install and enable all dependencies")
+    endif ()
 
     find_package(GTest REQUIRED)
     find_package(gmock REQUIRED)
