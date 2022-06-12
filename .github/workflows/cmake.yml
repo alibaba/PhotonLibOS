@@ -22,12 +22,12 @@ jobs:
     
     - name: Install Dependencies
       shell: bash  
-      run: sudo apt install -y git cmake libssl-dev libcurl4-openssl-dev libaio-dev libfuse-dev libgsasl7-dev libkrb5-dev libgtest-dev libgmock-dev libgflags-dev
+      run: sudo apt install -y git cmake libssl-dev libcurl4-openssl-dev libaio-dev libfuse-dev libgsasl7-dev libgtest-dev libgmock-dev libgflags-dev
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -B ${{github.workspace}}/build -D BUILD_TESTING=1 -D CMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+      run: cmake -B ${{github.workspace}}/build -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
 
     - name: Build
       run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
