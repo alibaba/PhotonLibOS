@@ -51,7 +51,7 @@ Set up 16 clients, with 16 connections per client, to give the maximum stress.
 |        boost::asio         |     Async + Callback      |     4KB     | 269K |   6.8Gb   |   100%   |
 
 Note:
-- boost::asio is a typical async + callback framework, which means you are not able to write sync style code.
+- [boost::asio](https://think-async.com/Asio/) is a typical async + callback framework, which means you are not able to write sync style code.
 - The [async_simple](https://github.com/alibaba/async_simple) project managed to integrate C++20 stackless coroutine into boost::asio.
 - Photon's coroutine is stackful.
 
@@ -75,13 +75,13 @@ Conclusion: Photon is faster than Nginx under this circumstance.
 #### CentOS 8.5
 ```shell
 dnf install gcc-c++ epel-release cmake
-dnf install openssl-devel libcurl-devel libaio-devel fuse-devel libgsasl-devel krb5-devel
+dnf install openssl-devel libcurl-devel libaio-devel
 ```
 
 #### Ubuntu 20.04
 ```shell
 apt install cmake
-apt install libssl-dev libcurl4-openssl-dev libaio-dev libfuse-dev libgsasl7-dev libkrb5-dev
+apt install libssl-dev libcurl4-openssl-dev libaio-dev
 ```
 
 ### 2. Build from source
@@ -96,11 +96,11 @@ All the libs and executables will be saved in `build/output`.
 ```shell
 # CentOS
 dnf config-manager --set-enabled PowerTools
-dnf install gtest-devel gmock-devel gflags-devel
+dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 # Ubuntu
-apt install libgtest-dev libgmock-dev libgflags-dev
+apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
-cmake -D BUILD_TESTING=1 ..
+cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=Debug ..
 make -j
 ctest
 ```
