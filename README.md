@@ -7,8 +7,8 @@ Photon is a high-efficiency LibOS framework, based on a set of carefully selecte
 By connecting user apps and the operating system, it helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the name came from.
 
 ## Features
-* Coroutine lib (support multi-core)
-* Async event engine, natively integrated into coroutine scheduling (support epoll or io_uring)
+* Coroutine library (support multi-thread)
+* Async event engine, natively integrated into coroutine scheduling (support epoll or [io_uring](https://github.com/axboe/liburing))
 * Multiple I/O engines: psync, posix_aio, libaio, io_uring
 * Multiple socket implementations: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
 * A full functionality HTTP client/server (even faster than Nginx)
@@ -24,7 +24,7 @@ and prepared to wrap them into the framework. It is a real killer in the low lev
 
 ### 1. IO
 
-Compare Photon and fio when reading an NVMe raw device.
+Compare Photon and fio when reading an 3.5TB NVMe raw device.
 
 Note that fio only enables 1 job (process).
 
@@ -40,20 +40,27 @@ Conclusion: Photon is faster than fio under this circumstance.
 
 #### 2.1 TCP
 
-Compare Photon and boost::asio when running as TCP echo servers.
-
-Set up 16 clients, with 16 connections per client, to give the maximum stress.
+Compare TCP echo server performance, in descending order.
 
 |                                              |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
 |:--------------------------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
-|                    Photon                    | Photon Stackful Coroutine |     4KB     | 502K |  15.3Gb   |   100%   |
-| [asyncio](https://github.com/netcan/asyncio) | C++20 Stackless Coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
+|                    Photon                    |    Stackful coroutine     |     4KB     | 560K |  17.1Gb   |   100%   |
+| [libgo](https://github.com/yyzybb537/libgo)  |    Stackful coroutine     |     4KB     | 444K |  13.6Gb   |   105%   |
 | [boost::asio](https://think-async.com/Asio/) |     Async + Callback      |     4KB     | 224K |   6.8Gb   |   100%   |
+|  [libco](https://github.com/Tencent/libco)   |    Stackful coroutine     |     4KB     | 182K |   5.6Gb   |   98%    |
+|                Go echo server                |         Goroutine         |     4KB     | 727K |  22.2Gb   |   450%   |
+|  [zab](https://github.com/Donald-Rupin/zab)  | C++20 stackless coroutine |     4KB     | 855K |  26.1Gb   |   530%   |
+| [asyncio](https://github.com/netcan/asyncio) | C++20 stackless coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
+
 
 Note:
+- Set up 16 echo clients(processes), with 16 connections per client, to give the maximum stress.
+- Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs.
 - boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
-- Photon's coroutine is stackful.
-- More projects are being tested. Please wait for the results.
+- Photon's coroutine supports multi-thread. But unlike Go's automatic scheduling, you have to explicitly assign coroutine tasks onto OS threads.
+This test was only meant to compare per-core QPS.
+
+Conclusion: Photon socket has the best per-core QPS.
 
 #### 2.2 HTTP
 
