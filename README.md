@@ -44,16 +44,16 @@ Compare Photon and boost::asio when running as TCP echo servers.
 
 Set up 16 clients, with 16 connections per client, to give the maximum stress.
 
-|                            |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
-|:--------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
-|           Photon           | Photon Stackful Coroutine |     4KB     | 502K |  15.3Gb   |   100%   |
-| boost::asio + async_simple | C++20 Stackless Coroutine |     4KB     | 201K |   6.4Gb   |   100%   |
-|        boost::asio         |     Async + Callback      |     4KB     | 269K |   6.8Gb   |   100%   |
+|                                              |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
+|:--------------------------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
+|                    Photon                    | Photon Stackful Coroutine |     4KB     | 502K |  15.3Gb   |   100%   |
+| [asyncio](https://github.com/netcan/asyncio) | C++20 Stackless Coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
+| [boost::asio](https://think-async.com/Asio/) |     Async + Callback      |     4KB     | 224K |   6.8Gb   |   100%   |
 
 Note:
-- [boost::asio](https://think-async.com/Asio/) is a typical async + callback framework, which means you are not able to write sync style code.
-- The [async_simple](https://github.com/alibaba/async_simple) project managed to integrate C++20 stackless coroutine into boost::asio.
+- boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
 - Photon's coroutine is stackful.
+- More projects are being tested. Please wait for the results.
 
 #### 2.2 HTTP
 
@@ -67,6 +67,10 @@ Note that Nginx only enables 1 worker (process).
 | Nginx  |    4KB    | 97K  |   100%   |
 
 Conclusion: Photon is faster than Nginx under this circumstance.
+
+## Example
+
+See the [example](examples/simple.cpp) about how to write a Photon program.
 
 ## Build
 
@@ -105,12 +109,8 @@ make -j
 ctest
 ```
 
-## Example
-
-See the [example](examples/simple.cpp) about how to write a Photon program.
-
-## Contributing
-Welcome to contribute!
+## Commitment
+TODO: Add our commitment to this project, including history, current status in Alibaba Cloud, and future vision.
 
 ## Licenses
 Photon is released under the Apache License, Version 2.0.

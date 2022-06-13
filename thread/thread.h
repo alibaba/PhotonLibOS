@@ -142,15 +142,23 @@ namespace photon
      */
     int stack_pages_gc(thread* th = CURRENT);
 
-    class spinlock
-    {
+    class spinlock {
     public:
         int lock();
         int try_lock();
         void unlock();
-
     protected:
-        std::atomic_flag _lock = ATOMIC_FLAG_INIT;
+        std::atomic_bool _lock = {false};
+    };
+
+    class ticket_spinlock {
+    public:
+        int lock();
+        int try_lock();
+        void unlock();
+    protected:
+        std::atomic_size_t serv = {0};
+        std::atomic_size_t next = {0};
     };
 
     class waitq
