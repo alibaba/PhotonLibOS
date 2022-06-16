@@ -99,7 +99,7 @@ auto WorkPool::enqueue(F&& f, Args&&... args)
 template <class F, class... Args>
 auto WorkPool::photon_call(F&& f, Args&&... args) ->
     typename std::result_of<F(Args...)>::type {
-    photon::thread* th = photon::CURRENT;
+    photon::semaphore sem(0);
 
     using return_type = typename std::result_of<F(Args...)>::type;
 
@@ -107,14 +107,13 @@ auto WorkPool::photon_call(F&& f, Args&&... args) ->
 
     auto runtask = [&]() -> return_type {
         auto ret = f(std::forward<Args>(args)...);
-        photon::thread_interrupt(th);
+        sem.signal(1);
         return ret;
     };
 
-    auto caller = [&]() -> void { future = enqueue(runtask); };
-
-    photon::thread_usleep_defer(-1UL, caller);
-
+    future = enqueue(runtask);
+    sem.wait(1);
+    
     return future.get();
 }
 

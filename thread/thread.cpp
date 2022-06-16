@@ -1194,18 +1194,21 @@ namespace photon
                 return ret;
             }
         }
+        try_resume();
         splock.unlock();
         return 0;
     }
     void semaphore::try_resume()
     {
+        auto cnt = m_count.load();
         while(true)
         {
             ScopedLockHead h(this);
             if (!h) return;
             auto th = (thread*)h;
             auto& qfcount = (uint64_t&)th->retval;
-            if (!try_substract(qfcount)) break;
+            if (qfcount > cnt) break;
+            cnt -= qfcount;
             qfcount = 0;
             prelocked_thread_interrupt(th, ECANCELED);
         }
