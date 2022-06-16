@@ -45,20 +45,20 @@ Compare TCP echo server performance, in descending order.
 |                                              |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
 |:--------------------------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
 |                    Photon                    |    Stackful coroutine     |     4KB     | 560K |  17.1Gb   |   100%   |
+|       Rust [tokio](https://tokio.rs/)        |      Rust coroutine       |     4KB     | 476K |  15.9Gb   |   97%    |
+|                      Go                      |         Goroutine         |     4KB     | 476K |  14.5Gb   |   98%    |
 | [libgo](https://github.com/yyzybb537/libgo)  |    Stackful coroutine     |     4KB     | 444K |  13.6Gb   |   105%   |
 | [boost::asio](https://think-async.com/Asio/) |     Async + Callback      |     4KB     | 224K |   6.8Gb   |   100%   |
 |  [libco](https://github.com/Tencent/libco)   |    Stackful coroutine     |     4KB     | 182K |   5.6Gb   |   98%    |
-|                Go echo server                |         Goroutine         |     4KB     | 727K |  22.2Gb   |   450%   |
 |  [zab](https://github.com/Donald-Rupin/zab)  | C++20 stackless coroutine |     4KB     | 855K |  26.1Gb   |   530%   |
 | [asyncio](https://github.com/netcan/asyncio) | C++20 stackless coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
 
-
 Note:
 - Set up 16 echo clients(processes), with 16 connections per client, to give the maximum stress.
-- Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs.
+- Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz
 - boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
 - Photon's coroutine supports multi-thread. But unlike Go's automatic scheduling, you have to explicitly assign coroutine tasks onto OS threads.
-This test was only meant to compare per-core QPS.
+- This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1. For those who don't support setting single thread, just list the data for reference.
 
 Conclusion: Photon socket has the best per-core QPS.
 
