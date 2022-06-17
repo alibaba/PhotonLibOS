@@ -1,10 +1,12 @@
 # Photon
 
-## Overview
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.yml)
 
 Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
-By connecting user apps and the operating system, it helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the name came from.
+According to out tests, it also has the fastest I/O engine in the open source world, even among different programing languages.
+
+By connecting user apps and the operating system, Photon helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## Features
 * Coroutine library (support multi-thread)
@@ -57,8 +59,7 @@ Note:
 - Set up 16 echo clients(processes), with 16 connections per client, to give the maximum stress.
 - Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz
 - boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
-- Photon's coroutine supports multi-thread. But unlike Go's automatic scheduling, you have to explicitly assign coroutine tasks onto OS threads.
-- This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1. For those who don't support setting single thread, just list the data for reference.
+- This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.
 
 Conclusion: Photon socket has the best per-core QPS.
 
@@ -118,6 +119,3 @@ ctest
 
 ## Commitment
 TODO: Add our commitment to this project, including history, current status in Alibaba Cloud, and future vision.
-
-## Licenses
-Photon is released under the Apache License, Version 2.0.
