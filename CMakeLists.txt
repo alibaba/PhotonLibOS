@@ -150,8 +150,9 @@ if (ENABLE_SASL)
 endif ()
 target_link_libraries(external_lib INTERFACE ${EXTERNAL_LIB_ARGS})
 
-# Link photon lib
+# Link photon dynamic lib
 add_library(photon SHARED $<TARGET_OBJECTS:photon_obj>)
+set_target_properties(photon PROPERTIES OUTPUT_NAME photon)
 target_link_libraries(
         photon
         -Wl,--whole-archive
@@ -161,6 +162,17 @@ target_link_libraries(
         external_lib
 )
 
+# Archive photon static lib
+add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
+target_link_libraries(
+        photon_static
+        uring
+        easy_weak
+        external_lib
+)
+set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon)
+
+# Third party
 add_subdirectory(third_party)
 
 # Build test cases
