@@ -84,7 +84,9 @@ Conclusion: Photon is faster than Nginx under this circumstance.
 
 ## Example
 
-See the [example](examples/simple.cpp) about how to write a Photon program.
+See the [simple example](examples/simple.cpp) about how to write a Photon program.
+
+See the full test code of [echo server](examples/perf/net-perf.cpp).
 
 ## Build
 
@@ -122,6 +124,11 @@ cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=D
 make -j
 ctest
 ```
+
+## Who is using Photon
+
+- [containerd/overlaybd](https://github.com/containerd/overlaybd) The storage backend of accelerated container image, providing a layering block-level image format, designed for container, secure container and virtual machine.
+- [data-accelerator/photon-libtcmu](https://github.com/data-accelerator/photon-libtcmu) A TCMU implementation, reworked from libtcmu, acting as a iSCSI target.
 
 ## Commitment
 TODO: Add our commitment to this project, including history, current status in Alibaba Cloud, and future vision.
