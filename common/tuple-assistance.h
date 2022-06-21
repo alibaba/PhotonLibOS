@@ -16,6 +16,8 @@ limitations under the License.
 
 #pragma once
 
+#include <tuple>
+
 struct tuple_assistance
 {
     template<int...>
@@ -30,11 +32,27 @@ struct tuple_assistance
         typedef seq<S...> type;
     };
 
-    template <class F>
+    template <class F, bool is_ptr = std::is_pointer<F>::value>
     struct callable;
 
+    template <class F>
+    struct callable<F, false> {
+        template<typename...Ts>
+        static decltype(auto) apply(F f, std::tuple<Ts...>& args)
+        {
+            typedef typename gens<sizeof...(Ts)>::type S;
+            return do_apply(S(), f, args);
+        }
+
+    protected:
+        template<int...S, typename...Ts>
+        static decltype(auto) do_apply(seq<S...>, F f, std::tuple<Ts...>& args)
+        {
+            return f(std::forward<Ts>(std::get<S>(args))...);
+        }
+    };
     template <class R, class...A>
-    struct callable<R (*)(A...)>
+    struct callable<R (*)(A...), true>
     {
         typedef R (*F)(A...);
 

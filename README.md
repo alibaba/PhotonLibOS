@@ -4,9 +4,15 @@
 
 Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
-According to out tests, it also has the fastest I/O engine in the open source world, even among different programing languages.
+The role of LibOS is to connect user apps and the kernel. Following the principle of Least Astonishment,
+we designed Photon's API to be as consistent as possible with glibc and POSIX semantics.
+This flattens the learning curve for lib users and brings convenience when migrating legacy codebases.
 
-By connecting user apps and the operating system, Photon helps programs run as *fast* and *agile* as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
+Photon's runtime is driven by a coroutine lib. According to out tests, it has the fastest I/O performance in the
+open source world, even among different programing languages.
+
+As to the project vision, we hope that Photon would help programs run as *fast* and *agile*
+as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## Features
 * Coroutine library (support multi-thread)
