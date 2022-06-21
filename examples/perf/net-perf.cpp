@@ -31,10 +31,10 @@ bool stop_test = false;
 uint64_t qps = 0;
 uint64_t time_cost = 0;
 DEFINE_uint64(show_statistics_interval, 1, "interval seconds to show statistics");
-DEFINE_uint64(num_threads, 32, "num of threads");
 
 // Network parameters
 DEFINE_bool(client, false, "client or server? default is server");
+DEFINE_uint64(client_thread_num, 32, "thread number of the client");
 DEFINE_string(ip, "127.0.0.1", "ip");
 DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 4096, "buffer size");
@@ -80,6 +80,8 @@ static int echo_client() {
         while (!stop_test) {
             auto start = std::chrono::system_clock::now();
             ssize_t ret;
+            // There are internal locks to protect concurrent reads/writes for a socket.
+            // write equals to fully send, read equals to fully recv
             ret = conn->write(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
                 LOG_ERRNO_RETURN(0, -1, "write fail");
@@ -97,7 +99,7 @@ static int echo_client() {
 
     photon::thread_create11(run_latency_loop);
 
-    for (size_t i = 0; i < FLAGS_num_threads; i++) {
+    for (size_t i = 0; i < FLAGS_client_thread_num; i++) {
         photon::thread_create11(&decltype(run_echo_worker)::operator(), &run_echo_worker);
     }
 
@@ -142,7 +144,6 @@ static int echo_server() {
             if (ret1 <= 0) {
                 LOG_ERRNO_RETURN(0, -1, "read fail");
             }
-            // write = fully send
             ret2 = sock->write(buf, ret1);
             if (ret2 != ret1) {
                 LOG_ERRNO_RETURN(0, -1, "write fail");
