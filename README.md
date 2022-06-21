@@ -123,5 +123,11 @@ make -j
 ctest
 ```
 
+## Related projects
+
+### overlaybd
+
+[Overlaybd](https://github.com/containerd/overlaybd) Overlaybd a novel layering block-level image format, which is design for container, secure container and applicable to virtual machine. And it is an open-source implementation of paper [DADI: Block-Level Image Service for Agile and Elastic Application Deployment. USENIX ATC'20".](https://www.usenix.org/conference/atc20/presentation/li-huiba)
+
 ## Commitment
 TODO: Add our commitment to this project, including history, current status in Alibaba Cloud, and future vision.
