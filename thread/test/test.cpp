@@ -1212,48 +1212,116 @@ TEST(mutex, timeout_is_zero) {
 }
 
 int jobwork(WorkPool* pool, int i) {
-    auto ret = pool->photon_call(
-        [](int i) -> int {
-            this_thread::sleep_for(std::chrono::seconds(2));
-            return i;
+    LOG_INFO("LAUNCH");
+    int ret = 0;
+    pool->call(
+        [&ret](int i) {
+            LOG_INFO("START");
+            this_thread::sleep_for(std::chrono::seconds(1));
+            LOG_INFO("FINISH");
+            ret = i;
         },
         i);
+    LOG_INFO("RETURN");
     EXPECT_EQ(i, ret);
     return 0;
 }
 
-TEST(workpool, work) {
-    WorkPool pool(2);
+int jobasyncwork(WorkPool* pool, int i) {
+    LOG_INFO("START");
+    this_thread::sleep_for(std::chrono::seconds(1));
+    LOG_INFO("FINISH");
+    return 0;
+}
 
-    std::vector<std::future<int>> fts;
-    auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 4; i++) {
-        fts.emplace_back(pool.enqueue(
-            [](int i) {
-                this_thread::sleep_for(std::chrono::seconds(2));
-                return i;
-            },
-            i));
-    }
-    for (int i = 0; i < 4; i++) {
-        EXPECT_EQ(i, fts[i].get());
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(4));
-    EXPECT_LE(duration, std::chrono::seconds(5));
+TEST(workpool, work) {
+    std::unique_ptr<WorkPool> pool(new WorkPool(2));
 
     std::vector<photon::join_handle*> jhs;
-    start = std::chrono::system_clock::now();
+    auto start = std::chrono::system_clock::now();
     for (int i = 0; i < 4; i++) {
         jhs.emplace_back(photon::thread_enable_join(
-            photon::thread_create11(&jobwork, &pool, i)));
+            photon::thread_create11(&jobwork, pool.get(), i)));
     }
     for (auto& j : jhs) {
         photon::thread_join(j);
     }
-    duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(4));
-    EXPECT_LE(duration, std::chrono::seconds(5));
+    auto duration = std::chrono::system_clock::now() - start;
+    EXPECT_GE(duration, std::chrono::seconds(2));
+    EXPECT_LE(duration, std::chrono::seconds(3));
+}
+
+TEST(workpool, async_work) {
+    std::unique_ptr<WorkPool> pool(new WorkPool(2));
+
+    std::vector<photon::join_handle*> jhs;
+    auto start = std::chrono::system_clock::now();
+    for (int i = 0; i < 4; i++) {
+        pool->async_call(jobasyncwork, pool.get(), i);
+    }
+    auto duration = std::chrono::system_clock::now() - start;
+    EXPECT_GE(duration, std::chrono::seconds(0));
+    EXPECT_LE(duration, std::chrono::seconds(1));
+    photon::thread_sleep(3);
+    LOG_INFO("DONE");
+}
+
+struct CopyMoveRecord{
+    size_t copy = 0;
+    size_t move = 0;
+    CopyMoveRecord() {
+    }
+    ~CopyMoveRecord() {
+    }
+    CopyMoveRecord(const CopyMoveRecord& rhs) {
+        copy = rhs.copy + 1;
+        move = rhs.move;
+        LOG_INFO("COPY ", this);
+    }
+    CopyMoveRecord(CopyMoveRecord&& rhs) {
+        copy = rhs.copy;
+        move = rhs.move + 1;
+        LOG_INFO("MOVE ", this);
+    }
+    CopyMoveRecord& operator=(const CopyMoveRecord& rhs) {
+        copy = rhs.copy + 1;
+        move = rhs.move;
+        LOG_INFO("COPY ASSIGN ", this);
+        return *this;
+    }
+    CopyMoveRecord& operator=(CopyMoveRecord&& rhs) {
+        copy = rhs.copy;
+        move = rhs.move + 1;
+        LOG_INFO("MOVE ASSIGN", this);
+        return *this;
+    }
+};
+
+TEST(workpool, async_work_lambda) {
+    std::unique_ptr<WorkPool> pool(new WorkPool(2));
+
+    std::vector<photon::join_handle*> jhs;
+    auto start = std::chrono::system_clock::now();
+    for (int i = 0; i < 4; i++) {
+        pool->async_call(
+            [](WorkPool* pool, int i, CopyMoveRecord r) {
+                LOG_INFO("START ", VALUE(__cplusplus), VALUE(r.copy),
+                         VALUE(r.move));
+#if __cplusplus < 201300L
+                EXPECT_EQ(1, r.copy);
+#else
+                EXPECT_EQ(0, r.copy);
+#endif
+                this_thread::sleep_for(std::chrono::seconds(1));
+                LOG_INFO("FINISH");
+            },
+            pool.get(), i, CopyMoveRecord());
+    }
+    auto duration = std::chrono::system_clock::now() - start;
+    EXPECT_GE(duration, std::chrono::seconds(0));
+    EXPECT_LE(duration, std::chrono::seconds(1));
+    photon::thread_sleep(3);
+    LOG_INFO("DONE");
 }
 
 void* waiter(void* arg) {
@@ -1317,6 +1385,7 @@ void* testwork(void*) {
     // there are 4MB stack used;
     stack_pages_gc();
     EXPECT_STRNE("Hello, stack", topbuf);
+    return nullptr;
 }
 
 TEST(photon, free_stack) {
@@ -1328,6 +1397,7 @@ void* __null_work(void*) {
     LOG_INFO("RUNNING");
     photon::thread_usleep(1UL * 1000 * 1000);
     LOG_INFO("DONE");
+    return nullptr;
 }
 
 TEST(smp, join_on_smp) {

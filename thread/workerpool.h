@@ -16,113 +16,66 @@ limitations under the License.
 
 #pragma once
 
-#include <condition_variable>
-#include <functional>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <queue>
-#include <stdexcept>
-#include <thread>
-#include <vector>
+#include <photon/common/callback.h>
+#include <photon/common/tuple-assistance.h>
 
-#include <photon/thread/thread11.h>
+#include <memory>
+#include <utility>
+
+namespace photon {
 
 class WorkPool {
 public:
-    WorkPool(size_t);
-    template <class F, class... Args>
-    auto enqueue(F&& f, Args&&... args)
-        -> std::future<typename std::result_of<F(Args...)>::type>;
+    WorkPool(int thread_num, int ev_engine = 0, int io_engine = 0);
 
-    template <class F, class... Args>
-    auto photon_call(F&& f, Args&&... args) ->
-        typename std::result_of<F(Args...)>::type;
+    WorkPool(const WorkPool& other) = delete;
+    WorkPool& operator=(const WorkPool& rhs) = delete;
+
     ~WorkPool();
 
-private:
-    // need to keep track of threads so we can join them
-    std::vector<std::thread> workers;
-    // the task queue
-    std::queue<std::function<void()> > tasks;
+    template <typename F, typename... Args>
+    void call(F&& f, Args&&... args) {
+        auto task = [&] { f(std::forward<Args>(args)...); };
+        do_call(task);
+    }
 
-    // synchronization
-    std::mutex queue_mutex;
-    std::condition_variable condition;
-    bool stop;
+    template <typename F>
+    void call(F&& f) {  // in case f is a lambda
+        do_call(f);
+    }
+
+    template <typename F, typename... Args>
+    void async_call(F&& f, Args&&... args) {
+#if __cplusplus < 201300L
+        // capture by reference in C++11
+        // it will acturally copy f and args once
+        auto task = new auto([&]() mutable { f(std::forward<Args>(args)...); });
+#else
+        // or by value/move in C++14 on
+        auto task = new auto([f = std::forward<F>(f),
+                              pack = std::make_tuple(
+                                  std::forward<Args>(args)...)]() mutable {
+            tuple_assistance::callable<decltype(f)>::apply(std::move(f), pack);
+        });
+#endif
+
+        void (*func)(void*);
+        func = [](void* task_) {
+            using Task = decltype(task);
+            auto t = (Task)task_;
+            (*t)();
+            delete t;
+        };
+        enqueue({func, task});
+    }
+
+protected:
+    class impl;  // does not depend on T
+    std::unique_ptr<impl> pImpl;
+    // send delegate to run at a workerthread,
+    // Caller should keep callable object and resources alive
+    void do_call(Delegate<void> call);
+    void enqueue(Delegate<void> call);
 };
 
-// the constructor just launches some amount of workers
-inline WorkPool::WorkPool(size_t threads) : stop(false) {
-    for (size_t i = 0; i < threads; ++i)
-        workers.emplace_back([this] {
-            for (;;) {
-                std::function<void()> task;
-
-                {
-                    std::unique_lock<std::mutex> lock(this->queue_mutex);
-                    this->condition.wait(lock, [this] {
-                        return this->stop || !this->tasks.empty();
-                    });
-                    if (this->stop && this->tasks.empty()) return;
-                    task = std::move(this->tasks.front());
-                    this->tasks.pop();
-                }
-
-                task();
-            }
-        });
-}
-
-// add new work item to the pool
-template <class F, class... Args>
-auto WorkPool::enqueue(F&& f, Args&&... args)
-    -> std::future<typename std::result_of<F(Args...)>::type> {
-    using return_type = typename std::result_of<F(Args...)>::type;
-
-    auto task = std::make_shared<std::packaged_task<return_type()> >(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
-
-    std::future<return_type> res = task->get_future();
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-
-        // don't allow enqueueing after stopping the pool
-        if (stop) throw std::runtime_error("enqueue on stopped WorkPool");
-
-        tasks.emplace([task]() { (*task)(); });
-    }
-    condition.notify_one();
-    return res;
-}
-
-template <class F, class... Args>
-auto WorkPool::photon_call(F&& f, Args&&... args) ->
-    typename std::result_of<F(Args...)>::type {
-    photon::semaphore sem(0);
-
-    using return_type = typename std::result_of<F(Args...)>::type;
-
-    std::future<return_type> future;
-
-    auto runtask = [&]() -> return_type {
-        auto ret = f(std::forward<Args>(args)...);
-        sem.signal(1);
-        return ret;
-    };
-
-    future = enqueue(runtask);
-    sem.wait(1);
-    
-    return future.get();
-}
-
-// the destructor joins all threads
-inline WorkPool::~WorkPool() {
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        stop = true;
-    }
-    condition.notify_all();
-    for (std::thread& worker : workers) worker.join();
-}
+}  // namespace photon
