@@ -112,7 +112,7 @@ namespace photon {
 ### C++ 11 modern syntax (thread/thread11.h)
 ```cpp
 // 1. Create thread to run a global function with arbitrary arguments
-int func(std::vector<int, char) { return 0; }
+int func(int, char) { return 0; }
 int x;
 char y;
 photon::thread_create11(func, x, y);
