@@ -53,7 +53,7 @@ Compare TCP echo server performance, in descending order.
 |                                              |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
 |:--------------------------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
 |                    Photon                    |    Stackful coroutine     |     4KB     | 560K |  17.1Gb   |   100%   |
-|       Rust [tokio](https://tokio.rs/)        |      Rust coroutine       |     4KB     | 476K |  15.9Gb   |   97%    |
+|       Rust [tokio](https://tokio.rs/)        |      Rust coroutine       |     4KB     | 521K |  15.9Gb   |   97%    |
 |                      Go                      |         Goroutine         |     4KB     | 476K |  14.5Gb   |   98%    |
 | [libgo](https://github.com/yyzybb537/libgo)  |    Stackful coroutine     |     4KB     | 444K |  13.6Gb   |   105%   |
 | [boost::asio](https://think-async.com/Asio/) |     Async + Callback      |     4KB     | 224K |   6.8Gb   |   100%   |
