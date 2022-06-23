@@ -124,6 +124,7 @@ cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=D
 make -j
 ctest
 ```
+Note the examples are also built from testing. When running performance test, remember to remove CMAKE_BUILD_TYPE=Debug.
 
 ## Who is using Photon
 
