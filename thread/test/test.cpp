@@ -1333,6 +1333,41 @@ void* waiter(void* arg) {
     return nullptr;
 }
 
+void* somework(void* arg) {
+    auto vcpu = (photon::vcpu_base*)arg;
+    LOG_INFO("Work on `", photon::get_vcpu());
+    EXPECT_NE(vcpu, photon::get_vcpu());
+    return nullptr;
+}
+
+TEST(photon, migrate) {
+    vcpu_base* vcpu = nullptr;
+    photon::thread *th;
+    photon::semaphore sem, semdone;
+    std::thread worker([&vcpu, &sem, &th, &semdone]{
+        photon::thread_init();
+        DEFER(photon::thread_fini());
+        th = CURRENT;
+        vcpu = photon::get_vcpu();
+        sem.signal(1);
+        LOG_TEMP("WORKER READY ", CURRENT);
+        semdone.wait(1);
+        LOG_TEMP("WORKER DONE ", CURRENT);
+    });
+    sem.wait(1);
+    auto task = photon::thread_create(somework, photon::get_vcpu());
+    photon::thread_enable_join(task);
+    LOG_TEMP("task READY ", task);
+    auto ret = photon::thread_migrate(task, vcpu);
+    LOG_TEMP("migrate DONE ", ret);
+    photon::thread_join(task);
+    LOG_TEMP("task join");
+    semdone.signal(1);
+    LOG_TEMP("worker interrupt");
+    worker.join();
+    LOG_TEMP("worker join");
+}
+
 TEST(photon, wait_all) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -1421,7 +1456,7 @@ TEST(smp, join_on_smp) {
                 sem.signal(1);
             }
             cv.wait_no_lock();
-            LOG_INFO("STD thread done, ", VALUE(::CURRENT->vcpu->nthreads));
+            LOG_INFO("STD thread done, ", VALUE(::CURRENT->vcpu->nthreads.load()));
         });
     }
     sem.wait(3);
