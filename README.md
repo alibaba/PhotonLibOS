@@ -62,7 +62,7 @@ Compare TCP echo server performance, in descending order.
 | [asyncio](https://github.com/netcan/asyncio) | C++20 stackless coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
 
 Note:
-- Set up 16 echo clients(processes), with 16 connections per client, to give the maximum stress.
+- Set up 16 echo clients(processes), with 32 concurrency per client, to give the maximum stress.
 - Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz
 - boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
 - This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.

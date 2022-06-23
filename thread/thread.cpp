@@ -372,12 +372,16 @@ namespace photon
         void(*th_die)(thread*)) asm ("_photon_switch_context_defer_die");
     inline void switch_context(thread* from, thread* to);
 
-    static void thread_stub()
-    {
-        auto& current = CURRENT;
-        thread_yield_to((thread*)current->retval);
-        current->go();
-
+    // Since thread may be moved from one vcpu to another
+    // thread local CURRENT *** MUST *** re-load before cleanup
+    // We found that in GCC ,compile with -O3 may leads compiler
+    // load CURRENT address only once, that will leads improper result 
+    // to ready list after thread migration.
+    // Here seperate a standalone function threqad_stub_cleanup, and forbidden
+    // inline optimization for it, to make sure load CURRENT again before clean up
+    __attribute__((noinline))
+    static void thread_stub_cleanup() {
+        auto &current = CURRENT;
         auto th = current;
         th->lock.lock();
         th->state = states::DONE;
@@ -392,6 +396,14 @@ namespace photon
         } else {
             switch_context_defer(th, next, &spinlock_unlock, (void*)&th->lock);
         }
+    }
+
+    static void thread_stub()
+    {
+        auto th = CURRENT;
+        thread_yield_to((thread*)th->retval);
+        th->go();
+        thread_stub_cleanup();
     }
 
     thread* thread_create(void* (*start)(void*), void* arg, uint64_t stack_size)
@@ -1378,6 +1390,31 @@ namespace photon
     }
 
     static std::atomic<uint32_t> _n_vcpu{0};
+
+    int thread_migrate(photon::thread* th, vcpu_base* v) {
+        if (th->state != READY) {
+            LOG_ERROR_RETURN(EINVAL, -1,
+                             "Try to migrate thread `, which is not ready.", th)
+        }
+        if (th->vcpu != CURRENT->vcpu) {
+            LOG_ERROR_RETURN(
+                EINVAL, -1,
+                "Try to migrate thread `, which is not on current vcpu.", th)
+        }
+        if (v == nullptr) {
+            v = &vcpus[(th->vcpu - &vcpus[0] + 1) % _n_vcpu];
+        }
+        if (v == th->vcpu) return 0;
+        auto vc = (vcpu_t*)v;
+        th->vcpu->nthreads--;
+        vc->nthreads++;
+        th->remove_from_list();
+        th->state = STANDBY;
+        th->vcpu = vc;
+        th->idx = -1;
+        vc->move_to_standbyq_atomic(th);
+        return 0;
+    }
 
     int thread_init()
     {

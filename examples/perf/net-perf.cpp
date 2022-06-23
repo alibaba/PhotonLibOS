@@ -67,10 +67,12 @@ static int echo_client() {
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client")
     }
+    DEFER(delete cli);
     auto conn = cli->connect(ep);
     if (conn == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to connect")
     }
+    DEFER(delete conn);
 
     auto run_echo_worker = [&]() -> int {
         AlignedAlloc alloc(512);
@@ -117,6 +119,7 @@ static int echo_server() {
     if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create server")
     }
+    DEFER(delete server);
 
     auto stop_watcher = [&] {
         while (true) {
@@ -130,8 +133,6 @@ static int echo_server() {
     };
 
     auto handle = [&](photon::net::ISocketStream* arg) -> int {
-        LOG_TEMP("Connection established");
-        DEFER(LOG_TEMP("Connection shutdown"));
         auto sock = (photon::net::ISocketStream*) arg;
 
         AlignedAlloc alloc(512);
