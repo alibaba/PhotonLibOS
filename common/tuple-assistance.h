@@ -17,94 +17,106 @@ limitations under the License.
 #pragma once
 
 #include <tuple>
+#include <utility>
 
-struct tuple_assistance
-{
-    template<int...>
-    struct seq { };
+namespace tuple_assistance {
 
-    template<int N, int...S>
-    struct gens : gens<N-1, N-1, S...> { };
+template <class F>
+struct callable;
 
-    template<int...S>
-    struct gens<0, S...>
-    {
-        typedef seq<S...> type;
-    };
+// function pointer
+template <class R, class... Args>
+struct callable<R (*)(Args...)> : public callable<R(Args...)> {};
 
-    template <class F, bool is_ptr = std::is_pointer<F>::value>
-    struct callable;
+template <class R, class... Args>
+struct callable<R(Args...)> {
+    using return_type = R;
 
-    template <class F>
-    struct callable<F, false> {
-        template<typename...Ts>
-        static decltype(auto) apply(F f, std::tuple<Ts...>& args)
-        {
-            typedef typename gens<sizeof...(Ts)>::type S;
-            return do_apply(S(), f, args);
-        }
+    using arguments = std::tuple<Args...>;
+};
 
-    protected:
-        template<int...S, typename...Ts>
-        static decltype(auto) do_apply(seq<S...>, F f, std::tuple<Ts...>& args)
-        {
-            return f(std::forward<Ts>(std::get<S>(args))...);
-        }
-    };
-    template <class R, class...A>
-    struct callable<R (*)(A...), true>
-    {
-        typedef R (*F)(A...);
+// member function pointer
+template <class C, class R, class... Args>
+struct callable<R (C::*)(Args...)> : public callable<R(C&, Args...)> {};
 
-        typedef R return_type;
+// const member function pointer
+template <class C, class R, class... Args>
+struct callable<R (C::*)(Args...) const> : public callable<R(C&, Args...)> {};
 
-        typedef std::tuple<A...> arguments;
+// member object pointer
+template <class C, class R>
+struct callable<R(C::*)> : public callable<R(C&)> {};
 
-        template<typename...Ts>
-        static return_type apply(F f, std::tuple<Ts...>& args)
-        {
-            typedef typename gens<sizeof...(Ts)>::type S;
-            return do_apply(S(), f, args);
-        }
+template <typename T>
+struct __remove_first_type_in_tuple {};
 
-    protected:
-        template<int...S, typename...Ts>
-        static return_type do_apply(seq<S...>, F f, std::tuple<Ts...>& args)
-        {
-//            return f(std::get<S>(args)...);
-//            return f(std::move(std::get<S>(args))...);
-            return f(std::forward<Ts>(std::get<S>(args))...);
-        }
-    };
+template <typename T, typename... Ts>
+struct __remove_first_type_in_tuple<std::tuple<T, Ts...>> {
+    typedef std::tuple<Ts...> type;
+};
 
-    template<typename P, size_t I, typename...Ts>
-    struct do_enumerate;
+// functor
+template <class F>
+struct callable {
+private:
+    using call_type = callable<decltype(&F::operator())>;
 
-    template<typename P, size_t I, typename...Ts>
-    struct do_enumerate<P, I, std::tuple<Ts...>>
-    {
-        static_assert(0 < I && I < sizeof...(Ts), "");
-        static void proc(const P& p, std::tuple<Ts...>& t)
-        {
-            do_enumerate<P, I - 1, std::tuple<Ts...>>::proc(p, t);
-            p.proc(std::get<I>(t));
-        }
-    };
+public:
+    using return_type = typename call_type::return_type;
 
-    template<typename P, typename...Ts>
-    struct do_enumerate<P, 0, std::tuple<Ts...>>
-    {
-        static void proc(const P& p, std::tuple<Ts...>& t)
-        {
-            p.proc(std::get<0>(t));
-        }
-    };
+    using arguments = typename __remove_first_type_in_tuple<
+        typename call_type::arguments>::type;
+};
 
-    template<typename P, typename...Ts>
-    static void enumerate(const P& p, std::tuple<Ts...>& t)
-    {
-        do_enumerate<P, sizeof...(Ts) - 1, std::tuple<Ts...>>::proc(p, t);
+template <class F>
+struct callable<F&> : public callable<F> {};
+
+template <class F>
+struct callable<F&&> : public callable<F> {};
+
+#if cplusplus__ < 201700
+template <typename F, typename Tuple, std::size_t... I>
+constexpr static decltype(auto) apply_impl(F&& f, Tuple&& t,
+                                           std::index_sequence<I...>) {
+    return f(std::forward<typename std::tuple_element<
+                 I, typename callable<F>::arguments>::type>(std::get<I>(t))...);
+}
+
+// Implementation of a simplified std::apply from C++17
+template <typename F, typename Tuple>
+constexpr static decltype(auto) apply(F&& f, Tuple&& t) {
+    return apply_impl(
+        std::forward<F>(f), std::forward<Tuple>(t),
+        std::make_index_sequence<
+            std::tuple_size<std::remove_reference_t<Tuple>>::value>{});
+}
+
+#else
+template <typename F, typename Tuple>
+using template std::apply<F, Tuple>;
+#endif
+
+template <typename P, size_t I, typename... Ts>
+struct do_enumerate;
+
+template <typename P, size_t I, typename... Ts>
+struct do_enumerate<P, I, std::tuple<Ts...>> {
+    static_assert(0 < I && I < sizeof...(Ts), "");
+    static void proc(const P& p, std::tuple<Ts...>& t) {
+        do_enumerate<P, I - 1, std::tuple<Ts...>>::proc(p, t);
+        p.proc(std::get<I>(t));
     }
 };
 
+template <typename P, typename... Ts>
+struct do_enumerate<P, 0, std::tuple<Ts...>> {
+    static void proc(const P& p, std::tuple<Ts...>& t) {
+        p.proc(std::get<0>(t));
+    }
+};
 
+template <typename P, typename... Ts>
+static void enumerate(const P& p, std::tuple<Ts...>& t) {
+    do_enumerate<P, sizeof...(Ts) - 1, std::tuple<Ts...>>::proc(p, t);
+}
+}  // namespace tuple_assistance

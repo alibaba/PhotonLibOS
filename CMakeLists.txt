@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 
 project(
         photon
@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS off)
 set(CMAKE_CXX_FLAGS "-mcrc32 -msse4.2 -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_BUILD_RPATH_USE_ORIGIN on)
 
 set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
 set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})

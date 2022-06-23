@@ -55,7 +55,7 @@ public:
         auto task = new auto([f = std::forward<F>(f),
                               pack = std::make_tuple(
                                   std::forward<Args>(args)...)]() mutable {
-            tuple_assistance::callable<decltype(f)>::apply(std::move(f), pack);
+            tuple_assistance::apply(f, pack);
         });
 #endif
 
