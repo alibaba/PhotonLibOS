@@ -31,7 +31,6 @@ namespace photon
         using base = tuple_assistance::callable<F>;
         using typename base::return_type;
         using typename base::arguments;
-        using base::apply;
 
         F start;
         uint64_t stack_size;
@@ -55,7 +54,7 @@ namespace photon
 //            LOG_DEBUG("arguments tuple moved");
             ctx_->got_it = true;
             thread_yield_to(ctx.parent);
-            return base::apply(ctx.start, ctx.args);
+            return tuple_assistance::apply(ctx.start, ctx.args);
         }
         thread* thread_create(thread_entry start)
         {

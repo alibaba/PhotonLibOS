@@ -80,12 +80,12 @@ static int echo_client() {
         while (!stop_test) {
             auto start = std::chrono::system_clock::now();
             ssize_t ret;
-            // There are internal locks to protect concurrent reads/writes for a socket.
-            // write equals to fully send, read equals to fully recv
+            //  write equals to fully send
             ret = conn->write(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
                 LOG_ERRNO_RETURN(0, -1, "write fail");
             }
+            // read equals to fully recv
             ret = conn->read(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
                 LOG_ERRNO_RETURN(0, -1, "read fail");
@@ -139,6 +139,8 @@ static int echo_server() {
         DEFER(alloc.dealloc(buf));
 
         while (true) {
+            // There are internal locks in sockets to protect concurrent reads/writes.
+            // Removing them would increase performance, however, cause data inconsistency.
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
             if (ret1 <= 0) {

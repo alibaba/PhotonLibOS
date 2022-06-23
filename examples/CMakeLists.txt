@@ -1,7 +1,7 @@
 include_directories(${CMAKE_SOURCE_DIR}/include)
 link_directories(${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 
-add_executable(simple-example simple.cpp)
+add_executable(simple-example simple/simple.cpp)
 target_link_libraries(simple-example PRIVATE photon)
 
 add_executable(net-perf perf/net-perf.cpp)
