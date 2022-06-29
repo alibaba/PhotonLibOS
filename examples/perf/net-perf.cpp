@@ -102,7 +102,7 @@ static int echo_client() {
     photon::thread_create11(run_latency_loop);
 
     for (size_t i = 0; i < FLAGS_client_thread_num; i++) {
-        photon::thread_create11(&decltype(run_echo_worker)::operator(), &run_echo_worker);
+        photon::thread_create11(run_echo_worker);
     }
 
     // Forever sleep until Ctrl + C

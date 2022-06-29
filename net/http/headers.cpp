@@ -255,12 +255,11 @@ int ResponseHeaders::append_bytes(ISocketStream* s) {
         return -1;
     }
     auto transfer_bytes = s->recv(_buf + _buf_size, _MAX_TRANSFER_BYTES);
-    if (transfer_bytes == 0) {
-        errno = ECONNRESET;
-        return -1;
-    }
-    return (transfer_bytes < 0) ? transfer_bytes
-                                : append_bytes((uint16_t)transfer_bytes);
+    auto ret = (transfer_bytes < 0) ? transfer_bytes
+                                    : append_bytes((uint16_t)transfer_bytes);
+    if (ret != 0 && transfer_bytes == 0) 
+        LOG_ERROR_RETURN(0, -1, "Peer closed before ")
+    return ret;
 }
 int ResponseHeaders::append_bytes(uint16_t size)
 {
@@ -268,12 +267,16 @@ int ResponseHeaders::append_bytes(uint16_t size)
     if(_buf_size + size >= (uint64_t)_buf_capacity)
         LOG_ERROR_RETURN(0, -1, "need more buffer");
     std::string_view sv(_buf + _buf_size, size);
+    auto income = _buf + _buf_size;
+    auto left = income - 3;
+    if (left < _buf) left = _buf;
     _buf_size += size;
-    auto pos = sv.find("\r\n\r\n");
-    if (pos == sv.npos) return 1;
+    std::string_view whole(left, _buf + _buf_size - left);
+    auto pos = whole.find("\r\n\r\n");
+    if (pos == whole.npos) return 1;
 
     _status_code = -1;
-    pos += 4;
+    pos += 4 - (income - left);
     auto body_begin = sv.begin() + pos - _buf;
     _body = {(uint16_t)body_begin, sv.size() - pos};
     Parser p({_buf, _buf_size});

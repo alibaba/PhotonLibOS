@@ -6,18 +6,31 @@ project(
         LANGUAGES C CXX ASM
 )
 
+# Get CPU arch
+execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64))
+    message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
+endif ()
+
 # Compiler options
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED on)
 set(CMAKE_CXX_EXTENSIONS off)
-set(CMAKE_CXX_FLAGS "-mcrc32 -msse4.2 -fPIC")
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_BUILD_RPATH_USE_ORIGIN on)
+set(CMAKE_POSITION_INDEPENDENT_CODE on)
+if (${ARCH} STREQUAL x86_64)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32 -msse4.2")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+endif()
 
 set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
 set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
 set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+
+add_compile_options(-Wall)  # -Werror is not enable yet
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -53,12 +66,6 @@ if (ENABLE_FUSE)
 endif ()
 if (ENABLE_SASL)
     find_package(gsasl REQUIRED)
-endif ()
-
-# Get CPU arch
-execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
-if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64))
-    message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
 endif ()
 
 # Fetch liburing
@@ -130,7 +137,6 @@ endif ()
 add_library(photon_obj OBJECT ${PHOTON_SRC})
 target_include_directories(photon_obj PUBLIC include ${liburing_include_dir} ${boost_include_dir})
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
-target_compile_options(photon_obj PRIVATE -Wall)
 
 # Make virtual interface for external dynamic libs
 add_library(external_lib INTERFACE)

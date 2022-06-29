@@ -31,7 +31,8 @@ limitations under the License.
 // Because every module has its own document, this example will not focus on the API details.
 // Please refer to the README under the module directories.
 
-static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file);
+static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file,
+                              photon::condition_variable* cond);
 
 int main() {
     // Initialize the OS thread with Photon environment. Choose the iouring event engine.
@@ -65,9 +66,12 @@ int main() {
     }
     DEFER(delete file);
 
-    // Create a Photon thread to run socket server, pass server and file to the new thread as arguments
     auto server = photon::net::new_tcp_socket_server();
-    auto server_thread = photon::thread_create11(run_socket_server, server, file);
+    photon::condition_variable cond;
+
+    // In the photon world, we just call coroutine thread. Photon threads run on top of native OS threads.
+    // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
+    auto server_thread = photon::thread_create11(run_socket_server, server, file, &cond);
     photon::thread_enable_join(server_thread);
 
     // Sleep some time waiting for server ready
@@ -97,7 +101,7 @@ int main() {
     photon::thread_join((photon::join_handle*) server_thread);
 }
 
-void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file) {
+void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, photon::condition_variable* cond) {
     auto handler = [&](photon::net::ISocketStream* arg) -> int {
         char buf[1024];
         auto sock = (photon::net::ISocketStream*) arg;
@@ -128,7 +132,13 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
     // Photon's logging system formats the output string at compile time and has better performance
     // than other systems using snprintf. The ` is a generic placeholder.
     LOG_INFO("Server is listening for port ` ...", 9527);
-    // This Photon thread will block here, until been interrupted by `photon::thread_interrupt`.
-    server->start_loop(true);
+    server->start_loop(false);
+
+    // Notify outside main function to continue.
+    cond->notify_one();
+
+    photon::thread_sleep(-1);
+    // This Photon thread will here sleep forever, until been interrupted by `photon::thread_interrupt`.
+    // Note that the underlying OS thread won't be blocked. It's basically a context switch.
     LOG_INFO("Server stopped");
 }

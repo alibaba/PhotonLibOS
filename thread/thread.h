@@ -104,6 +104,7 @@ namespace photon
         MasterEventEngine* master_event_engine;
         std::atomic<uint32_t> nthreads;
         uint32_t id;
+        volatile uint64_t switch_count;
     };
 
     // A helper struct in order to make some function calls inline.
@@ -436,4 +437,7 @@ namespace photon
 */
 #define WITH_LOCK(mutex) if (auto __lock__ = scoped_lock(mutex))
 
-
+#define SCOPE_MAKESURE_YIELD                                       \
+    uint64_t __swc_##__LINE__ = get_vcpu(CURRENT)->switch_count;   \
+    DEFER(if (__swc_##__LINE__ == get_vcpu(CURRENT)->switch_count) \
+              photon::thread_yield(););

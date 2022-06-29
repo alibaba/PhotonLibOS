@@ -1472,6 +1472,43 @@ TEST(smp, join_on_smp) {
     LOG_INFO("std threads joined");
 }
 
+TEST(makesure_yield, basic) {
+    static volatile bool mark = true;
+    photon::thread_create11([&]{
+        photon::thread_usleep(100*1000);
+        mark=false;
+    });
+    while (mark) {
+        SCOPE_MAKESURE_YIELD;
+#ifdef __aarch64__
+        asm volatile("isb" : : : "memory");
+#else
+        _mm_pause();
+#endif
+    }
+    EXPECT_EQ(false, mark);
+}
+
+
+TEST(thread11, lambda) {
+    photon::semaphore sem(0);
+    photon::thread_create11([&]{
+        sem.signal(1);
+    });
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    auto lambda = [](photon::semaphore &sem){
+        sem.signal(1);
+    };
+    photon::thread_create11(lambda, sem);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    auto lambda2 = [&sem]{
+        sem.signal(1);
+    };
+    photon::thread_create11(lambda2);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));    
+}
+
+
 int main(int argc, char** arg)
 {
     ::testing::InitGoogleTest(&argc, arg);
