@@ -52,6 +52,27 @@ namespace photon {
 }
 ```
 
+### C++ 11 modern syntax (thread/thread11.h)
+```cpp
+// 1. Create a thread to run a global function with arbitrary arguments
+int func(int, char) { return 0; }
+photon::thread_create11(func, 1, 'a');
+
+// 2. Create a thread to run class member function
+class A {
+public:
+    void caller() {
+        photon::thread_create11(&A::member_func, 1, 'a');
+    }
+private:
+    void* member_func(int, char) { return nullptr; }
+}
+
+// 3. Create a thread to run lambda
+auto f = [&](int, char) -> int { return 0; };
+photon::thread_create11(f, 1, 'a');
+```
+
 ### Timer (thread/timer.h)
 ```cpp
 namespace photon {
@@ -106,28 +127,6 @@ namespace photon {
         int signal(uint64_t count);
     };
 }
-```
-## Extension API
-
-### C++ 11 modern syntax (thread/thread11.h)
-```cpp
-// 1. Create thread to run a global function with arbitrary arguments
-int func(int, char) { return 0; }
-photon::thread_create11(func, 1, 'a');
-
-// 2. Create thread to run class member function
-class A {
-public:
-    void caller() {
-        photon::thread_create11(&A::member_func, 1, 'a');
-    }
-private:
-    void* member_func(int, char) { return nullptr; }
-}
-
-// 3. Create thread to run lambda
-auto f = [&](int, char) -> int { return 0; };
-photon::thread_create11(f, 1, 'a');
 ```
 
 ### Thread pool（thread/thread-pool.h）

@@ -35,7 +35,7 @@ static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IF
                               photon::condition_variable* cond);
 
 int main() {
-    // Initialize the OS thread with Photon environment. Choose the iouring event engine.
+    // Initialize Photon environment. Choose the iouring event engine.
     // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
     // the latest kernel, running an io_uring program does need the version be greater than 5.8.
     //
@@ -74,8 +74,8 @@ int main() {
     auto server_thread = photon::thread_create11(run_socket_server, server, file, &cond);
     photon::thread_enable_join(server_thread);
 
-    // Sleep some time waiting for server ready
-    photon::thread_sleep(1);
+    // Wait for server ready
+    cond.wait_no_lock();
 
     // Create socket client and connect
     auto client = photon::net::new_tcp_socket_client();
@@ -94,10 +94,12 @@ int main() {
     // Close connection
     delete conn;
 
-    // Terminate server by `photon::thread_interrupt`
+    // Sleep one second and shutdown server
+    photon::thread_usleep(1000 * 1000);
     server->terminate();
 
-    // Join server thread
+    // Interrupt the sleeping server thread, and join it
+    photon::thread_interrupt(server_thread);
     photon::thread_join((photon::join_handle*) server_thread);
 }
 
@@ -117,8 +119,8 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
         iov.push_back(buf, 512);
         iov.push_back(buf + 512, 512);
 
-        // Write file with io-vector. Even though some io engines may not have the writev method,
-        // the Photon IFile encapsulation would make it compatible.
+        // This is a demo about how to use the io-vector interface. Even though some io engines
+        // may not have the writev method, Photon's IFile encapsulation would make it compatible.
         ssize_t written = file->writev(iov.iovec(), iov.iovcnt());
         if (written != (ssize_t) iov.sum()) {
             LOG_ERRNO_RETURN(0, -1, "failed to write file");
@@ -129,7 +131,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
     server->set_handler(handler);
     server->bind(9527, photon::net::IPAddr());
     server->listen(1024);
-    // Photon's logging system formats the output string at compile time and has better performance
+    // Photon's logging system formats the output string at compile time, and has better performance
     // than other systems using snprintf. The ` is a generic placeholder.
     LOG_INFO("Server is listening for port ` ...", 9527);
     server->start_loop(false);
