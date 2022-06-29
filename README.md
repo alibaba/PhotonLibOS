@@ -8,8 +8,8 @@ The role of LibOS is to connect user apps and the kernel. Following the principl
 we designed Photon's API to be as consistent as possible with glibc and POSIX semantics.
 This flattens the learning curve for lib users and brings convenience when migrating legacy codebases.
 
-Photon's runtime is driven by a coroutine lib. According to out tests, it has the fastest I/O performance in the
-open source world, even among different programing languages.
+Photon's runtime is driven by a coroutine lib. Out tests show that it has the **best** I/O performance in the
+open source world by the year of 2022, even among different programing languages.
 
 As to the project vision, we hope that Photon would help programs run as *fast* and *agile*
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
@@ -124,12 +124,22 @@ cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=D
 make -j
 ctest
 ```
+
 Note the examples are also built from testing. When running performance test, remember to remove CMAKE_BUILD_TYPE=Debug.
 
-## Who is using Photon
+## About Photon
+
+Photon was originally created from the storage team of Alibaba Cloud since 2017. It's a production ready library, and has
+been deployed to hundreds of thousands of hosts as the infrastructure of cloud software. We would like to make a
+commitment that Photon will be continuously updated, as long as those cloud software still evolve.
+
+Some open source projects are using Photon as well, for instance:
 
 - [containerd/overlaybd](https://github.com/containerd/overlaybd) The storage backend of accelerated container image, providing a layering block-level image format, designed for container, secure container and virtual machine.
-- [data-accelerator/photon-libtcmu](https://github.com/data-accelerator/photon-libtcmu) A TCMU implementation, reworked from libtcmu, acting as a iSCSI target.
+- [data-accelerator/photon-libtcmu](https://github.com/data-accelerator/photon-libtcmu) A TCMU implementation, reworked from tcmu-runner, acting as a iSCSI target.
 
-## Commitment
-TODO: Add our commitment to this project, including history, current status in Alibaba Cloud, and future vision.
+Any addition to this list is appreciated, if you have been using Photon, or just enlightened by its coroutine design.
+
+## Future work
+
+We are building an independent website for developers to view the documents. Please stay tuned.

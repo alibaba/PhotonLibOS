@@ -18,7 +18,9 @@ limitations under the License.
 #include <sys/time.h>
 #include <sys/mman.h>
 #include <memory.h>
+#ifndef __aarch64__
 #include <emmintrin.h>
+#endif
 
 #include <cstddef>
 #include <cassert>
@@ -496,6 +498,7 @@ namespace photon
     {
         assert(from->vcpu == to->vcpu);
         to->state   = states::RUNNING;
+        to->vcpu->switch_count ++;
         photon_switch_context(from->stack.pointer_ref(), to->stack.pointer_ref());
     }
     inline void switch_context(thread* from, states new_state, thread* to)
@@ -509,6 +512,7 @@ namespace photon
     {
         assert(from->vcpu == to->vcpu);
         to->state   = states::RUNNING;
+        to->vcpu->switch_count ++;
         photon_switch_context_defer(from->stack.pointer_ref(),
             to->stack.pointer_ref(), defer, arg);
     }
@@ -594,7 +598,8 @@ namespace photon
         } else if (th->vcpu != t0->vcpu) {
             LOG_ERROR_RETURN(EINVAL, , VALUE(th), " must be at same vcpu as CURRENT!");
         } else if (th->state == states::STANDBY) {
-            resume_threads();
+            while (th->state == states::STANDBY)
+                resume_threads();
             assert(th->state == states::READY);
         }
         if (th->state != states::READY) {
@@ -978,7 +983,11 @@ namespace photon
     int spinlock::lock() {
         while (_lock.exchange(true, std::memory_order_acquire)) {
             while (_lock.load(std::memory_order_relaxed)) {
+#ifdef __aarch64__
+                asm volatile("isb" : : : "memory");
+#else
                 _mm_pause();
+#endif
             }
         }
         return 0;
@@ -995,7 +1004,11 @@ namespace photon
     int ticket_spinlock::lock() {
         const auto ticket = next.fetch_add(1, std::memory_order_relaxed);
         while (serv.load(std::memory_order_acquire) != ticket) {
+#ifdef __aarch64__
+            asm volatile("isb" : : : "memory");
+#else
             _mm_pause();
+#endif
         }
         return 0;
     }

@@ -127,7 +127,7 @@ private:
 
 // 3. Create thread to run lambda
 auto f = [&](int, char) -> int { return 0; };
-photon::thread_create11(&decltype(f)::operator(), &f, 1, 'a');
+photon::thread_create11(f, 1, 'a');
 ```
 
 ### Thread pool（thread/thread-pool.h）
