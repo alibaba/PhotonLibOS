@@ -158,7 +158,6 @@ public:
 
 class KernelSocketStream : public KernelSocket {
 public:
-    photon::mutex m_rmutex, m_wmutex;
     using KernelSocket::KernelSocket;
     KernelSocketStream(int socket_family, bool autoremove)
         : KernelSocket(socket_family, autoremove, true) {}
@@ -166,11 +165,9 @@ public:
         if (fd > 0) shutdown(ShutdownHow::ReadWrite);
     }
     virtual ssize_t read(void* buf, size_t count) override {
-        photon::scoped_lock lock(m_rmutex);
         return net::read_n(fd, buf, count, m_timeout);
     }
     virtual ssize_t write(const void* buf, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::send2_n(fd, buf, count, 0, m_timeout);
     }
     virtual ssize_t readv(const struct iovec* iov, int iovcnt) override {
@@ -178,7 +175,6 @@ public:
         return readv_mutable(ciov.ptr, iovcnt);
     }
     virtual ssize_t readv_mutable(struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_rmutex);
         return net::readv_n(fd, iov, iovcnt, m_timeout);
     }
     virtual ssize_t writev(const struct iovec* iov, int iovcnt) override {
@@ -186,37 +182,29 @@ public:
         return writev_mutable(ciov.ptr, iovcnt);
     }
     virtual ssize_t writev_mutable(struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::sendv2_n(fd, iov, iovcnt, 0, m_timeout);
     }
     virtual ssize_t recv(void* buf, size_t count) override {
-        photon::scoped_lock lock(m_rmutex);
         return net::read(fd, buf, count, m_timeout);
     }
     virtual ssize_t recv(const struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_rmutex);
         return net::readv(fd, iov, iovcnt, m_timeout);
     }
     virtual ssize_t send(const void* buf, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::send2(fd, buf, count, 0, m_timeout);
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::sendv2(fd, iov, iovcnt, 0, m_timeout);
     }
 
     virtual ssize_t send2(const void* buf, size_t count, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::send2_n(fd, (void*)buf, (size_t)count, flag, m_timeout);
     }
     virtual ssize_t send2(const struct iovec* iov, int iovcnt, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::sendv2_n(fd, (struct iovec*)iov, (int)iovcnt, flag, m_timeout);
     }
 
     virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         return net::sendfile_n(fd, in_fd, &offset, count);
     }
     virtual uint64_t timeout() override { return m_timeout; }
@@ -316,13 +304,9 @@ public:
         auto iov_view = iovector_view(iov, iovcnt);
         size_t sum = iov_view.sum();
 
-        {
-            photon::scoped_lock lock(m_wmutex);
-            n_written =
-                zerocopy_n(fd, iov_view.iov, iovcnt, m_num_calls, m_timeout);
-            if (n_written != (ssize_t)sum) {
-                LOG_ERRNO_RETURN(0, n_written, "zerocopy failed");
-            }
+        n_written = zerocopy_n(fd, iov_view.iov, iovcnt, m_num_calls, m_timeout);
+        if (n_written != (ssize_t)sum) {
+            LOG_ERRNO_RETURN(0, n_written, "zerocopy failed");
         }
 
         int ret = m_event_entry->zerocopy_wait(m_num_calls - 1, m_timeout);
@@ -461,21 +445,18 @@ public:
         KernelSocketStream(socket_family, autoremove, false) {}
 
     ssize_t read(void* buf, size_t count) override {
-        photon::scoped_lock lock(m_rmutex);
         uint64_t timeout = m_timeout;
         auto cb = LAMBDA_TIMEOUT(photon::iouring_pread(fd, buf, count, 0, timeout));
         return net::doio_n(buf, count, cb);
     }
 
     ssize_t write(const void* buf, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         uint64_t timeout = m_timeout;
         auto cb = LAMBDA_TIMEOUT(photon::iouring_pwrite(fd, buf, count, 0, timeout));
         return net::doio_n((void*&) buf, count, cb);
     }
 
     ssize_t readv(const iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_rmutex);
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
         uint64_t timeout = m_timeout;
@@ -484,7 +465,6 @@ public:
     }
 
     ssize_t writev(const iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_wmutex);
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
         uint64_t timeout = m_timeout;
@@ -493,23 +473,19 @@ public:
     }
 
     ssize_t recv(void* buf, size_t count) override {
-        photon::scoped_lock lock(m_rmutex);
         return photon::iouring_recv(fd, buf, count, 0, m_timeout);
     }
 
     ssize_t recv(const iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_rmutex);
         return photon::iouring_preadv(fd, iov, iovcnt, 0, m_timeout);
     }
 
     ssize_t send(const void* buf, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         return photon::iouring_send(fd, buf, count, 0, m_timeout);
     }
 
     // fully send
     ssize_t send2(const void* buf, size_t count, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         uint64_t timeout = m_timeout;
         auto cb = LAMBDA_TIMEOUT(photon::iouring_send(fd, buf, count, flag, timeout));
         return net::doio_n((void*&) buf, count, cb);
@@ -517,7 +493,6 @@ public:
 
     // fully sendmsg
     ssize_t send2(const struct iovec* iov, int iovcnt, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         iovector_view view((iovec*) iov, iovcnt);
         uint64_t timeout = m_timeout;
         auto cb = LAMBDA_TIMEOUT(do_sendmsg(fd, view.iov, view.iovcnt, flag, timeout));
