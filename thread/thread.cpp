@@ -456,7 +456,6 @@ namespace photon
     #if defined(__x86_64__)
         uint32_t low, hi;
         asm volatile(
-            "lfence\n"
             "rdtsc"
             : "=a"(low), "=d"(hi)
             :

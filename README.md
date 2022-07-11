@@ -50,21 +50,42 @@ Conclusion: Photon is faster than fio under this circumstance.
 
 Compare TCP echo server performance, in descending order.
 
-|                                              |     Concurrency Model     | Buffer Size | QPS  | Bandwidth | CPU util |
-|:--------------------------------------------:|:-------------------------:|:-----------:|:----:|:---------:|:--------:|
-|                    Photon                    |    Stackful coroutine     |     4KB     | 560K |  17.1Gb   |   100%   |
-|       Rust [tokio](https://tokio.rs/)        |      Rust coroutine       |     4KB     | 521K |  15.9Gb   |   97%    |
-|                      Go                      |         Goroutine         |     4KB     | 476K |  14.5Gb   |   98%    |
-| [libgo](https://github.com/yyzybb537/libgo)  |    Stackful coroutine     |     4KB     | 444K |  13.6Gb   |   105%   |
-| [boost::asio](https://think-async.com/Asio/) |     Async + Callback      |     4KB     | 224K |   6.8Gb   |   100%   |
-|  [zab](https://github.com/Donald-Rupin/zab)  | C++20 stackless coroutine |     4KB     | 204K |   6.2Gb   |   100%   |
-|  [libco](https://github.com/Tencent/libco)   |    Stackful coroutine     |     4KB     | 182K |   5.6Gb   |   98%    |
-| [asyncio](https://github.com/netcan/asyncio) | C++20 stackless coroutine |     4KB     | 115K |   3.5Gb   |   100%   |
+Client Mode: Streaming
+
+|                                                  |     Concurrency Model     | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
+|:------------------------------------------------:|:-------------------------:|:-----------:|:--------:|:-----:|:---------:|:--------:|
+|                      Photon                      |    Stackful coroutine     |  512 Bytes  |    4     | 1604K |  6.12Gb   |   99%    |
+| [cocoyaxi](https://github.com/idealvin/cocoyaxi) |    Stackful coroutine     |  512 Bytes  |    4     | 1545K |  5.89Gb   |   99%    |
+|         Rust [tokio](https://tokio.rs/)          |      Rust coroutine       |  512 Bytes  |    4     | 1384K |  5.28Gb   |   98%    |
+|                        Go                        |         Goroutine         |  512 Bytes  |    4     | 1083K |  4.13Gb   |   100%   |
+|   [libgo](https://github.com/yyzybb537/libgo)    |    Stackful coroutine     |  512 Bytes  |    4     | 770K  |  2.94Gb   |   99%    |
+|   [boost::asio](https://think-async.com/Asio/)   |     Async + Callback      |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
+|    [libco](https://github.com/Tencent/libco)     |    Stackful coroutine     |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
+|    [zab](https://github.com/Donald-Rupin/zab)    | C++20 stackless coroutine |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
+|   [asyncio](https://github.com/netcan/asyncio)   | C++20 stackless coroutine |  512 Bytes  |    4     | 163K  |  0.60Gb   |   98%    |
+
+Client Mode: Ping-pong
+
+|                                                  |     Concurrency Model     | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
+|:------------------------------------------------:|:-------------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
+|                      Photon                      |    Stackful coroutine     |  512 Bytes  |   1000   | 399K |  1.52Gb   |   100%   |
+|   [boost::asio](https://think-async.com/Asio/)   |     Async + Callback      |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
+|         Rust [tokio](https://tokio.rs/)          |      Rust coroutine       |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
+|                        Go                        |         Goroutine         |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
+|    [zab](https://github.com/Donald-Rupin/zab)    | C++20 stackless coroutine |  512 Bytes  |   1000   | 317K |  1.21Gb   |   100%   |
+| [cocoyaxi](https://github.com/idealvin/cocoyaxi) |    Stackful coroutine     |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
+|    [libco](https://github.com/Tencent/libco)     |    Stackful coroutine     |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
+|   [libgo](https://github.com/yyzybb537/libgo)    |    Stackful coroutine     |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
+|   [asyncio](https://github.com/netcan/asyncio)   | C++20 stackless coroutine |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
+
 
 Note:
-- Set up 16 echo clients(processes), with 32 concurrency per client, to give the maximum stress.
-- Server's maximum network bandwidth is 32Gb. Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz
-- boost::asio is a typical async + callback framework, which means you are NOT able to write sync style code.
+- The Streaming client is to measure echo server performance when handling high throughput. We will set up 4 client processes,
+and each of them will create only one connection. Send coroutine and recv coroutine are running loops separately.
+- The Ping-pong client is to measure echo server performance when handling large amounts of connections.
+We will set up 10 client processes, and each of them will create 100 connections. Within a single connection, 
+recv has to be invoked after send.
+- Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. The network bandwidth (unilateral) is 32Gb.
 - This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.
 
 Conclusion: Photon socket has the best per-core QPS.

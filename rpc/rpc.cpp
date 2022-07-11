@@ -224,19 +224,21 @@ namespace rpc
             bool got_it;
             int* stream_serv_count;
             photon::condition_variable *stream_cv;
+            std::shared_ptr<photon::mutex> w_lock;
 
             Context(SkeletonImpl* sk, IStream* s) :
                 request(sk->m_allocator), stream(s), sk(sk) { }
 
             Context(Context&& rhs) : request(std::move(rhs.request))
             {
-#define COPY(x) x = rhs. x;
+#define COPY(x) x = rhs.x
                 COPY(header.size);
                 COPY(header.function);
                 COPY(header.tag);
                 COPY(func);
                 COPY(stream);
                 COPY(sk);
+                COPY(w_lock);
 #undef COPY
             }
 
@@ -297,7 +299,13 @@ namespace rpc
                 resp->push_front(&h, sizeof(h));
                 if (stream == nullptr)
                     LOG_ERRNO_RETURN(0, -1, "socket closed ");
+                if (w_lock) {
+                    w_lock->lock();
+                }
                 ssize_t ret = stream->writev(resp->iovec(), resp->iovcnt());
+                if (w_lock) {
+                    w_lock->unlock();
+                }
                 if (ret < (ssize_t)(sizeof(h) + h.size)) {
                     stream->shutdown(ShutdownHow::ReadWrite);
                     LOG_ERRNO_RETURN(0, -1, "failed to send rpc response to stream ", stream);
@@ -334,11 +342,13 @@ namespace rpc
             });
             if (stream_accept_notify) stream_accept_notify(stream);
             DEFER(if (stream_close_notify) stream_close_notify(stream));
+            auto w_lock = m_concurrent ? std::make_shared<photon::mutex>() : nullptr;
             while(m_running)
             {
                 Context context(this, stream);
                 context.stream_serv_count = &stream_serv_count;
                 context.stream_cv = &stream_cv;
+                context.w_lock = w_lock;
                 node.thread = CURRENT;
                 int ret = context.read_request();
                 ERRNO err;

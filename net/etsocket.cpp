@@ -299,7 +299,6 @@ static __FORCE_INLINE__ ssize_t etdoio(IOCB iocb, WAITCB waitcb) {
 
 class ETKernelSocketStream : public ETKernelSocket {
 public:
-    photon::mutex m_rmutex, m_wmutex;
     uint64_t m_timeout = -1;
 
     using ETKernelSocket::ETKernelSocket;
@@ -308,12 +307,10 @@ public:
     }
     virtual Object* get_underlay_object(int) override { return (Object*)(uint64_t)fd; }
     virtual ssize_t read(void* buf, size_t count) override {
-        photon::scoped_lock lock(m_rmutex);
         auto b = buf;
         return etdoio_n(b, count, LAMBDA(recv(b, count)));
     }
     virtual ssize_t write(const void* buf, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         auto b = (void*)buf;
         return etdoio_n(b, count, LAMBDA(send(b, count)));
     }
@@ -322,7 +319,6 @@ public:
         return readv_mutable(ciov.ptr, iovcnt);
     }
     virtual ssize_t readv_mutable(struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_rmutex);
         iovector_view v(iov, iovcnt);
         return etdoiov_n(v, LAMBDA(recv((const struct iovec*)v.iov, v.iovcnt)));
     }
@@ -331,7 +327,6 @@ public:
         return writev_mutable(ciov.ptr, iovcnt);
     }
     virtual ssize_t writev_mutable(struct iovec* iov, int iovcnt) override {
-        photon::scoped_lock lock(m_wmutex);
         iovector_view v(iov, iovcnt);
         return etdoiov_n(v, LAMBDA(send((const struct iovec*)v.iov, v.iovcnt)));
     }
@@ -382,12 +377,10 @@ public:
     }
 
     virtual ssize_t send2(const void* buf, size_t count, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         auto b = (void*)buf;
         return etdoio_n(b, count, LAMBDA(do_send(b, count, flag)));
     }
     virtual ssize_t send2(const struct iovec* iov, int iovcnt, int flag) override {
-        photon::scoped_lock lock(m_wmutex);
         iovector_view v((struct iovec*)iov, iovcnt);
         return etdoiov_n(v, LAMBDA(do_send((const struct iovec*)v.iov, v.iovcnt, flag)));
     }
@@ -399,7 +392,6 @@ public:
     }
 
     ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
-        photon::scoped_lock lock(m_wmutex);
         void* buf_unused = nullptr;
         return etdoio_n(buf_unused, count,
             LAMBDA(do_sendfile(in_fd, offset, count)));

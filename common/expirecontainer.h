@@ -15,196 +15,240 @@ limitations under the License.
 */
 
 #pragma once
-#include <cerrno>
+#include <photon/common/object.h>
+#include <photon/common/string_view.h>
+#include <photon/common/timeout.h>
+#include <photon/common/utility.h>
+#include <photon/thread/list.h>
+#include <photon/thread/thread.h>
+#include <photon/thread/timer.h>
 
 #include <memory>
 #include <tuple>
 #include <type_traits>
-#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
-#include <photon/common/object.h>
-#include <photon/thread/list.h>
-#include <photon/thread/thread.h>
-#include <photon/thread/timer.h>
-#include <photon/common/string-keyed.h>
-#include <photon/common/timeout.h>
-#include <photon/common/utility.h>
+/**
+ * @brief ExpireContainerBase is basic class for all expire containers
+ * provides index for items and a release list for item recycle.
+ *
+ */
+class ExpireContainerBase : public Object {
+protected:
+    class Item : public intrusive_list_node<Item> {
+    protected:
+        Item() : _timeout(0) {}
 
-template <typename T, typename... Ts>
-struct Payload : public Payload<Ts...> {
-    T p;
+    public:
+        Timeout _timeout;
+        virtual ~Item() { remove_from_list(); }
+        virtual size_t key_hash() const = 0;
+        virtual bool key_equal(const Item* rhs) const = 0;
+        virtual Item* construct() const = 0;
+    };
 
-    template <typename Arg, typename... Args>
-    Payload(Arg&& t, Args&&... ts)
-        : Payload<Ts...>(std::forward<Args>(ts)...), p(std::forward<Arg>(t)) {}
-    Payload() : Payload<Ts...>(), p() {}
+    template <typename BaseItem, typename KeyType>
+    class KeyedItem : public BaseItem {
+    public:
+        constexpr static bool _is_string_key =
+            std::is_base_of<std::string, KeyType>::value ||
+            std::is_base_of<std::string_view, KeyType>::value ||
+            std::is_same<const char*, const KeyType>::value;
+
+        using ItemKey = KeyType;
+
+        using InterfaceKey =
+            typename std::conditional<_is_string_key, std::string_view,
+                                      ItemKey>::type;
+
+        ItemKey _key;
+        KeyedItem(const InterfaceKey& key) : _key(key) {}
+        virtual size_t key_hash() const override {
+            return std::hash<ItemKey>()(_key);
+        }
+        virtual bool key_equal(const Item* rhs) const override {
+            return _key == static_cast<const KeyedItem*>(rhs)->_key;
+        }
+        virtual KeyedItem* construct() const override {
+            return new KeyedItem(_key);
+        }
+        const ItemKey& key() { return _key; }
+    };
+
+    intrusive_list<Item> _list;
+    uint64_t _expiration;
+    photon::Timer _timer;
+    photon::mutex _mtx;
+
+    using ItemPtr = std::unique_ptr<Item>;
+    struct ItemHash {
+        size_t operator()(const ItemPtr& x) const { return x->key_hash(); }
+    };
+    struct ItemEqual {
+        size_t operator()(const ItemPtr& x, const ItemPtr& y) const {
+            return x->key_equal(y.get());
+        }
+    };
+
+    std::unordered_set<ItemPtr, ItemHash, ItemEqual> _set;
+
+    ExpireContainerBase(uint64_t expiration, uint64_t recycle_timeout);
+    ~ExpireContainerBase() { clear(); }
+
+    using iterator = decltype(_set)::iterator;
+    std::pair<iterator, bool> insert(Item* item);
+    iterator begin() { return _set.begin(); }
+    iterator end() { return _set.end(); }
+    iterator find(const Item& key_item);
+
+    template <typename T>
+    struct TypedIterator : public iterator {
+        TypedIterator(const iterator& rhs) : iterator(rhs) {}
+        std::unique_ptr<T>& operator*() const {
+            return (std::unique_ptr<T>&)iterator::operator*();
+        }
+
+        std::unique_ptr<T>* operator->() const {
+            return (std::unique_ptr<T>*)iterator::operator->();
+        }
+    };
+
+    bool keep_alive(const Item& item, bool insert_if_not_exists);
+
+    void enqueue(Item* item) {
+        _list.pop(item);
+        item->_timeout.timeout(_expiration);
+        _list.push_back(item);
+    }
+
+public:
+    void clear();
+    uint64_t expire();
+    size_t size() { return _set.size(); }
+    size_t expiration() { return _expiration; }
 };
-
-template <typename T>
-struct Payload<T> {
-    T p;
-
-    template <typename Arg>
-    Payload(Arg&& t) : p(std::forward<Arg>(t)) {}
-    Payload() = default;
-};
-
-template <int idx, typename T, typename... Ts>
-struct __type_idx_helper : public __type_idx_helper<idx - 1, Ts...> {
-    using __type_idx_helper<idx - 1, Ts...>::type;
-    using __type_idx_helper<idx - 1, Ts...>::ptype;
-};
-
-template <typename T, typename... Ts>
-struct __type_idx_helper<0, T, Ts...> {
-    using type = T;
-    using ptype = Payload<T, Ts...>;
-};
-
-template <int idx, typename T, typename... Ts>
-inline typename __type_idx_helper<idx, T, Ts...>::type& GetPayload(
-    Payload<T, Ts...>& payload) {
-    return ((typename __type_idx_helper<idx, T, Ts...>::ptype&)(payload)).p;
-}
 
 template <typename KeyType, typename... Ts>
-class ExpireContainer : public Object {
+class ExpireContainer : public ExpireContainerBase {
 public:
-    using MapKey =
-        typename std::conditional<std::is_base_of<std::string, KeyType>::value,
-                                  std::string_view, KeyType>::type;
-    struct ItemRef : public intrusive_list_node<ItemRef> {
-        Timeout timeout;
-        // Actual key stores in payload
-        Payload<MapKey, Ts...> payload;
-
-        template <typename... Gs>
-        ItemRef(const MapKey& key, uint64_t expire, Gs&&... xs)
-            : timeout(expire), payload(key, std::forward<Gs>(xs)...) {}
-
-        MapKey key() { return GetPayload<0>(payload); }
-    };
-
-    using Map =
-        typename std::conditional<std::is_base_of<std::string, KeyType>::value,
-                                  unordered_map_string_key<ItemRef*>,
-                                  std::unordered_map<KeyType, ItemRef*>>::type;
-
-    explicit ExpireContainer(uint64_t expiration)
-        : m_expiration(expiration),
-          m_timer(expiration, {this, &ExpireContainer::expire}, true,
-                  8UL * 1024 * 1024) {}
-
-    void clear() {
-        m_list.node = nullptr;
-        for (auto& x : m_map) {
-            delete x.second;
-        }
-        m_map.clear();
-    }
-    ~ExpireContainer() override {
-        m_timer.stop();
-        clear();
-    }
-
-    template <typename... Gs>
-    typename Map::iterator insert(const MapKey& key, Gs&&... xs) {
-        // when key is string view for outside,
-        // it should change to an string view object that
-        // refers key_string inside m_map
-        // so emplace first, then create ItemRef by m_map iter
-        auto it = insert_into_map(key, std::forward<Gs>(xs)...);
-        if (it == m_map.end()) return m_map.end();
-        m_list.push_back(it->second);
-        return it;
-    }
-
-    uint64_t expire() {
-        photon::scoped_lock lock(m_mtx);
-        while (!m_list.empty() &&
-               m_list.front()->timeout.expire() < photon::now) {
-            auto p = m_list.pop_front();
-            // make sure that m_map erased p before release p
-            m_map.erase(p->key());
-            delete p;
-        }
-        return 0;
-    };
-
-    // return the # of items currently in the list
-    size_t size() { return m_map.size(); }
-
-    // time to expire, in us
-    size_t expiration() { return m_expiration; }
-
-    struct iterator : public Map::iterator {
-        using base = typename Map::iterator;
-        iterator() = default;
-        iterator(base it) : base(it) {}
-        MapKey operator*() { return base::operator*().second->key(); }
-    };
-
-    iterator begin() { return m_map.begin(); }
-
-    iterator end() { return m_map.end(); }
-
-    iterator find(const MapKey& key) { return m_map.find(key); }
+    using Base = ExpireContainerBase;
+    ExpireContainer(uint64_t expiration, uint64_t recycle_timeout = -1UL)
+        : Base(expiration, recycle_timeout) {}
 
 protected:
-    uint64_t m_expiration;
-    intrusive_list<ItemRef> m_list;
-    Map m_map;
-    photon::Timer m_timer;
-    photon::mutex m_mtx;
+    using KeyedItem = typename Base::KeyedItem<Base::Item, KeyType>;
+    class Item : public KeyedItem {
+    public:
+        std::tuple<Ts...> payload;
 
-    // update timestamp of a reference to item.
-    void refresh(ItemRef* ref) {
-        m_list.pop(ref);
-        ref->timeout.timeout(m_expiration);
-        m_list.push_back(ref);
+        using typename KeyedItem::InterfaceKey;
+        using typename KeyedItem::ItemKey;
+        using iterator = typename intrusive_list_node<Item>::iterator;
+
+        template <typename... Gs>
+        Item(const InterfaceKey& key, Gs&&... gs)
+            : KeyedItem(key), payload(std::forward<Gs>(gs)...) {}
+
+        template <size_t idx,
+                  typename = typename std::enable_if<(idx > 0)>::type>
+        decltype(auto) get_payload() {
+            return std::get<idx - 1>(payload);
+        }
+        template <size_t idx,
+                  typename = typename std::enable_if<(idx == 0)>::type>
+        InterfaceKey get_payload() {
+            return KeyedItem::_key;
+        }
+    };
+    intrusive_list<Item>& list() { return (intrusive_list<Item>&)_list; }
+    using ItemPtr = std::unique_ptr<Item>;
+
+public:
+    using ItemKey = typename Item::ItemKey;
+    using InterfaceKey = typename Item::InterfaceKey;
+
+    using iterator = typename ExpireContainerBase::TypedIterator<Item>;
+    iterator begin() { return Base::begin(); }
+    iterator end() { return Base::end(); }
+    iterator find(const InterfaceKey& key) {
+        return Base::find(KeyedItem(key));
     }
 
     template <typename... Gs>
-    typename Map::iterator insert_into_map(const MapKey& key, Gs&&... xs) {
-        // when key is string view for outside,
-        // it should change to an string view object that
-        // refers key_string inside m_map
-        // so emplace first, then create ItemRef by m_map iter
-        auto res = m_map.emplace(key, nullptr);
-        if (!res.second) return m_map.end();
-        auto it = res.first;
-        auto node =
-            new ItemRef(it->first, m_expiration, std::forward<Gs>(xs)...);
-        it->second = node;
-        return it;
+    iterator insert(const InterfaceKey& key, Gs&&... xs) {
+        auto item = new Item(key, std::forward<Gs>(xs)...);
+        auto pr = Base::insert(item);
+        if (!pr.second) {
+            delete item;
+            return end();
+        }
+        enqueue(item);
+        return pr.first;
     }
 };
 
 // a set / list like structure
 // able to query whether an item not expired in it.
-template <typename ItemType>
-class ExpireList : public ExpireContainer<ItemType> {
-protected:
-    using base = ExpireContainer<ItemType>;
-    using base::base;
-    using base::expire;
-    using base::insert;
-    using base::m_map;
-    using base::refresh;
 
+template <typename T>
+class ExpireList : public ExpireContainer<T> {
 public:
-    bool keep_alive(ItemType item, bool insert_if_not_exists) {
-        DEFER(expire());
-        photon::scoped_lock lock(this->m_mtx);
-        auto iter = m_map.find(item);
-        if (iter != m_map.end()) {
-            refresh(iter->second);
-        } else if (insert_if_not_exists) {
-            insert(item);
-        } else
-            return false;
-        return true;
+    using Base = ExpireContainer<T>;
+    using Base::Base;
+    using typename Base::Item;
+    bool keep_alive(const T& x, bool insert_if_not_exists) {
+        return Base::keep_alive(Item(x), insert_if_not_exists);
     }
+};
+
+class ObjectCacheBase : public ExpireContainerBase {
+protected:
+    using Base = ExpireContainerBase;
+    using Base::Base;
+    using Base::KeyedItem;
+    // using Base::iterator;
+    // using Base::begin;
+    // using Base::end;
+
+    class Item : public Base::Item {
+    public:
+        Item() : Base::Item() {
+            _obj = nullptr;
+            _refcnt = 0;
+            _recycle = nullptr;
+        }
+        void* _obj;
+        photon::mutex _mtx;
+        uint32_t _refcnt;
+        photon::semaphore* _recycle;
+    };
+
+    photon::condition_variable blocker;
+
+    using ItemPtr = std::unique_ptr<Item>;
+
+    // in case of missing, ref_acquire() performs a 2 phase construction:
+    // (1) creating an item with _obj==nullptr, preventing
+    //     concurrent construction of objects with the same key;
+    // (2) construction of the object itself, and possibly do
+    //     clean-up in case of failure
+    Item* ref_acquire(const Item& key_item, Delegate<void*> ctor);
+
+    int ref_release(Item* item, bool recycle = false);
+
+    void* acquire(const Item& key_item, Delegate<void*> ctor) {
+        auto ret = ref_acquire(key_item, ctor);
+        return ret ? ret->_obj : nullptr;
+    }
+
+    // the argument `key` plays the roles of (type-erased) key
+    int release(const Item& key_item, bool recycle = false);
+
+    using iterator = typename ExpireContainerBase::TypedIterator<Item>;
+    iterator begin() { return Base::begin(); }
+    iterator end() { return Base::end(); }
+    iterator find(const Item& key_item) { return Base::find(key_item); }
 };
 
 // Resource pool based on reference count
@@ -213,179 +257,68 @@ public:
 // or findout the object, add reference count; when object release, reduce
 // refcount. if some resource is not referenced, it will be put back to gc list
 // waiting to release.
-template <typename T,
-          typename D = typename std::default_delete<
-              typename std::remove_pointer<T>::type>,
-          typename = typename std::enable_if<std::is_pointer<T>::value>::type>
-using UniqPtr =
-    typename std::unique_ptr<typename std::remove_pointer<T>::type, D>;
-
-template <typename KeyType, typename ValType,
-          typename Deleter = typename std::default_delete<
-              typename std::remove_pointer<ValType>::type>>
-class ObjectCache : public ExpireContainer<KeyType, UniqPtr<ValType>, uint64_t,
-                                           bool, photon::mutex> {
+template <typename KeyType, typename ValPtr>
+class ObjectCache : public ObjectCacheBase {
 protected:
-    using base = ExpireContainer<KeyType, UniqPtr<ValType>, uint64_t, bool,
-                                 photon::mutex>;
-    using base::base;
-    using base::expire;
-    using base::insert_into_map;
-    using base::m_list;
-    using base::m_map;
-    using typename base::ItemRef;
-    using typename base::MapKey;
+    using Base = ObjectCacheBase;
+    using ValEntity = typename std::remove_pointer<ValPtr>::type;
+    using KeyedItem = Base::KeyedItem<Base::Item, KeyType>;
+    class Item : public KeyedItem {
+    public:
+        using KeyedItem::KeyedItem;
+        virtual Item* construct() const override {
+            auto item = new Item(this->_key);
+            item->_obj = nullptr;
+            item->_refcnt = 0;
+            item->_recycle = nullptr;
+            return item;
+        }
+        ~Item() override { delete (ValPtr)this->_obj; }
+    };
 
-    photon::condition_variable release_cv, block_cv;
+    using ItemKey = typename Item::ItemKey;
+    using InterfaceKey = typename Item::InterfaceKey;
+    using ItemPtr = std::unique_ptr<Item>;
 
 public:
-    static inline MapKey& get_key(ItemRef* ref) {
-        return GetPayload<0>(ref->payload);
+    ObjectCache(uint64_t expiration, uint64_t recycle_timeout = -1UL)
+        : Base(expiration, recycle_timeout) {}
+
+    template <typename Constructor>
+    Item* ref_acquire(const InterfaceKey& key, const Constructor& ctor) {
+        auto _ctor = [&]() -> void* { return ctor(); };
+        // _ctor can always implicit cast to `Delegate<void*>`
+        return (Item*)Base::ref_acquire(Item(key), _ctor);
     }
-    static inline UniqPtr<ValType>& get_ptr(ItemRef* ref) {
-        return GetPayload<1>(ref->payload);
-    }
-    static inline uint64_t& get_refcnt(ItemRef* ref) {
-        return GetPayload<2>(ref->payload);
-    }
-    static inline bool& get_block_flag(ItemRef* ref) {
-        return GetPayload<3>(ref->payload);
-    }
-    static inline photon::mutex& get_ref_mtx(ItemRef* ref) {
-        return GetPayload<4>(ref->payload);
+
+    int ref_release(Item* item, bool recycle = false) {
+        return Base::ref_release(item, recycle);
     }
 
     template <typename Constructor>
-    ItemRef* ref_acquire(const MapKey& key, const Constructor& ctor) {
-        DEFER(expire());
-        ItemRef* ref = nullptr;
-        {
-            photon::scoped_lock lock(this->m_mtx);
-            auto iter = m_map.find(key);
-            // check if it is in immediately release
-            // if it is true, block till complete
-            while (iter != m_map.end() && get_block_flag(iter->second)) {
-                block_cv.wait(lock);
-                iter = m_map.find(key);
-            }
-            if (iter == m_map.end()) {
-                // create an empty reference for item, block before make sure
-                iter = insert_into_map(key, nullptr, 0, true);
-                if (iter == m_map.end()) return nullptr;
-            } else {
-                m_list.pop(iter->second);
-            };
-            // here got a item reference
-            ref = iter->second;
-            assert(ref != nullptr);
-        }
-        {
-            photon::scoped_lock reflock(get_ref_mtx(ref));
-            if (get_ptr(ref) == nullptr) {
-                get_ptr(ref).reset(ctor());
-                get_block_flag(ref) = false;
-            }
-            if (get_ptr(ref) != nullptr) {
-                get_refcnt(ref)++;
-            }
-        }
-        {
-            photon::scoped_lock lock(this->m_mtx);
-            if (get_ptr(ref) == nullptr) {
-                if (get_refcnt(ref) == 0) {
-                    ref->timeout.timeout(this->m_expiration);
-                    m_list.push_back(ref);
-                }
-                ref = nullptr;
-            }
-            block_cv.notify_all();
-        }
-        return ref;
+    ValPtr acquire(const InterfaceKey& key, const Constructor& ctor) {
+        auto item = ref_acquire(key, ctor);
+        return (ValPtr)(item ? item->_obj : nullptr);
     }
 
-    ItemRef* ref_acquire(const MapKey& key) {
-        return ref_acquire(key, [] {
-            return new typename std::remove_pointer<ValType>::type();
-        });
+    int release(const InterfaceKey& key, bool recycle = false) {
+        return Base::release(Item(key), recycle);
     }
 
-    // acquire resource with identity key. It can be sure to get an resource
-    // resources are reusable, managed by reference count and key.
-    // when the pool is full and not able to create any resource, it will block
-    // till resourece created
-    template <typename Constructor>
-    ValType acquire(const MapKey& key, const Constructor& ctor) {
-        auto ret = ref_acquire(key, ctor);
-        return ret ? get_ptr(ret).get() : nullptr;
-    }
-
-    ValType acquire(const MapKey& key) {
-        return acquire(key, [] {
-            return new typename std::remove_pointer<ValType>::type();
-        });
-    }
-
-    // once user finished using a resource, it should call release(key) to tell
-    // the pool that the reference is over
-    int ref_release(ItemRef* ref, bool recycle = false) {
-        DEFER(expire());
-        if (!ref) return 0;
-        bool cycler = false;
-        uint64_t ret = 0;
-        {
-            photon::scoped_lock reflock(get_ref_mtx(ref));
-            if (recycle &&
-                !get_block_flag(ref)) {  // this thread should do recycle
-                get_block_flag(ref) = true;
-                cycler = true;
-            }
-            auto& refcnt = get_refcnt(ref);
-            if (!cycler) {
-                refcnt--;
-                release_cv.notify_all();
-                if (!recycle) ret = refcnt;
-            } else {
-                while (refcnt > 1) release_cv.wait(reflock);
-                refcnt--;
-                ret = refcnt;
-                assert(ret == 0);
-                get_ptr(ref).reset(nullptr);
-                get_block_flag(ref) = false;
-            }
-        }
-        {
-            photon::scoped_lock lock(this->m_mtx);
-            if (get_refcnt(ref) == 0) {
-                ref->timeout.timeout(this->m_expiration);
-                m_list.push_back(ref);
-            }
-            block_cv.notify_all();
-        }
-        return ret;
-    }
-
-    int release(const MapKey& key, bool recycle = false) {
-        ItemRef* ref = nullptr;
-        {
-            photon::scoped_lock lock(this->m_mtx);
-            auto iter = m_map.find(key);
-            if (iter == m_map.end()) {
-                return -1;
-            }
-            ref = iter->second;
-        }
-        return ref_release(ref, recycle);
+    using iterator = typename ExpireContainerBase::TypedIterator<Item>;
+    iterator begin() { return Base::begin(); }
+    iterator end() { return Base::end(); }
+    iterator find(const InterfaceKey& key) {
+        return Base::find(KeyedItem(key));
     }
 
     class Borrow {
         ObjectCache* _oc;
-        ItemRef* _ref;
+        Item* _ref;
         bool _recycle = false;
-        using ValPtr = ValType;
-        using ValEntity = typename std::remove_pointer<ValType>::type;
 
     public:
-        Borrow(ObjectCache* oc, ItemRef* ref, bool recycle)
+        Borrow(ObjectCache* oc, Item* ref, bool recycle)
             : _oc(oc), _ref(ref), _recycle(recycle) {}
         ~Borrow() {
             if (_ref) _oc->ref_release(_ref, _recycle);
@@ -397,9 +330,9 @@ public:
         void operator=(const Borrow&) = delete;
         void operator=(Borrow&& rhs) { move(rhs); }
 
-        ValEntity& operator*() { return *get_ptr(_ref); }
+        ValEntity& operator*() { return *get_ptr(); }
 
-        ValPtr operator->() { return get_ptr(_ref).get(); }
+        ValPtr operator->() { return get_ptr(); }
 
         operator bool() { return _ref; }
 
@@ -408,6 +341,8 @@ public:
         bool recycle(bool x) { return _recycle = x; }
 
     private:
+        ValPtr get_ptr() { return (ValPtr)_ref->_obj; }
+
         void move(Borrow&& rhs) {
             _oc = rhs._oc;
             rhs._oc = nullptr;
@@ -418,13 +353,11 @@ public:
     };
 
     template <typename Constructor>
-    Borrow borrow(const MapKey& key, const Constructor& ctor) {
+    Borrow borrow(const InterfaceKey& key, const Constructor& ctor) {
         return Borrow(this, ref_acquire(key, ctor), false);
     }
 
-    Borrow borrow(const MapKey& key) {
-        return borrow(key, [] {
-            return new typename std::remove_pointer<ValType>::type();
-        });
+    Borrow borrow(const InterfaceKey& key) {
+        return borrow(key, [] { return new ValEntity(); });
     }
 };

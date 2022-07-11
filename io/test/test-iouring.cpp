@@ -31,26 +31,18 @@ limitations under the License.
 #include <photon/common/io-alloc.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/alog.h>
-#include <photon/net/socket.h>
+
 
 using namespace photon;
 
 // Common parameters
 bool stop_test = false;
 uint64_t qps = 0;
-uint64_t g_time_cost = 0;
 DEFINE_uint64(show_loop_interval, 10, "interval seconds of show loop");
 DEFINE_uint64(num_threads, 32, "num of threads");
-
-// IO parameters
 const size_t max_io_size = 2 * 1024 * 1024;
 DEFINE_string(src, "src", "src file path");
 DEFINE_string(dst, "dst", "dst file path");
-
-// Network parameters
-std::unordered_map<photon::thread*, bool> g_client_threads;
-DEFINE_string(ip, "127.0.0.1", "ip");
-DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 4096, "buffer size");
 
 /* Helper functions */
@@ -60,11 +52,6 @@ DEFINE_uint64(buf_size, 4096, "buffer size");
 static void handle_signal(int sig) {
     LOG_INFO("try to stop test");
     stop_test = true;
-    for (auto& pair : g_client_threads) {
-        if (pair.second) {
-            photon::thread_interrupt(pair.first);
-        }
-    }
 }
 
 static void ignore_signal(int sig) {
@@ -76,15 +63,6 @@ static void show_qps_loop() {
         photon::thread_sleep(FLAGS_show_loop_interval);
         LOG_INFO("qps: `", qps / FLAGS_show_loop_interval);
         qps = 0;
-    }
-}
-
-void show_latency_loop() {
-    while (!stop_test) {
-        photon::thread_sleep(FLAGS_show_loop_interval);
-        uint64_t lat = (qps != 0) ? (g_time_cost / qps) : 0;
-        LOG_INFO("latency: ` us", lat);
-        qps = g_time_cost = 0;
     }
 }
 
@@ -569,123 +547,6 @@ TEST(event_engine, cascading_one_shot) {
     ASSERT_EQ(errno, ETIMEDOUT);
 
     photon::thread_join((photon::join_handle*) sub);
-}
-
-/* Network Tests */
-
-TEST(echo_server, DISABLED_client) {
-    photon::sync_signal_init();
-    DEFER(photon::sync_signal_fini());
-    photon::sync_signal(SIGTERM, &handle_signal);
-    photon::sync_signal(SIGINT, &handle_signal);
-    photon::sync_signal(SIGPIPE, &ignore_signal);
-
-    auto qps_th = photon::thread_create11(show_latency_loop);
-    photon::thread_enable_join(qps_th);
-
-    net::EndPoint ep{net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
-    auto cli = net::new_tcp_socket_client();
-    auto conn = cli->connect(ep);
-    ASSERT_NE(conn, nullptr);
-
-    auto worker = [&]() -> int {
-        DEFER(g_client_threads[photon::CURRENT] = false);
-
-        void* buf = malloc(FLAGS_buf_size);
-        DEFER(free(buf));
-        while (!stop_test) {
-            timeval start = {}, end = {};
-            gettimeofday(&start, nullptr);
-
-            ssize_t ret;
-            ret = conn->write(buf, FLAGS_buf_size);
-            if (ret != (ssize_t) FLAGS_buf_size) {
-                LOG_ERRNO_RETURN(0, -1, "write fail");
-            }
-            ret = conn->read(buf, FLAGS_buf_size);
-            if (ret != (ssize_t) FLAGS_buf_size) {
-                LOG_ERRNO_RETURN(0, -1, "read fail");
-            }
-
-            gettimeofday(&end, nullptr);
-            qps++;
-            g_time_cost += (end.tv_sec * 1000000 + end.tv_usec - start.tv_sec * 1000000 - start.tv_usec);
-        }
-        return 0;
-    };
-
-    for (size_t i = 0; i < FLAGS_num_threads; i++) {
-        auto th = photon::thread_create11(&decltype(worker)::operator(), &worker);
-        photon::thread_enable_join(th);
-        g_client_threads[th] = true;
-    }
-
-    for (auto& pair : g_client_threads) {
-        if (pair.second) {
-            photon::thread_join((photon::join_handle*) pair.first);
-        }
-    }
-    LOG_INFO("workers all joined");
-    photon::thread_join((photon::join_handle*) qps_th);
-    LOG_INFO("qps thread joined");
-}
-
-void run_echo_server(net::ISocketServer* server) {
-    photon::sync_signal_init();
-    DEFER(photon::sync_signal_fini());
-    photon::sync_signal(SIGTERM, &handle_signal);
-    photon::sync_signal(SIGINT, &handle_signal);
-    photon::sync_signal(SIGPIPE, &ignore_signal);
-
-    auto stop_watcher = [&] {
-        while (true) {
-            photon::thread_sleep(1);
-            if (stop_test) {
-                LOG_INFO("terminate server");
-                server->terminate();
-                break;
-            }
-        }
-    };
-
-    photon::thread_create11(show_qps_loop);
-    photon::thread_create11(&decltype(stop_watcher)::operator(), &stop_watcher);
-
-    auto handle = [&](net::ISocketStream* arg) -> int {
-        LOG_TEMP("Connection established");
-        DEFER(LOG_TEMP("Connection shutdown"));
-        auto sock = (net::ISocketStream*) arg;
-        void* buf = malloc(FLAGS_buf_size);
-        DEFER(free(buf));
-
-        while (true) {
-            ssize_t ret1, ret2;
-            ret1 = sock->recv(buf, FLAGS_buf_size);
-            if (ret1 <= 0) {
-                LOG_ERRNO_RETURN(0, -1, "read fail");
-            }
-            ret2 = sock->write(buf, ret1);
-            if (ret2 != ret1) {
-                LOG_ERRNO_RETURN(0, -1, "write fail");
-            }
-            qps++;
-        }
-        return 0;
-    };
-    server->set_handler(handle);
-    server->bind(9527, net::IPAddr());
-    server->listen(1024);
-    server->start_loop(true);
-}
-
-TEST(echo_server, DISABLED_iouring) {
-    auto server = net::new_socket_server_iouring();
-    run_echo_server(server);
-}
-
-TEST(echo_server, DISABLED_epoll) {
-    auto server = net::new_tcp_socket_server();
-    run_echo_server(server);
 }
 
 int main(int argc, char** arg) {

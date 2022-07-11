@@ -26,18 +26,17 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
 
-// Common parameters
 bool stop_test = false;
 uint64_t qps = 0;
 uint64_t time_cost = 0;
-DEFINE_uint64(show_statistics_interval, 1, "interval seconds to show statistics");
 
-// Network parameters
+DEFINE_uint64(show_statistics_interval, 1, "interval seconds to show statistics");
 DEFINE_bool(client, false, "client or server? default is server");
-DEFINE_uint64(client_thread_num, 32, "thread number of the client");
+DEFINE_string(client_mode, "streaming", "client mode. Choose between streaming or ping-pong");
+DEFINE_uint64(client_connection_num, 100, "number of the connections of the client, only available in ping-pong mode");
 DEFINE_string(ip, "127.0.0.1", "ip");
 DEFINE_uint64(port, 9527, "port");
-DEFINE_uint64(buf_size, 4096, "buffer size");
+DEFINE_uint64(buf_size, 512, "buffer size");
 
 static void handle_signal(int sig) {
     LOG_INFO("Try to gracefully stop test ...");
@@ -61,29 +60,30 @@ static void run_latency_loop() {
     }
 }
 
-static int echo_client() {
+// Create coroutines for each of the connections, doing ping-pong send/recv
+static int ping_pong_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
     auto cli = photon::net::new_tcp_socket_client();
     if (cli == nullptr) {
-        LOG_ERRNO_RETURN(0, -1, "fail to create client")
+        LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
     DEFER(delete cli);
-    auto conn = cli->connect(ep);
-    if (conn == nullptr) {
-        LOG_ERRNO_RETURN(0, -1, "fail to connect")
-    }
-    DEFER(delete conn);
 
-    auto run_echo_worker = [&]() -> int {
+    auto run_ping_pong_worker = [&]() -> int {
         AlignedAlloc alloc(512);
         void* buf = alloc.alloc(FLAGS_buf_size);
         DEFER(alloc.dealloc(buf));
 
+        auto conn = cli->connect(ep);
+        if (conn == nullptr) {
+            LOG_ERRNO_RETURN(0, -1, "fail to connect")
+        }
+        DEFER(delete conn);
+
         while (!stop_test) {
             auto start = std::chrono::system_clock::now();
-            ssize_t ret;
             //  write equals to fully send
-            ret = conn->write(buf, FLAGS_buf_size);
+            ssize_t ret = conn->write(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
                 LOG_ERRNO_RETURN(0, -1, "write fail");
             }
@@ -101,9 +101,56 @@ static int echo_client() {
 
     photon::thread_create11(run_latency_loop);
 
-    for (size_t i = 0; i < FLAGS_client_thread_num; i++) {
-        photon::thread_create11(run_echo_worker);
+    for (size_t i = 0; i < FLAGS_client_connection_num; i++) {
+        photon::thread_create11(run_ping_pong_worker);
     }
+
+    // Forever sleep until Ctrl + C
+    photon::thread_sleep(-1);
+    return 0;
+}
+
+// Create two coroutines, one for sending and the other for receiving
+static int streaming_client() {
+    photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
+    auto cli = photon::net::new_tcp_socket_client();
+    if (cli == nullptr) {
+        LOG_ERRNO_RETURN(0, -1, "fail to create client");
+    }
+    DEFER(delete cli);
+
+    auto conn = cli->connect(ep);
+    if (conn == nullptr) {
+        LOG_ERRNO_RETURN(0, -1, "fail to connect")
+    }
+    DEFER(delete conn);
+
+    auto send = [&]() -> int {
+        AlignedAlloc alloc(512);
+        void* buf = alloc.alloc(FLAGS_buf_size);
+        DEFER(alloc.dealloc(buf));
+        while (!stop_test) {
+            ssize_t ret = conn->write(buf, FLAGS_buf_size);
+            if (ret != (ssize_t) FLAGS_buf_size) {
+                LOG_ERRNO_RETURN(0, -1, "write fail");
+            }
+        }
+        return 0;
+    };
+    auto recv = [&]() -> int {
+        AlignedAlloc alloc(512);
+        void* buf = alloc.alloc(FLAGS_buf_size);
+        DEFER(alloc.dealloc(buf));
+        while (!stop_test) {
+            ssize_t ret = conn->read(buf, FLAGS_buf_size);
+            if (ret != (ssize_t) FLAGS_buf_size) {
+                LOG_ERRNO_RETURN(0, -1, "read fail");
+            }
+        }
+        return 0;
+    };
+    photon::thread_create11(recv);
+    photon::thread_create11(send);
 
     // Forever sleep until Ctrl + C
     photon::thread_sleep(-1);
@@ -116,6 +163,7 @@ static int echo_server() {
     photon::sync_signal(SIGINT, &handle_signal);
 
     auto server = photon::net::new_tcp_socket_server();
+    // auto server = photon::net::new_socket_server_iouring();
     if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create server")
     }
@@ -140,16 +188,14 @@ static int echo_server() {
         DEFER(alloc.dealloc(buf));
 
         while (true) {
-            // There are internal locks in sockets to protect concurrent reads/writes.
-            // Removing them would increase performance, however, cause data inconsistency.
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
             if (ret1 <= 0) {
-                LOG_ERRNO_RETURN(0, -1, "read fail");
+                LOG_ERRNO_RETURN(0, -1, "read fail", VALUE(ret1));
             }
             ret2 = sock->write(buf, ret1);
             if (ret2 != ret1) {
-                LOG_ERRNO_RETURN(0, -1, "write fail");
+                LOG_ERRNO_RETURN(0, -1, "write fail", VALUE(ret2));
             }
             qps++;
         }
@@ -176,6 +222,9 @@ int main(int argc, char** arg) {
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     set_log_output_level(ALOG_INFO);
 
+    // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
+    // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
+    //
     // If you have trouble upgrading the kernel, please switch the event_engine argument
     // from `photon::INIT_EVENT_IOURING` to `photon::INIT_EVENT_EPOLL`.
     int ret = photon::init(photon::INIT_EVENT_IOURING | photon::INIT_EVENT_SIGNALFD, 0);
@@ -185,7 +234,13 @@ int main(int argc, char** arg) {
     DEFER(photon::fini());
 
     if (FLAGS_client) {
-        echo_client();
+        if (FLAGS_client_mode == "streaming") {
+            streaming_client();
+        } else if (FLAGS_client_mode == "ping-pong") {
+            ping_pong_client();
+        } else {
+            LOG_ERROR_RETURN(0, -1, "unknown client mode");
+        }
     } else {
         echo_server();
     }

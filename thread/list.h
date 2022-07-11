@@ -180,11 +180,11 @@ public:
                 ptr = nullptr;
             return rst;
         }
-        bool operator == (const iterator& rhs)
+        bool operator == (const iterator& rhs) const
         {
             return ptr == rhs.ptr;
         }
-        bool operator != (const iterator& rhs)
+        bool operator != (const iterator& rhs) const
         {
             return  !(*this == rhs);
         }

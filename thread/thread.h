@@ -438,6 +438,6 @@ namespace photon
 #define WITH_LOCK(mutex) if (auto __lock__ = scoped_lock(mutex))
 
 #define SCOPE_MAKESURE_YIELD                                       \
-    uint64_t __swc_##__LINE__ = get_vcpu(CURRENT)->switch_count;   \
-    DEFER(if (__swc_##__LINE__ == get_vcpu(CURRENT)->switch_count) \
+    uint64_t __swc_##__LINE__ = get_vcpu(photon::CURRENT)->switch_count;   \
+    DEFER(if (__swc_##__LINE__ == get_vcpu(photon::CURRENT)->switch_count) \
               photon::thread_yield(););
