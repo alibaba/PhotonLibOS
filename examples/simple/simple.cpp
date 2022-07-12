@@ -37,7 +37,7 @@ static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IF
 int main() {
     // Initialize Photon environment. Choose the iouring event engine.
     // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
-    // the latest kernel, running an io_uring program does need the version be greater than 5.8.
+    // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
     //
     // If you have trouble upgrading the kernel, please switch the event_engine argument
     // from `photon::INIT_EVENT_IOURING` to `photon::INIT_EVENT_EPOLL`.

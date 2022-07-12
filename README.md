@@ -68,7 +68,7 @@ Client Mode: Ping-pong
 
 |                                                  |     Concurrency Model     | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
 |:------------------------------------------------:|:-------------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
-|                      Photon                      |    Stackful coroutine     |  512 Bytes  |   1000   | 399K |  1.52Gb   |   100%   |
+|                      Photon                      |    Stackful coroutine     |  512 Bytes  |   1000   | 412K |  1.57Gb   |   100%   |
 |   [boost::asio](https://think-async.com/Asio/)   |     Async + Callback      |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
 |         Rust [tokio](https://tokio.rs/)          |      Rust coroutine       |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
 |                        Go                        |         Goroutine         |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
