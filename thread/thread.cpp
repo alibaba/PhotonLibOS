@@ -1414,7 +1414,7 @@ namespace photon
                 "Try to migrate thread `, which is not on current vcpu.", th)
         }
         if (v == nullptr) {
-            v = &vcpus[(th->vcpu - &vcpus[0] + 1) % _n_vcpu];
+            v = &vcpus[rand() % _n_vcpu];
         }
         if (v == th->vcpu) return 0;
         auto vc = (vcpu_t*)v;

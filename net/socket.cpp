@@ -337,8 +337,8 @@ protected:
             waiting = false;
             if (!workth) return 0;
             if (sess) {
-                photon::thread_create11(&KernelSocketServer::handler, m_handler,
-                                        sess);
+                auto th = photon::thread_create11(&KernelSocketServer::handler, m_handler, sess);
+                if (photon::thread_migrate(th, nullptr) != 0) return -1;
             } else {
                 photon::thread_usleep(1000);
             }

@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <chrono>
+#include <thread>
 
 #include <gflags/gflags.h>
 
@@ -232,6 +233,14 @@ int main(int argc, char** arg) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
     DEFER(photon::fini());
+
+    for (int i = 0; i < 8; ++i) {
+        new std::thread([]{
+            photon::init(photon::INIT_EVENT_IOURING, 0);
+            DEFER(photon::fini());
+            photon::thread_sleep(-1);
+        });
+    }
 
     if (FLAGS_client) {
         if (FLAGS_client_mode == "streaming") {
