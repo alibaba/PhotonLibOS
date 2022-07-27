@@ -67,6 +67,11 @@ int main() {
     DEFER(delete file);
 
     auto server = photon::net::new_tcp_socket_server();
+    if (server != nullptr) {
+        LOG_ERRNO_RETURN(0, -1, "failed to create tcp server");
+    }
+    DEFER(delete server);
+
     photon::condition_variable cond;
 
     // In the photon world, we just call coroutine thread. Photon threads run on top of native OS threads.
@@ -79,6 +84,11 @@ int main() {
 
     // Create socket client and connect
     auto client = photon::net::new_tcp_socket_client();
+    if (client != nullptr) {
+        LOG_ERRNO_RETURN(0, -1, "failed to create tcp client");
+    }
+    DEFER(delete client);
+
     photon::net::EndPoint ep{photon::net::IPAddr("127.0.0.1"), 9527};
     auto conn = client->connect(ep);
     if (!conn) {

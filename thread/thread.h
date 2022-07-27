@@ -147,8 +147,7 @@ namespace photon
      * @brief Migrate a READY state thread to another vcpu
      *
      * @param th photon thead
-     * @param vcpu target vcpu ptr, if `vcpu` is nullptr, th will be migrated to
-     * unspecified vcpu
+     * @param vcpu target vcpu
      * @return int 0 for success and -1 for failure
      */
     int thread_migrate(thread* th, vcpu_base* vcpu);
@@ -437,7 +436,7 @@ namespace photon
 */
 #define WITH_LOCK(mutex) if (auto __lock__ = scoped_lock(mutex))
 
-#define SCOPE_MAKESURE_YIELD                                       \
+#define SCOPE_MAKESURE_YIELD                                               \
     uint64_t __swc_##__LINE__ = get_vcpu(photon::CURRENT)->switch_count;   \
     DEFER(if (__swc_##__LINE__ == get_vcpu(photon::CURRENT)->switch_count) \
               photon::thread_yield(););

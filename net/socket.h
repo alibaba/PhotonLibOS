@@ -60,7 +60,7 @@ namespace net
     struct EndPoint
     {
         IPAddr addr;
-        uint16_t port;
+        uint16_t port = 0;
         EndPoint() = default;
         EndPoint(IPAddr ip, uint16_t port): addr(ip), port(port) {}
         EndPoint(const struct sockaddr_in& addr_in)
@@ -90,6 +90,9 @@ namespace net
         bool operator!=(const EndPoint& rhs) const {
             return !operator==(rhs);
         }
+        bool empty() const {
+            return addr.addr == 0 && port == 0;
+        }
     };
 
     // operators to help with logging IP addresses
@@ -99,52 +102,51 @@ namespace net
     LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
     LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
 
-    class ISocket
-    {
+    class ISocketBase {
     public:
-        virtual ~ISocket() = default;
+        virtual ~ISocketBase() = default;
+
+        virtual Object* get_underlay_object(uint64_t recursion = 0) = 0;
         int get_underlay_fd() {
             auto ret = get_underlay_object(-1);
-            return ret ? (int)(uint64_t)ret : -1;
+            return ret ? (int) (uint64_t) ret : -1;
         }
-        virtual Object* get_underlay_object(int i = 0) = 0;
 
-        virtual int setsockopt(int level, int option_name,
-                const void *option_value, socklen_t option_len) = 0;
-        virtual int getsockopt(int level, int option_name,
-                void* option_value, socklen_t* option_len) = 0;
+        virtual int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) = 0;
+        virtual int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) = 0;
         template<typename T>
-        int setsockopt(int level, int option_name, T value)
-        {
+        int setsockopt(int level, int option_name, T value) {
             return setsockopt(level, option_name, &value, sizeof(value));
         }
         template<typename T>
-        int getsockopt(int level, int option_name, T* value)
-        {
+        int getsockopt(int level, int option_name, T* value) {
             socklen_t len = sizeof(*value);
             return getsockopt(level, option_name, value, &len);
         }
 
+        // get/set timeout, in us, (default +∞)
+        virtual uint64_t timeout() const = 0;
+        virtual void timeout(uint64_t tm) = 0;
+    };
+
+    class ISocketName {
+    public:
+        virtual ~ISocketName() = default;
         virtual int getsockname(EndPoint& addr) = 0;
         virtual int getpeername(EndPoint& addr) = 0;
         virtual int getsockname(char* path, size_t count) = 0;
         virtual int getpeername(char* path, size_t count) = 0;
         EndPoint getsockname() { EndPoint ep; getsockname(ep); return ep; }
         EndPoint getpeername() { EndPoint ep; getpeername(ep); return ep; }
-
-        // get/set timeout, in us, (default +∞)
-        virtual uint64_t timeout() = 0;
-        virtual void timeout(uint64_t tm) = 0;
     };
 
-    class ISocketStream : public IStream, public ISocket
-    {
+    class ISocketStream : public IStream, public ISocketBase, public ISocketName {
     public:
         // recv some bytes from the socket;
         // return actual # of bytes recvd, which may be LESS than `count`;
         // may block once at most, when there's no data yet in the socket;
-        virtual ssize_t recv(void *buf, size_t count) = 0;
-        virtual ssize_t recv(const struct iovec *iov, int iovcnt) = 0;
+        virtual ssize_t recv(void *buf, size_t count, int flags = 0) = 0;
+        virtual ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
 
         // read count bytes and drop them
         // return true/false for success/failure
@@ -153,36 +155,28 @@ namespace net
         // send some bytes to the socket;
         // return actual # of bytes sent, which may be LESS than `count`;
         // may block once at most, when there's no free space in the socket's internal buffer;
-        virtual ssize_t send(const void *buf, size_t count) = 0;
-        virtual ssize_t send(const struct iovec *iov, int iovcnt) = 0;
-
-
-        //add for support EaseHttpserver
-        virtual ssize_t send2(const void *buf, size_t count, int flag) = 0;
-        virtual ssize_t send2(const struct iovec *iov, int iovcnt, int flag) = 0;
+        virtual ssize_t send(const void *buf, size_t count, int flags = 0) = 0;
+        virtual ssize_t send(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
 
         virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) = 0;
     };
 
-    /// ISocketClient is kind of SocketStream factory
-    class ISocketClient : public ISocket
-    {
+    class ISocketClient : public ISocketBase, public Object {
     public:
-        virtual ISocketStream* connect(const EndPoint& ep) = 0;
+        // Connect to a remote IPv4 endpoint.
+        // If `local` endpoint is not empty, its address will be bind to the socket before connecting to the `remote`.
+        virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) = 0;
+        // Connect to a Unix Domain Socket.
         virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
     };
 
-    class ISocketServer : public ISocket
-    {
+    class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
         virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
         virtual int bind(const char* path, size_t count) = 0;
         int bind(const char* path) { return bind(path, strlen(path)); }
-
         virtual int listen(int backlog = 1024) = 0;
-
-        virtual ISocketStream* accept() = 0;
-        virtual ISocketStream* accept(EndPoint* remote_endpoint) = 0;
+        virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
 
         using Handler = Callback<ISocketStream*>;
         virtual ISocketServer* set_handler(Handler handler) = 0;
@@ -192,12 +186,17 @@ namespace net
 
     extern "C" ISocketClient* new_tcp_socket_client();
     extern "C" ISocketServer* new_tcp_socket_server();
-    extern "C" ISocketServer* new_tcp_socket_server_0c();
-    extern "C" ISocketClient* new_socket_client_iouring();
-    extern "C" ISocketServer* new_socket_server_iouring();
+    extern "C" ISocketServer* new_zerocopy_tcp_server();
+    extern "C" ISocketClient* new_iouring_tcp_client();
+    extern "C" ISocketServer* new_iouring_tcp_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration=-1UL);
+
+    extern "C" int et_poller_init();
+    extern "C" int et_poller_fini();
+    extern "C" ISocketClient* new_et_tcp_socket_client();
+    extern "C" ISocketServer* new_et_tcp_socket_server();
 }
 }
 

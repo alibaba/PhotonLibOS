@@ -23,64 +23,9 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/security-context/tls-stream.h>
 
+#include "../../test/cert-key.cpp"
+
 using namespace photon;
-
-static const char cert_str[] = R"PEMSTR(
------BEGIN CERTIFICATE-----
-MIIDGTCCAgGgAwIBAgIJAJTRQod8eLVYMA0GCSqGSIb3DQEBCwUAMCMxEjAQBgNV
-BAoMCXQtc3RvcmFnZTENMAsGA1UECwwEZGFkaTAeFw0yMDA1MjUxMDI1NDZaFw0y
-MzA1MjUxMDI1NDZaMCMxEjAQBgNVBAoMCXQtc3RvcmFnZTENMAsGA1UECwwEZGFk
-aTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMjojRFNr6rTWj3AlgQW
-oTUKj/A2rXdfvCMVrJtsQLdir1FWqrvia2FrGabvCGqpSOmDVsNXM01putjHlq+R
-dFZOG3Ye7WE0advSB3/3POauLt4wMs3LgOV53AkX4YWgrdZPVyfiG216aQQd9cZM
-NZ13evqBn7diclgFqVM+Wt0k6AsN2Xns36x6SZPIY9mAF68QTf8aOMlTbC5UVQ3S
-T/H9H9nIVMwSJ/DUADrdTejNYRnCzEri0FNHM39kB8LJrgRflyMGQeXgVRwQ16eP
-MCR1N2NdSJz5lmXvegBjzS2P714vI0J33gI5UbJfDWVFXsV1R5E0fMe7yrNdOqv2
-q10CAwEAAaNQME4wHQYDVR0OBBYEFDfkPK7Nj/WMnZZN9e6+Dt3tbZB6MB8GA1Ud
-IwQYMBaAFDfkPK7Nj/WMnZZN9e6+Dt3tbZB6MAwGA1UdEwQFMAMBAf8wDQYJKoZI
-hvcNAQELBQADggEBAH9GWMoLrZLjDk/OHOuXy/gbOFnOvJq78x+8F5hSaemDRR1l
-gNKMm4GkXRaYj3YoMHn+kSEgpDguVa/zCo0k5ZEj0g9ZriAyQVLf8nR1hRfoP6CZ
-YQMTEM6RYyweXzoJFYsHlnRWU2uTSK+ZLN0qdg4ST8REBpaexQ2t6zk/DaZpW8lp
-nG6Zo1KkJbYp3vfpc03Kez1do/QkTDRB9pm14qz7MTQ3mzKxhSG+HJLvUQARsqHQ
-dhHsVbXV15G/6PsqE0ToTr3wFBqoIgZbvEedqrt7CkQc95qnLcXkURg4tqZ3creU
-g9t6WMtBxl9lFqzZZWJSwXhTGuFKiyAiQ6sBit0=
------END CERTIFICATE-----
-)PEMSTR";
-
-static const char key_str[] = R"PEMSTR(
------BEGIN ENCRYPTED PRIVATE KEY-----
-MIIFDjBABgkqhkiG9w0BBQ0wMzAbBgkqhkiG9w0BBQwwDgQI9rxFFVP8ySoCAggA
-MBQGCCqGSIb3DQMHBAiKyInYU4ROGwSCBMgcgUP7WYTwieC9jki6aeaRwrbUdqX3
-/GGf8A6hM0o74rL8HlBU1IRv9n/9pY3Bf/Ll2qjFpqs8qq5xLkCgHaPIgwcsr26b
-NlRJWt9c17qoFkn8brCWzpafeao9T0gxBprERL9N7uFBAbDSHOix7MB5BUJipuXO
-uZyC2mvbTN5bzeR+A2z+SgNKLUnxwuEhalLhOhKtV9xKQX47E50oMpBY1EoKDeyJ
-3ierZK7XvUyxAjxYeZ+g4qL9zKmL4Bo3SIs0Q3F3Oj8eYDfsLFRD1St65BCymFft
-hkGNb7ZS1Sfx04pGKvWvR2ghPSpJ1ac46FTeGAF7Ch7/U67+czLyl+fdSpqe8oWP
-tla5MwmKOO7jruCbxqNQ3NAbIu13j5lEPcsK/yimp5QQ1CGfLrONEuzRnFYMjN8Q
-3qpkeJmhwGF6W9JJ1KgMMlyvGJRAjisOz8BqNbHq2sjOmaWAkAD+UI7tztPgxTUf
-tT57hchxTQRPrcoB6E4T/gQXNRzvBJWbY0YnlLsgPYSChdKdQ8JNtJDoqYWvCyNx
-YngKKet+z5VtgVb9oHor+wkjgO71zsvpQbKh4rzpwGsHwXHiYY4Bzf/fnyLj7gFl
-eSPzb/M3cxcqbP4VA4iSs5DJ/y0xRxVWFlL8vCwmKX/3wzlGJXLcjwb37kGqMWlh
-BZylQI3Y5Auv50hyaL8dZvhnALKoPtQSomq/ajtBILx/UEmXhLiXIgJmJ4fqdn0N
-nd0S+nBr1s1Y4UjoihT98QHBIZkSFBHpojWssGd39IWaYVA0sCs+aIhZMfMtnEjf
-05KgFZZNfpk8ANMsLlVDQZKg+WTPldRIdD5SVS/uTH82qWx3JDu1plKwpnsFyZMt
-49vk8EBkdE0eFdtcRoB7lfl4DcIQut1zLye/3AY3mYZ8yWCF5wUjM7HJL7P9gx9I
-u0bcWva1XyMsnED+fhXfRItEsy8iz0wQT9sjZlZ73ZAReE4k0PU1J1b0yPbDDy5W
-xwezBdNTw8fF7vCx4HF47DfoxCZ9hI1ZEE/OyDhMvURBHP4DM4+RKknsxAKVmUk1
-Smlu+jB6CwiAT0lIyl4y25NTYeta+3YOf+7DPTfGB1cfqLUyLQHngbgLSi4PcNr2
-Yx3Y2dQ6s5KrOLdjwkM1MHRxQupsOWerxMxzCGhdBSZyUe/wGib/W29YvsVJB25V
-UIueRsoBR/EF5F2lWtChkkgZhHjjx0a9v94HtauQFE/tcPT1hiapuV53W0eQBeYt
-6Ofo7flnu7NEp5ZPfBVRplL/S7R3qXOiymUJKDSGK5JF6gCB+R3C83J6dCfpOJvA
-v0KDae0QqFPQa+kAUdRpNCkgsSE+Pga4EG+1SFJO51nBQoc0c0GTM2UP9bUB7H6n
-o+wc8fMgfrQx3lqS0gFXb0TTANRL0CqpOKRkveGoS5wjxcbXLvzKdQoVSFkPECpy
-40s5Xn6tFb4XSv0viD2G0tztOkqhOZWGQObV7CUzhMCrsuAFG2kP4w/fKwhfe/zG
-T48wYg2jgps8p6eGvuM94APKdeuDTTxdqF+QGLn7htXBxDWZCnbb0k7LPPs1ZSOp
-g3DuxnLgkoimHT8MNAooUo3KpPM6PEYP3GStF8JfiNfRCpe4GwYjIM9yJ+NzBZxJ
-Lvg=
------END ENCRYPTED PRIVATE KEY-----
-)PEMSTR";
-
-static const char passphrase_str[] = "Just4Test";
 
 photon::semaphore sem(0);
 
@@ -139,6 +84,115 @@ TEST(basic, test) {
     DEFER(delete stream);
 
     client_test(stream, ctx);
+}
+
+int close_test_handler_during_read(void* arg, net::ISocketStream* stream) {
+    auto* ctx = (net::TLSContext*)arg;
+    char buf[6];
+    char buffer[1048576];
+    auto ss = net::new_tls_stream(ctx, stream,
+                                       net::SecurityRole::Server, false);
+    DEFER(delete ss);
+    LOG_INFO("BEFORE READ");
+    auto ret = ss->read(buf, 6);
+    LOG_INFO("AFTER READ");
+    // since client will shutdown, return value should be 0
+    EXPECT_EQ(0, ret);
+    LOG_INFO(VALUE(buf));
+    LOG_INFO("BEFORE WRITE");
+    ss->write(buffer, 1048576);
+    LOG_INFO("AFTER WRITE");
+    sem.signal(1);
+    return 0;
+}
+
+int close_test_handler_during_write(void* arg, net::ISocketStream* stream) {
+    auto* ctx = (net::TLSContext*)arg;
+    char buf[6];
+    char buffer[1048576];
+    auto ss = net::new_tls_stream(ctx, stream,
+                                       net::SecurityRole::Server, false);
+    DEFER(delete ss);
+    LOG_INFO("BEFORE READ");
+    auto ret = ss->read(buf, 6);
+    LOG_INFO("AFTER READ");
+    EXPECT_EQ(6, ret);
+    LOG_INFO(VALUE(buf));
+    LOG_INFO("BEFORE WRITE");
+    ss->write(buffer, 1048576);
+    LOG_INFO("AFTER WRITE");
+    sem.signal(1);
+    return 0;
+}
+
+void close_sending_client_test(net::ISocketStream* stream, net::TLSContext* ctx) {
+    auto ss = net::new_tls_stream(ctx, stream,
+                                       net::SecurityRole::Client, false);
+    char buf[] = "Hello";
+    ss->write(buf, 3);
+    delete ss;
+    stream->close();
+    sem.wait(1);
+}
+
+void close_reading_client_test(net::ISocketStream* stream, net::TLSContext* ctx) {
+    auto ss = net::new_tls_stream(ctx, stream,
+                                       net::SecurityRole::Client, false);
+    char buf[] = "Hello";
+    auto ret = ss->write(buf, 6);
+    EXPECT_EQ(6, ret);
+    char b[4096];
+    size_t rx = 0;
+    for (int i = 0; i < 100; i++) {
+        rx += ss->read(b, 4096);
+    }
+    EXPECT_EQ(409600UL, rx);
+    delete ss;
+    stream->close();
+    sem.wait(1);}
+
+TEST(basic, socket_close_in_read) {
+    auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(net::delete_tls_context(ctx));
+    DEFER(photon::wait_all());
+    auto server = net::new_tcp_socket_server();
+    DEFER(delete server);
+    auto client = net::new_tcp_socket_client();
+    DEFER(delete client);
+    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    LOG_INFO(VALUE(ep));
+    ASSERT_EQ(0, server->start_loop(false));
+    photon::thread_yield();
+    server->set_handler({close_test_handler_during_read, ctx});
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    close_sending_client_test(stream, ctx);
+}
+
+TEST(basic, socket_close_in_write) {
+    auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(net::delete_tls_context(ctx));
+    DEFER(photon::wait_all());
+    auto server = net::new_tcp_socket_server();
+    DEFER(delete server);
+    auto client = net::new_tcp_socket_client();
+    DEFER(delete client);
+    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    LOG_INFO(VALUE(ep));
+    ASSERT_EQ(0, server->start_loop(false));
+    photon::thread_yield();
+    server->set_handler({close_test_handler_during_write, ctx});
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    close_reading_client_test(stream, ctx);
 }
 
 TEST(basic, uds) {
@@ -234,6 +288,59 @@ TEST(cs, uds) {
     DEFER(delete stream);
 
     s_client_test(stream);
+}
+
+TEST(Socket, nested) {
+    ASSERT_GE(net::et_poller_init(), 0);
+    DEFER(net::et_poller_fini());
+
+    auto server_ssl_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ssl_ctx, nullptr);
+    DEFER(net::delete_tls_context(server_ssl_ctx));
+
+    auto server = net::new_tls_server(server_ssl_ctx, net::new_et_tcp_socket_server(), true);
+    DEFER(delete server);
+
+    server->set_handler({s_handler, server_ssl_ctx});
+    ASSERT_EQ(0, server->bind());
+    ASSERT_EQ(0, server->listen());
+    ASSERT_EQ(0, server->start_loop(false));
+
+    net::EndPoint ep1, ep2;
+    ASSERT_EQ(0, server->getsockname(ep1));
+    LOG_INFO("Sock address: `", ep1);
+
+    auto client = net::new_et_tcp_socket_client();
+    auto client_ssl_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
+    auto tls_client = net::new_tls_client(client_ssl_ctx, client, true);
+    DEFER(delete client);
+
+    auto pooled_client = net::new_tcp_socket_pool(tls_client);
+    DEFER(delete pooled_client);
+
+    auto conn = pooled_client->connect(ep1);
+    ASSERT_NE(conn, nullptr);
+
+    ASSERT_EQ(0, conn->getpeername(ep2));
+    LOG_INFO("Peer address: `", ep2);
+
+    ASSERT_EQ(ep1.port, ep2.port);
+
+    s_client_test(conn);
+
+    auto u1 = pooled_client->get_underlay_object(0);
+    ASSERT_EQ(u1, tls_client);
+
+    auto u2 = pooled_client->get_underlay_object(1);
+    ASSERT_EQ(u2, client);
+
+    auto u3 = pooled_client->get_underlay_object(2);
+    ASSERT_EQ(u3, nullptr);
+
+    auto u4 = server->get_underlay_object(1);
+    auto u5 = server->get_underlay_object(-1);
+    auto fd = server->get_underlay_fd();
+    ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
 }
 
 int main(int argc, char** arg) {

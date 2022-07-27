@@ -9,8 +9,8 @@ Network lib provides non-blocking socket implementations for clients and servers
     ISocketServer* new_tcp_socket_server();
     ISocketClient* new_uds_client();
     ISocketServer* new_uds_server(bool autoremove = false);
-    ISocketClient* new_socket_client_iouring();
-    ISocketServer* new_socket_server_iouring();
+    ISocketClient* new_iouring_tcp_client();
+    ISocketServer* new_iouring_tcp_server();
     ...
 ```
 
@@ -28,8 +28,7 @@ public:
     virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
     virtual int bind(const char* path, size_t count) = 0;
     virtual int listen(int backlog = 1024) = 0;
-    virtual ISocketStream* accept() = 0;
-    virtual ISocketStream* accept(EndPoint* remote_endpoint) = 0;
+    virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
     using Handler = Callback<ISocketStream*>;
     virtual ISocketServer* set_handler(Handler handler) = 0;
     virtual int start_loop(bool block = false) = 0;
@@ -102,7 +101,9 @@ namespace net {
 }
 ```
 
+## Socket class hierarchy
 
+![socket](../doc/socket.png)
 
 
 

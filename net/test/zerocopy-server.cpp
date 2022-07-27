@@ -43,7 +43,7 @@ limitations under the License.
 using namespace std;
 using namespace photon;
 
-DEFINE_int32(socket_type, 0, "0: tcp socket, 1: zerocopy socket, 2: iouring socket");
+DEFINE_int32(socket_type, 0, "0: tcp socket, 1: zerocopy socket, 2: iouring socket， 3: et socket");
 DEFINE_string(dir_name, "zerocopy", "dir_name");
 
 struct FileDescriptor {
@@ -117,20 +117,22 @@ public:
         m_skeleton->register_service<TestWriteProto>(this);
         m_qps = 0;
         m_statis_thread = photon::thread_create11(&TestRPCServer::loop_show_statis, this);
+        photon::thread_enable_join(m_statis_thread);
     }
 
     ~TestRPCServer() override {
         photon::thread_interrupt(m_statis_thread);
+        photon::thread_join((photon::join_handle*) m_statis_thread);
         delete m_skeleton;
     }
 
     int serve(net::ISocketStream* socket) {
         int ret = m_skeleton->serve(socket, false);
-
         return ret;
     }
 
     int shutdown() {
+        LOG_INFO("shutdown rpc server");
         return m_skeleton->shutdown();
     }
 
@@ -181,9 +183,6 @@ private:
     photon::thread* m_statis_thread;
 };
 
-void ignore_signal(int) {
-}
-
 void handle_signal(int) {
     LOG_INFO("try to stop test");
     g_stop_test = true;
@@ -193,12 +192,10 @@ int main(int argc, char** argv) {
     set_log_output_level(ALOG_INFO);
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    if (photon::init(INIT_EVENT_DEFAULT, INIT_IO_LIBAIO | INIT_IO_SOCKET_ZEROCOPY) < 0)
+    if (photon::init(INIT_EVENT_IOURING | INIT_EVENT_SIGNALFD,
+                     INIT_IO_LIBAIO | INIT_IO_SOCKET_ZEROCOPY | INIT_IO_SOCKET_EDGE_TRIGGER) < 0)
         return -1;
     DEFER(photon::fini());
-    photon::sync_signal(SIGPIPE, &ignore_signal);
-    photon::sync_signal(SIGTERM, &handle_signal);
-    photon::sync_signal(SIGINT, &handle_signal);
 
     auto pooled_allocator = new PooledAllocator<>;
     DEFER(delete pooled_allocator);
@@ -214,32 +211,42 @@ int main(int argc, char** argv) {
         }
     }
 
+    photon::sync_signal(SIGTERM, &handle_signal);
+    photon::sync_signal(SIGINT, &handle_signal);
+
     net::ISocketServer* socket_srv = nullptr;
     if (SocketType(FLAGS_socket_type) == SocketType::TCP) {
         socket_srv = net::new_tcp_socket_server();
         LOG_INFO("New tcp socket server");
     } else if (SocketType(FLAGS_socket_type) == SocketType::ZEROCOPY) {
-        socket_srv = net::new_tcp_socket_server_0c();
+        socket_srv = net::new_zerocopy_tcp_server();
         LOG_INFO("New zerocopy socket server");
     } else if (SocketType(FLAGS_socket_type) == SocketType::IOURING) {
-        socket_srv = net::new_socket_server_iouring();
+        socket_srv = net::new_iouring_tcp_server();
         LOG_INFO("New iouring socket server");
-    }
-    if (!socket_srv) {
-        LOG_ERROR_RETURN(0, -1, "failed to create socket srv");
+    } else if (SocketType(FLAGS_socket_type) == SocketType::ET) {
+        socket_srv = net::new_et_tcp_socket_server();
+        LOG_INFO("New et socket server");
     }
     DEFER(delete socket_srv);
 
-    auto handler_srv = new TestRPCServer(pooled_allocator->get_io_alloc());
-    DEFER(delete handler_srv);
+    auto rpc_server = new TestRPCServer(pooled_allocator->get_io_alloc());
+    DEFER(delete rpc_server);
 
-    socket_srv->set_handler({handler_srv, &TestRPCServer::serve});
+    socket_srv->set_handler({rpc_server, &TestRPCServer::serve});
     socket_srv->bind((uint16_t) FLAGS_port, net::IPAddr("0.0.0.0"));
     socket_srv->listen(1024);
-    socket_srv->start_loop(false);
+
+    auto stop_watcher = [&] {
+        while (!g_stop_test) {
+            photon::thread_sleep(1);
+        }
+        rpc_server->shutdown();
+        socket_srv->terminate();
+    };
+    photon::thread_create11(stop_watcher);
     LOG_INFO("Socket server running ...");
-    while (!g_stop_test) {
-        photon::thread_sleep(1);
-    }
+
+    socket_srv->start_loop(true);
     LOG_INFO("Out of sleep");
 }

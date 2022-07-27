@@ -25,7 +25,7 @@ limitations under the License.
 
 #include "../../curl.h"
 #include "../../socket.h"
-#include "../../etsocket.h"
+#include "../../base_socket.h"
 #include <photon/common/alog-stdstring.h>
 #include "../client.cpp"
 #include <photon/io/fd-events.h>
@@ -74,7 +74,7 @@ TEST(headers, req_header) {
     EXPECT_EQ(true, req_header_proxy.target() == "http://HostName/targetName");
 }
 
-class test_stream : public net::ISocketStream {
+class test_stream : public net::SocketStreamBase {
 public:
     string rand_stream;
     size_t remain;
@@ -87,10 +87,7 @@ public:
         ptr = (char*)rand_stream.data();
         remain = rand_stream.size();
     }
-    virtual Object* get_underlay_object(int) override {
-        return nullptr;
-    }
-    virtual ssize_t recv(void *buf, size_t count) override {
+    virtual ssize_t recv(void *buf, size_t count, int flags = 0) override {
         // assert(count > remain);
         // LOG_DEBUG(remain);
         if (remain > 200) {
@@ -108,7 +105,7 @@ public:
         remain = 0;
         return ret;
     }
-    virtual ssize_t recv(const struct iovec *iov, int iovcnt) override {
+    virtual ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) override {
         ssize_t ret = 0;
         auto iovec = IOVector(iov, iovcnt);
         while (!iovec.empty()) {
@@ -120,37 +117,6 @@ public:
         }
         return ret;
     }
-
-    UNIMPLEMENTED(ssize_t send(const void *buf, size_t count) override);
-    UNIMPLEMENTED(ssize_t send(const struct iovec *iov, int iovcnt) override);
-    UNIMPLEMENTED(ssize_t send2(const void *buf, size_t count, int flag) override);
-    UNIMPLEMENTED(ssize_t send2(const struct iovec *iov, int iovcnt, int flag) override);
-
-    UNIMPLEMENTED(ssize_t sendfile(int in_fd, off_t offset, size_t count) override);
-    UNIMPLEMENTED(int close() override);
-
-    UNIMPLEMENTED(ssize_t read(void *buf, size_t count) override);
-    UNIMPLEMENTED(ssize_t readv(const struct iovec *iov, int iovcnt) override);
-
-    UNIMPLEMENTED(ssize_t write(const void *buf, size_t count) override);
-    UNIMPLEMENTED(ssize_t writev(const struct iovec *iov, int iovcnt) override);
-
-    UNIMPLEMENTED(int setsockopt(int level, int option_name,
-        const void *option_value, socklen_t option_len) override);
-    UNIMPLEMENTED(int getsockopt(int level, int option_name,
-                void* option_value, socklen_t* option_len) override);
-
-
-    UNIMPLEMENTED(int getsockname(net::EndPoint& addr) override);
-    UNIMPLEMENTED(int getpeername(net::EndPoint& addr) override);
-    UNIMPLEMENTED(int getsockname(char* path, size_t count) override);
-    UNIMPLEMENTED(int getpeername(char* path, size_t count) override);
-    UNIMPLEMENTED(uint64_t timeout() override);
-
-    void timeout(uint64_t tm) override {
-        LOG_ERROR_RETURN(0, , "method timeout(uint64_t) UNIMPLEMENTED");
-    }
-
     bool done() {
         return remain == 0;
     }

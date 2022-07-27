@@ -58,9 +58,9 @@ void delete_tls_context(TLSContext* ctx);
  * @param base base socket, as underlay socket using for data transport
  * @param role should act as client or server during TLS handshake
  * @param ownership if new socket stream owns base socket.
- * @return net::ISocketStream*
+ * @return ISocketStream*
  */
-ISocketStream* new_tls_stream(TLSContext* ctx, net::ISocketStream* base,
+ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
                                    SecurityRole role, bool ownership = false);
 /**
  * @brief Create socket server on TLS. as a client socket factory.
@@ -69,9 +69,9 @@ ISocketStream* new_tls_stream(TLSContext* ctx, net::ISocketStream* base,
  *            keep it accessable during whole life time.
  * @param base base socket, as underlay socket using for data transport.
  * @param ownership if new socket stream owns base socket.
- * @return net::ISocketServer* server factory
+ * @return ISocketServer* server factory
  */
-ISocketServer* new_tls_server(TLSContext* ctx, net::ISocketServer* base,
+ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
                                    bool ownership = false);
 
 /**
@@ -81,9 +81,9 @@ ISocketServer* new_tls_server(TLSContext* ctx, net::ISocketServer* base,
  *            keep it accessable during whole life time.
  * @param base base socket, as underlay socket using for data transport.
  * @param ownership if new socket stream owns base socket.
- * @return net::ISocketClient* client factory
+ * @return ISocketClient* client factory
  */
-ISocketClient* new_tls_client(TLSContext* ctx, net::ISocketClient* base,
+ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
                                    bool ownership = false);
 
 }

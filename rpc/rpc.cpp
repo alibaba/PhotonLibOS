@@ -26,7 +26,7 @@ limitations under the License.
 #include <photon/common/timeout.h>
 #include <photon/common/expirecontainer.h>
 #include <photon/net/socket.h>
-#include <photon/net/tlssocket.h>
+#include <photon/net/security-context/tls-stream.h>
 
 using namespace std;
 
@@ -430,8 +430,9 @@ namespace rpc
     class StubPoolImpl : public StubPool {
     public:
         explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
+            tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
-            tlsclient = net::new_tls_socket_client();
+            tlsclient = net::new_tls_client(tls_ctx, tcpclient, false);
             tcpclient->timeout(connect_timeout);
             tlsclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
@@ -442,6 +443,7 @@ namespace rpc
             delete tcpclient;
             delete tlsclient;
             delete m_pool;
+            net::delete_tls_context(tls_ctx);
         }
 
         Stub* get_stub(const net::EndPoint& endpoint, bool tls) override {
@@ -480,6 +482,7 @@ namespace rpc
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
         net::ISocketClient *tcpclient, *tlsclient;
+        net::TLSContext* tls_ctx = nullptr;
         uint64_t m_rpc_timeout;
     };
 

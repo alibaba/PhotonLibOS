@@ -15,23 +15,27 @@ limitations under the License.
 */
 
 #include "../socket.h"
-#include "../tlssocket.h"
 #include <photon/thread/thread.h>
 #include <photon/io/fd-events.h>
+#include <photon/net/security-context/tls-stream.h>
 #include <photon/common/alog.h>
+
+#include "cert-key.cpp"
 
 using namespace photon;
 
 int main(int argc, char** argv) {
     photon::thread_init();
     photon::fd_events_init();
-    net::ssl_init("net/test/cert.pem", "net/test/key.pem", "Just4Test");
     DEFER({
-        net::ssl_fini();
         photon::fd_events_fini();
         photon::thread_fini();
     });
-    auto server = net::new_tls_socket_server();
+
+    auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    if (!ctx) return -1;
+    DEFER(net::delete_tls_context(ctx));
+    auto server = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete server);
 
     auto logHandle = [&](net::ISocketStream* arg) {

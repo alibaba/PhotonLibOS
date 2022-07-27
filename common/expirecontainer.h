@@ -101,6 +101,7 @@ protected:
     iterator begin() { return _set.begin(); }
     iterator end() { return _set.end(); }
     iterator find(const Item& key_item);
+    iterator __find_prelock(const Item& key_item);
 
     template <typename T>
     struct TypedIterator : public iterator {
@@ -186,6 +187,12 @@ public:
         enqueue(item);
         return pr.first;
     }
+
+    void refresh(Item* item) {
+        DEFER(expire());
+        photon::scoped_lock _(_mtx);
+        enqueue(item);
+    }
 };
 
 // a set / list like structure
@@ -207,9 +214,6 @@ protected:
     using Base = ExpireContainerBase;
     using Base::Base;
     using Base::KeyedItem;
-    // using Base::iterator;
-    // using Base::begin;
-    // using Base::end;
 
     class Item : public Base::Item {
     public:

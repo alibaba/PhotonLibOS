@@ -20,8 +20,8 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
+#include <photon/net/socket.h>
 #include <photon/io/fd-events.h>
-#include <photon/net/etsocket.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/fs/localfs.h>
@@ -209,6 +209,38 @@ TEST(http_server, proxy_handler) {
     EXPECT_EQ(std_data_size, ret);
     data_buf.resize(ret);
     EXPECT_EQ(true, data_buf == std_data);
+}
+
+RetType failure_director(void*, HTTPServerRequest& req) {
+    req.Insert("proxy_server_test", "just4test");
+    req.SetTarget("/filename_not_important");
+    req.Erase("Host");
+    req.Insert("Host", "wtf.nothing.exists");
+    return RetType::success;
+}
+
+TEST(http_server, proxy_handler_failure) {
+    //------------------------------------------
+    auto client = new_http_client();
+    DEFER(delete client);
+    //--------start proxy server ------------
+    auto client_proxy = new_http_client();
+    DEFER(delete client_proxy);
+    client_proxy->timeout_ms(500);
+    auto proxy_server = new_http_server(19876);
+    DEFER(delete proxy_server);
+    auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
+                                                   {nullptr, &test_modifier},
+                                                   client_proxy);
+    proxy_server->SetHandler(proxy_handler->GetHandler());
+    EXPECT_EQ(true, proxy_server->Launch());
+    DEFER(proxy_server->Stop());
+    //----------------------------------------------------
+    auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
+    DEFER(delete op);
+    auto ret = op->call();
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(502, op->resp.status_code());
 }
 
 TEST(http_server, mux_handler) {

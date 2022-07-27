@@ -30,7 +30,7 @@ DEFINE_uint64(num_threads, 32, "num of threads");
 DEFINE_bool(calculate_checksum, false, "calculate checksum for read test");
 
 enum class SocketType {
-    TCP, ZEROCOPY, IOURING,
+    TCP, ZEROCOPY, IOURING, ET,
 };
 
 enum class IOType {
