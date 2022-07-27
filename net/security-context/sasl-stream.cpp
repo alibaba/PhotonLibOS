@@ -20,6 +20,8 @@ limitations under the License.
 #include <photon/common/iovector.h>
 #include <photon/net/socket.h>
 
+#include "../base_socket.h"
+
 #include <error.h>
 
 namespace photon {
@@ -112,11 +114,9 @@ void gsasl_property_set_session(SaslSession *session, Gsasl_property prop, const
 
 void delete_sasl_context(SaslSession *session) { delete session; }
 
-class SaslStream : public net::ISocketStream {
+class SaslSocketStream : public ForwardSocketStream {
   private:
     SaslSession *sasl_session;
-    net::ISocketStream *underlay_stream;
-    bool m_ownership;
     Gsasl_qop qop = Gsasl_qop::GSASL_QOP_AUTH;
     char *saslmsg;
     size_t saslmsg_size;
@@ -125,26 +125,19 @@ class SaslStream : public net::ISocketStream {
     size_t decodebuf_finish = 0;
 
   public:
-    SaslStream(SaslSession *session, net::ISocketStream *stream, bool ownership)
-        : sasl_session(session), underlay_stream(stream), m_ownership(ownership) {
+    SaslSocketStream(SaslSession *session, ISocketStream *stream, bool ownership)
+        : ForwardSocketStream(stream, ownership), sasl_session(session) {
         saslmsg = (char *)malloc(TOKEN_SIZE);
         saslmsg_size = TOKEN_SIZE;
     }
 
-    ~SaslStream() {
-        if (m_ownership) {
-            delete underlay_stream;
-        }
+    ~SaslSocketStream() {
         free(saslmsg);
         gsasl_free(decodebuf);
     }
 
-    virtual Object* get_underlay_object(int level) override {
-        return level ? underlay_stream->get_underlay_object(level - 1) : nullptr;
-    }
-
     bool initSasl() {
-        int rc = sasl_session->auth_cb(sasl_session->session, underlay_stream);
+        int rc = sasl_session->auth_cb(sasl_session->session, m_underlay);
         if (rc != GSASL_OK)
             LOG_ERROR_RETURN(0, false, "Failed to setup SaslConnection!, `", rc);
         // This is for data integrity and privacy protection in DIGEST-MD5, which is not fully
@@ -163,16 +156,16 @@ class SaslStream : public net::ISocketStream {
         return true;
     }
 
-    ssize_t recv(void *buf, size_t cnt) override { return do_recv(buf, cnt); }
+    ssize_t recv(void *buf, size_t cnt, int flags = 0) override { return do_recv(buf, cnt); }
 
-    ssize_t recv(const struct iovec *iov, int iovcnt) override {
+    ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) override {
         // since recv allows partial read
-        return recv(iov[0].iov_base, iov[0].iov_len);
+        return recv(iov[0].iov_base, iov[0].iov_len, flags);
     }
-    ssize_t send(const void *buf, size_t cnt) override { return do_send(buf, cnt); }
-    ssize_t send(const struct iovec *iov, int iovcnt) override {
+    ssize_t send(const void *buf, size_t cnt, int flags = 0) override { return do_send(buf, cnt); }
+    ssize_t send(const struct iovec *iov, int iovcnt, int flags = 0) override {
         // since send allows partial write
-        return send(iov[0].iov_base, iov[0].iov_len);
+        return send(iov[0].iov_base, iov[0].iov_len, flags);
     }
 
     ssize_t write(const void *buf, size_t cnt) override {
@@ -203,11 +196,6 @@ class SaslStream : public net::ISocketStream {
         return count;
     }
 
-    ssize_t send2(const void *buf, size_t cnt, int flags) override { return send(buf, cnt); }
-    ssize_t send2(const struct iovec *iov, int iovcnt, int flags) override {
-        return send(iov, iovcnt);
-    }
-
     ssize_t sendfile(int fd, off_t offset, size_t size) override {
         // SASL not supported
         LOG_ERROR_RETURN(ENOSYS, -1, "Not implemented.");
@@ -215,33 +203,10 @@ class SaslStream : public net::ISocketStream {
 
     int close() override {
         if (m_ownership)
-            return underlay_stream->close();
+            return m_underlay->close();
         else
             return 0;
     }
-
-    virtual int getsockname(net::EndPoint &addr) override {
-        return underlay_stream->getsockname(addr);
-    }
-    virtual int getpeername(net::EndPoint &addr) override {
-        return underlay_stream->getpeername(addr);
-    }
-    virtual int getsockname(char *path, size_t count) override {
-        return underlay_stream->getsockname(path, count);
-    }
-    virtual int getpeername(char *path, size_t count) override {
-        return underlay_stream->getpeername(path, count);
-    }
-    virtual int setsockopt(int level, int option_name, const void *option_value,
-                           socklen_t option_len) override {
-        return underlay_stream->setsockopt(level, option_name, option_value, option_len);
-    }
-    virtual int getsockopt(int level, int option_name, void *option_value,
-                           socklen_t *option_len) override {
-        return underlay_stream->getsockopt(level, option_name, option_value, option_len);
-    }
-    virtual uint64_t timeout() override { return underlay_stream->timeout(); }
-    virtual void timeout(uint64_t tm) override { underlay_stream->timeout(tm); }
 
   private:
     template <typename IOCB> __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
@@ -258,7 +223,7 @@ class SaslStream : public net::ISocketStream {
 
     int do_send(const void *buf, size_t cnt) {
         if (qop == Gsasl_qop::GSASL_QOP_AUTH) {
-            return underlay_stream->send(buf, cnt);
+            return m_underlay->send(buf, cnt);
         }
 
         char *output = nullptr;
@@ -270,7 +235,7 @@ class SaslStream : public net::ISocketStream {
             LOG_ERROR_RETURN(0, -1, "Failed to encode data (`): `", rc, gsasl_strerror(rc));
         }
         // LOG_DEBUG("encode, input: `, ouput: ` `", (char *)buf, outlen, output);
-        int ret = underlay_stream->write(output, outlen);
+        int ret = m_underlay->write(output, outlen);
         if (ret != static_cast<int>(outlen)) {
             LOG_ERROR_RETURN(ECONNRESET, -1, "Failed to send out all data, datalen: `, ret: `",
                              outlen, ret);
@@ -282,7 +247,7 @@ class SaslStream : public net::ISocketStream {
     ssize_t read_more(void *userbuf, size_t cnt) {
         // The leading four cotet field represents the length of SASL contents as defined in RFC
         // 2222.
-        ssize_t ret = underlay_stream->read(saslmsg, 4);
+        ssize_t ret = m_underlay->read(saslmsg, 4);
         if (ret != 4) {
             LOG_ERROR_RETURN(0, -1, "Failed to read length of saslmsg, ret: `", ret);
         }
@@ -291,7 +256,7 @@ class SaslStream : public net::ISocketStream {
             saslmsg_size = len + 4;
             saslmsg = (char *)realloc(saslmsg, saslmsg_size);
         }
-        ret = underlay_stream->read(saslmsg + 4, len);
+        ret = m_underlay->read(saslmsg + 4, len);
         if (ret != static_cast<ssize_t>(len)) {
             LOG_ERROR_RETURN(0, -1, "Incorrect saslmsg size, ret: `, should be `", ret, len);
         }
@@ -309,7 +274,7 @@ class SaslStream : public net::ISocketStream {
 
     ssize_t do_recv(void *buf, size_t cnt) {
         if (qop == Gsasl_qop::GSASL_QOP_AUTH) {
-            return underlay_stream->recv(buf, cnt);
+            return m_underlay->recv(buf, cnt);
         }
 
         if (decodebuf_start == decodebuf_finish) { // no data left in decodebuf
@@ -329,128 +294,61 @@ class SaslStream : public net::ISocketStream {
     }
 };
 
-ISocketStream *new_sasl_stream(SaslSession *session, net::ISocketStream *stream,
+ISocketStream *new_sasl_stream(SaslSession *session, ISocketStream *stream,
                                     bool ownership) {
-    auto ret = new SaslStream(session, stream, ownership);
+    auto ret = new SaslSocketStream(session, stream, ownership);
     if (ret->initSasl()) return ret;
     return nullptr;
 }
 
-class SaslClient : public net::ISocketClient {
+class SaslSocketClient : public ForwardSocketClient {
   public:
     SaslSession *session;
-    net::ISocketClient *underlay;
-    bool ownership;
 
-    SaslClient(SaslSession *session, net::ISocketClient *underlay, bool ownership)
-        : session(session), underlay(underlay), ownership(ownership) {}
-
-    ~SaslClient() {
-        if (ownership) {
-            delete underlay;
-        }
+    SaslSocketClient(SaslSession* session, ISocketClient* underlay, bool ownership)
+            : ForwardSocketClient(underlay, ownership), session(session) {}
+    virtual ISocketStream *connect(const char *path, size_t count) override {
+        return new_sasl_stream(session, m_underlay->connect(path, count), true);
     }
-    virtual Object* get_underlay_object(int level) override {
-        return level ? underlay->get_underlay_object(level - 1) : nullptr;
+    virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
+        return new_sasl_stream(session, m_underlay->connect(remote, local), true);
     }
-    virtual net::ISocketStream *connect(const net::EndPoint &ep) override {
-        return new_sasl_stream(session, underlay->connect(ep), true);
-    }
-    virtual net::ISocketStream *connect(const char *path, size_t count) override {
-        return new_sasl_stream(session, underlay->connect(path, count), true);
-    }
-    virtual int getsockname(net::EndPoint &addr) override { return underlay->getsockname(addr); }
-    virtual int getpeername(net::EndPoint &addr) override { return underlay->getpeername(addr); }
-    virtual int getsockname(char *path, size_t count) override {
-        return underlay->getsockname(path, count);
-    }
-    virtual int getpeername(char *path, size_t count) override {
-        return underlay->getpeername(path, count);
-    }
-    virtual int setsockopt(int level, int option_name, const void *option_value,
-                           socklen_t option_len) override {
-        return underlay->setsockopt(level, option_name, option_value, option_len);
-    }
-    virtual int getsockopt(int level, int option_name, void *option_value,
-                           socklen_t *option_len) override {
-        return underlay->getsockopt(level, option_name, option_value, option_len);
-    }
-    virtual uint64_t timeout() override { return underlay->timeout(); }
-    virtual void timeout(uint64_t tm) override { underlay->timeout(tm); }
 };
 
-ISocketClient *new_sasl_client(SaslSession *session, net::ISocketClient *base,
+ISocketClient *new_sasl_client(SaslSession *session, ISocketClient *base,
                                     bool ownership) {
     if (!session || !base || session->role != SecurityRole::Client)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(session), VALUE(base));
-    return new SaslClient(session, base, ownership);
+    return new SaslSocketClient(session, base, ownership);
 }
 
-class SaslServer : public net::ISocketServer {
-  public:
-    SaslSession *session;
-    net::ISocketServer *underlay;
+class SaslSocketServer : public ForwardSocketServer {
+public:
+    SaslSession* session;
     Handler m_handler;
-    bool ownership;
 
-    SaslServer(SaslSession *session, net::ISocketServer *underlay, bool ownership)
-        : session(session), underlay(underlay), ownership(ownership) {}
+    SaslSocketServer(SaslSession* session, ISocketServer* underlay, bool ownership)
+            : ForwardSocketServer(underlay, ownership), session(session) {}
 
-    ~SaslServer() {
-        if (ownership) {
-            delete underlay;
-        }
+    virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) override {
+        return new_sasl_stream(session, m_underlay->accept(remote_endpoint), true);
     }
-    virtual Object* get_underlay_object(int level) override {
-        return level ? underlay->get_underlay_object(level - 1) : nullptr;
-    }
-    virtual net::ISocketStream *accept() override {
-        return new_sasl_stream(session, underlay->accept(), true);
-    }
-    virtual net::ISocketStream *accept(net::EndPoint *remote_endpoint) override {
-        return new_sasl_stream(session, underlay->accept(remote_endpoint), true);
-    }
-    virtual int bind(uint16_t port, net::IPAddr addr) override {
-        return underlay->bind(port, addr);
-    }
-    virtual int bind(const char *path, size_t count) override {
-        return underlay->bind(path, count);
-    }
-    virtual int listen(int backlog = 1024) override { return underlay->listen(backlog); }
-    int forwarding_handler(net::ISocketStream *stream) {
+
+    int forwarding_handler(ISocketStream* stream) {
         return m_handler(new_sasl_stream(session, stream, true));
     }
-    virtual net::ISocketServer *set_handler(Handler handler) override {
+
+    virtual ISocketServer* set_handler(Handler handler) override {
         m_handler = handler;
-        return underlay->set_handler({this, &SaslServer::forwarding_handler});
+        return m_underlay->set_handler({this, &SaslSocketServer::forwarding_handler});
     }
-    virtual int start_loop(bool block = false) override { return underlay->start_loop(block); }
-    virtual void terminate() override { return underlay->terminate(); }
-    virtual int getsockname(net::EndPoint &addr) override { return underlay->getsockname(addr); }
-    virtual int getpeername(net::EndPoint &addr) override { return underlay->getpeername(addr); }
-    virtual int getsockname(char *path, size_t count) override {
-        return underlay->getsockname(path, count);
-    }
-    virtual int getpeername(char *path, size_t count) override {
-        return underlay->getpeername(path, count);
-    }
-    virtual int setsockopt(int level, int option_name, const void *option_value,
-                           socklen_t option_len) override {
-        return underlay->setsockopt(level, option_name, option_value, option_len);
-    }
-    virtual int getsockopt(int level, int option_name, void *option_value,
-                           socklen_t *option_len) override {
-        return underlay->getsockopt(level, option_name, option_value, option_len);
-    }
-    virtual uint64_t timeout() override { return underlay->timeout(); }
-    virtual void timeout(uint64_t tm) override { underlay->timeout(tm); }
 };
 
-ISocketServer *new_sasl_server(SaslSession *session, net::ISocketServer *base,
+ISocketServer *new_sasl_server(SaslSession *session, ISocketServer *base,
                                     bool ownership) {
     if (!session || !base || session->role != SecurityRole::Server)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(session), VALUE(base));
-    return new SaslServer(session, base, ownership);
+    return new SaslSocketServer(session, base, ownership);
 }
 
 }

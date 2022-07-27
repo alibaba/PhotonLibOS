@@ -21,8 +21,8 @@ limitations under the License.
 #include "io/signalfd.h"
 #include "io/aio-wrapper.h"
 #include "net/curl.h"
+#include "net/socket.h"
 #include "net/zerocopy.h"
-#include "net/etsocket.h"
 #include "fs/exportfs.h"
 
 namespace photon {

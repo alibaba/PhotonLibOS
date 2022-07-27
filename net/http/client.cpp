@@ -24,9 +24,8 @@ limitations under the License.
 #include <photon/common/iovector.h>
 #include <photon/common/string_view.h>
 #include <photon/fs/filesystem.h>
-#include <photon/net/etsocket.h>
 #include <photon/net/socket.h>
-#include <photon/net/tlssocket.h>
+#include <photon/net/security-context/tls-stream.h>
 #include <photon/net/utils.h>
 
 namespace photon {
@@ -39,13 +38,19 @@ static constexpr size_t LINE_BUFFER_SIZE = 4 * 1024;
 
 class PooledDialer {
 public:
+    net::TLSContext* tls_ctx = nullptr;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
 
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
-    PooledDialer()
-        : tcpsock(new_tcp_socket_pool(new_tcp_socket_client())),
-          tlssock(new_tcp_socket_pool(new_tls_socket_client())) {}
+    PooledDialer() :
+            tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
+            tcpsock(new_tcp_socket_pool(new_tcp_socket_client())),
+            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1)) {
+    }
+
+    ~PooledDialer() { delete_tls_context(tls_ctx); }
+
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
                              uint64_t timeout = -1UL);
 

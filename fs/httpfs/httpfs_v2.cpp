@@ -67,7 +67,7 @@ public:
         if (!file) return -1;
         return file->fstat(buf);
     }
-    UNIMPLEMENTED(int lstat(const char* path, struct stat* buf) override);
+    int lstat(const char* path, struct stat* buf) override { return stat(path, buf); }
     UNIMPLEMENTED_POINTER(IFile* creat(const char*, mode_t) override);
     UNIMPLEMENTED(int mkdir(const char*, mode_t) override);
     UNIMPLEMENTED(int rmdir(const char*) override);

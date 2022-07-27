@@ -29,11 +29,16 @@ std::pair<ExpireContainerBase::iterator, bool> ExpireContainerBase::insert(
     return _set.emplace(item);
 }
 
-ExpireContainerBase::iterator ExpireContainerBase::find(const Item& key_item) {
+ExpireContainerBase::iterator ExpireContainerBase::__find_prelock(const Item& key_item) {
     ItemPtr tp((Item*)&key_item);
     auto it = _set.find(tp);
     (void)tp.release();
     return it;
+}
+
+ExpireContainerBase::iterator ExpireContainerBase::find(const Item& key_item) {
+    photon::scoped_lock lock(_mtx);
+    return __find_prelock(key_item);
 }
 
 void ExpireContainerBase::clear() {
@@ -55,7 +60,7 @@ uint64_t ExpireContainerBase::expire() {
 bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
     DEFER(expire());
     photon::scoped_lock lock(_mtx);
-    auto it = find(x);
+    auto it = __find_prelock(x);
     if (it == _set.end() && insert_if_not_exists) {
         auto ptr = x.construct();
         auto pr = insert(ptr);
@@ -73,7 +78,7 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
     Item* item = nullptr;
     do {
         photon::scoped_lock lock(_mtx);
-        holder = Base::find(key_item);
+        holder = Base::__find_prelock(key_item);
         if (holder == Base::end()) {
             auto x = key_item.construct();
             auto pr = insert(x);

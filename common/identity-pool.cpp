@@ -71,7 +71,7 @@ IdentityPoolBase::~IdentityPoolBase()
 }
 
 struct ScalePoolController;
-static ScalePoolController* g_scale_pool_controller;
+static thread_local ScalePoolController* g_scale_pool_controller;
 struct ScalePoolController {
     photon::Timer timer;
     intrusive_list<IdentityPoolBase> entries;

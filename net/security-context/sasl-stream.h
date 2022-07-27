@@ -27,7 +27,7 @@ class ISocketServer;
 class ISocketClient;
 class SaslSession;
 
-using Gsasl_auth_cb = Callback<Gsasl_session *, net::ISocketStream *>;
+using Gsasl_auth_cb = Callback<Gsasl_session *, ISocketStream *>;
 using Gsasl_prep_cb = Callback<Gsasl *, Gsasl_session *, Gsasl_property>;
 
 /**
@@ -87,7 +87,7 @@ void delete_sasl_context(SaslSession *session);
  * @param ownership if new socket stream owns @base socket.
  * @return Return sasl stream handle or nullptr if authentification failed.
  */
-ISocketStream *new_sasl_stream(SaslSession *session, net::ISocketStream *base, bool ownership);
+ISocketStream *new_sasl_stream(SaslSession *session, ISocketStream *base, bool ownership);
 
 /**
  * @brief Create sasl client. Act as a client socket factory.
@@ -98,7 +98,7 @@ ISocketStream *new_sasl_stream(SaslSession *session, net::ISocketStream *base, b
  * @param ownership if new socket stream owns @base socket.
  * @return Return sasl client handle or nullptr if parameters are invalid.
  */
-ISocketClient *new_sasl_client(SaslSession *session, net::ISocketClient *base, bool ownership);
+ISocketClient *new_sasl_client(SaslSession *session, ISocketClient *base, bool ownership);
 
 /**
  * @brief Create sasl server. Act as a server socket factory.
@@ -109,7 +109,7 @@ ISocketClient *new_sasl_client(SaslSession *session, net::ISocketClient *base, b
  * @param ownership if new socket stream owns @base socket.
  * @return Return sasl server handle or nullptr if parameters are invalid.
  */
-ISocketServer *new_sasl_server(SaslSession *session, net::ISocketServer *base, bool ownership);
+ISocketServer *new_sasl_server(SaslSession *session, ISocketServer *base, bool ownership);
 
 }
 }

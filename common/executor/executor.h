@@ -61,18 +61,21 @@ public:
         });
     }
 
+    // `task` accept on heap lambda or functor pointer
+    // Usually could able to call as
+    // `e.async_perform(new auto ([]{ ... })`
+    // to create a new lambda object on heap without move from stack.
+    // The task object will be delete after work done
     template <typename Context = StdContext, typename Func>
-    void async_perform(Func &&act) {
-        AsyncOp<Context> aop;
-        aop.call(e, [&] {
-            // copy the work, so when context is dropped
-            // still able to call
-            auto copy_act = std::forward<Func>(act);
-            aop.done();
-            // till here, `act` may be destructed
-            // call the copied `copy_act`
-            copy_act();
-        });
+    void async_perform(Func *task) {
+        void (*func)(void*);
+        func = [](void* task_) {
+            using Task = decltype(task);
+            auto t = (Task)task_;
+            (*t)();
+            delete t;
+        };
+        _issue(e, {func, task});
     }
 
 protected:

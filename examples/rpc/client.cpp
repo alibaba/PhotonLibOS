@@ -27,7 +27,7 @@ int64_t ExampleClient::RPCHeartbeat(photon::net::EndPoint ep) {
     Heartbeat::Request req;
     req.now = photon::now;
     Heartbeat::Response resp;
-    int ret;
+    int ret = 0;
 
     auto stub = pool->get_stub(ep, false);
     if (!stub) return -1;
@@ -68,7 +68,7 @@ ssize_t ExampleClient::RPCRead(photon::net::EndPoint ep, const std::string& fn,
     req.fn.assign(fn);
     ReadBuffer::Response resp;
     resp.buf.assign(iovec, iovcnt);
-    int ret;
+    int ret = 0;
 
     auto stub = pool->get_stub(ep, false);
     if (!stub) return -1;
@@ -84,7 +84,7 @@ ssize_t ExampleClient::RPCWrite(photon::net::EndPoint ep, const std::string& fn,
     req.fn.assign(fn);
     req.buf.assign(iovec, iovcnt);
     WriteBuffer::Response resp;
-    int ret;
+    int ret = 0;
 
     auto stub = pool->get_stub(ep, false);
     if (!stub) return -1;
@@ -125,7 +125,7 @@ void ExampleClient::RPCTestrun(photon::net::EndPoint ep) {
     riov.push_back(1024);
     resp.buf.assign(riov.iovec(), riov.iovcnt());
 
-    int ret;
+    int ret = 0;
     auto stub = pool->get_stub(ep, false);
     if (!stub) return;
     DEFER(pool->put_stub(ep, ret < 0));

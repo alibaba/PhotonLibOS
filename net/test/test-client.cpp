@@ -19,20 +19,22 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/timeout.h>
 #include <photon/net/socket.h>
-#include <photon/net/tlssocket.h>
+#include <photon/net/security-context/tls-stream.h>
 
 using namespace photon;
 
 int main(int argc, char** argv) {
     photon::thread_init();
     photon::fd_events_init();
-    net::ssl_init("net/test/cert.pem", "net/test/key.pem", "Just4Test");
     DEFER({
-        net::ssl_fini();
         photon::fd_events_fini();
         photon::thread_fini();
     });
-    auto cli = net::new_tls_socket_client();
+
+    auto ctx = net::new_tls_context(nullptr, nullptr, "Just4Test");
+    if (!ctx) return -1;
+    DEFER(net::delete_tls_context(ctx));
+    auto cli = net::new_tls_client(ctx, net::new_tcp_socket_client(), true);
     DEFER(delete cli);
     char buff[4096];
     auto tls = cli->connect(net::EndPoint{net::IPAddr("127.0.0.1"), 31526});

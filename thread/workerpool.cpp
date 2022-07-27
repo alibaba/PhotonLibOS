@@ -16,7 +16,7 @@ limitations under the License.
 
 #include "workerpool.h"
 
-#include <photon/common/ring.h>
+#include <photon/common/lockfree_queue.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 
@@ -30,14 +30,13 @@ public:
     static constexpr uint32_t RING_SIZE = 256;
 
     std::vector<std::thread> workers;
-    photon::ticket_spinlock queue_lock;
     std::atomic<bool> stop;
     photon::semaphore queue_sem;
-    RingQueue<Delegate<void>> ring;
+    LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE> ring;
     int th_num;
 
     impl(int thread_num, int ev_engine, int io_engine)
-        : stop(false), queue_sem(0), ring(RING_SIZE), th_num(thread_num) {
+        : stop(false), queue_sem(0), th_num(thread_num) {
         for (int i = 0; i < thread_num; ++i)
             workers.emplace_back(&WorkPool::impl::worker_thread_routine, this,
                                  ev_engine, io_engine);
@@ -51,8 +50,7 @@ public:
 
     void enqueue(Delegate<void> call) {
         {
-            photon::locker<photon::ticket_spinlock> lock(queue_lock);
-            ring.push_back(call);
+            ring.send(call);
         }
         queue_sem.signal(1);
     }
@@ -75,8 +73,7 @@ public:
             {
                 queue_sem.wait(1);
                 if (this->stop && ring.empty()) return;
-                photon::locker<photon::ticket_spinlock> lock(queue_lock);
-                ring.pop_front(task);
+                task = ring.recv();
             }
             task();
         }

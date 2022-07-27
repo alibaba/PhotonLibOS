@@ -62,7 +62,7 @@ photon::thread_create11(func, 1, 'a');
 class A {
 public:
     void caller() {
-        photon::thread_create11(&A::member_func, 1, 'a');
+        photon::thread_create11(&A::member_func, this, 1, 'a');
     }
 private:
     void* member_func(int, char) { return nullptr; }

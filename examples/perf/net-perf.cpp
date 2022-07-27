@@ -163,7 +163,7 @@ static int echo_server() {
     photon::sync_signal(SIGINT, &handle_signal);
 
     auto server = photon::net::new_tcp_socket_server();
-    // auto server = photon::net::new_socket_server_iouring();
+    // auto server = photon::net::new_iouring_tcp_server();
     if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create server")
     }
@@ -205,7 +205,7 @@ static int echo_server() {
     auto qps_th = photon::thread_create11(run_qps_loop);
     photon::thread_enable_join(qps_th);
 
-    auto stop_th = photon::thread_create11(&decltype(stop_watcher)::operator(), &stop_watcher);
+    auto stop_th = photon::thread_create11(stop_watcher);
     photon::thread_enable_join(stop_th);
 
     server->set_handler(handle);
