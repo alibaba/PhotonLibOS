@@ -49,7 +49,7 @@ public:
             tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1)) {
     }
 
-    ~PooledDialer() { delete_tls_context(tls_ctx); }
+    ~PooledDialer() { delete tls_ctx; }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
                              uint64_t timeout = -1UL);

@@ -432,24 +432,20 @@ namespace rpc
         explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
-            tlsclient = net::new_tls_client(tls_ctx, tcpclient, false);
             tcpclient->timeout(connect_timeout);
-            tlsclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
             m_rpc_timeout = rpc_timeout;
         }
 
         ~StubPoolImpl() {
             delete tcpclient;
-            delete tlsclient;
             delete m_pool;
-            net::delete_tls_context(tls_ctx);
+            delete tls_ctx;
         }
 
         Stub* get_stub(const net::EndPoint& endpoint, bool tls) override {
             auto stub_ctor = [&]() -> rpc::Stub* {
-                auto socket_ctor = tls ? tlsclient : tcpclient;
-                auto socket = get_socket(socket_ctor, endpoint);
+                auto socket = get_socket(endpoint, tls);
                 if (socket == nullptr) {
                     return nullptr;
                 }
@@ -472,16 +468,19 @@ namespace rpc
         }
 
     protected:
-        net::ISocketStream* get_socket(net::ISocketClient* client, const net::EndPoint& ep) const {
+        net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
             LOG_INFO("Connect to ", ep);
-            auto sock = client->connect(ep);
+            auto sock = tcpclient->connect(ep);
             if (!sock) return nullptr;
             sock->timeout(m_rpc_timeout);
+            if (tls) {
+                sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
+            }
             return sock;
         }
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
-        net::ISocketClient *tcpclient, *tlsclient;
+        net::ISocketClient *tcpclient;
         net::TLSContext* tls_ctx = nullptr;
         uint64_t m_rpc_timeout;
     };

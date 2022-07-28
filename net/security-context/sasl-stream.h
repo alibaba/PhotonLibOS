@@ -16,8 +16,9 @@ limitations under the License.
 
 #pragma once
 
-#include <photon/common/callback.h>
 #include <gsasl.h>
+#include <photon/common/callback.h>
+#include <photon/common/object.h>
 
 namespace photon {
 namespace net {
@@ -25,10 +26,14 @@ namespace net {
 class ISocketStream;
 class ISocketServer;
 class ISocketClient;
-class SaslSession;
 
 using Gsasl_auth_cb = Callback<Gsasl_session *, ISocketStream *>;
 using Gsasl_prep_cb = Callback<Gsasl *, Gsasl_session *, Gsasl_property>;
+
+class SaslSession : public Object {
+public:
+    virtual void property_set(Gsasl_property prop, const char *data) = 0;
+};
 
 /**
  * @brief Create a sasl client session. It will init the Gsasl ctx, bind the @cb to Gsasl_session,
@@ -43,8 +48,7 @@ using Gsasl_prep_cb = Callback<Gsasl *, Gsasl_session *, Gsasl_property>;
  * requested behaviour.
  * @return Return sasl session handle or nullptr if gsasl setup failed.
  */
-SaslSession *new_sasl_client_session(const char *mech, Gsasl_auth_cb auth_cb,
-                                     Gsasl_prep_cb prep_cb);
+SaslSession *new_sasl_client_session(const char *mech, Gsasl_auth_cb auth_cb, Gsasl_prep_cb prep_cb);
 /**
  * @brief Create a sasl server session.
  * It will init the Gsasl ctx, bind the @cb to Gsasl_session, and start the Gsasl_session;
@@ -58,23 +62,7 @@ SaslSession *new_sasl_client_session(const char *mech, Gsasl_auth_cb auth_cb,
  * requested behaviour.
  * @returnReturn sasl session handle or nullptr if gsasl setup failed.
  */
-SaslSession *new_sasl_server_session(const char *mech, Gsasl_auth_cb auth_cb,
-                                     Gsasl_prep_cb prep_cb);
-/**
- * @brief set property of sasl session. It will call gsasl_property_set function.
- *
- * @param session SaslSession handle.
- * @param prop enumerated value of Gsasl_property type, indicating the type of data in data.
- * @param data zero terminated character string to store.
- */
-void gsasl_property_set_session(SaslSession* session, Gsasl_property prop, const char *data);
-
-/**
- * @brief Destruct and free a sasl session.
- *
- * @param session Sasl Session handle.
- */
-void delete_sasl_context(SaslSession *session);
+SaslSession *new_sasl_server_session(const char *mech, Gsasl_auth_cb auth_cb, Gsasl_prep_cb prep_cb);
 
 /**
  * @brief Create sasl stream.
@@ -111,5 +99,5 @@ ISocketClient *new_sasl_client(SaslSession *session, ISocketClient *base, bool o
  */
 ISocketServer *new_sasl_server(SaslSession *session, ISocketServer *base, bool ownership);
 
-}
-}
+}  // namespace net
+}  // namespace photon

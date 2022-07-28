@@ -1411,13 +1411,13 @@ namespace photon
         auto m = (migrate_args*)m_;
         do_thread_migrate(m->th, m->v);
     }
-    static int defer_migrate(thread* th, vcpu_base* v) {
+    static int defer_migrate(thread*& current, thread* th, vcpu_base* v) {
         assert(th == CURRENT);
         assert(!th->single());
-        thread* next = th->next();
+        auto next = current = th->next();
         prefetch_context(th, next);
-        migrate_args defer_arg{th, v};
         th->state = states::READY;
+        migrate_args defer_arg{th, v};
         switch_context_defer(th, next,
             &do_defer_migrate, &defer_arg);
         return 0;
@@ -1431,7 +1431,7 @@ namespace photon
             return 0;
         }
         if (th == CURRENT) {
-            return defer_migrate(th, v);
+            return defer_migrate(CURRENT, th, v);
         }
         if (th->vcpu != CURRENT->vcpu) {
             LOG_ERROR_RETURN(EINVAL, -1,

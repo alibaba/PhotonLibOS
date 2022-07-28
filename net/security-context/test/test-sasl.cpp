@@ -370,7 +370,7 @@ int handler(void *, net::ISocketStream *stream) {
                                                 : net::Gsasl_auth_cb(nullptr, &auth_cb_send);
     auto prep_cb = net::Gsasl_prep_cb(nullptr, &server_callback);
     auto session = net::new_sasl_server_session(sasltvs[testId].mech.data(), auth_cb, prep_cb);
-    DEFER(delete_sasl_context(session));
+    DEFER(delete session);
     char buf[6];
     char buffer[1048576];
     auto ss = net::new_sasl_stream(session, stream, false);
@@ -393,7 +393,7 @@ void client_test(net::ISocketStream *stream) {
                                                 : net::Gsasl_auth_cb(nullptr, &auth_cb_recv);
     auto prep_cb = net::Gsasl_prep_cb(nullptr, &client_callback);
     auto session = net::new_sasl_client_session(sasltvs[testId].mech.data(), auth_cb, prep_cb);
-    DEFER(delete_sasl_context(session));
+    DEFER(delete session);
     auto ss = net::new_sasl_stream(session, stream, false);
     DEFER(delete ss);
     char buf[] = "Hello";
@@ -490,14 +490,14 @@ TEST(cs, test) {
         auto c_prep_cb = net::Gsasl_prep_cb(nullptr, &client_callback);
         auto c_session =
             net::new_sasl_client_session(sasltvs[testId].mech.data(), c_auth_cb, c_prep_cb);
-        DEFER(delete_sasl_context(c_session));
+        DEFER(delete c_session);
         auto s_auth_cb = sasltvs[testId].client_first
                              ? net::Gsasl_auth_cb(nullptr, &auth_cb_recv)
                              : net::Gsasl_auth_cb(nullptr, &auth_cb_send);
         auto s_prep_cb = net::Gsasl_prep_cb(nullptr, &server_callback);
         auto s_session =
             net::new_sasl_server_session(sasltvs[testId].mech.data(), s_auth_cb, s_prep_cb);
-        DEFER(delete_sasl_context(s_session));
+        DEFER(delete s_session);
         DEFER(photon::wait_all());
         auto server = net::new_sasl_server(s_session, net::new_tcp_socket_server(), true);
         DEFER(delete server);
@@ -527,14 +527,14 @@ TEST(cs, uds) {
         auto c_prep_cb = net::Gsasl_prep_cb(nullptr, &client_callback);
         auto c_session =
             net::new_sasl_client_session(sasltvs[testId].mech.data(), c_auth_cb, c_prep_cb);
-        DEFER(delete_sasl_context(c_session));
+        DEFER(delete c_session);
         auto s_auth_cb = sasltvs[testId].client_first
                              ? net::Gsasl_auth_cb(nullptr, &auth_cb_recv)
                              : net::Gsasl_auth_cb(nullptr, &auth_cb_send);
         auto s_prep_cb = net::Gsasl_prep_cb(nullptr, &server_callback);
         auto s_session =
             net::new_sasl_server_session(sasltvs[testId].mech.data(), s_auth_cb, s_prep_cb);
-        DEFER(delete_sasl_context(s_session));
+        DEFER(delete s_session);
         DEFER(photon::wait_all());
         auto server = net::new_sasl_server(s_session, net::new_uds_server(true), true);
         DEFER(delete server);

@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
 
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
     if (!ctx) return -1;
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     auto server = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete server);
 
