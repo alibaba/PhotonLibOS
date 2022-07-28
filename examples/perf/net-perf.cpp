@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <chrono>
+#include <vector>
 
 #include <gflags/gflags.h>
 
@@ -23,12 +24,9 @@ limitations under the License.
 #include <photon/io/signalfd.h>
 #include <photon/common/io-alloc.h>
 #include <photon/thread/thread11.h>
+#include <photon/thread/workerpool.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
-
-bool stop_test = false;
-uint64_t qps = 0;
-uint64_t time_cost = 0;
 
 DEFINE_uint64(show_statistics_interval, 1, "interval seconds to show statistics");
 DEFINE_bool(client, false, "client or server? default is server");
@@ -37,6 +35,11 @@ DEFINE_uint64(client_connection_num, 100, "number of the connections of the clie
 DEFINE_string(ip, "127.0.0.1", "ip");
 DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 512, "buffer size");
+DEFINE_uint64(vcpu_num, 1, "server vcpu num. Increase this value to enable multi-vcpu scheduling");
+
+bool stop_test = false;
+uint64_t qps = 0;
+uint64_t time_cost = 0;
 
 static void handle_signal(int sig) {
     LOG_INFO("Try to gracefully stop test ...");
@@ -159,9 +162,18 @@ static int streaming_client() {
 
 static int echo_server() {
     // Server has configured gracefully termination by signal processing
+    photon::block_all_signal();
     photon::sync_signal(SIGTERM, &handle_signal);
     photon::sync_signal(SIGINT, &handle_signal);
 
+    // Create a work pool if enabling multi-vcpu scheduling
+    photon::WorkPool* work_pool = nullptr;
+    if (FLAGS_vcpu_num > 1) {
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_IOURING, 0);
+    }
+    DEFER(delete work_pool);
+
+    // Create socket server
     auto server = photon::net::new_tcp_socket_server();
     // auto server = photon::net::new_iouring_tcp_server();
     if (server == nullptr) {
@@ -180,13 +192,17 @@ static int echo_server() {
         }
     };
 
-    auto handle = [&](photon::net::ISocketStream* arg) -> int {
-        auto sock = (photon::net::ISocketStream*) arg;
+    // Define handler for new connections (SocketStream)
+    auto handler = [&](photon::net::ISocketStream* arg) -> int {
+        if (FLAGS_vcpu_num > 1) {
+            work_pool->thread_migrate();
+        }
 
         AlignedAlloc alloc(512);
         void* buf = alloc.alloc(FLAGS_buf_size);
         DEFER(alloc.dealloc(buf));
 
+        auto sock = (photon::net::ISocketStream*) arg;
         while (true) {
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
@@ -208,7 +224,7 @@ static int echo_server() {
     auto stop_th = photon::thread_create11(stop_watcher);
     photon::thread_enable_join(stop_th);
 
-    server->set_handler(handle);
+    server->set_handler(handler);
     server->bind(FLAGS_port, photon::net::IPAddr());
     server->listen(1024);
     server->start_loop(true);

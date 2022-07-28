@@ -19,21 +19,19 @@ limitations under the License.
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-
-#include <vector>
-
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
-#include <photon/net/socket.h>
 #include <photon/net/basic_socket.h>
+#include <photon/net/socket.h>
 #include <photon/thread/thread.h>
+
+#include <vector>
 
 #include "../base_socket.h"
 
 namespace photon {
 namespace net {
 
-constexpr size_t BUFFER_SIZE = 4 * 1024;
 constexpr size_t MAX_PASSPHASE_SIZE = 4 * 1024;
 constexpr size_t MAX_ERRSTRING_SIZE = 4 * 1024;
 
@@ -91,12 +89,12 @@ public:
     }
 };
 
-class TLSContext {
+class TLSContextImpl : public TLSContext {
 public:
     SSL_CTX* ctx;
     char pempassword[MAX_PASSPHASE_SIZE];
 
-    TLSContext() {
+    TLSContextImpl() {
         char errbuf[4096];
         ctx = SSL_CTX_new(SSLv23_method());
         if (ctx == nullptr) {
@@ -106,20 +104,20 @@ public:
         }
     }
 
-    ~TLSContext() {
+    ~TLSContextImpl() override {
         if (ctx) SSL_CTX_free(ctx);
     }
 
     static int pem_password_cb(char* buf, int size, int rwflag, void* ptr) {
-        auto self = (TLSContext*)ptr;
+        auto self = (TLSContextImpl*)ptr;
         strncpy(buf, self->pempassword, size);
         return strlen(buf);
     }
-    ssize_t set_pass_phrase(const char* pass) {
+    int set_pass_phrase(const char* pass) override {
         strncpy(pempassword, pass, sizeof(pempassword));
         return strlen(pempassword);
     }
-    int ssl_set_cert(const char* cert_str) {
+    int set_cert(const char* cert_str) override {
         char errbuf[4096];
         auto bio = BIO_new_mem_buf((void*)cert_str, -1);
         DEFER(BIO_free(bio));
@@ -131,7 +129,7 @@ public:
         }
         return 0;
     }
-    int ssl_set_pkey(const char* key_str, const char* passphrase) {
+    int set_pkey(const char* key_str, const char* passphrase) override {
         char errbuf[4096];
         if (passphrase) {
             SSL_CTX_set_default_passwd_cb(ctx, &pem_password_cb);
@@ -140,8 +138,8 @@ public:
         }
         auto bio = BIO_new_mem_buf((void*)key_str, -1);
         DEFER(BIO_free(bio));
-        auto key = PEM_read_bio_RSAPrivateKey(bio, nullptr,
-                                              &pem_password_cb, this);
+        auto key =
+            PEM_read_bio_RSAPrivateKey(bio, nullptr, &pem_password_cb, this);
         auto ret = SSL_CTX_use_RSAPrivateKey(ctx, key);
         if (ret != 1) {
             ERR_error_string_n(ret, errbuf, sizeof(errbuf));
@@ -159,152 +157,108 @@ public:
 TLSContext* new_tls_context(const char* cert_str, const char* key_str,
                             const char* passphrase) {
     GlobalSSLContext::getInstance();
-    auto ret = new TLSContext();
+    auto ret = new TLSContextImpl();
     if (ret->ctx == NULL) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to create TLS context");
     }
-    if (cert_str && ret->ssl_set_cert(cert_str)) {
+    if (cert_str && ret->set_cert(cert_str)) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to set TLS cert");
     };
-    if (key_str && ret->ssl_set_pkey(key_str, passphrase)) {
+    if (key_str && ret->set_pkey(key_str, passphrase)) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to set TLS pkey");
     }
     return ret;
 }
 
-void delete_tls_context(TLSContext* ctx) { delete ctx; }
-
 class TLSSocketStream : public ForwardSocketStream {
 public:
-    SecurityRole role;
-    photon::mutex rmtx, wmtx;
-
     SSL* ssl;
-    BIO* rbio;
-    BIO* wbio;
+    BIO* ssbio;
 
-    TLSSocketStream(TLSContext* ctx, ISocketStream* stream, SecurityRole r, bool ownership = false)
-        : ForwardSocketStream(stream, ownership), role(r) {
-        ssl = SSL_new(ctx->ctx);
-        rbio = BIO_new(BIO_s_mem());
-        wbio = BIO_new(BIO_s_mem());
-        SSL_set_bio(ssl, rbio, wbio);
+    static int ssbio_bwrite(BIO* b, const char* buf, int cnt) {
+        auto sock = (ISocketStream*)b->ptr;
+        return sock->write(buf, cnt);
+    }
+
+    static int ssbio_bread(BIO* b, char* buf, int cnt) {
+        auto sock = (ISocketStream*)b->ptr;
+        return sock->recv(buf, cnt);
+    }
+
+    static int ssbio_bputs(BIO* bio, const char* str) {
+        return ssbio_bwrite(bio, str, strlen(str));
+    }
+
+    static long ssbio_ctrl(BIO* b, int cmd, long num, void* ptr) {
+        long ret = 1;
+
+        switch (cmd) {
+            case BIO_C_SET_FILE_PTR:
+                b->ptr = ptr;
+                b->shutdown = (int)num;
+                b->init = 1;
+                break;
+            case BIO_CTRL_GET_CLOSE:
+                ret = b->shutdown;
+                break;
+            case BIO_CTRL_SET_CLOSE:
+                b->shutdown = (int)num;
+                break;
+            case BIO_CTRL_DUP:
+            case BIO_CTRL_FLUSH:
+                ret = 1;
+                break;
+            default:
+                ret = 0;
+                break;
+        }
+        return (ret);
+    }
+
+    static int ssbio_create(BIO* bi) {
+        bi->init = 0;
+        bi->num = 0;
+        bi->ptr = NULL;
+        bi->flags = 0;
+        return (1);
+    }
+
+    static int ssbio_destroy(BIO*) { return 1; }
+
+    static BIO_METHOD bio_s_sockstream;
+
+    static BIO_METHOD* BIO_s_sockstream() { return &bio_s_sockstream; }
+
+    TLSSocketStream(TLSContext* ctx, ISocketStream* stream, SecurityRole r,
+                    bool ownership = false)
+        : ForwardSocketStream(stream, ownership) {
+        ssl = SSL_new(((TLSContextImpl*)ctx)->ctx);
+        ssbio = BIO_new(BIO_s_sockstream());
+        BIO_ctrl(ssbio, BIO_C_SET_FILE_PTR, 0, stream);
+        SSL_set_bio(ssl, ssbio, ssbio);
+
+        switch (r) {
+            case SecurityRole::Client:
+                SSL_set_connect_state(ssl);
+                break;
+            case SecurityRole::Server:
+                SSL_set_accept_state(ssl);
+                break;
+            default:
+                break;
+        }
     }
 
     ~TLSSocketStream() {
+        close();
         SSL_free(ssl);
     }
 
-    // dump all wbio buffer to socket
-    // return failure if write failed
-    int do_write() {
-        char* buf;
-        BUF_MEM* bufptr;
-        ssize_t buflen;
-        int n = 0;
-        if (!BIO_eof(wbio)) {
-            BIO_get_mem_ptr(wbio, &bufptr);
-            buflen = bufptr->length;
-            buf = bufptr->data;
-            n = m_underlay->write(buf, buflen);
-            if (n != buflen) {
-                LOG_ERROR_RETURN(ECONNRESET, -1, "Failed to send out all data");
-            }
-            bufptr->length = 0;
-        };
-        return n;
-    }
-
-    // recv from socket and put into rbio
-    int do_read() {
-        char buf[BUFFER_SIZE];
-        int ret, n;
-        n = m_underlay->recv(buf, BUFFER_SIZE);
-        if (n > 0) {
-            ret = BIO_write(rbio, buf, n);
-            if (ret < 0) {
-                char errbuf[MAX_ERRSTRING_SIZE];
-                auto e = SSL_get_error(ssl, ret);
-                ERR_error_string_n(e, errbuf, MAX_ERRSTRING_SIZE);
-                LOG_ERROR_RETURN(ECONNRESET, ret, errbuf);
-            }
-        }
-        return n;
-    }
-
-    template <typename Action>
-    int do_io_action(Action&& action) {
-        int ret;
-        while (1) {
-            // read or write to buffered bio
-            ret = action(ssl);
-            // flush all writable content
-            // always keep wbio clean
-            int wret;
-            do {
-                wret = do_write();
-            } while (wret > 0);
-            // return failure if flush failed
-            if (wret < 0) return -1;
-            
-            if (ret >= 0) {
-                // succeed
-                // if operation is write, 
-                return ret;
-            } else {
-                auto e = SSL_get_error(ssl, ret);
-                switch (e) {
-                    case SSL_ERROR_WANT_WRITE:
-                        // since alread flushed
-                        // just go another round
-                        break;
-                    case SSL_ERROR_WANT_READ:
-                        // need to read more into rbio
-                        ret = do_read();
-                        // if closed or failed, return failure
-                        if (ret <= 0) return ret;
-                        break;
-                    default:
-                        // other error, return failure
-                        return ret;
-                }
-            }
-        }
-    }
-
-    inline int get_ready() {
-        switch (role) {
-            case SecurityRole::Client:
-                return do_io_action([](SSL* ssl) { return SSL_connect(ssl); });
-            case SecurityRole::Server:
-                return do_io_action([](SSL* ssl) { return SSL_accept(ssl); });
-            default:
-                LOG_ERROR_RETURN(EINVAL, -EINVAL,
-                                 "Role not set before io action");
-        }
-    }
-
-    template <typename Action>
-    int get_ready_and_do_io_action(Action&& action) {
-        int ret;
-        if (!SSL_is_init_finished(ssl)) {
-            ret = get_ready();
-            if (ret != 1) {
-                char errbuf[4096];
-                auto e = SSL_get_error(ssl, ret);
-                ERR_error_string_n(e, errbuf, 4096);
-                LOG_ERROR_RETURN(-ret, ret, errbuf);
-            }
-        }
-        return do_io_action(std::move(action));
-    }
-
     ssize_t recv(void* buf, size_t cnt, int flags = 0) override {
-        return get_ready_and_do_io_action(
-            [&](SSL* ssl) -> int { return SSL_read(ssl, buf, cnt); });
+        return SSL_read(ssl, buf, cnt);
     }
 
     ssize_t recv(const struct iovec* iov, int iovcnt, int flags = 0) override {
@@ -312,8 +266,7 @@ public:
         return recv(iov[0].iov_base, iov[0].iov_len);
     }
     ssize_t send(const void* buf, size_t cnt, int flags = 0) override {
-        return get_ready_and_do_io_action(
-            [&](SSL* ssl) -> int { return SSL_write(ssl, buf, cnt); });
+        return SSL_write(ssl, buf, cnt);
     }
     ssize_t send(const struct iovec* iov, int iovcnt, int flags = 0) override {
         // since send allows partial write
@@ -349,16 +302,32 @@ public:
         return -2;
     }
 
+    int shutdown(ShutdownHow) override { return SSL_shutdown(ssl); }
+
     int close() override {
-        if (m_ownership)
+        shutdown(ShutdownHow::ReadWrite);
+        if (m_ownership) {
             return m_underlay->close();
-        else
+        } else
             return 0;
     }
 };
 
+BIO_METHOD TLSSocketStream::bio_s_sockstream{
+    .type = BIO_TYPE_SOURCE_SINK,
+    .name = "BIO_PHOTON_SOCKSTREAM",
+    .bwrite = &TLSSocketStream::ssbio_bwrite,
+    .bread = &TLSSocketStream::ssbio_bread,
+    .bputs = &TLSSocketStream::ssbio_bputs,
+    .bgets = nullptr,
+    .ctrl = &TLSSocketStream::ssbio_ctrl,
+    .create = &TLSSocketStream::ssbio_create,
+    .destroy = &TLSSocketStream::ssbio_destroy,
+    .callback_ctrl = nullptr,
+};
+
 ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
-                                   SecurityRole role, bool ownership) {
+                              SecurityRole role, bool ownership) {
     if (!ctx || !base)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(ctx),
                          VALUE(base));
@@ -371,19 +340,22 @@ public:
     TLSContext* ctx;
 
     TLSSocketClient(TLSContext* ctx, ISocketClient* underlay, bool ownership)
-            : ForwardSocketClient(underlay, ownership), ctx(ctx) {}
+        : ForwardSocketClient(underlay, ownership), ctx(ctx) {}
 
     virtual ISocketStream* connect(const char* path, size_t count) override {
-        return new_tls_stream(ctx, m_underlay->connect(path, count), SecurityRole::Client, true);
+        return new_tls_stream(ctx, m_underlay->connect(path, count),
+                              SecurityRole::Client, true);
     }
 
-    virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
-        return new_tls_stream(ctx, m_underlay->connect(remote, local), SecurityRole::Client, true);
+    virtual ISocketStream* connect(EndPoint remote,
+                                   EndPoint local = EndPoint()) override {
+        return new_tls_stream(ctx, m_underlay->connect(remote, local),
+                              SecurityRole::Client, true);
     }
 };
 
 ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
-                                   bool ownership) {
+                              bool ownership) {
     if (!ctx || !base)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(ctx),
                          VALUE(base));
@@ -396,9 +368,10 @@ public:
     Handler m_handler;
 
     TLSSocketServer(TLSContext* ctx, ISocketServer* underlay, bool ownership)
-            : ForwardSocketServer(underlay, ownership), ctx(ctx) {}
+        : ForwardSocketServer(underlay, ownership), ctx(ctx) {}
 
-    virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) override {
+    virtual ISocketStream* accept(
+        EndPoint* remote_endpoint = nullptr) override {
         return new_tls_stream(ctx, m_underlay->accept(remote_endpoint),
                               SecurityRole::Server, true);
     }
@@ -411,17 +384,18 @@ public:
 
     virtual ISocketServer* set_handler(Handler handler) override {
         m_handler = handler;
-        return m_underlay->set_handler({this, &TLSSocketServer::forwarding_handler});
+        return m_underlay->set_handler(
+            {this, &TLSSocketServer::forwarding_handler});
     }
 };
 
 ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
-                                   bool ownership) {
+                              bool ownership) {
     if (!ctx || !base)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(ctx),
                          VALUE(base));
     return new TLSSocketServer(ctx, base, ownership);
 }
 
-}
-}
+}  // namespace net
+}  // namespace photon

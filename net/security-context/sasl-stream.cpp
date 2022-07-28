@@ -38,7 +38,7 @@ static int delegate_callback(Gsasl *ctx, Gsasl_session *sctx, Gsasl_property pro
     return cb->fire(ctx, sctx, prop);
 }
 
-class SaslSession {
+class SaslSessionImpl : public SaslSession {
   public:
     Gsasl *ctx = nullptr;
     Gsasl_session *session = nullptr;
@@ -48,20 +48,24 @@ class SaslSession {
     Gsasl_prep_cb prep_cb;
     bool inited = false;
 
-    SaslSession(const char *mech, SecurityRole r, Gsasl_auth_cb auth_cb, Gsasl_prep_cb prep_cb)
+    SaslSessionImpl(const char *mech, SecurityRole r, Gsasl_auth_cb auth_cb, Gsasl_prep_cb prep_cb)
         : mech(mech), role(r), auth_cb(auth_cb), prep_cb(prep_cb) {
         inited = initGsaslCtx();
     }
-    SaslSession(const SaslSession &) = delete;
-    SaslSession(SaslSession &&) = delete;
-    SaslSession &operator=(const SaslSession &) = delete;
-    SaslSession &operator=(SaslSession &&) = delete;
-    ~SaslSession() {
+    SaslSessionImpl(const SaslSessionImpl &) = delete;
+    SaslSessionImpl(SaslSessionImpl &&) = delete;
+    SaslSessionImpl &operator=(const SaslSessionImpl &) = delete;
+    SaslSessionImpl &operator=(SaslSessionImpl &&) = delete;
+    ~SaslSessionImpl() override {
         if (inited) {
             gsasl_finish(session);
             gsasl_done(ctx);
             inited = false;
         }
+    }
+
+    void property_set(Gsasl_property prop, const char *data) override {
+        gsasl_property_set(session, prop, data);
     }
 
   private:
@@ -90,7 +94,7 @@ class SaslSession {
 
 SaslSession *new_sasl_client_session(const char *mech, Gsasl_auth_cb auth_cb,
                                      Gsasl_prep_cb prep_cb) {
-    SaslSession *ret = new SaslSession(mech, SecurityRole::Client, auth_cb, prep_cb);
+    SaslSessionImpl *ret = new SaslSessionImpl(mech, SecurityRole::Client, auth_cb, prep_cb);
     if (!ret->inited) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to create Sasl Client Session");
@@ -100,23 +104,16 @@ SaslSession *new_sasl_client_session(const char *mech, Gsasl_auth_cb auth_cb,
 
 SaslSession *new_sasl_server_session(const char *mech, Gsasl_auth_cb auth_cb,
                                      Gsasl_prep_cb prep_cb) {
-    SaslSession *ret = new SaslSession(mech, SecurityRole::Server, auth_cb, prep_cb);
+    SaslSessionImpl *ret = new SaslSessionImpl(mech, SecurityRole::Server, auth_cb, prep_cb);
     if (!ret->inited) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to create Sasl Server Session");
     }
     return ret;
 }
-
-void gsasl_property_set_session(SaslSession *session, Gsasl_property prop, const char *data) {
-    gsasl_property_set(session->session, prop, data);
-}
-
-void delete_sasl_context(SaslSession *session) { delete session; }
-
 class SaslSocketStream : public ForwardSocketStream {
   private:
-    SaslSession *sasl_session;
+    SaslSessionImpl *sasl_session;
     Gsasl_qop qop = Gsasl_qop::GSASL_QOP_AUTH;
     char *saslmsg;
     size_t saslmsg_size;
@@ -125,7 +122,7 @@ class SaslSocketStream : public ForwardSocketStream {
     size_t decodebuf_finish = 0;
 
   public:
-    SaslSocketStream(SaslSession *session, ISocketStream *stream, bool ownership)
+    SaslSocketStream(SaslSessionImpl *session, ISocketStream *stream, bool ownership)
         : ForwardSocketStream(stream, ownership), sasl_session(session) {
         saslmsg = (char *)malloc(TOKEN_SIZE);
         saslmsg_size = TOKEN_SIZE;
@@ -296,16 +293,16 @@ class SaslSocketStream : public ForwardSocketStream {
 
 ISocketStream *new_sasl_stream(SaslSession *session, ISocketStream *stream,
                                     bool ownership) {
-    auto ret = new SaslSocketStream(session, stream, ownership);
+    auto ret = new SaslSocketStream((SaslSessionImpl*)session, stream, ownership);
     if (ret->initSasl()) return ret;
     return nullptr;
 }
 
 class SaslSocketClient : public ForwardSocketClient {
   public:
-    SaslSession *session;
+    SaslSessionImpl *session;
 
-    SaslSocketClient(SaslSession* session, ISocketClient* underlay, bool ownership)
+    SaslSocketClient(SaslSessionImpl* session, ISocketClient* underlay, bool ownership)
             : ForwardSocketClient(underlay, ownership), session(session) {}
     virtual ISocketStream *connect(const char *path, size_t count) override {
         return new_sasl_stream(session, m_underlay->connect(path, count), true);
@@ -317,17 +314,17 @@ class SaslSocketClient : public ForwardSocketClient {
 
 ISocketClient *new_sasl_client(SaslSession *session, ISocketClient *base,
                                     bool ownership) {
-    if (!session || !base || session->role != SecurityRole::Client)
+    if (!session || !base || ((SaslSessionImpl*)session)->role != SecurityRole::Client)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(session), VALUE(base));
-    return new SaslSocketClient(session, base, ownership);
+    return new SaslSocketClient((SaslSessionImpl*)session, base, ownership);
 }
 
 class SaslSocketServer : public ForwardSocketServer {
 public:
-    SaslSession* session;
+    SaslSessionImpl* session;
     Handler m_handler;
 
-    SaslSocketServer(SaslSession* session, ISocketServer* underlay, bool ownership)
+    SaslSocketServer(SaslSessionImpl* session, ISocketServer* underlay, bool ownership)
             : ForwardSocketServer(underlay, ownership), session(session) {}
 
     virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) override {
@@ -346,9 +343,9 @@ public:
 
 ISocketServer *new_sasl_server(SaslSession *session, ISocketServer *base,
                                     bool ownership) {
-    if (!session || !base || session->role != SecurityRole::Server)
+    if (!session || !base || ((SaslSessionImpl*)session)->role != SecurityRole::Server)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(session), VALUE(base));
-    return new SaslSocketServer(session, base, ownership);
+    return new SaslSocketServer((SaslSessionImpl*)session, base, ownership);
 }
 
 }

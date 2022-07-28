@@ -33,7 +33,7 @@ int main(int argc, char** argv) {
 
     auto ctx = net::new_tls_context(nullptr, nullptr, "Just4Test");
     if (!ctx) return -1;
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     auto cli = net::new_tls_client(ctx, net::new_tcp_socket_client(), true);
     DEFER(delete cli);
     char buff[4096];

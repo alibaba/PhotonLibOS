@@ -405,7 +405,7 @@ private:
         ts->tv_nsec = nsec;
     }
 
-    static const int QUEUE_DEPTH = 32768;
+    static const int QUEUE_DEPTH = 16384;
     bool m_master;
     int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;

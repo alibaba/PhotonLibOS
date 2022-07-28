@@ -18,6 +18,8 @@ limitations under the License.
 
 #include <photon/common/object.h>
 
+#include <cstdlib>
+
 namespace photon {
 namespace net {
 
@@ -30,7 +32,15 @@ enum class SecurityRole {
     Server = 2,
 };
 
-class TLSContext;
+/**
+ * @brief TLSContext managers TLS key and cert
+ * These parameters is able to set after created
+ */
+class TLSContext : public Object {
+    virtual int set_pass_phrase(const char* pass) = 0;
+    virtual int set_cert(const char* cert_str) = 0;
+    virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
+};
 
 /**
  * @brief Create a tls context, contains cert and private key infomation.
@@ -40,15 +50,9 @@ class TLSContext;
  * @param passphrase passphrase for private key
  * @return TLSContext* context object pointer
  */
-TLSContext* new_tls_context(const char* cert_str, const char* key_str,
+TLSContext* new_tls_context(const char* cert_str = nullptr,
+                            const char* key_str = nullptr,
                             const char* passphrase = nullptr);
-
-/**
- * @brief Destruct and free a tls context.
- *
- * @param ctx
- */
-void delete_tls_context(TLSContext* ctx);
 
 /**
  * @brief Create socket stream on TLS.
@@ -61,7 +65,7 @@ void delete_tls_context(TLSContext* ctx);
  * @return ISocketStream*
  */
 ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
-                                   SecurityRole role, bool ownership = false);
+                              SecurityRole role, bool ownership = false);
 /**
  * @brief Create socket server on TLS. as a client socket factory.
  *
@@ -72,7 +76,7 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
  * @return ISocketServer* server factory
  */
 ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
-                                   bool ownership = false);
+                              bool ownership = false);
 
 /**
  * @brief Create socket client on TLS. as a client socket factory.
@@ -84,7 +88,7 @@ ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
  * @return ISocketClient* client factory
  */
 ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
-                                   bool ownership = false);
+                              bool ownership = false);
 
-}
-}
+}  // namespace net
+}  // namespace photon

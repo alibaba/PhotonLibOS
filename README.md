@@ -136,7 +136,7 @@ All the libs and executables will be saved in `build/output`.
 ### 3. Testing
 ```shell
 # CentOS
-dnf config-manager --set-enabled PowerTools
+dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 # Ubuntu
 apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev

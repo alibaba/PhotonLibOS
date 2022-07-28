@@ -66,7 +66,7 @@ void client_test(net::ISocketStream* stream, net::TLSContext* ctx) {
 
 TEST(basic, test) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
@@ -153,7 +153,7 @@ void close_reading_client_test(net::ISocketStream* stream, net::TLSContext* ctx)
 
 TEST(basic, socket_close_in_read) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
@@ -175,7 +175,7 @@ TEST(basic, socket_close_in_read) {
 
 TEST(basic, socket_close_in_write) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
@@ -197,7 +197,7 @@ TEST(basic, socket_close_in_write) {
 
 TEST(basic, uds) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server = net::new_uds_server(true);
     DEFER(delete server);
@@ -246,7 +246,7 @@ void s_client_test(net::ISocketStream* stream) {
 
 TEST(cs, test) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server =
         net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
@@ -270,7 +270,7 @@ TEST(cs, test) {
 
 TEST(cs, uds) {
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(net::delete_tls_context(ctx));
+    DEFER(delete ctx);
     DEFER(photon::wait_all());
     auto server =
         net::new_tls_server(ctx, net::new_uds_server(true), true);
@@ -296,7 +296,7 @@ TEST(Socket, nested) {
 
     auto server_ssl_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
     ASSERT_NE(server_ssl_ctx, nullptr);
-    DEFER(net::delete_tls_context(server_ssl_ctx));
+    DEFER(delete server_ssl_ctx);
 
     auto server = net::new_tls_server(server_ssl_ctx, net::new_et_tcp_socket_server(), true);
     DEFER(delete server);
