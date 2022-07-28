@@ -27,6 +27,7 @@ limitations under the License.
 #include <photon/thread/timer.h>
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
+#include <photon/net/security-context/tls-stream.h>
 
 namespace photon {
 namespace net {
@@ -195,32 +196,12 @@ int libcurl_set_maxconnects(long val) {
     // return 0;
 }
 
-static std::vector<std::unique_ptr<std::mutex>> mutex_buf;
-
-static void locking_function(int mode, int n, const char* file, int line) {
-    if (mode & CRYPTO_LOCK) {
-        mutex_buf[n]->lock();
-    } else {
-        mutex_buf[n]->unlock();
-    }
-}
-
-static unsigned long id_function(void) {
-    return ((unsigned long)pthread_self());
-}
-
-int thread_setup(void) {
-    while((ssize_t)mutex_buf.size() < CRYPTO_num_locks()) {
-        mutex_buf.emplace_back(new std::mutex());
-    }
-    CRYPTO_set_id_callback(id_function);
-    CRYPTO_set_locking_callback(locking_function);
-    return 1;
-}
-
 __attribute__((constructor)) void global_init() {
     global_initialized = curl_global_init(CURL_GLOBAL_ALL);
 }
+
+// Fuction defined in tls-stream.
+void __OpenSSLGlobalInit();
 
 // Since global cleanup will cleanup openssl
 // it needs mutex_buf, which will be destructed before global fini
@@ -233,7 +214,7 @@ __attribute__((constructor)) void global_init() {
 
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
-        thread_setup();
+        __OpenSSLGlobalInit();
         cctx.g_poller = photon::new_epoll_cascading_engine();
         cctx.g_loop = new cURLLoop();
         cctx.g_loop->start();
