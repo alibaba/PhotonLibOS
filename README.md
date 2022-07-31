@@ -87,7 +87,7 @@ and each of them will create only one connection. Send coroutine and recv corout
 - The Ping-pong client is to measure echo server performance when handling large amounts of connections.
 We will set up 10 client processes, and each of them will create 100 connections. Within a single connection, 
 recv has to be invoked after send.
-- Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. The network bandwidth (unilateral) is 32Gb.
+- Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. Kernel version is 5.15. The network bandwidth (unilateral) is 32Gb.
 - This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.
 
 Conclusion: Photon socket has the best per-core QPS.
