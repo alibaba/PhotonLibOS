@@ -67,7 +67,7 @@ int main() {
     DEFER(delete file);
 
     auto server = photon::net::new_tcp_socket_server();
-    if (server != nullptr) {
+    if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "failed to create tcp server");
     }
     DEFER(delete server);
@@ -84,7 +84,7 @@ int main() {
 
     // Create socket client and connect
     auto client = photon::net::new_tcp_socket_client();
-    if (client != nullptr) {
+    if (client == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "failed to create tcp client");
     }
     DEFER(delete client);
