@@ -18,23 +18,27 @@ limitations under the License.
 
 #include <photon/common/callback.h>
 #include <photon/common/tuple-assistance.h>
-#include <photon/thread/thread11.h>
+#include <photon/thread/thread.h>
 
 #include <memory>
 #include <utility>
 
 namespace photon {
 
-/**
- * @brief `WorkPool` is a helper to create background vcpu pool
- * to deploy works.
- * It will create `vcpu_num` std threads, and initialize photon environment,
- * make them works as a VCPU.
- * When `WorkPool` during destruction, all controlled std threads will be join.
- */
 class WorkPool {
 public:
-    explicit WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0);
+    /**
+     * @brief Construct a new Work Pool object
+     *
+     * @param vcpu_num how many VCPU (std threads) create for this workpool
+     * @param ev_engine how to initial event engine as preset VCPUs
+     * @param io_engine how to initial io engine as preset VCPUs
+     * @param thread_mod threads work in which mode, -1 for non-thread mode, set
+     * to 0 will create photon thread for every task, and >0 to create photon
+     * thread in photon thread pool with this size.
+     */
+    explicit WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0,
+                      int thread_mod = -1);
 
     WorkPool(const WorkPool& other) = delete;
     WorkPool& operator=(const WorkPool& rhs) = delete;
@@ -42,11 +46,27 @@ public:
     ~WorkPool();
 
     /**
+     * @brief `hold_as_worker` makes blocks current std thread join workpool, as
+     * a woker member. Noticed that worker should initial environment by self,
+     * workpool will not do photon environment for it. When workpool destructed,
+     * the function call will be finished, and return 0.
+     * @return int 0 for success, and -1 for failure
+     */
+    int join_current_vcpu_into_workpool();
+
+    /**
+     * @brief Get the vcpu num
+     * 
+     * @return int 
+     */
+    int get_vcpu_num();
+
+    /**
      * @brief `call` method deploy a callable object (usually lambda function)
      * into one of workpool vcpu, and wait till this function finished.
-     * 
-     * @param f Callable object as a work task. Noticed that the return value of f 
-     *          will not being collected.
+     *
+     * @param f Callable object as a work task. Noticed that the return value of
+     * f will not being collected.
      * @param args Arguments calling `f`
      */
     template <typename F, typename... Args>
@@ -62,59 +82,28 @@ public:
 
     /**
      * @brief `async_call` just like `call`, but do not wait for task done.
-     * 
-     * @param f Callable object as a work task. Noticed that the return value of f 
-     *          will not being collected.
-     * @param args Arguments calling `f`
+     *
+     * @param task Pointer to async task callable object. Call by lamda could
+     * using `workpool.async_call(new auto ([&](){ // some lambda; }));` The
+     * ownership of callable object is moved to workpool, object will be delete
+     * after task done.
      */
-    template <typename F, typename... Args>
-    void async_call(F&& f, Args&&... args) {
-#if __cplusplus < 201300L
-        // capture by reference in C++11
-        // it will acturally copy f and args once
-        auto task = new auto([&]() mutable { f(std::forward<Args>(args)...); });
-#else
-        // or by value/move in C++14 on
-        auto task = new auto([f = std::forward<F>(f),
-                              pack = std::make_tuple(
-                                  std::forward<Args>(args)...)]() mutable {
-            tuple_assistance::apply(f, pack);
-        });
-#endif
-
-        void (*func)(void*);
-        func = [](void* task_) {
-            using Task = decltype(task);
-            auto t = (Task)task_;
-            (*t)();
-            delete t;
-        };
-        enqueue({func, task});
+    template <typename Task>
+    void async_call(Task* task) {
+        enqueue({&WorkPool::__async_call_helper<Task>, task});
     }
 
     /**
-     * @brief `thread_migrate` takes a thread to migrate to one of work-pool managed
-     * vcpu.
-     * 
+     * @brief `thread_migrate` takes a thread to migrate to one of work-pool
+     * managed vcpu.
+     *
      * @param th Photon thread that goint to migrate
-     * @param index Which vcpu in pool to migrate to. if index is not in range [0, vcpu_num),
-     *              it will choose random one in pool.
+     * @param index Which vcpu in pool to migrate to. if index is not in range
+     * [0, vcpu_num), it will choose random one in pool.
      * @return int 0 for success, and <0 means failed to migrate.
      */
     int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL) {
         return photon::thread_migrate(th, get_vcpu_in_pool(index));
-    }
-
-    /**
-     * @brief `thread_create` create a photon thread in one of work-pool vcpu
-     * 
-     * @param args as same as defined in `thread_create11`
-     * @return int 0 for success, and <0 means failed to create
-     */
-    template <typename... Args>
-    int thread_create(Args&&... args) {
-        auto th = photon::thread_create11(std::forward<Args>(args)...);
-        return thread_migrate(th);
     }
 
 protected:
@@ -125,6 +114,13 @@ protected:
     void do_call(Delegate<void> call);
     void enqueue(Delegate<void> call);
     photon::vcpu_base* get_vcpu_in_pool(size_t index);
+
+    template<typename Task>
+    static void __async_call_helper(void* task) {
+        auto t = (Task*)task;
+        (*t)();
+        delete t;
+    }
 };
 
 }  // namespace photon

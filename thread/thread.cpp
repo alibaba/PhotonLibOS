@@ -171,9 +171,10 @@ namespace photon
         void dispose()
         {
             auto b = buf;
+#ifndef __aarch64__
             madvise(b, stack_size, MADV_DONTNEED);
+#endif
             free(b);
-            // munmap(buf, stack_size);
         }
     };
 
@@ -735,6 +736,7 @@ namespace photon
     }
 
     static void do_stack_pages_gc(void* arg) {
+#ifndef __aarch64__
         auto th = (thread*)arg;
         assert(th->vcpu == CURRENT->vcpu);
         // hold `lock` so th will not change state
@@ -746,6 +748,7 @@ namespace photon
         auto rsp = (char*)th->stack._ptr;
         auto len = align_down(rsp - buf, PAGE_SIZE);
         madvise(buf, len, MADV_DONTNEED);
+#endif
     }
 
     int stack_pages_gc(thread* th) {

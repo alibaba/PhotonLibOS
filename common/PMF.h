@@ -32,6 +32,7 @@ inline auto __get_mfa__(T* obj, MF f)
     {
         union { uint64_t func_ptr, offset; };
         uint64_t this_adjustment;
+#ifdef __x86_64__
         bool is_virtual() const
         {
             return offset & 1;
@@ -42,6 +43,18 @@ inline auto __get_mfa__(T* obj, MF f)
             auto vtbl_addr = *(uint64_t*)obj;
             return *(uint64_t*)(vtbl_addr + offset - 1);
         }
+#elif defined(__aarch64__)
+        bool is_virtual() const
+        {
+            return this_adjustment & 1;
+        }
+        uint64_t get_virtual_function_address(void*& obj) const
+        {
+            (char*&)obj += (this_adjustment / 2);
+            auto vtbl_addr = *(uint64_t*)obj;
+            return *(uint64_t*)(vtbl_addr + offset);
+        }
+#endif
         uint64_t get_function_address(void*& obj) const
         {
             return is_virtual() ? get_virtual_function_address(obj) : func_ptr;
