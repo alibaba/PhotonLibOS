@@ -1597,7 +1597,7 @@ TEST(thread11, lambda) {
     auto lambda = [](photon::semaphore &sem){
         sem.signal(1);
     };
-    photon::thread_create11(lambda, sem);
+    photon::thread_create11(&decltype(lambda)::operator(),&lambda,sem);
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
     auto lambda2 = [&sem]{
         sem.signal(1);
