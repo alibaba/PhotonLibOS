@@ -93,8 +93,11 @@ int main(int argc, char** argv) {
     for (auto& c : data_str) c = '0';
 
     thread_create11(show_qps_loop);
-
-    auto http_srv = net::new_http_server(FLAGS_port);
+    auto tcpserv = net::new_tcp_socket_server();
+    tcpserv->bind(FLAGS_port);
+    tcpserv->listen();
+    DEFER(delete tcpserv);
+    auto http_srv = net::new_http_server();
     DEFER(delete http_srv);
     SimpleHandler handler;
     auto fs = fs::new_localfs_adaptor(".");
@@ -113,16 +116,14 @@ int main(int argc, char** argv) {
     auto fs_handler = net::new_fs_handler(fs, "/");
     DEFER(delete fs_handler);
     if (FLAGS_serve_file) {
-        http_srv->SetHandler(fs_handler->GetHandler());
+        http_srv->SetHTTPHandler(fs_handler->GetHandler());
     } else {
-        http_srv->SetHandler(handler.GetHandler());
+        http_srv->SetHTTPHandler(handler.GetHandler());
     }
-    http_srv->Launch();
+    tcpserv->set_handler(http_srv->GetConnectionHandler());
+    tcpserv->start_loop();
     while (!stop_flag) {
         photon::thread_sleep(1);
-        if (stop_flag) {
-            http_srv->Stop();
-        }
     }
     LOG_INFO("test stopped");
 }

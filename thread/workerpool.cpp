@@ -45,7 +45,7 @@ public:
     int mode;
 
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-        : stop(false), queue_sem(0), ready_vcpu(0), gen(rd()) {
+        : stop(false), queue_sem(0), ready_vcpu(0), gen(rd()), mode(mode) {
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,

@@ -52,11 +52,6 @@ namespace net {
 constexpr static uint64_t KminFileLife = 30 * 1000UL * 1000UL;
 using beast_string_view =
     boost::basic_string_view<char, struct std::char_traits<char>>;
-#define RETURN_IF_FAILED(func)                             \
-    if (0 != (func)) {                                     \
-        status = Status::failure;                          \
-        LOG_ERROR_RETURN(0, , "Failed to perform " #func); \
-    }
 
 template <typename T>
 struct has_data {
@@ -570,46 +565,25 @@ public:
 class HTTPServerImpl : public HTTPServer {
 public:
     enum class Status {
-        ready = 0,
         running = 1,
         stopping = 2,
-        failure = 3
-    } status = Status::ready;
-    uint16_t m_port = 19876;
-    photon::join_handle* th = nullptr;
+    } status = Status::running;
     HTTPServerHandler m_handler;
     uint64_t connection_idx = 0, working_thread_cnt = 0;
     std::map<uint64_t, net::ISocketStream*> connection_map;
-    HTTPServerImpl(uint16_t port) : m_port(port) {}
+    HTTPServerImpl() {}
     ~HTTPServerImpl() {
-        Stop();
+        status = Status::stopping;
+        for (auto it : connection_map) {
+            it.second->shutdown(ShutdownHow::ReadWrite);
+            connection_map.erase(it.first);
+        }
+        while (working_thread_cnt != 0) {
+            photon::thread_usleep(50 * 1000);
+        }
     }
 
-    void run(uint16_t port, net::IPAddr ip) {
-        working_thread_cnt++;
-        DEFER(working_thread_cnt--);
-        if (status != Status::ready) {
-            return;
-        }
-        auto sock = net::new_tcp_socket_server();
-        DEFER(delete (sock));
-        sock->timeout(1000UL * 1000);
-        RETURN_IF_FAILED(sock->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1L));
-        RETURN_IF_FAILED(sock->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1));
-        RETURN_IF_FAILED(sock->bind(m_port, net::IPAddr {}));
-        RETURN_IF_FAILED(sock->listen(1024));
-        status = Status::running;
-        sock->set_handler({this, &HTTPServerImpl::control_handler});
-        sock->start_loop(false);
-
-        while (status != Status::stopping) {
-            photon::thread_usleep(1000 * 1000);
-        }
-        status = Status::ready;
-    }
-
-    int control_handler(net::ISocketStream* sock) {
-
+    int handle_connection(net::ISocketStream* sock) override {
         auto idx = connection_idx++;
         LOG_DEBUG("enter control handler `", idx);
         DEFER(LOG_DEBUG("leave control handler `", idx));
@@ -645,30 +619,7 @@ public:
         return 0;
     }
 
-    bool Launch() override{
-        th = photon::thread_enable_join(photon::thread_create11(
-            &HTTPServerImpl::run, this, m_port, net::IPAddr()));
-        while (status == Status::ready) photon::thread_usleep(1000);
-        return status != Status::failure;
-    }
-
-    void Stop() override{
-        if (status == Status::running) status = Status::stopping;
-        if (th) {
-            photon::thread_interrupt((photon::thread*)th, ECANCELED);
-            photon::thread_join(th);
-            th = nullptr;
-        }
-        for (auto it : connection_map) {
-            it.second->shutdown(ShutdownHow::ReadWrite);
-            connection_map.erase(it.first);
-        }
-        while (working_thread_cnt != 0) {
-            photon::thread_usleep(50 * 1000);
-        }
-    }
-
-    void SetHandler(HTTPServerHandler handler) override {
+    void SetHTTPHandler(HTTPServerHandler handler) override {
         m_handler = handler;
     }
 };
@@ -888,8 +839,8 @@ public:
     }
 };
 
-HTTPServer* new_http_server(uint16_t port) {
-    return new HTTPServerImpl(port);
+HTTPServer* new_http_server() {
+    return new HTTPServerImpl();
 }
 HTTPHandler* new_fs_handler(fs::IFileSystem* fs,
                             std::string_view prefix) {

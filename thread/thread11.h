@@ -99,34 +99,33 @@ namespace photon
         }
     };
 
-    #define ENABLE_IF_PF(F) ENABLE_IF(is_function_pointer<F>::value)
-
-    template<typename F, ENABLE_IF_PF(F), typename...ARGUMENTS>
-    inline thread* thread_create11(uint64_t stack_size, F f, ARGUMENTS&&...args)
-    {
-        return ThreadContext11<F>(stack_size, f, std::forward<ARGUMENTS>(args)...).thread_create();
+    template <typename F, typename... ARGUMENTS>
+    inline std::enable_if_t<is_function_pointer<F>::value, thread*>
+    thread_create11(uint64_t stack_size, F f, ARGUMENTS&&... args) {
+        return ThreadContext11<F>(stack_size, f,
+                                  std::forward<ARGUMENTS>(args)...)
+            .thread_create();
     }
 
-    template<typename F, ENABLE_IF_PF(F), typename...ARGUMENTS>
-    inline thread* thread_create11(F f, ARGUMENTS&&...args)
-    {
-        return thread_create11<F, void, ARGUMENTS...>(
+    template <typename F, typename... ARGUMENTS>
+    inline std::enable_if_t<is_function_pointer<F>::value, thread*>
+    thread_create11(F f, ARGUMENTS&&... args) {
+        return thread_create11<F, ARGUMENTS...>(
             DEFAULT_STACK_SIZE, f, std::forward<ARGUMENTS>(args)...);
     }
 
-    #define ENABLE_IF_PMF(F) typename __P__ = typename std::enable_if<std::is_member_function_pointer<F>::value>::type
-
-    template<typename CLASS, typename F, ENABLE_IF_PMF(F), typename...ARGUMENTS>
-    inline thread* thread_create11(uint64_t stack_size, F f, CLASS* obj, ARGUMENTS&&...args)
-    {
+    template <typename CLASS, typename F, typename... ARGUMENTS>
+    inline std::enable_if_t<std::is_member_function_pointer<F>::value, thread*>
+    thread_create11(uint64_t stack_size, F f, CLASS* obj, ARGUMENTS&&... args) {
         auto pmf = ::get_member_function_address(obj, f);
-        return thread_create11(stack_size, pmf.f, pmf.obj, std::forward<ARGUMENTS>(args)...);
+        return thread_create11(stack_size, pmf.f, pmf.obj,
+                               std::forward<ARGUMENTS>(args)...);
     }
 
-    template<typename CLASS, typename F, ENABLE_IF_PMF(F), typename...ARGUMENTS>
-    inline thread* thread_create11(F f, CLASS* obj, ARGUMENTS&&...args)
-    {
-        return thread_create11<CLASS, F, void, ARGUMENTS...>(
+    template <typename CLASS, typename F, typename... ARGUMENTS>
+    inline std::enable_if_t<std::is_member_function_pointer<F>::value, thread*>
+    thread_create11(F f, CLASS* obj, ARGUMENTS&&... args) {
+        return thread_create11<CLASS, F, ARGUMENTS...>(
             DEFAULT_STACK_SIZE, f, obj, std::forward<ARGUMENTS>(args)...);
     }
 
@@ -137,20 +136,21 @@ namespace photon
 
     template <typename FUNCTOR, typename... ARGUMENTS>
     inline typename std::enable_if<
-        !std::is_void<decltype(&std::decay<FUNCTOR>::type::operator())>::value,
+        !std::is_void<
+            decltype(&std::remove_reference<FUNCTOR>::type::operator())>::value,
         thread*>::type
     thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&... args) {
         // takes `f` as parameter to helper function
         // thread_create11 will make sure parameters copy is completed
-        return thread_create11<void (*)(FUNCTOR&&, ARGUMENTS && ...), void,
-                               ARGUMENTS...>(
+        return thread_create11(
             stack_size, &__functor_call_helper<FUNCTOR, ARGUMENTS...>,
             std::forward<FUNCTOR>(f), std::forward<ARGUMENTS>(args)...);
     }
 
     template <typename FUNCTOR, typename... ARGUMENTS>
     inline typename std::enable_if<
-        !std::is_void<decltype(&std::decay<FUNCTOR>::type::operator())>::value,
+        !std::is_void<
+            decltype(&std::remove_reference<FUNCTOR>::type::operator())>::value,
         thread*>::type
     thread_create11(FUNCTOR&& f, ARGUMENTS&&... args) {
         return thread_create11<FUNCTOR, ARGUMENTS...>(

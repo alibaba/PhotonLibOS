@@ -48,10 +48,17 @@ RetType idiot_handle(void*, HTTPServerRequest &req, HTTPServerResponse &resp) {
 }
 
 TEST(http_server, headers) {
-    auto server = new_http_server(19876);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
     DEFER(delete server);
-    server->SetHandler({nullptr, &idiot_handle});
-    EXPECT_EQ(true, server->Launch());
+    server->SetHTTPHandler({nullptr, &idiot_handle});
+    tcpserver->set_handler(server->GetConnectionHandler());
+    tcpserver->start_loop();
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, "localhost:19876/test");
@@ -64,7 +71,6 @@ TEST(http_server, headers) {
     auto ret = op->resp_body->read(buf, 4096);
     EXPECT_EQ(exp_len, ret);
     EXPECT_EQ(true, "test" == op->resp["Test_Handle"]);
-    server->Stop();
 }
 std::string fs_handler_std_str = "01234567890123456789";
 
@@ -92,21 +98,27 @@ TEST(http_server, fs_handler) {
     system(std::string("mkdir -p /tmp/ease_ut/http_server/").c_str());
     system(std::string("touch /tmp/ease_ut/http_server/fs_handler_test").c_str());
     system(std::string("echo -n '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
-    auto server = new_http_server(19876);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
     DEFER(delete server);
     auto fs = fs::new_localfs_adaptor("/tmp/ease_ut/http_server/");
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHandler(fs_handler->GetHandler());
-    EXPECT_EQ(true, server->Launch());
+    server->SetHTTPHandler(fs_handler->GetHandler());
+    tcpserver->set_handler(server->GetConnectionHandler());
+    tcpserver->start_loop();
     auto client = new_http_client();
     DEFER(delete client);
     test_case(client, 5, 10, 10);
     test_case(client, 5, 20, 0, true);
     test_case(client, 25, 5, 0, true);
     test_case(client, 0, 20, 20);
-    server->Stop();
 }
 
 net::EndPoint ep{net::IPAddr("127.0.0.1"), 19731};
@@ -190,14 +202,20 @@ TEST(http_server, proxy_handler) {
     auto client = new_http_client();
     DEFER(delete client);
     //--------start proxy server ------------
-    auto proxy_server = new_http_server(19876);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto proxy_server = new_http_server();
     DEFER(delete proxy_server);
     auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
                                                    {nullptr, &test_modifier},
                                                    client);
-    proxy_server->SetHandler(proxy_handler->GetHandler());
-    EXPECT_EQ(true, proxy_server->Launch());
-    DEFER(proxy_server->Stop());
+    proxy_server->SetHTTPHandler(proxy_handler->GetHandler());
+    tcpserver->set_handler(proxy_server->GetConnectionHandler());
+    tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
     DEFER(delete op);
@@ -227,14 +245,20 @@ TEST(http_server, proxy_handler_failure) {
     auto client_proxy = new_http_client();
     DEFER(delete client_proxy);
     client_proxy->timeout_ms(500);
-    auto proxy_server = new_http_server(19876);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto proxy_server = new_http_server();
     DEFER(delete proxy_server);
     auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
                                                    {nullptr, &test_modifier},
                                                    client_proxy);
-    proxy_server->SetHandler(proxy_handler->GetHandler());
-    EXPECT_EQ(true, proxy_server->Launch());
-    DEFER(proxy_server->Stop());
+    proxy_server->SetHTTPHandler(proxy_handler->GetHandler());
+    tcpserver->set_handler(proxy_server->GetConnectionHandler());
+    tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
     DEFER(delete op);
@@ -270,7 +294,13 @@ TEST(http_server, mux_handler) {
     auto client = new_http_client();
     DEFER(delete client);
     //--------start mux server ------------
-    auto mux_server = new_http_server(19876);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto mux_server = new_http_server();
     DEFER(delete mux_server);
     auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
                                                    {nullptr, &test_modifier},
@@ -282,9 +312,9 @@ TEST(http_server, mux_handler) {
     auto mux_handler = new_mux_handler();
     mux_handler->AddHandler("/static_service/", fs_handler);
     mux_handler->AddHandler("/proxy/", proxy_handler);
-    mux_server->SetHandler(mux_handler->GetHandler());
-    EXPECT_EQ(true, mux_server->Launch());
-    DEFER(mux_server->Stop());
+    mux_server->SetHTTPHandler(mux_handler->GetHandler());
+    tcpserver->set_handler(mux_server->GetConnectionHandler());
+    tcpserver->start_loop();
     //----------------------------------------------------
     //--------------test static service--------------------
     auto op_static = client->new_operation(Verb::GET, "localhost:19876/static_service/fs_handler_test");
