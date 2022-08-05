@@ -62,14 +62,19 @@ int timeout_writer(void *self, IStream* stream) {
 TEST(http_client, post) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client post request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
-    auto server = new_http_server(18731);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind(18731);
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
     DEFER(delete server);
     auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHandler(fs_handler->GetHandler());
-    server->Launch();
+    server->SetHTTPHandler(fs_handler->GetHandler());
+    tcpserver->set_handler(server->GetConnectionHandler());
+    tcpserver->start_loop();
     std::string target_post =
         "http://localhost:18731/ease-httpclient-posttestfile";
     auto client = new_http_client();
@@ -386,14 +391,19 @@ TEST(http_client, partial_body) {
     system("echo \"this is a http_client post request body text for socket stream\" > /tmp/photon-http-client-test/file");
     DEFER(system("rm -rf /tmp/photon-http-client-test/"));
 
-    auto server = new_http_server(18731);
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind(18731);
+    tcpserver->listen();
+    auto server = new_http_server();
     DEFER(delete server);
     auto fs = photon::fs::new_localfs_adaptor("/tmp/photon-http-client-test/");
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHandler(fs_handler->GetHandler());
-    server->Launch();
+    server->SetHTTPHandler(fs_handler->GetHandler());
+    tcpserver->set_handler(server->GetConnectionHandler());
+    tcpserver->start_loop();
+
     std::string target_get = "http://localhost:18731/file";
     auto client = new_http_client();
     DEFER(delete client);

@@ -22,6 +22,7 @@ limitations under the License.
 #include <photon/common/string_view.h>
 #include <photon/common/iovector.h>
 #include <photon/net/http/verb.h>
+#include <photon/net/socket.h>
 
 namespace photon {
 namespace fs {
@@ -90,9 +91,11 @@ using HTTPServerHandler = Delegate<RetType, HTTPServerRequest&, HTTPServerRespon
 
 class HTTPServer : public Object {
 public:
-    virtual bool Launch() = 0;
-    virtual void Stop() = 0;
-    virtual void SetHandler(HTTPServerHandler handler) = 0;
+    virtual void SetHTTPHandler(HTTPServerHandler handler) = 0;
+    virtual int handle_connection(ISocketStream* stream) = 0;
+    ISocketServer::Handler GetConnectionHandler() {
+        return {this, &HTTPServer::handle_connection};
+    }
 };
 
 class HTTPHandler : public Object {
@@ -124,7 +127,7 @@ HTTPHandler* new_reverse_proxy_handler(Director cb_Director,
 // HTTPHandler new_static_file(std::string root);
 
 MuxHandler* new_mux_handler();
-HTTPServer* new_http_server(uint16_t port);
+HTTPServer* new_http_server();
 
 } // end of namespace net
 }
