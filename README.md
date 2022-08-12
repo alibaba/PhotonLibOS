@@ -15,15 +15,15 @@ As to the project vision, we hope that Photon would help programs run as *fast* 
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## Features
-* Coroutine library (support multi-thread)
+* Coroutine library (support multi-core)
 * Async event engine, natively integrated into coroutine scheduling (support epoll or [io_uring](https://github.com/axboe/liburing))
-* Multiple I/O engines: psync, posix_aio, libaio, io_uring
+* Multiple I/O wrappers: psync, posix_aio, libaio, io_uring
 * Multiple socket implementations: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
-* A full functionality HTTP client/server (even faster than Nginx)
-* A simple RPC client/server
+* A high performance and lightweight RPC client/server
+* A HTTP client/server (even faster than Nginx)
 * A POSIX-like filesystem abstraction and some implementations: local fs, http fs, fuse fs, etc.
 * A bunch of useful tools: io-vector manipulation, resource pool, object cache, mem allocator, callback delegator,
-  pre-compiled logging, ring buffer, etc.
+  pre-compiled logging, lockless ring buffer, etc.
 
 While Photon has already encapsulated many mature OS functionalities, it remains keen to the latest kernel features,
 and prepared to wrap them into the framework. It is a real killer in the low level programing field.
@@ -83,10 +83,9 @@ Client Mode: Ping-pong
 
 Note:
 - The Streaming client is to measure echo server performance when handling high throughput. We will set up 4 client processes,
-and each of them will create only one connection. Send coroutine and recv coroutine are running loops separately.
+and each of them will create only one connection. Send coroutine and recv coroutine are running their loops separately.
 - The Ping-pong client is to measure echo server performance when handling large amounts of connections.
-We will set up 10 client processes, and each of them will create 100 connections. Within a single connection, 
-recv has to be invoked after send.
+We will set up 10 client processes, and each of them will create 100 connections. For a single connection, it has to send before recv.
 - Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. Kernel version is 5.15. The network bandwidth (unilateral) is 32Gb.
 - This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.
 
@@ -109,7 +108,7 @@ Conclusion: Photon is faster than Nginx under this circumstance.
 
 See the [simple example](examples/simple/simple.cpp) about how to write a Photon program.
 
-See the full test code of [echo server](examples/perf/net-perf.cpp).
+See the full test code of [echo server](examples/perf/net-perf.cpp). It also illustrates how to enable multi-core.
 
 ## Build
 

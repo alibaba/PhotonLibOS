@@ -1606,6 +1606,116 @@ TEST(thread11, lambda) {
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));    
 }
 
+struct simple_functor {
+    void operator()(char) {}
+};
+
+struct simple_typed_functor {
+    int operator()(char) { return 0; }
+};
+
+struct overloaded_functor {
+    void operator()(char) {}
+    void operator()(int) {}
+};
+
+struct dumb_object {};
+
+struct static_member_function {
+    static void somefunc(char) {}
+};
+
+struct member_function_bind {
+    void somefunc() {}
+} mf;
+
+void func(void*, char) {}
+
+TEST(thread11, functor_trait) {
+    char x = rand();
+    auto lambda = [](){};
+    auto lambda2 = [x](char) {(void)x; };
+    auto lambda3 = [lambda, &x]()->int { lambda(); return (int)x; };
+    auto bind_obj = std::bind(&member_function_bind::somefunc, &mf);
+
+    EXPECT_EQ(true, (is_functor<simple_functor, char>::value));
+    EXPECT_EQ(true, (is_functor<simple_typed_functor, char>::value));
+    EXPECT_EQ(true, (is_functor<overloaded_functor, char>::value));
+    EXPECT_EQ(true, (is_functor<overloaded_functor, int>::value));
+    EXPECT_EQ(true, (is_functor<decltype(lambda)>::value));
+    EXPECT_EQ(true, (is_functor<typename std::add_lvalue_reference<decltype(lambda)>::type>::value));
+    EXPECT_EQ(true, (is_functor<typename std::add_rvalue_reference<decltype(lambda)>::type>::value));
+    EXPECT_EQ(true, (is_functor<decltype(lambda2), char>::value));
+    EXPECT_EQ(true, (is_functor<decltype(lambda3)>::value));
+    EXPECT_EQ(true, (is_functor<decltype(bind_obj)>::value));
+    EXPECT_EQ(false, (is_functor<dumb_object>::value));
+    EXPECT_EQ(false, (is_functor<static_member_function, char>::value));
+    EXPECT_EQ(false, (is_functor<decltype(&static_member_function::somefunc), char>::value));
+    EXPECT_EQ(false, (is_functor<size_t>::value));
+}
+
+struct invoke_functor {
+    photon::semaphore &sem;
+    void operator()(char) {
+        sem.signal(1);
+    }
+};
+
+struct invoke_typed_functor {
+    photon::semaphore &sem;
+    int operator()(char) { 
+        sem.signal(1);
+        return 0;
+    }
+};
+
+struct invoke_overloaded_functor {
+    photon::semaphore &sem;
+    void operator()(char) {
+        sem.signal(1);
+    }
+    void operator()(int) {
+        sem.signal(2);
+    }
+};
+
+struct invoke_function_bind {
+    photon::semaphore &sem;
+    void somefunc() {
+        sem.signal(1);
+    }
+};
+
+TEST(thread11, functor_invoke) {
+    photon::semaphore sem;
+    char x = 1;
+    auto lambda = [&sem](){sem.signal(1);};
+    auto lambda2 = [x](photon::semaphore&sem) { sem.signal(x); };
+    auto lambda3 = [lambda2, &x, &sem]()->int { lambda2(sem); return (int)x; };
+    invoke_function_bind mf{sem};
+    auto bind_obj = std::bind(&invoke_function_bind::somefunc, &mf);
+
+    invoke_functor ivf1{sem};
+    invoke_typed_functor ivf2{sem};
+    invoke_overloaded_functor ivf3{sem};
+
+    thread_create11(ivf1, 'x');
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(ivf2, 'x');
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(ivf3, 'x');
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(ivf3, 123);
+    EXPECT_EQ(0, sem.wait(2, 1UL*1000*1000));
+    thread_create11(lambda);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(lambda2, sem);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(lambda3);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    thread_create11(bind_obj);
+    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+}
 
 int main(int argc, char** arg)
 {
