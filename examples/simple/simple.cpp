@@ -35,7 +35,7 @@ static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IF
                               photon::condition_variable* cond);
 
 int main() {
-    // Initialize Photon environment. Choose the iouring event engine.
+    // Initialize Photon environment in current vcpu. Choose the iouring event engine.
     // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
     // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
     //
@@ -74,7 +74,7 @@ int main() {
 
     photon::condition_variable cond;
 
-    // In the photon world, we just call coroutine thread. Photon threads run on top of native OS threads.
+    // In the photon world, we just call coroutine thread. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
     auto server_thread = photon::thread_create11(run_socket_server, server, file, &cond);
     photon::thread_enable_join(server_thread);
@@ -151,6 +151,6 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
 
     photon::thread_sleep(-1);
     // This Photon thread will here sleep forever, until been interrupted by `photon::thread_interrupt`.
-    // Note that the underlying OS thread won't be blocked. It's basically a context switch.
+    // Note that the underlying vcpu won't be blocked. It's basically a context switch.
     LOG_INFO("Server stopped");
 }

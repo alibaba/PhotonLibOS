@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 #include <tuple>
 #include <utility>
+#include <functional>
 #include <photon/thread/thread.h>
 #include <photon/common/PMF.h>
 #include <photon/common/utility.h>
@@ -134,10 +135,19 @@ namespace photon
         f(std::forward<ARGUMENTS>(args)...);
     }
 
+    template <typename T, typename... Args>
+    struct is_functor
+        : std::conditional<
+              std::is_class<typename std::decay<T>::type>::value &&
+                  std::is_constructible<typename std::function<void(Args...)>,
+                                        typename std::reference_wrapper<
+                                            typename std::remove_reference<
+                                                T>::type>::type>::value,
+              std::true_type, std::false_type>::type {};
+
     template <typename FUNCTOR, typename... ARGUMENTS>
     inline typename std::enable_if<
-        !std::is_void<
-            decltype(&std::remove_reference<FUNCTOR>::type::operator())>::value,
+        is_functor<FUNCTOR, ARGUMENTS...>::value,
         thread*>::type
     thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&... args) {
         // takes `f` as parameter to helper function
@@ -149,8 +159,7 @@ namespace photon
 
     template <typename FUNCTOR, typename... ARGUMENTS>
     inline typename std::enable_if<
-        !std::is_void<
-            decltype(&std::remove_reference<FUNCTOR>::type::operator())>::value,
+        is_functor<FUNCTOR, ARGUMENTS...>::value,
         thread*>::type
     thread_create11(FUNCTOR&& f, ARGUMENTS&&... args) {
         return thread_create11<FUNCTOR, ARGUMENTS...>(
