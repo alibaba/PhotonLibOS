@@ -88,7 +88,7 @@ protected:
     char _shift;
     char _width = 0;
     char _padding = ' ';
-    char _comma = false;
+    bool _comma = false;
     bool _lower = false;
     bool _signed;
 };
