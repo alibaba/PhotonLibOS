@@ -87,7 +87,7 @@ TEST(std_executor, with_exportfs) {
     photon::Executor eth;
 
     auto fs = eth.perform([] {
-        fs::exportfs_init();
+        fs::exportfs_init(10);
         auto local = fs::new_localfs_adaptor();
         return fs::export_as_sync_fs(local);
     });

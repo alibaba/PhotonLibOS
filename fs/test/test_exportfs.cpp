@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include "mock.h"
 #include <atomic>
+#include <thread>
 
 using namespace photon;
 using namespace photon::fs;
@@ -42,10 +43,9 @@ int callback(void*, AsyncResult<T>* ret) {
     return 0;
 }
 
-template<uint64_t val>
-int callbackf(void*, AsyncResult<IAsyncFile*>* ret) {
+int callbackf(void* ptr, AsyncResult<IAsyncFile*>* ret) {
     auto pt = static_cast<ExportAsAsyncFile*>(ret->result);
-    EXPECT_EQ(val, reinterpret_cast<uint64_t>(pt->m_file));
+    EXPECT_EQ(ptr, pt->m_file);
     LOG_DEBUG("DONE `", VALUE(ret->operation));
     work--;
     return 0;
@@ -74,21 +74,21 @@ int callbackvoid(void*, AsyncResult<void>* ret) {
     return 0;
 }
 
+#define CALL_TEST0(obj, method, cb)                 \
+    {                                               \
+        work++;                                     \
+        LOG_DEBUG("START `->`()", #obj, #method);   \
+        (obj)->method(cb);                          \
+        LOG_DEBUG("WAITING `->`()", #obj, #method); \
+    }
 
-#define CALL_TEST0(obj, method, cb) {               \
-    work++;                                         \
-    LOG_DEBUG("START `->`()", #obj, #method);       \
-    obj->method(cb);                                \
-    LOG_DEBUG("WAITING `->`()", #obj, #method);     \
-}
-
-#define CALL_TEST(obj, method, cb, ...) {           \
-    work++;                                         \
-    LOG_DEBUG("START `->`()", #obj, #method);       \
-    obj->method(__VA_ARGS__, cb);                   \
-    LOG_DEBUG("WAITING `->`()", #obj, #method);     \
-}
-
+#define CALL_TEST(obj, method, cb, ...)             \
+    {                                               \
+        work++;                                     \
+        LOG_DEBUG("START `->`()", #obj, #method);   \
+        (obj)->method(__VA_ARGS__, cb);             \
+        LOG_DEBUG("WAITING `->`()", #obj, #method); \
+    }
 
 TEST(ExportFS, basic) {
     photon::thread_init();
@@ -99,9 +99,9 @@ TEST(ExportFS, basic) {
         photon::fd_events_fini();
         photon::thread_fini();
     });
-    Mock::MockNullFile* mockfile = new Mock::MockNullFile();
-    Mock::MockNullFileSystem* mockfs = new Mock::MockNullFileSystem();
-    Mock::MockNullDIR* mockdir = new Mock::MockNullDIR();
+    PMock::MockNullFile* mockfile = new PMock::MockNullFile();
+    PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
+    PMock::MockNullDIR* mockdir = new PMock::MockNullDIR();
     auto file = export_as_async_file(mockfile);
     auto fs = export_as_async_fs(mockfs);
     auto dir = export_as_async_dir(mockdir);
@@ -157,10 +157,10 @@ TEST(ExportFS, basic) {
     CALL_TEST(file, fstat, cbint, nullptr);
     CALL_TEST(file, ftruncate, cbint, 0);
 
-    IFile* paf_magic = reinterpret_cast<IFile*>(magic);
+    IFile* paf_magic = reinterpret_cast<IFile*>(mockfile);
     DIR* pad_magic = reinterpret_cast<DIR*>(magic);
     Callback<AsyncResult<IAsyncFile*>*> cbaf;
-    cbaf.bind(nullptr, callbackf<magic>);
+    cbaf.bind(mockfile, callbackf);
     Callback<AsyncResult<AsyncDIR*>*> cbad;
     cbad.bind(nullptr, callbackd<magic>);
 
@@ -269,7 +269,7 @@ TEST(ExportFS, op_failed_situation) {
         photon::fd_events_fini();
         // photon::thread_fini();
     });
-    Mock::MockNullFile* mockfile = new Mock::MockNullFile;
+    PMock::MockNullFile* mockfile = new PMock::MockNullFile;
     errno = 0;
     EXPECT_CALL(*mockfile, read(_, _))
         .WillRepeatedly(SetErrnoAndReturn(ENOSYS, -1)); // failure
@@ -289,9 +289,126 @@ TEST(ExportFS, op_failed_situation) {
     EXPECT_EQ(EDOM, errno);
 }
 
+TEST(ExportFS, xattr) {
+    photon::thread_init();
+    photon::fd_events_init();
+    exportfs_init();
+    DEFER({
+        exportfs_fini();
+        photon::fd_events_fini();
+        photon::thread_fini();
+    });
+    PMock::MockNullFile* mockfile = new PMock::MockNullFile();
+    PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
+    auto file = dynamic_cast<IAsyncFileXAttr*>(export_as_async_file(mockfile));
+    auto fs = dynamic_cast<IAsyncFileSystemXAttr*>(export_as_async_fs(mockfs));
+    DEFER({
+        delete file;
+        delete fs;
+    });
+
+    Callback<AsyncResult<ssize_t>*> cbsst0;
+    cbsst0.bind(nullptr, &callback<ssize_t, 0>);
+    Callback<AsyncResult<int>*> cbint;
+    cbint.bind(nullptr, &callback<int, (int)0>);
+
+    work = 0;
+
+    EXPECT_CALL(*mockfile, fgetxattr(_, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, flistxattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, fsetxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, fremovexattr(_)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+
+    CALL_TEST(file, fgetxattr, cbsst0, nullptr, nullptr, 0);
+    CALL_TEST(file, flistxattr, cbsst0, nullptr, 0);
+    CALL_TEST(file, fsetxattr, cbint, nullptr, nullptr, 0, 0);
+    CALL_TEST(file, fremovexattr, cbint, nullptr);
+
+    EXPECT_CALL(*mockfs, getxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, listxattr(_, _ , _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, setxattr(_, _, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, removexattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lgetxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, llistxattr(_, _ , _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lsetxattr(_, _, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lremovexattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+
+    CALL_TEST(fs, getxattr, cbsst0, nullptr, nullptr, nullptr, 0);
+    CALL_TEST(fs, listxattr, cbsst0, nullptr, nullptr, 0);
+    CALL_TEST(fs, setxattr, cbint, nullptr, nullptr, nullptr, 0, 0);
+    CALL_TEST(fs, removexattr, cbint, nullptr, nullptr);
+    CALL_TEST(fs, lgetxattr, cbsst0, nullptr, nullptr, nullptr, 0);
+    CALL_TEST(fs, llistxattr, cbsst0, nullptr, nullptr, 0);
+    CALL_TEST(fs, lsetxattr, cbint, nullptr, nullptr, nullptr, 0, 0);
+    CALL_TEST(fs, lremovexattr, cbint, nullptr, nullptr);
+
+    while (work > 0) thread_yield_to(nullptr);
+}
+
 
 #undef CALL_TEST
 #undef CALL_TEST0
+
+TEST(ExportFS, xattr_sync) {
+    photon::semaphore sem;
+    PMock::MockNullFile* mockfile = new PMock::MockNullFile();
+    PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
+
+    IFileXAttr* file = nullptr;
+    IFileSystemXAttr* fs = nullptr;
+
+    std::thread th([&]{
+        photon::thread_init();
+        photon::fd_events_init();
+        exportfs_init();
+        DEFER({
+            exportfs_fini();
+            photon::fd_events_fini();
+            photon::thread_fini();
+        });
+        file = dynamic_cast<IFileXAttr*>(export_as_sync_file(mockfile));
+        fs = dynamic_cast<IFileSystemXAttr*>(export_as_sync_fs(mockfs));
+        sem.wait(1);
+        DEFER({
+            delete file;
+            delete fs;
+        });
+    });
+
+    while (!file || !fs) { ::sched_yield(); }
+
+    EXPECT_CALL(*mockfile, fgetxattr(_, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, flistxattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, fsetxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfile, fremovexattr(_)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+
+    EXPECT_EQ(0, file->fgetxattr(nullptr, nullptr, 0));
+    EXPECT_EQ(0, file->flistxattr(nullptr, 0));
+    EXPECT_EQ(0, file->fsetxattr(nullptr, nullptr, 0, 0));
+    EXPECT_EQ(0, file->fremovexattr(nullptr));
+
+    EXPECT_CALL(*mockfs, getxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, listxattr(_, _ , _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, setxattr(_, _, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, removexattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lgetxattr(_, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, llistxattr(_, _ , _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lsetxattr(_, _, _, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lremovexattr(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+
+    EXPECT_EQ(0, fs->getxattr(nullptr, nullptr, nullptr, 0));
+    EXPECT_EQ(0, fs->listxattr(nullptr, nullptr, 0));
+    EXPECT_EQ(0, fs->setxattr(nullptr, nullptr, nullptr, 0, 0));
+    EXPECT_EQ(0, fs->removexattr(nullptr, nullptr));
+    EXPECT_EQ(0, fs->lgetxattr(nullptr, nullptr, nullptr, 0));
+    EXPECT_EQ(0, fs->llistxattr(nullptr, nullptr, 0));
+    EXPECT_EQ(0, fs->lsetxattr(nullptr, nullptr, nullptr, 0, 0));
+    EXPECT_EQ(0, fs->lremovexattr(nullptr, nullptr));
+
+    sem.signal(1);
+    th.join();
+}
+
 
 int main(int argc, char **argv)
 {

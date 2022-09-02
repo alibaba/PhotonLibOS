@@ -1407,6 +1407,9 @@ namespace photon
     }
 
     static std::atomic<uint32_t> _n_vcpu{0};
+    uint32_t get_vcpu_num() {
+        return _n_vcpu.load();
+    }
 
     struct migrate_args {thread* th; vcpu_base* v;};
     static int do_thread_migrate(thread* th, vcpu_base* v);

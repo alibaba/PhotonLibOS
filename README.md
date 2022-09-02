@@ -5,7 +5,7 @@
 Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
 The role of LibOS is to connect user apps and the kernel. Following the principle of Least Astonishment,
-we designed Photon's API to be as consistent as possible with glibc and POSIX semantics.
+we designed Photon's API to be as consistent as possible with C++ std and glibc semantics.
 This flattens the learning curve for lib users and brings convenience when migrating legacy codebases.
 
 Photon's runtime is driven by a coroutine lib. Out tests show that it has the **best** I/O performance in the

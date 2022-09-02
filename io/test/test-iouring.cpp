@@ -459,8 +459,7 @@ TEST(event_engine, cascading_timeout) {
 
     void* data[5] = {};
     ssize_t num_events = engine->wait_for_events(data, 5, 1000000);
-    ASSERT_EQ(num_events, -1);
-    ASSERT_EQ(errno, ETIMEDOUT);
+    ASSERT_EQ(0, num_events);
 
     engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
     engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
@@ -543,7 +542,7 @@ TEST(event_engine, cascading_one_shot) {
 
     LOG_INFO("wait non events");
     num_events = engine->wait_for_events(data, 5, 2000000);
-    ASSERT_EQ(num_events, -1);
+    ASSERT_EQ(num_events, 0);
     ASSERT_EQ(errno, ETIMEDOUT);
 
     photon::thread_join((photon::join_handle*) sub);

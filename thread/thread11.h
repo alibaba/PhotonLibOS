@@ -131,10 +131,15 @@ namespace photon
     }
 
     template <typename FUNCTOR, typename... ARGUMENTS>
-    inline void __functor_call_helper(FUNCTOR&& f, ARGUMENTS&&... args) {
+    inline void __functor_call_helper(
+        typename std::decay<FUNCTOR>::type f,
+        typename std::decay<ARGUMENTS>::type... args) {
         f(std::forward<ARGUMENTS>(args)...);
     }
 
+    // NOTICE: The arguments to the thread function are moved or copied by
+    // value. If a reference argument needs to be passed to the thread function,
+    // it has to be wrapped (e.g., with std::ref or std::cref).
     template <typename T, typename... Args>
     struct is_functor
         : std::conditional<
@@ -146,9 +151,8 @@ namespace photon
               std::true_type, std::false_type>::type {};
 
     template <typename FUNCTOR, typename... ARGUMENTS>
-    inline typename std::enable_if<
-        is_functor<FUNCTOR, ARGUMENTS...>::value,
-        thread*>::type
+    inline typename std::enable_if<is_functor<FUNCTOR, ARGUMENTS...>::value,
+                                   thread*>::type
     thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&... args) {
         // takes `f` as parameter to helper function
         // thread_create11 will make sure parameters copy is completed
@@ -157,10 +161,12 @@ namespace photon
             std::forward<FUNCTOR>(f), std::forward<ARGUMENTS>(args)...);
     }
 
+    // NOTICE: The arguments to the thread function are moved or copied by
+    // value. If a reference argument needs to be passed to the thread function,
+    // it has to be wrapped (e.g., with std::ref or std::cref).
     template <typename FUNCTOR, typename... ARGUMENTS>
-    inline typename std::enable_if<
-        is_functor<FUNCTOR, ARGUMENTS...>::value,
-        thread*>::type
+    inline typename std::enable_if<is_functor<FUNCTOR, ARGUMENTS...>::value,
+                                   thread*>::type
     thread_create11(FUNCTOR&& f, ARGUMENTS&&... args) {
         return thread_create11<FUNCTOR, ARGUMENTS...>(
             DEFAULT_STACK_SIZE, std::forward<FUNCTOR>(f),

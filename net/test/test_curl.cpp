@@ -53,8 +53,8 @@ TEST(cURL, feature) {
         client->GET("http://github.com", buffer.get());
     // }
     LOG_INFO(buffer->str().c_str());
-    buffer.release();
-    client.release();
+    buffer.reset();
+    client.reset();
 
     net::cURL::fini();
     photon::fd_events_fini();

@@ -19,47 +19,50 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 ExpireContainerBase::ExpireContainerBase(uint64_t expiration,
-                                         uint64_t recycle_timeout)
+                                         uint64_t timer_cycle)
     : _expiration(expiration),
-      _timer(recycle_timeout, {this, &ExpireContainerBase::expire}, true,
-             8UL * 1024 * 1024) {}
+      _timer(std::max(1UL * 1000, timer_cycle),
+             {this, &ExpireContainerBase::expire}, true, 8UL * 1024 * 1024) {}
 
 std::pair<ExpireContainerBase::iterator, bool> ExpireContainerBase::insert(
     Item* item) {
     return _set.emplace(item);
 }
 
-ExpireContainerBase::iterator ExpireContainerBase::__find_prelock(const Item& key_item) {
-    ItemPtr tp((Item*)&key_item);
-    auto it = _set.find(tp);
-    (void)tp.release();
+ExpireContainerBase::iterator ExpireContainerBase::__find_prelock(
+    const Item& key_item) {
+    auto it = _set.find((Item*)&key_item);
     return it;
 }
 
 ExpireContainerBase::iterator ExpireContainerBase::find(const Item& key_item) {
-    photon::scoped_lock lock(_mtx);
+    SCOPED_LOCK(_lock);
     return __find_prelock(key_item);
 }
 
 void ExpireContainerBase::clear() {
-    _set.clear();
-    _list.node = nullptr;
+    for (auto x : ({ SCOPED_LOCK(_lock);
+                     _list.node = nullptr;
+                     Set(std::move(_set)); })) {
+        delete x;
+    }
 }
 
 uint64_t ExpireContainerBase::expire() {
-    photon::scoped_lock lock(_mtx);
-    while (!_list.empty() && _list.front()->_timeout.expire() < photon::now) {
-        auto p = _list.pop_front();
-        ItemPtr ptr(p);
-        _set.erase(ptr);
-        (void)ptr.release();  // p has been deleted inside erase()
-    }
+    ({
+        SCOPED_LOCK(_lock);
+        _list.split_by_predicate([&](Item* x) {
+            bool ret = x->_timeout.expire() < photon::now;
+            if (ret) _set.erase(x);
+            return ret;
+        });
+    }).delete_all();
     return 0;
 }
 
 bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
     DEFER(expire());
-    photon::scoped_lock lock(_mtx);
+    SCOPED_LOCK(_lock);
     auto it = __find_prelock(x);
     if (it == _set.end() && insert_if_not_exists) {
         auto ptr = x.construct();
@@ -68,7 +71,7 @@ bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
         it = pr.first;
     }
     if (it == _set.end()) return false;
-    enqueue(it->get());
+    enqueue(*it);
     return true;
 }
 
@@ -76,8 +79,9 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
                                                     Delegate<void*> ctor) {
     Base::iterator holder;
     Item* item = nullptr;
+    expire();
     do {
-        photon::scoped_lock lock(_mtx);
+        SCOPED_LOCK(_lock);
         holder = Base::__find_prelock(key_item);
         if (holder == Base::end()) {
             auto x = key_item.construct();
@@ -85,18 +89,18 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
             if (!pr.second) delete x;
             holder = pr.first;
         }
-        _list.pop(holder->get());
-        item = (Item*)holder->get();
+        _list.pop(*holder);
+        item = (ItemPtr)*holder;
         if (item->_recycle) {
             holder = end();
             item = nullptr;
-            blocker.wait(lock);
+            blocker.wait(_lock);
         } else {
             item->_refcnt++;
         }
     } while (!item);
     {
-        photon::scoped_lock lock(item->_mtx);
+        SCOPED_LOCK(item->_mtx);
         if (!item->_obj) {
             item->_obj = ctor();
         }
@@ -108,10 +112,11 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
     return item;
 }
 
-int ObjectCacheBase::ref_release(ObjectCacheBase::Item* item, bool recycle) {
+int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
+    DEFER(expire());
     photon::semaphore sem;
     {
-        photon::scoped_lock lock(_mtx);
+        SCOPED_LOCK(_lock);
         if (item->_recycle) recycle = false;
         if (recycle) {
             item->_recycle = &sem;
@@ -128,12 +133,11 @@ int ObjectCacheBase::ref_release(ObjectCacheBase::Item* item, bool recycle) {
     if (recycle) {
         sem.wait(1);
         {
-            photon::scoped_lock lock(_mtx);
+            SCOPED_LOCK(_lock);
             assert(item->_refcnt == 0);
-            Base::ItemPtr ptr(item);
-            _set.erase(ptr);
-            (void)ptr.release();
+            _set.erase(item);
         }
+        delete item;
         blocker.notify_all();
     }
     return 0;
@@ -144,5 +148,5 @@ int ObjectCacheBase::release(const ObjectCacheBase::Item& key_item,
                              bool recycle) {
     auto item = find(key_item);
     if (item == end()) return -1;
-    return ref_release(item->get(), recycle);
+    return ref_release(*item, recycle);
 }

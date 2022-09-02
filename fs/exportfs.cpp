@@ -20,7 +20,6 @@ limitations under the License.
 #include <vector>
 #include <mutex>
 #include <condition_variable>
-#include <boost/lockfree/spsc_queue.hpp>
 #include <sched.h>
 #include "filesystem.h"
 #include "async_filesystem.h"
@@ -29,63 +28,63 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/event-loop.h>
 #include <photon/common/alog.h>
+#include <photon/common/lockfree_queue.h>
 
 namespace photon {
 namespace fs
 {
     static EventLoop* evloop = nullptr;
-    typedef boost::lockfree::spsc_queue<std::function<void()>, boost::lockfree::capacity<65536> > spsc;
+    using Queue = LockfreeSPSCRingQueue<Delegate<void>, 65536>;
 
     class ExportBase
     {
     public:
-        static std::mutex mutex;
+        static spinlock lock;
         using F0 = std::function<void()>;
-        static spsc op_queue;
+        static Queue op_queue;
         static int ref;
         static condition_variable cond;
+        static semaphore sem;
         static ThreadPoolBase* pool;
-        static void perform(uint64_t /*timeout*/, const F0& act)
+        template<typename Func>
+        static void perform_helper(void* arg) {
+            auto callable = (Func*)arg;
+            (*callable)();
+            delete callable;
+        }
+        template<typename Func>
+        static void perform(uint64_t /*timeout*/, Func* act)
         {
             {
-                std::lock_guard<std::mutex> lock(mutex);
-                while (!op_queue.push(act)) sched_yield();
+                SCOPED_LOCK(lock);
+                op_queue.send(Delegate<void>(&ExportBase::perform_helper<Func>, act));
             }
-            thread_interrupt(evloop->loop_thread(), EINPROGRESS);
+            sem.signal(1);
         }
         static int wait4events(void*, EventLoop*)
         {
-            if (op_queue.read_available()) return 1;
-            auto th = photon::CURRENT;
-            int ret = photon::thread_usleep_defer(1000UL * 1000, [&] {
-                if (op_queue.read_available()) photon::thread_interrupt(th, EINPROGRESS);
-            });
-            if (ret < 0) {
-                if (errno == EINPROGRESS) {
-                    return 1;
-                }
-                return -1;
-            }
-            return 0;
+            sem.wait(1);
+            if (op_queue.empty()) return -1;
+            return 1;
+
         }
         static int on_events(void*, EventLoop*)
         {
-            //TODO: thread pooling
             ++ref;
+            thread* th = nullptr;
             if (pool != nullptr)
-                pool->thread_create(&do_opq, nullptr);
+                th = pool->thread_create(&do_opq, nullptr);
             else
-                photon::thread_create(&do_opq, nullptr);
-            photon::thread_yield_to(nullptr); // let `th` to run and pop an op
+                th = photon::thread_create(&do_opq, nullptr);
+            photon::thread_yield_to(th); // let `th` to run and pop an op
             return 0;
         }
         static void* do_opq(void*)
         {
             DEFER({if (--ref == 0) cond.notify_all();});
-            if (op_queue.read_available() == 0) return nullptr;
-            F0 func;
-            op_queue.pop(func);
-            func();
+            if (op_queue.empty()) return nullptr;
+            auto func = op_queue.recv();
+            if (func) func();
             return nullptr;
         }
         template<typename R, typename RT = typename AsyncResult<R>::result_type>
@@ -120,30 +119,32 @@ namespace fs
                 delete ptr;
             } else {
                 auto n_ptr = ptr;
-                perform(-1UL, [n_ptr] { delete n_ptr; });
+                perform(-1UL, new auto ([n_ptr] { delete n_ptr; }));
             }
             ptr = nullptr;
         }
     };
 
-    __attribute__((visibility("hidden"))) std::mutex ExportBase::mutex;
-    __attribute__((visibility("hidden"))) spsc ExportBase::op_queue;
+    __attribute__((visibility("hidden"))) spinlock ExportBase::lock;
+    __attribute__((visibility("hidden"))) Queue ExportBase::op_queue;
     __attribute__((visibility("hidden"))) int ExportBase::ref = 1;
     __attribute__((visibility("hidden"))) condition_variable ExportBase::cond;
+    __attribute__((visibility("hidden"))) semaphore ExportBase::sem(0);
     __attribute__((visibility("hidden"))) ThreadPoolBase* ExportBase::pool = nullptr;
 
-    #define PERFORM(ID, expr)       \
-        perform(timeout, [=]() {    \
-            do_callback(ID, expr, done); });
+#define PERFORM(ID, expr) \
+    perform(timeout, new auto([=]() { do_callback(ID, expr, done); }));
 
-    class ExportAsAsyncFile : public ExportBase, public IAsyncFile
+    class ExportAsAsyncFile : public ExportBase, public IAsyncFile, public IAsyncFileXAttr
     {
     public:
         IFile* m_file;
+        IFileXAttr* m_xattr;
         IAsyncFileSystem* m_fs;
         ExportAsAsyncFile(IFile* file, IAsyncFileSystem* fs)
         {
             m_file = file;
+            m_xattr = dynamic_cast<IFileXAttr*>(file);
             m_fs = fs;
         }
         virtual ~ExportAsAsyncFile()
@@ -230,6 +231,38 @@ namespace fs
         {
             PERFORM(OPID_APPENDV, m_file->do_appendv(iov, iovcnt, offset, position));
         }
+        OVERRIDE_ASYNC(ssize_t, fgetxattr, const char *name, void *value, size_t size)
+        {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_FGETXATTR, m_xattr->fgetxattr(name, value, size));
+        }
+        OVERRIDE_ASYNC(ssize_t, flistxattr, char *list, size_t size)
+        {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_FLISTXATTR, m_xattr->flistxattr(list, size));
+        }
+        OVERRIDE_ASYNC(int, fsetxattr, const char *name, const void *value, size_t size, int flags)
+        {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_FSETXATTR, m_xattr->fsetxattr(name, value, size, flags));
+        }
+        OVERRIDE_ASYNC(int, fremovexattr, const char *name)
+        {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_FREMOVEXATTR, m_xattr->fremovexattr(name));
+        }
         template<typename R>
         struct AsyncWaiter
         {
@@ -314,12 +347,14 @@ namespace fs
             PERFORM(OPID_TELLDIR, m_dirp->telldir());
         }
     };
-    class ExportAsAsyncFS : public ExportBase, public IAsyncFileSystem
+    class ExportAsAsyncFS : public ExportBase, public IAsyncFileSystem, public IAsyncFileSystemXAttr
     {
     public:
         IFileSystem* m_fs;
+        IFileSystemXAttr* m_xattr;
         ExportAsAsyncFS(IFileSystem* fs) : m_fs(fs)
         {
+            m_xattr = dynamic_cast<IFileSystemXAttr*>(fs);
         }
 
         virtual ~ExportAsAsyncFS() {
@@ -419,6 +454,62 @@ namespace fs
         {
             PERFORM(OPID_OPENDIR, wrap(m_fs->opendir(name)));
         }
+        OVERRIDE_ASYNC(ssize_t, getxattr, const char *path, const char *name, void *value, size_t size) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_GETXATTR, m_xattr->getxattr(path, name, value, size));
+        }
+        OVERRIDE_ASYNC(ssize_t, lgetxattr, const char *path, const char *name, void *value, size_t size) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_LGETXATTR, m_xattr->lgetxattr(path, name, value, size));
+        }
+        OVERRIDE_ASYNC(ssize_t, listxattr, const char *path, char *list, size_t size) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_LISTXATTR, m_xattr->listxattr(path, list, size));
+        }
+        OVERRIDE_ASYNC(ssize_t, llistxattr, const char *path, char *list, size_t size) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_LLISTXATTR, m_xattr->llistxattr(path, list, size));
+        }
+        OVERRIDE_ASYNC(int, setxattr, const char *path, const char *name, const void *value, size_t size, int flags) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_SETXATTR, m_xattr->setxattr(path, name, value, size, flags));
+        }
+        OVERRIDE_ASYNC(int, lsetxattr, const char *path, const char *name, const void *value, size_t size, int flags) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_LSETXATTR, m_xattr->lsetxattr(path, name, value, size, flags))
+        }
+        OVERRIDE_ASYNC(int, removexattr, const char *path, const char *name) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_REMOVEXATTR, m_xattr->removexattr(path, name));
+        }
+        OVERRIDE_ASYNC(int, lremovexattr, const char *path, const char *name) {
+            if (!m_xattr) {
+                callback_umimplemented(done);
+                return;
+            }
+            PERFORM(OPID_LREMOVEXATTR, m_xattr->lremovexattr(path, name));
+        }
     };
     int exportfs_init(uint32_t thread_pool_capacity)
     {
@@ -438,6 +529,7 @@ namespace fs
             LOG_ERROR_RETURN(EFAULT, -1, "failed to create event loop");
 
         ExportBase::ref = 1;
+        ExportBase::sem.wait(ExportBase::sem.count());
         if (thread_pool_capacity != 0) ExportBase::pool = new_thread_pool(thread_pool_capacity);
         evloop->async_run();
         return 0;
@@ -450,6 +542,7 @@ namespace fs
         if (!evloop)
             LOG_ERROR_RETURN(ENOSYS, -1, "not inited yet");
 
+        ExportBase::sem.signal(1);
         evloop->stop();
         --ExportBase::ref;
         while (ExportBase::ref != 0)
@@ -460,7 +553,11 @@ namespace fs
         evloop = nullptr;
         if (ExportBase::pool != nullptr) delete_thread_pool(ExportBase::pool);
         ExportBase::pool = nullptr;
-        ExportBase::op_queue.reset();
+        while (!ExportBase::op_queue.empty()) {
+            auto cb = ExportBase::op_queue.recv();
+            cb();
+        }
+        ExportBase::sem.wait(ExportBase::sem.count());
         return 0;
     }
     IAsyncFile* export_as_async_file(IFile* file)

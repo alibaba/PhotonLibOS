@@ -66,6 +66,25 @@ public:
     {
         ptr->insert_list_between(this, __next_ptr);
     }
+    // split into two list ring, one starts from this and another starts from ptr
+    // this n1 n2 n3 ... np ptr nn ... nX
+    // ==> this n1 n2 n3 ... np
+    // ==> ptr nn ... nx
+    void split(__intrusive_list_node* ptr)
+    {
+        assert(ptr != this);
+        assert(!single());
+        auto front_head = this;
+        auto front_tail = ptr->__prev_ptr;
+        auto back_head = ptr;
+        auto back_tail = this->__prev_ptr;
+
+        front_head->__prev_ptr = front_tail;
+        front_tail->__next_ptr = front_head;
+
+        back_head->__prev_ptr = back_tail;
+        back_tail->__next_ptr = back_head;
+    }
 
 private:
     void insert_between(__intrusive_list_node* prev, __intrusive_list_node* next)
@@ -147,6 +166,10 @@ public:
     {
         __intrusive_list_node::insert_list_after(&ptr);
     }
+    void split(T* ptr)
+    {
+        __intrusive_list_node::split(ptr);
+    }
 
     T* next()
     {
@@ -206,6 +229,8 @@ class intrusive_list
 {
 public:
     NodeType* node = nullptr;
+    intrusive_list() = default;
+    explicit intrusive_list(NodeType* node): node(node) {}
     ~intrusive_list()
     {   // node (NodeType*) MUST be intrusive_list_node<T>, which
         // should be implicitly convertible to __intrusive_list_node*
@@ -303,6 +328,62 @@ public:
     iterator end()
     {
         return {nullptr, nullptr};
+    }
+    intrusive_list split_front_inclusive(NodeType* ptr)
+    {
+        auto ret = node;
+        if (!node || !ptr) return intrusive_list();
+        if (ptr->__next_ptr == node) {
+            // all elements are splitted
+            node = nullptr;
+            return intrusive_list(ret);
+        }
+        auto rest_head = ptr->next();
+        node->split(rest_head);
+        node = rest_head;
+        return intrusive_list(ret);
+    }
+    intrusive_list split_front_exclusive(NodeType* ptr)
+    {
+        auto ret = node;
+        if (!ptr) {
+            // all elements are splitted
+            node = nullptr;
+            return intrusive_list(ret);
+        }
+        if (!node || ptr == node) {
+            return intrusive_list();
+        }
+        node->split(ptr);
+        node = ptr;
+        return intrusive_list(ret);
+    }
+    template<typename Predicate>
+    intrusive_list split_by_predicate(Predicate&& pred)
+    {
+        if (!node) {
+            return intrusive_list();
+        }
+        NodeType* first_not_fit = nullptr;
+        for (auto x : *this) {
+            if (!pred(x)) {
+                first_not_fit = x;
+                break;
+            }
+        }
+        return split_front_exclusive(first_not_fit);
+    }
+    void delete_all()
+    {
+        auto ptr = node;
+        if (ptr) {
+            do {
+                auto next = ptr->next();
+                delete ptr;
+                ptr = next;
+            } while (ptr != node);
+        }
+        node = nullptr;
     }
 };
 

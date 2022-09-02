@@ -248,7 +248,7 @@ public:
         // Use master engine to wait for self event fd
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(m_cascading_event_fd, timeout);
         if (ret < 0) {
-            return ret;
+            return errno == ETIMEDOUT ? 0 : -1;
         }
         uint64_t value = 0;
         if (eventfd_read(m_cascading_event_fd, &value)) {

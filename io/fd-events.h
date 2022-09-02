@@ -92,7 +92,7 @@ public:
     /**
      * @brief Wait for events, returns number of the arrived events, and their associated `data`
      * @param[out] data
-     * @return -1 for error, positive for the number of events, 0 for no events and should run it again
+     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
      * @warning Do NOT block vcpu
      */
     virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;

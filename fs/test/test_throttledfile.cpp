@@ -138,7 +138,7 @@ TEST(ThrottledFile, basic_throttled) {
     limit.R.throughput = 4*1024*1024;
     limit.W = limit.R;
     limit.RW = limit.R;
-    Mock::MockNullFile mock;
+    PMock::MockNullFile mock;
     IFile * pmock = &mock;
     IFile * tf = new_throttled_file(pmock, limit);
     iovec iov[10];
@@ -238,7 +238,7 @@ TEST(ThrottledFile, large_pulse) {
     limit.RW.throughput = 1024;
     limit.R = limit.RW;
     limit.W = limit.RW;
-    Mock::MockNullFile *mock = new Mock::MockNullFile();
+    PMock::MockNullFile *mock = new PMock::MockNullFile();
     DEFER({ delete mock; });
     EXPECT_CALL(*mock, write(_, _)).WillRepeatedly(ReturnArg<1>());
     IFile * pmock = mock;
@@ -263,7 +263,7 @@ TEST(ThrottledFile, limit_cover) {
     limit.RW.concurent_ops = 0;
     limit.RW.IOPS = 0;
     limit.RW.throughput = 1024;
-    Mock::MockNullFile *mock = new Mock::MockNullFile();
+    PMock::MockNullFile *mock = new PMock::MockNullFile();
     DEFER({ delete mock; });
     EXPECT_CALL(*mock, write(_, _)).WillRepeatedly(ReturnArg<1>());
     IFile * pmock = mock;

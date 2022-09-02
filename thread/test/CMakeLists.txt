@@ -9,3 +9,7 @@ add_test(NAME perf_usleepdefer_semaphore COMMAND $<TARGET_FILE:perf_usleepdefer_
 add_executable(test-thread test.cpp x.cpp)
 target_link_libraries(test-thread PRIVATE photon ${testing_libs})
 add_test(NAME test-thread COMMAND $<TARGET_FILE:test-thread>)
+
+add_executable(test-std-compat test-std-compat.cpp)
+target_link_libraries(test-std-compat PRIVATE photon ${testing_libs})
+add_test(NAME test-std-compat COMMAND $<TARGET_FILE:test-std-compat>)

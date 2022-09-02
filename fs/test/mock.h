@@ -19,12 +19,12 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <photon/fs/filesystem.h>
 
-namespace Mock {
+namespace PMock {
     using namespace photon::fs;
     using photon::fs::DIR;
     using photon::fs::fiemap;
 
-    class MockNullFile : public IFile {
+    class MockNullFile : public IFile, public IFileXAttr {
     public:
         MOCK_METHOD0(filesystem, IFileSystem*());
         MOCK_METHOD3(pread, ssize_t(void*, size_t, off_t));
@@ -49,9 +49,13 @@ namespace Mock {
         MOCK_METHOD2(trim, int(off_t, off_t));
         MOCK_METHOD1(fiemap, int(struct fiemap *p));
         MOCK_METHOD2(vioctl, int(int, va_list));
+        MOCK_METHOD3(fgetxattr, ssize_t(const char*, void*, size_t));
+        MOCK_METHOD2(flistxattr, ssize_t(char*, size_t));
+        MOCK_METHOD4(fsetxattr, int(const char*, const void*, size_t, int));
+        MOCK_METHOD1(fremovexattr, int(const char*));
     };
 
-    class MockNullFileSystem : public IFileSystem {
+    class MockNullFileSystem : public IFileSystem, public IFileSystemXAttr{
     public:
         MOCK_METHOD2(open, IFile*(const char *pathname, int flags));
         MOCK_METHOD3(open, IFile*(const char *pathname, int flags, mode_t mode));
@@ -74,6 +78,14 @@ namespace Mock {
         MOCK_METHOD2(truncate, int(const char *path, off_t length));
         MOCK_METHOD0(syncfs, int());
         MOCK_METHOD1(opendir, DIR*(const char *name));
+        MOCK_METHOD4(getxattr, ssize_t(const char*, const char*, void*, size_t));
+        MOCK_METHOD4(lgetxattr, ssize_t(const char*, const char*, void*, size_t));
+        MOCK_METHOD3(listxattr, ssize_t(const char*, char*, size_t));
+        MOCK_METHOD3(llistxattr, ssize_t(const char*, char*, size_t));
+        MOCK_METHOD5(setxattr, int(const char*, const char*, const void*, size_t, int));
+        MOCK_METHOD5(lsetxattr, int(const char*, const char*, const void*, size_t, int));
+        MOCK_METHOD2(removexattr, int(const char*, const char*));
+        MOCK_METHOD2(lremovexattr, int(const char*, const char*));
     };
 
     class MockNullDIR : public DIR {
