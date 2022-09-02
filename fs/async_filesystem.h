@@ -156,6 +156,11 @@ namespace fs
         DEFINE_ASYNC(ssize_t, flistxattr, char *list, size_t size);
         DEFINE_ASYNC(int, fsetxattr, const char *name, const void *value, size_t size, int flags);
         DEFINE_ASYNC(int, fremovexattr, const char *name);
+
+        const static uint32_t OPID_FGETXATTR   = 30;
+        const static uint32_t OPID_FLISTXATTR  = 31;
+        const static uint32_t OPID_FSETXATTR   = 32;
+        const static uint32_t OPID_FREMOVEXATTR  = 33;
     };
 
     class AsyncDIR : public Object
@@ -238,6 +243,15 @@ namespace fs
         DEFINE_ASYNC(int, lsetxattr, const char *path, const char *name, const void *value, size_t size, int flags);
         DEFINE_ASYNC(int, removexattr, const char *path, const char *name);
         DEFINE_ASYNC(int, lremovexattr, const char *path, const char *name);
+
+        const static uint32_t OPID_GETXATTR   = 90;
+        const static uint32_t OPID_LGETXATTR   = 91;
+        const static uint32_t OPID_LISTXATTR  = 92;
+        const static uint32_t OPID_LLISTXATTR  = 93;
+        const static uint32_t OPID_SETXATTR   = 94;
+        const static uint32_t OPID_LSETXATTR   = 95;
+        const static uint32_t OPID_REMOVEXATTR  = 96;
+        const static uint32_t OPID_LREMOVEXATTR  = 97;
     };
 
     class IFile;

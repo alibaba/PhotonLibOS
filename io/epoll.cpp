@@ -235,7 +235,7 @@ public:
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(
             _engine_fd, timeout);
         if (ret < 0) {
-            return ret;
+            return errno == ETIMEDOUT ? 0 : -1;
         }
         auto ptr = data;
         auto end = data + count;
@@ -246,8 +246,7 @@ public:
                     return (end - ptr) >= 3;
                 });
         if (ptr == data) {
-            errno = ETIMEDOUT;
-            return -1;
+            return 0;
         }
         return ptr - data;
     }

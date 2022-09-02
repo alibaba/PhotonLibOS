@@ -42,7 +42,7 @@ protected:
 
     public:
         Timeout _timeout;
-        virtual ~Item() { remove_from_list(); }
+        virtual ~Item() {}
         virtual size_t key_hash() const = 0;
         virtual bool key_equal(const Item* rhs) const = 0;
         virtual Item* construct() const = 0;
@@ -79,21 +79,22 @@ protected:
     intrusive_list<Item> _list;
     uint64_t _expiration;
     photon::Timer _timer;
-    photon::mutex _mtx;
+    photon::spinlock _lock;
 
-    using ItemPtr = std::unique_ptr<Item>;
+    using ItemPtr = Item*;
     struct ItemHash {
         size_t operator()(const ItemPtr& x) const { return x->key_hash(); }
     };
     struct ItemEqual {
         size_t operator()(const ItemPtr& x, const ItemPtr& y) const {
-            return x->key_equal(y.get());
+            return x->key_equal(y);
         }
     };
 
-    std::unordered_set<ItemPtr, ItemHash, ItemEqual> _set;
+    using Set = std::unordered_set<ItemPtr, ItemHash, ItemEqual>;
+    Set _set;
 
-    ExpireContainerBase(uint64_t expiration, uint64_t recycle_timeout);
+    ExpireContainerBase(uint64_t expiration, uint64_t timer_cycle);
     ~ExpireContainerBase() { clear(); }
 
     using iterator = decltype(_set)::iterator;
@@ -106,12 +107,13 @@ protected:
     template <typename T>
     struct TypedIterator : public iterator {
         TypedIterator(const iterator& rhs) : iterator(rhs) {}
-        std::unique_ptr<T>& operator*() const {
-            return (std::unique_ptr<T>&)iterator::operator*();
+        using TPtr = T*;
+        TPtr operator*() const {
+            return (TPtr)iterator::operator*();
         }
 
-        std::unique_ptr<T>* operator->() const {
-            return (std::unique_ptr<T>*)iterator::operator->();
+        TPtr* operator->() const {
+            return (TPtr*)iterator::operator->();
         }
     };
 
@@ -134,8 +136,10 @@ template <typename KeyType, typename... Ts>
 class ExpireContainer : public ExpireContainerBase {
 public:
     using Base = ExpireContainerBase;
-    ExpireContainer(uint64_t expiration, uint64_t recycle_timeout = -1UL)
-        : Base(expiration, recycle_timeout) {}
+    ExpireContainer(uint64_t expiration)
+        : Base(expiration, expiration / 16) {}
+    ExpireContainer(uint64_t expiration, uint64_t timer_cycle)
+        : Base(expiration, timer_cycle) {}
 
 protected:
     using KeyedItem = typename Base::KeyedItem<Base::Item, KeyType>;
@@ -163,7 +167,6 @@ protected:
         }
     };
     intrusive_list<Item>& list() { return (intrusive_list<Item>&)_list; }
-    using ItemPtr = std::unique_ptr<Item>;
 
 public:
     using ItemKey = typename Item::ItemKey;
@@ -190,7 +193,7 @@ public:
 
     void refresh(Item* item) {
         DEFER(expire());
-        photon::scoped_lock _(_mtx);
+        SCOPED_LOCK(_lock);
         enqueue(item);
     }
 };
@@ -230,7 +233,7 @@ protected:
 
     photon::condition_variable blocker;
 
-    using ItemPtr = std::unique_ptr<Item>;
+    using ItemPtr = Item*;
 
     // in case of missing, ref_acquire() performs a 2 phase construction:
     // (1) creating an item with _obj==nullptr, preventing
@@ -239,7 +242,7 @@ protected:
     //     clean-up in case of failure
     Item* ref_acquire(const Item& key_item, Delegate<void*> ctor);
 
-    int ref_release(Item* item, bool recycle = false);
+    int ref_release(ItemPtr item, bool recycle = false);
 
     void* acquire(const Item& key_item, Delegate<void*> ctor) {
         auto ret = ref_acquire(key_item, ctor);
@@ -282,20 +285,22 @@ protected:
 
     using ItemKey = typename Item::ItemKey;
     using InterfaceKey = typename Item::InterfaceKey;
-    using ItemPtr = std::unique_ptr<Item>;
+    using ItemPtr = Item*;
 
 public:
-    ObjectCache(uint64_t expiration, uint64_t recycle_timeout = -1UL)
-        : Base(expiration, recycle_timeout) {}
+    ObjectCache(uint64_t expiration)
+        : Base(expiration, expiration / 16) {}
+    ObjectCache(uint64_t expiration, uint64_t timer_cycle)
+        : Base(expiration, timer_cycle) {}
 
     template <typename Constructor>
-    Item* ref_acquire(const InterfaceKey& key, const Constructor& ctor) {
+    ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor) {
         auto _ctor = [&]() -> void* { return ctor(); };
         // _ctor can always implicit cast to `Delegate<void*>`
-        return (Item*)Base::ref_acquire(Item(key), _ctor);
+        return (ItemPtr)Base::ref_acquire(Item(key), _ctor);
     }
 
-    int ref_release(Item* item, bool recycle = false) {
+    int ref_release(ItemPtr item, bool recycle = false) {
         return Base::ref_release(item, recycle);
     }
 
@@ -318,11 +323,11 @@ public:
 
     class Borrow {
         ObjectCache* _oc;
-        Item* _ref;
+        ItemPtr _ref;
         bool _recycle = false;
 
     public:
-        Borrow(ObjectCache* oc, Item* ref, bool recycle)
+        Borrow(ObjectCache* oc, ItemPtr ref, bool recycle)
             : _oc(oc), _ref(ref), _recycle(recycle) {}
         ~Borrow() {
             if (_ref) _oc->ref_release(_ref, _recycle);

@@ -132,6 +132,8 @@ namespace photon
         return ((partial_thread*)th) -> vcpu;
     }
 
+    uint32_t get_vcpu_num();
+
     /**
      * @brief Clear unused stack.
      * if target is a ready or sleeped photon thread, clear will not perform thread switch;
@@ -289,7 +291,7 @@ namespace photon
 
     #define _TOKEN_CONCAT(a, b) a ## b
     #define _TOKEN_CONCAT_(a, b) _TOKEN_CONCAT(a, b)
-    #define SCOPED_LOCK(x, ...) locker<decltype(x)> \
+    #define SCOPED_LOCK(x, ...) photon::locker<decltype(x)> \
         _TOKEN_CONCAT_(__locker__, __LINE__) (x, ##__VA_ARGS__)
 
     class condition_variable : protected waitq

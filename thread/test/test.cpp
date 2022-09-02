@@ -1597,7 +1597,7 @@ TEST(thread11, lambda) {
     auto lambda = [](photon::semaphore &sem){
         sem.signal(1);
     };
-    photon::thread_create11(lambda, sem);
+    photon::thread_create11(lambda, std::ref(sem));
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
     auto lambda2 = [&sem]{
         sem.signal(1);
@@ -1709,12 +1709,117 @@ TEST(thread11, functor_invoke) {
     EXPECT_EQ(0, sem.wait(2, 1UL*1000*1000));
     thread_create11(lambda);
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
-    thread_create11(lambda2, sem);
+    thread_create11(lambda2, std::ref(sem));
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
     thread_create11(lambda3);
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
     thread_create11(bind_obj);
     EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+}
+
+TEST(thread11, functor_param) {
+    photon::semaphore sem;
+    int arr[8] = {0};
+    for (int i=0;i<8;i++) {
+        thread_create11([&](int x){
+            arr[x] ++;
+            LOG_INFO(VALUE(x));
+            sem.signal(1);
+        }, i);
+    }
+    sem.wait(8);
+    for (int i=0;i<8;i++) {
+        EXPECT_EQ(1, arr[i]);
+    }
+    memset(arr, 0, sizeof(arr));
+    for (int i=0;i<8;i++) {
+        thread_create11([i, &arr, &sem](){
+            arr[i] ++;
+            LOG_INFO(VALUE(i));
+            sem.signal(1);
+        });
+    }
+    sem.wait(8);
+    for (int i=0;i<8;i++) {
+        EXPECT_EQ(1, arr[i]);
+    }
+}
+
+struct IntNode : intrusive_list_node<IntNode> {
+    int x;
+    IntNode() = default;
+};
+
+TEST(intrusive_list, split) {
+    intrusive_list<IntNode> testlist;
+    IntNode intarr[100];
+
+    for (int i=0;i<100;i++) {
+        intarr[i].x=i;
+        testlist.push_back(&intarr[i]);
+    }
+
+    // since testlist member are on stack
+    // just set to clear, without delete
+    DEFER(testlist.node = nullptr);
+
+    auto sp = testlist.split_front_exclusive(&intarr[50]);
+    DEFER(sp.node = nullptr);
+    int cnt = 0;
+    for (auto x : sp) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(50, cnt);
+    for (auto x : testlist) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(100, cnt);
+
+    auto ssp = sp.split_front_inclusive(&intarr[15]);
+    DEFER(ssp.node = nullptr);
+    cnt = 0;
+    for (auto x : ssp) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(16, cnt);
+    for (auto x : sp) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(50, cnt);
+
+    auto esplit = ssp.split_front_exclusive(&intarr[0]);
+    DEFER(esplit.node = nullptr);
+    EXPECT_EQ(nullptr, esplit.node);
+    cnt = 0;
+    for (auto x : ssp) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(16, cnt);
+
+    auto isplit = ssp.split_front_inclusive(&intarr[15]);
+    DEFER(isplit.node = nullptr);
+    EXPECT_EQ(nullptr, ssp.node);
+    cnt = 0;
+    for (auto x : isplit) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(16, cnt);
+
+    auto psplit = isplit.split_by_predicate([](IntNode* x){ return x->x < 3; });
+    DEFER(psplit.node = nullptr);
+    cnt = 0;
+    for (auto x : psplit) {
+        EXPECT_EQ(cnt, x->x);
+        cnt++;
+    }
+    EXPECT_EQ(3, cnt);
+
 }
 
 int main(int argc, char** arg)

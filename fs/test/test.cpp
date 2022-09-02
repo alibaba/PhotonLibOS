@@ -1091,7 +1091,7 @@ TEST(XFile, error_stiuation) {
     zero_stat.st_size=0;
     frage_stat.st_size=4095;
     different_size_stat.st_size=5120;
-    Mock::MockNullFile nop;
+    PMock::MockNullFile nop;
     //fstat在LinearFile和StripeFile创建时会访问，因此需要先模拟为正常以成功打开文件，再模拟失败
     EXPECT_CALL(nop, fstat(_)).Times(AtLeast(1))
         .WillOnce(Return(-1))
@@ -1247,7 +1247,7 @@ TEST(AlignedFileAdaptor, err_situation) {
     IFile *wrong_size_aligned_file = new_aligned_file_adaptor(underlay_file, getpagesize() - 1, true, false);
     EXPECT_EQ(nullptr, wrong_size_aligned_file);
     EXPECT_EQ(EINVAL, errno);
-    Mock::MockNullFile mock_file;
+    PMock::MockNullFile mock_file;
     EXPECT_CALL(mock_file, pread(_, _, _))
         .Times(AtLeast(1))
         .WillOnce(Return(-1))

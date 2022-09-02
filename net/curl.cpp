@@ -167,12 +167,7 @@ protected:
 
     int wait_fds(EventLoop*) {
         cnt = cctx.g_poller->wait_for_events((void**)&cbs, poll_size);
-        if (cnt > 0) return 1;
-        if (cnt < 0 && errno == ETIMEDOUT) {
-            return 0;
-        }
-        if (cnt < 0 || errno == EINTR) return -1;
-        return 0;
+        return cnt;
     }
 
     int on_poll(EventLoop*) {

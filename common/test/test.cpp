@@ -1524,7 +1524,10 @@ void* objcache(void* arg) {
     auto args = (OCArg*)arg;
     auto oc = args->oc;
     auto id = args->id;
-    auto ctor = [&]() { return new ShowOnDtor(id); };
+    auto ctor = [&]() {
+        cycle_cnt++;
+        return new ShowOnDtor(id);
+    };
     // acquire every 10ms
     photon::thread_usleep(10*1000UL * id);
     auto ret = oc->acquire(0, ctor);
@@ -1535,7 +1538,6 @@ void* objcache(void* arg) {
     if (id % 10 == 0) LOG_INFO("Cycle ", VALUE(id));
     // every 10 objs will recycle
     oc->release(0, id % 10 == 0);
-    if (id % 10 == 0) cycle_cnt ++;
     LOG_DEBUG("Released ", VALUE(id));
     return 0;
 }
@@ -1713,7 +1715,7 @@ TEST(ExpireContainer, expire_container) {
     memset(key2, 0, sizeof(key2));
     auto it = expire.find(key);
     EXPECT_NE(expire.end(), it);
-    auto ref = it->get();
+    auto ref = *it;
     EXPECT_EQ(0, strcmp(ref->key().data(), key));
     EXPECT_EQ(0, strcmp(ref->get_payload<0>().data(), key));
     EXPECT_EQ(-1, ref->get_payload<1>());
@@ -1737,7 +1739,7 @@ TEST(ExpireContainer, refresh) {
     expire.insert(key2, 1, true);
     photon::thread_usleep(900 * 1000);
     expire.expire();
-    expire.refresh(it->get());
+    expire.refresh(*it);
     photon::thread_usleep(900 * 1000);
     expire.expire();
     EXPECT_NE(expire.end(), expire.find(key));
@@ -1752,7 +1754,7 @@ TEST(ExpireList, expire_container) {
     expire.keep_alive(key, true);
     auto it = expire.find(key);
     EXPECT_NE(expire.end(), it);
-    auto ref = it->get();
+    auto ref = *it;
     EXPECT_EQ(0, strcmp(ref->key().data(), key));
     expire.expire();
     it = expire.find(key);

@@ -62,8 +62,7 @@ public:
 
     int wait_event(EventLoop*) {
         n = poller->wait_for_events(event_entries, MAX_POLL_SIZE, MAX_WAIT_TIME);
-        if (n == -1) return -1;
-        return n > 0 ? 1 : 0;
+        return n;
     }
 
     int on_event(EventLoop*) {
