@@ -14,7 +14,7 @@ open source world by the year of 2022, even among different programing languages
 As to the project vision, we hope that Photon would help programs run as *fast* and *agile*
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
-# What's New
+## What's New
 
 * Photon 0.3 was released on 2 Sep 2022. Except for bug fixes and improvements, a new `photon::std` namespace is added.
 Developers can search for `std::thread`, `std::mutex` in their own projects, and replace them all into the equivalents of `photon::std::<xxx>`.
