@@ -20,6 +20,7 @@ limitations under the License.
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/utsname.h>
 
 #include <thread>
 #include <vector>
@@ -140,6 +141,24 @@ void Base64Encode(std::string_view in, std::string &out) {
     }
     base64_translate_3to4(itail, _out);
     for (size_t i = 0; i < (3 - remain); ++i) out[out_size - i - 1] = '=';
+}
+
+static bool do_zerocopy_available() {
+    utsname buf = {};
+    uname(&buf);
+    std::string kernel_release(buf.release);
+    std::string kernel_version = kernel_release.substr(0, kernel_release.find('-'));
+    int result = 0;
+    int ret = Utility::version_compare(kernel_version, "4.15", result);
+    if (ret != 0) {
+        LOG_ERROR_RETURN(0, false, "Unable to detect kernel version, not using zero-copy");
+    }
+    return result >= 0;
+}
+
+bool zerocopy_available() {
+    static bool r = do_zerocopy_available();
+    return r;
 }
 
 }  // namespace net

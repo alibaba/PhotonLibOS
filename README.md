@@ -14,6 +14,20 @@ open source world by the year of 2022, even among different programing languages
 As to the project vision, we hope that Photon would help programs run as *fast* and *agile*
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
+# What's New
+
+* Photon 0.3 was released on 2 Sep 2022. Except for bug fixes and improvements, a new `photon::std` namespace is added.
+Developers can search for `std::thread`, `std::mutex` in their own projects, and replace them all into the equivalents of `photon::std::<xxx>`.
+It's a quick way to transform thread-based programs to coroutine-based ones.
+* Photon 0.2 was released on 28 Jul 2022. This release was mainly focused on network socket, security context and multi-vcpu support.
+We re-worked the `WorkPool` so it's more friendly now to write multi-vcpu programs.
+
+<details><summary>More history</summary><p>
+
+* Made the first tag on 27 Jul 2022. Fix the compatibility for ARM CPU. Throughly compared the TCP echo server performance with other libs.
+
+</p></details>
+
 ## Features
 * Coroutine library (support multi-core)
 * Async event engine, natively integrated into coroutine scheduling (support epoll or [io_uring](https://github.com/axboe/liburing))
@@ -32,9 +46,11 @@ and prepared to wrap them into the framework. It is a real killer in the low lev
 
 ### 1. IO
 
-Compare Photon and fio when reading an 3.5TB NVMe raw device.
+Compare *Photon* with *fio* when reading an 3.5TB NVMe raw device.
 
 Note that fio only enables 1 job (process).
+
+<details><summary>Results</summary><p>
 
 |        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO | QPS  | Throughput | CPU util |
 |:------:|:---------:|:---------:|:-------:|:--------:|:--------:|:----:|:----------:|:--------:|
@@ -42,13 +58,15 @@ Note that fio only enables 1 job (process).
 | Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 346K |   1.38GB   |   100%   |
 |  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K |   1.11GB   |   100%   |
 
+</p></details>
+
 Conclusion: Photon is faster than fio under this circumstance.
 
 ### 2. Network
 
 #### 2.1 TCP
 
-Compare TCP echo server performance, in descending order.
+Compare *Photon* with other *libs / languages frameworks* with regard to TCP echo server performance, in descending order.
 
 Client Mode: Streaming
 
@@ -80,14 +98,16 @@ Client Mode: Ping-pong
 |              [libgo](https://github.com/yyzybb537/libgo)              |    Stackful coroutine     |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
 |             [asyncio](https://github.com/netcan/asyncio)              | C++20 stackless coroutine |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
 
+<details><summary>Note</summary><p>
 
-Note:
 - The Streaming client is to measure echo server performance when handling high throughput. We will set up 4 client processes,
 and each of them will create only one connection. Send coroutine and recv coroutine are running their loops separately.
 - The Ping-pong client is to measure echo server performance when handling large amounts of connections.
 We will set up 10 client processes, and each of them will create 100 connections. For a single connection, it has to send before recv.
 - Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. Kernel version is 5.15. The network bandwidth (unilateral) is 32Gb.
 - This test was only meant to compare per-core QPS, so we limited the thread number to 1, for instance, set GOMAXPROCS=1.
+
+</p></details>
 
 Conclusion: Photon socket has the best per-core QPS.
 
@@ -97,10 +117,14 @@ Compare Photon and Nginx when serving static files, using Apache Bench(ab) as cl
 
 Note that Nginx only enables 1 worker (process).
 
+<details><summary>Results</summary><p>
+
 |        | File Size | QPS  | CPU util |
 |:------:|:---------:|:----:|:--------:|
 | Photon |    4KB    | 114K |   100%   |
 | Nginx  |    4KB    | 97K  |   100%   |
+
+</p></details>
 
 Conclusion: Photon is faster than Nginx under this circumstance.
 
@@ -135,6 +159,9 @@ make -j
 All the libs and executables will be saved in `build/output`.
 
 ### 3. Testing
+
+Note the examples are also built from testing. When running performance test, remember to remove CMAKE_BUILD_TYPE=Debug.
+
 ```shell
 # CentOS
 dnf config-manager --set-enabled powertools
@@ -147,13 +174,11 @@ make -j
 ctest
 ```
 
-Note the examples are also built from testing. When running performance test, remember to remove CMAKE_BUILD_TYPE=Debug.
-
 ## About Photon
 
 Photon was originally created from the storage team of Alibaba Cloud since 2017. It's a production ready library, and has
-been deployed to hundreds of thousands of hosts as the infrastructure of cloud software. We would like to make a
-commitment that Photon will be continuously updated, as long as those cloud software still evolve.
+been deployed to hundreds of thousands of hosts as the infrastructure of cloud software. **We would like to make a
+commitment that Photon will be continuously updated, as long as those cloud software still evolve**.
 
 Some open source projects are using Photon as well, for instance:
 

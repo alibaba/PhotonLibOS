@@ -143,5 +143,8 @@ inline int gethostbyname_nb(const char* name, std::vector<IPAddr>& ret) {
 
 void Base64Encode(std::string_view in, std::string &out);
 
+/* Check if kernel version satisfies and thus zerocopy feature should be enabled */
+bool zerocopy_available();
+
 }  // namespace net
 }

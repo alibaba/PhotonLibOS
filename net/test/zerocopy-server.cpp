@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     if (photon::init(INIT_EVENT_IOURING | INIT_EVENT_SIGNALFD,
-                     INIT_IO_LIBAIO | INIT_IO_SOCKET_ZEROCOPY | INIT_IO_SOCKET_EDGE_TRIGGER) < 0)
+                     INIT_IO_LIBAIO | INIT_IO_SOCKET_EDGE_TRIGGER) < 0)
         return -1;
     DEFER(photon::fini());
 
