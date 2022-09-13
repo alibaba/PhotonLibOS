@@ -685,8 +685,6 @@ TEST(ZeroCopySocket, basic) {
     if (!zerocopy_available()) {
         return;
     }
-    ASSERT_EQ(zerocopy_init(), 0);
-    DEFER(zerocopy_fini());
 
     EndPoint ep_src(IPAddr("127.0.0.1"), 13659), ep_dst;
     const size_t size = 8192;

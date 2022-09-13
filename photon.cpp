@@ -22,7 +22,7 @@ limitations under the License.
 #include "io/aio-wrapper.h"
 #include "net/curl.h"
 #include "net/socket.h"
-#include "net/zerocopy.h"
+#include "net/utils.h"
 #include "fs/exportfs.h"
 
 namespace photon {
@@ -47,12 +47,6 @@ int init(uint64_t event_engine, uint64_t io_engine) {
     if (io_engine & INIT_IO_LIBCURL) {
         if (net::libcurl_init() < 0) return -1;
     }
-    if (io_engine & INIT_IO_SOCKET_ZEROCOPY) {
-        if (!net::zerocopy_available()) {
-            LOG_ERRNO_RETURN(0, -1, "zerocopy not available");
-        }
-        if (net::zerocopy_init() < 0) return -1;
-    }
     if (io_engine & INIT_IO_SOCKET_EDGE_TRIGGER) {
         if (net::et_poller_init() < 0) return -1;
     }
@@ -73,11 +67,6 @@ int fini() {
     }
     if (g_io_engine & INIT_IO_LIBCURL) {
         net::libcurl_fini();
-    }
-    if (g_io_engine & INIT_IO_SOCKET_ZEROCOPY) {
-        if (net::zerocopy_available()) {
-            net::zerocopy_fini();
-        }
     }
     if (g_io_engine & INIT_IO_SOCKET_EDGE_TRIGGER) {
         net::et_poller_fini();

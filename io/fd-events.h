@@ -47,6 +47,10 @@ public:
         return wait_for_fd(fd, EVENT_WRITE, timeout);
     }
 
+    int wait_for_fd_error(int fd, uint64_t timeout = -1) {
+        return wait_for_fd(fd, EVENT_ERROR, timeout);
+    }
+
     /**
      * @brief Wait for events, and fire them by photon::thread_interrupt()
      * @param timeout The *maximum* amount of time to sleep. The sleep can be interrupted by invoking
@@ -66,6 +70,10 @@ inline int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
 
 inline int wait_for_fd_writable(int fd, uint64_t timeout = -1) {
     return get_vcpu()->master_event_engine->wait_for_fd_writable(fd, timeout);
+}
+
+inline int wait_for_fd_error(int fd, uint64_t timeout = -1) {
+    return get_vcpu()->master_event_engine->wait_for_fd_error(fd, timeout);
 }
 
 class CascadingEventEngine {

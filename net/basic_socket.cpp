@@ -22,6 +22,7 @@ limitations under the License.
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <linux/errqueue.h>
 #ifndef __APPLE__
 #include <sys/sendfile.h>
 #endif
@@ -29,11 +30,20 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/net/socket.h>
 #include <photon/thread/thread.h>
+#include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/common/utility.h>
 
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY    0x4000000
+#endif
+
+#ifndef SO_EE_ORIGIN_ZEROCOPY
+#define SO_EE_ORIGIN_ZEROCOPY		5
+#endif
+
+#ifndef SO_EE_CODE_ZEROCOPY_COPIED
+#define SO_EE_CODE_ZEROCOPY_COPIED	1
 #endif
 
 namespace photon {
@@ -206,6 +216,56 @@ bool ISocketStream::skip_read(size_t count) {
         count -= len;
     }
     return true;
+}
+
+static ssize_t recv_errqueue(int fd, uint32_t &ret_counter) {
+    char control[128];
+    msghdr msg = {};
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    auto ret = recvmsg(fd, &msg, MSG_ERRQUEUE);
+    if (ret < 0) return ret;
+    cmsghdr* cm = CMSG_FIRSTHDR(&msg);
+    if (cm == nullptr) {
+        LOG_ERROR_RETURN(0, -1, "Fail to get control message header");
+    }
+    auto serr = (sock_extended_err*) CMSG_DATA(cm);
+    if (serr->ee_origin != SO_EE_ORIGIN_ZEROCOPY) {
+        LOG_ERROR_RETURN(0, -1, "wrong origin");
+    }
+    if (serr->ee_errno != 0) {
+        LOG_ERROR_RETURN(0, -1, "wrong error code ", serr->ee_errno);
+    }
+    if ((serr->ee_code & SO_EE_CODE_ZEROCOPY_COPIED)) {
+        LOG_DEBUG("deferred copy occurs, might harm performance");
+    }
+
+    ret_counter = serr->ee_data;
+    return 0;
+}
+
+static int64_t read_counter(int fd, uint64_t timeout) {
+    uint32_t counter = 0;
+    auto ret = doio(LAMBDA(recv_errqueue(fd, counter)),
+                LAMBDA_TIMEOUT(photon::wait_for_fd_error(fd, timeout)));
+    if (ret < 0) return ret;
+    return counter;
+}
+
+inline bool is_counter_less_than(uint32_t left, uint32_t right) {
+    const uint32_t mid = UINT32_MAX / 2;
+    return (left < right) || (left > right && left > mid && right - left < mid);
+}
+
+ssize_t zerocopy_confirm(int fd, uint32_t num_calls, uint64_t timeout) {
+    auto func = LAMBDA_TIMEOUT(read_counter(fd, timeout));
+    uint32_t counter = 0;
+    do {
+        auto ret = func();
+        if (ret < 0) return ret;
+        counter = ret;
+    } while (is_counter_less_than(counter, num_calls));
+    return 0;
 }
 
 }  // namespace net
