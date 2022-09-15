@@ -171,7 +171,7 @@ public:
                 errno = -io_ctx.res;
                 return -1;
             } else {
-                errno = 0;
+                // errno = 0;
                 return io_ctx.res;
             }
         } else {

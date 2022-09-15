@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <photon/thread/workerpool.h>
 #include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>
 
@@ -40,9 +41,11 @@ struct A {
 };
 
 TEST(std, thread) {
-    int x = 0;
+    photon::std::work_pool_init(8);
+    DEFER(photon::std::work_pool_fini());
 
     // type 1
+    int x = 0;
     photon::std::thread t1(func, &x);
     t1.join();
 
@@ -65,6 +68,9 @@ TEST(std, thread) {
 }
 
 TEST(std, unique_lock) {
+    photon::std::work_pool_init(8);
+    DEFER(photon::std::work_pool_fini());
+
     {
         photon::std::unique_lock<photon::std::mutex> a;
         ASSERT_FALSE(a.owns_lock());
@@ -100,6 +106,9 @@ TEST(std, unique_lock) {
 }
 
 TEST(std, cv) {
+    photon::std::work_pool_init(8);
+    DEFER(photon::std::work_pool_fini());
+
     photon::std::mutex mu;
     photon::std::condition_variable cv;
 
@@ -120,6 +129,9 @@ TEST(std, cv) {
 }
 
 TEST(std, cv_timeout) {
+    photon::std::work_pool_init(8);
+    DEFER(photon::std::work_pool_fini());
+
     photon::std::mutex mu;
     photon::std::condition_variable cv;
 
@@ -130,19 +142,21 @@ TEST(std, cv_timeout) {
         cv.notify_all();
     });
 
-    {
+    photon::std::thread th2([&]{
         photon::std::unique_lock<photon::std::mutex> lock(mu);
         ASSERT_EQ(std::cv_status::timeout, cv.wait_for(lock, std::chrono::milliseconds(900)));
         DO_LOG("wait timeout done");
-    }
+    });
 
-    {
+    photon::std::thread th3([&]{
         photon::std::unique_lock<photon::std::mutex> lock(mu);
         ASSERT_EQ(std::cv_status::no_timeout, cv.wait_for(lock, std::chrono::milliseconds(1100)));
         DO_LOG("wait no_timeout done");
-    }
+    });
 
     th.join();
+    th2.join();
+    th3.join();
 }
 
 TEST(std, exception) {
@@ -156,8 +170,8 @@ TEST(std, exception) {
 }
 
 int main(int argc, char** arg) {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::init(photon::INIT_EVENT_EPOLL, 0);
+    DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

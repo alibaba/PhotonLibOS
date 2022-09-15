@@ -409,7 +409,7 @@ namespace photon
         thread_stub_cleanup();
     }
 
-    thread* thread_create(void* (*start)(void*), void* arg, uint64_t stack_size)
+    thread* thread_create(thread_entry start, void* arg, uint64_t stack_size)
     {
         auto current = CURRENT;
         if (current == nullptr) {
