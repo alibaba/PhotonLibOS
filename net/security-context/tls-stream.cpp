@@ -98,8 +98,7 @@ public:
         char errbuf[4096];
         ctx = SSL_CTX_new(SSLv23_method());
         if (ctx == nullptr) {
-            auto e = ERR_get_error();
-            ERR_error_string_n(e, errbuf, MAX_ERRSTRING_SIZE);
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR(0, -1, "Failed to initial TLS: ", errbuf);
         }
     }
@@ -124,7 +123,7 @@ public:
         auto cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
         auto ret = SSL_CTX_use_certificate(ctx, cert);
         if (ret != 1) {
-            ERR_error_string_n(ret, errbuf, sizeof(errbuf));
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR_RETURN(0, -1, errbuf);
         }
         return 0;
@@ -139,15 +138,15 @@ public:
         auto bio = BIO_new_mem_buf((void*)key_str, -1);
         DEFER(BIO_free(bio));
         auto key =
-            PEM_read_bio_RSAPrivateKey(bio, nullptr, &pem_password_cb, this);
-        auto ret = SSL_CTX_use_RSAPrivateKey(ctx, key);
+            PEM_read_bio_PrivateKey(bio, nullptr, &pem_password_cb, this);
+        auto ret = SSL_CTX_use_PrivateKey(ctx, key);
         if (ret != 1) {
-            ERR_error_string_n(ret, errbuf, sizeof(errbuf));
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR_RETURN(0, -1, errbuf);
         }
         ret = SSL_CTX_check_private_key(ctx);
         if (ret != 1) {
-            ERR_error_string_n(ret, errbuf, sizeof(errbuf));
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR_RETURN(0, -1, errbuf);
         }
         return 0;

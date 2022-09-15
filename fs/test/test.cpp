@@ -683,6 +683,8 @@ TEST(AsyncFS, Timeout)
     // fd_events_fini();
 }
 
+// Mock a failed memory allocation test case
+#if !__GLIBC_PREREQ(2, 34)
 void (*old_free)(void *ptr, const void *caller);
 void *(*old_malloc)(size_t size, const void *caller);
 
@@ -712,6 +714,7 @@ void my_free(void *ptr, const void *caller) {
     malloc_unhook();
     free(ptr);
 }
+#endif
 
 TEST(range_split, sub_range)
 {
@@ -1158,11 +1161,13 @@ TEST(XFile, error_stiuation) {
     xf = new_stripe_file(1025, lf, 2, false);
     EXPECT_EQ(nullptr, xf);
 
+#if !__GLIBC_PREREQ(2, 34)
     init_hook();
     malloc_hook();
     IFile* rtp = new_linear_file(lf, 2, false);
     malloc_unhook();
     EXPECT_EQ(nullptr, rtp);
+#endif
 }
 
 void fill_random_buff(char * buff, size_t length) {

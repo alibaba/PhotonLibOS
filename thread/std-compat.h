@@ -22,6 +22,7 @@ limitations under the License.
 #include <condition_variable>
 #include <system_error>
 
+#include <photon/photon.h>
 #include <photon/thread/thread11.h>
 
 namespace photon {
@@ -79,6 +80,7 @@ public:
     explicit thread(Function&& f, Args&& ... args) {
         m_th = photon::thread_create11(::std::forward<Function>(f), ::std::forward<Args>(args)...);
         photon::thread_enable_join(m_th, true);
+        do_migrate();
     }
 
     bool joinable() const {
@@ -86,7 +88,7 @@ public:
     }
 
     id get_id() const noexcept {
-        return {photon::CURRENT};
+        return photon::CURRENT;
     }
 
     static unsigned int hardware_concurrency() noexcept {
@@ -110,6 +112,7 @@ public:
     }
 
 private:
+    void do_migrate();
     photon::thread* m_th = nullptr;
 };
 
@@ -266,6 +269,9 @@ public:
     template<class Rep, class Period>
     cv_status wait_for(unique_lock<mutex>& lock, const ::std::chrono::duration<Rep, Period>& d) {
         uint64_t timeout = __duration_to_microseconds(d);
+        if (timeout == 0) {
+            return cv_status::timeout;
+        }
         int ret = photon::condition_variable::wait(lock.mutex(), timeout);
         return ret == 0 ? cv_status::no_timeout : cv_status::timeout;
     }
@@ -315,6 +321,19 @@ inline void sleep_until(const ::std::chrono::time_point<Clock, Duration>& t) {
 }
 
 }   // namespace this_thread
+
+/**
+ * @brief Initialize work pool for multi-vcpu environment
+ * @note Should be called at the beginning of the main function, after photon::init().
+ * @param vcpu_num The maximum vcpu number for the newly created threads, starts from 1. The main thread doesn't count.
+ */
+int work_pool_init(int vcpu_num = 1, int event_engine = INIT_EVENT_EPOLL, int io_engine = 0);
+
+/**
+ * @brief Destroy work pool
+ */
+int work_pool_fini();
+
 }   // namespace std
 }   // namespace photon
 
