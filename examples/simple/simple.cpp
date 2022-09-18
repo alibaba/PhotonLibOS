@@ -71,12 +71,13 @@ int main() {
     }
     DEFER(delete server);
 
+    // Photon's std is equivalent to the standard std, but specially working for coroutines
     photon::std::mutex mu;
     photon::std::condition_variable cv;
     bool got_msg = false;
     AlignedAlloc alloc(512);
 
-    // In the photon world, we just call coroutine thread. Photon threads run on top of vcpu(native OS threads).
+    // So the thread is actually a coroutine. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
     auto server_thread = photon::std::thread(run_socket_server, server, file, alloc, cv, mu, got_msg);
 
