@@ -130,7 +130,7 @@ Conclusion: Photon is faster than Nginx under this circumstance.
 
 ## Example
 
-See the [simple example](examples/simple/simple.cpp) (on io_uring) about how to write a Photon program.
+See the [simple example](examples/simple/simple.cpp) about how to write a Photon program.
 
 See the full test code of [echo server](examples/perf/net-perf.cpp). It also illustrates how to enable multi-core.
 

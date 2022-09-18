@@ -17,8 +17,7 @@ limitations under the License.
 #include <fcntl.h>
 #include <vector>
 
-#include <photon/photon.h>
-#include <photon/thread/thread11.h>
+#include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/fs/localfs.h>
@@ -31,17 +30,17 @@ limitations under the License.
 // Because every module has its own document, this example will not focus on the API details.
 // Please refer to the README under the module directories.
 
-static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file,
-                              photon::condition_variable* cond);
+static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, AlignedAlloc& alloc,
+                              photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg);
 
 int main() {
-    // Initialize Photon environment in current vcpu. Choose the iouring event engine.
+    // Initialize Photon environment in current vcpu. Choose the epoll event engine.
+    //
     // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
     // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
-    //
-    // If you have trouble upgrading the kernel, please switch the event_engine argument
-    // from `photon::INIT_EVENT_IOURING` to `photon::INIT_EVENT_EPOLL`.
-    int ret = photon::init(photon::INIT_EVENT_IOURING, 0);
+    // If you are willing to use io_uring, please switch the event_engine argument from `photon::INIT_EVENT_EPOLL`
+    // to `photon::INIT_EVENT_IOURING`.
+    int ret = photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
@@ -51,9 +50,9 @@ int main() {
     DEFER(photon::fini());
 
     // Create a local IFileSystem under current working dir.
-    // If not enabling io_uring, please switch the io_engine_type from `photon::fs::ioengine_iouring` to
-    // `photon::fs::ioengine_psync`.
-    auto fs = photon::fs::new_localfs_adaptor(".", photon::fs::ioengine_iouring);
+    // When enabling io_uring, please switch the io_engine_type from `photon::fs::ioengine_libaio` to
+    // `photon::fs::ioengine_iouring`.
+    auto fs = photon::fs::new_localfs_adaptor(".", photon::fs::ioengine_libaio);
     if (!fs) {
         LOG_ERRNO_RETURN(0, -1, "failed to create fs");
     }
@@ -72,15 +71,27 @@ int main() {
     }
     DEFER(delete server);
 
-    photon::condition_variable cond;
+    photon::std::mutex mu;
+    photon::std::condition_variable cv;
+    bool got_msg = false;
+    AlignedAlloc alloc(512);
 
     // In the photon world, we just call coroutine thread. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
-    auto server_thread = photon::thread_create11(run_socket_server, server, file, &cond);
-    photon::thread_enable_join(server_thread);
+    auto server_thread = photon::std::thread(run_socket_server, server, file, alloc, cv, mu, got_msg);
 
-    // Wait for server ready
-    cond.wait_no_lock();
+    // Create a watcher thread to wait the go_msg flag
+    auto watcher_thread = photon::std::thread([&] {
+        LOG_INFO("Start to watch message");
+        photon::std::unique_lock<photon::std::mutex> lock(mu);
+        while (!got_msg) {
+            cv.wait(lock);
+        }
+        LOG_INFO("Got message!");
+    });
+
+    // Wait server to be ready to accept
+    photon::std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // Create socket client and connect
     auto client = photon::net::new_tcp_socket_client();
@@ -90,32 +101,33 @@ int main() {
     DEFER(delete client);
 
     photon::net::EndPoint ep{photon::net::IPAddr("127.0.0.1"), 9527};
-    auto conn = client->connect(ep);
-    if (!conn) {
+    auto stream = client->connect(ep);
+    if (!stream) {
         LOG_ERRNO_RETURN(0, -1, "failed to connect server");
     }
 
     // Write socket
-    char buf[1024];
-    if (conn->send(buf, 1024) != 1024) {
+    void* buf = alloc.alloc(1024);
+    if (stream->send(buf, 1024) != 1024) {
         LOG_ERRNO_RETURN(0, -1, "failed to write socket");
     }
 
     // Close connection
-    delete conn;
+    delete stream;
 
-    // Sleep one second and shutdown server
-    photon::thread_usleep(1000 * 1000);
+    // Wait for a while and shutdown the server
+    photon::std::this_thread::sleep_for(std::chrono::seconds(1));
     server->terminate();
 
-    // Interrupt the sleeping server thread, and join it
-    photon::thread_interrupt(server_thread);
-    photon::thread_join((photon::join_handle*) server_thread);
+    // Join other threads
+    watcher_thread.join();
+    server_thread.join();
 }
 
-void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, photon::condition_variable* cond) {
+void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, AlignedAlloc& alloc,
+                       photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg) {
     auto handler = [&](photon::net::ISocketStream* arg) -> int {
-        char buf[1024];
+        void* buf = alloc.alloc(1024);
         auto sock = (photon::net::ISocketStream*) arg;
 
         // read is a wrapper for fully recv
@@ -124,16 +136,24 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
             LOG_ERRNO_RETURN(0, -1, "failed to read socket");
         }
 
-        // IOVector is a helper class for manipulate io-vectors.
+        // IOVector is a helper class to manipulate io-vectors, taking the buf as underlying buffer
         IOVector iov;
         iov.push_back(buf, 512);
-        iov.push_back(buf + 512, 512);
+        iov.push_back((char*) buf + 512, 512);
 
         // This is a demo about how to use the io-vector interface. Even though some io engines
         // may not have the writev method, Photon's IFile encapsulation would make it compatible.
+        // Note all the IOs in Photon are non-blocking.
         ssize_t written = file->writev(iov.iovec(), iov.iovcnt());
         if (written != (ssize_t) iov.sum()) {
             LOG_ERRNO_RETURN(0, -1, "failed to write file");
+        }
+
+        // Got message. Notify the watcher
+        {
+            photon::std::lock_guard<photon::std::mutex> lock(mu);
+            got_msg = true;
+            cv.notify_one();
         }
         return 0;
     };
@@ -145,12 +165,4 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
     // than other systems using snprintf. The ` is a generic placeholder.
     LOG_INFO("Server is listening for port ` ...", 9527);
     server->start_loop(false);
-
-    // Notify outside main function to continue.
-    cond->notify_one();
-
-    photon::thread_sleep(-1);
-    // This Photon thread will here sleep forever, until been interrupted by `photon::thread_interrupt`.
-    // Note that the underlying vcpu won't be blocked. It's basically a context switch.
-    LOG_INFO("Server stopped");
 }

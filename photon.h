@@ -22,6 +22,7 @@ namespace photon {
 
 #define SHIFT(n) (1 << n)
 
+const uint64_t INIT_EVENT_NONE = 0;
 const uint64_t INIT_EVENT_EPOLL = SHIFT(0);
 const uint64_t INIT_EVENT_IOURING = SHIFT(1);
 const uint64_t INIT_EVENT_SELECT = SHIFT(2);
@@ -30,6 +31,7 @@ const uint64_t INIT_EVENT_IOCP = SHIFT(4);
 const uint64_t INIT_EVENT_SIGNALFD = SHIFT(10);
 const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_EPOLL | INIT_EVENT_SIGNALFD;
 
+const uint64_t INIT_IO_NONE = 0;
 const uint64_t INIT_IO_LIBAIO = SHIFT(0);
 const uint64_t INIT_IO_LIBCURL = SHIFT(1);
 const uint64_t INIT_IO_SOCKET_EDGE_TRIGGER = SHIFT(2);
