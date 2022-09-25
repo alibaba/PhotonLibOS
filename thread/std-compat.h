@@ -38,9 +38,14 @@ void __throw_system_error(int err_num, const char* msg);
 template<typename Rep, typename Period>
 inline uint64_t __duration_to_microseconds(const ::std::chrono::duration<Rep, Period>& d) {
     using namespace ::std::chrono;
-    if (d < d.zero()) {
+    // Don't use the evil duration::max() and duration::min(). Use fixed number as a boundary.
+    static constexpr auto MAX_DURATION = hours(24UL * 365 * 100);
+    static constexpr auto MIN_DURATION = microseconds(1);
+    if (d <= d.zero()) {
         return 0;
-    } else if (d > microseconds::max()) {
+    } else if (d < MIN_DURATION) {
+        return 1;
+    } else if (d > MAX_DURATION) {
         return -1;
     } else {
         return duration_cast<microseconds>(d).count();
@@ -125,7 +130,7 @@ public:
     template<class Rep, class Period>
     bool try_lock_for(const ::std::chrono::duration<Rep, Period>& d) {
         uint64_t timeout = __duration_to_microseconds(d);
-        return lock(timeout) != 0;
+        return lock(timeout) == 0;
     }
 
     template<class Clock, class Duration>
@@ -268,12 +273,7 @@ public:
 
     template<class Rep, class Period>
     cv_status wait_for(unique_lock<mutex>& lock, const ::std::chrono::duration<Rep, Period>& d) {
-        uint64_t timeout = __duration_to_microseconds(d);
-        if (timeout == 0) {
-            return cv_status::timeout;
-        }
-        int ret = photon::condition_variable::wait(lock.mutex(), timeout);
-        return ret == 0 ? cv_status::no_timeout : cv_status::timeout;
+        return wait_until(lock, ::std::chrono::steady_clock::now() + d);
     }
 
     template<class Rep, class Period, class Predicate>
@@ -284,7 +284,16 @@ public:
 
     template<class Clock, class Duration>
     cv_status wait_until(unique_lock<mutex>& lock, const ::std::chrono::time_point<Clock, Duration>& t) {
-        return wait_for(lock, t - Clock::now());
+        auto d = t - ::std::chrono::steady_clock::now();
+        uint64_t timeout = __duration_to_microseconds(d);
+        int ret = photon::condition_variable::wait(lock.mutex(), timeout);
+        if (ret == 0)
+            return cv_status::no_timeout;
+        // We got a timeout when measured against photon's internal clock,
+        // but we need to check against the caller-supplied clock to tell whether we should return a timeout.
+        if (Clock::now() < t)
+            return cv_status::no_timeout;
+        return cv_status::timeout;
     }
 
     template<class Clock, class Duration, class Predicate>
@@ -296,7 +305,6 @@ public:
         }
         return true;
     }
-
 };
 
 namespace this_thread {

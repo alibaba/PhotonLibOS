@@ -46,9 +46,7 @@ and prepared to wrap them into the framework. It is a real killer in the low lev
 
 ### 1. IO
 
-Compare *Photon* with *fio* when reading an 3.5TB NVMe raw device.
-
-Note that fio only enables 1 job (process).
+Compare Photon with fio when reading an 3.5TB NVMe raw device.
 
 <details><summary>Results</summary><p>
 
@@ -58,6 +56,8 @@ Note that fio only enables 1 job (process).
 | Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 346K |   1.38GB   |   100%   |
 |  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K |   1.11GB   |   100%   |
 
+Note that fio only enables 1 job (process).
+
 </p></details>
 
 Conclusion: Photon is faster than fio under this circumstance.
@@ -66,37 +66,38 @@ Conclusion: Photon is faster than fio under this circumstance.
 
 #### 2.1 TCP
 
-Compare *Photon* with other *libs / languages frameworks* with regard to TCP echo server performance, in descending order.
+Compare Photon with other libs / languages frameworks in regard to TCP echo server performance, in descending order.
 
 Client Mode: Streaming
 
-|                                                                       |     Concurrency Model     | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
-|:---------------------------------------------------------------------:|:-------------------------:|:-----------:|:--------:|:-----:|:---------:|:--------:|
-|                                Photon                                 |    Stackful coroutine     |  512 Bytes  |    4     | 1604K |  6.12Gb   |   99%    |
-|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |    Stackful coroutine     |  512 Bytes  |    4     | 1545K |  5.89Gb   |   99%    |
-|                    Rust [tokio](https://tokio.rs/)                    |      Rust coroutine       |  512 Bytes  |    4     | 1384K |  5.28Gb   |   98%    |
-| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |    Stackful coroutine     |  512 Bytes  |    4     | 1240K |  4.73Gb   |   94%    |
-|                                  Go                                   |         Goroutine         |  512 Bytes  |    4     | 1083K |  4.13Gb   |   100%   |
-|              [libgo](https://github.com/yyzybb537/libgo)              |    Stackful coroutine     |  512 Bytes  |    4     | 770K  |  2.94Gb   |   99%    |
-|             [boost::asio](https://think-async.com/Asio/)              |     Async + Callback      |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
-|               [libco](https://github.com/Tencent/libco)               |    Stackful coroutine     |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
-|              [zab](https://github.com/Donald-Rupin/zab)               | C++20 stackless coroutine |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
-|             [asyncio](https://github.com/netcan/asyncio)              | C++20 stackless coroutine |  512 Bytes  |    4     | 163K  |  0.60Gb   |   98%    |
+|                                                                       | Language / Concurrency Model | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
+|:---------------------------------------------------------------------:|:----------------------------:|:-----------:|:--------:|:-----:|:---------:|:--------:|
+|                                Photon                                 |        C++ / Stackful        |  512 Bytes  |    4     | 1604K |  6.12Gb   |   99%    |
+|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |        C++ / Stackful        |  512 Bytes  |    4     | 1545K |  5.89Gb   |   99%    |
+|                      [tokio](https://tokio.rs/)                       |       Rust / Stackless       |  512 Bytes  |    4     | 1384K |  5.28Gb   |   98%    |
+| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |        C++ / Stackful        |  512 Bytes  |    4     | 1240K |  4.73Gb   |   94%    |
+|                                  Go                                   |      Golang / Stackful       |  512 Bytes  |    4     | 1083K |  4.13Gb   |   100%   |
+|              [libgo](https://github.com/yyzybb537/libgo)              |        C++ / Stackful        |  512 Bytes  |    4     | 770K  |  2.94Gb   |   99%    |
+|             [boost::asio](https://think-async.com/Asio/)              |     C++ / Async Callback     |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
+|               [libco](https://github.com/Tencent/libco)               |        C++ / Stackful        |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
+|              [zab](https://github.com/Donald-Rupin/zab)               |      C++20 / Stackless       |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
+|             [asyncio](https://github.com/netcan/asyncio)              |      C++20 / Stackless       |  512 Bytes  |    4     | 163K  |  0.60Gb   |   98%    |
 
 Client Mode: Ping-pong
 
-|                                                                       |     Concurrency Model     | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
-|:---------------------------------------------------------------------:|:-------------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
-|                                Photon                                 |    Stackful coroutine     |  512 Bytes  |   1000   | 412K |  1.57Gb   |   100%   |
-|             [boost::asio](https://think-async.com/Asio/)              |     Async + Callback      |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
-|                    Rust [tokio](https://tokio.rs/)                    |      Rust coroutine       |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
-|                                  Go                                   |         Goroutine         |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
-| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |    Stackful coroutine     |  512 Bytes  |   1000   | 327K |  1.25Gb   |   100%   |
-|              [zab](https://github.com/Donald-Rupin/zab)               | C++20 stackless coroutine |  512 Bytes  |   1000   | 317K |  1.21Gb   |   100%   |
-|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |    Stackful coroutine     |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
-|               [libco](https://github.com/Tencent/libco)               |    Stackful coroutine     |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
-|              [libgo](https://github.com/yyzybb537/libgo)              |    Stackful coroutine     |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
-|             [asyncio](https://github.com/netcan/asyncio)              | C++20 stackless coroutine |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
+|                                                                       | Language / Concurrency Model | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
+|:---------------------------------------------------------------------:|:----------------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
+|                                Photon                                 |        C++ / Stackful        |  512 Bytes  |   1000   | 412K |  1.57Gb   |   100%   |
+|             [boost::asio](https://think-async.com/Asio/)              |     C++ / Async Callback     |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
+|                      [tokio](https://tokio.rs/)                       |       Rust / Stackless       |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
+|                                  Go                                   |      Golang / Stackful       |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
+| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |        C++ / Stackful        |  512 Bytes  |   1000   | 327K |  1.25Gb   |   100%   |
+|            [swoole](https://github.com/swoole/swoole-src)             |        PHP / Stackful        |  512 Bytes  |   1000   | 325K |  1.24Gb   |   99%    |
+|              [zab](https://github.com/Donald-Rupin/zab)               |      C++20 / Stackless       |  512 Bytes  |   1000   | 317K |  1.21Gb   |   100%   |
+|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |        C++ / Stackful        |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
+|               [libco](https://github.com/Tencent/libco)               |        C++ / Stackful        |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
+|              [libgo](https://github.com/yyzybb537/libgo)              |        C++ / Stackful        |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
+|             [asyncio](https://github.com/netcan/asyncio)              |      C++20 / Stackless       |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
 
 <details><summary>Note</summary><p>
 
@@ -115,14 +116,14 @@ Conclusion: Photon socket has the best per-core QPS.
 
 Compare Photon and Nginx when serving static files, using Apache Bench(ab) as client.
 
-Note that Nginx only enables 1 worker (process).
-
 <details><summary>Results</summary><p>
 
 |        | File Size | QPS  | CPU util |
 |:------:|:---------:|:----:|:--------:|
 | Photon |    4KB    | 114K |   100%   |
 | Nginx  |    4KB    | 97K  |   100%   |
+
+Note that Nginx only enables 1 worker (process).
 
 </p></details>
 
