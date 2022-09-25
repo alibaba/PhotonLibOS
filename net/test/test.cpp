@@ -469,6 +469,28 @@ TEST(Socket, faults) {
     EXPECT_EQ(nullptr, ts);
 }
 
+void test_server_start_and_terminate(bool blocking) {
+    auto server = net::new_tcp_socket_server();
+    DEFER(delete server);
+    auto th = photon::thread_create11([&]{
+        server->bind();
+        server->listen();
+        server->start_loop(blocking);
+    });
+    photon::thread_enable_join(th);
+    photon::thread_usleep(200'000);
+    server->terminate();
+    photon::thread_join((photon::join_handle*) th);
+}
+
+TEST(TCPServer, start_and_terminate_blocking) {
+    test_server_start_and_terminate(true);
+}
+
+TEST(TCPServer, start_and_terminate_nonblocking) {
+    test_server_start_and_terminate(false);
+}
+
 TEST(TCPServer, listen_twice) {
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);

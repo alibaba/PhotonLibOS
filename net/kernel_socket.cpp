@@ -299,6 +299,7 @@ public:
 
     int start_loop(bool block) override {
         if (workth) LOG_ERROR_RETURN(EALREADY, -1, "Already listening");
+        m_block = block;
         if (block) return accept_loop();
         auto loop = &KernelSocketServer::accept_loop;
         auto th = thread_create((thread_entry&)loop, this);
@@ -308,13 +309,13 @@ public:
     }
 
     void terminate() override {
-        if (workth) {
-            auto th = workth;
-            workth = nullptr;
-            if (waiting) {
-                thread_interrupt(th);
+        if (!workth) return;
+        auto th = workth;
+        workth = nullptr;
+        if (waiting) {
+            thread_interrupt(th);
+            if (!m_block)
                 thread_join((join_handle*)th);
-            }
         }
     }
 
@@ -392,6 +393,7 @@ protected:
 
     Handler m_handler;
     photon::thread* workth = nullptr;
+    bool m_block = false;
     bool waiting = false;
     int m_listen_fd = -1;
 
@@ -431,6 +433,7 @@ protected:
             if (sess) {
                 photon::thread_create11(&KernelSocketServer::handler, m_handler, sess);
             } else {
+                LOG_WARN("KernelSocketServer: failed to accept new connections");
                 photon::thread_usleep(1000);
             }
         }

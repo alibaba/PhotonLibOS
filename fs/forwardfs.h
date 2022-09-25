@@ -20,11 +20,12 @@ limitations under the License.
 namespace photon {
 namespace fs
 {
-    class ForwardFile : public IFile
+    template<class IFileBase>
+    class ForwardFileBase : public IFileBase
     {
     protected:
-        IFile* m_file;
-        ForwardFile(IFile* file)
+        IFileBase* m_file;
+        ForwardFileBase(IFileBase* file)
         {
             m_file = file;
         }
@@ -155,28 +156,33 @@ namespace fs
             return m_file->vioctl(request, args);
         }
     };
-    class ForwardFile_Ownership : public ForwardFile
+    template<class IFileBase>
+    class ForwardFileBase_Ownership : public ForwardFileBase<IFileBase>
     {
     protected:
         bool m_ownership;
-        ForwardFile_Ownership(IFile* file, bool ownership) : ForwardFile(file)
+        ForwardFileBase_Ownership(IFileBase* file, bool ownership) : ForwardFileBase<IFileBase>(file)
         {
             m_ownership = ownership;
         }
-        virtual ~ForwardFile_Ownership() override
+        virtual ~ForwardFileBase_Ownership() override
         {
-            if (m_ownership) delete m_file;
+            if (m_ownership) delete this->m_file;
         }
         virtual int close() override
         {
-            return m_ownership ? m_file->close() : 0;
+            return m_ownership ? this->m_file->close() : 0;
         }
     };
-    class ForwardFS : public IFileSystem
+    using ForwardFile = ForwardFileBase<IFile>;
+    using ForwardFile_Ownership = ForwardFileBase_Ownership<IFile>;
+
+    template<class IFileSystemBase>
+    class ForwardFSBase : public IFileSystemBase
     {
     protected:
-        IFileSystem* m_fs;
-        ForwardFS(IFileSystem* fs)
+        IFileSystemBase* m_fs;
+        ForwardFSBase(IFileSystemBase* fs)
         {
             m_fs = fs;
         }
@@ -299,18 +305,21 @@ namespace fs
         }
         */
     };
-    class ForwardFS_Ownership : public ForwardFS
+    template<class IFileSystemBase>
+    class ForwardFSBase_Ownership : public ForwardFSBase<IFileSystemBase>
     {
     protected:
         bool m_ownership;
-        ForwardFS_Ownership(IFileSystem* fs, bool ownership) : ForwardFS(fs)
+        ForwardFSBase_Ownership(IFileSystemBase* fs, bool ownership) : ForwardFSBase<IFileSystemBase>(fs)
         {
             m_ownership = ownership;
         }
-        virtual ~ForwardFS_Ownership() override
+        virtual ~ForwardFSBase_Ownership() override
         {
-            if (m_ownership) delete m_fs;
+            if (m_ownership) delete this->m_fs;
         }
     };
+    using ForwardFS = ForwardFSBase<IFileSystem>;
+    using ForwardFS_Ownership = ForwardFSBase_Ownership<IFileSystem>;
 }
 }

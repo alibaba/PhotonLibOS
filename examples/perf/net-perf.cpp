@@ -169,7 +169,7 @@ static int echo_server() {
     // Create a work pool if enabling multi-vcpu scheduling
     photon::WorkPool* work_pool = nullptr;
     if (FLAGS_vcpu_num > 1) {
-        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_IOURING, 0);
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE);
     }
     DEFER(delete work_pool);
 
@@ -240,10 +240,9 @@ int main(int argc, char** arg) {
 
     // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
     // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
-    //
-    // If you have trouble upgrading the kernel, please switch the event_engine argument
-    // from `photon::INIT_EVENT_IOURING` to `photon::INIT_EVENT_EPOLL`.
-    int ret = photon::init(photon::INIT_EVENT_IOURING | photon::INIT_EVENT_SIGNALFD, 0);
+    // If you are willing to use io_uring, please switch the event_engine argument from `photon::INIT_EVENT_EPOLL`
+    // to `photon::INIT_EVENT_IOURING`.
+    int ret = photon::init(photon::INIT_EVENT_EPOLL | photon::INIT_EVENT_SIGNALFD, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
