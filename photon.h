@@ -28,15 +28,20 @@ const uint64_t INIT_EVENT_IOURING = SHIFT(1);
 const uint64_t INIT_EVENT_SELECT = SHIFT(2);
 const uint64_t INIT_EVENT_KQUEUE = SHIFT(3);
 const uint64_t INIT_EVENT_IOCP = SHIFT(4);
-const uint64_t INIT_EVENT_SIGNALFD = SHIFT(10);
-const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_EPOLL | INIT_EVENT_SIGNALFD;
+const uint64_t INIT_EVENT_SIGNAL = SHIFT(10);
 
 const uint64_t INIT_IO_NONE = 0;
 const uint64_t INIT_IO_LIBAIO = SHIFT(0);
 const uint64_t INIT_IO_LIBCURL = SHIFT(1);
 const uint64_t INIT_IO_SOCKET_EDGE_TRIGGER = SHIFT(2);
 const uint64_t INIT_IO_EXPORTFS = SHIFT(10);
+#if __APPLE__
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_KQUEUE;
+const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBCURL;
+#else
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_EPOLL;
 const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBAIO | INIT_IO_LIBCURL;
+#endif
 
 #undef SHIFT
 
@@ -45,7 +50,8 @@ const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBAIO | INIT_IO_LIBCURL;
  *        Ancillary threads will be running in background.
  * @return 0 for success
  */
-int init(uint64_t event_engine = INIT_EVENT_DEFAULT, uint64_t io_engine = INIT_IO_DEFAULT);
+int init(uint64_t event_engine = INIT_EVENT_DEFAULT | INIT_EVENT_SIGNAL,
+         uint64_t io_engine = INIT_IO_DEFAULT);
 
 /**
  * @brief Destroy/join ancillary threads, and finish the main thread.

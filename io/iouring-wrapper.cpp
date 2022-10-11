@@ -29,6 +29,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
 #include <photon/io/fd-events.h>
+#include "events_map.h"
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

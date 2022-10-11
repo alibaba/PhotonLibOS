@@ -580,6 +580,10 @@ namespace fs
         {
             return PERFORM(statvfs, path, buf);
         }
+        virtual int utime(const char *path, const struct utimbuf *file_times) override
+        {
+            return PERFORM(utime, path, file_times);
+        }
     };
 
     template<typename UIF, typename Performer, typename...Timeout>

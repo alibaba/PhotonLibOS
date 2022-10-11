@@ -27,6 +27,9 @@ limitations under the License.
 #include <photon/common/object.h>
 
 struct LogBuffer;
+LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
+LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
+LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
 namespace photon {
 namespace net
 {
@@ -98,9 +101,6 @@ namespace net
     // operators to help with logging IP addresses
     LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
     LogBuffer& operator << (LogBuffer& log, const EndPoint ep);
-    LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
-    LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
-    LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
 
     class ISocketBase {
     public:
@@ -186,13 +186,13 @@ namespace net
 
     extern "C" ISocketClient* new_tcp_socket_client();
     extern "C" ISocketServer* new_tcp_socket_server();
-    extern "C" ISocketServer* new_zerocopy_tcp_server();
-    extern "C" ISocketClient* new_iouring_tcp_client();
-    extern "C" ISocketServer* new_iouring_tcp_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration=-1UL);
 
+    extern "C" ISocketServer* new_zerocopy_tcp_server();
+    extern "C" ISocketClient* new_iouring_tcp_client();
+    extern "C" ISocketServer* new_iouring_tcp_server();
     extern "C" int et_poller_init();
     extern "C" int et_poller_fini();
     extern "C" ISocketClient* new_et_tcp_socket_client();

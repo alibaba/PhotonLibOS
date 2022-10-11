@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <stdlib.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <photon/common/iovector.h>
 #include "filesystem.h"
 #include "forwardfs.h"

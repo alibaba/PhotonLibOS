@@ -19,7 +19,7 @@ limitations under the License.
 
 namespace photon
 {
-    extern uint64_t now;
+    extern volatile uint64_t now;
 }
 
 class Timeout

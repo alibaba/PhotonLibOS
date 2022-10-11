@@ -422,7 +422,7 @@ int main(int argc, char** arg) {
     default_audit_logger.log_output = log_output_stdout;
     set_log_output_level(ALOG_INFO);
 
-    photon::thread_init();
+    photon::vcpu_init();
 
     if (FLAGS_vcpus <= 1) {
         return RUN_ALL_TESTS();
@@ -431,17 +431,17 @@ int main(int argc, char** arg) {
     std::vector<std::thread> ths;
     for (int i = 1; i <= FLAGS_vcpus; i++) {
         ths.emplace_back([i] {
-            photon::thread_init();
+            photon::vcpu_init();
             set_log_output_level(ALOG_INFO);
             run_all_tests(i);
-            photon::thread_fini();
+            photon::vcpu_fini();
         });
     }
 
     for (auto &x : ths) x.join();
 
     wait_for_completion(0);
-    while (photon::thread_fini() != 0) {
+    while (photon::vcpu_fini() != 0) {
         LOG_DEBUG("wait for other vCPU(s) to end");
         ::usleep(1000 * 1000);
     }

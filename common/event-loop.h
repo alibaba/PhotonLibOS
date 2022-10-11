@@ -19,7 +19,7 @@ limitations under the License.
 #include <photon/common/object.h>
 
 namespace photon {
-class thread;
+struct thread;
 };
 
 class EventLoop : public Object {

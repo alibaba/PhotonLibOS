@@ -1543,8 +1543,8 @@ void* objcache(void* arg) {
 }
 
 TEST(ObjectCache, release_cycle) {
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -1568,8 +1568,8 @@ TEST(ObjectCache, release_cycle) {
 
 TEST(ObjectCache, timeout_refresh) {
     release_cnt = 0;
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
@@ -1595,8 +1595,8 @@ void* ph_act(void* arg) {
 
 TEST(ObjectCache, ctor_may_yield_and_null) {
     release_cnt = 0;
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
@@ -1614,8 +1614,8 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
 }
 
 TEST(ObjectCache, multithread) {
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -1625,8 +1625,8 @@ TEST(ObjectCache, multithread) {
     std::vector<std::thread> ths;
     for (int i = 0; i < 10; i++) {
         ths.emplace_back([&] {
-            photon::thread_init();
-            DEFER(photon::thread_fini());
+            photon::vcpu_init();
+            DEFER(photon::vcpu_fini());
             std::vector<photon::join_handle*> handles;
             std::vector<OCArg> args;
             for (int i = 0; i < 100; i++) {
@@ -1682,8 +1682,8 @@ TEST(ObjectCache, borrow) {
     std::vector<std::thread> ths;
     for (int i = 0; i < 10; i++) {
         ths.emplace_back([&] {
-            photon::thread_init();
-            DEFER(photon::thread_fini());
+            photon::vcpu_init();
+            DEFER(photon::vcpu_fini());
             std::vector<photon::join_handle*> handles;
             std::vector<OCArg> args;
             for (int i = 0; i < 100; i++) {
@@ -1706,8 +1706,8 @@ TEST(ObjectCache, borrow) {
 }
 
 TEST(ExpireContainer, expire_container) {
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     char key2[10] = "hello";
     ExpireContainer<std::string, int, bool> expire(1000*1000); // expire in 100ms
@@ -1747,8 +1747,8 @@ TEST(ExpireContainer, refresh) {
 }
 
 TEST(ExpireList, expire_container) {
-    // photon::thread_init();
-    // DEFER(photon::thread_fini());
+    // photon::vcpu_init();
+    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     ExpireList<std::string> expire(1000*1000); // expire in 100ms
     expire.keep_alive(key, true);
@@ -1866,8 +1866,8 @@ TEST(ALog, log_audit) {
 // #endif
 int main(int argc, char **argv)
 {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     char a[100]{}, b[100]{};
     memset(a, 1, sizeof(a));
     memcpy(b, a, sizeof(a));

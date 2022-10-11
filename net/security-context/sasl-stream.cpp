@@ -22,8 +22,6 @@ limitations under the License.
 
 #include "../base_socket.h"
 
-#include <error.h>
-
 namespace photon {
 namespace net {
 

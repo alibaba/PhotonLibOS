@@ -20,10 +20,9 @@ limitations under the License.
 #include <string>
 #include <fcntl.h>
 #include <sys/statvfs.h>
-#include <sys/vfs.h>
 #include <queue>
 #include <photon/thread/thread11.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/io/fd-events.h>
@@ -45,6 +44,10 @@ limitations under the License.
 #include <boost/beast/core/static_buffer.hpp>
 #include <boost/beast/http/error.hpp>
 #include <boost/beast/http/read.hpp>
+
+#ifndef MSG_MORE
+# define MSG_MORE 0
+#endif
 
 namespace photon {
 namespace net {
@@ -576,8 +579,8 @@ public:
         status = Status::stopping;
         for (auto it : connection_map) {
             it.second->shutdown(ShutdownHow::ReadWrite);
-            connection_map.erase(it.first);
         }
+        connection_map.clear();
         while (working_thread_cnt != 0) {
             photon::thread_usleep(50 * 1000);
         }

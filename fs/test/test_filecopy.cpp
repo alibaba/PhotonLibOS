@@ -42,7 +42,10 @@ TEST(filecopy, simple_localfile_copy) {
     EXPECT_EQ(0, WEXITSTATUS(ret));
 }
 
+#ifdef __linux__
 TEST(filecopy, libaio_localfile_copy) {
+    photon::libaio_wrapper_init();
+    DEFER(photon::libaio_wrapper_fini());
     auto fs = fs::new_localfs_adaptor("/tmp", fs::ioengine_libaio);
     auto f1 = fs->open("test_filecopy_src", O_RDONLY);
     auto f2 = fs->open("test_filecopy_dst2", O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -54,14 +57,13 @@ TEST(filecopy, libaio_localfile_copy) {
     ret = system("diff -b /tmp/test_filecopy_src /tmp/test_filecopy_dst2");
     EXPECT_EQ(0, WEXITSTATUS(ret));
 }
+#endif
 
 int main(int argc, char **argv) {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     photon::fd_events_init();
     DEFER(photon::fd_events_fini());
-    photon::libaio_wrapper_init();
-    DEFER(photon::libaio_wrapper_fini());
 
     ::testing::InitGoogleTest(&argc, argv);
     // 500 * 4100, make sure it have no aligned file length

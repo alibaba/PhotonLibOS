@@ -441,6 +441,10 @@ namespace fs
         {
             PERFORM(OPID_TRUNCATE, m_fs->truncate(path, length));
         }
+        OVERRIDE_ASYNC(int, utime, const char *path, const struct utimbuf *file_times)
+        {
+            PERFORM(OPID_UTIME, m_fs->utime(path, file_times));
+        }
         OVERRIDE_ASYNC0(int, syncfs)
         {
             PERFORM(OPID_SYNCFS, m_fs->syncfs());

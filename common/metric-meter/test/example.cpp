@@ -46,8 +46,8 @@ uint64_t print(void*) {
 }
 
 int main() {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     photon::Timer printer(1UL * 100 * 1000, {print, nullptr});
     table.maxv.interval(1000UL * 1000);
     table.pread_latency.interval(1000UL * 1000);

@@ -217,7 +217,7 @@ int test_aio(const char* fn, bool is_posix)
 
 int main(int argc, char** arg)
 {
-    photon::thread_init();
+    photon::vcpu_init();
     ::testing::InitGoogleTest(&argc, arg);
 
     int ret = fd_events_init();

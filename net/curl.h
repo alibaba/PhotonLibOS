@@ -48,7 +48,7 @@ inline void convert(const std::string& v, uint64_t& value) {
     value = std::atoll(v.c_str());
 }
 
-inline void convert(const std::string& v, int64_t& value) {
+inline void convert(const std::string& v, ssize_t& value) {
     value = std::atoll(v.c_str());
 }
 
@@ -277,7 +277,8 @@ public:
         char range[128];
         // seems like llu refer long long unsigned int, uint64_t refers to long
         // unsigned int, so %lu should be good without warning
-        snprintf(range, sizeof(range), "%lu-%lu", start, end);
+        snprintf(range, sizeof(range), "%llu-%llu", (long long unsigned)start,
+                 (long long unsigned)end);   // for compatiblity on macOS
         return setopt(CURLOPT_RANGE, range);
     }
     cURL& set_cafile(const char* cafile) {

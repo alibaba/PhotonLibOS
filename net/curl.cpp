@@ -32,7 +32,6 @@ limitations under the License.
 namespace photon {
 namespace net {
 static constexpr int poll_size = 16;
-static constexpr int EOK = ENXIO;
 
 class cURLLoop;
 struct CurlThCtx {
@@ -210,7 +209,7 @@ void __OpenSSLGlobalInit();
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
-        cctx.g_poller = photon::new_epoll_cascading_engine();
+        cctx.g_poller = photon::new_default_cascading_engine();
         cctx.g_loop = new cURLLoop();
         cctx.g_loop->start();
         cctx.g_timer =

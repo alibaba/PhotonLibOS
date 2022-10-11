@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "thread-pool.h"
+#include "thread-key.h"
 #include "../common/alog.h"
 
 namespace photon
@@ -42,8 +43,9 @@ namespace photon
 
             if (ctrl.start == &stub)
                 break;
-            thread_set_local(nullptr);
+            ((partial_thread*) CURRENT)->tls = nullptr;
             ctrl.start(ctrl.arg);
+            deallocate_tls();
             if (ctrl.joining) {
                 assert(ctrl.joinable);
                 ctrl.cvar.notify_all();

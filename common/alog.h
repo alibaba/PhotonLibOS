@@ -467,7 +467,7 @@ struct LogBuilder {
             }                                                            \
         };                                                               \
         LogBuilder<decltype(__build_lambda__)>(                          \
-            level, std::move(__build_lambda__), &logger);                \
+            level, ::std::move(__build_lambda__), &logger);                \
     })
 
 #define LOG_DEBUG(...) (__LOG__(default_logger, ALOG_DEBUG, __VA_ARGS__))

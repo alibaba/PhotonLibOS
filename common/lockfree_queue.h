@@ -105,9 +105,25 @@ public:
     alignas(CACHELINE_SIZE) std::atomic<size_t> tail{0};
     alignas(CACHELINE_SIZE) std::atomic<size_t> head{0};
 
-    bool empty() { return check_empty(head, tail); }
+    bool empty() {
+        return check_empty(head.load(std::memory_order_relaxed),
+                           tail.load(std::memory_order_relaxed));
+    }
 
-    bool full() { return check_full(head, tail); }
+    bool full() {
+        return check_full(head.load(std::memory_order_relaxed),
+                          tail.load(std::memory_order_relaxed));
+    }
+
+    size_t read_available() const {
+        return tail.load(std::memory_order_relaxed) -
+               head.load(std::memory_order_relaxed);
+    }
+
+    size_t write_available() const {
+        return head.load(std::memory_order_relaxed) + capacity -
+               tail.load(std::memory_order_relaxed);
+    }
 
 protected:
     bool check_mask_equal(size_t x, size_t y) const {

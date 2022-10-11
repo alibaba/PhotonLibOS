@@ -27,6 +27,7 @@ limitations under the License.
 #include "mock.h"
 #include <atomic>
 #include <thread>
+#include <utime.h>
 
 using namespace photon;
 using namespace photon::fs;
@@ -91,13 +92,13 @@ int callbackvoid(void*, AsyncResult<void>* ret) {
     }
 
 TEST(ExportFS, basic) {
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     exportfs_init();
     DEFER({
         exportfs_fini();
         photon::fd_events_fini();
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile();
     PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
@@ -183,6 +184,7 @@ TEST(ExportFS, basic) {
     EXPECT_CALL(*mockfs, lstat(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, access(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, truncate(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, utime(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, syncfs()).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, opendir(_)).Times(AtLeast(1)).WillRepeatedly(Return(pad_magic));
 
@@ -205,6 +207,8 @@ TEST(ExportFS, basic) {
     CALL_TEST(fs, lstat, cbint, "", nullptr);
     CALL_TEST(fs, access, cbint, "", 0);
     CALL_TEST(fs, truncate, cbint, "", 0);
+    struct utimbuf ut = {0, 0};
+    CALL_TEST(fs, utime, cbint, "", &ut);
     CALL_TEST0(fs, syncfs, cbint);
     CALL_TEST(fs, opendir, cbad, "");
 
@@ -242,7 +246,7 @@ TEST(ExportFS, init_fini_failed_situation) {
     auto ret = exportfs_fini();
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ENOSYS, errno);
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     ret = exportfs_init();
     EXPECT_EQ(0, ret);
@@ -252,7 +256,7 @@ TEST(ExportFS, init_fini_failed_situation) {
     ret = exportfs_fini();
     EXPECT_EQ(0, ret);
     photon::fd_events_fini();
-    // photon::thread_fini();
+    // photon::vcpu_fini();
 }
 
 TEST(ExportFS, op_failed_situation) {
@@ -261,13 +265,13 @@ TEST(ExportFS, op_failed_situation) {
     DEFER({
         log_output = _o_output;
     });
-    // photon::thread_init();
+    // photon::vcpu_init();
     photon::fd_events_init();
     exportfs_init();
     DEFER({
         exportfs_fini();
         photon::fd_events_fini();
-        // photon::thread_fini();
+        // photon::vcpu_fini();
     });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile;
     errno = 0;
@@ -290,13 +294,13 @@ TEST(ExportFS, op_failed_situation) {
 }
 
 TEST(ExportFS, xattr) {
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     exportfs_init();
     DEFER({
         exportfs_fini();
         photon::fd_events_fini();
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile();
     PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
@@ -358,13 +362,13 @@ TEST(ExportFS, xattr_sync) {
     IFileSystemXAttr* fs = nullptr;
 
     std::thread th([&]{
-        photon::thread_init();
+        photon::vcpu_init();
         photon::fd_events_init();
         exportfs_init();
         DEFER({
             exportfs_fini();
             photon::fd_events_fini();
-            photon::thread_fini();
+            photon::vcpu_fini();
         });
         file = dynamic_cast<IFileXAttr*>(export_as_sync_file(mockfile));
         fs = dynamic_cast<IFileSystemXAttr*>(export_as_sync_fs(mockfs));
@@ -412,8 +416,8 @@ TEST(ExportFS, xattr_sync) {
 
 int main(int argc, char **argv)
 {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);
     int ret = RUN_ALL_TESTS();
     LOG_ERROR_RETURN(0, ret, VALUE(ret));

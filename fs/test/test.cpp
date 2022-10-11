@@ -32,7 +32,9 @@ limitations under the License.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <gtest/gtest-spi.h>
+#ifdef __linux__
 #include <malloc.h>
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #include <ctime>
@@ -93,18 +95,18 @@ TEST(Path, split)
         Path path(p);
         vector<string> sp;
         for (auto x: path)
-            sp.push_back(x.to_string());
+            sp.push_back(std::string(x));
         EXPECT_EQ(sp, *it);
         ++it;
 
         sp.clear();
         for (auto x: path.directory())
-            sp.push_back(x.to_string());
+            sp.push_back(std::string(x));
         EXPECT_EQ(sp, *itd);
         ++itd;
 
         for (auto it = path.begin(); it!=path.end(); ++it)
-            cout << it->to_string() << ", ";
+            cout << *it << ", ";
         cout << endl;
     }
 }
@@ -498,6 +500,10 @@ namespace fs
         {
             callback_umimplemented(done);
         }
+        OVERRIDE_ASYNC(int, utime, const char *path, const struct utimbuf *file_times)
+        {
+            callback_umimplemented(done);
+        }
         OVERRIDE_ASYNC0(int, syncfs)
         {
             callback_umimplemented(done);
@@ -683,6 +689,7 @@ TEST(AsyncFS, Timeout)
     // fd_events_fini();
 }
 
+#if defined(__linux__)
 // Mock a failed memory allocation test case
 #if !__GLIBC_PREREQ(2, 34)
 void (*old_free)(void *ptr, const void *caller);
@@ -715,6 +722,7 @@ void my_free(void *ptr, const void *caller) {
     free(ptr);
 }
 #endif
+#endif // defined(__linux__)
 
 TEST(range_split, sub_range)
 {
@@ -881,7 +889,7 @@ TEST(range_split_vi, basic) {
     EXPECT_FALSE(split.ascending(kpfail, 7));
     EXPECT_DEATH(
         not_ascend_death(),
-        ".*fs::range_split_vi::range_split_vi.*"
+        ".*range-split-vi.h.*"
     );
 }
 
@@ -1161,6 +1169,7 @@ TEST(XFile, error_stiuation) {
     xf = new_stripe_file(1025, lf, 2, false);
     EXPECT_EQ(nullptr, xf);
 
+#if defined(__linux__)
 #if !__GLIBC_PREREQ(2, 34)
     init_hook();
     malloc_hook();
@@ -1168,6 +1177,7 @@ TEST(XFile, error_stiuation) {
     malloc_unhook();
     EXPECT_EQ(nullptr, rtp);
 #endif
+#endif // defined(__linux__)
 }
 
 void fill_random_buff(char * buff, size_t length) {
@@ -1271,8 +1281,8 @@ TEST(AlignedFileAdaptor, err_situation) {
 }
 
 TEST(range_split_vi, special_case) {
-    auto offset = 10601376;
-    auto len = 2256;
+    uint64_t offset = 10601376;
+    uint64_t len = 2256;
     vector<uint64_t> kp{0, offset, offset+len, UINT64_MAX};
     range_split split(10601376, 2256, 4096);
     ASSERT_TRUE(split.small_note);
@@ -1346,11 +1356,11 @@ TEST(Walker, basic) {
 int main(int argc, char **argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     DEFER({
         photon::fd_events_fini();
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     int ret = RUN_ALL_TESTS();
     LOG_ERROR_RETURN(0, ret, VALUE(ret));

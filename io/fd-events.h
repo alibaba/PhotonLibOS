@@ -16,7 +16,6 @@ limitations under the License.
 
 #pragma once
 #include <photon/thread/thread.h>
-#include <photon/io/iouring-wrapper.h>
 
 namespace photon {
 
@@ -28,6 +27,12 @@ const static uint32_t ONE_SHOT = 0x8000;
 
 const static int EOK = ENXIO;   // the Event of NeXt I/O
 
+// Event engine is the abstraction of substrates like epoll,
+// io-uring, kqueue, etc.
+// Master event engine is the default one used by global functions
+// of wait_for_fd_readable/writable(), and it is also invoked by
+// the thread scheduler to wait for events when idle.
+// Every vCPU that processes events has a dedicated master engine.
 class MasterEventEngine {
 public:
     virtual ~MasterEventEngine() = default;
@@ -53,8 +58,8 @@ public:
 
     /**
      * @brief Wait for events, and fire them by photon::thread_interrupt()
-     * @param timeout The *maximum* amount of time to sleep. The sleep can be interrupted by invoking
-     *        wait_and_fire_events(-1) from another vcpu thread, and get -1 && errno == EINTR.
+     * @param timeout The *maximum* amount of time to sleep. May wake up
+     *        earilier in the case of some events happended.
      * @return 0 if slept well, or -1 if error occurred.
      * @warning Do NOT invoke photon::usleep() or photon::sleep() in this function, because their
      *          implementations also rely on this function.
@@ -76,6 +81,11 @@ inline int wait_for_fd_error(int fd, uint64_t timeout = -1) {
     return get_vcpu()->master_event_engine->wait_for_fd_error(fd, timeout);
 }
 
+// Cascading event engine is used explicitly with a pointer, for complex
+// scenarios that the master engine cannot handle, e.g., waiting for multiple
+// events with a single invocation.
+// Cascading event engines do NOT block the vCPU. Instead, they only block
+// current thread, with the help of master event engine.
 class CascadingEventEngine {
 public:
     virtual ~CascadingEventEngine() = default;
@@ -106,38 +116,11 @@ public:
     virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;
 };
 
-MasterEventEngine* new_epoll_master_engine();
-MasterEventEngine* new_select_master_engine();
-MasterEventEngine* new_iouring_master_engine();
-// MasterEventEngine* new_kqueue_master_engine();
-// MasterEventEngine* new_iocp_master_engine();
-
-CascadingEventEngine* new_epoll_cascading_engine();
-CascadingEventEngine* new_select_cascading_engine();
-CascadingEventEngine* new_iouring_cascading_engine();
-// CascadingEventEngine* new_kqueue_cascading_engine();
-// CascadingEventEngine* new_iocp_cascading_engine();
-
-inline int fd_events_epoll_init() {
+template<typename Ctor> inline
+int _fd_events_init(Ctor new_engine) {
     assert(is_master_event_engine_default());
-    auto ee = get_vcpu()->master_event_engine = new_epoll_master_engine();
+    auto ee = get_vcpu()->master_event_engine = new_engine();
     return -!ee;
-}
-
-inline int fd_events_select_init() {
-    assert(is_master_event_engine_default());
-    auto ee = get_vcpu()->master_event_engine = new_select_master_engine();
-    return -!ee;
-}
-
-inline int fd_events_iouring_init() {
-    assert(is_master_event_engine_default());
-    auto ee = get_vcpu()->master_event_engine = new_iouring_master_engine();
-    return -!ee;
-}
-
-inline int fd_events_init() {
-    return fd_events_epoll_init();
 }
 
 inline int fd_events_fini() {
@@ -145,55 +128,39 @@ inline int fd_events_fini() {
     return 0;
 }
 
-// a helper class to translate events into underlay representation
-template<uint32_t UNDERLAY_EVENT_READ_,
-        uint32_t UNDERLAY_EVENT_WRITE_,
-        uint32_t UNDERLAY_EVENT_ERROR_>
-struct EventsMap {
-    const static uint32_t UNDERLAY_EVENT_READ = UNDERLAY_EVENT_READ_;
-    const static uint32_t UNDERLAY_EVENT_WRITE = UNDERLAY_EVENT_WRITE_;
-    const static uint32_t UNDERLAY_EVENT_ERROR = UNDERLAY_EVENT_ERROR_;
-    static_assert(UNDERLAY_EVENT_READ != UNDERLAY_EVENT_WRITE, "...");
-    static_assert(UNDERLAY_EVENT_READ != UNDERLAY_EVENT_ERROR, "...");
-    static_assert(UNDERLAY_EVENT_ERROR != UNDERLAY_EVENT_WRITE, "...");
-    static_assert(UNDERLAY_EVENT_READ, "...");
-    static_assert(UNDERLAY_EVENT_WRITE, "...");
-    static_assert(UNDERLAY_EVENT_ERROR, "...");
+#define DEFINE_ENGINE_INIT_FINI(name)                       \
+MasterEventEngine* new_##name##_master_engine();            \
+CascadingEventEngine* new_##name##_cascading_engine();      \
+inline int fd_events_##name##_init() {                      \
+    return _fd_events_init( &new_##name##_master_engine );  \
+}                                                           \
+inline int fd_events_##name##_fini() {                      \
+    return fd_events_fini();                                \
+}
 
-    uint64_t ev_read, ev_write, ev_error;
+DEFINE_ENGINE_INIT_FINI(epoll);
+DEFINE_ENGINE_INIT_FINI(select);
+DEFINE_ENGINE_INIT_FINI(iouring);
+DEFINE_ENGINE_INIT_FINI(kqueue);
 
-    EventsMap(uint64_t event_read, uint64_t event_write, uint64_t event_error) {
-        ev_read = event_read;
-        ev_write = event_write;
-        ev_error = event_error;
-        assert(ev_read);
-        assert(ev_write);
-        assert(ev_error);
-        assert(ev_read != ev_write);
-        assert(ev_read != ev_error);
-        assert(ev_error != ev_write);
-    }
+inline int fd_events_init() {
+#ifdef __APPLE__
+    return fd_events_kqueue_init();
+#else
+    return fd_events_epoll_init();
+#endif
+}
 
-    uint32_t translate_bitwisely(uint64_t events) const {
-        uint32_t ret = 0;
-        if (events & ev_read)
-            ret |= UNDERLAY_EVENT_READ;
-        if (events & ev_write)
-            ret |= UNDERLAY_EVENT_WRITE;
-        if (events & ev_error)
-            ret |= UNDERLAY_EVENT_ERROR;
-        return ret;
-    }
+inline CascadingEventEngine* new_default_cascading_engine() {
+#ifdef __APPLE__
+    return new_kqueue_cascading_engine();
+#else
+    return new_epoll_cascading_engine();
+#endif
+}
 
-    uint32_t translate_byval(uint64_t event) const {
-        if (event == ev_read)
-            return UNDERLAY_EVENT_READ;
-        if (event == ev_write)
-            return UNDERLAY_EVENT_WRITE;
-        if (event == ev_error)
-            return UNDERLAY_EVENT_ERROR;
-    }
-};
+
+#undef DEFINE_ENGINE_INIT_FINI
 
 } // namespace photon
 

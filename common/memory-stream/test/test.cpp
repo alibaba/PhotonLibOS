@@ -84,8 +84,8 @@ int main(int argc, char **argv)
 {
     log_output_level = ALOG_DEBUG;
     ::testing::InitGoogleTest(&argc, argv);
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     auto ret = RUN_ALL_TESTS();
     return ret;
 }

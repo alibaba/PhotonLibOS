@@ -22,8 +22,8 @@ limitations under the License.
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#ifdef __linux__
 #include <linux/errqueue.h>
-#ifndef __APPLE__
 #include <sys/sendfile.h>
 #endif
 #include <sys/uio.h>
@@ -36,6 +36,14 @@ limitations under the License.
 
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY    0x4000000
+#endif
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+#ifndef MSG_ERRQUEUE
+#define MSG_ERRQUEUE 0
 #endif
 
 #ifndef SO_EE_ORIGIN_ZEROCOPY
@@ -61,7 +69,15 @@ int set_socket_nonblocking(int fd) {
 #endif
 }
 int socket(int domain, int type, int protocol) {
+#ifdef __APPLE__
+    auto fd = ::socket(domain, type, protocol);
+    set_fd_nonblocking(fd);
+    int val = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
+    return fd;
+#else
     return ::socket(domain, type | SOCK_NONBLOCK, protocol);
+#endif
 }
 int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
             uint64_t timeout) {
@@ -112,8 +128,19 @@ static __FORCE_INLINE__ ssize_t doio(IOCB iocb, WAITCB waitcb) {
 
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
            uint64_t timeout) {
+#ifdef __APPLE__
+    auto ret = (int)doio(LAMBDA(::accept(fd, addr, addrlen)),
+                  LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    if (ret > 0) {
+        set_fd_nonblocking(ret);
+        int val = 1;
+        ::setsockopt(ret, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
+    }
+    return ret;
+#else
     return (int)doio(LAMBDA(::accept4(fd, addr, addrlen, SOCK_NONBLOCK)),
                   LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+#endif
 }
 ssize_t read(int fd, void *buf, size_t count, uint64_t timeout) {
     return doio(LAMBDA(::read(fd, buf, count)),
@@ -218,6 +245,7 @@ bool ISocketStream::skip_read(size_t count) {
     return true;
 }
 
+#ifdef __linux__
 static ssize_t recv_errqueue(int fd, uint32_t &ret_counter) {
     char control[128];
     msghdr msg = {};
@@ -267,6 +295,6 @@ ssize_t zerocopy_confirm(int fd, uint32_t num_calls, uint64_t timeout) {
     } while (is_counter_less_than(counter, num_calls));
     return 0;
 }
-
+#endif
 }  // namespace net
 }

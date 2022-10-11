@@ -33,7 +33,8 @@ struct Delegate_Base { };
 template<typename R, typename...Ts>
 struct Delegate : public Delegate_Base
 {
-    typedef R (*Func)(void*, Ts...);
+    using Func = R (*)(void*, Ts...);
+    using Func0= R (*)(Ts...);
     void* _obj = nullptr;
     Func _func = nullptr;
 
@@ -49,8 +50,8 @@ struct Delegate : public Delegate_Base
     using UFunc  = R (*)(U*, Ts...);
 
     Delegate(void* obj, Func func)      { bind(obj, func); }
-
     Delegate(Func func, void* obj)      { bind(obj, func); }
+    Delegate(Func0 func0)               { bind(func0); }
 
     template<typename U>
     Delegate(U* obj, UFunc<U> func)     { bind(obj, func); }
@@ -77,8 +78,8 @@ struct Delegate : public Delegate_Base
     }
 
     void bind(void* obj, Func func)     { _obj = obj; _func = func; }
-
     void bind(Func func, void* obj)     { _obj = obj; _func = func; }
+    void bind(Func0 func0)          { _obj = nullptr; _func = (Func&)func0; }
 
     template<typename U>
     void bind(U* obj, UFunc<U> func)    { bind(obj, (Func&)func); }
