@@ -24,7 +24,7 @@ limitations under the License.
 
 #include <photon/io/fd-events.h>
 #include <photon/io/aio-wrapper.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
 #include <photon/common/checksum/crc32c.h>
@@ -322,11 +322,8 @@ TEST(perf, DISABLED_read) {
 /* Event Engine Tests */
 
 photon::CascadingEventEngine* new_cascading_engine(bool iouring = false) {
-    if (iouring) {
-        return photon::new_iouring_cascading_engine();
-    } else {
-        return photon::new_epoll_cascading_engine();
-    }
+    // return photon::new_iouring_cascading_engine();
+    return photon::new_epoll_cascading_engine();
 }
 
 TEST(event_engine, master) {
@@ -556,11 +553,11 @@ int main(int argc, char** arg) {
     testing::FLAGS_gtest_break_on_failure = true;
     gflags::ParseCommandLineFlags(&argc, &arg, true);
 
-    int ret = photon::thread_init();
-    if (ret != 0) return -1;
-    DEFER(photon::thread_fini());
+    int ret = photon::vcpu_init();
+    if (ret < 0) return -1;
+    DEFER(photon::vcpu_fini());
     ret = photon::fd_events_init();
-    if (ret != 0) return -1;
+    if (ret < 0) return -1;
     DEFER(photon::fd_events_fini());
 
     return RUN_ALL_TESTS();

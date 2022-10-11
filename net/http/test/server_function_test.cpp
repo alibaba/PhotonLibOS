@@ -97,7 +97,7 @@ void test_case(Client* client, off_t st, size_t len, size_t exp_content_length, 
 TEST(http_server, fs_handler) {
     system(std::string("mkdir -p /tmp/ease_ut/http_server/").c_str());
     system(std::string("touch /tmp/ease_ut/http_server/fs_handler_test").c_str());
-    system(std::string("echo -n '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
+    system(std::string("printf '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
     tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
@@ -270,7 +270,7 @@ TEST(http_server, proxy_handler_failure) {
 TEST(http_server, mux_handler) {
     system(std::string("mkdir -p /tmp/ease_ut/http_server/").c_str());
     system(std::string("touch /tmp/ease_ut/http_server/fs_handler_test").c_str());
-    system(std::string("echo -n '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
+    system(std::string("printf '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
     std_data.resize(std_data_size);
     int num = 0;
     for (auto &c : std_data) {
@@ -347,15 +347,17 @@ TEST(http_server, mux_handler) {
 }
 
 int main(int argc, char** arg) {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     photon::fd_events_init();
     DEFER(photon::fd_events_fini());
+#ifdef __linux__
     if (net::et_poller_init() < 0) {
         LOG_ERROR("net::et_poller_init failed");
         exit(EAGAIN);
     }
     DEFER(net::et_poller_fini());
+#endif
     set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
     LOG_DEBUG("test result:`", RUN_ALL_TESTS());

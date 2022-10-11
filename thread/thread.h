@@ -25,13 +25,15 @@ limitations under the License.
 
 namespace photon
 {
-    int thread_init();
-    int thread_fini();
+    int vcpu_init();
+    int vcpu_fini();
     int wait_all();
+    int timestamp_updater_init();
+    int timestamp_updater_fini();
 
     struct thread;
     extern "C" __thread thread* CURRENT;
-    extern uint64_t now;
+    extern volatile uint64_t now;
 
     enum states
     {
@@ -103,7 +105,7 @@ namespace photon
     struct vcpu_base {
         MasterEventEngine* master_event_engine;
         std::atomic<uint32_t> nthreads;
-        uint32_t id;
+        states state;
         volatile uint64_t switch_count;
     };
 
@@ -113,20 +115,10 @@ namespace photon
     {
         uint64_t _, __;
         vcpu_base* vcpu;
-        void* _thread_local;
+        void* tls;
         // ...
     };
 
-    // the getter and setter of thread-local variable
-    // getting and setting local in a timer context will cause undefined behavior!
-    inline void* thread_get_local()
-    {
-        return ((partial_thread*)CURRENT) -> _thread_local;
-    }
-    inline void thread_set_local(void* local)
-    {
-        ((partial_thread*)CURRENT) -> _thread_local = local;
-    }
     inline vcpu_base* get_vcpu(thread* th = CURRENT)
     {
         return ((partial_thread*)th) -> vcpu;

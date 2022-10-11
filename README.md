@@ -16,14 +16,18 @@ as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is
 
 ## What's New
 
+* Version 0.4 has come, bringing us these three major features:
+  1. Support coroutine local variables. Similar to the C++11 `thread_local` keyword. See [doc](doc/thread-local.md).
+  2. Support running on macOS platform, both Intel x86_64 and Apple M1 included.
+  3. Support LLVM Clang/Apple Clang/GCC compilers.
 * Photon 0.3 was released on 2 Sep 2022. Except for bug fixes and improvements, a new `photon::std` namespace is added.
 Developers can search for `std::thread`, `std::mutex` in their own projects, and replace them all into the equivalents of `photon::std::<xxx>`.
 It's a quick way to transform thread-based programs to coroutine-based ones.
-* Photon 0.2 was released on 28 Jul 2022. This release was mainly focused on network socket, security context and multi-vcpu support.
-We re-worked the `WorkPool` so it's more friendly now to write multi-vcpu programs.
 
 <details><summary>More history</summary><p>
 
+* Photon 0.2 was released on 28 Jul 2022. This release was mainly focused on network socket, security context and multi-vcpu support.
+  We re-worked the `WorkPool` so it's more friendly now to write multi-vcpu programs.
 * Made the first tag on 27 Jul 2022. Fix the compatibility for ARM CPU. Throughly compared the TCP echo server performance with other libs.
 
 </p></details>
@@ -48,8 +52,6 @@ and prepared to wrap them into the framework. It is a real killer in the low lev
 
 Compare Photon with fio when reading an 3.5TB NVMe raw device.
 
-<details><summary>Results</summary><p>
-
 |        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO | QPS  | Throughput | CPU util |
 |:------:|:---------:|:---------:|:-------:|:--------:|:--------:|:----:|:----------:|:--------:|
 | Photon | io_uring  | Rand-read |   4KB   |   128    |   Yes    | 433K |   1.73GB   |   100%   |
@@ -57,8 +59,6 @@ Compare Photon with fio when reading an 3.5TB NVMe raw device.
 |  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K |   1.11GB   |   100%   |
 
 Note that fio only enables 1 job (process).
-
-</p></details>
 
 Conclusion: Photon is faster than fio under this circumstance.
 
@@ -117,16 +117,12 @@ Conclusion: Photon socket has the best per-core QPS.
 
 Compare Photon and Nginx when serving static files, using Apache Bench(ab) as client.
 
-<details><summary>Results</summary><p>
-
 |        | File Size | QPS  | CPU util |
 |:------:|:---------:|:----:|:--------:|
 | Photon |    4KB    | 114K |   100%   |
 | Nginx  |    4KB    | 97K  |   100%   |
 
 Note that Nginx only enables 1 worker (process).
-
-</p></details>
 
 Conclusion: Photon is faster than Nginx under this circumstance.
 
@@ -152,10 +148,15 @@ apt install cmake
 apt install libssl-dev libcurl4-openssl-dev libaio-dev
 ```
 
+#### macOS
+```shell
+brew install cmake openssl
+```
+
 ### 2. Build from source
 ```shell
 mkdir build && cd build
-cmake ..
+cmake ..    # On macOS, we need to add -DOPENSSL_ROOT_DIR=/path/to/openssl/
 make -j
 ```
 All the libs and executables will be saved in `build/output`.
@@ -170,8 +171,10 @@ dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 # Ubuntu
 apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
+# macOS
+brew install gflags googletest gsasl
 
-cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D CMAKE_BUILD_TYPE=Debug ..
+cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D ENABLE_URING=1 -D CMAKE_BUILD_TYPE=Debug ..
 make -j
 ctest
 ```

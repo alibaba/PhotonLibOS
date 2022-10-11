@@ -40,6 +40,7 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/timeout.h>
 #include <photon/common/alog.h>
+#include <photon/thread/thread-key.h>
 
 /* notes on the scheduler:
 
@@ -118,9 +119,8 @@ namespace photon
     struct thread : public intrusive_list_node<thread>
     {
         vcpu_t* vcpu;
-        void* arg = nullptr;
+        void* arg = nullptr;                /* will be used as thread local storage after thread started */
         states state = states::READY;
-        // std::atomic<states> state {states::READY};
         int error_number = 0;
         int idx;                            /* index in the sleep queue array */
         int flags = 0;
@@ -138,7 +138,7 @@ namespace photon
         void* go()
         {
             auto _arg = arg;
-            arg = nullptr;                  // arg will be used as thread-local variable
+            arg = nullptr;
             return retval = start(_arg);
         }
         char* buf;
@@ -358,7 +358,6 @@ namespace photon
         vcpu->move_to_standbyq_atomic(this);
     }
 
-    static vcpu_t vcpus[128];
     __thread thread* CURRENT;
     static void thread_die(thread* th)
     {
@@ -386,6 +385,7 @@ namespace photon
     static void thread_stub_cleanup() {
         auto &current = CURRENT;
         auto th = current;
+        deallocate_tls();
         th->lock.lock();
         th->state = states::DONE;
         th->cond.notify_all();
@@ -441,7 +441,8 @@ namespace photon
         return th;
     }
 
-    uint64_t now;
+    volatile uint64_t now;
+    static std::atomic<pthread_t> ts_updater(0);
     static inline uint64_t update_now()
     {
         struct timeval tv;
@@ -473,12 +474,40 @@ namespace photon
     }
     static uint32_t last_tsc = 0;
     static inline uint64_t if_update_now() {
+        if (ts_updater.load(std::memory_order_relaxed)) {
+            return photon::now;
+        }
         uint32_t tsc = _rdtscp();
         if (last_tsc != tsc) {
             last_tsc = tsc;
             return update_now();
         }
         return photon::now;
+    }
+    int timestamp_updater_init() {
+        if (!ts_updater) {
+            std::thread([&]{
+                pthread_t current_tid = pthread_self();
+                pthread_t pid = 0;
+                if (!ts_updater.compare_exchange_weak(pid, current_tid, std::memory_order_acq_rel))
+                    return;
+                while (current_tid == ts_updater.load(std::memory_order_relaxed)) {
+                    usleep(500);
+                    update_now();
+                }
+            }).detach();
+            return 0;
+        }
+        LOG_WARN("Timestamp updater already started");
+        return -1;
+    }
+    int timestamp_updater_fini() {
+        if (ts_updater.load()) {
+            ts_updater = 0;
+            return 0;
+        }
+        LOG_WARN("Timestamp updater not launch or already stopped");
+        return -1;
     }
     static inline void prefetch_context(thread* from, thread* to)
     {
@@ -554,7 +583,6 @@ namespace photon
             return count;
         }
 
-        update_now();
         while(!sleepq.empty())
         {
             auto th = sleepq.front();
@@ -567,6 +595,7 @@ namespace photon
                 count++;
             }
         }
+        if_update_now();
         return count;
     }
 
@@ -1343,11 +1372,11 @@ namespace photon
         ee = _default_event_engine;
     }
 
-    static vcpu_t* _init_current(uint32_t i)
+    static vcpu_t* _init_current()
     {
         auto current = CURRENT = new thread;
-        auto vcpu = current->vcpu = &vcpus[i];
-        vcpu->id = i;
+        auto vcpu = current->vcpu = new vcpu_t;
+        vcpu->state = states::RUNNING;
         vcpu->nthreads = 1;
         current->idx = -1;
         current->state = states::RUNNING;
@@ -1361,7 +1390,7 @@ namespace photon
         auto current = CURRENT;
         auto vcpu = current->vcpu;
         auto last_idle = now;
-        while (vcpu->id != -1U)
+        while (vcpu->state != states::DONE)
         {
             while (!current->single()) {
                 thread_yield();
@@ -1371,7 +1400,7 @@ namespace photon
                 }
                 resume_threads();
             }
-            if (vcpu->id == -1U)
+            if (vcpu->state == states::DONE)
                 break;
             // only idle stub aliving
             // other threads must be sleeping
@@ -1407,9 +1436,7 @@ namespace photon
     }
 
     static std::atomic<uint32_t> _n_vcpu{0};
-    uint32_t get_vcpu_num() {
-        return _n_vcpu.load();
-    }
+    uint32_t get_vcpu_num() { return _n_vcpu.load(std::memory_order_relaxed); }
 
     struct migrate_args {thread* th; vcpu_base* v;};
     static int do_thread_migrate(thread* th, vcpu_base* v);
@@ -1462,30 +1489,32 @@ namespace photon
         return 0;
     }
 
-    int thread_init()
+    int vcpu_init()
     {
         if (CURRENT) return -1;      // re-init has no side-effect
-        auto _vcpuid = _n_vcpu++;
-        auto vcpu = _init_current(_vcpuid);
+        _n_vcpu++;
+        auto vcpu = _init_current();
         vcpu->idle_worker = thread_create(&idle_stub, nullptr);
         thread_enable_join(vcpu->idle_worker);
         update_now();
-        return _vcpuid;
+        return get_vcpu_num();
     }
-    int thread_fini()
+    int vcpu_fini()
     {
         auto& current = CURRENT;
         if (!current) return -1;
+        deallocate_tls();
         auto vcpu = current->vcpu;
         while(current->next() != current->prev()) photon::thread_yield();
         assert(!current->single());
         assert(vcpu->nthreads == 2); // idle_stub & current alive
-        assert(vcpu == &vcpus[vcpu->id]);
-        vcpu->id = -1;  // instruct idle_worker to exit
+        vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
+        _n_vcpu--;
         current->state = states::DONE;
         safe_delete(current);
         safe_delete(_default_event_engine);
+        safe_delete(vcpu);
         return 0;
     }
 }

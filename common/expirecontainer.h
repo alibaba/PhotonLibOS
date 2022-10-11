@@ -22,7 +22,7 @@ limitations under the License.
 #include <photon/thread/list.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/timer.h>
-
+#include <algorithm>
 #include <memory>
 #include <tuple>
 #include <type_traits>

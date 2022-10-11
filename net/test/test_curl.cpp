@@ -42,7 +42,7 @@ class StringStream {
 };
 
 TEST(cURL, feature) {
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     net::cURL::init();
 
@@ -58,7 +58,7 @@ TEST(cURL, feature) {
 
     net::cURL::fini();
     photon::fd_events_fini();
-    photon::thread_fini();
+    photon::vcpu_fini();
 }
 
 int main(int argc, char** argv) {

@@ -23,8 +23,10 @@ limitations under the License.
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#ifdef __linux__
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
+#endif
 #include <unistd.h>
 #include <memory>
 #include <unordered_map>
@@ -39,12 +41,33 @@ limitations under the License.
 #include <photon/common/event-loop.h>
 #include <photon/net/basic_socket.h>
 #include <photon/net/utils.h>
+#ifdef PHOTON_URING
+#include <photon/io/iouring-wrapper.h>
+#endif
 
 #include "base_socket.h"
+#include "../io/events_map.h"
 
 #ifndef SO_ZEROCOPY
 #define SO_ZEROCOPY 60
 #endif
+
+LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
+    return log << photon::net::IPAddr(ntohl(iaddr.s_addr));
+}
+
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
+    return log << photon::net::EndPoint(addr);
+}
+
+LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
+    if (addr.sa_family == AF_INET) {
+        log << (const sockaddr_in&)addr;
+    } else {
+        log.printf("<sockaddr>");
+    }
+    return log;
+}
 
 namespace photon {
 namespace net {
@@ -402,7 +425,7 @@ protected:
     }
 
     virtual int fd_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
-        return net::accept(fd, addr, addrlen, m_timeout);
+        return net::accept(fd, addr, addrlen);
     }
 
     int do_accept() { return fd_accept(m_listen_fd, nullptr, nullptr); }
@@ -433,7 +456,7 @@ protected:
             if (sess) {
                 photon::thread_create11(&KernelSocketServer::handler, m_handler, sess);
             } else {
-                LOG_WARN("KernelSocketServer: failed to accept new connections");
+                LOG_WARN("KernelSocketServer: failed to accept new connections: `", ERRNO());
                 photon::thread_usleep(1000);
             }
         }
@@ -446,6 +469,7 @@ protected:
     }
 };
 
+#ifdef __linux__
 class ZeroCopySocketStream : public KernelSocketStream {
 protected:
     uint32_t m_num_calls = 0;
@@ -501,6 +525,7 @@ protected:
     }
 };
 
+#ifdef PHOTON_URING
 class IouringSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
@@ -586,9 +611,10 @@ protected:
     }
 
     int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
-        return photon::iouring_accept(fd, addr, addrlen, m_timeout);
+        return photon::iouring_accept(fd, addr, addrlen, -1);
     }
 };
+#endif
 
 /* ET Socket - Start */
 
@@ -801,11 +827,12 @@ protected:
     }
 
     int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
-        auto timeout = m_timeout;
+        uint64_t timeout = -1;
         return (int) etdoio(LAMBDA(::accept4(fd, addr, addrlen, SOCK_NONBLOCK)),
                             LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 };
+#endif
 
 /* ET Socket - End */
 
@@ -817,37 +844,11 @@ LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
     return log << ep.addr << ':' << ep.port;
 }
 
-LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
-    return log << net::IPAddr(ntohl(iaddr.s_addr));
-}
-
-LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
-    return log << net::EndPoint(addr);
-}
-
-LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
-    if (addr.sa_family == AF_INET) {
-        log << (const sockaddr_in&)addr;
-    } else {
-        log.printf("<sockaddr>");
-    }
-    return log;
-}
-
 extern "C" ISocketClient* new_tcp_socket_client() {
     return new KernelSocketClient(AF_INET, true);
 }
 extern "C" ISocketServer* new_tcp_socket_server() {
     return NewObj<KernelSocketServer>(AF_INET, false, true)->init();
-}
-extern "C" ISocketServer* new_zerocopy_tcp_server() {
-    return NewObj<ZeroCopySocketServer>(AF_INET, false, true)->init();
-}
-extern "C" ISocketClient* new_iouring_tcp_client() {
-    return new IouringSocketClient(AF_INET, false);
-}
-extern "C" ISocketServer* new_iouring_tcp_server() {
-    return NewObj<IouringSocketServer>(AF_INET, false, false)->init();
 }
 extern "C" ISocketClient* new_uds_client() {
     return new KernelSocketClient(AF_UNIX, true);
@@ -855,12 +856,25 @@ extern "C" ISocketClient* new_uds_client() {
 extern "C" ISocketServer* new_uds_server(bool autoremove) {
     return NewObj<KernelSocketServer>(AF_UNIX, autoremove, true)->init();
 }
+#ifdef __linux__
+extern "C" ISocketServer* new_zerocopy_tcp_server() {
+    return NewObj<ZeroCopySocketServer>(AF_INET, false, true)->init();
+}
+#ifdef PHOTON_URING
+extern "C" ISocketClient* new_iouring_tcp_client() {
+    return new IouringSocketClient(AF_INET, false);
+}
+extern "C" ISocketServer* new_iouring_tcp_server() {
+    return NewObj<IouringSocketServer>(AF_INET, false, false)->init();
+}
+#endif // PHOTON_URING
 extern "C" ISocketClient* new_et_tcp_socket_client() {
     return new ETKernelSocketClient(AF_INET, true);
 }
 extern "C" ISocketServer* new_et_tcp_socket_server() {
     return NewObj<ETKernelSocketServer>(AF_INET, false, true)->init();
 }
+#endif
 
 }
 }

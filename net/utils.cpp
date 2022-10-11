@@ -27,7 +27,7 @@ limitations under the License.
 
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
 #include "socket.h"
@@ -70,6 +70,9 @@ IPAddr gethostbypeer(const char *domain) {
 
 int _gethostbyname(const char *name, Delegate<int, IPAddr> append_op) {
     struct hostent *ent = nullptr;
+#ifdef __APPLE__
+    ent = ::gethostbyname(name);
+#else
     int err;
     struct hostent hbuf;
     char buf[32 * 1024];
@@ -77,6 +80,7 @@ int _gethostbyname(const char *name, Delegate<int, IPAddr> append_op) {
     // only retval 0 means successful
     if (::gethostbyname_r(name, &hbuf, buf, sizeof(buf), &ent, &err) != 0)
         LOG_ERRNO_RETURN(0, -1, "Failed to gethostbyname", VALUE(err));
+#endif
     int idx = 0;
     if (ent && ent->h_addrtype == AF_INET) {
         // can only support IPv4

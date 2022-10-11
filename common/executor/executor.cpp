@@ -75,7 +75,7 @@ public:
     }
 
     void do_loop() {
-        photon::thread_init();
+        photon::vcpu_init();
         photon::fd_events_init();
         pth = photon::CURRENT;
         LOG_INFO("worker start");
@@ -92,7 +92,7 @@ public:
         photon::delete_thread_pool(pool);
         pool = nullptr;
         photon::fd_events_fini();
-        photon::thread_fini();
+        photon::vcpu_fini();
     }
 };
 

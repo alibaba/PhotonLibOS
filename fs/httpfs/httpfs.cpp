@@ -79,6 +79,7 @@ public:
     UNIMPLEMENTED(int unlink(const char* filename) override);
     UNIMPLEMENTED(int lchown(const char* pathname, uid_t owner, gid_t group)
                       override);
+    UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times) override);
     UNIMPLEMENTED_POINTER(DIR* opendir(const char*) override);
 
     net::cURL* acquire_curl() { return new net::cURL(); }

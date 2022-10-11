@@ -170,7 +170,7 @@ TEST(std, exception) {
 }
 
 int main(int argc, char** arg) {
-    photon::init(photon::INIT_EVENT_EPOLL, 0);
+    photon::init(photon::INIT_EVENT_DEFAULT, 0);
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();

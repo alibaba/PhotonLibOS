@@ -25,11 +25,11 @@ limitations under the License.
 using namespace photon;
 
 int main(int argc, char** argv) {
-    photon::thread_init();
+    photon::vcpu_init();
     photon::fd_events_init();
     DEFER({
         photon::fd_events_fini();
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
 
     auto ctx = net::new_tls_context(cert_str, key_str, passphrase_str);

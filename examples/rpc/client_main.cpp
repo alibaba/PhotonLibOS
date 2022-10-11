@@ -16,7 +16,7 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 #include <photon/common/alog-stdstring.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/photon.h>
 
 #include "client.h"

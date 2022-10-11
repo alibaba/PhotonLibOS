@@ -14,28 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include "signalfd.h"
+#include "signal.h"
 #include <unistd.h>
-#include <assert.h>
+#ifdef __APPLE__
+#include <sys/event.h>
+#else
 #include <sys/signalfd.h>
+#endif
 #include <sys/types.h>
-#include <unistd.h>
 #include "fd-events.h"
-#include "../thread/thread.h"
 #include "../common/event-loop.h"
-#include "../common/utility.h"
 #include "../common/alog.h"
-
-extern "C"
-{
-    int __register_atfork(
-        void (*prepare) (void),
-        void (*parent)  (void),
-        void (*child)   (void),
-        void *__dso_handle);
-
-    void __unregister_atfork(void *__dso_handle);
-}
 
 namespace photon
 {
@@ -44,12 +33,28 @@ namespace photon
     static int sgfd = -1;
     static void* sighandlers[SIGNAL_MAX + 1];
     static sigset_t infoset = {0};
-    static sigset_t sigset = {-1UL};
+    static sigset_t sigset = {-1U};
     static EventLoop* eloop = nullptr;
+#ifdef __APPLE__
+    struct kevent _events[32];
+    struct timespec tm {0, 0};
+#define WATCH_SIGNAL(signum, handler) { \
+      struct kevent evt; \
+      if (handler == SIG_IGN) { \
+        EV_SET(&evt, signum, EVFILT_SIGNAL, EV_DELETE, 0, 0, nullptr); \
+      } else { \
+        EV_SET(&evt, signum, EVFILT_SIGNAL, EV_ADD | EV_CLEAR, 0, 0, nullptr); \
+      } \
+      int ret = kevent(sgfd, &evt, 1, nullptr, 0, nullptr); \
+      if (ret < 0) LOG_WARN("failed to submit events with kevent()"); \
+    }
+#else
+#define WATCH_SIGNAL(signum, handler)
+#endif
 
     static int set_signal_mask()
     {
-        if (sigprocmask(SIG_SETMASK, &sigset, NULL) == -1)
+        if (sigprocmask(SIG_SETMASK, &sigset, nullptr) == -1)
             LOG_ERRNO_RETURN(0, -1, "failed to set sigprocmask()");
         return 0;
     }
@@ -84,6 +89,7 @@ namespace photon
         sighandlers[signum] = (void*)handler;
         sigdelset(&infoset, signum);
         update_signal_mask(signum, h, (void*)handler);
+        WATCH_SIGNAL(signum, handler)
         return (sighandler_t)h;
     }
 
@@ -110,6 +116,7 @@ namespace photon
             sigdelset(&infoset, signum);
         }
         update_signal_mask(signum, h, sighandlers[signum]);
+        WATCH_SIGNAL(signum, (void*)act->sa_handler)
         return 0;
     }
 
@@ -118,7 +125,7 @@ namespace photon
         // for somehow EventLoop use 0 to present no events
         // and -1 as exit
         // but in fd-event, 0 just means done wait without error
-        if (wait_for_fd_readable(sgfd)< 0) {
+        if (wait_for_fd_readable(sgfd) < 0) {
             ERRNO err;
             if (err.no == ETIMEDOUT) {
                 // it might be timedout
@@ -135,6 +142,33 @@ namespace photon
 
     static int fire_signal(void*, EventLoop*)
     {
+#ifdef __APPLE__
+        int ret = kevent(sgfd, nullptr, 0, _events, LEN(_events), &tm);
+        if (ret <= 0) {
+            LOG_ERRNO_RETURN(0, 0, "SignalFD read failed");
+        }
+        for (int i = 0; i < ret; i++) {
+            if (_events[i].filter == EVFILT_SIGNAL) {
+                auto signum = _events[i].ident;
+                if (signum > SIGNAL_MAX)
+                    LOG_ERROR_RETURN(EINVAL, -1, "signal number ` too big (` maximum)", signum, SIGNAL_MAX);
+
+                auto h = sighandlers[signum];
+                if (h == nullptr) continue;
+                if (!sigismember(&infoset, signum))
+                {
+                    ((sighandler_t)h)(signum);
+                } else {
+                    siginfo_t siginfo;
+                    memset(&siginfo, 0, sizeof(siginfo_t));
+                    reinterpret_cast<decltype(sigaction::sa_sigaction)>(h)(signum, &siginfo, nullptr);
+                }
+            } else if (_events[i].flags & EV_ERROR) {
+                LOG_WARN("EV_ERROR found in events, data: `", _events[i].data);
+            }
+        }
+        return 0;
+#else
         struct signalfd_siginfo fdsi;
         ssize_t ret = read(sgfd, &fdsi, sizeof(fdsi));
         if (ret != sizeof(fdsi))
@@ -187,6 +221,7 @@ namespace photon
         #undef ASSIGN
         reinterpret_cast<decltype(sigaction::sa_sigaction)>(h)(no, &siginfo, nullptr);
         return 0;
+#endif
     }
 
     // should be invoked in child process after forked, to clear signal mask
@@ -195,15 +230,18 @@ namespace photon
         LOG_DEBUG("Fork hook");
         sigset_t sigset0;       // can NOT use photon::clear_signal_mask(),
         sigemptyset(&sigset0);  // as memory may be shared with parent, when vfork()ed
-        sigprocmask(SIG_SETMASK, &sigset0, NULL);
+        sigprocmask(SIG_SETMASK, &sigset0, nullptr);
     }
 
     int sync_signal_init()
     {
         if (sgfd != -1)
             LOG_ERROR_RETURN(EALREADY, -1, "already inited");
-
+#ifdef __APPLE__
+        sgfd = kqueue();
+#else
         sgfd = signalfd(-1, &sigset, SFD_CLOEXEC | SFD_NONBLOCK);
+#endif
         if (sgfd == -1)
             LOG_ERRNO_RETURN(0, -1, "failed to create signalfd()");
 
@@ -218,7 +256,7 @@ namespace photon
         }
         eloop->async_run();
         thread_yield(); // give a chance let eloop to execute do_wait
-        __register_atfork(nullptr, nullptr, &fork_hook_child, (void*)&fork_hook_child);
+        pthread_atfork(nullptr, nullptr, &fork_hook_child);
         return clear_signal_mask();
     }
 
@@ -230,7 +268,22 @@ namespace photon
         eloop->stop();
         close(sgfd);
         delete eloop;
-        // __unregister_atfork((void*)&fork_hook_child);
+#ifdef __APPLE__
+        // Kqueue can detect singals with EVFILT_SIGNAL but cannot consume them, so we need clear
+        // all pending signals before clearing signal mask.
+        sigset_t pending_sigs;
+        if (sigpending(&pending_sigs) != 0) {
+            LOG_ERRNO_RETURN(0, -1, "get sigpending failed");
+        }
+        int psig = 0;
+        for (int sig = 1; sig < NSIG; sig++) {
+            if (sigismember(&pending_sigs, sig)) {
+                if (sigwait(&pending_sigs, &psig) != 0) {
+                    LOG_ERRNO_RETURN(0, -1, "sigwait failed");
+                }
+            }
+        }
+#endif
         return clear_signal_mask();
     }
 }

@@ -125,7 +125,7 @@ protected:
 public:
     TCPSocketPool(ISocketClient* client, uint64_t expiration)
             : ForwardSocketClient(client, false),
-              ev(photon::new_epoll_cascading_engine()),
+              ev(photon::new_default_cascading_engine()),
               expiration(expiration),
               timer(0, {this, &TCPSocketPool::evict}) {
         collector = (photon::thread*) photon::thread_enable_join(

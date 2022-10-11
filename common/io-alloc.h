@@ -205,7 +205,7 @@ protected:
     }
     int deallocator(void* ptr)
     {
-#ifdef __clang__
+#ifdef __APPLE__
         size_t size = malloc_size(ptr);
 #else
         size_t size = malloc_usable_size(ptr);

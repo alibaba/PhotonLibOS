@@ -30,7 +30,7 @@ collection of result. The first 2 parts are realized via callbacks.
 
 namespace photon{
 
-class thread;
+struct thread;
 
 namespace rpc {
 

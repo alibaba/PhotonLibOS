@@ -270,6 +270,10 @@ namespace fs
         {
             return m_fs->statvfs(path, buf);
         }
+        virtual int utime(const char *path, const struct utimbuf *file_times) override
+        {
+            return m_fs->utime(path, file_times);
+        }
         /*
         virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override
         {

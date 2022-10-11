@@ -26,12 +26,12 @@ limitations under the License.
 
 
 static constexpr size_t pool_size = 4;
-static constexpr size_t data_size = 40UL * 1024 * 1024 * 1024;
+static constexpr size_t data_size = 4UL * 1024 * 1024 * 1024;
 static constexpr size_t concurrent = 64;
 static constexpr size_t bs = 4UL * 1024;
 static constexpr size_t turn = data_size / bs / concurrent;
 
-photon::WorkPool pool(pool_size, photon::INIT_EVENT_EPOLL, 0);
+photon::WorkPool *pool;
 
 void* task(void* arg) {
     auto fs =
@@ -42,7 +42,7 @@ void* task(void* arg) {
     auto file = fs->open("/tmp/workpool_perf", O_RDONLY);
     DEFER(delete file);
     for (auto i = 0U; i < turn; i++) {
-        pool.call([i, buffer, file, arg] {
+        pool->call([i, buffer, file, arg] {
             auto ret =
                 file->pread(buffer, bs, i * bs + ((uint64_t)arg) * bs * turn);
             if (ret < 0) LOG_ERROR("Failed to read");
@@ -71,8 +71,10 @@ int main() {
     // system(
     //     "dd if=/dev/zero of=/tmp/workpool_perf bs=1G count=40; sysctl "
     //     "vm.drop_caches=3");
-    photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBAIO);
     DEFER(photon::fini());
+    pool = new photon::WorkPool(pool_size, photon::INIT_EVENT_EPOLL, 64);
+    DEFER(delete pool);
     std::vector<photon::join_handle*> jhs;
     auto start = photon::now;
     for (uint64_t i = 0; i < concurrent; i++) {

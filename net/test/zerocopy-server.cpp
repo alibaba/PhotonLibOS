@@ -28,7 +28,7 @@ limitations under the License.
 
 #include <photon/photon.h>
 #include <photon/io/aio-wrapper.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
     set_log_output_level(ALOG_INFO);
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    if (photon::init(INIT_EVENT_IOURING | INIT_EVENT_SIGNALFD,
+    if (photon::init(INIT_EVENT_IOURING | INIT_EVENT_SIGNAL,
                      INIT_IO_LIBAIO | INIT_IO_SOCKET_EDGE_TRIGGER) < 0)
         return -1;
     DEFER(photon::fini());

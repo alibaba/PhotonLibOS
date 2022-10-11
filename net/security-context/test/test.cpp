@@ -291,14 +291,21 @@ TEST(cs, uds) {
 }
 
 TEST(Socket, nested) {
+#ifdef __linux___
     ASSERT_GE(net::et_poller_init(), 0);
     DEFER(net::et_poller_fini());
+#endif
 
     auto server_ssl_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
     ASSERT_NE(server_ssl_ctx, nullptr);
     DEFER(delete server_ssl_ctx);
-
+#ifdef __linux___
     auto server = net::new_tls_server(server_ssl_ctx, net::new_et_tcp_socket_server(), true);
+    auto client = net::new_et_tcp_socket_client();
+#else
+    auto server = net::new_tls_server(server_ssl_ctx, net::new_tcp_socket_server(), true);
+    auto client = net::new_tcp_socket_client();
+#endif
     DEFER(delete server);
 
     server->set_handler({s_handler, server_ssl_ctx});
@@ -310,7 +317,6 @@ TEST(Socket, nested) {
     ASSERT_EQ(0, server->getsockname(ep1));
     LOG_INFO("Sock address: `", ep1);
 
-    auto client = net::new_et_tcp_socket_client();
     auto client_ssl_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
     auto tls_client = net::new_tls_client(client_ssl_ctx, client, true);
     DEFER(delete client);
@@ -344,8 +350,8 @@ TEST(Socket, nested) {
 }
 
 int main(int argc, char** arg) {
-    photon::thread_init();
-    DEFER(photon::thread_fini());
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     photon::fd_events_init();
     DEFER(photon::fd_events_fini());
     ::testing::InitGoogleTest(&argc, arg);

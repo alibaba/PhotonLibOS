@@ -21,7 +21,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 
 #include <photon/photon.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/common/io-alloc.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
@@ -242,7 +242,7 @@ int main(int argc, char** arg) {
     // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
     // If you are willing to use io_uring, please switch the event_engine argument from `photon::INIT_EVENT_EPOLL`
     // to `photon::INIT_EVENT_IOURING`.
-    int ret = photon::init(photon::INIT_EVENT_EPOLL | photon::INIT_EVENT_SIGNALFD, photon::INIT_IO_NONE);
+    int ret = photon::init(photon::INIT_EVENT_EPOLL | photon::INIT_EVENT_SIGNAL, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }

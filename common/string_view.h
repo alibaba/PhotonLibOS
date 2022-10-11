@@ -38,7 +38,9 @@ limitations under the License.
 // std::experimental::string_view
 // which requires __cplusplus >= 201402
 
-#if __cplusplus >= 201700L
+#ifdef __APPLE__
+    #include <string_view>
+#elif __cplusplus >= 201700L
     // C++ 17 supported
     // directly include <string_view>
     #include <string_view>

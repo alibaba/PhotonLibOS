@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 #include <cerrno>
 #include <cstdarg>
+#include <sys/uio.h>  // struct iovec
 #include <photon/common/stream.h>
 
 #define UNIMPLEMENTED(func)  \
@@ -35,12 +36,12 @@ limitations under the License.
 
 #define ECHECKSUM EUCLEAN
 
-struct iovec;
 struct dirent;
 struct stat;
 struct statfs;
 struct statvfs;
-struct iovector;
+class iovector;
+struct utimbuf;
 
 namespace photon {
 namespace fs
@@ -248,6 +249,7 @@ namespace fs
         virtual int lstat(const char *path, struct stat *buf)=0;
         virtual int access(const char *pathname, int mode)=0;
         virtual int truncate(const char *path, off_t length)=0;
+        virtual int utime(const char *path, const struct utimbuf *file_times)=0;
         virtual int syncfs()=0;
         int sync() { return syncfs(); }
 

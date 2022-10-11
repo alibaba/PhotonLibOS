@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 #include <photon/io/fd-events.h>
+#include "events_map.h"
 
 namespace photon {
 #ifndef EPOLLRDHUP

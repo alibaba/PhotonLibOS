@@ -16,7 +16,9 @@ limitations under the License.
 
 #pragma once
 #include <csignal>
-
+#ifdef __APPLE__
+using sighandler_t = void(*)(int);
+#endif
 
 // sync_signal will be executed sequentially in a dedicated photon thread
 namespace photon
@@ -34,6 +36,7 @@ namespace photon
     // set signal handler for signal `signum`, default to SIG_IGN
     // the handler is always restartable, until removed by setting to SIG_IGN
     // `sa_mask` and most flags of `sa_flags` are ingored
+    // It is not fully supported and equivlent to sync_signal on MacOS
     extern "C" int sync_sigaction(int signum,
         const struct sigaction *act, struct sigaction *oldact);
 

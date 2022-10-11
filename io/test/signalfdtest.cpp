@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
@@ -115,8 +115,8 @@ TEST(SignalFD, blockall) {
 int main(int argc, char** arg)
 {
     LOG_INFO("Set native signal handler");
-    thread_init();
-    DEFER({thread_fini();});
+    vcpu_init();
+    DEFER({vcpu_fini();});
     auto ret = fd_events_init();
     if (ret != 0)
         LOG_ERROR_RETURN(0, -1, "failed to init fdevents");

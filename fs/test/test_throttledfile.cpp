@@ -55,7 +55,7 @@ void pop_in_another_thread(StatisticsQueue &queue) {
 
 TEST(ThrottledFile, statistics_queue) {
     using namespace fs;
-    photon::thread_init();
+    photon::vcpu_init();
     StatisticsQueue queue(50*4096, 128);
     EXPECT_EQ(0UL, queue.sum());
 
@@ -78,7 +78,7 @@ TEST(ThrottledFile, statistics_queue) {
 
 TEST(ThrottledFile, scoped_queue) {
     using namespace fs;
-    photon::thread_init();
+    photon::vcpu_init();
     StatisticsQueue queue(4096, 128);
 
     auto start = photon::now;
@@ -289,7 +289,7 @@ TEST(ThrottledFile, timestamp) {
 
 TEST(ThrottledFile, timebase_overflow) {
     StatisticsQueue q(4096, 128);
-    photon::thread_init();
+    photon::vcpu_init();
     auto now = photon::now / 1024;
     q.push_back(1);
     EXPECT_EQ(now, q._get_time(q.m_events.front().time_stamp));
@@ -300,9 +300,9 @@ TEST(ThrottledFile, timebase_overflow) {
 }
 
 TEST(ThrottledFs, basic){
-    photon::thread_init();
+    photon::vcpu_init();
     DEFER({
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     ThrottleLimits limit;
     limit.R.block_size = 2 * 1024 * 1024;
@@ -349,10 +349,10 @@ void concurrent_read(IFileSystem* fs, int i){
 }
 
 TEST(ThrottledFs, qps){
-    photon::thread_init();
+    photon::vcpu_init();
     log_output_level = ALOG_INFO;
     DEFER({
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     ThrottleLimits limit;
     limit.R.block_size = 1 * 1024 * 1024;
@@ -399,10 +399,10 @@ TEST(ThrottledFs, qps){
 }
 
 TEST(ThrottledFs, concurrent){
-    photon::thread_init();
+    photon::vcpu_init();
     log_output_level = ALOG_INFO;
     DEFER({
-        photon::thread_fini();
+        photon::vcpu_fini();
     });
     ThrottleLimits limit;
     limit.RW.block_size = 1 * 1024 * 1024;

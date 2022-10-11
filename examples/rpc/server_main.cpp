@@ -16,7 +16,7 @@ limitations under the License.
 
 #include <gflags/gflags.h>
 #include <photon/common/utility.h>
-#include <photon/io/signalfd.h>
+#include <photon/io/signal.h>
 #include <photon/photon.h>
 
 #include "server.h"
