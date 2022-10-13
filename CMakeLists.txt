@@ -26,7 +26,7 @@ endif ()
 option(ENABLE_URING "enable io_uring function" OFF)
 option(ENABLE_FUSE "enable fuse function" OFF)
 option(ENABLE_SASL "enable sasl" OFF)
-option(ENABLE_MIMIC_VDSO "enable mimic vdso" ON)
+option(ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
