@@ -25,6 +25,7 @@ jobs:
       run: |
         sudo apt update -y
         sudo apt install -y git cmake libssl-dev libcurl4-openssl-dev libaio-dev libfuse-dev libgsasl7-dev libgtest-dev libgmock-dev libgflags-dev
+        LD_SHOW_AUXV=1 sleep 1
 
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
