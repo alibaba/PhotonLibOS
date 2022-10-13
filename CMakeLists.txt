@@ -26,6 +26,7 @@ endif ()
 option(ENABLE_URING "enable io_uring function" OFF)
 option(ENABLE_FUSE "enable fuse function" OFF)
 option(ENABLE_SASL "enable sasl" OFF)
+option(ENABLE_MIMIC_VDSO "enable mimic vdso" ON)
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -166,6 +167,9 @@ target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERS
 if (ENABLE_URING)
     target_include_directories(photon_obj PUBLIC ${liburing_include_dir})
     target_compile_definitions(photon_obj PRIVATE PHOTON_URING=on)
+endif()
+if (ENABLE_MIMIC_VDSO)
+    target_compile_definitions(photon_obj PRIVATE ENABLE_MIMIC_VDSO=on)
 endif()
 
 # Make virtual interface for external dynamic libs

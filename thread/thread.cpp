@@ -441,10 +441,82 @@ namespace photon
         return th;
     }
 
+#if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
+#include <sys/auxv.h>
+    struct MimicVDSOTimeX86 {
+        static constexpr size_t BASETIME_MAX = 12;
+        static constexpr size_t REALTIME_CLOCK = 2;
+        static constexpr size_t US_PER_SEC = 1ULL * 1000 * 1000;
+        static constexpr size_t NS_PER_US = 1ULL * 1000;
+
+        struct vgtod_ts {
+            volatile uint64_t sec;
+            volatile uint64_t nsec;
+        };
+
+        struct vgtod_data {
+            unsigned int seq;
+
+            int vclock_mode;
+            volatile uint64_t cycle_last;
+            uint64_t mask;
+            uint32_t mult;
+            uint32_t shift;
+
+            struct vgtod_ts basetime[BASETIME_MAX];
+
+            int tz_minuteswest;
+            int tz_dsttime;
+        };
+
+        vgtod_data* vp = nullptr;
+        uint64_t last_now = 0;
+
+        MimicVDSOTimeX86() {
+            uintptr_t gptr = getauxval(AT_SYSINFO_EHDR);
+            if (gptr) vp = (vgtod_data*)(gptr - 0x3000 + 0x80);
+        }
+
+        __attribute__((always_inline)) static inline uint64_t rdtsc64() {
+            uint32_t low, hi;
+            asm volatile("rdtsc" : "=a"(low), "=d"(hi) : :);
+            return ((uint64_t)hi << 32) | low;
+        }
+
+        operator bool() const { return vp; }
+
+        uint64_t get_now(bool accurate = false) {
+            if (!vp) {
+                return -1;
+            }
+            uint64_t sec, ns, last;
+            do {
+                last = vp->cycle_last;
+                sec = vp->basetime[REALTIME_CLOCK].sec;
+                ns = vp->basetime[REALTIME_CLOCK].nsec;
+            } while (PHOTON_UNLIKELY(last != vp->cycle_last));
+            if (PHOTON_UNLIKELY(accurate)) {
+                auto rns = ns;
+                auto cycles = rdtsc64();
+                if (PHOTON_LIKELY(cycles > last))
+                    rns += ((cycles - last) * vp->mult) >> vp->shift;
+                return last_now = sec * US_PER_SEC + rns / NS_PER_US;
+            }
+            auto ret = sec * US_PER_SEC + ns / NS_PER_US;
+            if (ret < last_now) return last_now;
+            return last_now = ret;
+        }
+    } __mimic_vdso_time_x86;
+#endif
+
     volatile uint64_t now;
     static std::atomic<pthread_t> ts_updater(0);
     static inline uint64_t update_now()
     {
+#if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
+        if (PHOTON_LIKELY(__mimic_vdso_time_x86))
+            return photon::now = __mimic_vdso_time_x86.get_now();
+#endif
         struct timeval tv;
         gettimeofday(&tv, NULL);
         uint64_t nnow = tv.tv_sec;
@@ -473,7 +545,12 @@ namespace photon
     #endif
     }
     static uint32_t last_tsc = 0;
-    static inline uint64_t if_update_now() {
+    static inline uint64_t if_update_now(bool accurate = false) {
+#if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
+        if (PHOTON_LIKELY(__mimic_vdso_time_x86)) {
+            return photon::now = __mimic_vdso_time_x86.get_now(accurate);
+        }
+#endif
         if (ts_updater.load(std::memory_order_relaxed)) {
             return photon::now;
         }
@@ -583,6 +660,8 @@ namespace photon
             return count;
         }
 
+        if_update_now();
+
         while(!sleepq.empty())
         {
             auto th = sleepq.front();
@@ -595,7 +674,6 @@ namespace photon
                 count++;
             }
         }
-        if_update_now();
         return count;
     }
 
@@ -674,7 +752,7 @@ namespace photon
             SCOPED_LOCK(current->lock);
             prepare_usleep(current, useconds, waitq);
         });
-        if_update_now();
+        if_update_now(useconds != -1UL);
         switch_context(r.t0, r.next);
         assert(r.t0->waitq == nullptr);
         return r.t0->set_error_number();

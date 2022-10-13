@@ -504,6 +504,18 @@ namespace fs
         {
             callback_umimplemented(done);
         }
+        OVERRIDE_ASYNC(int, utimes, const char *path, const struct timeval times[2])
+        {
+            callback_umimplemented(done);
+        }
+        OVERRIDE_ASYNC(int, lutimes, const char *path, const struct timeval times[2])
+        {
+            callback_umimplemented(done);
+        }
+        OVERRIDE_ASYNC(int, mknod, const char *path, mode_t mode, dev_t dev)
+        {
+            callback_umimplemented(done);
+        }
         OVERRIDE_ASYNC0(int, syncfs)
         {
             callback_umimplemented(done);

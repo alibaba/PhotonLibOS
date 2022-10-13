@@ -274,6 +274,18 @@ namespace fs
         {
             return m_fs->utime(path, file_times);
         }
+        virtual int utimes(const char *path, const struct timeval times[2]) override
+        {
+            return m_fs->utimes(path, times);
+        }
+        virtual int lutimes(const char *path, const struct timeval times[2]) override
+        {
+            return m_fs->lutimes(path, times);
+        }
+        virtual int mknod(const char *path, mode_t mode, dev_t dev) override
+        {
+            return m_fs->mknod(path, mode, dev);
+        }
         /*
         virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override
         {

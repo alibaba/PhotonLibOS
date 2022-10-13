@@ -283,8 +283,8 @@ public:
 	}
 */
 
-#define EASE_LIKELY(x) __builtin_expect(!!(x), 1)
-#define EASE_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define PHOTON_LIKELY(x) __builtin_expect(!!(x), 1)
+#define PHOTON_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 namespace Utility {
 

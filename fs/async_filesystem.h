@@ -205,6 +205,9 @@ namespace fs
         DEFINE_ASYNC(int, access, const char *pathname, int mode);
         DEFINE_ASYNC(int, truncate, const char *path, off_t length);
         DEFINE_ASYNC(int, utime, const char *path, const struct utimbuf *file_times);
+        DEFINE_ASYNC(int, utimes, const char *path, const struct timeval times[2]);
+        DEFINE_ASYNC(int, lutimes, const char *path, const struct timeval times[2]);
+        DEFINE_ASYNC(int, mknod, const char *path, mode_t mode, dev_t dev);
         DEFINE_ASYNC0(int, syncfs);
 
         DEFINE_ASYNC(AsyncDIR*, opendir, const char *name);
@@ -230,6 +233,9 @@ namespace fs
         const static uint32_t OPID_SYNCFS   = 82;
         const static uint32_t OPID_OPENDIR  = 83;
         const static uint32_t OPID_UTIME    = 84;
+        const static uint32_t OPID_UTIMES   = 85;
+        const static uint32_t OPID_LUTIMES  = 86;
+        const static uint32_t OPID_MKNOD    = 87;
     };
 
     class IAsyncFileSystemXAttr

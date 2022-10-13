@@ -28,6 +28,7 @@ limitations under the License.
 #include <sys/statvfs.h>
 #include <sys/ioctl.h>
 #include <sys/xattr.h>
+#include <sys/time.h>
 #include <dirent.h>
 #ifdef __linux__
 #include <linux/fs.h>
@@ -484,6 +485,18 @@ namespace fs
         virtual int utime(const char *path, const struct utimbuf *file_times) override
         {
             return UISysCall(::utime(path, file_times));
+        }
+        virtual int utimes(const char *path, const struct timeval times[2]) override
+        {
+            return UISysCall(::utimes(path, times));
+        }
+        virtual int lutimes(const char *path, const struct timeval times[2]) override
+        {
+            return UISysCall(::lutimes(path, times));
+        }
+        virtual int mknod(const char *path, mode_t mode, dev_t dev) override
+        {
+            return UISysCall(::mknod(path, mode, dev));
         }
         virtual int statfs(const char *path, struct statfs *buf) override
         {

@@ -165,5 +165,95 @@ bool zerocopy_available() {
     return r;
 }
 
+
+static const char base64_index_min = '+';
+static const char base64_index_max = 'z';
+static const unsigned char base64_index_count = 80; //= '+' - 'z' + 1
+#define EI 255
+static unsigned char base64_index_map[]= {
+    //'+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@',
+       62,  EI,  EI,  EI,  63,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  EI,  EI,  EI,  EI,  EI,  EI,  EI,
+    //'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+        0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25,
+    //'[', '\', ']', '^', '_', '`',
+        EI, EI,  EI,  EI,  EI,  EI,
+    //abcdefghijklmnopqrstuvwxyz
+        26, 27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37, 38, 39, 40, 41, 42,  43,  44,  45,  46,  47,  48,  49,  50,  51,  52 };
+
+static unsigned char get_index_of(char val, bool &ok) {
+    ok = true;
+    if (val < base64_index_min || val > base64_index_max) {
+        ok = false;
+        return 0;
+    }
+     unsigned char ret = base64_index_map[val - base64_index_min];
+     ok = (ret != EI);
+     return ret;
+}
+ #undef EI
+
+bool base64_translate_4to3(const char *in, char *out)  {
+    struct xlator {
+        unsigned char _;
+        unsigned char a : 6;
+        unsigned char b : 6;
+        unsigned char c : 6;
+        unsigned char d : 6;
+    } __attribute__((packed));
+    static_assert(sizeof(xlator) == 4, "...");
+
+    xlator v;
+    bool f1, f2, f3, f4;
+    v.a = get_index_of(*(in+3), f1);
+    v.b = get_index_of(*(in+2), f2);
+    v.c = get_index_of(*(in+1), f3);
+    v.d = get_index_of(*(in),   f4);
+
+
+    *(uint32_t *)out = ntohl(*(uint32_t *)&v);
+    return (f1 && f2 && f3 && f4);
+}
+bool Base64Decode(std::string_view in, std::string &out) {
+#define GSIZE 4 //Size of each group
+    auto in_size = in.size();
+    if (in_size == 0 || in_size % GSIZE != 0) {
+        return false;
+    }
+
+    char in_tail[GSIZE];
+    int pad = 0;
+    if (in[in_size - 1] == '=') {
+        memcpy(in_tail, &(in[in_size - GSIZE]), GSIZE);
+        in_tail[GSIZE-1] = 'A';
+        pad = 1;
+
+        if (in[in_size - 2] == '='){
+            in_tail[GSIZE-2] = 'A';
+            pad = 2;
+        }
+    }
+    auto out_size = (in_size/GSIZE ) * 3;
+    out.resize(out_size);
+
+    auto _in = &in[0];
+    auto _out = &out[0];
+    auto end = _in + (in_size - pad);
+    for (; _in + GSIZE <= end; _in += GSIZE, _out += 3 ) {
+        if (!base64_translate_4to3(_in, _out)) {
+            return false;
+        }
+    }
+
+    if (!pad) {
+        return true;
+    }
+    if (!base64_translate_4to3(in_tail, _out)) {
+        return false;
+    }
+    out.resize(out_size - pad);
+    return true;
+#undef BUNIT
+}
+
 }  // namespace net
 }
