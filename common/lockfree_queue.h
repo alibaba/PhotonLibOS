@@ -264,7 +264,7 @@ public:
 
     bool push(const T&  x) {
         auto t = tail.load(std::memory_order_acquire);
-        if (EASE_UNLIKELY(Base::check_full(head, t))) return false;
+        if (PHOTON_UNLIKELY(Base::check_full(head, t))) return false;
         slots[idx(t)] = x;
         tail.store(t + 1, std::memory_order_release);
         return true;
@@ -272,7 +272,7 @@ public:
 
     bool pop(T& x) {
         auto h = head.load(std::memory_order_acquire);
-        if (EASE_UNLIKELY(Base::check_empty(h, tail))) return false;
+        if (PHOTON_UNLIKELY(Base::check_empty(h, tail))) return false;
         x = slots[idx(h)];
         head.store(h + 1, std::memory_order_release);
         return true;

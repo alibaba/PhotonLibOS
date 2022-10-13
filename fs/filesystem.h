@@ -250,6 +250,9 @@ namespace fs
         virtual int access(const char *pathname, int mode)=0;
         virtual int truncate(const char *path, off_t length)=0;
         virtual int utime(const char *path, const struct utimbuf *file_times)=0;
+        virtual int utimes(const char *path, const struct timeval times[2])=0;
+        virtual int lutimes(const char *path, const struct timeval times[2])=0;
+        virtual int mknod(const char *path, mode_t mode, dev_t dev)=0;
         virtual int syncfs()=0;
         int sync() { return syncfs(); }
 

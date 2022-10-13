@@ -86,6 +86,9 @@ public:
     UNIMPLEMENTED(int lchown(const char* pathname, uid_t owner, gid_t group)
                       override);
     UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times) override);
+    UNIMPLEMENTED(int utimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int lutimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int mknod(const char *path, mode_t mode, dev_t dev) override);
     UNIMPLEMENTED_POINTER(DIR* opendir(const char*) override);
 };
 

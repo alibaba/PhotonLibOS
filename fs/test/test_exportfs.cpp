@@ -28,6 +28,8 @@ limitations under the License.
 #include <atomic>
 #include <thread>
 #include <utime.h>
+#include <sys/time.h>
+#include <sys/sysmacros.h>
 
 using namespace photon;
 using namespace photon::fs;
@@ -185,6 +187,9 @@ TEST(ExportFS, basic) {
     EXPECT_CALL(*mockfs, access(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, truncate(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, utime(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, utimes(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, lutimes(_, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
+    EXPECT_CALL(*mockfs, mknod(_, _, _)).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, syncfs()).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockfs, opendir(_)).Times(AtLeast(1)).WillRepeatedly(Return(pad_magic));
 
@@ -209,6 +214,10 @@ TEST(ExportFS, basic) {
     CALL_TEST(fs, truncate, cbint, "", 0);
     struct utimbuf ut = {0, 0};
     CALL_TEST(fs, utime, cbint, "", &ut);
+    struct timeval times[2] = {{0, 0}, {0, 0}};
+    CALL_TEST(fs, utimes, cbint, "", times);
+    CALL_TEST(fs, lutimes, cbint, "", times);
+    CALL_TEST(fs, mknod, cbint, "", 0, makedev(0, 0));
     CALL_TEST0(fs, syncfs, cbint);
     CALL_TEST(fs, opendir, cbad, "");
 

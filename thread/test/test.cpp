@@ -1386,6 +1386,7 @@ TEST(workpool, async_work_lambda_threadpool) {
     EXPECT_LE(duration, std::chrono::seconds(1));
     sem.wait(4);
     duration = std::chrono::system_clock::now() - start;
+    LOG_INFO(VALUE(duration.count()));
     EXPECT_GE(duration, std::chrono::seconds(1));
     EXPECT_LE(duration, std::chrono::seconds(2));
     LOG_INFO("DONE");
