@@ -32,6 +32,7 @@ namespace photon {
 namespace net {
 
 static const uint64_t kMinimalStreamLife = 300UL * 1000 * 1000;
+static const uint64_t kDNSCacheLife = 3600UL * 1000 * 1000;
 static constexpr char USERAGENT[] = "EASE/0.21.6";
 static constexpr size_t SKIP_LIMIT = 4 * 1024;
 static constexpr size_t LINE_BUFFER_SIZE = 4 * 1024;
@@ -41,12 +42,14 @@ public:
     net::TLSContext* tls_ctx = nullptr;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
+    std::unique_ptr<Resolver> resolver;
 
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
     PooledDialer() :
             tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
             tcpsock(new_tcp_socket_pool(new_tcp_socket_client())),
-            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1)) {
+            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1)),
+            resolver(new_default_resolver(kDNSCacheLife)) {
     }
 
     ~PooledDialer() { delete tls_ctx; }
@@ -226,29 +229,26 @@ public:
 ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
     LOG_DEBUG("Dial to `", host);
     std::string strhost(host);
-    std::vector<IPAddr> hosts;
-    gethostbyname(strhost.c_str(), hosts);
-    auto hosts_size = hosts.size();
-    for (size_t _time = 0; _time < hosts_size; _time++) {
-        auto idx= rand() % hosts_size;
-        auto h = hosts[idx];
-        EndPoint ep(h, port);
-        LOG_DEBUG("Connecting ` ssl: `", ep, secure);
-            ISocketStream* sock = nullptr;
-            if (secure) {
-                tlssock->timeout(timeout);
-                sock = tlssock->connect(ep);
-            } else {
-                tcpsock->timeout(timeout);
-                sock = tcpsock->connect(ep);
-            }
-            if (sock) {
-                LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
-                return sock;
-            }
-            LOG_DEBUG("connect ssl : ` ep : `  host : ` failed, try others", secure, ep, host);
+    auto ipaddr = resolver->resolve(strhost.c_str());
+    EndPoint ep(ipaddr, port);
+    LOG_DEBUG("Connecting ` ssl: `", ep, secure);
+    ISocketStream *sock = nullptr;
+    if (secure) {
+        tlssock->timeout(timeout);
+        sock = tlssock->connect(ep);
+    } else {
+        tcpsock->timeout(timeout);
+        sock = tcpsock->connect(ep);
     }
-    LOG_DEBUG("No connectable resolve result");
+    if (sock) {
+        LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
+        return sock;
+    }
+    LOG_DEBUG("connect ssl : ` ep : `  host : ` failed", secure, ep, host);
+    if (ipaddr.addr == 0) LOG_DEBUG("No connectable resolve result");
+    // When failed, remove resolved result from dns cache so that following retries can try
+    // different ips.
+    resolver->discard_cache(strhost.c_str());
     return nullptr;
 }
 

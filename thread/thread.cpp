@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <unistd.h>
-#include <sys/time.h>
-#include <sys/mman.h>
 #include <memory.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#include <unistd.h>
 #ifndef __aarch64__
 #include <emmintrin.h>
 #endif
@@ -473,8 +473,26 @@ namespace photon
         uint64_t last_now = 0;
 
         MimicVDSOTimeX86() {
-            uintptr_t gptr = getauxval(AT_SYSINFO_EHDR);
-            if (gptr) vp = (vgtod_data*)(gptr - 0x3000 + 0x80);
+            vp = get_vvar_addr();
+        }
+
+        static vgtod_data* get_vvar_addr() {
+            // quickly parse /proc/self/maps to find [vvar] mapping
+            auto mmapsfile = fopen("/proc/self/maps", "r");
+            if (!mmapsfile) {
+                return nullptr;
+            }
+            DEFER(fclose(mmapsfile));
+            size_t len = 0;
+            char* line = nullptr;
+            // getline will alloc buffer and realloc when line point to nullptr
+            // so always free before return once
+            DEFER(free(line));
+            while ((getline(&line, &len, mmapsfile)) != EOF) {
+                if (strstr(line, "[vvar]"))
+                    return (vgtod_data*)(strtol(line, NULL, 16) + 0x80);
+            }
+            return nullptr;
         }
 
         __attribute__((always_inline)) static inline uint64_t rdtsc64() {
