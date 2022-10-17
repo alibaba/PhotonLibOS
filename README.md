@@ -179,6 +179,10 @@ make -j
 ctest
 ```
 
+### 4. Integration
+
+We recommend using CMake's `FetchContent` to integrate Photon into your existing project. See this [example](doc/CMakeLists.txt).
+
 ## About Photon
 
 Photon was originally created from the storage team of Alibaba Cloud since 2017. It's a production ready library, and has

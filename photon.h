@@ -39,7 +39,7 @@ const uint64_t INIT_IO_EXPORTFS = SHIFT(10);
 const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_KQUEUE;
 const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBCURL;
 #else
-const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_EPOLL;
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_EPOLL | INIT_EVENT_SIGNAL;
 const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBAIO | INIT_IO_LIBCURL;
 #endif
 
@@ -50,7 +50,7 @@ const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBAIO | INIT_IO_LIBCURL;
  *        Ancillary threads will be running in background.
  * @return 0 for success
  */
-int init(uint64_t event_engine = INIT_EVENT_DEFAULT | INIT_EVENT_SIGNAL,
+int init(uint64_t event_engine = INIT_EVENT_DEFAULT,
          uint64_t io_engine = INIT_IO_DEFAULT);
 
 /**

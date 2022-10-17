@@ -30,6 +30,7 @@ limitations under the License.
 #include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
+#include <photon/common/expirecontainer.h>
 #include "socket.h"
 
 namespace photon {
@@ -253,6 +254,45 @@ bool Base64Decode(std::string_view in, std::string &out) {
     out.resize(out_size - pad);
     return true;
 #undef BUNIT
+}
+
+class DefaultResolver : public Resolver {
+public:
+    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
+        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
+    ~DefaultResolver() { dnscache_.clear(); }
+
+    IPAddr resolve(const char *host) override {
+        auto ctr = [&]() -> IPAddr * {
+            auto *ip = new IPAddr();
+            photon::semaphore sem;
+            std::thread([&]() {
+                *ip = gethostbyname(host);
+                sem.signal(1);
+            }).detach();
+            auto ret = sem.wait(1, resolve_timeout_);
+            if (ret < 0 && errno == ETIMEDOUT) {
+                LOG_WARN("Domain resolution for ` timeout!", host);
+            }
+            return ip;
+        };
+        return *(dnscache_.borrow(host, ctr));
+    }
+
+    void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
+
+    void discard_cache(const char *host) override {
+        auto ipaddr = dnscache_.borrow(host);
+        ipaddr.recycle(true);
+    }
+
+private:
+    ObjectCache<std::string, IPAddr *> dnscache_;
+    uint64_t resolve_timeout_;
+};
+
+Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout) {
+    return new DefaultResolver(cache_ttl, resolve_timeout);
 }
 
 }  // namespace net

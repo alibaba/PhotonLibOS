@@ -183,11 +183,14 @@ protected:
 int libcurl_set_pipelining(long val) {
     return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_PIPELINING, val);
 }
-// this feature seems not able to use in 7.29.0
+
 int libcurl_set_maxconnects(long val) {
-    return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS,
-                             val);
-    // return 0;
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 30
+    return curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, val);
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 __attribute__((constructor)) void global_init() {
@@ -230,7 +233,9 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_TIMERFUNCTION, timer_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAXCONNECTS, 0);
+#if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 30
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_MAX_TOTAL_CONNECTIONS, 0);
+#endif
 
         libcurl_set_pipelining(pipelining);
         libcurl_set_maxconnects(maxconn);

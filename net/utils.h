@@ -147,5 +147,27 @@ bool Base64Decode(std::string_view in, std::string &out);
 /* Check if kernel version satisfies and thus zerocopy feature should be enabled */
 bool zerocopy_available();
 
+/**
+ * @brief A DNS Resolver which can cache domain resolution result.
+ *
+ */
+class Resolver : public Object {
+public:
+    // When failed, IPAddr(0) should be returned.
+    // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
+    virtual IPAddr resolve(const char* host) = 0;
+    virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
+    virtual void discard_cache(const char* host) = 0;  // discard current cache of host:ip
+};
+
+/**
+ * @brief A non-blocking Resolver based on gethostbyname.
+ *
+ * @param cache_ttl cache's lifetime in microseconds.
+ * @param resolve_timeout timeout in microseconds for domain resolution.
+ * @return Resolver*
+ */
+Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
+
 }  // namespace net
 }
