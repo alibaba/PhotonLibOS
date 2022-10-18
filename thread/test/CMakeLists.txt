@@ -21,3 +21,11 @@ add_test(NAME test-specific-key COMMAND $<TARGET_FILE:test-specific-key>)
 add_executable(test-thread-local test-thread-local.cpp)
 target_link_libraries(test-thread-local PRIVATE photon_shared ${testing_libs})
 add_test(NAME test-thread-local COMMAND $<TARGET_FILE:test-thread-local>)
+
+add_executable(test-tls-order-native test-tls-order-native.cpp)
+target_link_libraries(test-tls-order-native PRIVATE photon_shared ${testing_libs})
+add_test(NAME test-tls-order-native COMMAND $<TARGET_FILE:test-tls-order-native>)
+
+add_executable(test-tls-order-photon test-tls-order-photon.cpp)
+target_link_libraries(test-tls-order-photon PRIVATE photon_shared ${testing_libs})
+add_test(NAME test-tls-order-photon COMMAND $<TARGET_FILE:test-tls-order-photon>)

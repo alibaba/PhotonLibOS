@@ -33,8 +33,8 @@ namespace photon {
 #endif
 
 // maps interface event(s) to epoll defined events
-using EVMAP = EventsMap<EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR>;
-const static EVMAP evmap(EVENT_READ, EVENT_WRITE, EVENT_ERROR);
+using EVMAP = EventsMap<EVUnderlay<EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR>>;
+constexpr static EVMAP evmap;
 constexpr static uint32_t ERRBIT = EVMAP::UNDERLAY_EVENT_ERROR;
 constexpr static uint32_t READBITS =
     EVMAP::UNDERLAY_EVENT_READ | ERRBIT | EPOLLHUP;

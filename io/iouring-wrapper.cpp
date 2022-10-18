@@ -40,7 +40,8 @@ limitations under the License.
 
 namespace photon {
 
-static EventsMap<POLLIN | POLLRDHUP, POLLOUT, POLLERR> evmap(EVENT_READ, EVENT_WRITE, EVENT_ERROR);
+constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>>
+    evmap;
 
 class iouringEngine : public MasterEventEngine, public CascadingEventEngine {
 public:
@@ -211,7 +212,7 @@ public:
         }
 
         bool one_shot = e.interests & ONE_SHOT;
-        fdInterest fd_interest{e.fd, evmap.translate_bitwisely(e.interests)};
+        fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
         ioCtx io_ctx{CURRENT, -1, false, true};
         eventCtx event_ctx{e, one_shot, io_ctx};
         auto pair = m_event_contexts.insert({fd_interest, event_ctx});
@@ -234,7 +235,7 @@ public:
             LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
         }
 
-        fdInterest fd_interest{e.fd, evmap.translate_bitwisely(e.interests)};
+        fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
         auto iter = m_event_contexts.find(fd_interest);
         if (iter == m_event_contexts.end()) {
             LOG_ERROR_RETURN(0, -1, "iouring: event is either non-existent or one-shot finished");
@@ -276,7 +277,7 @@ public:
                 LOG_ERROR_RETURN(0, -1, "iouring: only cascading engine need to handle event. Must be a bug...")
             }
             eventCtx* event_ctx = container_of(ctx, eventCtx, io_ctx);
-            fdInterest fd_interest{event_ctx->event.fd, evmap.translate_bitwisely(event_ctx->event.interests)};
+            fdInterest fd_interest{event_ctx->event.fd, (uint32_t)evmap.translate_bitwisely(event_ctx->event.interests)};
             if (ctx->res == -ECANCELED) {
                 m_event_contexts.erase(fd_interest);
             } else if (event_ctx->one_shot) {
