@@ -23,6 +23,7 @@ jobs:
     - name: Install Dependencies
       shell: bash  
       run: |
+        uname -a
         sudo apt update -y
         sudo apt install -y git cmake libssl-dev libcurl4-openssl-dev libaio-dev libfuse-dev libgsasl7-dev libgtest-dev libgmock-dev libgflags-dev
 
