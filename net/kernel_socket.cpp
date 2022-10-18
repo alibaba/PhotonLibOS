@@ -618,7 +618,10 @@ protected:
 
 /* ET Socket - Start */
 
-static photon::EventsMap<EVENT_READ, EVENT_WRITE, EVENT_ERROR> et_evmap(EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR);
+constexpr static photon::EventsMap<
+    EVUnderlay<EVENT_READ, EVENT_WRITE, EVENT_ERROR>,
+    EVKey<EPOLLIN | EPOLLRDHUP, EPOLLOUT, EPOLLERR>>
+    et_evmap;
 
 struct NotifyContext {
     photon::thread* waiter[3] = {nullptr, nullptr, nullptr};

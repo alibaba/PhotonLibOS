@@ -61,8 +61,9 @@ private:
                 }
             };
             data = tuple_assistance::apply(ctor(), m_args);
-            if (data)
-                photon::thread_setspecific(m_key, data);
+            assert(data != nullptr);    // operator new should not fail
+            if (photon::thread_setspecific(m_key, data) != 0)
+                abort();
         }
         return (T*) data;
     }
