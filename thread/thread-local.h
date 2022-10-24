@@ -34,9 +34,9 @@ public:
             abort();
     }
 
-    ~thread_local_ptr() {
-        photon::thread_key_delete(m_key);
-    }
+    // If every thread_local_ptr has been declared as static, its lifecycle will remain
+    // to the end of the program. So we don't even need to delete the key.
+    ~thread_local_ptr() = default;
 
     T& operator*() {
         return *get();

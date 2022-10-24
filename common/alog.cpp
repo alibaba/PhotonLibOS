@@ -29,12 +29,18 @@ limitations under the License.
 using namespace std;
 
 class BaseLogOutput : public ILogOutput {
-protected:
-    uint64_t throttle = -1UL;
-    time_t ts = 0;
-    uint64_t count = 0;
-
 public:
+    uint64_t throttle = -1UL;
+    uint64_t count = 0;
+    time_t ts = 0;
+    int log_file_fd;
+
+    constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
+
+    void write(int, const char* begin, const char* end) override {
+        ::write(log_file_fd, begin, end - begin);
+        throttle_block();
+    }
     void throttle_block() {
         if (throttle == -1UL) return;
         time_t t = time(0);
@@ -46,42 +52,28 @@ public:
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
-    int get_log_file_fd() override {
-        return 0;
-    }
-    uint64_t set_throttle(uint64_t t = -1) override {
-        return throttle = t;
-    }
-    uint64_t get_throttle() override {
-        return throttle;
-    }
+    virtual int get_log_file_fd() override { return log_file_fd; }
+    virtual uint64_t set_throttle(uint64_t t = -1) override { return throttle = t; }
+    virtual uint64_t get_throttle() override { return throttle; }
+    virtual void destruct() override { }
 };
+
+static BaseLogOutput _log_output_stdout(1);
+static BaseLogOutput _log_output_stderr(2);
+ILogOutput* const log_output_stdout = &_log_output_stdout;
+ILogOutput* const log_output_stderr = &_log_output_stderr;
 
 class LogOutputNull : public BaseLogOutput {
 public:
     void write(int, const char* , const char* ) override { throttle_block(); }
 };
 
-static LogOutputNull _log_output_null;
+// static LogOutputNull _log_output_null;
+static BaseLogOutput _log_output_null(0);
 ILogOutput* const log_output_null = &_log_output_null;
 
-template<int FD>
-class LogOutputFd: public BaseLogOutput {
-public:
-    void write(int, const char* begin, const char* end) override {
-        ::write(FD, begin, end - begin);
-        throttle_block();
-    }
-    int get_log_file_fd() override {return FD;}
-};
-
-static LogOutputFd<1> _log_output_stdout;
-static LogOutputFd<2> _log_output_stderr;
-ILogOutput* const log_output_stdout = &_log_output_stdout;
-ILogOutput* const log_output_stderr = &_log_output_stderr;
-
-ALogLogger default_logger(ALOG_DEBUG, log_output_stdout);
-ALogLogger default_audit_logger(ALOG_AUDIT, log_output_null);
+ALogLogger default_logger {ALOG_DEBUG, log_output_stdout};
+ALogLogger default_audit_logger {ALOG_AUDIT, log_output_null};
 
 int &log_output_level = default_logger.log_level;
 ILogOutput* &log_output = default_logger.log_output;
@@ -235,51 +227,41 @@ static struct tm* alog_update_time()
     return alog_update_time(time(0) + 8 * 60 * 60);
 }
 
-class LogOutputFile : public BaseLogOutput {
+class LogOutputFile final : public BaseLogOutput {
 public:
-    int log_file_fd = -1;
-    uint64_t log_file_size_limit = UINT64_MAX;
-    char log_file_name[PATH_MAX];
-    atomic<uint64_t> log_file_size;
-    mutex log_file_lock;
+    uint64_t log_file_size_limit = 0;
+    char* log_file_name = nullptr;
+    atomic<uint64_t> log_file_size{0};
     unsigned int log_file_max_cnt = 10;
 
-    LogOutputFile() {}
+    virtual void destruct() override {
+        log_output_file_close();
+        delete this;
+    }
 
-    ~LogOutputFile() { log_output_file_close(); }
+    int fopen(const char* fn) {
+        auto mode   =   S_IRUSR | S_IWUSR  | S_IRGRP | S_IROTH;
+        return open(fn, O_CREAT | O_WRONLY | O_APPEND, mode);
+    }
 
     void write(int, const char* begin, const char* end) override {
         if (log_file_fd < 0) return;
         uint64_t length = end - begin;
         iovec iov{(void*)begin, length};
-        ::writev(log_file_fd, &iov, 1);
+        ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
         throttle_block();
-        if ((log_file_size += length) > log_file_size_limit) {
-            lock_guard<mutex> guard(log_file_lock);
+        if (log_file_name && log_file_size_limit) {
+            log_file_size += length;
             if (log_file_size > log_file_size_limit) {
-                log_file_rotate();
-                // close(log_file_fd);
-
-                const auto mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-                int fd =
-                    open(log_file_name, O_CREAT | O_WRONLY | O_APPEND, mode);
-                if (fd < 0) {
-                    char enter = '\n';
-                    static char msg[] = "failed to open log output file: ";
-                    ::write(log_file_fd, msg, sizeof(msg) - 1);
-                    ::write(log_file_fd, log_file_name, strlen(log_file_name));
-                    ::write(log_file_fd, &enter, 1);
-                    return;
+                static mutex log_file_lock;
+                lock_guard<mutex> guard(log_file_lock);
+                if (log_file_size > log_file_size_limit) {
+                    log_file_rotate();
+                    reopen_log_output_file();
                 }
-
-                log_file_size = 0;
-                dup2(fd, log_file_fd);  // to make sure log_file_fd
-                close(fd);              // doesn't change
             }
         }
     }
-
-    int get_log_file_fd() override { return log_file_fd ? log_file_fd : -1; }
 
     static inline void add_generation(char* buf, int size,
                                       unsigned int generation) {
@@ -290,32 +272,50 @@ public:
         }
     }
 
-    void log_output_file_setting(int fd, uint64_t rotate_limit) {
-        if (fd < 0) return;
-        if (log_file_fd > 2 && log_file_fd != fd) close(log_file_fd);
+    void log_output_file_setting(int fd) {
+        if (fd < 0)
+            return;
+        if (log_file_fd > 2 && log_file_fd != fd)
+            close(log_file_fd);
 
         log_file_fd = fd;
-        log_file_name[0] = '\0';
-        log_file_size_limit = max(rotate_limit, (uint64_t)(1024 * 1024));
+        log_file_size.store(lseek(fd, 0, SEEK_END));
+        free(log_file_name);
+        log_file_name = nullptr;
+        log_file_size_limit = 0;
     }
 
     int log_output_file_setting(const char* fn, uint64_t rotate_limit,
                                 int max_log_files) {
-        const auto mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-        int fd = open(fn, O_CREAT | O_WRONLY | O_APPEND, mode);
+        int fd = fopen(fn);
         if (fd < 0) return -1;
 
-        log_file_size.store(lseek(fd, 0, SEEK_END));
-        log_output_file_setting(fd, rotate_limit);
-        strcpy(log_file_name,
-               fn);  // must comes after log_output_file(fd, rotate_limit);
-
+        log_output_file_setting(fd);
+        free(log_file_name);
+        log_file_name = strdup(fn);
+        log_file_size_limit = max(rotate_limit, (uint64_t)(1024 * 1024));
         log_file_max_cnt = min(max_log_files, 30);
         return 0;
     }
 
+    void reopen_log_output_file() {
+        int fd = fopen(log_file_name);
+        if (fd < 0) {
+            static char msg[] = "failed to open log output file: ";
+            ::write(log_file_fd, msg, sizeof(msg) - 1);
+            if (log_file_name)
+                ::write(log_file_fd, log_file_name, strlen(log_file_name));
+            ::write(log_file_fd, "\n", 1);
+            return;
+        }
+
+        log_file_size = 0;
+        dup2(fd, log_file_fd);  // to make sure log_file_fd
+        close(fd);              // doesn't change
+    }
+
     void log_file_rotate() {
-        if (access(log_file_name, F_OK) != 0) return;
+        if (!log_file_name || access(log_file_name, F_OK) != 0) return;
 
         int fn_length = (int)strlen(log_file_name);
         char fn0[PATH_MAX], fn1[PATH_MAX];
@@ -347,10 +347,13 @@ public:
 
     int log_output_file_close() {
         if (log_file_fd < 0) {
-            return errno = EALREADY, -1;
+            errno = EALREADY;
+            return -1;
         }
         close(log_file_fd);
         log_file_fd = -1;
+        free(log_file_name);
+        log_file_name = nullptr;
         return 0;
     }
 };
@@ -367,9 +370,9 @@ ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
     return ret;
 }
 
-ILogOutput* new_log_output_file(int fd, uint64_t rotate_limit, uint64_t throttle) {
+ILogOutput* new_log_output_file(int fd, uint64_t throttle) {
     auto ret = new LogOutputFile();
-    ret->log_output_file_setting(fd, rotate_limit);
+    ret->log_output_file_setting(fd);
     ret->set_throttle(throttle);
     return ret;
 }
@@ -379,19 +382,20 @@ ILogOutput* new_log_output_file(int fd, uint64_t rotate_limit, uint64_t throttle
 // log_output_file(...) and log_output_file_close()
 static LogOutputFile default_log_output_file;
 
-int log_output_file(int fd, uint64_t rotate_limit, uint64_t throttle) {
-    default_log_output_file.log_output_file_setting(fd, rotate_limit);
+int log_output_file(int fd, uint64_t throttle) {
+    default_log_output_file.log_output_file_setting(fd);
+    default_log_output_file.set_throttle(throttle);
     default_logger.log_output = &default_log_output_file;
-    default_logger.log_output->set_throttle(throttle);
     return 0;
 }
 
 int log_output_file(const char* fn, uint64_t rotate_limit, int max_log_files, uint64_t throttle) {
-    if (default_log_output_file.log_output_file_setting(fn, rotate_limit,
-                                                        max_log_files) < 0)
+    int ret = default_log_output_file.log_output_file_setting(
+        fn, rotate_limit, max_log_files);
+    if (ret < 0)
         LOG_ERROR_RETURN(0, -1, "Fail to open log file ", fn);
+    default_log_output_file.set_throttle(throttle);
     default_logger.log_output = &default_log_output_file;
-    default_logger.log_output->set_throttle(throttle);
     return 0;
 }
 
