@@ -136,8 +136,7 @@ void Base64Encode(std::string_view in, std::string &out) {
         base64_translate_3to4(_in, _out);
     }
 
-    char itail[4];
-    itail[3] = 0;
+    char itail[4] = {0};
     itail[0] = _in[0];
     if (remain == 2) {
         itail[1] = _in[1];

@@ -158,7 +158,7 @@ TEST(Socket, sockopt) {
     EXPECT_EQ((socklen_t)sizeof(timeo), len_out);
 }
 
-class LogOutputTest : public ILogOutput {
+class LogOutputTest final : public ILogOutput {
 public:
     size_t _log_len;
     char _log_buf[4096];
@@ -173,6 +173,8 @@ public:
 
     uint64_t set_throttle(uint64_t) { return -1; }
     uint64_t get_throttle() { return -1; }
+
+    void destruct() override {}
 } log_output_test;
 
 TEST(Socket, endpoint) {

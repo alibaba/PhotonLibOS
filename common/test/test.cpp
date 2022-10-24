@@ -94,7 +94,7 @@ TEST(ALog, DEC) {
 
 TEST(ALog, DoubleLogger) {
     LogOutputTest lo2;
-    ALogLogger l2(0, &lo2);
+    ALogLogger l2{0, &lo2};
     log_output = &log_output_test;
     DEFER(log_output = log_output_stdout);
     // LOG_DEBUG(' ');
@@ -1821,6 +1821,8 @@ struct LevelOutput : public ILogOutput {
     uint64_t set_throttle(uint64_t t = -1UL) override { return 0; }
 
     uint64_t get_throttle() override { return 0; };
+
+    void destruct() override {}
 };
 
 TEST(ALog, level_in_output) {

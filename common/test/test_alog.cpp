@@ -48,6 +48,8 @@ public:
     uint64_t set_throttle(uint64_t) override {
         return -1UL;
     }
+
+    void destruct() override {}
 } log_output_test;
 
 auto &_log_buf=log_output_test._log_buf;
@@ -75,6 +77,16 @@ TEST(alog, example) {
     LOG_INFO(VALUE(foobar));
     EXPECT_STREQ("[foobar=n]", log_output_test.log_start());
 }
+
+struct BeforeAndAfter {
+    BeforeAndAfter() {
+        LOG_INFO("Before global");
+    }
+
+    ~BeforeAndAfter() {
+        LOG_INFO("After global");
+    }
+} baa;
 
 int main(int argc, char **argv)
 {

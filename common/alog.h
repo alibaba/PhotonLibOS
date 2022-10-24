@@ -25,15 +25,19 @@ limitations under the License.
 #include <type_traits>
 
 #include <photon/common/utility.h>
-#include <photon/common/object.h>
 #include <photon/common/conststr.h>
 
-class ILogOutput : public Object {
+class ILogOutput {
+protected:
+    // output object should be destructed via `destruct()`
+    ~ILogOutput() = default;
+
 public:
     virtual void write(int level, const char* begin, const char* end) = 0;
     virtual int get_log_file_fd() = 0;
     virtual uint64_t set_throttle(uint64_t t = -1UL) = 0;
     virtual uint64_t get_throttle() = 0;
+    virtual void destruct() = 0;
 };
 
 extern ILogOutput * const log_output_null;
@@ -276,11 +280,8 @@ protected:
 
 struct LogBuffer;
 struct ALogLogger {
-    int log_level = ALOG_DEBUG;
-    ILogOutput* log_output = log_output_stdout;
-
-    ALogLogger(int level = 0, ILogOutput* output = log_output_stdout)
-        : log_level(level), log_output(output) {}
+    int log_level;
+    ILogOutput* log_output;
 
     template <typename T>
     ALogLogger& operator<<(T&& rhs) {
