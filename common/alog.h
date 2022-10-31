@@ -30,6 +30,7 @@ limitations under the License.
 class ILogOutput {
 protected:
     // output object should be destructed via `destruct()`
+    // make alog to used in the construct/destruct of global variables
     ~ILogOutput() = default;
 
 public:
@@ -45,7 +46,8 @@ extern ILogOutput * const log_output_stderr;
 extern ILogOutput * const log_output_stdout;
 
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10, uint64_t throttle = -1UL);
-ILogOutput* new_log_output_file(int fd, uint64_t rotate_limit = UINT64_MAX, uint64_t throttle = -1UL);
+ILogOutput* new_log_output_file(int fd, uint64_t throttle = -1UL);
+ILogOutput* new_async_log_output(ILogOutput* output);
 
 // old-style log_output_file & log_output_file_close
 // return 0 when successed, -1 for failed

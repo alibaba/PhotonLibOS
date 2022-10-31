@@ -21,24 +21,14 @@ limitations under the License.
 
 using namespace std;
 
-namespace Utility {
-
-inline bool all_digits(string_view s)
-{
-    for (auto c: s)
-        if (!isdigit(c))
-            return false;
-    return true;
-}
-
-int version_compare(const std::string& a, const std::string& b, int& result) {
-    auto sa = ((estring&) a).split('.');
-    auto sb = ((estring&) b).split('.');
+int version_compare(string_view a, string_view b, int& result) {
+    auto sa = ((estring_view&)a).split('.');
+    auto sb = ((estring_view&)b).split('.');
 
     for (auto ita = sa.begin(), itb = sb.begin();
             ita != sa.end() && itb != sb.end();
             ++ita, ++itb) {
-        if (!all_digits(*ita) || !all_digits(*itb)) {
+        if (!ita->all_digits() || !itb->all_digits()) {
             return -1;
         }
         if (ita->size() == itb->size()) {
@@ -67,4 +57,3 @@ void print_stacktrace() {
     free(stacktrace);
 }
 
-}

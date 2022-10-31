@@ -30,6 +30,11 @@ stp x29, x30, [sp, #-0x60]
 sub sp, sp, #0x60
 mov x4, sp // r4 = sp
 str x4, [x0] // (*rdi_from_c) = r4
+.global _photon_switch_to
+#if !defined( __APPLE__ ) && !defined( __FreeBSD__ )
+.type  _photon_switch_to, @function
+#endif
+_photon_switch_to:
 ldr x4, [x1] // sp = (*rsi_to_c)
 mov sp, x4
 ldp x29, x30, [sp, #0x00]

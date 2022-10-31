@@ -53,7 +53,7 @@ int work_pool_init(int vcpu_num, int event_engine, int io_engine) {
         log_error("Invalid vcpu_num");
         return -1;
     }
-    g_work_pool = new photon::WorkPool(vcpu_num, event_engine, io_engine);
+    g_work_pool = new photon::WorkPool(vcpu_num, event_engine, io_engine, -1);
     return 0;
 }
 
@@ -65,6 +65,17 @@ int work_pool_fini() {
     delete g_work_pool;
     g_work_pool = nullptr;
     return 0;
+}
+
+namespace this_thread {
+
+void migrate() {
+    if (unlikely(!g_work_pool)) {
+        throw_system_error(EPERM, "this_thread::migrate: work pool is not initialized");
+    }
+    g_work_pool->thread_migrate();
+}
+
 }
 
 }

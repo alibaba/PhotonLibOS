@@ -24,16 +24,6 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/utility.h>
 
-#ifndef likely
-#define __ease_metrics_defined_likely__
-#define likely(x) __builtin_expect((x), 1)
-#endif
-
-#ifndef unlikely
-#define __ease_metrics_defined_unlikely__
-#define unlikely(x) __builtin_expect((x), 0)
-#endif
-
 namespace Metric {
 
 class AddCounter {
@@ -205,10 +195,3 @@ public:
 
 }  // namespace Metric
 
-#ifdef __ease_metrics_defined_likely__
-#undef likely
-#endif
-
-#ifdef __ease_metrics_defined_unlikely__
-#undef unlikely
-#endif

@@ -32,7 +32,7 @@ namespace photon
     int timestamp_updater_fini();
 
     struct thread;
-    extern "C" __thread thread* CURRENT;
+    extern __thread thread* CURRENT;
     extern volatile uint64_t now;
 
     enum states
@@ -105,7 +105,6 @@ namespace photon
     struct vcpu_base {
         MasterEventEngine* master_event_engine;
         std::atomic<uint32_t> nthreads;
-        states state;
         volatile uint64_t switch_count;
     };
 
