@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <sys/types.h>
 #include <photon/thread/thread.h>
 
 namespace photon {

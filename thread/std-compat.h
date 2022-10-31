@@ -329,6 +329,11 @@ inline void sleep_until(const ::std::chrono::time_point<Clock, Duration>& t) {
     sleep_for(t - Clock::now());
 }
 
+/**
+ * @brief Migrate current thread to a random vcpu
+ */
+void migrate();
+
 }   // namespace this_thread
 
 /**
@@ -336,7 +341,7 @@ inline void sleep_until(const ::std::chrono::time_point<Clock, Duration>& t) {
  * @note Should be called at the beginning of the main function, after photon::init().
  * @param vcpu_num The maximum vcpu number for the newly created threads, starts from 1. The main thread doesn't count.
  */
-int work_pool_init(int vcpu_num = 1, int event_engine = INIT_EVENT_DEFAULT, int io_engine = 0);
+int work_pool_init(int vcpu_num = 1, int event_engine = INIT_EVENT_DEFAULT & (~INIT_EVENT_SIGNAL), int io_engine = 0);
 
 /**
  * @brief Destroy work pool

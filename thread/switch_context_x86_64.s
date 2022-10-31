@@ -28,6 +28,11 @@ mov %r14, -40(%rsp);
 mov %r15, -48(%rsp);
 leaq  -48(%rsp), %rsp
 mov  %rsp, (%rdi);   // rdi is `from`
+.global _photon_switch_to
+#if !defined( __APPLE__ ) && !defined( __FreeBSD__ )
+.type  _photon_switch_to, @function
+#endif
+_photon_switch_to:
 mov  (%rsi), %rsp;   // rsi is `to`
 mov 0(%rsp), %r15;
 mov 8(%rsp), %r14;

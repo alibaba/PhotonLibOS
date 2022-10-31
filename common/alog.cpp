@@ -15,8 +15,11 @@ limitations under the License.
 */
 
 #include "alog.h"
+#include "lockfree_queue.h"
+#include "photon/thread/thread.h"
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -358,6 +361,69 @@ public:
     }
 };
 
+class AsyncLogOutput final : public ILogOutput {
+public:
+    ILogOutput* log_output;
+    std::mutex mt;
+    std::condition_variable cv;
+    std::thread background;
+    LockfreeSPSCRingQueue<iovec, 16384> pending;
+    photon::spinlock lock;
+    bool stopped = false;
+
+    AsyncLogOutput(ILogOutput* output) : log_output(output) {
+        background = std::thread([&] {
+            auto log_file_fd = log_output->get_log_file_fd();
+            auto wb = [this, log_file_fd] {
+                iovec iov;
+                while (pending.pop(iov)) {
+                    log_output->write(log_file_fd, (char*)iov.iov_base, (char*)iov.iov_base + iov.iov_len);
+                    delete (char*)iov.iov_base;
+                }
+            };
+            while (!stopped) {
+                uint64_t interval = 1000UL;
+                if (!pending.empty()) {
+                    interval = 100UL;
+                    wb();
+                }
+                std::unique_lock<std::mutex> l(mt);
+                if (!stopped) cv.wait_for(l, std::chrono::milliseconds(interval));
+            }
+            if (!pending.empty()) wb();
+        });
+    }
+
+    void write(int, const char* begin, const char* end) override {
+        uint64_t length = end - begin;
+        void* buf = new char[length];
+        memcpy(buf, begin, length);
+        iovec iov{buf, length};
+        bool pushed = ({
+            SCOPED_LOCK(lock);
+            pending.push(iov);
+        });
+        if (!pushed) {
+            delete (char*)buf;
+            cv.notify_all();
+        }
+    }
+    virtual int get_log_file_fd() override { return log_output->get_log_file_fd(); }
+    virtual uint64_t set_throttle(uint64_t t = -1UL) override { return log_output->set_throttle(t); }
+    virtual uint64_t get_throttle() override { return log_output->get_throttle(); }
+    virtual void destruct() override {
+        if (!stopped) {
+            {
+                std::unique_lock<std::mutex> l(mt);
+                stopped = true;
+                cv.notify_all();
+            }
+            background.join();
+        }
+        delete this;
+    }
+};
+
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
                                 int max_log_files, uint64_t throttle) {
     auto ret = new LogOutputFile();
@@ -375,6 +441,10 @@ ILogOutput* new_log_output_file(int fd, uint64_t throttle) {
     ret->log_output_file_setting(fd);
     ret->set_throttle(throttle);
     return ret;
+}
+
+ILogOutput* new_async_log_output(ILogOutput* output) {
+    return output ? new AsyncLogOutput(output) : nullptr;
 }
 
 // default_log_file is not defined in header
@@ -409,7 +479,7 @@ int log_output_file_close() {
 namespace photon
 {
     struct thread;
-    extern "C" __thread thread* CURRENT;
+    extern __thread thread* CURRENT;
 }
 
 static inline ALogInteger DEC_W2P0(uint64_t x)
