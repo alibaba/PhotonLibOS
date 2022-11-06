@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "signal.h"
 #include <unistd.h>
+#include <pthread.h>
 #ifdef __APPLE__
 #include <sys/event.h>
 #else

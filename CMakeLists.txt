@@ -217,7 +217,7 @@ if (BUILD_TESTING)
     find_package(gflags REQUIRED)
 
     set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
-    include_directories(${GTEST_INCLUDE_DIR} ${GMOCK_INCLUDE_DIR} ${GFLAGS_INCLUDE_DIR})
+    include_directories(${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS})
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)
