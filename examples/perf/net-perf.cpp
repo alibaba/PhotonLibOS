@@ -193,7 +193,7 @@ static int echo_server() {
     };
 
     // Define handler for new connections (SocketStream)
-    auto handler = [&](photon::net::ISocketStream* arg) -> int {
+    auto handler = [&](photon::net::ISocketStream* sock) -> int {
         if (FLAGS_vcpu_num > 1) {
             work_pool->thread_migrate();
         }
@@ -202,7 +202,6 @@ static int echo_server() {
         void* buf = alloc.alloc(FLAGS_buf_size);
         DEFER(alloc.dealloc(buf));
 
-        auto sock = (photon::net::ISocketStream*) arg;
         while (true) {
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
@@ -214,6 +213,7 @@ static int echo_server() {
                 LOG_ERRNO_RETURN(0, -1, "write fail", VALUE(ret2));
             }
             qps++;
+            photon::thread_yield();
         }
         return 0;
     };
