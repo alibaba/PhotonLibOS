@@ -731,6 +731,42 @@ TEST(ThreadPool, test)
     LOG_INFO("???????????????");
 }
 
+TEST(ThreadPool, migrate) {
+    WorkPool wp(4, 0, 0, -1);
+    ThreadPool<64> pool(64 * 1024);
+    vector<TPControl*> ths;
+    ths.resize(FLAGS_ths_total);
+    for (int i = 0; i < FLAGS_ths_total; i++) {
+        ths[i] = pool.thread_create_ex(&::func1, nullptr, true);
+        wp.thread_migrate(ths[i]->th);
+    }
+    LOG_INFO("----------");
+    for (int i = 0; i < FLAGS_ths_total; i++) {
+        LOG_DEBUG("wait thread: `", ths[i]->th);
+        pool.join(ths[i]);
+    }
+    LOG_INFO("???????????????");
+}
+
+TEST(ThreadPool, multithread) {
+    WorkPool wp(4, 0, 0, -1);
+    ThreadPool<64> pool(64 * 1024);
+    vector<TPControl*> ths;
+    ths.resize(FLAGS_ths_total);
+    for (int i = 0; i < FLAGS_ths_total; i++) {
+        wp.call(
+            [&] { ths[i] = pool.thread_create_ex(&::func1, nullptr, true); });
+    }
+    LOG_INFO("----------");
+    for (int i = 0; i < FLAGS_ths_total; i++) {
+        wp.call([&] {
+            LOG_DEBUG("wait thread: `", ths[i]->th);
+            pool.join(ths[i]);
+        });
+    }
+    LOG_INFO("???????????????");
+}
+
 thread_local uint64_t rw_count;
 thread_local bool writing = false;
 thread_local photon::rwlock rwl;

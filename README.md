@@ -155,15 +155,15 @@ brew install cmake openssl
 
 ### 2. Build from source
 ```shell
-mkdir build && cd build
-cmake ..    # On macOS, we need to add -DOPENSSL_ROOT_DIR=/path/to/openssl/
-make -j
+cd PhotonLibOS
+cmake -B build    # On macOS, we need to add -DOPENSSL_ROOT_DIR=/path/to/openssl/
+cmake --build build -j
 ```
 All the libs and executables will be saved in `build/output`.
 
-### 3. Testing
+### 3. Examples / Testing
 
-Note the examples are also built from testing. When running performance test, remember to remove CMAKE_BUILD_TYPE=Debug.
+Note the examples and test code are built together. When running performance test, remember to switch to Release build type.
 
 ```shell
 # CentOS
@@ -174,8 +174,11 @@ apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 # macOS
 brew install gflags googletest gsasl
 
-cmake -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D ENABLE_URING=1 -D CMAKE_BUILD_TYPE=Debug ..
-make -j
+cd PhotonLibOS
+cmake -B build -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D ENABLE_FUSE=1 -D ENABLE_URING=1 -D CMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+
+cd build
 ctest
 ```
 

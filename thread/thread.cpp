@@ -175,6 +175,7 @@ namespace photon
             return (vcpu_t*)vcpu;
         }
         char* buf;
+        char* stackful_alloc_top;
         size_t stack_size;
 
         Stack stack;
@@ -190,6 +191,31 @@ namespace photon
                 return -1;
             }
             return 0;
+        }
+
+        struct stack_alloc_header {
+            uint32_t size;
+            uint32_t reserved;
+        };
+
+        static_assert(sizeof(stack_alloc_header) == sizeof(uint64_t),
+                      "stack_alloc_header size not fit");
+
+        void* stackful_malloc(size_t size) {
+            auto ret = stackful_alloc_top;
+            stackful_alloc_top += size;
+            auto head = (stack_alloc_header*)stackful_alloc_top;
+            head->size = size;
+            stackful_alloc_top += sizeof(stack_alloc_header);
+            return ret;
+        }
+
+        void stackful_free(void* ptr) {
+            assert(((uint64_t)ptr) < ((uint64_t)stackful_alloc_top));
+            auto rc = stackful_alloc_top - sizeof(stack_alloc_header);
+            (void)rc;
+            assert(ptr == (rc - ((stack_alloc_header*)rc)->size));
+            stackful_alloc_top = (char*)ptr;
         }
 
         void dequeue_ready_atomic(states newstat = states::READY);
@@ -628,6 +654,7 @@ namespace photon
         (uint64_t&)p &= ~63;
         auto th = new (p) thread;
         th->buf = ptr;
+        th->stackful_alloc_top = ptr;
         th->idx = -1;
         th->start = start;
         th->arg = arg;
@@ -1566,6 +1593,10 @@ namespace photon
         CURRENT->vcpu = vcpu;
         CURRENT->idx = -1;
         CURRENT->state = states::RUNNING;
+        pthread_attr_t gattr;
+        pthread_getattr_np(pthread_self(), &gattr);
+        pthread_attr_getstack(&gattr, (void**)&CURRENT->stackful_alloc_top,
+                                         &CURRENT->stack_size);
         vcpu->state = states::RUNNING;
         vcpu->nthreads = 1;
         vcpu->idle_worker = thread_create(&idle_stub, nullptr);
@@ -1589,5 +1620,13 @@ namespace photon
         safe_delete(CURRENT);
         safe_delete(vcpu);
         return 0;
+    }
+
+    void* stackful_malloc(size_t size) {
+        return CURRENT->stackful_malloc(size);
+    }
+
+    void stackful_free(void* ptr) {
+        CURRENT->stackful_free(ptr);
     }
 }

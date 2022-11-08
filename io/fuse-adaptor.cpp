@@ -39,6 +39,9 @@ limitations under the License.
 #include "aio-wrapper.h"
 #include "fd-events.h"
 #include "../thread/thread-pool.h"
+#include "../photon.h"
+#include <vector>
+#include <thread>
 
 namespace photon {
 
@@ -77,7 +80,7 @@ protected:
             if (--obj->ref == 0) obj->cond.notify_all();;
         });
         auto res = fuse_session_receive_buf(obj->se, &fbuf, &tmpch);
-        if (res == -EINTR) return nullptr;
+        if (res == -EINTR || res == -EAGAIN) return nullptr;
         if (res <= 0) {
             obj->loop->stop();
             return nullptr;
@@ -88,7 +91,8 @@ protected:
 
     int on_accept(EventLoop *) {
         ++ref;
-        threadpool.thread_create(&FuseSessionLoop::worker, (void *)this);
+        auto th = threadpool.thread_create(&FuseSessionLoop::worker, (void *)this);
+        thread_yield_to(th);
         return 0;
     }
 
@@ -130,36 +134,52 @@ public:
 static int fuse_session_loop_mpt(struct fuse_session *se) {
     FuseSessionLoop loop(se);
     loop.run();
-    fuse_session_reset(se);
     return 0;
 }
 
-static int fuse_loop_mpt(struct fuse *f) {
-    // fuse may fork and daemonized the process,
-    // but aioctx will not copy, so init aio wrapper again
-    auto rfdev = fd_events_init();
-    auto rlaio = libaio_wrapper_init();
-    DEFER({
-        if (rfdev == 0) fd_events_fini();
-        if (rlaio == 0) libaio_wrapper_fini();
-    });
-    return fuse_session_loop_mpt(fuse_get_session(f));
-}
+struct user_config {
+    int threads;
+};
+
+#define USER_OPT(t, p, v) { t, offsetof(struct user_config, p), v }
+struct fuse_opt user_opts[] = { USER_OPT("threads=%d", threads, 0), FUSE_OPT_END };
 
 int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
              void *user_data) {
+    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+    struct user_config cfg{ .threads = 4, };
+    fuse_opt_parse(&args, &cfg, user_opts, NULL);
     struct fuse *fuse;
     char *mountpoint;
     int multithreaded;
     int res;
     size_t op_size = sizeof(*(op));
-
-    fuse = fuse_setup(argc, argv, op, op_size, &mountpoint, &multithreaded,
+    fuse = fuse_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded,
                       user_data);
     if (fuse == NULL) return 1;
-
-    res = fuse_loop_mpt(fuse);
-
+    if (multithreaded) {
+        if (cfg.threads < 1) cfg.threads = 1;
+        if (cfg.threads > 64) cfg.threads = 64;
+        auto se = fuse_get_session(fuse);
+        auto ch = fuse_session_next_chan(se, NULL);
+        auto fd = fuse_chan_fd(ch);
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        std::vector<std::thread> ths;
+        for (int i = 0; i < cfg.threads; ++i) {
+          ths.emplace_back(std::thread([&]() {
+              init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
+              DEFER(fini());
+              if (fuse_session_loop_mpt(se) != 0) res = -1;
+          }));
+        }
+        for (auto& th : ths) th.join();
+        fuse_session_reset(se);
+    } else {
+        auto se = fuse_get_session(fuse);
+        res = fuse_session_loop_mpt(se);
+        fuse_session_reset(se);
+    }
     fuse_teardown(fuse, mountpoint);
     if (res == -1) return 1;
 

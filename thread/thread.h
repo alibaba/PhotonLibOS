@@ -30,6 +30,9 @@ namespace photon
     int wait_all();
     int timestamp_updater_init();
     int timestamp_updater_fini();
+    void* stackful_malloc(size_t size);
+    void stackful_free(void* ptr);
+
 
     struct thread;
     extern __thread thread* CURRENT;

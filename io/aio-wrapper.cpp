@@ -360,6 +360,7 @@ namespace photon
         ctx->polling_thread = thread_create(&libaio_polling, nullptr);
         assert(ctx->polling_thread);
         libaio_ctx = ctx.release();
+        thread_yield_to(libaio_ctx->polling_thread);
         return 0;
     }
 
