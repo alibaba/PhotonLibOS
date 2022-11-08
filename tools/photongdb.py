@@ -39,7 +39,7 @@ def get_next_ready(p):
 
 
 def get_current():
-    return gdb.parse_and_eval("(photon::thread*)::CURRENT")
+    return gdb.parse_and_eval("(photon::thread*)photon::CURRENT")
 
 
 def get_vcpu(p):

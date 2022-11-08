@@ -34,12 +34,11 @@ static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IF
                               photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg);
 
 int main() {
-    // Initialize Photon environment in current vcpu. Choose the epoll event engine.
+    // Initialize Photon environment in current vcpu.
     //
-    // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
-    // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
-    // If you are willing to use io_uring, please switch the event_engine argument from `photon::INIT_EVENT_EPOLL`
-    // to `photon::INIT_EVENT_IOURING`.
+    // Note Photon's event engine could be either epoll or io_uring. Running an io_uring program would need
+    // the kernel version to be greater than 5.8. If you are willing to use io_uring, please switch the
+    // event_engine argument from `photon::INIT_EVENT_EPOLL` to `photon::INIT_EVENT_IOURING`.
     int ret = photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
@@ -127,10 +126,10 @@ int main() {
 
 void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, AlignedAlloc& alloc,
                        photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg) {
-    auto handler = [&](photon::net::ISocketStream* arg) -> int {
-        void* buf = alloc.alloc(1024);
-        auto sock = (photon::net::ISocketStream*) arg;
+    void* buf = alloc.alloc(1024);
+    DEFER(alloc.dealloc(buf));
 
+    auto handler = [&](photon::net::ISocketStream* sock) -> int {
         // read is a wrapper for fully recv
         ssize_t ret = sock->read(buf, 1024);
         if (ret <= 0) {

@@ -32,6 +32,7 @@ limitations under the License.
 #include "../fuse_adaptor.h"
 #include "../localfs.h"
 #include "photon/common/executor/executor.h"
+#include "photon/photon.h"
 
 using namespace photon;
 
@@ -76,6 +77,7 @@ int main(int argc, char *argv[]) {
     LOG_DEBUG(VALUE(cfg.src));
     LOG_DEBUG(VALUE(cfg.ioengine));
     LOG_DEBUG(VALUE(cfg.exportfs));
+    log_output_level = ALOG_INFO;
     if (cfg.exportfs && *cfg.exportfs == 't') {
         auto fs = fs::new_localfs_adaptor(cfg.src, ioengine);
         auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
@@ -93,8 +95,11 @@ int main(int argc, char *argv[]) {
         auto oper = photon::fs::get_fuse_xmp_oper();
         return fuse_main(args.argc, args.argv, oper, NULL);
     } else {
+        photon::init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
+        DEFER(photon::fini());
         auto fs = fs::new_localfs_adaptor(cfg.src, ioengine);
         auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
+        DEFER(delete wfs);
         return fuser_go(wfs, args.argc, args.argv);
     }
 }

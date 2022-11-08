@@ -71,8 +71,7 @@ public:
     void write(int, const char* , const char* ) override { throttle_block(); }
 };
 
-// static LogOutputNull _log_output_null;
-static BaseLogOutput _log_output_null(0);
+static LogOutputNull _log_output_null;
 ILogOutput* const log_output_null = &_log_output_null;
 
 ALogLogger default_logger {ALOG_DEBUG, log_output_stdout};

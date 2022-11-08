@@ -117,6 +117,7 @@ static int ping_pong_client() {
 static int streaming_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
     auto cli = photon::net::new_tcp_socket_client();
+    // auto cli = photon::net::new_iouring_tcp_client();
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
@@ -212,8 +213,8 @@ static int echo_server() {
             if (ret2 != ret1) {
                 LOG_ERRNO_RETURN(0, -1, "write fail", VALUE(ret2));
             }
-            qps++;
             photon::thread_yield();
+            qps++;
         }
         return 0;
     };
@@ -238,10 +239,9 @@ int main(int argc, char** arg) {
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     set_log_output_level(ALOG_INFO);
 
-    // Note that Photon downloads and compiles liburing by default. Even though compiling it doesn't require
-    // the latest kernel, running an io_uring program does need the kernel version be greater than 5.8.
-    // If you are willing to use io_uring, please switch the event_engine argument from `photon::INIT_EVENT_EPOLL`
-    // to `photon::INIT_EVENT_IOURING`.
+    // Note Photon's event engine could be either epoll or io_uring. Running an io_uring program would need
+    // the kernel version to be greater than 5.8. If you are willing to use io_uring, please switch the
+    // event_engine argument from `photon::INIT_EVENT_EPOLL` to `photon::INIT_EVENT_IOURING`.
     int ret = photon::init(photon::INIT_EVENT_EPOLL | photon::INIT_EVENT_SIGNAL, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");

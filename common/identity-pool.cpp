@@ -20,6 +20,7 @@ limitations under the License.
 
 void* IdentityPoolBase::get()
 {
+    SCOPED_LOCK(m_mtx);
     void* obj = nullptr;
     assert(m_size <= m_capacity);
     if (m_size > 0) {
@@ -27,7 +28,9 @@ void* IdentityPoolBase::get()
         if (m_size < min_size_in_interval)
             min_size_in_interval = m_size;
     } else {
+        m_mtx.unlock();
         m_ctor(&obj);
+        m_mtx.lock();
     }
     ++m_refcnt;
     return obj;
@@ -36,12 +39,17 @@ void* IdentityPoolBase::get()
 void IdentityPoolBase::put(void* obj)
 {
     if (!obj) return;
-    if (m_size < m_capacity) {
-        m_items[m_size++] = obj;
-    } else{
-        m_dtor(obj);
+    {
+        SCOPED_LOCK(m_mtx);
+        if (m_size < m_capacity) {
+            m_items[m_size++] = obj;
+        } else{
+            m_mtx.unlock();
+            m_dtor(obj);
+            m_mtx.lock();
+        }
+        --m_refcnt;
     }
-    --m_refcnt;
     m_cvar.notify_all();
     assert(m_size <= m_capacity);
 }
@@ -50,8 +58,12 @@ uint64_t IdentityPoolBase::do_scale()
 {
     auto des_n = (min_size_in_interval + 1) / 2;
     assert(des_n <= m_size);
+    SCOPED_LOCK(m_mtx);
     while (m_size > 0 && des_n-- > 0) {
-        m_dtor(m_items[--m_size]);
+        auto x = --m_size;
+        m_mtx.unlock();
+        m_dtor(m_items[x]);
+        m_mtx.lock();
     }
     min_size_in_interval = m_size;
     return 0;
@@ -61,9 +73,12 @@ IdentityPoolBase::~IdentityPoolBase()
 {
     if (autoscale)
         disable_autoscale();
-    while (m_refcnt > 0) {
-        m_cvar.wait_no_lock(10 * 1000 * 1000);
-        LOG_WARN("IdentityPool is still in use, unable to destruct");
+    {
+        SCOPED_LOCK(m_mtx);
+        while (m_refcnt > 0) {
+            LOG_DEBUG("IdentityPool is still in use, wait to destruct");
+            m_cvar.wait(m_mtx, 10 * 1000 * 1000);
+        }
     }
     assert(m_size <= m_capacity);
     while (m_size > 0)
