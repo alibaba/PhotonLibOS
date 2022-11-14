@@ -1,8 +1,7 @@
-find_path(GFLAGS_INCLUDE_DIR gflags/gflags.h)
+find_path(GFLAGS_INCLUDE_DIRS gflags/gflags.h)
 
 find_library(GFLAGS_LIBRARIES gflags)
 
-include(FindPackageHandleStandardArgs)
-find_package_handle_standard_args(gflags DEFAULT_MSG GFLAGS_LIBRARIES GFLAGS_INCLUDE_DIR)
+find_package_handle_standard_args(gflags DEFAULT_MSG GFLAGS_LIBRARIES GFLAGS_INCLUDE_DIRS)
 
-mark_as_advanced(GFLAGS_INCLUDE_DIR GFLAGS_LIBRARIES)
+mark_as_advanced(GFLAGS_INCLUDE_DIRS GFLAGS_LIBRARIES)

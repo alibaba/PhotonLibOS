@@ -2,13 +2,13 @@ cmake_minimum_required(VERSION 3.14)
 
 project(
         photon
-        VERSION 0.4.0
+        VERSION 0.4
         LANGUAGES C CXX ASM
 )
 
 # Utilities
+include(FindPackageHandleStandardArgs)
 include(CheckCXXCompilerFlag)
-include(CPack)
 include(FetchContent)
 set(FETCHCONTENT_QUIET false)
 
