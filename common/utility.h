@@ -289,5 +289,6 @@ constexpr bool likely(bool expr) { return __builtin_expect(expr, true); }
 constexpr bool unlikely(bool expr) { return __builtin_expect(expr, false); }
 
 int version_compare(std::string_view a, std::string_view b, int& result);
+int kernel_version_compare(std::string_view dst, int& result);
 void print_stacktrace();
 

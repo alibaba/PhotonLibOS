@@ -166,10 +166,10 @@ All the libs and executables will be saved in `build/output`.
 Note the examples and test code are built together. When running performance test, remember to switch to Release build type.
 
 ```shell
-# CentOS
-dnf config-manager --set-enabled powertools
+# CentOS 8.5
+dnf config-manager --set-enabled PowerTools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
-# Ubuntu
+# Ubuntu 20.04
 apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 # macOS
 brew install gflags googletest gsasl

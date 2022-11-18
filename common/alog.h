@@ -148,7 +148,7 @@ struct ALogString
     const char* const s;
     size_t size;
 
-    constexpr ALogString(const char* s, size_t n) : s(s), size(n) { }
+    constexpr ALogString(const char* s_, size_t n) : s(s_), size(n) { }
 
     constexpr char operator[](size_t i) const { return s[i]; }
 };
@@ -158,7 +158,7 @@ struct ALogStringL : public ALogString
     using ALogString::ALogString;
 
     template<size_t N> constexpr
-    ALogStringL(const char (&s)[N]) : ALogString(s, N-1) { }
+    ALogStringL(const char (&s_)[N]) : ALogString(s_, N-1) { }
 };
 
 struct ALogStringPChar : public ALogString
@@ -418,10 +418,10 @@ struct LogBuilder {
     ALogLogger* logger;
     bool done;
 
-    LogBuilder(int level, BuilderType&& builder, ALogLogger* logger)
-        : level(level),
-          builder(std::forward<BuilderType>(builder)),
-          logger(logger),
+    LogBuilder(int level_, BuilderType&& builder_, ALogLogger* logger_)
+        : level(level_),
+          builder(std::forward<BuilderType>(builder_)),
+          logger(logger_),
           done(false) {}
     LogBuilder(LogBuilder&& rhs)
         : level(rhs.level),
@@ -499,7 +499,7 @@ struct ERRNO
 {
     const int no;
     ERRNO() : no(errno) { }
-    constexpr ERRNO(int no) : no(no) { }
+    constexpr ERRNO(int no_) : no(no_) { }
 };
 
 inline LogBuffer& operator << (LogBuffer& log, ERRNO e)

@@ -20,12 +20,25 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(photon)
 set(PHOTON_INCLUDE_DIR ${photon_SOURCE_DIR}/include/)
 
-# Statically linking your target with Photon
-add_executable(demo_1 demo.cpp)
-target_include_directories(demo_1 PRIVATE ${PHOTON_INCLUDE_DIR})
-target_link_libraries(demo_1 photon_static)
+# Case 1: Statically linking your app with Photon
+add_executable(app_1 ${SOURCES})
+target_include_directories(app_1 PRIVATE ${PHOTON_INCLUDE_DIR})
+target_link_libraries(app_1 photon_static)
 
-# Dynamically linking your target with Photon
-add_executable(demo_2 demo.cpp)
-target_include_directories(demo_2 PRIVATE ${PHOTON_INCLUDE_DIR})
-target_link_libraries(demo_2 photon_shared)
+# Case 2: Dynamically linking your app with Photon
+add_executable(app_2 ${SOURCES})
+target_include_directories(app_2 PRIVATE ${PHOTON_INCLUDE_DIR})
+target_link_libraries(app_2 photon_shared)
+
+# Case 3: Add Photon into your static lib
+add_library(lib_3 STATIC ${SOURCES})
+target_include_directories(lib_3 PRIVATE ${PHOTON_INCLUDE_DIR})
+target_link_libraries(lib_3 photon_static)
+
+# Case 4: Add Photon into your shared lib
+add_library(lib_4 SHARED ${SOURCES})
+target_include_directories(lib_4 PRIVATE ${PHOTON_INCLUDE_DIR})
+target_link_libraries(lib_4 -Wl,--whole-archive photon_static -Wl,--no-whole-archive)
+
+# Note: If your lib needs to be installed via CMake's `install(EXPORT)`, you should
+# change photon_static to $<BUILD_INTERFACE:photon_static> to avoid exporting libphoton.a
