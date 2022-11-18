@@ -172,6 +172,7 @@ struct Closure : public Delegate<int64_t, ARGS...> {
 
 using Closure0 = struct Closure<>;
 
+/*
 inline int __Examples_of_Callback(void*, int, double, long)
 {
     static char ptr[] = "example";
@@ -200,5 +201,6 @@ inline int __Examples_of_Callback(void*, int, double, long)
 
     return 0;
 }
+*/
 
 #pragma GCC diagnostic pop

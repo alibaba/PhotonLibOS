@@ -532,7 +532,7 @@ public:
 
     ssize_t read(void* buf, size_t count) override {
         uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(photon::iouring_pread(fd, buf, count, 0, timeout));
+        auto cb = LAMBDA_TIMEOUT(do_recv(fd, buf, count, 0, timeout));
         return net::doio_n(buf, count, cb);
     }
 
@@ -546,7 +546,7 @@ public:
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
         uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(photon::iouring_preadv(fd, view.iov, view.iovcnt, 0, timeout));
+        auto cb = LAMBDA_TIMEOUT(do_recvmsg(fd, view.iov, view.iovcnt, 0, timeout));
         return net::doiov_n(view, cb);
     }
 
@@ -559,11 +559,11 @@ public:
     }
 
     ssize_t recv(void* buf, size_t count, int flags = 0) override {
-        return photon::iouring_pread(fd, buf, count, 0, m_timeout);
+        return do_recv(fd, buf, count, flags, m_timeout);
     }
 
     ssize_t recv(const iovec* iov, int iovcnt, int flags = 0) override {
-        return photon::iouring_preadv(fd, iov, iovcnt, 0, m_timeout);
+        return do_recvmsg(fd, iov, iovcnt, flags, m_timeout);
     }
 
     ssize_t send(const void* buf, size_t count, int flags = 0) override {
@@ -579,11 +579,22 @@ private:
         return photon::iouring_send(fd, buf, count, flags | MSG_NOSIGNAL, timeout);
     }
 
+    static ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) {
+        return photon::iouring_recv(fd, buf, count, flags, timeout);
+    }
+
     static ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
         msghdr msg = {};
         msg.msg_iov = (iovec*) iov;
         msg.msg_iovlen = iovcnt;
         return photon::iouring_sendmsg(fd, &msg, flags | MSG_NOSIGNAL, timeout);
+    }
+
+    static ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
+        msghdr msg = {};
+        msg.msg_iov = (iovec*) iov;
+        msg.msg_iovlen = iovcnt;
+        return photon::iouring_recvmsg(fd, &msg, flags, timeout);
     }
 };
 

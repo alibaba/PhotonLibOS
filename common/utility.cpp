@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <sys/utsname.h>
 #include <execinfo.h>
 #include "utility.h"
 #include "estring.h"
@@ -42,6 +43,18 @@ int version_compare(string_view a, string_view b, int& result) {
         }
     }
     result = (int) (a.size() - b.size());
+    return 0;
+}
+
+int kernel_version_compare(std::string_view dst, int& result) {
+    utsname buf = {};
+    uname(&buf);
+    estring kernel_release(buf.release);
+    estring_view kernel_version = kernel_release.split("-")[0];
+    int ret = version_compare(kernel_version, dst, result);
+    if (ret != 0) {
+        LOG_ERRNO_RETURN(0, -1, "Unable to detect kernel version, `", kernel_release.c_str());
+    }
     return 0;
 }
 

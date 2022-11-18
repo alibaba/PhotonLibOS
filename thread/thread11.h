@@ -40,8 +40,8 @@ namespace photon
         thread* parent;
 
         template<typename...ARGUMENTS>
-        ThreadContext11__(uint64_t stack_size, F f, ARGUMENTS&&...args_) :
-            start(f), stack_size(stack_size), args{std::forward<ARGUMENTS>(args_)...}
+        ThreadContext11__(uint64_t stack_size_, F f, ARGUMENTS&&...args_) :
+            start(f), stack_size(stack_size_), args{std::forward<ARGUMENTS>(args_)...}
         {
             parent = CURRENT;
 //            LOG_DEBUG("arguments stored in tuple");
@@ -57,9 +57,9 @@ namespace photon
             thread_yield_to(ctx.parent);
             return tuple_assistance::apply(ctx.start, ctx.args);
         }
-        thread* thread_create(thread_entry start)
+        thread* thread_create(thread_entry start_)
         {
-            auto th = ::photon::thread_create(start, this, stack_size);
+            auto th = ::photon::thread_create(start_, this, stack_size);
             thread_yield_to(th);
             return th;
         }
