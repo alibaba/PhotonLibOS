@@ -117,8 +117,8 @@ namespace photon
                 pCtrl->m_mtx.lock();
             }
             pCtrl->start = &stub;
+            pCtrl->cvar.notify_all();
         }
-        pCtrl->cvar.notify_all();
         thread_yield();
         return 0;
     }
