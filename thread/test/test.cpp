@@ -572,8 +572,11 @@ int test_thread2(Marker x, Marker& y, Marker&& z, int n)
     EXPECT_EQ(x, aa);
     EXPECT_EQ(a, "");
     EXPECT_EQ(&y, &b);
-    EXPECT_EQ(&z, &c);
-    EXPECT_EQ(c, cc);
+    if (n == 42) {
+        EXPECT_EQ(&z, &c);
+        EXPECT_EQ(c, cc);
+    }
+    
     return 0;
 }
 
@@ -587,7 +590,7 @@ TEST(thread11, test)
     }
     {
         LOG_DEBUG(' ');
-        auto th = thread_create11(&test_thread, a, b, std::move(c), 31);
+        auto th = thread_create11(&test_thread, a, std::ref(b), std::move(c), 31);
         auto jh = thread_enable_join(th);
         thread_join(jh);
         a.assign(aa); c.assign(cc);
@@ -596,13 +599,13 @@ TEST(thread11, test)
     {
         int n = 42;
         LOG_DEBUG(' ');
-        test_thread2(std::move(a), (b), std::move(c), std::move(n));
+        test_thread2(std::move(a), std::ref(b), std::move(c), std::move(n));
         a.assign(aa); c.assign(cc);
     }
     {
         int n = 43;
         LOG_DEBUG(' ');
-        auto th = thread_create11(&test_thread2, std::move(a), (b), std::move(c), std::move(n));
+        auto th = thread_create11(&test_thread2, std::move(a), std::ref(b), std::move(c), std::move(n));
         auto jh = thread_enable_join(th);
         thread_join(jh);
         a.assign(aa); c.assign(cc);
@@ -664,8 +667,8 @@ void semaphore_test_catch(semaphore* sem, int &step) {
 TEST(Semaphore, basic) {
     int step = 0;
     semaphore sem(0);
-    auto th1 = thread_create11(semaphore_test_catch, &sem, step);
-    auto th2 = thread_create11(semaphore_test_hold, &sem, step);
+    auto th1 = thread_create11(semaphore_test_catch, &sem, std::ref(step));
+    auto th2 = thread_create11(semaphore_test_hold, &sem, std::ref(step));
     auto jh1 = thread_enable_join(th1);
     auto jh2 = thread_enable_join(th2);
     thread_join(jh1);
@@ -686,7 +689,7 @@ TEST(Semaphore, heavy) {
     semaphore sem(0);
     const int thread_num = 100000;
     for (int i=1; i<=thread_num;i++) {
-        thread_create11(64 * 1024, semaphore_heavy, sem, i);
+        thread_create11(64 * 1024, semaphore_heavy, std::ref(sem), i);
     }
     LOG_DEBUG("created ` threads", thread_num);
     sem.signal(1);
@@ -1675,29 +1678,6 @@ struct member_function_bind {
 } mf;
 
 void func(void*, char) {}
-
-TEST(thread11, functor_trait) {
-    char x = rand();
-    auto lambda = [](){};
-    auto lambda2 = [x](char) {(void)x; };
-    auto lambda3 = [lambda, &x]()->int { lambda(); return (int)x; };
-    auto bind_obj = std::bind(&member_function_bind::somefunc, &mf);
-
-    EXPECT_EQ(true, (is_functor<simple_functor, char>::value));
-    EXPECT_EQ(true, (is_functor<simple_typed_functor, char>::value));
-    EXPECT_EQ(true, (is_functor<overloaded_functor, char>::value));
-    EXPECT_EQ(true, (is_functor<overloaded_functor, int>::value));
-    EXPECT_EQ(true, (is_functor<decltype(lambda)>::value));
-    EXPECT_EQ(true, (is_functor<typename std::add_lvalue_reference<decltype(lambda)>::type>::value));
-    EXPECT_EQ(true, (is_functor<typename std::add_rvalue_reference<decltype(lambda)>::type>::value));
-    EXPECT_EQ(true, (is_functor<decltype(lambda2), char>::value));
-    EXPECT_EQ(true, (is_functor<decltype(lambda3)>::value));
-    EXPECT_EQ(true, (is_functor<decltype(bind_obj)>::value));
-    EXPECT_EQ(false, (is_functor<dumb_object>::value));
-    EXPECT_EQ(false, (is_functor<static_member_function, char>::value));
-    EXPECT_EQ(false, (is_functor<decltype(&static_member_function::somefunc), char>::value));
-    EXPECT_EQ(false, (is_functor<size_t>::value));
-}
 
 struct invoke_functor {
     photon::semaphore &sem;

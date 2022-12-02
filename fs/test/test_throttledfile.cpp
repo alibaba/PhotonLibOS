@@ -191,7 +191,7 @@ TEST(ThrottledFile, huge_scope_que) {
     using namespace fs;
     StatisticsQueue q(1024, 128);
     auto start = photon::now;
-    photon::thread_create11(enq_thread, q);
+    photon::thread_create11(enq_thread, std::ref(q));
     do { photon::thread_yield_to(nullptr); q.try_pop(); } while (q.sum()>0);
     EXPECT_EQ(0UL, q.sum());
     EXPECT_GE(photon::now - start, 4UL*1000*1000);

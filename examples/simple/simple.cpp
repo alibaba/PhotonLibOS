@@ -78,7 +78,7 @@ int main() {
 
     // So the thread is actually a coroutine. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
-    auto server_thread = photon::std::thread(run_socket_server, server, file, alloc, cv, mu, got_msg);
+    auto server_thread = photon::std::thread(run_socket_server, server, file, std::ref(alloc), std::ref(cv), std::ref(mu), std::ref(got_msg));
 
     // Create a watcher thread to wait the go_msg flag
     auto watcher_thread = photon::std::thread([&] {
