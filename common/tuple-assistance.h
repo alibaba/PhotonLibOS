@@ -21,65 +21,12 @@ limitations under the License.
 
 namespace tuple_assistance {
 
-template <class F>
-struct callable;
-
-// function pointer
-template <class R, class... Args>
-struct callable<R (*)(Args...)> : public callable<R(Args...)> {};
-
-template <class R, class... Args>
-struct callable<R(Args...)> {
-    using return_type = R;
-
-    using arguments = std::tuple<Args...>;
-};
-
-// member function pointer
-template <class C, class R, class... Args>
-struct callable<R (C::*)(Args...)> : public callable<R(C&, Args...)> {};
-
-// const member function pointer
-template <class C, class R, class... Args>
-struct callable<R (C::*)(Args...) const> : public callable<R(C&, Args...)> {};
-
-// member object pointer
-template <class C, class R>
-struct callable<R(C::*)> : public callable<R(C&)> {};
-
-template <typename T>
-struct __remove_first_type_in_tuple {};
-
-template <typename T, typename... Ts>
-struct __remove_first_type_in_tuple<std::tuple<T, Ts...>> {
-    typedef std::tuple<Ts...> type;
-};
-
-// functor
-template <class F>
-struct callable {
-private:
-    using call_type = callable<decltype(&F::operator())>;
-
-public:
-    using return_type = typename call_type::return_type;
-
-    using arguments = typename __remove_first_type_in_tuple<
-        typename call_type::arguments>::type;
-};
-
-template <class F>
-struct callable<F&> : public callable<F> {};
-
-template <class F>
-struct callable<F&&> : public callable<F> {};
-
 #if cplusplus__ < 201700
 template <typename F, typename Tuple, std::size_t... I>
 constexpr static decltype(auto) apply_impl(F&& f, Tuple&& t,
                                            std::index_sequence<I...>) {
-    return f(std::forward<typename std::tuple_element<
-                 I, typename callable<F>::arguments>::type>(std::get<I>(t))...);
+    return std::__invoke(std::forward<F>(f), 
+                        std::get<I>(std::forward<Tuple>(t))...);
 }
 
 // Implementation of a simplified std::apply from C++17
