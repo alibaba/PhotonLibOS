@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <chrono>
 #include <cinttypes>
 #include <cassert>
 #include <cerrno>
@@ -103,6 +104,27 @@ namespace photon
     // if it is currently sleeping or blocking, it is thread_interupt()ed
     // with EPERM)
     int thread_shutdown(thread* th, bool flag = true);
+
+    // same as std::this_thread
+namespace this_thread {
+    inline uint64_t get_id() noexcept { return reinterpret_cast<uint64_t>(CURRENT); }
+
+    inline void yield() { return thread_yield(); }
+    
+    inline void yield_to(thread* th) { return thread_yield_to(th); }
+
+    template <class Rep, class Period>
+    inline void sleep_for(const std::chrono::duration<Rep, Period>& sleep_duration) {
+        uint64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(sleep_duration).count();
+        thread_usleep(ms);    
+    }
+
+    template <class Clock, class Duration>
+    inline void sleep_until(const std::chrono::time_point<Clock, Duration>& sleep_time) {
+        return sleep_for(sleep_time - Clock::now());
+    }
+
+} // namespace this_thread
 
     class MasterEventEngine;
     struct vcpu_base {

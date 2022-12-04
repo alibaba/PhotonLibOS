@@ -1261,7 +1261,7 @@ int jobwork(WorkPool* pool, int i) {
     pool->call(
         [&ret](int i) {
             LOG_INFO("START");
-            this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(1));
             LOG_INFO("FINISH");
             ret = i;
         },
@@ -1356,7 +1356,7 @@ TEST(workpool, async_work_lambda) {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
-                this_thread::sleep_for(std::chrono::seconds(1));
+                std::this_thread::sleep_for(std::chrono::seconds(1));
                 LOG_INFO("FINISH");
                 delete r;
             }));
