@@ -109,9 +109,7 @@ public:
         return length() >= len &&
             memcmp(data(), x.data(), len) == 0;
     }
-    bool istarts_with(estring_view x) {
-        return strncasecmp(data(), x.data(), x.size()) == 0;
-    }
+
     bool ends_with(estring_view x)
     {
         auto len = x.size();
@@ -119,6 +117,11 @@ public:
             memcmp(&*end() - len, x.data(), len) == 0;
     }
 #endif
+
+    bool istarts_with(estring_view x) {
+        return strncasecmp(data(), x.data(), x.size()) == 0;
+    }
+
     template<typename Separator>
     struct _split
     {

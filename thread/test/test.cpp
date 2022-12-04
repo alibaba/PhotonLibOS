@@ -207,7 +207,7 @@ thread_local photon::mutex aMutex;
 void* thread_test_function(void* arg)
 {
     LOG_DEBUG(VALUE(CURRENT), " before lock");
-    scoped_lock aLock(aMutex);
+    photon::scoped_lock aLock(aMutex);
     LOG_DEBUG(VALUE(CURRENT), " after lock");
 
     uint32_t* result = (uint32_t*)arg;
