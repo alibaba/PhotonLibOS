@@ -22,6 +22,7 @@ limitations under the License.
 #include <unistd.h>
 
 #include <thread>
+#include <string>
 
 #include <photon/common/alog.h>
 #include <photon/io/signal.h>

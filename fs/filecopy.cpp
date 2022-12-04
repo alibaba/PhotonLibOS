@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "filecopy.h"
 
+#include <cstdlib>
 #include <stddef.h>
 #include <sys/stat.h>
 
