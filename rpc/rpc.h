@@ -84,15 +84,18 @@ namespace rpc
                 return -1;
             }
 
-            if (ret < size)
-            {
+            if (ret < size) {
                 DeserializerIOV des;
                 respmsg.iov.truncate(ret);
                 using P = typename Operation::Response;
                 auto re = des.deserialize<P>(&respmsg.iov);
+                if (re == nullptr) return -1;
                 assert((((char*)re + sizeof(P)) <= (char*)&resp) ||
                     ((char*)re >= ((char*)&resp + sizeof(P))));
                 memcpy(&resp, re, sizeof(P));
+            } else {
+                if (!resp.validate_checksum(&respmsg.iov, nullptr, 0))
+                    return -1;
             }
             return ret;
         }

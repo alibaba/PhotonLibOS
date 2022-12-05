@@ -20,13 +20,10 @@ limitations under the License.
 #include <netdb.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <sys/utsname.h>
 
 #include <thread>
-#include <vector>
 
 #include <photon/common/alog.h>
-#include <photon/io/fd-events.h>
 #include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
@@ -148,15 +145,9 @@ void Base64Encode(std::string_view in, std::string &out) {
 }
 
 static bool do_zerocopy_available() {
-    utsname buf = {};
-    uname(&buf);
-    std::string kernel_release(buf.release);
-    std::string kernel_version = kernel_release.substr(0, kernel_release.find('-'));
     int result = 0;
-    int ret = version_compare(kernel_version, "4.15", result);
-    if (ret != 0) {
-        LOG_ERROR_RETURN(0, false, "Unable to detect kernel version, not using zero-copy");
-    }
+    int ret = kernel_version_compare("4.15", result);
+    if (ret != 0) return false;
     return result >= 0;
 }
 
