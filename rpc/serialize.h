@@ -24,6 +24,7 @@ limitations under the License.
 #include <sys/uio.h>
 #include <photon/common/iovector.h>
 #include <photon/common/utility.h>
+#include <photon/common/checksum/crc32c.h>
 
 namespace photon {
 namespace rpc
@@ -146,14 +147,16 @@ namespace rpc
     };
 
     // structs of concrete messages MUST derive from `Message`,
-    // and implement serialize_fields(), possbile with SERIALIZE_FIELDS()
+    // and implement serialize_fields(), possible with SERIALIZE_FIELDS()
     struct Message
     {
     public:
         template<typename AR>
-        void serialize_fields(AR& ar)
-        {
-        }
+        void serialize_fields(AR& ar) {}
+
+        void add_checksum(iovector* iov) {}
+
+        bool validate_checksum(iovector* iov, void* body, size_t body_length) { return true; }
 
     protected:
         template<typename AR>
@@ -168,13 +171,54 @@ namespace rpc
         }
     };
 
+    struct Crc32Hasher {
+        using ValueType = uint32_t;
+
+        static constexpr ValueType init_value() { return 0; };
+
+        static void extend_hash(ValueType& value, const iovector* iov) {
+            for (const auto iter : *iov)
+                value = crc32c_extend(iter.iov_base, iter.iov_len, value);
+        }
+
+        static void extend_hash(ValueType& value, void* buf, size_t length) {
+            value = crc32c_extend(buf, length, value);
+        }
+    };
+
+    template<typename Hasher = Crc32Hasher>
+    struct CheckedMessage : public Message {
+    public:
+        using ValueType = typename Hasher::ValueType;
+
+        CheckedMessage() : m_checksum(Hasher::init_value()) {}
+
+        void add_checksum(iovector* iov) {
+            assert(m_checksum == Hasher::init_value());
+            Hasher::extend_hash(m_checksum, iov);
+        }
+
+        bool validate_checksum(iovector* iov, void* body, size_t body_length) {
+            assert(iov->sum() != 0);
+            auto dst = m_checksum;
+            m_checksum = Hasher::init_value();
+            Hasher::extend_hash(m_checksum, iov);
+            if (body != nullptr && body_length != 0)
+                Hasher::extend_hash(m_checksum, body, body_length);
+            if (dst != m_checksum)
+                return false;
+            return true;
+        }
+
+    private:
+        ValueType m_checksum;
+    };
+
 #define PROCESS_FIELDS(...)                     \
         template<typename AR>                   \
         void process_fields(AR& ar) {           \
             return reduce(ar, __VA_ARGS__);     \
         }
-
-
 
     template<typename Derived>  // The Curiously Recurring Template Pattern (CRTP)
     class ArchiveBase
@@ -308,6 +352,7 @@ namespace rpc
             x.process_fields(non_aligned);
             buffer msg(&x, sizeof(x));
             d()->process_field(msg);
+            x.add_checksum(&iov);
         }
     };
 
@@ -350,6 +395,10 @@ namespace rpc
             _iov=iov;
             auto t = iov -> extract_back<T>();
             if (t) {
+                if (!t->validate_checksum(iov, t, sizeof(*t))) {
+                    failed = true;
+                    return nullptr;
+                }
                 // deserialize aligned fields, and non-aligned fields, from front
                 auto aligned = FilterAlignedFields(this, true);
                 t->process_fields(aligned);

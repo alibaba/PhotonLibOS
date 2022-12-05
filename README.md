@@ -4,7 +4,7 @@
 
 Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
-The role of LibOS is to connect user apps and the kernel. Following the principle of Least Astonishment,
+The role of LibOS is to connect user apps and the OS. Following the principle of Least Astonishment,
 we designed Photon's API to be as consistent as possible with C++ std and POSIX semantics.
 This flattens the learning curve for lib users and brings convenience when migrating legacy codebases.
 
@@ -24,7 +24,7 @@ as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is
 Developers can search for `std::thread`, `std::mutex` in their own projects, and replace them all into the equivalents of `photon::std::<xxx>`.
 It's a quick way to transform thread-based programs to coroutine-based ones.
 
-<details><summary>More history</summary><p>
+<details><summary>More history...</summary><p>
 
 * Photon 0.2 was released on 28 Jul 2022. This release was mainly focused on network socket, security context and multi-vcpu support.
   We re-worked the `WorkPool` so it's more friendly now to write multi-vcpu programs.
@@ -101,7 +101,7 @@ Client Mode: Ping-pong
 |                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K |  0.75Gb   |   100%   |
 |             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
 
-<details><summary>Note</summary><p>
+<details><summary>More details...</summary><p>
 
 - The Streaming client is to measure echo server performance when handling high throughput. A similar scenario in the
 real world is the multiplexing technology used by RPC and HTTP 2.0. We will set up 4 client processes,

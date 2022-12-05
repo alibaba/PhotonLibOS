@@ -377,7 +377,7 @@ public:
                 iovec iov;
                 while (pending.pop(iov)) {
                     log_output->write(log_file_fd, (char*)iov.iov_base, (char*)iov.iov_base + iov.iov_len);
-                    delete (char*)iov.iov_base;
+                    delete[] (char*)iov.iov_base;
                 }
             };
             while (!stopped) {
@@ -395,7 +395,7 @@ public:
 
     void write(int, const char* begin, const char* end) override {
         uint64_t length = end - begin;
-        void* buf = new char[length];
+        auto buf = new char[length];
         memcpy(buf, begin, length);
         iovec iov{buf, length};
         bool pushed = ({
@@ -403,7 +403,7 @@ public:
             pending.push(iov);
         });
         if (!pushed) {
-            delete (char*)buf;
+            delete[] buf;
             cv.notify_all();
         }
     }

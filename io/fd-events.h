@@ -60,7 +60,7 @@ public:
     /**
      * @brief Wait for events, and fire them by photon::thread_interrupt()
      * @param timeout The *maximum* amount of time to sleep. May wake up
-     *        earilier in the case of some events happended.
+     *        earlier in the case of some events happened.
      * @return 0 if slept well, or -1 if error occurred.
      * @warning Do NOT invoke photon::usleep() or photon::sleep() in this function, because their
      *          implementations also rely on this function.
