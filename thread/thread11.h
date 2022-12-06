@@ -27,17 +27,18 @@ limitations under the License.
 
 namespace photon {
 
-template<class F, class... Args, size_t I0, size_t... I>
-void __thread_execute(std::tuple<F, Args...>& t, std::index_sequence<I0, I...>) {
-    tuple_assistance::invoke(std::move(std::get<I0>(t)), std::move(std::get<I>(t))...);
+template<class F, class... Args, size_t I0, size_t I1, size_t... I>
+void __thread_execute(std::tuple<F, Args...>& t, std::index_sequence<I0, I1, I...>) {
+    thread_yield_to(std::get<I0>(t));
+    tuple_assistance::invoke(std::move(std::get<I1>(t)), std::move(std::get<I>(t))...);
 }
 
 template <class Tuple>
 void* __thread_proxy(void* vp) {
-    // Tuple = std::tuple<Func, Args...>
-    std::unique_ptr<Tuple> p(static_cast<Tuple*>(vp));
+    // Tuple = std::tuple<thread*, Func, Args...>
+    auto tp = std::move(*static_cast<Tuple*>(vp));
 
-    __thread_execute(*p, std::make_index_sequence<std::tuple_size<Tuple>::value>{});
+    __thread_execute(tp, std::make_index_sequence<std::tuple_size<Tuple>::value>{});
     return nullptr;
 }
 
@@ -46,12 +47,10 @@ void* __thread_proxy(void* vp) {
 // it has to be wrapped (e.g., with std::ref or std::cref).
 template <class F, class... Args, typename = std::enable_if_t<tuple_assistance::is_invocable<F, Args...>::value>>
 thread* thread_create11(uint64_t stack_size, F&& f, Args&&... args) {
-    using Gp = std::tuple<typename std::decay<F>::type, typename std::decay<Args>::type...>;
-    std::unique_ptr<Gp> p(new Gp(std::forward<F>(f), std::forward<Args>(args)...));
-    auto thread = thread_create(&__thread_proxy<Gp>, p.get(), stack_size);
-    if (thread) {
-        _unused(p.release());
-    }
+    using Gp = std::tuple<thread*, typename std::decay<F>::type, typename std::decay<Args>::type...>;
+    Gp tp(CURRENT, std::forward<F>(f), std::forward<Args>(args)...);
+    auto thread = thread_create(&__thread_proxy<Gp>, &tp, stack_size);
+    thread_yield_to(thread);
     return thread;
 }
 
