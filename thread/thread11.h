@@ -29,7 +29,7 @@ namespace photon {
 
 template<class F, class... Args, size_t I0, size_t... I>
 void __thread_execute(std::tuple<F, Args...>& t, std::index_sequence<I0, I...>) {
-    std::__invoke(std::move(std::get<I0>(t)), std::move(std::get<I>(t))...);
+    tuple_assistance::invoke(std::move(std::get<I0>(t)), std::move(std::get<I>(t))...);
 }
 
 template <class Tuple>
@@ -44,7 +44,7 @@ void* __thread_proxy(void* vp) {
 // NOTICE: The arguments to the thread function are moved or copied by
 // value. If a reference argument needs to be passed to the thread function,
 // it has to be wrapped (e.g., with std::ref or std::cref).
-template <class F, class... Args, typename = std::enable_if_t<std::__is_invocable<F&&, Args&&...>::value>>
+template <class F, class... Args, typename = std::enable_if_t<tuple_assistance::is_invocable<F, Args...>::value>>
 thread* thread_create11(uint64_t stack_size, F&& f, Args&&... args) {
     using Gp = std::tuple<typename std::decay<F>::type, typename std::decay<Args>::type...>;
     std::unique_ptr<Gp> p(new Gp(std::forward<F>(f), std::forward<Args>(args)...));
@@ -58,7 +58,7 @@ thread* thread_create11(uint64_t stack_size, F&& f, Args&&... args) {
 // NOTICE: The arguments to the thread function are moved or copied by
 // value. If a reference argument needs to be passed to the thread function,
 // it has to be wrapped (e.g., with std::ref or std::cref).
-template <class F, class... Args, typename = std::enable_if_t<std::__is_invocable<F&&, Args&&...>::value>>
+template <class F, class... Args, typename = std::enable_if_t<tuple_assistance::is_invocable<F, Args...>::value>>
 thread* thread_create11(F&& f, Args&&... args) {
     return thread_create11(DEFAULT_STACK_SIZE, std::forward<F>(f), std::forward<Args>(args)...);
 }
