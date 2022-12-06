@@ -152,9 +152,10 @@ int thread_key_delete(thread_key_t key) {
     return result;
 }
 
-void deallocate_tls() {
+void deallocate_tls(void** tls_) {
     size_t round = 0;
-    auto tls = (thread_local_storage*) (((partial_thread*) CURRENT)->tls);
+    auto ptr = tls_ ? *tls_ : ((partial_thread*)CURRENT)->tls;
+    auto tls = (thread_local_storage*)ptr;
     if (!tls) return;                           /* No key was ever created */
     if (!tls->specific_used) goto free_tls;     /* No specific was ever set */
 
@@ -203,7 +204,8 @@ free_key:
 
 free_tls:
     delete tls;
-    ((partial_thread*) CURRENT)->tls = nullptr;
+    if (tls_)
+        *tls_ = nullptr;
 }
 
 }

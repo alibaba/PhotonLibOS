@@ -20,21 +20,20 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+namespace http {
 
 constexpr char http_url_scheme[] = "http://";
 constexpr char https_url_scheme[] = "https://";
 
-inline std::string_view http_or_s(bool cond)
-{
+inline std::string_view http_or_s(bool cond){
     return cond ?
-        std::string_view(net::http_url_scheme) :
-        std::string_view(net::https_url_scheme);
+        std::string_view(http_url_scheme) :
+        std::string_view(https_url_scheme);
 }
 
-inline int what_protocol(estring_view url)
-{
-    if (url.istarts_with(net::http_url_scheme)) return 1;
-    if (url.istarts_with(net::https_url_scheme)) return 2;
+inline int what_protocol(estring_view url) {
+    if (url.istarts_with(http_url_scheme)) return 1;
+    if (url.istarts_with(https_url_scheme)) return 2;
     return 0;
 }
 
@@ -77,10 +76,9 @@ public:
     std::string_view host_port() const { return m_url | m_host_port;}
     uint16_t port() const { return m_port; }
     bool secure() const { return m_secure; }
-    bool empty() const { return m_url; }
+    bool empty() const { return !m_url; }
 };
-class StoredURL : public URL
-{
+class StoredURL : public URL {
 public:
     StoredURL() = default;
     StoredURL(std::string_view url) { from_string(url); }
@@ -91,8 +89,7 @@ public:
         auto u = strndup(url.data(), url.size());
         URL::from_string({u, url.size()});
     }
-    ~StoredURL()
-    {
+    ~StoredURL() {
         free((void*)m_url);
     }
 };
@@ -103,5 +100,6 @@ inline bool need_optional_port(const URL& u) {
     return false;
 }
 
-}
-}
+} // namespace http
+} // namespace net
+} // namespace photon

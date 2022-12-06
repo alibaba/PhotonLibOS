@@ -20,11 +20,12 @@ limitations under the License.
 #include "client.h"
 #include "parser.h"
 #include <photon/common/string-keyed.h>
-#include <photon/thread/thread11.h>
 #include <photon/common/estring.h>
+#include <photon/common/alog.h>
 
 namespace photon {
 namespace net {
+namespace http {
 
 using namespace std;
 
@@ -54,9 +55,10 @@ struct SimpleValue{
 class SimpleCookie {
 public:
     unordered_map_string_key<SimpleValue> m_kv;
-    int get_cookies_from_headers(ResponseHeaders* headers)  {
-        auto it = headers->find("Set-Cookies");
-        while (it != headers->end() && it.first() == "Set-Cookies") {
+    int get_cookies_from_headers(Message* message)  {
+        auto it = message->headers.find("Set-Cookies");
+        while (it != message->headers.end() && it.first() == "Set-Cookies") {
+            LOG_INFO("get cookie");
             auto Cookies = it.second();
             Parser p(Cookies);
             uint64_t expire = -1UL;
@@ -78,21 +80,21 @@ public:
         return 0;
     }
 
-    int set_cookies_to_headers(RequestHeaders *headers) {
+    int set_cookies_to_headers(Request* request) {
         bool first_kv = true;
         vector<string_view> eliminate;
-        if (headers->insert("Cookie", "") != 0) return -1;
+        if (request->headers.insert("Cookie", "") != 0) return -1;
         for (auto it : m_kv) {
             if (it.second.m_expire <= photon::now) {
                 eliminate.emplace_back(it.first);
                 continue;
             }
             if (!first_kv) {
-                if (!headers->value_append("; ")) return -1;
+                if (!request->headers.value_append("; ")) return -1;
             } else first_kv = false;
-            if (!headers->value_append(it.first) ||
-                !headers->value_append("=") ||
-                !headers->value_append(it.second.m_value))
+            if (!request->headers.value_append(it.first) ||
+                !request->headers.value_append("=") ||
+                !request->headers.value_append(it.second.m_value))
                 return -1;
         }
         for (auto key : eliminate) {
@@ -111,19 +113,20 @@ class SimpleCookieJar : public ICookieJar {
 public:
     unordered_map_string_key<SimpleCookiePtr> m_cookie;
 
-    int get_cookies_from_headers(string_view host, ResponseHeaders* headers) override {
+    int get_cookies_from_headers(string_view host, Message* message) override {
         if (host.empty()) return -1;
-        return m_cookie[host]->get_cookies_from_headers(headers);
+        return m_cookie[host]->get_cookies_from_headers(message);
     }
-    int set_cookies_to_headers(RequestHeaders* headers) override {
-        if (headers->host().empty()) return -1;
-        return m_cookie[headers->host()]->set_cookies_to_headers(headers);
+    int set_cookies_to_headers(Request* request) override {
+        if (request->host().empty()) return -1;
+        return m_cookie[request->host()]->set_cookies_to_headers(request);
     }
 };
 
 ICookieJar* new_simple_cookie_jar() {
     return new SimpleCookieJar();
+}
 
-}
-}
-}
+} // namespace http
+} // namespace net
+} // namespace photon

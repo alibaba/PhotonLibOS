@@ -34,7 +34,7 @@ __attribute__((constructor)) static void crc_init() {
 }
 
 #if (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32))
-#ifdef __APPLE__
+#if (defined(__clang__))
 #define _crc32di __builtin_arm_crc32cd
 #define _crc32qi __builtin_arm_crc32cb
 #else

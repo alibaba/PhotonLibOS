@@ -30,21 +30,23 @@ limitations under the License.
 
 using namespace photon;
 using namespace photon::net;
+using namespace photon::net::http;
 
-RetType idiot_handle(void*, HTTPServerRequest &req, HTTPServerResponse &resp) {
+int idiot_handle(void*, Request &req, Response &resp, std::string_view) {
     std::string str;
-    auto r = req.Range();
+    auto r = req.headers.range();
     auto cl = r.second - r.first + 1;
     if (cl > 4096) {
-        LOG_ERROR_RETURN(0, RetType::failed, "RetType failed test");
+        LOG_ERROR_RETURN(0, -1, "RetType failed test");
     }
-    resp.ContentLength(cl);
-    resp.SetResult(200);
+    resp.set_result(200);
+    resp.headers.content_length(cl);
+    resp.headers.insert("Test_Handle", "test");
+
     str.resize(cl);
     memset((void*)str.data(), '0', cl);
-    resp.Insert("Test_Handle", "test");
-    resp.Write((void*)str.data(), str.size());
-    return RetType::success;
+    resp.write((void*)str.data(), str.size());
+    return 0;
 }
 
 TEST(http_server, headers) {
@@ -56,29 +58,79 @@ TEST(http_server, headers) {
     DEFER(delete tcpserver);
     auto server = new_http_server();
     DEFER(delete server);
-    server->SetHTTPHandler({nullptr, &idiot_handle});
-    tcpserver->set_handler(server->GetConnectionHandler());
+    server->add_handler({nullptr, &idiot_handle});
+    tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, "localhost:19876/test");
     DEFER(delete op);
     auto exp_len = 20;
-    op->req.insert_range(0, exp_len - 1);
+    op->req.headers.range(0, exp_len - 1);
     op->call();
     EXPECT_EQ(200, op->resp.status_code());
     char buf[4096];
-    auto ret = op->resp_body->read(buf, 4096);
+    auto ret = op->resp.read(buf, 4096);
     EXPECT_EQ(exp_len, ret);
-    EXPECT_EQ(true, "test" == op->resp["Test_Handle"]);
+    EXPECT_EQ(true, "test" == op->resp.headers["Test_Handle"]);
 }
+
+
+int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
+    char buf[4096];
+    auto ret = req.read(buf, 4096);
+    EXPECT_EQ(ret, 10);
+    EXPECT_EQ(0, strncmp(buf, "1234567890", 10));
+
+    resp.set_result(200);
+    std::string str = "success";
+    resp.headers.content_length(7);
+    resp.headers.insert("Test_Handle", "test");
+    resp.write((void*)str.data(), str.size());
+    return 0;
+}
+
+
+TEST(http_server, post) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &body_check_handler});
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto client = new_http_client();
+    DEFER(delete client);
+    auto op = client->new_operation(Verb::POST, "localhost:19876/test");
+    DEFER(delete op);
+    op->req.headers.content_length(10);
+    std::string body = "1234567890";
+    auto writer = [&](Request *req)-> int {
+        return req->write(body.data(), body.size());
+    };
+    op->body_writer = writer;
+    op->call();
+    EXPECT_EQ(200, op->resp.status_code());
+    EXPECT_EQ(true, "test" == op->resp.headers["Test_Handle"]);
+    char buf[4096];
+    auto ret = op->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
+}
+
 std::string fs_handler_std_str = "01234567890123456789";
 
 void test_case(Client* client, off_t st, size_t len, size_t exp_content_length, bool invalid = false) {
+    LOG_INFO("test case start");
     auto op = client->new_operation(Verb::GET, "localhost:19876/fs_handler_test");
-    DEFER(delete op);
-    op->req.insert_range(st, st + len - 1);
+    // DEFER(delete op);
+    op->req.headers.range(st, st + len - 1);
     auto ret = op->call();
+    LOG_INFO("call finished");
     EXPECT_EQ(0, ret);
     if (!invalid) {
         if (exp_content_length != fs_handler_std_str.size())
@@ -86,7 +138,7 @@ void test_case(Client* client, off_t st, size_t len, size_t exp_content_length, 
         else
             EXPECT_EQ(200, op->resp.status_code());
         char buf[4096];
-        ret = op->resp_body->read(buf, 4096);
+        ret = op->resp.read(buf, 4096);
         EXPECT_EQ(exp_content_length, ret);
         if (st >= fs_handler_std_str.size()) st = fs_handler_std_str.size() - 1;
         if (st + len > fs_handler_std_str.size()) len = fs_handler_std_str.size() - st;
@@ -110,8 +162,8 @@ TEST(http_server, fs_handler) {
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHTTPHandler(fs_handler->GetHandler());
-    tcpserver->set_handler(server->GetConnectionHandler());
+    server->add_handler(fs_handler);
+    tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
     auto client = new_http_client();
     DEFER(delete client);
@@ -119,6 +171,7 @@ TEST(http_server, fs_handler) {
     test_case(client, 5, 20, 0, true);
     test_case(client, 25, 5, 0, true);
     test_case(client, 0, 20, 20);
+
 }
 
 net::EndPoint ep{net::IPAddr("127.0.0.1"), 19731};
@@ -166,19 +219,28 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
     return 0;
 }
 
-RetType test_director(void*, HTTPServerRequest& req) {
-    req.Insert("proxy_server_test", "just4test");
-    req.SetTarget("/filename_not_important");
-    req.Erase("Host");
-    req.Insert("Host", "127.0.0.1:19731");
-    return RetType::success;
+int test_director(void*, Request& src, Request& dst) {
+    estring url;
+    url.appends(http_url_scheme, "127.0.0.1:19731", "/filename_not_important");
+    dst.reset(src.verb(), url);
+    dst.headers.insert("proxy_server_test", "just4test");
+    for (auto kv = src.headers.begin(); kv != src.headers.end(); kv++) {
+        if (kv.first() != "Host") dst.headers.insert(kv.first(), kv.second(), 1);
+    }
+    return 0;
 }
 
-RetType test_modifier(void*, HTTPServerResponse& resp) {
-    resp.Insert("proxy_server_test", "just4test");
-    return RetType::success;
+int test_modifier(void*, Response& src, Response& dst) {
+    dst.set_result(src.status_code());
+    for (auto kv : src.headers) {
+        dst.headers.insert(kv.first, kv.second);
+        LOG_DEBUG(kv.first, ": ", kv.second);
+    }
+    dst.headers.insert("proxy_server_test", "just4test");
+
+    return 0;
 }
-TEST(http_server, proxy_handler) {
+TEST(http_server, proxy_handler_get) {
     std_data.resize(std_data_size);
     int num = 0;
     for (auto &c : std_data) {
@@ -210,11 +272,9 @@ TEST(http_server, proxy_handler) {
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
     DEFER(delete proxy_server);
-    auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
-                                                   {nullptr, &test_modifier},
-                                                   client);
-    proxy_server->SetHTTPHandler(proxy_handler->GetHandler());
-    tcpserver->set_handler(proxy_server->GetConnectionHandler());
+    auto proxy_handler = new_proxy_handler({nullptr, &test_director}, {nullptr, &test_modifier}, client);
+    proxy_server->add_handler(proxy_handler);
+    tcpserver->set_handler(proxy_server->get_connection_handler());
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
@@ -223,19 +283,122 @@ TEST(http_server, proxy_handler) {
     EXPECT_EQ(0, ret);
     std::string data_buf;
     data_buf.resize(std_data_size + 1000);
-    ret = op->resp_body->read((void*)data_buf.data(), data_buf.size());
+    ret = op->resp.read((void*)data_buf.data(), data_buf.size());
     EXPECT_EQ(std_data_size, ret);
     data_buf.resize(ret);
     EXPECT_EQ(true, data_buf == std_data);
 }
 
-RetType failure_director(void*, HTTPServerRequest& req) {
-    req.Insert("proxy_server_test", "just4test");
-    req.SetTarget("/filename_not_important");
-    req.Erase("Host");
-    req.Insert("Host", "wtf.nothing.exists");
-    return RetType::success;
+
+TEST(http_server, proxy_handler_post) {
+    auto source_server = new_tcp_socket_server();
+    source_server->timeout(1000UL*1000);
+    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    source_server->bind(19731, IPAddr("127.0.0.1"));
+    source_server->listen();
+    DEFER(delete source_server);
+    auto source_http_server = new_http_server();
+    DEFER(delete source_http_server);
+    source_http_server->add_handler({nullptr, &body_check_handler});
+    source_server->set_handler(source_http_server->get_connection_handler());
+    source_server->start_loop();
+
+    photon::thread_sleep(1);
+    //------------------------------------------
+    auto client = new_http_client();
+    DEFER(delete client);
+    //--------start proxy server ------------
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto proxy_server = new_http_server();
+    DEFER(delete proxy_server);
+    auto proxy_handler = new_proxy_handler({nullptr, &test_director}, {nullptr, &test_modifier}, client);
+    proxy_server->add_handler(proxy_handler);
+    tcpserver->set_handler(proxy_server->get_connection_handler());
+    tcpserver->start_loop();
+    //----------------------------------------------------
+    auto op = client->new_operation(Verb::POST, "localhost:19876/filename");
+    DEFER(delete op);
+    std::string body = "1234567890";
+    op->req.headers.content_length(10);
+    auto writer = [&](Request *req)-> int {
+        return req->write(body.data(), body.size());
+    };
+    op->body_writer = writer;
+    int ret = op->call();
+    EXPECT_EQ(0, ret);
+    char buf[4096];
+    ret = op->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
 }
+
+int test_forward_director(void*, Request& src, Request& dst) {
+    LOG_INFO("request url = `", src.target());
+    estring url;
+    url.appends(http_url_scheme, "127.0.0.1:19731", "/filename_not_important");
+    dst.reset(src.verb(), url);
+    dst.headers.insert("proxy_server_test", "just4test");
+    for (auto kv = src.headers.begin(); kv != src.headers.end(); kv++) {
+        if (kv.first() != "Host") dst.headers.insert(kv.first(), kv.second(), 1);
+    }
+    return 0;
+}
+
+TEST(http_server, proxy_handler_post_forward) {
+    auto source_server = new_tcp_socket_server();
+    source_server->timeout(1000UL*1000);
+    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    source_server->bind(19731, IPAddr("127.0.0.1"));
+    source_server->listen();
+    DEFER(delete source_server);
+    auto source_http_server = new_http_server();
+    DEFER(delete source_http_server);
+    source_http_server->add_handler({nullptr, &body_check_handler});
+    source_server->set_handler(source_http_server->get_connection_handler());
+    source_server->start_loop();
+
+    photon::thread_sleep(1);
+    //------------------------------------------
+    auto client = new_http_client();
+    DEFER(delete client);
+    //--------start proxy server ------------
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto proxy_server = new_http_server();
+    DEFER(delete proxy_server);
+    auto proxy_handler = new_proxy_handler({nullptr, &test_forward_director}, {nullptr, &test_modifier}, client);
+    proxy_server->add_handler(proxy_handler);
+    tcpserver->set_handler(proxy_server->get_connection_handler());
+    tcpserver->start_loop();
+    //----------------------------------------------------
+    auto client1 = new_http_client();
+    DEFER(delete client1);
+    client1->set_proxy("http://localhost:19876/");
+    auto op = client1->new_operation(Verb::POST, "http://localhost:19731/filename");
+    DEFER(delete op);
+    std::string body = "1234567890";
+    op->req.headers.content_length(10);
+    auto writer = [&](Request *req)-> int {
+        return req->write(body.data(), body.size());
+    };
+    op->body_writer = writer;
+    int ret = op->call();
+    EXPECT_EQ(0, ret);
+    char buf[4096];
+    ret = op->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
+}
+
 
 TEST(http_server, proxy_handler_failure) {
     //------------------------------------------
@@ -253,11 +416,9 @@ TEST(http_server, proxy_handler_failure) {
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
     DEFER(delete proxy_server);
-    auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
-                                                   {nullptr, &test_modifier},
-                                                   client_proxy);
-    proxy_server->SetHTTPHandler(proxy_handler->GetHandler());
-    tcpserver->set_handler(proxy_server->GetConnectionHandler());
+    auto proxy_handler = new_proxy_handler({nullptr, &test_director}, {nullptr, &test_modifier}, client_proxy);
+    proxy_server->add_handler(proxy_handler);
+    tcpserver->set_handler(proxy_server->get_connection_handler());
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
@@ -300,20 +461,15 @@ TEST(http_server, mux_handler) {
     tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->listen();
     DEFER(delete tcpserver);
-    auto mux_server = new_http_server();
-    DEFER(delete mux_server);
-    auto proxy_handler = new_reverse_proxy_handler({nullptr, &test_director},
-                                                   {nullptr, &test_modifier},
-                                                   client);
+    auto proxy_handler = new_proxy_handler({nullptr, &test_director}, {nullptr, &test_modifier}, client);
     auto fs = fs::new_localfs_adaptor("/tmp/ease_ut/http_server/");
     DEFER(delete fs);
-    auto fs_handler = new_fs_handler(fs, "static_service/");
-    DEFER(delete fs_handler);
-    auto mux_handler = new_mux_handler();
-    mux_handler->AddHandler("/static_service/", fs_handler);
-    mux_handler->AddHandler("/proxy/", proxy_handler);
-    mux_server->SetHTTPHandler(mux_handler->GetHandler());
-    tcpserver->set_handler(mux_server->GetConnectionHandler());
+    auto fs_handler = new_fs_handler(fs);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(fs_handler, true, "/static_service/");
+    server->add_handler(proxy_handler, true, "/proxy/");
+    tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
     //----------------------------------------------------
     //--------------test static service--------------------
@@ -324,7 +480,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(200, op_static->resp.status_code());
     std::string data_buf;
     data_buf.resize(fs_handler_std_str.size());
-    ret = op_static->resp_body->read((void*)data_buf.data(), data_buf.size());
+    ret = op_static->resp.read((void*)data_buf.data(), data_buf.size());
     EXPECT_EQ(data_buf.size(), ret);
     EXPECT_EQ(true, data_buf == fs_handler_std_str);
     //--------------test proxy service---------------------
@@ -334,7 +490,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(0, ret);
     EXPECT_EQ(200, op_proxy->resp.status_code());
     data_buf.resize(std_data_size + 1000);
-    ret = op_proxy->resp_body->read((void*)data_buf.data(), data_buf.size());
+    ret = op_proxy->resp.read((void*)data_buf.data(), data_buf.size());
     EXPECT_EQ(std_data_size, ret);
     data_buf.resize(ret);
     EXPECT_EQ(true, data_buf == std_data);

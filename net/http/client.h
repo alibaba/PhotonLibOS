@@ -18,42 +18,48 @@ limitations under the License.
 
 #include <memory>
 #include <photon/net/http/verb.h>
-#include <photon/net/http/headers.h>
+#include <photon/net/http/message.h>
 #include <photon/net/http/url.h>
-#include <photon/common/callback.h>
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
+#include <photon/net/socket.h>
+
 
 namespace photon {
 namespace net {
+namespace http {
 
 class ICookieJar : public Object {
 public:
-    virtual int get_cookies_from_headers(std::string_view host, ResponseHeaders* headers) = 0;
-    virtual int set_cookies_to_headers(RequestHeaders* headers) = 0;
+    virtual int get_cookies_from_headers(std::string_view host, Message* message) = 0;
+    virtual int set_cookies_to_headers(Request* request) = 0;
 };
 
-class Client : public Object
-{
+class Client : public Object {
 public:
-    class Operation
-    {
+    class Operation {
     public:
-        RequestHeaders req;                       // request headers
-        Callback<IStream*> req_body_writer = {};  // request body stream
+        Request req;                              // request
         Timeout timeout = {-1UL};                 // default timeout: unlimited
         uint16_t follow = 8;                      // default follow: 8 at most
         uint16_t retry = 5;                       // default retry: 5 at most
-        ResponseHeaders resp;                     // response headers
-        std::unique_ptr<IStream> resp_body;       // response body stream
+        Response resp;                            // response
         int status_code = -1;                     // status code in response
         bool enable_proxy;
+        IStream* body_stream = nullptr;           // use body_stream as body
+        using BodyWriter = Callback<Request*>;    // or call body_writer if body_stream
+        BodyWriter body_writer = {};              // is not set
+
         static Operation* create(Client* c, Verb v, std::string_view url,
                             uint16_t buf_size = 64 * 1024 - 1) {
             auto ptr = malloc(sizeof(Operation) + buf_size);
             return new (ptr) Operation(c, v, url, buf_size);
+        }
+        static Operation* create(Client* c, uint16_t buf_size = 64 * 1024 - 1) {
+            auto ptr = malloc(sizeof(Operation) + buf_size);
+            return new (ptr) Operation(c, buf_size);
         }
         void set_enable_proxy(bool enable) { enable_proxy = enable; }
 
@@ -69,30 +75,35 @@ public:
             : req(_buf, buf_size, v, url),
               enable_proxy(c->has_proxy()),
               _client(c) {}
+        Operation(Client* c, uint16_t buf_size)
+            : req(_buf, buf_size),
+              enable_proxy(c->has_proxy()),
+              _client(c) {}
         Operation(uint16_t buf_size) : req(_buf, buf_size) {}
     };
 
-    Operation* new_operation(Verb v, std::string_view url,
-                             uint16_t buf_size = 64 * 1024 - 1)
-    {
+    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = 64 * 1024 - 1) {
         return Operation::create(this, v, url, buf_size);
     }
 
+    Operation* new_operation(uint16_t buf_size = 64 * 1024 - 1) {
+        return Operation::create(this, buf_size);
+    }
+
     template<uint16_t BufferSize>
-    class OperationOnStack : public Operation
-    {
+    class OperationOnStack : public Operation {
         char _buf[BufferSize];
     public:
-        OperationOnStack(Client* c, Verb v, std::string_view url) :
-            Operation(c, v, url, BufferSize) { }
-        OperationOnStack() : Operation(BufferSize) {}
+        OperationOnStack(Client* c, Verb v, std::string_view url):
+            Operation(c, v, url, BufferSize) {}
+        OperationOnStack(Client* c): Operation(c, BufferSize) {};
+        OperationOnStack(): Operation(BufferSize) {}
     };
 
     virtual int call(Operation* /*IN, OUT*/ op) = 0;
     // get common headers, to manipulate
     virtual Headers* common_headers() = 0;
 
-    void timeout(uint64_t timeout) { m_timeout = timeout; }
     void set_proxy(std::string_view proxy) {
         m_proxy_url.from_string(proxy);
         m_proxy = true;
@@ -109,8 +120,12 @@ public:
     bool has_proxy() {
         return m_proxy;
     }
+    void timeout(uint64_t timeout) { m_timeout = timeout; }
     void timeout_ms(uint64_t tmo) { timeout(tmo * 1000UL); }
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000UL * 1000UL); }
+
+    virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
+                                    bool secure = false, uint64_t timeout = -1UL) = 0;
 protected:
     StoredURL m_proxy_url;
     uint64_t m_timeout = -1UL;
@@ -122,5 +137,6 @@ Client* new_http_client(ICookieJar *cookie_jar = nullptr);
 
 ICookieJar* new_simple_cookie_jar();
 
-} //namespace net
-}
+} // namespace http
+} // namespace net
+} // namespace photon

@@ -73,16 +73,23 @@ IdentityPoolBase::~IdentityPoolBase()
 {
     if (autoscale)
         disable_autoscale();
+
+    bool logged = false;
     {
         SCOPED_LOCK(m_mtx);
         while (m_refcnt > 0) {
-            LOG_DEBUG("IdentityPool is still in use, wait to destruct");
             m_cvar.wait(m_mtx, 10 * 1000 * 1000);
+            if (m_refcnt > 0) {
+                LOG_WARN("IdentityPool is still in use! Waiting for destruction.");
+                logged = true;
+            }
         }
     }
     assert(m_size <= m_capacity);
     while (m_size > 0)
         m_dtor(m_items[--m_size]);
+    if (logged)
+        LOG_WARN("IdentityPool destructed");
 }
 
 struct ScalePoolController;

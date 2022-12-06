@@ -19,9 +19,9 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+namespace http {
 
-class Parser
-{
+class Parser {
 public:
     Parser(std::string_view headers)
     {
@@ -67,6 +67,9 @@ public:
     {
         return _ptr[i];
     }
+    char *cur() {
+        return (char*)_ptr;
+    }
 
 protected:
     const char* _ptr;
@@ -74,5 +77,6 @@ protected:
     const char* _end;
 };
 
-}
-}
+} // namespace http
+} // namespace net
+} // namespace photon
