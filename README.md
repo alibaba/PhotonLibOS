@@ -16,16 +16,18 @@ as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is
 
 ## What's New
 
-* How to rewrite RocksDB into a coroutine program by merely 200 lines?
-Just take a look at this article, [en](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
+* Version 0.5 is released. Except for various performance improvements, including spinlock, context switch,
+and new run queue for coroutine scheduling, we have re-implemented the HTTP module so that there is no `boost` dependency anymore.
+* How to transform RocksDB from multi-threads to coroutines with the help of Photon?
+Here is the article, [en](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
 [中文](https://developer.aliyun.com/article/1093864).
+
+<details><summary>More history...</summary><p>
+
 * Version 0.4 has come, bringing us these three major features:
   1. Support coroutine local variables. Similar to the C++11 `thread_local` keyword. See [doc](doc/thread-local.md).
   2. Support running on macOS platform, both Intel x86_64 and Apple M1 included.
   3. Support LLVM Clang/Apple Clang/GCC compilers.
-
-<details><summary>More history...</summary><p>
-
 * Photon 0.3 was released on 2 Sep 2022. Except for bug fixes and improvements, a new `photon::std` namespace is added.
   Developers can search for `std::thread`, `std::mutex` in their own projects, and replace them all into the equivalents of `photon::std::<xxx>`.
   It's a quick way to transform thread-based programs to coroutine-based ones.
