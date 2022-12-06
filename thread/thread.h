@@ -20,8 +20,10 @@ limitations under the License.
 #include <cerrno>
 #include <atomic>
 #include <type_traits>
-
 #include <photon/common/callback.h>
+#ifndef __aarch64__
+#include <emmintrin.h>
+#endif
 
 namespace photon
 {
@@ -100,30 +102,28 @@ namespace photon
     // if true, the thread `th` should cancel what is doing, and quit
     // current job ASAP (not allowed `th` to sleep or block more than
     // 10ms, otherwise -1 will be returned to `th` and errno == EPERM;
-    // if it is currently sleeping or blocking, it is thread_interupt()ed
+    // if it is currently sleeping or blocking, it is thread_interrupt()ed
     // with EPERM)
     int thread_shutdown(thread* th, bool flag = true);
 
     class MasterEventEngine;
     struct vcpu_base {
         MasterEventEngine* master_event_engine;
-        std::atomic<uint32_t> nthreads;
-        volatile uint64_t switch_count;
+        volatile uint64_t switch_count = 0;
     };
 
     // A helper struct in order to make some function calls inline.
     // The memory layout of its first 4 fields is the same as the one of thread.
-    struct partial_thread
-    {
+    struct partial_thread {
         uint64_t _, __;
-        vcpu_base* vcpu;
+        volatile vcpu_base* vcpu;
+        uint64_t ___[5];
         void* tls;
-        // ...
     };
 
-    inline vcpu_base* get_vcpu(thread* th = CURRENT)
-    {
-        return ((partial_thread*)th) -> vcpu;
+    inline vcpu_base* get_vcpu(thread* th = CURRENT) {
+        auto vcpu = ((partial_thread*)th) -> vcpu;
+        return (vcpu_base*)vcpu;
     }
 
     uint32_t get_vcpu_num();
@@ -148,13 +148,39 @@ namespace photon
      */
     int thread_migrate(thread* th, vcpu_base* vcpu);
 
+    inline void spin_wait() {
+#ifdef __aarch64__
+        asm volatile("isb" : : : "memory");
+#else
+        _mm_pause();
+#endif
+    }
+
     class spinlock {
     public:
-        int lock();
-        int try_lock();
-        void unlock();
+        int lock() {
+            while (unlikely(xchg())) {
+                while (likely(load())) {
+                    spin_wait();
+                }
+            }
+            return 0;
+        }
+        int try_lock() {
+            return (likely(!load()) &&
+                    likely(!xchg())) ? 0 : -1;
+        }
+        void unlock() {
+            _lock.store(false, std::memory_order_release);
+        }
     protected:
         std::atomic_bool _lock = {false};
+        bool xchg() {
+            return _lock.exchange(true, std::memory_order_acquire);
+        }
+        bool load() {
+            return _lock.load(std::memory_order_relaxed);
+        }
     };
 
     class ticket_spinlock {

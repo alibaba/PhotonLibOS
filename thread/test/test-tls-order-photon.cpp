@@ -38,19 +38,21 @@ static Value& get_v4() {
     return *v4;
 }
 
+#define ASSERT(x) if (!(x)) abort();
+
 struct GlobalEnv {
     GlobalEnv() {
         printf("Construct GlobalEnv\n");
         // WARING: No photon tls can be accessed BEFORE photon_init
-        assert(photon::init() == 0);
-        assert(photon::std::work_pool_init(4) == 0);
+        ASSERT(photon::init() == 0);
+        ASSERT(photon::std::work_pool_init(4) == 0);
         get_v1().m_val = -1;
     }
 
     ~GlobalEnv() {
         printf("Destruct GlobalEnv\n");
-        assert(get_v1().m_val == -1);
-        assert(get_v4().m_val == 4);
+        ASSERT(get_v1().m_val == -1);
+        ASSERT(get_v4().m_val == 4);
         photon::std::work_pool_fini();
         photon::fini();
         // WARING: No photon tls can be accessed AFTER photon_fini

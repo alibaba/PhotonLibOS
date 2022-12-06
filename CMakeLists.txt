@@ -17,6 +17,7 @@ option(ENABLE_URING "enable io_uring function" OFF)
 option(ENABLE_FUSE "enable fuse function" OFF)
 option(ENABLE_SASL "enable sasl" OFF)
 option(ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
+option(BUILD_TESTING "enable build testing" OFF)
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -40,7 +41,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE on)
 if (${ARCH} STREQUAL x86_64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")
 elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char -fno-stack-protector")
 endif ()
 
 check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
@@ -56,6 +57,12 @@ set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
+
+# If ccache exists, use it to speed up compiling
+find_program(CCACHE_FOUND ccache)
+if(CCACHE_FOUND)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+endif(CCACHE_FOUND)
 
 # CMake dirs
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/CMake)
@@ -104,15 +111,6 @@ if (ENABLE_SASL)
     find_package(gsasl REQUIRED)
 endif ()
 
-# Fetch boost
-FetchContent_Declare(
-        boost
-        URL https://boostorg.jfrog.io/artifactory/main/release/1.75.0/source/boost_1_75_0.tar.gz
-        URL_MD5 38813f6feb40387dfe90160debd71251
-)
-FetchContent_MakeAvailable(boost)
-set(boost_include_dir ${boost_SOURCE_DIR})
-
 # Compile photon objects
 file(GLOB PHOTON_SRC
         photon.cpp
@@ -138,7 +136,6 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
-        thread/switch_context_${ARCH}.s
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
@@ -156,7 +153,7 @@ if (ENABLE_SASL)
 endif ()
 
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PUBLIC include ${boost_include_dir} ${OPENSSL_INCLUDE_DIR})
+target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIR})
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 if (ENABLE_URING)
     target_include_directories(photon_obj PUBLIC ${liburing_include_dir})

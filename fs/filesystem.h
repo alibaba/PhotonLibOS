@@ -18,6 +18,7 @@ limitations under the License.
 #include <cerrno>
 #include <cstdarg>
 #include <sys/uio.h>  // struct iovec
+#include <sys/time.h> // struct timeval
 #include <photon/common/stream.h>
 
 #define UNIMPLEMENTED(func)  \

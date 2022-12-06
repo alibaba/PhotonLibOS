@@ -1,3 +1,4 @@
+
 /*
 Copyright 2022 The Photon Authors
 
@@ -16,26 +17,29 @@ limitations under the License.
 
 #pragma once
 
-#include <cstdint>
-#include <cstdlib>
-#include <photon/thread/thread.h>
+#include <photon/common/string_view.h>
+
+class IStream;
 
 namespace photon {
 
-constexpr size_t THREAD_KEYS_MAX = 1024;
-
-struct thread_local_storage;
-
-using thread_key_t = uint64_t;
-
-int thread_key_create(thread_key_t* key, void (* dtor)(void*));
-
-void* thread_getspecific(thread_key_t key);
-
-int thread_setspecific(thread_key_t key, const void* value);
-
-int thread_key_delete(thread_key_t key);
-
-void deallocate_tls(void** tls = &(((partial_thread*)CURRENT)->tls));
-
+namespace fs {
+    class IFile;
 }
+namespace net {
+
+class ISocketStream;
+
+namespace http {
+
+IStream *new_body_read_stream(ISocketStream *stream, std::string_view body, size_t body_remain);
+
+IStream *new_chunked_body_read_stream(ISocketStream *stream, std::string_view body);
+
+IStream *new_chunked_body_write_stream(ISocketStream *stream);
+
+IStream *new_body_write_stream(ISocketStream *stream, size_t size);
+
+} // namespace http
+} // namespace net
+} // namespace photon

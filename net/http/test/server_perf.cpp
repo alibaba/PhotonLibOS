@@ -46,29 +46,21 @@ static void show_qps_loop() {
     }
 }
 
-class SimpleHandler : public net::HTTPHandler {
+class SimpleHandler : public net::http::HTTPHandler {
 public:
-    net::HTTPServerHandler GetHandler() override {
-        return {this, &SimpleHandler::HandlerImpl};
-    }
-
-    net::RetType HandlerImpl(net::HTTPServerRequest& req, net::HTTPServerResponse& resp) {
-        auto target = req.GetTarget();
-        resp.SetResult(200);
-        resp.ContentLength((size_t) FLAGS_body_size);
-        resp.Insert("Server", "nginx/1.14.1");
-        resp.Insert("Content-Type", "application/octet-stream");
-        auto ret = resp.HeaderDone();
-        if (ret != net::RetType::success) {
-            LOG_ERRNO_RETURN(0, net::RetType::failed, "Send response header failed, url : `", target);
-        }
-        auto ret_w = resp.Write((void*) data_str.data(), FLAGS_body_size);
+    int handle_request(net::http::Request& req, net::http::Response& resp, std::string_view) {
+        auto target = req.target();
+        resp.set_result(200);
+        resp.headers.content_length((size_t) FLAGS_body_size);
+        resp.headers.insert("Server", "nginx/1.14.1");
+        resp.headers.insert("Content-Type", "application/octet-stream");
+        auto ret_w = resp.write((void*) data_str.data(), FLAGS_body_size);
         if (ret_w != (ssize_t) FLAGS_body_size) {
-            LOG_ERRNO_RETURN(0, net::RetType::failed,
+            LOG_ERRNO_RETURN(0, -1,
                              "send body failed, target: `, `", target, VALUE(ret_w));
         }
         qps++;
-        return resp.Done();
+        return 0;
     }
 };
 
@@ -97,7 +89,7 @@ int main(int argc, char** argv) {
     tcpserv->bind(FLAGS_port);
     tcpserv->listen();
     DEFER(delete tcpserv);
-    auto http_srv = net::new_http_server();
+    auto http_srv = net::http::new_http_server();
     DEFER(delete http_srv);
     SimpleHandler handler;
     auto fs = fs::new_localfs_adaptor(".");
@@ -113,14 +105,14 @@ int main(int argc, char** argv) {
     for (int i = 0; i < FLAGS_body_size; ++i) {
         file->write("1", 1);
     }
-    auto fs_handler = net::new_fs_handler(fs, "/");
+    auto fs_handler = net::http::new_fs_handler(fs);
     DEFER(delete fs_handler);
     if (FLAGS_serve_file) {
-        http_srv->SetHTTPHandler(fs_handler->GetHandler());
+        http_srv->add_handler(fs_handler);
     } else {
-        http_srv->SetHTTPHandler(handler.GetHandler());
+        http_srv->add_handler(&handler);
     }
-    tcpserv->set_handler(http_srv->GetConnectionHandler());
+    tcpserv->set_handler(http_srv->get_connection_handler());
     tcpserv->start_loop();
     while (!stop_flag) {
         photon::thread_sleep(1);

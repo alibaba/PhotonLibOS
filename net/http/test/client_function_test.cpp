@@ -41,8 +41,10 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 
 using namespace photon::net;
+using namespace photon::net::http;
+
 static char socket_buf[] =
-    "this is a http_client post request body text for socket stream";
+    "this is a http_client request body text for socket stream";
 
 int socket_put_cb(void* self, IStream* stream) {
     auto ret = stream->write(socket_buf, sizeof(socket_buf));
@@ -59,10 +61,11 @@ int timeout_writer(void *self, IStream* stream) {
     return 0;
 }
 
-TEST(http_client, post) {
+TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
-    system("echo \"this is a http_client post request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
+    system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
     auto tcpserver = new_tcp_socket_server();
+    tcpserver->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1L);
     tcpserver->bind(18731);
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -72,56 +75,131 @@ TEST(http_client, post) {
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHTTPHandler(fs_handler->GetHandler());
-    tcpserver->set_handler(server->GetConnectionHandler());
+    server->add_handler(fs_handler);
+    tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
-    std::string target_post =
-        "http://localhost:18731/ease-httpclient-posttestfile";
+    static const char target[] = "http://localhost:18731/ease-httpclient-gettestfile";
     auto client = new_http_client();
     DEFER(delete client);
-    auto op2 = client->new_operation(Verb::GET, target_post);
+    auto op2 = client->new_operation(Verb::GET, target);
     DEFER(delete op2);
-    op2->req.content_length(0);
+    op2->req.headers.content_length(0);
     client->call(op2);
-    auto stream2 = op2->resp_body.get();
+
     char resp_body_buf[1024];
     EXPECT_EQ(sizeof(socket_buf), op2->resp.resource_size());
-    auto ret = stream2->read(resp_body_buf, sizeof(socket_buf));
+    auto ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
     EXPECT_EQ(sizeof(socket_buf), ret);
     resp_body_buf[sizeof(socket_buf) - 1] = '\0';
     LOG_DEBUG(resp_body_buf);
     EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
 
-    auto op3 = client->new_operation(Verb::GET, target_post);
+    auto op3 = client->new_operation(Verb::GET, target);
     DEFER(delete op3);
-    op3->req.content_length(0);
-    op3->req.insert_range(10, 19);
+    op3->req.headers.content_length(0);
+    op3->req.headers.range(10, 19);
     client->call(op3);
-    auto stream3 = op3->resp_body.get();
     char resp_body_buf_range[1024];
-    ret = stream3->read(resp_body_buf_range, op3->resp.content_length());
+    ret = op3->resp.read(resp_body_buf_range, op3->resp.headers.content_length());
     resp_body_buf_range[10] = '\0';
     EXPECT_EQ(0, strcmp("http_clien", resp_body_buf_range));
     LOG_DEBUG(resp_body_buf_range);
 
-    auto op4 = client->new_operation(Verb::GET, target_post);
+    auto op4 = client->new_operation(Verb::GET, target);
     DEFER(delete op4);
-    op4->req.content_length(0);
+    op4->req.headers.content_length(0);
     op4->call();
-    auto stream4 = op4->resp_body.get();
     EXPECT_EQ(sizeof(socket_buf), op4->resp.resource_size());
-    ret = stream4->read(resp_body_buf, 10);
+    ret =  op4->resp.read(resp_body_buf, 10);
     EXPECT_EQ(10, ret);
     resp_body_buf[10] = '\0';
     EXPECT_EQ(0, strcmp("this is a ", resp_body_buf));
     LOG_DEBUG(resp_body_buf);
-    ret = stream4->read(resp_body_buf, 10);
+    ret =  op4->resp.read(resp_body_buf, 10);
     EXPECT_EQ(10, ret);
     resp_body_buf[10] = '\0';
     LOG_DEBUG(resp_body_buf);
     EXPECT_EQ(0, strcmp("http_clien", resp_body_buf));
-
 }
+
+int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
+    auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
+    DEFER(delete fs);
+
+    char buf[4096];
+    auto len_body = req.read(buf, 4096);
+    char buf_file[4096];
+    auto file = fs->open("ease-httpclient-posttestfile", O_RDONLY);
+    DEFER(delete file);
+    auto len_file = file->read(buf_file, 4096);
+    EXPECT_EQ(len_body, len_file);
+    EXPECT_EQ(0, strncmp(buf, buf_file, len_body));
+
+    resp.set_result(200);
+    std::string str = "success";
+    resp.headers.content_length(7);
+
+    resp.write((void*)str.data(), str.size());
+    return 0;
+}
+
+TEST(http_client, post) {
+    system("mkdir -p /tmp/ease_ut/http_test/");
+    system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->timeout(1000UL*1000);
+    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    tcpserver->bind(18731, IPAddr("127.0.0.1"));
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &body_check_handler});
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+
+
+    auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
+    DEFER(delete fs);
+    static const char target[] = "http://localhost:18731/ease-httpclient-posttestfile";
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    auto file = fs->open("ease-httpclient-posttestfile", O_RDONLY);
+    DEFER(delete file);
+
+    // body stream test
+    auto op1 = client->new_operation(Verb::POST, target);
+    DEFER(delete op1);
+    struct stat st;
+    EXPECT_EQ(0, file->fstat(&st));
+    op1->req.headers.content_length(st.st_size);
+    op1->body_stream = file;
+    client->call(op1);
+    EXPECT_EQ(200, op1->resp.status_code());
+    char buf[4096];
+    auto ret = op1->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
+
+    // body writer test
+    auto op2 = client->new_operation(Verb::POST, target);
+    DEFER(delete op2);
+    op2->req.headers.content_length(st.st_size);
+    auto writer = [&](Request *req)-> int {
+        file->lseek(0, SEEK_SET);
+        return req->write_stream(file, st.st_size);
+    };
+    op2->body_writer = writer;
+    client->call(op2);
+    EXPECT_EQ(200, op2->resp.status_code());
+    ret = op2->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
+}
+
+
+
 #define RETURN_IF_FAILED(func)                             \
     if (0 != (func)) {                                     \
         status = Status::failure;                          \
@@ -161,6 +239,7 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
     //-----------------------
     ret = sock->write("2710\r\n", 6);
     char space_buf[10000];
+    memset(space_buf, 'a', sizeof(space_buf));
     ret = sock->write(space_buf, 10000);
     EXPECT_EQ(ret, 10000);
     sock->write("\r\n", 2);
@@ -249,7 +328,7 @@ TEST(http_client, chunked) {
     op->call();
     EXPECT_EQ(200, op->status_code);
     buf.resize(30);
-    ret = op->resp_body->read((void*)buf.data(), 30);
+    ret = op->resp.read((void*)buf.data(), 30);
     EXPECT_EQ(25, ret);
     buf.resize(25);
     EXPECT_EQ(true, buf == "first chunk second chunk ");
@@ -261,8 +340,10 @@ TEST(http_client, chunked) {
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
-    ret = opc->resp_body->read((void*)buf.data(), 20000);
+    ret = opc->resp.read((void*)buf.data(), 20000);
     EXPECT_EQ(10000 + 4090 + 4086 + 1024, ret);
+    for (int i = 0; i < 10000 + 4090 + 4086 + 1024; i++)
+        EXPECT_EQ(buf[i], 'a');
 
     std_data.resize(std_data_size);
     int num = 0;
@@ -278,7 +359,7 @@ TEST(http_client, chunked) {
         EXPECT_EQ(200, op_test->status_code);
         buf.resize(std_data_size);
         memset((void*)buf.data(), '0', std_data_size);
-        ret = op_test->resp_body->read((void*)buf.data(), std_data_size);
+        ret = op_test->resp.read((void*)buf.data(), std_data_size);
         EXPECT_EQ(std_data_size, ret);
         EXPECT_EQ(true, buf == std_data);
         if (std_data_size != ret || buf != std_data) {
@@ -292,7 +373,7 @@ TEST(http_client, chunked) {
             std::cout << "buffer = \n" << buf << std::endl;
             break;
         }
-        op_test->resp_body->close();
+        op_test->resp.close();
         LOG_INFO("random chunked test ` passed", tmp);
     }
 }
@@ -354,7 +435,7 @@ TEST(http_client, debug) {
     std::string buf;
     buf.resize(std_data_size);
     memset((void*)buf.data(), '0', std_data_size);
-    ret = op_test->resp_body->read((void*)buf.data(), std_data_size);
+    ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
     EXPECT_EQ(true, buf == std_data);
     for (int i = 0; i < buf.size(); i++) {
@@ -381,17 +462,18 @@ TEST(http_client, server_no_resp) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, "http://127.0.0.1:38812/wtf");
-    op->req.content_length(0);
+    op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(-1, op->status_code);
 }
 
 TEST(http_client, partial_body) {
     system("mkdir -p /tmp/photon-http-client-test/");
-    system("echo \"this is a http_client post request body text for socket stream\" > /tmp/photon-http-client-test/file");
+    system("echo \"this is a http_client request body text for socket stream\" > /tmp/photon-http-client-test/file");
     DEFER(system("rm -rf /tmp/photon-http-client-test/"));
 
     auto tcpserver = new_tcp_socket_server();
+    DEFER(delete tcpserver);
     tcpserver->bind(18731);
     tcpserver->listen();
     auto server = new_http_server();
@@ -400,24 +482,23 @@ TEST(http_client, partial_body) {
     DEFER(delete fs);
     auto fs_handler = new_fs_handler(fs);
     DEFER(delete fs_handler);
-    server->SetHTTPHandler(fs_handler->GetHandler());
-    tcpserver->set_handler(server->GetConnectionHandler());
+    server->add_handler(fs_handler);
+    tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
 
     std::string target_get = "http://localhost:18731/file";
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    op->req.content_length(0);
+    op->req.headers.content_length(0);
     client->call(op);
-    auto stream = op->resp_body.get();
     EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
     std::string buf;
     buf.resize(10);
-    stream->read((void*)buf.data(), 10);
+    op->resp.read((void*)buf.data(), 10);
     LOG_DEBUG(VALUE(buf));
     EXPECT_EQ(true, buf == "this is a ");
-    stream->read((void*)buf.data(), 10);
+    op->resp.read((void*)buf.data(), 10);
     LOG_DEBUG(VALUE(buf));
     EXPECT_EQ(true, buf == "http_clien");
 }

@@ -331,7 +331,7 @@ TEST(ListTest, HandleNoneZeroInput)
     EXPECT_EQ(10, deleteCount);
 }
 
-thread_local static int running = 0;
+thread_local static int volatile running = 0;
 void* thread_pong(void* depth)
 {
 #ifdef RANDOMIZE_SP
@@ -340,7 +340,7 @@ void* thread_pong(void* depth)
 #endif
     running = 1;
     while (running)
-        thread_yield_to(nullptr);
+        thread_yield_fast();
     return nullptr;
 }
 
@@ -354,11 +354,11 @@ void test_thread_switch(uint64_t nth, uint64_t stack_size)
         photon::thread_create(&thread_pong, (void*)(uint64_t)(rand() % 32), stack_size);
 
     for (uint64_t i = 0; i < count; ++i)
-        thread_yield_to(nullptr);
+        thread_yield_fast();
 
     auto t0 = now_time();
     for (uint64_t i = 0; i < count; ++i)
-        thread_yield_to(nullptr);
+        thread_yield_fast();
 
     auto t1 = now_time();
 
@@ -723,12 +723,12 @@ TEST(ThreadPool, test)
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i<FLAGS_ths_total; i++)
         ths[i] = pool.thread_create_ex(&::func1, nullptr, true);
-    LOG_INFO("----------");
+    // LOG_INFO("----------");
     for (int i = 0; i<FLAGS_ths_total; i++) {
         LOG_DEBUG("wait thread: `", ths[i]->th);
         pool.join(ths[i]);
     }
-    LOG_INFO("???????????????");
+    // LOG_INFO("???????????????");
 }
 
 TEST(ThreadPool, migrate) {
@@ -1873,7 +1873,7 @@ int main(int argc, char** arg)
     google::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
     photon::vcpu_init();
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
 
     if (FLAGS_vcpus <= 1)
     {

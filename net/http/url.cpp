@@ -20,6 +20,7 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+namespace http {
 
 void URL::from_string(std::string_view url) {
     m_url = url.begin();
@@ -78,5 +79,6 @@ void URL::from_string(std::string_view url) {
     m_query = rstring_view16(pos, url.size() - (p + 1));
 }
 
-}
-}
+} // namespace http
+} // namespace net
+} // namespace photon
