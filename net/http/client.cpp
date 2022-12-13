@@ -43,8 +43,8 @@ public:
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
     PooledDialer() :
             tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
-            tcpsock(new_tcp_socket_pool(new_tcp_socket_client())),
-            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1)),
+            tcpsock(new_tcp_socket_pool(new_tcp_socket_client(), -1, true)),
+            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client()), -1, true)),
             resolver(new_default_resolver(kDNSCacheLife)) {
     }
 
@@ -202,7 +202,7 @@ public:
 
         op->status_code = resp.status_code();
         LOG_DEBUG("Got response ` ` code=` || content_length=`", req.verb(),
-                  req.target(), resp.status_code(), resp.headers["Content-Length"]);
+                  req.target(), resp.status_code(), resp.headers.content_length());
         if (m_cookie_jar) m_cookie_jar->get_cookies_from_headers(req.host(), &resp);
         if (resp.status_code() < 400 && resp.status_code() >= 300 && op->follow)
             return redirect(op);

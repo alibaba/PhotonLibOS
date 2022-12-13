@@ -45,7 +45,7 @@ TEST(Socket, pooled) {
     server->start_loop();
     DEFER(delete server);
     auto client =
-        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client());
+        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client(), -1, true);
     DEFER(delete client);
     task(client, ep);
     EXPECT_EQ(1, conncount);
@@ -70,7 +70,7 @@ TEST(Socket, pooled_multisock) {
     server->start_loop();
     DEFER(delete server);
     auto client =
-        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client());
+        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client(), -1, true);
     DEFER(delete client);
     std::vector<photon::join_handle*> jhs;
     for (int i = 0; i < 5; i++) {
@@ -110,7 +110,7 @@ TEST(Socket, pooled_multisock_serverclose) {
     server->start_loop();
     DEFER(delete server);
     auto client =
-        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client());
+        photon::net::new_tcp_socket_pool(photon::net::new_tcp_socket_client(), -1, true);
     DEFER(delete client);
     std::vector<photon::join_handle*> jhs;
     for (int i = 0; i < 1; i++) {
@@ -171,7 +171,7 @@ TEST(Socket, pooled_expiration) {
     DEFER(delete server);
     auto client = photon::net::new_tcp_socket_pool(
         photon::net::new_tcp_socket_client(),
-        1UL * 1000 * 1000);  // release every 1 sec
+        1UL * 1000 * 1000, true);  // release every 1 sec
     DEFER(delete client);
     std::vector<photon::join_handle*> jhs;
     for (int i = 0; i < 4; i++) {

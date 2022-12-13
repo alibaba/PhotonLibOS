@@ -121,13 +121,10 @@ protected:
         return (i < m_kv_size) ? kv_begin()[i] : KV{{0, 0}, {0, 0}};
     }
 
-
     KV* kv_add_sort(KV kv);
+    KV* kv_add(KV kv);
     KV* kv_end() const   { return (KV*)(m_buf + m_buf_capacity); }
     KV* kv_begin() const { return kv_end() - m_kv_size; }
-
-    KV* kv_add(KV kv);
-    void sort();
 
     int parse();
 };

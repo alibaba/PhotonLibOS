@@ -32,31 +32,34 @@ class HeaderAssistant {
 public:
     const HeadersBase* _h;
     HeaderAssistant(const HeadersBase* h) : _h(h) {}
-    //TODO: Case-insensitive string comparison
+
+    int icmp(estring_view k1, estring_view k2) const {
+        int r = (int)(k1.size() - k2.size());
+        return r ? r : strncasecmp(k1.data(), k2.data(), k1.size());
+    }
+
     bool equal_to(rstring_view16 _k, std::string_view key) const {
-        return (_k | _h->m_buf) == key;
+        return icmp(_k | _h->m_buf, key) == 0;
     }
     bool less(rstring_view16 _k1, rstring_view16 _k2) const {
-        return (_k1 | _h->m_buf) < (_k2 | _h->m_buf);
+        return icmp(_k1 | _h->m_buf, _k2 | _h->m_buf) < 0;
     }
     bool less(rstring_view16 _k, std::string_view key) const {
-        return (_k | _h->m_buf) < key;
+        return icmp(_k | _h->m_buf, key) < 0;
     }
     bool less(std::string_view key, rstring_view16 _k) const {
-        return key < (_k | _h->m_buf);
+        return icmp(key, _k | _h->m_buf) < 0;
     }
+
+    bool operator()(HeadersBase::KV a, std::string_view b) const { return less(a.first, b); }
+    bool operator()(std::string_view a, HeadersBase::KV b) const { return less(a, b.first); }
+    bool operator()(HeadersBase::KV a, HeadersBase::KV b) const { return less(a.first, b.first); }
 };
 
 using HA = HeaderAssistant;
-HeadersBase::iterator HeadersBase::find(std::string_view key) const {
-    struct Comp {
-        const HeadersBase* _headers;
-        Comp(const HeadersBase* h) : _headers(h) { }
-        bool operator()(KV a, std::string_view b) const { return HA(_headers).less(a.first, b); }
-        bool operator()(std::string_view a, KV b) const { return HA(_headers).less(a, b.first); }
-    };
 
-    auto it = std::lower_bound(kv_begin(), kv_end(), key, Comp(this));
+HeadersBase::iterator HeadersBase::find(std::string_view key) const {
+    auto it = std::lower_bound(kv_begin(), kv_end(), key, HA(this));
     if (it == kv_end() || !HA(this).equal_to(it->first, key)) return end();
     return {this, (uint16_t)(it - kv_begin())};
 }
@@ -147,10 +150,7 @@ HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
     auto begin = kv_begin();
     if ((char*)(begin - 1) <= m_buf + m_buf_size)
         LOG_ERROR_RETURN(ENOBUFS, nullptr, "no buffer");
-    auto it = std::lower_bound(begin, kv_end(), kv,
-                               [this](const KV& lh, const KV& rh) {
-                                   return HA(this).less(lh.first, rh.first);
-                               });
+    auto it = std::lower_bound(begin, kv_end(), kv, HA(this));
     memmove(begin - 1, begin, sizeof(KV) * (it - begin));
     m_kv_size++;
     *(it - 1) = kv;
@@ -166,12 +166,6 @@ HeadersBase::KV* HeadersBase::kv_add(KV kv) {
     return begin -1;
 }
 
-void HeadersBase::sort() {
-    std::sort(kv_begin(), kv_end(), [&](const KV& a, const KV& b){
-        return (m_buf | a.first) < (b.first | m_buf);
-    });
-}
-
 int HeadersBase::parse() {
     Parser p({m_buf, m_buf_size});
     while(p[0] != '\r') {
@@ -182,7 +176,7 @@ int HeadersBase::parse() {
         if (kv_add({k, v}) == nullptr)
             LOG_ERROR_RETURN(0, -1, "add kv failed");
     }
-    sort();
+    std::sort(kv_begin(), kv_end(), HA(this));
     return 0;
 }
 
