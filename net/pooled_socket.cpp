@@ -123,8 +123,8 @@ protected:
     photon::Timer timer;
 
 public:
-    TCPSocketPool(ISocketClient* client, uint64_t expiration)
-            : ForwardSocketClient(client, false),
+    TCPSocketPool(ISocketClient* client, uint64_t expiration, bool client_ownership = false)
+            : ForwardSocketClient(client, client_ownership),
               ev(photon::new_default_cascading_engine()),
               expiration(expiration),
               timer(0, {this, &TCPSocketPool::evict}) {
@@ -283,8 +283,8 @@ PooledTCPSocketStream::~PooledTCPSocketStream() {
     }
 }
 
-extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expire) {
-    return new TCPSocketPool(client, expire);
+extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expire, bool client_ownership) {
+    return new TCPSocketPool(client, expire, client_ownership);
 }
 
 }

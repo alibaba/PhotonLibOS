@@ -122,6 +122,12 @@ public:
         return strncasecmp(data(), x.data(), x.size()) == 0;
     }
 
+    int icmp(estring_view x) {
+        auto ret = strncasecmp(data(), x.data(), std::min(size(), x.size()));
+        if (ret != 0) return ret;
+        return size() - x.size();
+    }
+
     template<typename Separator>
     struct _split
     {

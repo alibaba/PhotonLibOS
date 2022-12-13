@@ -316,12 +316,17 @@ namespace fs
         };
 
         ThrottleBundle *throttles;
+        bool throttles_ownership;
 
         ThrottledFile(IFile *file, ThrottleBundle *throttle_bundle,
-                    bool ownership = false)
-            : ForwardFile_Ownership(file, ownership), throttles(throttle_bundle) {}
+                      bool file_ownership = false, bool throttles_ownership = false)
+            : ForwardFile_Ownership(file, file_ownership), throttles(throttle_bundle),
+              throttles_ownership(throttles_ownership) {}
 
-        ~ThrottledFile() {}
+        ~ThrottledFile() {
+            if (throttles_ownership)
+                delete throttles;
+        }
 
         virtual ssize_t pread(void *buf, size_t count, off_t offset) override
         {
@@ -467,9 +472,8 @@ namespace fs
     IFile *new_throttled_file(IFile *file, const ThrottleLimits &limits, bool ownership) {
         if (file == nullptr)
             LOG_ERROR_RETURN(EINVAL, nullptr, "cannot open file");
-        char* ptr = static_cast<char*>(malloc(sizeof(ThrottledFile) + sizeof(ThrottleBundle)));
-        auto bundle = new(ptr + sizeof(ThrottledFile)) ThrottleBundle(limits);
-        return new(ptr) ThrottledFile(file, bundle, ownership);
+        auto bundle = new ThrottleBundle(limits);
+        return new ThrottledFile(file, bundle, ownership, true);
     }
 
     IFileSystem *new_throttled_fs(IFileSystem *fs, const ThrottleLimits &limits,

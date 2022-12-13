@@ -241,10 +241,11 @@ namespace photon
         }
         void dispose() {
             assert(state == states::DONE);
+            register auto b = buf; //store in register to prevent from being deleted by madvise
 #ifndef __aarch64__
-            madvise(buf, stack_size, MADV_DONTNEED);
+            madvise(b, stack_size, MADV_DONTNEED);
 #endif
-            free(buf);
+            free(b);
         }
     };
 
@@ -785,7 +786,7 @@ _photon_thread_stub:
     }
 
     extern "C" void _photon_thread_stub();
-    
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
     thread* thread_create(thread_entry start, void* arg, uint64_t stack_size) {

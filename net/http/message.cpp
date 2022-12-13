@@ -33,9 +33,6 @@ static ssize_t constexpr MAX_TRANSFER_BYTES = 4 * 1024;
 static ssize_t constexpr RESERVED_INDEX_SIZE = 1024;
 
 Message::~Message() {
-    if (m_buf_ownership && m_buf)
-        free(m_buf);
-
     if (m_stream_ownership && m_stream) {
         if (m_abandon || (m_body_stream && m_body_stream->close() < 0) ) {
             LOG_DEBUG("close sockstream");
@@ -43,6 +40,9 @@ Message::~Message() {
         }
         delete m_stream;
     }
+
+    if (m_buf_ownership && m_buf)
+        free(m_buf);
 }
 
 int Message::receive_header(uint64_t timeout) {
