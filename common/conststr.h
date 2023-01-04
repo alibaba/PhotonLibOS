@@ -304,7 +304,7 @@ struct EnumStr : public Split {
 };
 
 #define DEFINE_ENUM_STR(enum_name, str_name, ...)                         \
-    enum class enum_name { __VA_ARGS__ };                                 \
+    enum class enum_name : char { __VA_ARGS__ };                          \
     static const auto str_name = [] {                                     \
         auto x = TSTRING(#__VA_ARGS__);                                   \
         using sp = typename ConstString::TSpliter<',', ' ', decltype(x)>; \

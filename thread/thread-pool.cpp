@@ -51,22 +51,19 @@ namespace photon
                 ((partial_thread*) CURRENT)->tls = nullptr;
             }
             ctrl.start(ctrl.arg);
+            deallocate_tls();
             {
-                deallocate_tls();
+                SCOPED_LOCK(ctrl.m_mtx);
                 if (ctrl.joining) {
                     assert(ctrl.joinable);
                     ctrl.cvar.notify_all();
                 } else if (ctrl.joinable) {
-                    SCOPED_LOCK(ctrl.m_mtx);
                     ctrl.joining = true;
                     ctrl.cvar.wait(ctrl.m_mtx);
                 }
-                {
-                    SCOPED_LOCK(ctrl.m_mtx);
-                    ctrl.joinable = false;
-                    ctrl.joining = false;
-                    ctrl.start = nullptr;
-                }
+                ctrl.joinable = false;
+                ctrl.joining = false;
+                ctrl.start = nullptr;
             }
             ctrl.pool->put(&ctrl);
         }
@@ -74,20 +71,17 @@ namespace photon
     }
     void ThreadPoolBase::join(TPControl* pCtrl)
     {
-        {
-            SCOPED_LOCK(pCtrl->m_mtx);
-            if (!pCtrl->joinable)
-                LOG_ERROR_RETURN(EINVAL, , "thread is not joinable");
-            if (!pCtrl->start)
-                LOG_ERROR_RETURN(EINVAL, , "thread is not running");
-            if (pCtrl->start == &stub)
-                LOG_ERROR_RETURN(EINVAL, , "thread is dying");
-        }
+        SCOPED_LOCK(pCtrl->m_mtx);
+        if (!pCtrl->joinable)
+            LOG_ERROR_RETURN(EINVAL, , "thread is not joinable");
+        if (!pCtrl->start)
+            LOG_ERROR_RETURN(EINVAL, , "thread is not running");
+        if (pCtrl->start == &stub)
+            LOG_ERROR_RETURN(EINVAL, , "thread is dying");
 
         if (pCtrl->joining) {
             pCtrl->cvar.notify_one();
         } else {
-            SCOPED_LOCK(pCtrl->m_mtx);
             pCtrl->joining = true;
             pCtrl->cvar.wait(pCtrl->m_mtx);
         }

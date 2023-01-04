@@ -190,10 +190,10 @@ public:
         auto &resp = op->resp;
 
         if (space.second > kMinimalHeadersSize) {
-            resp.reset(space.first, space.second, false, sock.release(), true);
+            resp.reset(space.first, space.second, false, sock.release(), true, req.verb());
         } else {
             auto buf = malloc(kMinimalHeadersSize);
-            resp.reset((char *)buf, kMinimalHeadersSize, true, sock.release(), true);
+            resp.reset((char *)buf, kMinimalHeadersSize, true, sock.release(), true, req.verb());
         }
         if (op->resp.receive_header(tmo.timeout()) != 0) {
             req.reset_status();

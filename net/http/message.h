@@ -89,6 +89,7 @@ public:
     std::string_view version() const {
         return std::string_view{m_buf, m_buf_size} | m_version;
     }
+    Verb verb() const { return m_verb;}
 
     ssize_t read(void *buf, size_t count) override;
     ssize_t readv(const struct iovec *iov, int iovcnt) override;
@@ -141,6 +142,7 @@ protected:
     bool m_stream_ownership = false;
     bool m_abandon;
     bool m_keep_alive = true;
+    Verb m_verb = Verb::UNKNOWN;
 
     friend class HTTPServerImpl;
     friend class ClientImpl;
@@ -161,7 +163,6 @@ public:
         Message::reset(s, stream_ownership);
     }
 
-    Verb verb() const { return (Verb)m_verb;}
     std::string_view target() const {
         return std::string_view{m_buf, m_buf_size} | m_target;
     }
@@ -200,7 +201,6 @@ protected:
     rstring_view16 m_target, m_path, m_query;
     uint16_t m_port = 80;
     bool m_secure = false;
-    char m_verb = (char)Verb::UNKNOWN;
 };
 
 class Response : public Message {
@@ -214,9 +214,10 @@ public:
     Response& operator=(const Response &&rhs) = delete;
 
     void reset(char* buf, uint16_t buf_capacity, bool buf_ownership = false,
-        ISocketStream* stream = nullptr, bool stream_ownership = false) {
+        ISocketStream* stream = nullptr, bool stream_ownership = false, Verb v = Verb::UNKNOWN) {
         Message::reset(buf, buf_capacity, buf_ownership, stream, stream_ownership);
         m_status_code = 0;
+        m_verb = v;
     }
     void reset(ISocketStream* s, bool stream_ownership = false) {
         Message::reset(s, stream_ownership);
