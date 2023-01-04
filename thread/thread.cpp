@@ -222,6 +222,7 @@ namespace photon
             pthread_getattr_np(pthread_self(), &gattr);
             pthread_attr_getstack(&gattr,
                 (void**)&stackful_alloc_top, &stack_size);
+            pthread_attr_destroy(&gattr);
         }
 
         void go() {
@@ -1760,7 +1761,8 @@ _photon_thread_stub:
         rq.current->state = states::DONE;
         delete rq.current;
         *rq.pc = nullptr;
-        delete vcpu;
+        vcpu->~vcpu_t();
+        free(vcpu);
         return --_n_vcpu;
     }
 

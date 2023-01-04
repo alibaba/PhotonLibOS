@@ -17,9 +17,21 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <photon/photon.h>
 #include <photon/rpc/rpc.h>
+#include <photon/rpc/serialize.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
+
+struct custom_value : photon::rpc::Message {
+    custom_value() = default;
+    custom_value(int a_, const char* b_, char c_) : a(a_), b(b_), c(c_) {}
+
+    int a;
+    photon::rpc::string b;
+    char c;
+
+    PROCESS_FIELDS(a, b, c);
+};
 
 struct TestOperation {
     const static uint32_t IID = 0x1;
@@ -28,8 +40,9 @@ struct TestOperation {
     struct Request : public photon::rpc::CheckedMessage<> {
         int32_t code;
         photon::rpc::buffer buf;
+        photon::rpc::sorted_map<photon::rpc::string, custom_value> map;
 
-        PROCESS_FIELDS(code, buf);
+        PROCESS_FIELDS(code, buf, map);
     };
 
     struct Response : public photon::rpc::CheckedMessage<> {
@@ -54,6 +67,33 @@ public:
         assert(iov->iovcnt() == 1);
         assert(iov->iovec()[0].iov_len == req->buf.size());
         resp->buf.assign(iov->iovec()[0].iov_base, iov->iovec()[0].iov_len);
+
+        auto iter = req->map.find("2");
+        assert(iter != req->map.end());
+        auto k = iter->first;
+        assert(k == "2");
+        auto v = iter->second;
+        assert(v.a == 2);
+        assert(v.b == "val-2");
+        assert(v.c == '2');
+
+        iter = req->map.find("4");
+        if (iter != req->map.end()) {
+            LOG_ERROR("shouldn't exist");
+            abort();
+        }
+
+        int max = 0;
+        for (iter = req->map.begin(); iter != req->map.end(); ++iter) {
+            auto& each_val = iter->second;
+            if (each_val.a > max) {
+                max = each_val.a;
+                LOG_DEBUG(each_val.b.c_str());
+            } else {
+                LOG_ERROR("corrupted order");
+                abort();
+            }
+        }
         return 0;
     }
 
@@ -96,11 +136,21 @@ TEST(rpc, message) {
     TestOperation::Response resp;
     resp.buf.assign(recv_buf, sizeof(recv_buf));
 
+    photon::rpc::sorted_map_factory<photon::rpc::string, custom_value> factory;
+    custom_value v2(2, "val-2", '2');
+    factory.append("2", v2);
+    custom_value v1(1, "val-1", '1');
+    factory.append("1", v1);
+    custom_value v3(3, "val-3", '3');
+    factory.append("3", v3);
+    factory.assign_to(&req.map);
+
     ASSERT_LT(0, stub->call<TestOperation>(req, resp));
     ASSERT_EQ(req.code + 1, resp.code);
     ASSERT_EQ(req.buf.size(), resp.buf.size());
     ASSERT_EQ(0, memcmp(send_buf, recv_buf, sizeof(send_buf)));
 
+    LOG_INFO("Test finished, shutdown server...");
     ASSERT_EQ(0, server.skeleton->shutdown());
 }
 

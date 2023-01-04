@@ -127,7 +127,7 @@ std::string fs_handler_std_str = "01234567890123456789";
 void test_case(Client* client, off_t st, size_t len, size_t exp_content_length, bool invalid = false) {
     LOG_INFO("test case start");
     auto op = client->new_operation(Verb::GET, "localhost:19876/fs_handler_test");
-    // DEFER(delete op);
+    DEFER(delete op);
     op->req.headers.range(st, st + len - 1);
     auto ret = op->call();
     LOG_INFO("call finished");
@@ -145,6 +145,24 @@ void test_case(Client* client, off_t st, size_t len, size_t exp_content_length, 
         EXPECT_EQ(true, std::string(fs_handler_std_str.data() + st, exp_content_length) ==
                         std::string(buf, exp_content_length));
     }
+}
+void test_head_case(Client* client, off_t st, size_t len, size_t exp_content_length) {
+    LOG_INFO("test HEAD case start");
+    auto op = client->new_operation(Verb::HEAD, "localhost:19876/fs_handler_test");
+    DEFER(delete op);
+    op->req.headers.range(st, st + len - 1);
+    op->req.headers.content_length(fs_handler_std_str.size());
+    auto ret = op->call();
+    LOG_INFO("call finished");
+    EXPECT_EQ(0, ret);
+    if (exp_content_length != fs_handler_std_str.size())
+        EXPECT_EQ(206, op->resp.status_code());
+    else
+        EXPECT_EQ(200, op->resp.status_code());
+    char range[64];
+    auto range_len = snprintf(range, 64, "bytes %lu-%lu/%lu", st, st + len - 1, fs_handler_std_str.size());
+    std::string rangestr(op->resp.headers["Content-Range"]);
+    EXPECT_EQ(0, memcmp(range, rangestr.data(), range_len));
 }
 TEST(http_server, fs_handler) {
     system(std::string("mkdir -p /tmp/ease_ut/http_server/").c_str());
@@ -171,7 +189,7 @@ TEST(http_server, fs_handler) {
     test_case(client, 5, 20, 0, true);
     test_case(client, 25, 5, 0, true);
     test_case(client, 0, 20, 20);
-
+    test_head_case(client, 5, 10, 10);
 }
 
 net::EndPoint ep{net::IPAddr("127.0.0.1"), 19731};

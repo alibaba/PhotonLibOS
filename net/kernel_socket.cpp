@@ -454,6 +454,7 @@ protected:
             waiting = false;
             if (!workth) return 0;
             if (sess) {
+                sess->timeout(m_timeout);
                 photon::thread_create11(&KernelSocketServer::handler, m_handler, sess);
             } else {
                 LOG_WARN("KernelSocketServer: failed to accept new connections: `", ERRNO());

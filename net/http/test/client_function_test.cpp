@@ -462,6 +462,7 @@ TEST(http_client, server_no_resp) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, "http://127.0.0.1:38812/wtf");
+    DEFER(delete op);
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(-1, op->status_code);
@@ -490,6 +491,7 @@ TEST(http_client, partial_body) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
+    DEFER(delete op);
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
