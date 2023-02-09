@@ -160,7 +160,6 @@ bool zerocopy_available() {
 
 static const char base64_index_min = '+';
 static const char base64_index_max = 'z';
-static const unsigned char base64_index_count = 80; //= '+' - 'z' + 1
 #define EI 255
 static unsigned char base64_index_map[]= {
     //'+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?', '@',

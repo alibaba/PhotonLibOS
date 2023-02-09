@@ -23,7 +23,8 @@ struct Value {
         printf("Construct %d\n", m_val);
     }
     ~Value() {
-        printf("Destruct %d\n", m_val);
+        // printf("Destruct %d\n", m_val);
+        puts("Destruct");
     }
     int m_val;
 };
@@ -44,8 +45,8 @@ struct GlobalEnv {
     GlobalEnv() {
         printf("Construct GlobalEnv\n");
         // WARING: No photon tls can be accessed BEFORE photon_init
-        ASSERT(photon::init() == 0);
-        ASSERT(photon::std::work_pool_init(4) == 0);
+        ASSERT(photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) == 0);
+        ASSERT(photon_std::work_pool_init(4) == 0);
         get_v1().m_val = -1;
     }
 
@@ -53,7 +54,7 @@ struct GlobalEnv {
         printf("Destruct GlobalEnv\n");
         ASSERT(get_v1().m_val == -1);
         ASSERT(get_v4().m_val == 4);
-        photon::std::work_pool_fini();
+        photon_std::work_pool_fini();
         photon::fini();
         // WARING: No photon tls can be accessed AFTER photon_fini
     }
@@ -69,7 +70,7 @@ static photon::thread_local_ptr<Value, int> v2(2);
 photon::thread_local_ptr<Value, int> GlobalEnv::v3(3);
 
 TEST(global_init, basic) {
-    auto th = photon::std::thread([] {
+    auto th = photon_std::thread([] {
         ASSERT_EQ(0, v0->m_val);        v0->m_val = 0;
         ASSERT_EQ(1, get_v1().m_val);   get_v1().m_val = 0;
         ASSERT_EQ(2, v2->m_val);        v2->m_val = 0;

@@ -10,14 +10,14 @@ template <EVENT_TYPE EV_READ_, EVENT_TYPE EV_WRITE_, EVENT_TYPE EV_ERROR_>
 struct EVGroupBase {
     static constexpr EVENT_TYPE EV_READ = EV_READ_;
     static constexpr EVENT_TYPE EV_WRITE = EV_WRITE_;
-    static constexpr EVENT_TYPE EV_ERROR = EV_ERROR_;
+    static constexpr EVENT_TYPE EV_ERR = EV_ERROR_;
 
     static_assert(EV_READ != EV_WRITE, "...");
-    static_assert(EV_READ != EV_ERROR, "...");
-    static_assert(EV_ERROR != EV_WRITE, "...");
+    static_assert(EV_READ != EV_ERR, "...");
+    static_assert(EV_ERR != EV_WRITE, "...");
     static_assert(EV_READ, "...");
     static_assert(EV_WRITE, "...");
-    static_assert(EV_ERROR, "...");
+    static_assert(EV_ERR, "...");
 };
 
 struct EVUBase {};
@@ -39,20 +39,20 @@ struct EventsMap {
 
     static constexpr EVENT_TYPE UNDERLAY_EVENT_READ = EV_UNDERLAY::EV_READ;
     static constexpr EVENT_TYPE UNDERLAY_EVENT_WRITE = EV_UNDERLAY::EV_WRITE;
-    static constexpr EVENT_TYPE UNDERLAY_EVENT_ERROR = EV_UNDERLAY::EV_ERROR;
+    static constexpr EVENT_TYPE UNDERLAY_EVENT_ERROR = EV_UNDERLAY::EV_ERR;
 
     EVENT_TYPE translate_bitwisely(EVENT_TYPE events) const {
         EVENT_TYPE ret = 0;
         if (events & EV_KEY::EV_READ) ret |= EV_UNDERLAY::EV_READ;
         if (events & EV_KEY::EV_WRITE) ret |= EV_UNDERLAY::EV_WRITE;
-        if (events & EV_KEY::EV_ERROR) ret |= EV_UNDERLAY::EV_ERROR;
+        if (events & EV_KEY::EV_ERR) ret |= EV_UNDERLAY::EV_ERR;
         return ret;
     }
 
     EVENT_TYPE translate_byval(EVENT_TYPE event) const {
         if (event == EV_KEY::EV_READ) return EV_UNDERLAY::EV_READ;
         if (event == EV_KEY::EV_WRITE) return EV_UNDERLAY::EV_WRITE;
-        if (event == EV_KEY::EV_ERROR) return EV_UNDERLAY::EV_ERROR;
+        if (event == EV_KEY::EV_ERR) return EV_UNDERLAY::EV_ERR;
     }
 };
 

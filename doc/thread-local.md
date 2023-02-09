@@ -33,7 +33,7 @@ int main() {
         abort();
     DEFER(photon::fini());
     
-    auto th = photon::std::thread([]{
+    auto th = photon_std::thread([]{
         *pI = 1;
     });
     th.join();

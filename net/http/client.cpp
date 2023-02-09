@@ -28,7 +28,6 @@ limitations under the License.
 namespace photon {
 namespace net {
 namespace http {
-static const uint64_t kMinimalStreamLife = 300UL * 1000 * 1000;
 static const uint64_t kDNSCacheLife = 3600UL * 1000 * 1000;
 static constexpr char USERAGENT[] = "EASE/0.21.6";
 
