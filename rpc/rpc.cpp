@@ -31,8 +31,8 @@ limitations under the License.
 using namespace std;
 
 namespace photon {
-namespace rpc
-{
+namespace rpc {
+
     class StubImpl : public Stub
     {
     public:
@@ -116,6 +116,9 @@ namespace rpc
             auto args = (OooArgs*)args_;
             args->response->truncate(m_header.size);
             auto iov = args->response;
+            if (iov->iovcnt() == 0) {
+                iov->malloc(m_header.size);
+            }
             auto ret = m_stream->readv((const iovec*)iov->iovec(), iov->iovcnt());
             // return 0 means it has been disconnected
             // should take as fault
@@ -147,17 +150,10 @@ namespace rpc
                 do_collect.bind(stub, &StubImpl::do_recv_body);
             }
         };
-        virtual int do_call(FunctionID function, SerializerIOV& req_iov, SerializerIOV& resp_iov, uint64_t timeout) override
-        {
-            if (resp_iov.iovfull) {
-                LOG_ERRNO_RETURN(ENOBUFS, -1, "RPC: response iov is full")
-            }
-            auto request = &req_iov.iov;
-            auto response = &resp_iov.iov;
+
+        int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) override {
             scoped_rwlock rl(m_rwlock, photon::RLOCK);
             Timeout tmo(timeout);
-            // m_sem.wait(1);
-            // DEFER(m_sem.signal(1));
             if (tmo.expire() < photon::now) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(timeout), VALUE(tmo.timeout()));
             }
@@ -165,14 +161,16 @@ namespace rpc
             OooArgs args(this, function, request, response, tmo.timeout());
             ret = ooo_issue_operation(args);
             if (ret < 0) {
-                ERRNO err;
-                LOG_ERRNO_RETURN((err.no == ECONNRESET) ? ECONNRESET : EFAULT, -1, "failed to send request");
+                if (errno != ECONNRESET)
+                    errno = EFAULT;
+                LOG_ERRNO_RETURN(0, -1, "failed to send request");
             }
             ret = ooo_wait_completion(args);
             if (ret < 0) {
-                ERRNO err;
-                LOG_ERRNO_RETURN((err.no == ECONNRESET) ? ECONNRESET : EFAULT, -1, "failed to receive response ");
-            } else if (ret > (int) resp_iov.iov.sum()) {
+                if (errno != ECONNRESET)
+                    errno = EFAULT;
+                LOG_ERRNO_RETURN(0, -1, "failed to receive response ");
+            } else if (ret > (int) response->sum()) {
                 LOG_ERROR_RETURN(0, -1, "RPC: response iov buffer is too small");
             }
 

@@ -126,7 +126,7 @@ protected:
     int append_bytes(uint16_t size);
 
     int skip_remain();
-    int close() { return 0; }
+    int close() override { return 0; }
 
     std::string_view partial_body() const {
         return std::string_view{m_buf, m_buf_size} | m_body;

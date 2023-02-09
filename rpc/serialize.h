@@ -68,7 +68,7 @@ namespace rpc
         T* end() const { return begin() + size(); }
         const T* cbegin() const { return begin(); }
         const T* cend() const { return end(); }
-        const T& operator[](long i) const { return ((char*)_ptr)[i]; }
+        const T& operator[](long i) const { return ((T*)_ptr)[i]; }
         const T& front() const    { return (*this)[0]; }
         const T& back() const     { return (*this)[(long)size() - 1]; }
         void assign(const T* x, size_t size) { buffer::assign(x, sizeof(*x) * size); }
@@ -99,24 +99,18 @@ namespace rpc
         using base::base;
 
         template<size_t LEN>
-        string(const char (&s)[LEN]) : base(s, LEN) { }
-        string(const char* s) : base(s, strlen(s)+1) { }
-        string(const char* s, size_t len) : base(s, len) { }
-        string(const std::string& s) { assign(s); }
+        string(const char (&s)[LEN]) : base(s, LEN) {}
+        string(std::string_view s) { assign(s); }
         string() : base(nullptr, 0) { }
         const char* c_str() const { return cbegin(); }
-        std::string_view sv() const { return {c_str(), size()}; }
+        std::string_view sv() const { return {c_str(), size() - 1}; }
+        std::string to_std() { return std::string(sv()); };
         bool operator==(const string& rhs) const { return sv() == rhs.sv(); }
         bool operator!=(const string& rhs) const { return !(*this == rhs); }
         bool operator<(const string& rhs) const { return sv() < rhs.sv(); }
         bool operator>(const string& rhs) const { return !(*this < rhs); }
-        void assign(const char* s) {
-            base::assign(s, strlen(s) + 1);
-        }
-        void assign(const std::string& s)
-        {
-            array<char>::assign(s.c_str(), s.size()+1);
-        }
+        void assign(std::string_view s) { base::assign(s.data(), s.size() + 1); }
+        void assign(const void* s, size_t len) { buffer::assign(s, len); }
     };
 
     template<typename T1, typename T2>
@@ -301,8 +295,9 @@ namespace rpc
             return static_cast<Derived*>(this);
         }
 
+        // process built-in types
         template<typename T>
-        void process_field(T& x)
+        typename std::enable_if<!std::is_base_of<Message, T>::value>::type process_field(T& x)
         {
         }
 
@@ -325,10 +320,6 @@ namespace rpc
         template<typename T>
         void process_field(array<T>& x)
         {
-            static_assert(
-                !std::is_base_of<Message, T>::value,
-                "no Messages are allowed");
-
             d()->process_field((buffer&)x);
             for (auto& i: x)
                 d()->process_field(i);
@@ -350,11 +341,11 @@ namespace rpc
             d()->process_field(x.base_buffer);
         }
 
-        // overload for embedded Message
+        // process embedded Message
         template<typename T, ENABLE_IF_BASE_OF(Message, T)>
         void process_field(T& x)
         {
-            x.serialize_fields(*d());
+            x.process_fields(*d());
         }
     };
 
@@ -546,48 +537,48 @@ namespace rpc
     public:
         using SortedMap = sorted_map<K, V>;
 
-        ~sorted_map_factory() {
-            if (m_flat_buffer)
-                free(m_flat_buffer);
-        }
-
-        // Append key and value into a temp iov, and append the index
+        // Serialize k/v data into iov, and append the index
         void append(const K& k, const V& v) {
             static_assert(std::is_base_of<photon::rpc::string, K>::value, "Only support rpc::string as key for now");
             static_assert(std::is_base_of<Message, V>::value, "The value must be a RPC message");
+            static_assert(!std::is_base_of<CheckedMessage<>, V>::value, "The value must not be a RPC CheckedMessage");
 
-            off_t offset = m_iov.sum();
-            m_iov.push_back(k.addr(), k.size() + 1);
-            typename SortedMap::KeyType key_slice(offset, k.size());
+            m_iov.push_back({k.addr(), k.size()});
+            typename SortedMap::KeyType key_slice(m_offset, k.size());
+            m_offset += k.size();
 
-            offset = m_iov.sum();
             SerializerIOV serializer;
             serializer.serialize((V&) v);
             size_t value_size = serializer.iov.sum();
-            for (auto each : serializer.iov) {
-                m_iov.push_back(each.iov_base, each.iov_len);
+            for (auto& each : serializer.iov) {
+                m_iov.push_back({each.iov_base, each.iov_len});
             }
-            typename SortedMap::MappedType val_slice(offset, value_size);
+            typename SortedMap::MappedType val_slice(m_offset, value_size);
+            m_offset += value_size;
 
             m_index.emplace_back(key_slice, val_slice);
         }
 
-        // Flatten the iov to a buffer, and bind the external sorted_map with this buffer.
+        // Copy iov into a flat_buffer. Assign the external sorted_map to this flat_buffer and the index.
         // Should be used in send side.
         void assign_to(SortedMap* sm) {
             if (m_index.empty())
                 return;
-            m_flat_buffer = malloc(m_iov.sum());
-            m_iov.memcpy_to(m_flat_buffer, m_iov.sum());
-            sm->base_buffer.assign(m_flat_buffer, m_iov.sum());
+
+            m_flat_buffer.reset(new uint8_t[m_offset]);
+            iovector_view view(&m_iov[0], m_iov.size());
+            view.memcpy_to(&m_flat_buffer[0], view.sum());
+
+            sm->base_buffer.assign(&m_flat_buffer[0], m_offset);
             std::sort(m_index.begin(), m_index.end(), typename SortedMap::KeyCompare(&sm->base_buffer));
             sm->index.assign(m_index);
         }
 
     protected:
         std::vector<typename SortedMap::ValueType> m_index;
-        IOVector m_iov;
-        void* m_flat_buffer = nullptr;
+        std::vector<iovec> m_iov;
+        size_t m_offset = 0;
+        std::unique_ptr<uint8_t[]> m_flat_buffer;
     };
 
 }

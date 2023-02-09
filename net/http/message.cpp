@@ -241,7 +241,7 @@ ssize_t Message::resource_size() const {
     return estring_view(ret).to_uint64();
 }
 
-uint64_t Message::body_size() const {
+size_t Message::body_size() const {
     if (m_verb == Verb::HEAD) return 0;
     auto it = headers.find("Content-Length");
     if (it != headers.end()) return estring_view(it.second()).to_uint64();

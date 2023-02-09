@@ -54,16 +54,16 @@ namespace rpc
         uint64_t reserved = 0;          // padding to 40 bytes
     };
 
-    class Stub : public Object
-    {
-    protected:
-        // Send the `*request`, and recv the response to `*response`.
-        // If there's not enough space in `response` before `call`,
-        // new buffers will be allocated with its allocator to full-fill the requirement.
-        // This `call` can be invoked concurrently, and may return out-of-order.
-        virtual int do_call(FunctionID function, SerializerIOV& req_iov, SerializerIOV& resp_iov, uint64_t timeout) = 0;
-
+    class Stub : public Object {
     public:
+        /**
+         * @param req Request of Message
+         * @param resp Response of Message
+         * @return The number of bytes received, -1 for failure
+         * @note Request and Response should assign to external memory buffers if they have variable-length fields.
+         *       Via this, we can achieve zero-copy send and receive.
+         *       For Response, there could be only 1 buffer at most. For Request, there is no limit.
+         */
         template<typename Operation>
         int call(typename Operation::Request& req,
                  typename Operation::Response& resp,
@@ -74,22 +74,26 @@ namespace rpc
 
             SerializerIOV respmsg;
             respmsg.serialize(resp);
+            if (respmsg.iovfull) {
+                errno = ENOBUFS;
+                return -1;
+            }
 
-            ssize_t size = respmsg.iov.sum();
+            ssize_t expected_size = respmsg.iov.sum();
             FunctionID fid(Operation::IID, Operation::FID);
-            int ret = do_call(fid, reqmsg, respmsg, timeout);
+            int ret = do_call(fid, &reqmsg.iov, &respmsg.iov, timeout);
             if (ret < 0) {
                 // thread_usleep(10 * 1000); // should be put into do_call(), if necessary
                 // LOG_ERROR("failed to perform RPC ", ERRNO());
                 return -1;
             }
-
-            if (ret < size) {
+            if (ret < expected_size) {
                 DeserializerIOV des;
                 respmsg.iov.truncate(ret);
                 using P = typename Operation::Response;
                 auto re = des.deserialize<P>(&respmsg.iov);
                 if (re == nullptr) return -1;
+                // Memory overlap is not supposed to happen
                 assert((((char*)re + sizeof(P)) <= (char*)&resp) ||
                     ((char*)re >= ((char*)&resp + sizeof(P))));
                 memcpy(&resp, re, sizeof(P));
@@ -100,11 +104,39 @@ namespace rpc
             return ret;
         }
 
+        /**
+         * @param req Request of Message
+         * @param resp_iov iovector for the Response
+         * @return Pointer of the Response. nullptr for failure. No need to delete.
+         * @note For this call, we don't need to assign buffers for the Response any more.
+         *       `resp_iov` will use its internal allocator to fulfill the memory requirement.
+         *       The only difference between these two calls is the allocator's overhead.
+         */
+        template<typename Operation>
+        typename Operation::Response* call(typename Operation::Request& req, iovector& resp_iov,
+                                            uint64_t timeout = -1UL) {
+            assert(resp_iov.iovcnt() == 0);
+            SerializerIOV reqmsg;
+            reqmsg.serialize(req);
+
+            FunctionID fid(Operation::IID, Operation::FID);
+            int ret = do_call(fid, &reqmsg.iov, &resp_iov, timeout);
+            if (ret < 0)
+                return nullptr;
+            DeserializerIOV des;
+            return des.deserialize<typename Operation::Response>(&resp_iov);
+        }
+
         virtual IStream* get_stream() = 0;
 
         virtual int set_stream(IStream*) = 0;
 
         virtual int get_queue_count() = 0;
+
+    protected:
+        // This call can be invoked concurrently, and may return out-of-order.
+        // Return the number of bytes received.
+        virtual int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) = 0;
     };
 
     class Skeleton : public Object

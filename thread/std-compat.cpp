@@ -29,10 +29,9 @@ static inline void log_error(FMT fmt, Ts&& ...xs) {
     LOG_ERROR(fmt, std::forward<Ts>(xs)...);
 }
 
-namespace photon {
-namespace std {
+namespace photon_std {
 
-static WorkPool* g_work_pool = nullptr;
+static photon::WorkPool* g_work_pool = nullptr;
 
 void __throw_system_error(int err_num, const char* msg) {
     throw_system_error(err_num, msg);
@@ -78,5 +77,4 @@ void migrate() {
 
 }
 
-}
 }

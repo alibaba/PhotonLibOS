@@ -166,7 +166,7 @@ void do_call(StubImpl& stub, uint64_t function)
     args.serialize(req_iov.iov);
 
     LOG_DEBUG("before call");
-    stub.do_call(function, req_iov, resp_iov, -1);
+    stub.do_call(function, &req_iov.iov, &resp_iov.iov, -1);
     LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     EXPECT_EQ(memcmp(STR, resp_iov.iov.back().iov_base, LEN(STR)), 0);
 }
@@ -243,7 +243,7 @@ void do_call_timeout(StubImpl& stub, uint64_t function)
     args.serialize(req_iov.iov);
 
     LOG_DEBUG("before call");
-    if (stub.do_call(function, req_iov, resp_iov, 1UL*1000*1000) >= 0) {
+    if (stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1UL*1000*1000) >= 0) {
         LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     }
 }

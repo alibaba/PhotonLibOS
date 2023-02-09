@@ -31,7 +31,7 @@ limitations under the License.
 // Please refer to the README under the module directories.
 
 static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, AlignedAlloc& alloc,
-                              photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg);
+                              photon_std::condition_variable& cv, photon_std::mutex& mu, bool& got_msg);
 
 int main() {
     // Initialize Photon environment in current vcpu.
@@ -71,19 +71,19 @@ int main() {
     DEFER(delete server);
 
     // Photon's std is equivalent to the standard std, but specially working for coroutines
-    photon::std::mutex mu;
-    photon::std::condition_variable cv;
+    photon_std::mutex mu;
+    photon_std::condition_variable cv;
     bool got_msg = false;
     AlignedAlloc alloc(512);
 
     // So the thread is actually a coroutine. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
-    auto server_thread = photon::std::thread(run_socket_server, server, file, alloc, cv, mu, got_msg);
+    auto server_thread = photon_std::thread(run_socket_server, server, file, alloc, cv, mu, got_msg);
 
     // Create a watcher thread to wait the go_msg flag
-    auto watcher_thread = photon::std::thread([&] {
+    auto watcher_thread = photon_std::thread([&] {
         LOG_INFO("Start to watch message");
-        photon::std::unique_lock<photon::std::mutex> lock(mu);
+        photon_std::unique_lock<photon_std::mutex> lock(mu);
         while (!got_msg) {
             cv.wait(lock);
         }
@@ -91,7 +91,7 @@ int main() {
     });
 
     // Wait server to be ready to accept
-    photon::std::this_thread::sleep_for(std::chrono::seconds(1));
+    photon_std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // Create socket client and connect
     auto client = photon::net::new_tcp_socket_client();
@@ -116,7 +116,7 @@ int main() {
     delete stream;
 
     // Wait for a while and shutdown the server
-    photon::std::this_thread::sleep_for(std::chrono::seconds(1));
+    photon_std::this_thread::sleep_for(std::chrono::seconds(1));
     server->terminate();
 
     // Join other threads
@@ -125,7 +125,7 @@ int main() {
 }
 
 void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* file, AlignedAlloc& alloc,
-                       photon::std::condition_variable& cv, photon::std::mutex& mu, bool& got_msg) {
+                       photon_std::condition_variable& cv, photon_std::mutex& mu, bool& got_msg) {
     void* buf = alloc.alloc(1024);
     DEFER(alloc.dealloc(buf));
 
@@ -151,7 +151,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
 
         // Got message. Notify the watcher
         {
-            photon::std::lock_guard<photon::std::mutex> lock(mu);
+            photon_std::lock_guard<photon_std::mutex> lock(mu);
             got_msg = true;
             cv.notify_one();
         }

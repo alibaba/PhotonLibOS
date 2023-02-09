@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <sstream>
 #define protected public
 #include "iovector.h"
 #include "utility.h"
@@ -326,5 +327,14 @@ size_t iovector::push_back_more(size_t bytes)
         push_back(v);
     }
     return bytes0 - bytes;
+}
+
+void iovector::debug_print() {
+    std::stringstream ss;
+    ss << "iov sum: " << sum() << ", ";
+    for (auto each : *this) {
+        ss << "{addr: " << each.iov_base << ", len: " << each.iov_len << "}, ";
+    }
+    LOG_DEBUG(ss.str().c_str());
 }
 

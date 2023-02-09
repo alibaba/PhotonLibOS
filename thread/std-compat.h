@@ -26,8 +26,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread-local.h>
 
-namespace photon {
-namespace std {
+namespace photon_std {
 
 using cv_status = ::std::cv_status;
 using defer_lock_t = ::std::defer_lock_t;
@@ -113,7 +112,7 @@ public:
         m_th = nullptr;
     }
 
-    void swap(std::thread& other) noexcept {
+    void swap(photon_std::thread& other) noexcept {
         ::std::swap(this->m_th, other.m_th);
     }
 
@@ -341,24 +340,24 @@ void migrate();
  * @note Should be called at the beginning of the main function, after photon::init().
  * @param vcpu_num The maximum vcpu number for the newly created threads, starts from 1. The main thread doesn't count.
  */
-int work_pool_init(int vcpu_num = 1, int event_engine = INIT_EVENT_DEFAULT & (~INIT_EVENT_SIGNAL), int io_engine = 0);
+int work_pool_init(int vcpu_num = 1, int event_engine = photon::INIT_EVENT_DEFAULT & (~photon::INIT_EVENT_SIGNAL),
+                   int io_engine = 0);
 
 /**
  * @brief Destroy work pool
  */
 int work_pool_fini();
 
-}   // namespace std
-}   // namespace photon
+}   // namespace photon_std
 
 namespace std {
 
-inline void swap(photon::std::thread& lhs, photon::std::thread& rhs) noexcept {
+inline void swap(photon_std::thread& lhs, photon_std::thread& rhs) noexcept {
     lhs.swap(rhs);
 }
 
 template<class Mutex>
-inline void swap(photon::std::unique_lock<Mutex>& lhs, photon::std::unique_lock<Mutex>& rhs) noexcept {
+inline void swap(photon_std::unique_lock<Mutex>& lhs, photon_std::unique_lock<Mutex>& rhs) noexcept {
     lhs.swap(rhs);
 }
 

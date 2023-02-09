@@ -118,6 +118,8 @@ struct iovector_view
         f.iov_len -= bytes;
         auto rst = f.iov_base;
         (char*&)f.iov_base += bytes;
+        if (f.iov_len == 0)
+            pop_front();
         return rst;
     }
 
@@ -143,7 +145,10 @@ struct iovector_view
             return nullptr;
 
         b.iov_len -= bytes;
-        return (char*)b.iov_base + b.iov_len;
+        void* ret = (char*)b.iov_base + b.iov_len;
+        if (b.iov_len == 0)
+            pop_back();
+        return ret;
     }
 
     // try to `extract_back(bytes)` and copy the extracted bytes to `buf`
@@ -423,6 +428,8 @@ public:
     // resize the # of bytes, by either poping-back or pushing-back
     size_t truncate(size_t size)
     {
+        if (size == sum())
+            return size;
         auto ret = shrink_to(size);
         if (ret == size)
             return size;
@@ -487,8 +494,7 @@ public:
         auto ret = va.extract_front(bytes, &vi);
         iov_begin = iov_end - va.iovcnt;
         if (ret >= 0) {
-            iov->iov_begin = vi.iov - iov->iovs;
-            iov->iov_end = iov->iov_begin + vi.iovcnt;
+            iov->update(vi);
         }
         return ret;
     }
@@ -507,8 +513,10 @@ public:
     {
         auto va = view();
         auto ptr = va.extract_front_continuous(bytes);
-        if (ptr)
+        if (ptr) {
+            update(va);
             return ptr;
+        }
 
         auto buf = do_malloc(bytes);
         auto ret = extract_front(bytes, buf);
@@ -577,8 +585,7 @@ public:
         auto ret = va.extract_back(bytes, &vi);
         iov_end = iov_begin + va.iovcnt;
         if (ret >= 0) {
-            iov->iov_begin = vi.iov - iov->iovs;
-            iov->iov_end = iov->iov_begin + vi.iovcnt;
+            iov->update(vi);
         }
         return ret;
     }
@@ -597,8 +604,10 @@ public:
     {
         auto va = view();
         auto ptr = va.extract_back_continuous(bytes);
-        if (ptr)
+        if (ptr) {
+            update(va);
             return ptr;
+        }
 
         auto buf = do_malloc(bytes);
         auto ret = extract_back(bytes, buf);
@@ -781,6 +790,11 @@ public:
         return iovector_view((struct iovec*)iovec(), iovcnt());
     }
 
+    void update(iovector_view va) {
+        iov_begin = va.iov - iovs;
+        iov_end = iov_begin + va.iovcnt;
+    }
+
     // generate iovector_view of partial data part in the iovector
     // generated view shares data field of this iovector, but has
     // its own iovec array.
@@ -806,6 +820,8 @@ public:
     {
         return allocator();
     }
+
+    void debug_print();
 
 protected:
     uint16_t capacity;              // total capacity
