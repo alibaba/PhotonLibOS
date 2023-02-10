@@ -1,6 +1,7 @@
 # Photon
 
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml)
 
 Photon is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
 
