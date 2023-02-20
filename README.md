@@ -87,7 +87,7 @@ Client Mode: Streaming
 |             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
 |               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
 |              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
-|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 163K  |  0.60Gb   |   98%    |
+|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 186K  |  0.71Gb   |   98%    |
 
 Client Mode: Ping-pong
 
@@ -104,8 +104,8 @@ Client Mode: Ping-pong
 |           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
 |               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
 |              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
+|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K |  0.92Gb   |   99%    |
 |                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K |  0.75Gb   |   100%   |
-|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 142K |  0.54Gb   |   99%    |
 
 <details><summary>More details...</summary><p>
 

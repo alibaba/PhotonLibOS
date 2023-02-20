@@ -629,8 +629,8 @@ namespace photon
 #if defined(__x86_64__)
 
     asm(
-DEF_ASM_FUNC(_photon_switch_context)
-R"(// (void** rdi_to, void** rsi_from)
+DEF_ASM_FUNC(_photon_switch_context) // (void** rdi_to, void** rsi_from)
+R"(
         push    %rbp
         mov     %rsp, (%rsi)
         mov     (%rdi), %rsp
@@ -638,14 +638,14 @@ R"(// (void** rdi_to, void** rsi_from)
         ret
 )"
 
-DEF_ASM_FUNC(_photon_switch_context_defer)
-R"(// (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to, void** rcx_from)
+DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to, void** rcx_from)
+R"(
         push    %rbp
         mov     %rsp, (%rcx)
 )"
 
-DEF_ASM_FUNC(_photon_switch_context_defer_die)
-R"(// (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
+DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
+R"(
         mov     (%rdx), %rsp
         pop     %rbp
         jmp     *%rsi
@@ -658,7 +658,7 @@ R"(
         call    *0x48(%rbp)
         mov     %rax, 0x48(%rbp)
         mov     %rbp, %rdi
-        jmp     _photon_thread_die
+        call    _photon_thread_die
 )"
     );
 
@@ -699,8 +699,8 @@ R"(
 #elif defined(__aarch64__) || defined(__arm64__)
 
     asm(
-DEF_ASM_FUNC(_photon_switch_context)
-R"(//; (void** x0_from, void** x1_to)
+DEF_ASM_FUNC(_photon_switch_context) // (void** x0_from, void** x1_to)
+R"(
         stp x29, x30, [sp, #-16]!
         mov x29, sp
         str x29, [x0]
@@ -710,15 +710,15 @@ R"(//; (void** x0_from, void** x1_to)
         ret
 )"
 
-DEF_ASM_FUNC(_photon_switch_context_defer)
-R"(//; (void* x0_arg, void (*x1_defer)(void*), void** x2_to, void** x3_from)
+DEF_ASM_FUNC(_photon_switch_context_defer) // (void* x0_arg, void (*x1_defer)(void*), void** x2_to, void** x3_from)
+R"(
         stp x29, x30, [sp, #-16]!
         mov x29, sp
         str x29, [x3]
 )"
 
-DEF_ASM_FUNC(_photon_switch_context_defer_die)
-R"(//; (void* x0_arg, void (*x1_defer)(void*), void** x2_to_th)
+DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* x0_arg, void (*x1_defer)(void*), void** x2_to_th)
+R"(
         ldr x29, [x2]
         mov sp, x29
         ldp x29, x30, [sp], #16

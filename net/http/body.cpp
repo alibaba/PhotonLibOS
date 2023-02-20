@@ -139,8 +139,7 @@ public:
         }
         if (body_remain > 0) {
             char tmp_buf[4];
-            auto ret =
-                m_stream->read(tmp_buf, body_remain);
+            auto ret = m_stream->read(tmp_buf, body_remain);
             if (ret != (ssize_t)body_remain) m_stream->close();
         }
         return true;
@@ -148,11 +147,10 @@ public:
     ssize_t read_from_line_buf(void* &buf, size_t &count) {
         //read from line_buf
         ssize_t ret = 0;
-        while (m_cursor < m_line_size && !m_finish) {
+        while (count > 0 && m_cursor < m_line_size && !m_finish) {
             //read chunk
             auto read_from_line = std::min(count,
-                                    std::min(m_chunked_remain,
-                                    m_line_size - m_cursor));
+                                           std::min(m_chunked_remain, m_line_size - m_cursor));
             memcpy(buf, m_get_line_buf + m_cursor, read_from_line);
             m_cursor += read_from_line;
             buf = (char*)buf + read_from_line;
@@ -182,12 +180,26 @@ public:
         return r;
     }
     int get_new_chunk() {
+        if (m_cursor < m_line_size) {
+            if (pos_next_chunk(m_cursor))
+                return 0;
+            else {
+                memmove(m_get_line_buf,
+                        m_get_line_buf + m_cursor, m_line_size - m_cursor);
+                m_line_size -= m_cursor;
+                m_cursor = 0;
+            }
+        }
+
         bool get_line_finish = false;
         while (!get_line_finish && !m_finish) {
             assert(m_line_size != LINE_BUFFER_SIZE);
             auto r = m_stream->recv(m_get_line_buf + m_line_size,
-                                            LINE_BUFFER_SIZE - m_line_size);
+                                    LINE_BUFFER_SIZE - m_line_size);
             if (r < 0) return r;
+            if (r == 0) {
+                LOG_ERROR_RETURN(0, -1, "Peer closed");
+            }
             m_line_size += r;
             if (m_line_size <= 2) continue; // too small
             get_line_finish = pos_next_chunk(0);
@@ -203,6 +215,7 @@ public:
                 auto r = read_from_stream(buf, count);
                 if (r < 0) return r;
                 ret += r;
+                if (m_chunked_remain > 0 && r == 0) break;
             }
             // get new chunk header
             if (m_chunked_remain == 0) {

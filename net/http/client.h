@@ -72,7 +72,7 @@ public:
         Client* _client;
         char _buf[0];
         Operation(Client* c, Verb v, std::string_view url, uint16_t buf_size)
-            : req(_buf, buf_size, v, url),
+            : req(_buf, buf_size, v, url, c->has_proxy()),
               enable_proxy(c->has_proxy()),
               _client(c) {}
         Operation(Client* c, uint16_t buf_size)
