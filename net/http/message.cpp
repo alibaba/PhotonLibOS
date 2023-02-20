@@ -304,7 +304,7 @@ int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     if ((size_t)m_buf_capacity <= u.target().size() + 21 + verbstr[v].size())
         LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
 
-    LOG_DEBUG("requst reset ", VALUE(u.host()), VALUE(u.host_port()));
+    LOG_DEBUG("requst reset ", VALUE(u.host()), VALUE(u.host_port()), VALUE(enable_proxy));
 
     Message::reset();
     make_request_line(v, u, enable_proxy);

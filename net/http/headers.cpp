@@ -182,7 +182,7 @@ int HeadersBase::parse() {
 
 std::pair<ssize_t, ssize_t> Headers::range() const {
     auto found = find("Range");
-    if (found == end()) return {-1, -1};
+    if (found == end()) return {0, -1};
     auto range = found.second();
     auto eq_pos = range.find("=");
     auto dash_pos = range.find("-");

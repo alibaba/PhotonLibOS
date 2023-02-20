@@ -20,11 +20,10 @@ limitations under the License.
 
 struct Value {
     explicit Value(int val) : m_val(val) {
-        printf("Construct %d\n", m_val);
+        LOG_DEBUG("Construct `", m_val);
     }
     ~Value() {
-        // printf("Destruct %d\n", m_val);
-        puts("Destruct");
+        LOG_DEBUG("Destruct `", m_val);
     }
     int m_val;
 };
@@ -43,7 +42,7 @@ static Value& get_v4() {
 
 struct GlobalEnv {
     GlobalEnv() {
-        printf("Construct GlobalEnv\n");
+        LOG_DEBUG("Construct GlobalEnv");
         // WARING: No photon tls can be accessed BEFORE photon_init
         ASSERT(photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) == 0);
         ASSERT(photon_std::work_pool_init(4) == 0);
@@ -51,7 +50,7 @@ struct GlobalEnv {
     }
 
     ~GlobalEnv() {
-        printf("Destruct GlobalEnv\n");
+        LOG_DEBUG("Destruct GlobalEnv");
         ASSERT(get_v1().m_val == -1);
         ASSERT(get_v4().m_val == 4);
         photon_std::work_pool_fini();
@@ -82,8 +81,8 @@ TEST(global_init, basic) {
 }
 
 int main(int argc, char** arg) {
-    printf("Begin main\n");
-    DEFER(printf("End main\n"));
+    LOG_DEBUG("Begin main");
+    DEFER(LOG_DEBUG("End main"));
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }
