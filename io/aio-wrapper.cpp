@@ -342,7 +342,7 @@ namespace photon
     int libaio_wrapper_init()
     {
         if (libaio_ctx)
-            LOG_ERROR_RETURN(EALREADY, -1, "already inited");
+            return 0;
 
         std::unique_ptr<libaio_ctx_t> ctx(new libaio_ctx_t);
         ctx->evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -368,7 +368,7 @@ namespace photon
     {
         if (!libaio_ctx || !libaio_ctx->running ||
             !libaio_ctx->polling_thread || libaio_ctx->evfd < 0)
-            LOG_ERROR_RETURN(ENOSYS, -1, "not inited");
+            return 0;
 
         if (libaio_ctx->running == 2) // if waiting for fd readable
             thread_interrupt(libaio_ctx->polling_thread, ECANCELED);

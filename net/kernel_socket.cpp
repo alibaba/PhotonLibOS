@@ -218,6 +218,19 @@ public:
     virtual void timeout(uint64_t tm) override { m_timeout = tm; }
 protected:
     uint64_t m_timeout = -1;
+
+    struct tmp_msg_hdr : public ::msghdr {
+        tmp_msg_hdr(const iovec* iov, int iovcnt) : ::msghdr{} {
+            this->msg_iov = (iovec*) iov;
+            this->msg_iovlen = iovcnt;
+        }
+
+        explicit tmp_msg_hdr(iovector_view& view) : tmp_msg_hdr(view.iov, view.iovcnt) {}
+
+        operator ::msghdr*() {
+            return this;
+        }
+    };
 };
 
 class KernelSocketClient : public SocketClientBase {
@@ -527,6 +540,7 @@ protected:
 };
 
 #ifdef PHOTON_URING
+
 class IouringSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
@@ -575,27 +589,21 @@ public:
         return do_sendmsg(fd, iov, iovcnt, flags, m_timeout);
     }
 
-private:
-    static ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
+protected:
+    virtual ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
         return photon::iouring_send(fd, buf, count, flags | MSG_NOSIGNAL, timeout);
     }
 
-    static ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) {
+    virtual ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) {
         return photon::iouring_recv(fd, buf, count, flags, timeout);
     }
 
-    static ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
-        msghdr msg = {};
-        msg.msg_iov = (iovec*) iov;
-        msg.msg_iovlen = iovcnt;
-        return photon::iouring_sendmsg(fd, &msg, flags | MSG_NOSIGNAL, timeout);
+    virtual ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
+        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), flags | MSG_NOSIGNAL, timeout);
     }
 
-    static ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
-        msghdr msg = {};
-        msg.msg_iov = (iovec*) iov;
-        msg.msg_iovlen = iovcnt;
-        return photon::iouring_recvmsg(fd, &msg, flags, timeout);
+    virtual ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
+        return photon::iouring_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
     }
 };
 
@@ -626,7 +634,63 @@ protected:
         return photon::iouring_accept(fd, addr, addrlen, -1);
     }
 };
-#endif
+
+class IouringFixedFileSocketStream : public IouringSocketStream {
+public:
+    explicit IouringFixedFileSocketStream(int fd) :
+            IouringSocketStream(fd) {
+        if (fd >= 0)
+            photon::iouring_register_files(fd);
+    }
+
+    IouringFixedFileSocketStream(int socket_family, bool nonblocking) :
+            IouringSocketStream(socket_family, nonblocking) {
+        if (fd >= 0)
+            photon::iouring_register_files(fd);
+    }
+
+    ~IouringFixedFileSocketStream() override {
+        if (fd >= 0)
+            photon::iouring_unregister_files(fd);
+    }
+
+protected:
+    ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        return photon::iouring_send_fixed_file(fd, buf, count, flags | MSG_NOSIGNAL, timeout);
+    }
+
+    ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) override {
+        return photon::iouring_recv_fixed_file(fd, buf, count, flags, timeout);
+    }
+
+    ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
+        return photon::iouring_sendmsg_fixed_file(fd, tmp_msg_hdr(iov, iovcnt), flags | MSG_NOSIGNAL, timeout);
+    }
+
+    ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
+        return photon::iouring_recvmsg_fixed_file(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
+    }
+};
+
+class IouringFixedFileSocketClient : public IouringSocketClient {
+protected:
+    using IouringSocketClient::IouringSocketClient;
+
+    KernelSocketStream* create_stream() override {
+        return new IouringFixedFileSocketStream(m_socket_family, false);
+    }
+};
+
+class IouringFixedFileSocketServer : public IouringSocketServer {
+protected:
+    using IouringSocketServer::IouringSocketServer;
+
+    KernelSocketStream* create_stream(int fd) override {
+        return new IouringFixedFileSocketStream(fd);
+    }
+};
+
+#endif // PHOTON_URING
 
 /* ET Socket - Start */
 
@@ -847,7 +911,8 @@ protected:
                             LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 };
-#endif
+
+#endif // __linux__
 
 /* ET Socket - End */
 
@@ -877,10 +942,16 @@ extern "C" ISocketServer* new_zerocopy_tcp_server() {
 }
 #ifdef PHOTON_URING
 extern "C" ISocketClient* new_iouring_tcp_client() {
-    return new IouringSocketClient(AF_INET, false);
+    if (photon::iouring_register_files_enabled())
+        return new IouringFixedFileSocketClient(AF_INET, false);
+    else
+        return new IouringSocketClient(AF_INET, false);
 }
 extern "C" ISocketServer* new_iouring_tcp_server() {
-    return NewObj<IouringSocketServer>(AF_INET, false, false)->init();
+    if (photon::iouring_register_files_enabled())
+        return NewObj<IouringFixedFileSocketServer>(AF_INET, false, false)->init();
+    else
+        return NewObj<IouringSocketServer>(AF_INET, false, false)->init();
 }
 #endif // PHOTON_URING
 extern "C" ISocketClient* new_et_tcp_socket_client() {
@@ -889,7 +960,7 @@ extern "C" ISocketClient* new_et_tcp_socket_client() {
 extern "C" ISocketServer* new_et_tcp_socket_server() {
     return NewObj<ETKernelSocketServer>(AF_INET, false, true)->init();
 }
-#endif
+#endif // __linux__
 
 }
 }

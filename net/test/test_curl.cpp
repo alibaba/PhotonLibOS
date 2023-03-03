@@ -42,9 +42,9 @@ class StringStream {
 };
 
 TEST(cURL, feature) {
-    photon::vcpu_init();
-    photon::fd_events_init();
-    net::cURL::init();
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBCURL))
+        FAIL();
+    DEFER(photon::fini());
 
     std::unique_ptr<net::cURL> client(new net::cURL());
     std::unique_ptr<StringStream> buffer(new StringStream());
@@ -55,10 +55,6 @@ TEST(cURL, feature) {
     LOG_INFO(buffer->str().c_str());
     buffer.reset();
     client.reset();
-
-    net::cURL::fini();
-    photon::fd_events_fini();
-    photon::vcpu_fini();
 }
 
 int main(int argc, char** argv) {

@@ -99,10 +99,9 @@ TEST(cookie_jar, basic) {
 }
 
 int main(int argc, char** arg) {
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
     set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
     LOG_DEBUG("test result:`", RUN_ALL_TESTS());

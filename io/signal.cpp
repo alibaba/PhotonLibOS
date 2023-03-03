@@ -32,10 +32,12 @@ namespace photon
     static constexpr int SIGNAL_MAX = 64;
 
     static int sgfd = -1;
+    static vcpu_base* signal_vcpu = nullptr;
     static void* sighandlers[SIGNAL_MAX + 1];
     static sigset_t infoset = {0};
     static sigset_t sigset = {-1U};
     static EventLoop* eloop = nullptr;
+    static photon::mutex init_mutex;
 #ifdef __APPLE__
     struct kevent _events[32];
     struct timespec tm {0, 0};
@@ -236,19 +238,21 @@ namespace photon
 
     int sync_signal_init()
     {
-        if (sgfd != -1)
-            LOG_ERROR_RETURN(EALREADY, -1, "already inited");
+        photon::scoped_lock lock(init_mutex);
+        if (sgfd >= 0)
+            return 0;
 #ifdef __APPLE__
         sgfd = kqueue();
 #else
         sgfd = signalfd(-1, &sigset, SFD_CLOEXEC | SFD_NONBLOCK);
 #endif
         if (sgfd == -1)
-            LOG_ERRNO_RETURN(0, -1, "failed to create signalfd()");
+            LOG_ERRNO_RETURN(0, -1, "failed to create signalfd() or kqueue()");
 
         eloop = new_event_loop(
             {nullptr, &wait_for_signal},
             {nullptr, &fire_signal});
+        signal_vcpu = photon::get_vcpu();
         if (!eloop)
         {
             close(sgfd);
@@ -263,11 +267,17 @@ namespace photon
 
     int sync_signal_fini()
     {
-        if (sgfd == -1)
-            LOG_ERROR_RETURN(EALREADY, -1, "already finited");
-
-        eloop->stop();
-        close(sgfd);
+        {
+            photon::scoped_lock lock(init_mutex);
+            if (get_vcpu() != signal_vcpu) {
+                return 0;
+            }
+            if (sgfd < 0)
+                return 0;
+            eloop->stop();
+            close(sgfd);
+            sgfd = -1;
+        }
         delete eloop;
 #ifdef __APPLE__
         // Kqueue can detect singals with EVFILT_SIGNAL but cannot consume them, so we need clear

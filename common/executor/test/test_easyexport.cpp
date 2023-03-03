@@ -84,8 +84,9 @@ TEST(easy_performer, test) {
     easy_atomic_set(count, 10000);
 
     std::thread([]() {
-        photon::vcpu_init();
-        photon::fd_events_init();
+        if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+            return -1;
+        DEFER(photon::fini());
         fs::exportfs_init();
 
         g_fs = fs::export_as_easy_sync_fs(
@@ -97,7 +98,6 @@ TEST(easy_performer, test) {
         }
 
         fs::exportfs_fini();
-        photon::fd_events_fini();
     }).detach();
 
     EasyCoroutinePool ecp;

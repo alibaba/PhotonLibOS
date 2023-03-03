@@ -24,12 +24,9 @@ limitations under the License.
 using namespace photon;
 
 int main(int argc, char** argv) {
-    photon::vcpu_init();
-    photon::fd_events_init();
-    DEFER({
-        photon::fd_events_fini();
-        photon::vcpu_fini();
-    });
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
 
     auto ctx = net::new_tls_context(nullptr, nullptr, "Just4Test");
     if (!ctx) return -1;
