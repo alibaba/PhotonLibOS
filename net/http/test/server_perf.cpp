@@ -66,16 +66,10 @@ public:
 
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
     set_log_output_level(ALOG_INFO);
-    if (photon::sync_signal_init() < 0) {
-        LOG_ERROR("photon::sync_signal_init failed");
-        exit(EAGAIN);
-    }
-    DEFER(photon::sync_signal_fini());
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
 
     photon::block_all_signal();
     photon::sync_signal(SIGINT, &stop_handler);

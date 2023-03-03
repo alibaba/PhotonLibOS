@@ -35,6 +35,11 @@ using namespace photon;
 using namespace photon::fs;
 using namespace testing;
 
+#ifdef __linux__
+static const int event_engine = photon::INIT_EVENT_EPOLL;
+#else
+static const int event_engine = photon::INIT_EVENT_KQUEUE;
+#endif
 constexpr uint64_t magic = 150820;
 static std::atomic<int> work(0);
 
@@ -95,7 +100,7 @@ int callbackvoid(void*, AsyncResult<void>* ret) {
 
 TEST(ExportFS, basic) {
     photon::vcpu_init();
-    photon::fd_events_init();
+    photon::fd_events_init(event_engine);
     exportfs_init();
     DEFER({
         exportfs_fini();
@@ -256,7 +261,7 @@ TEST(ExportFS, init_fini_failed_situation) {
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ENOSYS, errno);
     photon::vcpu_init();
-    photon::fd_events_init();
+    photon::fd_events_init(event_engine);
     ret = exportfs_init();
     EXPECT_EQ(0, ret);
     ret = exportfs_init();
@@ -275,7 +280,7 @@ TEST(ExportFS, op_failed_situation) {
         log_output = _o_output;
     });
     // photon::vcpu_init();
-    photon::fd_events_init();
+    photon::fd_events_init(event_engine);
     exportfs_init();
     DEFER({
         exportfs_fini();
@@ -304,7 +309,7 @@ TEST(ExportFS, op_failed_situation) {
 
 TEST(ExportFS, xattr) {
     photon::vcpu_init();
-    photon::fd_events_init();
+    photon::fd_events_init(event_engine);
     exportfs_init();
     DEFER({
         exportfs_fini();
@@ -372,7 +377,7 @@ TEST(ExportFS, xattr_sync) {
 
     std::thread th([&]{
         photon::vcpu_init();
-        photon::fd_events_init();
+        photon::fd_events_init(event_engine);
         exportfs_init();
         DEFER({
             exportfs_fini();

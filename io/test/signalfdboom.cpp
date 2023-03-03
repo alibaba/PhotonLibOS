@@ -50,16 +50,9 @@ TEST(Boom, boom) {
 int main(int argc, char** arg)
 {
     LOG_INFO("Set native signal handler");
-    vcpu_init();
-    DEFER({vcpu_fini();});
-    auto ret = fd_events_init();
-    if (ret != 0)
-        LOG_ERROR_RETURN(0, -1, "failed to init fdevents");
-    DEFER({fd_events_fini();});
-    ret = sync_signal_init();
-    if (ret != 0)
-        LOG_ERROR_RETURN(0, -1, "failed to init signalfd");
-    DEFER({sync_signal_fini();});
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     google::ParseCommandLineFlags(&argc, &arg, true);
     LOG_DEBUG("test result:`",RUN_ALL_TESTS());

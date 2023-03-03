@@ -114,8 +114,10 @@ int main(int argc, char** arg) {
     // Finally test dtor in main thread
     static Value v;
     photon::thread_key_t key;
-    assert(photon::thread_key_create(&key, &Value::key_dtor) == 0);
-    assert(photon::thread_setspecific(key, &v) == 0);
+    int ret_key = photon::thread_key_create(&key, &Value::key_dtor);
+    assert(ret_key == 0);
+    ret_key = photon::thread_setspecific(key, &v);
+    assert(ret_key == 0);
 
     return ret;
 }

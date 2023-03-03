@@ -119,9 +119,13 @@ protected:
     // return negative if an error occured
     int receive_header(uint64_t timeout = -1UL);
     int send_header(net::ISocketStream* stream = nullptr);
+    // return 0 if whole header recvd
+    // return 1 if end of stream
+    // return 2 if partial header recvd
+    // return a negative number if an error occured
     int receive_bytes(net::ISocketStream* stream);
     // return 0 if "\r\n\r\n" is recvd
-    // return 1 if "\r\n\r\n" is not recvd
+    // return 2 if "\r\n\r\n" is not recvd
     // return a negative number if an error occured
     int append_bytes(uint16_t size);
 

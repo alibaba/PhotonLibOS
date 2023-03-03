@@ -168,6 +168,9 @@ namespace fs
 #endif
         UNIMPLEMENTED(int fsync() override);
         UNIMPLEMENTED(int fdatasync() override);
+        Object* get_underlay_object(int i = 0) final {
+            return (Object*) (uint64_t) fd;
+        }
     };
 
     class PsyncFileAdaptor final : public BaseFileAdaptor

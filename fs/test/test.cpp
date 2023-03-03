@@ -1365,15 +1365,16 @@ TEST(Walker, basic) {
   EXPECT_EQ(2, count);
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv){
     ::testing::InitGoogleTest(&argc, argv);
-    photon::vcpu_init();
-    photon::fd_events_init();
-    DEFER({
-        photon::fd_events_fini();
-        photon::vcpu_fini();
-    });
+#ifdef __linux__
+    int ev_engine = photon::INIT_EVENT_EPOLL;
+#else
+    int ev_engine = photon::INIT_EVENT_KQUEUE;
+#endif
+    if (photon::init(ev_engine, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
     int ret = RUN_ALL_TESTS();
     LOG_ERROR_RETURN(0, ret, VALUE(ret));
 }

@@ -266,8 +266,6 @@ public:
     }
 };
 
-#define _unused(x) ((void)(x))
-
 // release resource by RAII
 #define WITH(init_expr) if (init_expr)
 

@@ -75,8 +75,8 @@ public:
     }
 
     void do_loop() {
-        photon::vcpu_init();
-        photon::fd_events_init();
+        photon::init(INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT);
+        DEFER(photon::fini());
         pth = photon::CURRENT;
         LOG_INFO("worker start");
         pool = photon::new_thread_pool(32);
@@ -91,8 +91,6 @@ public:
         delete loop;
         photon::delete_thread_pool(pool);
         pool = nullptr;
-        photon::fd_events_fini();
-        photon::vcpu_fini();
     }
 };
 

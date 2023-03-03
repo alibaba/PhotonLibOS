@@ -146,10 +146,9 @@ int main(int argc, char** argv) {
     set_log_output_level(ALOG_INFO);
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
 
     g_read_buffers = new uint8_t* [FLAGS_num_threads];   // 共 num_threads 个 read buffer
     DEFER(delete[] g_read_buffers);

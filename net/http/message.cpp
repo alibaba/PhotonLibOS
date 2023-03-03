@@ -57,7 +57,8 @@ int Message::receive_header(uint64_t timeout) {
         }
         if (ret == 1)
             return 1;
-        break;
+        if (ret != 2)
+            break;
     }
     return prepare_body_read_stream();
 }
@@ -68,11 +69,15 @@ int Message::receive_bytes(net::ISocketStream* stream) {
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
     auto rc = stream->recv(m_buf + m_buf_size, MAX_TRANSFER_BYTES);
-    if (message_status == INIT && rc == 0)
+    if (rc < 0) {
+        LOG_ERRNO_RETURN(0, rc, "failed to receive data ", VALUE(rc));
+    }
+    if (message_status == INIT && rc == 0) {
         return 1;
-    auto ret = (rc < 0) ? rc : append_bytes((uint16_t)rc);
+    }
+    auto ret = append_bytes((uint16_t)rc);
     if (ret != 0 && rc == 0)
-        LOG_ERROR_RETURN(0, -1, "Peer closed");
+        LOG_ERROR_RETURN(0, -1, "Peer closed"); // unexpected end of stream
     return ret;
 }
 
@@ -88,7 +93,7 @@ int Message::append_bytes(uint16_t size) {
     m_buf_size += size;
     std::string_view whole(left, m_buf + m_buf_size - left);
     auto pos = whole.find("\r\n\r\n");
-    if (pos == whole.npos) return 1;
+    if (pos == whole.npos) return 2;
 
     pos += 4 - (income - left);
     auto body_begin = sv.begin() + pos - m_buf;

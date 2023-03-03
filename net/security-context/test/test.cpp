@@ -350,10 +350,14 @@ TEST(Socket, nested) {
 }
 
 int main(int argc, char** arg) {
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
+#ifdef __linux__
+    int ev_engine = photon::INIT_EVENT_EPOLL;
+#else
+    int ev_engine = photon::INIT_EVENT_KQUEUE;
+#endif
+    if (photon::init(ev_engine, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

@@ -35,11 +35,19 @@ ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint
 
 ssize_t iouring_send(int fd, const void* buf, size_t len, int flags, uint64_t timeout);
 
+ssize_t iouring_send_fixed_file(int fd, const void* buf, size_t len, int flags, uint64_t timeout);
+
 ssize_t iouring_recv(int fd, void* buf, size_t len, int flags, uint64_t timeout);
+
+ssize_t iouring_recv_fixed_file(int fd, void* buf, size_t len, int flags, uint64_t timeout);
 
 ssize_t iouring_sendmsg(int fd, const msghdr* msg, int flags, uint64_t timeout);
 
+ssize_t iouring_sendmsg_fixed_file(int fd, const msghdr* msg, int flags, uint64_t timeout);
+
 ssize_t iouring_recvmsg(int fd, msghdr* msg, int flags, uint64_t timeout);
+
+ssize_t iouring_recvmsg_fixed_file(int fd, msghdr* msg, int flags, uint64_t timeout);
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout);
 
@@ -54,6 +62,12 @@ int iouring_open(const char* path, int flags, mode_t mode);
 int iouring_mkdir(const char* path, mode_t mode);
 
 int iouring_close(int fd);
+
+bool iouring_register_files_enabled();
+
+int iouring_register_files(int fd);
+
+int iouring_unregister_files(int fd);
 
 struct iouring
 {

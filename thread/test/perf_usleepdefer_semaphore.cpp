@@ -101,10 +101,9 @@ TEST(perf, task_in_photon) {
 }
 
 int main(int argc, char** arg) {
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

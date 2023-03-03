@@ -215,20 +215,17 @@ int test_aio(const char* fn, bool is_posix)
     return 0;
 }
 
-int main(int argc, char** arg)
-{
-    photon::vcpu_init();
+int main(int argc, char** arg) {
     ::testing::InitGoogleTest(&argc, arg);
 
-    int ret = fd_events_init();
-    if (ret < 0)
-        LOG_ERROR_RETURN(0, -1, "failed to init epoll subsystem");
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
 
     test_libaio("/tmp/test-syncio");
     test_posix_libaio("/tmp/test-syncio");
 
     usleep(0);
-    LOG_DEBUG("test result:`",RUN_ALL_TESTS());
+    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
 
-    fd_events_fini();
 }

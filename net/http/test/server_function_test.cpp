@@ -521,10 +521,9 @@ TEST(http_server, mux_handler) {
 }
 
 int main(int argc, char** arg) {
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    photon::fd_events_init();
-    DEFER(photon::fd_events_fini());
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
 #ifdef __linux__
     if (net::et_poller_init() < 0) {
         LOG_ERROR("net::et_poller_init failed");

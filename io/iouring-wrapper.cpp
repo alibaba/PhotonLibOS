@@ -73,12 +73,16 @@ public:
     int init() {
         rlimit resource_limit{.rlim_cur = RLIM_INFINITY, .rlim_max = RLIM_INFINITY};
         if (setrlimit(RLIMIT_MEMLOCK, &resource_limit) != 0) {
-            LOG_WARN("iouring: current user has no permission to set unlimited RLIMIT_MEMLOCK, change to root?");
+            LOG_ERROR_RETURN(0, -1, "iouring: failed to set resource limit. Use command `ulimit -l unlimited`, or change to root");
         }
+        check_register_file_support();
+        check_cooperative_task_support();
         set_submit_wait_function();
 
         m_ring = new io_uring{};
         io_uring_params params{};
+        if (m_cooperative_task_flag == 1)
+            params.flags = IORING_SETUP_COOP_TASKRUN;
         int ret = io_uring_queue_init_params(QUEUE_DEPTH, m_ring, &params);
         if (ret != 0) {
             // reset m_ring so that the destructor won't do duplicate munmap cleanup (io_uring_queue_exit)
@@ -105,10 +109,23 @@ public:
             LOG_ERROR_RETURN(0, -1, "iouring: some opcodes are not supported");
         }
 
-        // An additional feature only available since 5.18. Doesn't have to succeed
+        // Register ring fd, only available since 5.18. Doesn't have to succeed
         ret = io_uring_register_ring_fd(m_ring);
         if (ret < 0 && ret != -EINVAL) {
             LOG_ERROR_RETURN(EINVAL, -1, "iouring: unable to register ring fd", ret);
+        }
+
+        // Register files. Init with sparse entries
+        if (register_files_enabled()) {
+            auto entries = new int[REGISTER_FILES_MAX_NUM];
+            DEFER(delete[] entries);
+            for (int i = 0; i < REGISTER_FILES_MAX_NUM; ++i) {
+                entries[i] = REGISTER_FILES_SPARSE_FD;
+            }
+            ret = io_uring_register_files(m_ring, entries, REGISTER_FILES_MAX_NUM);
+            if (ret != 0) {
+                LOG_ERROR_RETURN(EPERM, -1, "iouring: unable to register files, ", ERRNO(-ret));
+            }
         }
 
         if (m_master) {
@@ -142,14 +159,17 @@ public:
      *     be set to ETIMEDOUT. If failed because of external interruption, errno will also be set accordingly.
      */
     template<typename Prep, typename... Args>
-    int32_t async_io(Prep prep, uint64_t timeout, Args... args) {
-        io_uring_sqe* sqe = io_uring_get_sqe(m_ring);
-        if (sqe == nullptr) {
-            LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-        }
-
-        ioCtx io_ctx{photon::CURRENT, -1, false, false};
+    int32_t async_io(Prep prep, uint64_t timeout, uint8_t flags, Args... args) {
+        auto* sqe = _get_sqe();
+        if (sqe == nullptr)
+            return -1;
         prep(sqe, args...);
+        sqe->flags |= flags;
+        return _async_io(sqe, timeout);
+    }
+
+    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
+        ioCtx io_ctx{photon::CURRENT, -1, false, false};
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx{photon::CURRENT, -1, true, false};
@@ -157,17 +177,16 @@ public:
         if (timeout < std::numeric_limits<int64_t>::max()) {
             sqe->flags |= IOSQE_IO_LINK;
             usec_to_timespec(timeout, &ts);
-            sqe = io_uring_get_sqe(m_ring);
-            if (sqe == nullptr) {
-                LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-            }
+            sqe = _get_sqe();
+            if (sqe == nullptr)
+                return -1;
             io_uring_prep_link_timeout(sqe, &ts, 0);
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
         photon::thread_sleep(-1);
 
-        if (errno == EOK) {
+        if (likely(errno == EOK)) {
             // Interrupted by `wait_and_fire_events`
             if (io_ctx.res < 0) {
                 errno = -io_ctx.res;
@@ -179,10 +198,9 @@ public:
         } else {
             // Interrupted by external user thread. Try to cancel the previous I/O
             ERRNO err_backup;
-            sqe = io_uring_get_sqe(m_ring);
-            if (sqe == nullptr) {
-                LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-            }
+            sqe = _get_sqe();
+            if (sqe == nullptr)
+                return -1;
             ioCtx cancel_ctx{CURRENT, -1, true, false};
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
@@ -195,7 +213,7 @@ public:
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
         unsigned poll_mask = evmap.translate_bitwisely(interests);
         // The io_uring_prep_poll_add's return value is the same as poll(2)'s revents.
-        int ret = async_io(&io_uring_prep_poll_add, timeout, fd, poll_mask);
+        int ret = async_io(&io_uring_prep_poll_add, timeout, 0, fd, poll_mask);
         if (ret < 0) {
             return -1;
         }
@@ -206,10 +224,9 @@ public:
     }
 
     int add_interest(Event e) override {
-        io_uring_sqe* sqe = io_uring_get_sqe(m_ring);
-        if (sqe == nullptr) {
-            LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-        }
+        auto* sqe = _get_sqe();
+        if (sqe == nullptr)
+            return -1;
 
         bool one_shot = e.interests & ONE_SHOT;
         fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
@@ -230,10 +247,9 @@ public:
     }
 
     int rm_interest(Event e) override {
-        io_uring_sqe* sqe = io_uring_get_sqe(m_ring);
-        if (sqe == nullptr) {
-            LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-        }
+        auto* sqe = _get_sqe();
+        if (sqe == nullptr)
+            return -1;
 
         fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
         auto iter = m_event_contexts.find(fd_interest);
@@ -294,7 +310,7 @@ public:
         return num;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) {
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
         // Prepare own timeout
         __kernel_timespec ts{};
         if (timeout > std::numeric_limits<int64_t>::max()) {
@@ -345,6 +361,30 @@ public:
         return 0;
     }
 
+    static bool register_files_enabled() {
+        return m_register_files_flag == 1;
+    }
+
+    int register_unregister_files(int fd, bool direction) {
+        if (unlikely(!register_files_enabled())) {
+            LOG_ERROR_RETURN(EINVAL, -1, "iouring: register_files not enabled");
+        }
+        if (unlikely(fd < 0)) {
+            LOG_ERROR_RETURN(EINVAL, -1, "iouring: invalid fd to register/unregister");
+        }
+        if (unlikely(fd >= REGISTER_FILES_MAX_NUM)) {
+            LOG_WARN("iouring: register fd exceeds max num, ignore ...");
+            return 0;
+        }
+        if (direction) LOG_DEBUG("register", VALUE(fd)); else LOG_DEBUG("unregister", VALUE(fd));
+        int value = direction ? fd : REGISTER_FILES_SPARSE_FD;
+        int ret = io_uring_register_files_update(m_ring, fd, &value, 1);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(-ret, -1, "iouring: register_files_update failed, ", VALUE(fd), ERRNO(-ret));
+        }
+        return 0;
+    }
+
 private:
     struct ioCtx {
         photon::thread* th_id;
@@ -374,6 +414,14 @@ private:
             return std::hash<uint64_t>()(*ptr);
         }
     };
+
+    io_uring_sqe* _get_sqe() {
+        io_uring_sqe* sqe = io_uring_get_sqe(m_ring);
+        if (sqe == nullptr) {
+            LOG_ERROR_RETURN(EBUSY, sqe, "iouring: submission queue is full");
+        }
+        return sqe;
+    }
 
     static int submit_wait_by_timer(io_uring* ring, __kernel_timespec* ts, io_uring_cqe** cqe) {
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
@@ -417,10 +465,32 @@ private:
         }
     }
 
+    static void check_register_file_support() {
+        if (m_register_files_flag >= 0)
+            return;
+        int result;
+        if (kernel_version_compare("5.12", result) == 0 && result >= 0) {
+            m_register_files_flag = 1;
+        } else {
+            m_register_files_flag = 0;
+        }
+    }
+
+    static void check_cooperative_task_support() {
+        if (m_cooperative_task_flag >= 0)
+            return;
+        int result;
+        if (kernel_version_compare("5.19", result) == 0 && result >= 0) {
+            m_cooperative_task_flag = 1;
+        } else {
+            m_cooperative_task_flag = 0;
+        }
+    }
+
     void run_cancel_poller() {
         while (m_cancel_poller_running) {
             uint32_t poll_mask = evmap.translate_bitwisely(EVENT_READ);
-            int ret = async_io(&io_uring_prep_poll_add, -1, m_cancel_fd, poll_mask);
+            int ret = async_io(&io_uring_prep_poll_add, -1, 0, m_cancel_fd, poll_mask);
             if (ret < 0) {
                 if (errno == EINTR) {
                     break;
@@ -446,6 +516,8 @@ private:
             IORING_FEAT_FAST_POLL, IORING_FEAT_EXT_ARG,
             IORING_FEAT_RW_CUR_POS};
     static const int QUEUE_DEPTH = 16384;
+    static const int REGISTER_FILES_SPARSE_FD = -1;
+    static const int REGISTER_FILES_MAX_NUM = 10000;
     bool m_master;
     int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;
@@ -453,85 +525,112 @@ private:
     thread* m_cancel_poller = nullptr;
     bool m_cancel_poller_running = true;
     std::unordered_map<fdInterest, eventCtx, fdInterestHasher> m_event_contexts;
+    static int m_register_files_flag;
+    static int m_cooperative_task_flag;
 };
 
 constexpr const uint32_t iouringEngine::REQUIRED_FEATURES[];
 
+int iouringEngine::m_register_files_flag = -1;
+
+int iouringEngine::m_cooperative_task_flag = -1;
+
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
+template<typename...Ts>
+inline size_t do_async_io(Ts...xs) {
+    auto mee = (iouringEngine*) get_vcpu()->master_event_engine;
+    return mee->async_io(xs...);
+}
+
 ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_read, timeout, fd, buf, count, offset);
+    return do_async_io(&io_uring_prep_read, timeout, 0, fd, buf, count, offset);
 }
 
 ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_write, timeout, fd, buf, count, offset);
+    return do_async_io(&io_uring_prep_write, timeout, 0, fd, buf, count, offset);
 }
 
 ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_readv, timeout, fd, iov, iovcnt, offset);
+    return do_async_io(&io_uring_prep_readv, timeout, 0, fd, iov, iovcnt, offset);
 }
 
 ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_writev, timeout, fd, iov, iovcnt, offset);
+    return do_async_io(&io_uring_prep_writev, timeout, 0, fd, iov, iovcnt, offset);
 }
 
 ssize_t iouring_send(int fd, const void* buf, size_t len, int flags, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_send, timeout, fd, buf, len, flags);
+    return do_async_io(&io_uring_prep_send, timeout, 0, fd, buf, len, flags);
+}
+
+ssize_t iouring_send_fixed_file(int fd, const void* buf, size_t len, int flags, uint64_t timeout) {
+    return do_async_io(&io_uring_prep_send, timeout, IOSQE_FIXED_FILE, fd, buf, len, flags);
 }
 
 ssize_t iouring_recv(int fd, void* buf, size_t len, int flags, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_recv, timeout, fd, buf, len, flags);
+    return do_async_io(&io_uring_prep_recv, timeout, 0, fd, buf, len, flags);
+}
+
+ssize_t iouring_recv_fixed_file(int fd, void* buf, size_t len, int flags, uint64_t timeout) {
+    return do_async_io(&io_uring_prep_recv, timeout, IOSQE_FIXED_FILE, fd, buf, len, flags);
 }
 
 ssize_t iouring_sendmsg(int fd, const msghdr* msg, int flags, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_sendmsg, timeout, fd, msg, flags);
+    return do_async_io(&io_uring_prep_sendmsg, timeout, 0, fd, msg, flags);
+}
+
+ssize_t iouring_sendmsg_fixed_file(int fd, const msghdr* msg, int flags, uint64_t timeout) {
+    return do_async_io(&io_uring_prep_sendmsg, timeout, IOSQE_FIXED_FILE, fd, msg, flags);
 }
 
 ssize_t iouring_recvmsg(int fd, msghdr* msg, int flags, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_recvmsg, timeout, fd, msg, flags);
+    return do_async_io(&io_uring_prep_recvmsg, timeout, 0, fd, msg, flags);
+}
+
+ssize_t iouring_recvmsg_fixed_file(int fd, msghdr* msg, int flags, uint64_t timeout) {
+    return do_async_io(&io_uring_prep_recvmsg, timeout, IOSQE_FIXED_FILE, fd, msg, flags);
 }
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_connect, timeout, fd, addr, addrlen);
+    return do_async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
 }
 
 int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, uint64_t timeout) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_accept, timeout, fd, addr, addrlen, 0);
+    return do_async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
 }
 
 int iouring_fsync(int fd) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_fsync, -1, fd, 0);
+    return do_async_io(&io_uring_prep_fsync, -1, 0, fd, 0);
 }
 
 int iouring_fdatasync(int fd) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_fsync, -1, fd, IORING_FSYNC_DATASYNC);
+    return do_async_io(&io_uring_prep_fsync, -1, 0, fd, IORING_FSYNC_DATASYNC);
 }
 
 int iouring_open(const char* path, int flags, mode_t mode) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_openat, -1, AT_FDCWD, path, flags, mode);
+    return do_async_io(&io_uring_prep_openat, -1, 0, AT_FDCWD, path, flags, mode);
 }
 
 int iouring_mkdir(const char* path, mode_t mode) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_mkdirat, -1, AT_FDCWD, path, mode);
+    return do_async_io(&io_uring_prep_mkdirat, -1, 0, AT_FDCWD, path, mode);
 }
 
 int iouring_close(int fd) {
+    return do_async_io(&io_uring_prep_close, -1, 0, fd);
+}
+
+bool iouring_register_files_enabled() {
+    return iouringEngine::register_files_enabled();
+}
+
+int iouring_register_files(int fd) {
     auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->async_io(&io_uring_prep_close, -1, fd);
+    return ee->register_unregister_files(fd, true);
+}
+
+int iouring_unregister_files(int fd) {
+    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
+    return ee->register_unregister_files(fd, false);
 }
 
 __attribute__((noinline))
