@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
         photon
@@ -18,6 +18,8 @@ option(ENABLE_FUSE "enable fuse function" OFF)
 option(ENABLE_SASL "enable sasl" OFF)
 option(ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(BUILD_TESTING "enable build testing" OFF)
+option(FETCH_GFLAGS_SOURCE "fetch gflags source" OFF)
+option(FETCH_GTEST_SOURCE "fetch gtest and gmock source" OFF)
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -111,6 +113,27 @@ if (ENABLE_SASL)
     find_package(gsasl REQUIRED)
 endif ()
 
+if (FETCH_GFLAGS_SOURCE)
+    FetchContent_Declare(
+            gflags
+            GIT_REPOSITORY https://github.com/gflags/gflags.git
+            # GIT_REPOSITORY https://gitee.com/mirrors/gflags.git
+            GIT_TAG v2.2.2
+            GIT_SUBMODULES ""
+    )
+    FetchContent_MakeAvailable(gflags)
+endif()
+
+if (FETCH_GTEST_SOURCE)
+    FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            # GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
+            GIT_TAG release-1.12.1
+    )
+    FetchContent_MakeAvailable(googletest)
+endif()
+
 # Compile photon objects
 file(GLOB PHOTON_SRC
         photon.cpp
@@ -161,6 +184,10 @@ if (ENABLE_URING)
 endif()
 if (ENABLE_MIMIC_VDSO)
     target_compile_definitions(photon_obj PRIVATE ENABLE_MIMIC_VDSO=on)
+endif()
+if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # This option is enabled by default after -std=c++17
+    target_compile_options(photon_obj PRIVATE -faligned-new)
 endif()
 
 # Make virtual interface for external dynamic libs
@@ -213,12 +240,15 @@ target_link_libraries(photon_static ${static_link_libs})
 if (BUILD_TESTING)
     include(CTest)
 
+if (FETCH_GTEST_SOURCE AND FETCH_GFLAGS_SOURCE)
+    set(testing_libs gtest gmock gflags::gflags)
+else()
     find_package(GTest REQUIRED)
     find_package(gmock REQUIRED)
     find_package(gflags REQUIRED)
-
     set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
     include_directories(${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS})
+endif()
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)

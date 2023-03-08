@@ -191,6 +191,7 @@ namespace net
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
                                                   bool client_ownership = false);
 
+    extern "C" ISocketClient* new_zerocopy_tcp_client();
     extern "C" ISocketServer* new_zerocopy_tcp_server();
     extern "C" ISocketClient* new_iouring_tcp_client();
     extern "C" ISocketServer* new_iouring_tcp_server();

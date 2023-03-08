@@ -1870,7 +1870,7 @@ TEST(intrusive_list, split) {
 int main(int argc, char** arg)
 {
     ::testing::InitGoogleTest(&argc, arg);
-    google::ParseCommandLineFlags(&argc, &arg, true);
+    gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
     photon::vcpu_init();
     set_log_output_level(ALOG_DEBUG);
