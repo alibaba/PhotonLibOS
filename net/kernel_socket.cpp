@@ -128,6 +128,8 @@ static int fill_path(struct sockaddr_un& name, const char* path, size_t count) {
 
 class KernelSocketStream : public SocketStreamBase {
 public:
+    using ISocketStream::setsockopt;
+    using ISocketStream::getsockopt;
     int fd = -1;
     explicit KernelSocketStream(int fd) : fd(fd) {}
     KernelSocketStream(int socket_family, bool nonblocking) {
@@ -137,8 +139,7 @@ public:
             fd = ::socket(socket_family, SOCK_STREAM, 0);
         }
         if (fd > 0 && socket_family == AF_INET) {
-            int val = 1;
-            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
+            setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
         }
     }
     virtual ~KernelSocketStream() {
@@ -181,7 +182,7 @@ public:
     virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
         return net::sendfile_n(fd, in_fd, &offset, count);
     }
-    virtual int shutdown(ShutdownHow how) override {
+    virtual int shutdown(ShutdownHow how) final {
         // shutdown how defined as 0 for RD, 1 for WR and 2 for RDWR
         // in sys/socket.h, cast ShutdownHow into int just fits
         return ::shutdown(fd, static_cast<int>(how));
@@ -189,7 +190,7 @@ public:
     virtual Object* get_underlay_object(uint64_t recursion = 0) override {
         return (Object*) (uint64_t) fd;
     }
-    virtual int close() override {
+    virtual int close() final {
         auto ret = ::close(fd);
         fd = -1;
         return ret;
@@ -207,11 +208,11 @@ public:
         return get_peer_name(fd, path, count);
     }
     virtual int setsockopt(int level, int option_name, const void* option_value,
-                           socklen_t option_len) override {
+                           socklen_t option_len) final {
         return ::setsockopt(fd, level, option_name, option_value, option_len);
     }
     virtual int getsockopt(int level, int option_name, void* option_value,
-                           socklen_t* option_len) override {
+                           socklen_t* option_len) final {
         return ::getsockopt(fd, level, option_name, option_value, option_len);
     }
     virtual uint64_t timeout() const override { return m_timeout; }
@@ -293,6 +294,9 @@ protected:
 
 class KernelSocketServer : public SocketServerBase {
 public:
+    using ISocketServer::setsockopt;
+    using ISocketServer::getsockopt;
+
     KernelSocketServer(int socket_family, bool autoremove, bool nonblocking) :
             m_socket_family(socket_family),
             m_autoremove(autoremove),
@@ -315,6 +319,8 @@ public:
         m_listen_fd = -1;
     }
 
+    // Comply with the NewObj interface.
+    // The derived classes may continue to add more implementations.
     int init() {
         if (m_nonblocking) {
             m_listen_fd = net::socket(m_socket_family, SOCK_STREAM, 0);
@@ -325,8 +331,7 @@ public:
             LOG_ERRNO_RETURN(0, -1, "fail to setup listen fd");
         }
         if (m_socket_family == AF_INET) {
-            int val = 1;
-            if (::setsockopt(m_listen_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) != 0) {
+            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0) {
                 LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt of TCP_NODELAY");
             }
         }
@@ -344,7 +349,7 @@ public:
         return 0;
     }
 
-    void terminate() override {
+    void terminate() final {
         if (!workth) return;
         auto th = workth;
         workth = nullptr;
@@ -410,14 +415,14 @@ public:
         return get_peer_name(m_listen_fd, path, count);
     }
 
-    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) final {
         if (::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0) {
             LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt");
         }
         return m_opts.put_opt(level, option_name, option_value, option_len);
     }
 
-    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) final {
         if (::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0) return 0;
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
@@ -487,9 +492,15 @@ protected:
 class ZeroCopySocketStream : public KernelSocketStream {
 protected:
     uint32_t m_num_calls = 0;
-
 public:
-    using KernelSocketStream::KernelSocketStream;
+    explicit ZeroCopySocketStream(int fd) : KernelSocketStream(fd) {
+        setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
+    }
+
+    ZeroCopySocketStream(int socket_family, bool nonblocking) :
+            KernelSocketStream(socket_family, nonblocking) {
+        setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
+    }
 
     ssize_t write(const void* buf, size_t count) override {
         struct iovec iov { const_cast<void*>(buf), count };
@@ -517,25 +528,27 @@ public:
     using KernelSocketServer::KernelSocketServer;
 
     int init() {
+        if (!net::zerocopy_available()) {
+            LOG_ERROR_RETURN(0, -1, "zerocopy not available");
+        }
         if (KernelSocketServer::init() != 0) {
             return -1;
-        }
-        if (!net::zerocopy_available()) {
-            LOG_WARN("zerocopy not available, use standard socket instead!!");
-            return isok_ = false;
-        }
-        int v = 1;
-        if (::setsockopt(m_listen_fd, SOL_SOCKET, SO_ZEROCOPY, &v, sizeof(v)) != 0) {
-            LOG_ERRNO_RETURN(0, -1, "fail to set sock opt of SO_ZEROCOPY");
         }
         return 0;
     }
 
 protected:
-    bool isok_ = true;
     KernelSocketStream* create_stream(int fd) override {
-        if (isok_) return new ZeroCopySocketStream(fd);
-        return new KernelSocketStream(fd);
+        return new ZeroCopySocketStream(fd);
+    }
+};
+
+class ZeroCopySocketClient : public KernelSocketClient {
+public:
+    using KernelSocketClient::KernelSocketClient;
+protected:
+    KernelSocketStream* create_stream() override {
+        return new ZeroCopySocketStream(m_socket_family, m_nonblocking);
     }
 };
 
@@ -939,6 +952,9 @@ extern "C" ISocketServer* new_uds_server(bool autoremove) {
 #ifdef __linux__
 extern "C" ISocketServer* new_zerocopy_tcp_server() {
     return NewObj<ZeroCopySocketServer>(AF_INET, false, true)->init();
+}
+extern "C" ISocketClient* new_zerocopy_tcp_client() {
+    return new ZeroCopySocketClient(AF_INET, true);
 }
 #ifdef PHOTON_URING
 extern "C" ISocketClient* new_iouring_tcp_client() {

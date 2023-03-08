@@ -172,7 +172,7 @@ static int echo_server() {
     // Create a work pool if enabling multi-vcpu scheduling
     photon::WorkPool* work_pool = nullptr;
     if (FLAGS_vcpu_num > 1) {
-        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE);
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     }
     DEFER(delete work_pool);
 
@@ -215,10 +215,7 @@ static int echo_server() {
             if (ret2 != ret1) {
                 LOG_ERRNO_RETURN(0, -1, "write fail", VALUE(ret2));
             }
-            if (event_engine == photon::INIT_EVENT_EPOLL) {
-                // A tiny patch, just ignore
-                photon::thread_yield();
-            }
+            photon::thread_yield();
             qps++;
         }
         return 0;
@@ -244,11 +241,10 @@ int main(int argc, char** arg) {
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     set_log_output_level(ALOG_INFO);
 
-    // Note Photon's event engine could be either epoll or io_uring. Running an io_uring program would need
-    // the kernel version to be greater than 5.8. If you are willing to use io_uring, please switch the
-    // event_engine from `photon::INIT_EVENT_EPOLL` to `photon::INIT_EVENT_IOURING`.
-    event_engine = photon::INIT_EVENT_EPOLL;
-    int ret = photon::init(event_engine | photon::INIT_EVENT_SIGNAL, photon::INIT_IO_NONE);
+    // Note Photon's default event engine will first try io_uring, then choose epoll if io_uring failed.
+    // Running an io_uring program would need the kernel version to be greater than 5.8.
+    // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }

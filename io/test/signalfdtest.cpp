@@ -119,7 +119,7 @@ int main(int argc, char** arg)
         return -1;
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
-    google::ParseCommandLineFlags(&argc, &arg, true);
+    gflags::ParseCommandLineFlags(&argc, &arg, true);
     LOG_DEBUG("test result:`",RUN_ALL_TESTS());
     return 0;
 }

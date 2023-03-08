@@ -36,10 +36,10 @@ static void run_socket_server(photon::net::ISocketServer* server, photon::fs::IF
 int main() {
     // Initialize Photon environment in current vcpu.
     //
-    // Note Photon's event engine could be either epoll or io_uring. Running an io_uring program would need
-    // the kernel version to be greater than 5.8. If you are willing to use io_uring, please switch the
-    // event_engine argument from `photon::INIT_EVENT_EPOLL` to `photon::INIT_EVENT_IOURING`.
-    int ret = photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
+    // Note Photon's default event engine will first try io_uring, then choose epoll if io_uring failed.
+    // Running an io_uring program would need the kernel version to be greater than 5.8.
+    // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
