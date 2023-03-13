@@ -241,12 +241,10 @@ namespace photon
         int32_t recursive_count = 0;
     };
 
-    template<typename M0>
+    template <typename M>
     class locker
     {
     public:
-        using M1 = typename std::decay<M0>::type;
-        using M  = typename std::remove_pointer<M1>::type;
 
         // do lock() if `do_lock` > 0, and lock() can NOT fail if `do_lock` > 1
         explicit locker(M* mutex, uint64_t do_lock = 2) : m_mutex(mutex)
@@ -311,8 +309,14 @@ namespace photon
 
     #define _TOKEN_CONCAT(a, b) a ## b
     #define _TOKEN_CONCAT_(a, b) _TOKEN_CONCAT(a, b)
-    #define SCOPED_LOCK(x, ...) photon::locker<decltype(x)> \
+
+#if __cpp_deduction_guides >= 201606
+    #define SCOPED_LOCK(x, ...) photon::locker \
         _TOKEN_CONCAT_(__locker__, __LINE__) (x, ##__VA_ARGS__)
+#else
+    #define SCOPED_LOCK(x, ...) photon::locker<std::remove_pointer_t<std::decay_t<decltype(x)>>> \
+        _TOKEN_CONCAT_(__locker__, __LINE__) (x, ##__VA_ARGS__)
+#endif
 
     class condition_variable : protected waitq
     {
