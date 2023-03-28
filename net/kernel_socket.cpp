@@ -503,21 +503,27 @@ public:
     }
 
     ssize_t write(const void* buf, size_t count) override {
-        struct iovec iov { const_cast<void*>(buf), count };
-        return writev_mutable(&iov, 1);
+        uint64_t timeout = m_timeout;
+        auto cb = LAMBDA_TIMEOUT(do_send_zc(fd, buf, count, 0, timeout));
+        return net::doio_n((void*&) buf, count, cb);
     }
 
-    ssize_t writev_mutable(iovec* iov, int iovcnt) override {
-        ssize_t n_written;
-        auto iov_view = iovector_view(iov, iovcnt);
-        size_t sum = iov_view.sum();
+    ssize_t send(const void* buf, size_t count, int flags = 0) override {
+        if (flags & ZEROCOPY_FLAG)
+            return do_send_zc(fd, buf, count, flags, m_timeout);
+        else
+            return KernelSocketStream::send(buf, count, flags);
+    }
 
-        n_written = zerocopy_n(fd, iov_view.iov, iovcnt, m_num_calls, m_timeout);
-        if (n_written != (ssize_t)sum) {
+protected:
+    ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
+        struct iovec iov{const_cast<void*>(buf), count};
+        ssize_t n_written = zerocopy_n(fd, &iov, 1, m_num_calls, timeout);
+        if (n_written != (ssize_t) count) {
             LOG_ERRNO_RETURN(0, n_written, "zerocopy failed");
         }
 
-        auto ret = zerocopy_confirm(fd, m_num_calls - 1, m_timeout);
+        auto ret = zerocopy_confirm(fd, m_num_calls - 1, timeout);
         if (ret < 0) return ret;
         return n_written;
     }
@@ -595,16 +601,19 @@ public:
     }
 
     ssize_t send(const void* buf, size_t count, int flags = 0) override {
-        return do_send(fd, buf, count, flags, m_timeout);
+        if (flags & ZEROCOPY_FLAG)
+            return do_send_zc(fd, buf, count, flags | MSG_NOSIGNAL | MSG_WAITALL, m_timeout);
+        else
+            return do_send(fd, buf, count, flags | MSG_NOSIGNAL, m_timeout);
     }
 
     ssize_t send(const iovec* iov, int iovcnt, int flags = 0) override {
-        return do_sendmsg(fd, iov, iovcnt, flags, m_timeout);
+        return do_sendmsg(fd, iov, iovcnt, flags | MSG_NOSIGNAL, m_timeout);
     }
 
 protected:
     virtual ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
-        return photon::iouring_send(fd, buf, count, flags | MSG_NOSIGNAL, timeout);
+        return photon::iouring_send(fd, buf, count, flags, timeout);
     }
 
     virtual ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) {
@@ -612,11 +621,15 @@ protected:
     }
 
     virtual ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
-        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), flags | MSG_NOSIGNAL, timeout);
+        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
     }
 
     virtual ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
         return photon::iouring_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
+    }
+
+    virtual ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
+        return photon::iouring_send_zc(fd, buf, count, flags, timeout);
     }
 };
 
@@ -626,7 +639,7 @@ public:
 
 protected:
     KernelSocketStream* create_stream() override {
-        return new IouringSocketStream(m_socket_family, false);
+        return new IouringSocketStream(m_socket_family, m_nonblocking);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
@@ -667,21 +680,25 @@ public:
             photon::iouring_unregister_files(fd);
     }
 
-protected:
+private:
     ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) override {
-        return photon::iouring_send_fixed_file(fd, buf, count, flags | MSG_NOSIGNAL, timeout);
+        return photon::iouring_send(fd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
     ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) override {
-        return photon::iouring_recv_fixed_file(fd, buf, count, flags, timeout);
+        return photon::iouring_recv(fd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
     ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
-        return photon::iouring_sendmsg_fixed_file(fd, tmp_msg_hdr(iov, iovcnt), flags | MSG_NOSIGNAL, timeout);
+        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), IouringFixedFileFlag | flags, timeout);
     }
 
     ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
-        return photon::iouring_recvmsg_fixed_file(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
+        return photon::iouring_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), IouringFixedFileFlag | flags, timeout);
+    }
+
+    ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        return photon::iouring_send_zc(fd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 };
 
@@ -690,7 +707,7 @@ protected:
     using IouringSocketClient::IouringSocketClient;
 
     KernelSocketStream* create_stream() override {
-        return new IouringFixedFileSocketStream(m_socket_family, false);
+        return new IouringFixedFileSocketStream(m_socket_family, m_nonblocking);
     }
 };
 

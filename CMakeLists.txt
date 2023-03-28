@@ -8,6 +8,7 @@ project(
 
 # Utilities
 include(FindPackageHandleStandardArgs)
+include(FindPkgConfig)
 include(CheckCXXCompilerFlag)
 include(FetchContent)
 set(FETCHCONTENT_QUIET false)
@@ -82,28 +83,34 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
         find_package(fuse REQUIRED)
     endif ()
     if (ENABLE_URING)
-        # Fetch liburing
-        FetchContent_Declare(
-                liburing
-                GIT_REPOSITORY https://github.com/axboe/liburing.git
-                GIT_TAG liburing-2.3
-                UPDATE_COMMAND ./configure
-        )
-        FetchContent_MakeAvailable(liburing)
-        set(liburing_include_dir ${liburing_SOURCE_DIR}/src/include)
-        add_library(
-                uring
-                STATIC
-                ${liburing_SOURCE_DIR}/src/setup.c
-                ${liburing_SOURCE_DIR}/src/queue.c
-                ${liburing_SOURCE_DIR}/src/register.c
-                ${liburing_SOURCE_DIR}/src/syscall.c
-        )
-        # CMake didn't provide an abstraction of optimization level for now.
-        # When multiple -O options appear, only the last one is effective
-        target_compile_options(uring PRIVATE -O3 -Wall -Wextra -fno-stack-protector -Wno-unused-parameter -Wno-sign-compare)
-        target_compile_definitions(uring PRIVATE _GNU_SOURCE LIBURING_INTERNAL)
-        target_include_directories(uring PRIVATE ${liburing_include_dir})
+        find_package(uring)
+        if (NOT URING_FOUND)
+            message("liburing not found, fetch source and compile it")
+            # Fetch liburing
+            FetchContent_Declare(
+                    liburing
+                    GIT_REPOSITORY https://github.com/axboe/liburing.git
+                    GIT_TAG liburing-2.3
+                    UPDATE_COMMAND ./configure
+            )
+            FetchContent_MakeAvailable(liburing)
+            set(liburing_include_dir ${liburing_SOURCE_DIR}/src/include)
+            add_library(
+                    uring
+                    STATIC
+                    ${liburing_SOURCE_DIR}/src/setup.c
+                    ${liburing_SOURCE_DIR}/src/queue.c
+                    ${liburing_SOURCE_DIR}/src/register.c
+                    ${liburing_SOURCE_DIR}/src/syscall.c
+            )
+            # CMake didn't provide an abstraction of optimization level for now.
+            # When multiple -O options appear, only the last one is effective
+            target_compile_options(uring PRIVATE -O3 -Wall -Wextra -fno-stack-protector -Wno-unused-parameter -Wno-sign-compare)
+            target_compile_definitions(uring PRIVATE _GNU_SOURCE LIBURING_INTERNAL)
+            target_include_directories(uring PRIVATE ${liburing_include_dir})
+        else()
+            message("liburing found")
+        endif()
     endif ()
 endif()
 find_package(OpenSSL REQUIRED)

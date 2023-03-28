@@ -57,6 +57,9 @@ ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, uint64_t timeout = -1);
 ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    uint64_t timeout = -1);
 
+class ISocketStream;
+ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, uint64_t timeout = -1);
+
 ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, uint64_t timeout = -1);
 
 ssize_t zerocopy_confirm(int fd, uint32_t num_calls, uint64_t timeout = -1);

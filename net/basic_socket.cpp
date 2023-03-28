@@ -233,6 +233,25 @@ ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, uint64_t timeout) {
     return sendv_n(fd, iov, iovcnt, 0, timeout);
 }
 
+ssize_t sendfile_fallback(ISocketStream* out_stream,
+            int in_fd, off_t offset, size_t count, uint64_t timeout) {
+    char buf[64 * 1024];
+    void* ptr_unused = nullptr;
+    auto func = [&]() __attribute__((always_inline)) -> ssize_t {
+        size_t s = sizeof(buf);
+        if (s > count) s = count;
+        ssize_t n_read = ::pread(in_fd, buf, s, offset);
+        if (n_read != (ssize_t) s)
+            LOG_ERRNO_RETURN(0, -1, "failed to read fd ", in_fd);
+        offset += n_read;
+        ssize_t n_write = out_stream->write(buf, s);
+        if (n_write != (ssize_t) s)
+            LOG_ERRNO_RETURN(0, -1, "failed to write to stream ", out_stream);
+        return n_write;
+    };
+    return doio_n(ptr_unused, count, func);
+}
+
 bool ISocketStream::skip_read(size_t count) {
     if (!count) return true;
     while(count) {

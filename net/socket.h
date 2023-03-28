@@ -142,6 +142,7 @@ namespace net
 
     class ISocketStream : public IStream, public ISocketBase, public ISocketName {
     public:
+        static const int ZEROCOPY_FLAG = 0x4000000;
         // recv some bytes from the socket;
         // return actual # of bytes recvd, which may be LESS than `count`;
         // may block once at most, when there's no data yet in the socket;

@@ -44,16 +44,19 @@ int init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
-    bool ok = false;
-    for (auto each : recommended_order) {
-        if ((each & event_engine) && fd_events_init(each) == 0) {
-            ok = true;
-            break;
+    if (event_engine != INIT_EVENT_NONE) {
+        bool ok = false;
+        for (auto each : recommended_order) {
+            if ((each & event_engine) && fd_events_init(each) == 0) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) {
+            LOG_ERROR_RETURN(0, -1, "All master engines init failed");
         }
     }
-    if (!ok) {
-        LOG_ERROR_RETURN(0, -1, "All master engines init failed");
-    }
+
     if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
         return -1;
 

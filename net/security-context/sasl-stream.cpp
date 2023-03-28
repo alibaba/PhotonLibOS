@@ -19,6 +19,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/net/socket.h>
+#include <photon/net/basic_socket.h>
 
 #include "../base_socket.h"
 
@@ -191,9 +192,8 @@ class SaslSocketStream : public ForwardSocketStream {
         return count;
     }
 
-    ssize_t sendfile(int fd, off_t offset, size_t size) override {
-        // SASL not supported
-        LOG_ERROR_RETURN(ENOSYS, -1, "Not implemented.");
+    ssize_t sendfile(int fd, off_t offset, size_t count) override {
+        return sendfile_fallback(this, fd, offset, count);
     }
 
     int close() override {
