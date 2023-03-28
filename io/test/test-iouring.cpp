@@ -23,13 +23,14 @@ limitations under the License.
 #include <gflags/gflags.h>
 
 #include <photon/io/fd-events.h>
-#include <photon/io/aio-wrapper.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
 #include <photon/common/checksum/crc32c.h>
 #include <photon/common/io-alloc.h>
 #include <photon/thread/thread11.h>
+#include <photon/thread/workerpool.h>
+#include <photon/io/iouring-wrapper.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 
@@ -45,6 +46,7 @@ const size_t max_io_size = 2 * 1024 * 1024;
 DEFINE_string(src, "src", "src file path");
 DEFINE_string(dst, "dst", "dst file path");
 DEFINE_uint64(buf_size, 4096, "buffer size");
+DEFINE_uint64(vcpu_num, 1, "vcpu num");
 
 /* Helper functions */
 
@@ -193,13 +195,8 @@ static void read_perf(const off_t max_offset, fs::IFile* src_file, IOAlloc* io_a
 }
 
 static void do_io_test(IOTestType type) {
-    ASSERT_EQ(photon::sync_signal_init(), 0);
-    DEFER(photon::sync_signal_fini());
     photon::sync_signal(SIGTERM, &handle_signal);
     photon::sync_signal(SIGINT, &handle_signal);
-
-    ASSERT_EQ(photon::libaio_wrapper_init(), 0);
-    DEFER(photon::libaio_wrapper_fini());
 
     photon::thread_create11(show_qps_loop);
 
@@ -226,7 +223,25 @@ static void do_io_test(IOTestType type) {
     off_t max_offset = st_buf.st_size - max_io_size;
     ASSERT_GT(max_offset, 0);
 
+    photon::WorkPool wp(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     std::vector<photon::thread*> join_threads;
+
+#ifdef TEST_IOURING_REGISTER_FILES
+    int fd = (int) (uint64_t) src_file->get_underlay_object();
+    for (uint64_t i = 0; i < FLAGS_vcpu_num; i++) {
+        auto th = photon::thread_create11([&] {
+            photon::iouring_register_files(fd);
+        });
+        wp.thread_migrate(th, i);
+        photon::thread_enable_join(th);
+        join_threads.push_back(th);
+    }
+    for (auto th : join_threads) {
+        photon::thread_join((photon::join_handle*) th);
+    }
+    join_threads.clear();
+#endif
+
     for (uint64_t i = 0; i < FLAGS_num_threads; i++) {
         photon::thread* th;
         switch (type) {
@@ -244,6 +259,8 @@ static void do_io_test(IOTestType type) {
                 break;
             case IOTestType::RAND_READ_PERF:
                 th = photon::thread_create11(read_perf, max_offset, src_file, &io_alloc);
+                size_t index = i % FLAGS_vcpu_num;
+                wp.thread_migrate(th, index);
                 break;
         }
         photon::thread_enable_join(th);

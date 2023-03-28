@@ -16,7 +16,7 @@ protected:
     void try_signal() {
         auto duration = photon::now - last_retrieve;
         if (duration > m_time_window) duration = m_time_window;
-        if (duration > m_time_slice) {
+        if (duration >= m_time_slice) {
             auto free = m_limit_slice * (duration / m_time_slice);
             auto current = photon::sat_sub(m_limit, sem.count());
             if (current < free) {

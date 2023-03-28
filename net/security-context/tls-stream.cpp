@@ -364,9 +364,8 @@ public:
         return doiov_n(v, [&] { return recv(v.iov, v.iovcnt); });
     }
 
-    ssize_t sendfile(int fd, off_t offset, size_t size) override {
-        // SSL not supported
-        return -2;
+    ssize_t sendfile(int fd, off_t offset, size_t count) override {
+        return sendfile_fallback(this, fd, offset, count);
     }
 
     int shutdown(ShutdownHow) override { return SSL_shutdown(ssl); }

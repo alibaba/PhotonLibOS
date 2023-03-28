@@ -155,16 +155,17 @@ public:
      *     later in the `wait_and_fire_events`.
      * @param timeout Timeout in usec. It could be 0 (immediate cancel), and -1 (most efficient way, no linked SQE).
      *     Note that the cancelling has no guarantee to succeed, it's just an attempt.
+     * @param ring_flags The lowest 8 bits is for sqe.flags, and the rest is reserved.
      * @retval Non negative integers for success, -1 for failure. If failed with timeout, errno will
      *     be set to ETIMEDOUT. If failed because of external interruption, errno will also be set accordingly.
      */
     template<typename Prep, typename... Args>
-    int32_t async_io(Prep prep, uint64_t timeout, uint8_t flags, Args... args) {
+    int32_t async_io(Prep prep, uint64_t timeout, uint32_t ring_flags, Args... args) {
         auto* sqe = _get_sqe();
         if (sqe == nullptr)
             return -1;
         prep(sqe, args...);
-        sqe->flags |= flags;
+        sqe->flags |= (uint8_t) (ring_flags & 0xff);
         return _async_io(sqe, timeout);
     }
 
@@ -332,6 +333,15 @@ public:
                 // Own timeout doesn't have user data
                 continue;
             }
+
+            if (cqe->flags & IORING_CQE_F_NOTIF) {
+                // The cqe for notify, corresponding to IORING_CQE_F_MORE
+                if (unlikely(cqe->res != 0))
+                    LOG_WARN("iouring: send_zc fall back to copying");
+                photon::thread_interrupt(ctx->th_id, EOK);
+                continue;
+            }
+
             ctx->res = cqe->res;
             if (!ctx->is_canceller && ctx->res == -ECANCELED) {
                 // An I/O was canceled because of:
@@ -340,13 +350,15 @@ public:
                 // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
                 ctx->res = -ETIMEDOUT;
                 continue;
-            }
-            if (ctx->is_canceller && ctx->res == -ECANCELED) {
+            } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
                 // The linked timer itself is also a canceller. The reasons it got cancelled could be:
                 // 1. I/O finished in time
                 // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
                 continue;
+            } else if (cqe->flags & IORING_CQE_F_MORE) {
+                continue;
             }
+
             photon::thread_interrupt(ctx->th_id, EOK);
         }
 
@@ -469,8 +481,9 @@ private:
         if (m_register_files_flag >= 0)
             return;
         int result;
-        if (kernel_version_compare("5.12", result) == 0 && result >= 0) {
+        if (kernel_version_compare("5.5", result) == 0 && result >= 0) {
             m_register_files_flag = 1;
+            LOG_INFO("iouring: register_files is enabled");
         } else {
             m_register_files_flag = 0;
         }
@@ -543,52 +556,54 @@ inline size_t do_async_io(Ts...xs) {
     return mee->async_io(xs...);
 }
 
-ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_read, timeout, 0, fd, buf, count, offset);
+ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, uint64_t timeout) {
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_write, timeout, 0, fd, buf, count, offset);
+ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, uint64_t timeout) {
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_readv, timeout, 0, fd, iov, iovcnt, offset);
+ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, uint64_t timeout) {
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_writev, timeout, 0, fd, iov, iovcnt, offset);
+ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, uint64_t timeout) {
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_send(int fd, const void* buf, size_t len, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_send, timeout, 0, fd, buf, len, flags);
+ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_send_fixed_file(int fd, const void* buf, size_t len, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_send, timeout, IOSQE_FIXED_FILE, fd, buf, len, flags);
+ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_recv, timeout, 0, fd, buf, len, flags);
+ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_recv_fixed_file(int fd, void* buf, size_t len, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_recv, timeout, IOSQE_FIXED_FILE, fd, buf, len, flags);
+ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_sendmsg(int fd, const msghdr* msg, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_sendmsg, timeout, 0, fd, msg, flags);
-}
-
-ssize_t iouring_sendmsg_fixed_file(int fd, const msghdr* msg, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_sendmsg, timeout, IOSQE_FIXED_FILE, fd, msg, flags);
-}
-
-ssize_t iouring_recvmsg(int fd, msghdr* msg, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_recvmsg, timeout, 0, fd, msg, flags);
-}
-
-ssize_t iouring_recvmsg_fixed_file(int fd, msghdr* msg, int flags, uint64_t timeout) {
-    return do_async_io(&io_uring_prep_recvmsg, timeout, IOSQE_FIXED_FILE, fd, msg, flags);
+ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout) {

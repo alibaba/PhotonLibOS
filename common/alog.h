@@ -403,12 +403,13 @@ struct STFMTLogBuffer : public LogBuffer
 };
 
 template<typename FMT, typename...Ts> __attribute__((noinline, cold))
-static void __log__(int level, ILogOutput* output, const Prologue& prolog, FMT fmt, Ts&&...xs)
+static STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog, FMT fmt, Ts&&...xs)
 {
     STFMTLogBuffer log(output);
     log << prolog;
     log.print_fmt(fmt, std::forward<Ts>(xs)...);
     log.level = level;
+    return log;
 }
 
 template<typename BuilderType>
@@ -456,21 +457,22 @@ struct LogBuilder {
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
-#define __LOG__(logger, level, first, ...)                               \
-    ({                                                                   \
-        DEFINE_PROLOGUE(level, prolog);                                  \
-        auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) {   \
-            if (_IS_LITERAL_STRING(first)) {                             \
-                __log__(level, __output_##__LINE__, prolog,              \
-                        TSTRING(#first).template strip<'\"'>(),          \
-                        ##__VA_ARGS__);                                  \
-            } else {                                                     \
-                __log__(level, __output_##__LINE__, prolog,              \
-                        ConstString::TString<>(), first, ##__VA_ARGS__); \
-            }                                                            \
-        };                                                               \
-        LogBuilder<decltype(__build_lambda__)>(                          \
-            level, ::std::move(__build_lambda__), &logger);                \
+#define __LOG__(logger, level, first, ...)                             \
+    ({                                                                 \
+        DEFINE_PROLOGUE(level, prolog);                                \
+        auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) { \
+            if (_IS_LITERAL_STRING(first)) {                           \
+                return __log__(level, __output_##__LINE__, prolog,     \
+                               TSTRING(#first).template strip<'\"'>(), \
+                               ##__VA_ARGS__);                         \
+            } else {                                                   \
+                return __log__(level, __output_##__LINE__, prolog,     \
+                               ConstString::TString<>(), first,        \
+                               ##__VA_ARGS__);                         \
+            }                                                          \
+        };                                                             \
+        LogBuilder<decltype(__build_lambda__)>(                        \
+            level, ::std::move(__build_lambda__), &logger);            \
     })
 
 #define LOG_DEBUG(...) (__LOG__(default_logger, ALOG_DEBUG, __VA_ARGS__))
@@ -553,3 +555,133 @@ inline LogBuffer& operator << (LogBuffer& log, const NamedValue<ALogString>& v)
     return retv;                                    \
 }
 
+// Acts like a LogBuilder
+// but able to do operations when log builds 
+template <typename Builder, typename Append>
+struct __LogAppender : public Builder {
+    // using Builder members
+    using Builder::level;
+    using Builder::builder;
+    using Builder::logger;
+    using Builder::done;
+    Append append;
+    explicit __LogAppender(Builder&& rhs, Append&& append)
+        : Builder(std::move(rhs)), append(std::move(append)) {}
+    __LogAppender(__LogAppender&& rhs)
+        : Builder(std::move(rhs)), append(std::move(rhs.append)) {}
+    ~__LogAppender() {
+        if (!done && level >= logger->log_level) {
+            append(builder(logger->log_output));
+            done = true;
+        }
+    }
+};
+
+template <typename Builder, typename Append>
+inline __LogAppender<typename std::remove_reference<Builder>::type,
+                     typename std::remove_reference<Append>::type>
+__log_append_tail(Builder&& builder, Append&& append) {
+    return __LogAppender<typename std::remove_reference<Builder>::type,
+                         typename std::remove_reference<Append>::type>(
+        std::move(builder), std::move(append));
+}
+
+template <uint64_t N>
+struct __limit_first_n {
+    uint64_t count = 0;
+    bool operator()() { return (++count) > N; }
+    void reset() { count = 0; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+};
+
+template <uint64_t N>
+struct __limit_every_n {
+    uint64_t count = 0;
+    bool operator()() { return ((++count) % N) != 1; }
+    void reset() { count = 0; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+};
+
+template <time_t T>
+struct __limit_every_t {
+    time_t last = 0;
+    time_t now = 0;
+    time_t duration = 0;
+    bool operator()() {
+        now = time(0);
+        auto l = last;
+        if (l + T <= now) {
+            if (l) duration = now - l;
+            last = now;
+        }
+        return l + T > now;
+    }
+    void reset() { last = 0; }
+    void append_tail(LogBuffer& buffer) {
+        if (duration)
+            buffer << " <last log " << duration << " sec>";
+        duration = 0;
+    }
+};
+
+template <uint64_t N, time_t T>
+struct __limit_first_n_every_t {
+    __limit_every_t<T> lt;
+    __limit_first_n<N> lf;
+    uint64_t cnt = 0;
+    bool operator()() {
+        if (!lt()) {
+            cnt = lf.count;
+            lf.reset();
+        }
+        return lf();
+    }
+    void reset() {
+        lt.reset();
+        lf.reset();
+    }
+    void append_tail(STFMTLogBuffer& buffer) {
+        if (cnt) {
+            buffer << " <" << cnt << " log(s) in " << T << " sec>";
+            cnt = 0;
+        }
+    }
+};
+
+#define __LOG_WITH_LIMIT(type, ...)                                  \
+    [&] {                                                            \
+        static type limiter;                                         \
+        auto __logstat__ = __VA_ARGS__;                              \
+        __logstat__.done = limiter();                                \
+        return __log_append_tail(std::move(__logstat__),             \
+                                 [](STFMTLogBuffer buffer) {         \
+                                     limiter.append_tail(buffer);    \
+                                 });                                 \
+    }()
+
+// output log once every T seconds.
+// example: LOG_EVERY_T(10, LOG_INFO(....))
+// this log line will only log once in 10 secs.
+// useful for logs in repeated checking
+#define LOG_EVERY_T(T, ...) __LOG_WITH_LIMIT(__limit_every_t<T>, __VA_ARGS__)
+
+// output log once every N rounds.
+// example: LOG_EVERY_N(10, LOG_INFO(....))
+// this log line will only print 1 time every 10 rounds.
+#define LOG_EVERY_N(N, ...) __LOG_WITH_LIMIT(__limit_every_n<N>, __VA_ARGS__)
+
+// output log only first N rounds.
+// example: LOG_FIRST_N(10, LOG_INFO(....))
+// this log line will only print 10 rounds, after that, nothing will logged
+#define LOG_FIRST_N(N, ...) __LOG_WITH_LIMIT(__limit_first_n<N>, __VA_ARGS__)
+
+// output log only first N rounds every T seconds.
+// example: LOG_FIRST_N_EVERY_T(10, 60, LOG_INFO(....))
+// this log line will only print 10 rounds every 60 seconds.
+// Because of macro can not parse template correctly,
+// here used a scoped type alais
+#define LOG_FIRST_N_EVERY_T(N, T, ...)                      \
+    ({                                                      \
+        using __limit_type = __limit_first_n_every_t<N, T>; \
+        __LOG_WITH_LIMIT(__limit_type, __VA_ARGS__);        \
+    })
