@@ -200,6 +200,7 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
     }
 }
 
+__attribute__((constructor)) static void __initial_timezone() { tzset(); }
 static time_t dayid = 0;
 static struct tm alog_time = {0};
 struct tm* alog_update_time(time_t now)
@@ -226,7 +227,7 @@ struct tm* alog_update_time(time_t now)
 
 static struct tm* alog_update_time()
 {
-    return alog_update_time(time(0) + 8 * 60 * 60);
+    return alog_update_time(time(0) - timezone);
 }
 
 class LogOutputFile final : public BaseLogOutput {
