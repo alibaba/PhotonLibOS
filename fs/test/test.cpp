@@ -899,10 +899,12 @@ TEST(range_split_vi, basic) {
     }
     uint64_t kpfail[] = {0, 32, 796, 128, 256, 512, UINT64_MAX};
     EXPECT_FALSE(split.ascending(kpfail, 7));
+#ifndef NDEBUG
     EXPECT_DEATH(
         not_ascend_death(),
         ".*range-split-vi.h.*"
     );
+#endif
 }
 
 TEST(range_split_vi, left_side_aligned) {
