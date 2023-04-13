@@ -28,7 +28,7 @@ jobs:
     - name: Test
       working-directory: ${{github.workspace}}/build
       run: |
-        sudo ulimit -l unlimited
+        sudo bash -c 'ulimit -l unlimited'
         ctest --timeout 3600 -V
 
   Release:
@@ -52,5 +52,5 @@ jobs:
     - name: Test
       working-directory: ${{github.workspace}}/build
       run: |
-        sudo ulimit -l unlimited
+        sudo bash -c 'ulimit -l unlimited'
         ctest --timeout 3600 -V
