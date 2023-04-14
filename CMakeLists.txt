@@ -44,7 +44,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE on)
 if (${ARCH} STREQUAL x86_64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")
 elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char -fno-stack-protector")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char -fno-stack-protector -fomit-frame-pointer")
 endif ()
 
 check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)

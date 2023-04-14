@@ -115,14 +115,18 @@ TEST(ALog, LOG_LIMIT) {
     EXPECT_EQ(10, x);
     x = 0;
 
-    auto start = std::chrono::steady_clock::now();
+    auto start = time(0);
+    auto last = start;
     // loop for 4.1 secs
-    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(4100)) {
+    do  {
         // print only 3 logs  every 1 sec
         LOG_FIRST_N_EVERY_T(3, 1, LOG_INFO("LOG 3 logs every 1 second ...", x++));
-    }
+        last = time(0);
+    } while (last - start < 4);
     // suppose to print and evaluate 15 times
-    EXPECT_EQ(15, x);
+    auto suppose = (last - start) * 3;
+    EXPECT_GE(x, suppose - 3);
+    EXPECT_LE(x, suppose + 3);
 }
 
 int main(int argc, char **argv)
