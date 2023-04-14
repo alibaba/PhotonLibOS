@@ -93,7 +93,7 @@ public:
     }
 
     id get_id() const noexcept {
-        return photon::CURRENT;
+        return m_th;
     }
 
     static unsigned int hardware_concurrency() noexcept {
