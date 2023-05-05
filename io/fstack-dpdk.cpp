@@ -14,20 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <photon/io/fd-events.h>
-#include <inttypes.h>
+#include "fstack-dpdk.h"
+
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <vector>
-#include <sys/event.h>
-#include <photon/common/alog.h>
+
+#include <ff_api.h>
+
+#include "fd-events.h"
 #include "events_map.h"
+#include "../thread/thread11.h"
+#include "../common/alog.h"
+#include "../net/basic_socket.h"
+
+#ifndef EVFILT_EXCEPT
+#define EVFILT_EXCEPT (-15)
+#endif
 
 namespace photon {
 
 constexpr static EventsMap<EVUnderlay<EVFILT_READ, EVFILT_WRITE, EVFILT_EXCEPT>>
     evmap;
 
-class KQueue : public MasterEventEngine, public CascadingEventEngine {
+class FstackDpdkEngine : public MasterEventEngine, public CascadingEventEngine {
 public:
     struct InFlightEvent {
         uint32_t interests = 0;
@@ -44,7 +54,18 @@ public:
         if (_kq >= 0)
             LOG_ERROR_RETURN(EALREADY, -1, "already init-ed");
 
-        _kq = kqueue();
+        static char* argv[] = {
+                (char*) "proc-name-not-used",
+                (char*) "--conf=/etc/f-stack.conf",
+                (char*) "--proc-type=primary",
+                (char*) "--proc-id=0",
+        };
+        // f-stack will exit the program if init failed.
+        // Unable to change the behavior unless it provides more flexible APIs ...
+        if (ff_init(LEN(argv), argv))
+            return -1;
+
+        _kq = ff_kqueue();
         if (_kq < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to create kqueue()");
 
@@ -55,8 +76,8 @@ public:
         return 0;
     }
 
-    ~KQueue() override {
-        LOG_INFO("Finish event engine: kqueue");
+    ~FstackDpdkEngine() override {
+        LOG_INFO("Finish f-stack dpdk engine");
         // if (_n > 0) LOG_INFO(VALUE(_events[0].ident), VALUE(_events[0].filter), VALUE(_events[0].flags));
         // assert(_n == 0);
         if (_kq >= 0)
@@ -69,7 +90,7 @@ public:
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
         if (immediate || _n == LEN(_events)) {
-            int ret = kevent(_kq, _events, _n, nullptr, 0, nullptr);
+            int ret = ff_kevent(_kq, _events, _n, nullptr, 0, nullptr);
             if (ret < 0)
                 LOG_ERRNO_RETURN(0, -1, "failed to submit events with kevent()");
             _n = 0;
@@ -98,7 +119,7 @@ public:
         tm.tv_nsec = (timeout % (1000 * 1000)) * 1000;
 
     again:
-        int ret = kevent(_kq, _events, _n, _events, LEN(_events), &tm);
+        int ret = ff_kevent(_kq, _events, _n, _events, LEN(_events), &tm);
         if (ret < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
 
@@ -169,7 +190,7 @@ public:
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
-        ret = kevent(_kq, _events, _n, _events, count, &_tm);
+        ret = ff_kevent(_kq, _events, _n, _events, count, &_tm);
         if (ret < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
 
@@ -182,19 +203,116 @@ public:
     }
 };
 
-__attribute__((noinline))
-KQueue* new_kqueue_engine() {
-    LOG_INFO("Init event engine: kqueue");
-    return NewObj<KQueue>()->init();
+static thread_local MasterEventEngine* g_engine = nullptr;
+
+static int poll_engine(void* arg) {
+    assert(g_engine != nullptr);
+    g_engine->wait_and_fire_events(0);
+    thread_yield();
+    return 0;
 }
 
-MasterEventEngine* new_kqueue_master_engine() {
-    return new_kqueue_engine();
+int fstack_dpdk_init() {
+    LOG_INFO("Init f-stack dpdk engine");
+    g_engine = NewObj<FstackDpdkEngine>()->init();
+    if (g_engine == nullptr)
+        return -1;
+    photon::thread_create11(ff_run, poll_engine, nullptr);
+    return 0;
 }
 
-CascadingEventEngine* new_kqueue_cascading_engine() {
-    return new_kqueue_engine();
+int fstack_dpdk_fini() {
+    return 0;   // TODO
 }
 
+int fstack_socket(int domain, int type, int protocol) {
+    int fd = ff_socket(domain, type, protocol);
+    if (fd < 0)
+        return fd;
+    int val = 1;
+    int ret = ff_ioctl(fd, FIONBIO, &val);
+    if (ret != 0)
+        return -1;
+    return fd;
+}
+
+// linux_sockaddr is required by f-stack api, and has the same layout to sockaddr
+static_assert(sizeof(linux_sockaddr) == sizeof(sockaddr));
+
+int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, uint64_t timeout) {
+    int err = 0;
+    while (true) {
+        int ret = ff_connect(sockfd, (linux_sockaddr*) addr, addrlen);
+        if (ret < 0) {
+            auto e = errno;
+            if (e == EINTR) {
+                err = 1;
+                continue;
+            }
+            if (e == EINPROGRESS || (e == EADDRINUSE && err == 1)) {
+                ret = g_engine->wait_for_fd_writable(sockfd, timeout);
+                if (ret < 0) return -1;
+                socklen_t n = sizeof(err);
+                ret = ff_getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &err, &n);
+                if (ret < 0) return -1;
+                if (err) {
+                    errno = err;
+                    return -1;
+                }
+                return 0;
+            }
+        }
+        return ret;
+    }
+}
+
+int fstack_listen(int sockfd, int backlog) {
+    return ff_listen(sockfd, backlog);
+}
+
+int fstack_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
+    return ff_bind(sockfd, (linux_sockaddr*) addr, addrlen);
+}
+
+int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, uint64_t timeout) {
+    return net::doio(LAMBDA(ff_accept(sockfd, (linux_sockaddr*) addr, addrlen)),
+                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+}
+
+int fstack_close(int fd) {
+    return ff_close(fd);
+}
+
+int fstack_shutdown(int sockfd, int how) {
+    return ff_shutdown(sockfd, how);
+}
+
+ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) {
+    return net::doio(LAMBDA(ff_send(sockfd, buf, count, flags)),
+                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
+}
+
+ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) {
+    return net::doio(LAMBDA(ff_sendmsg(sockfd, message, flags)),
+                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
+}
+
+ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
+    return net::doio(LAMBDA(ff_recv(sockfd, buf, count, flags)),
+                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+}
+
+ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
+    return net::doio(LAMBDA(ff_recvmsg(sockfd, message, flags)),
+                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+}
+
+int fstack_setsockopt(int socket, int level, int option_name, const void* option_value, socklen_t option_len) {
+    return ff_setsockopt(socket, level, option_name, option_value, option_len);
+}
+
+int fstack_getsockopt(int socket, int level, int option_name, void* option_value, socklen_t* option_len) {
+    return ff_getsockopt(socket, level, option_name, option_value, option_len);
+}
 
 } // namespace photon

@@ -582,10 +582,10 @@ ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, uint64
     return do_async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, uint64_t timeout) {
+ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
+    return do_async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
 ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, uint64_t timeout) {
@@ -594,16 +594,22 @@ ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, uint64_t time
     return do_async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
+ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
+}
+
+ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, uint64_t timeout) {
+    uint32_t io_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return do_async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
+}
+
 ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
-}
-
-ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
-    uint32_t io_flags = flags & 0xffffffff;
-    uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout) {

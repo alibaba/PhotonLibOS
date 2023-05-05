@@ -445,24 +445,33 @@ public:
             n);
     }
 
-    using std::string::operator+=;
-    std::string& operator += (const std::string_view &rhs)
+    // using std::string::operator+=;
+    template<typename T>
+    estring& operator+=(T&& t) {
+        return (estring&)std::string::operator+=(std::forward<T>(t));
+    }
+    estring& operator += (const std::string_view &rhs)
     {
         return append(rhs);
     }
-    using std::string::append;
-    std::string& append(uint64_t x);
-    std::string& append(const std::string_view& sv)
+    // using std::string::append;
+    template <typename... Args>
+    estring& append(Args&&... t) {
+        return (estring&)std::string::append(std::forward<Args>(t)...);
+    }
+    estring& append(uint64_t x);
+    estring& append(const std::string_view& sv)
     {
         return append(sv.data(), sv.size());
     }
 
     template<typename...Ts>
-    std::string& appends(const Ts&...xs)
+    estring& appends(const Ts&...xs)
     {
-        return append(make_cat_list(xs...));
+        return cat(make_cat_list(xs...));
     }
 
+protected:
     template<typename...Ts>
     class CatList : public std::tuple<Ts...>
     {
@@ -495,7 +504,7 @@ public:
 
     template<typename...Ts>
     __attribute__((always_inline))
-    std::string& append(const CatList<Ts...>& cl)
+    estring& cat(const CatList<Ts...>& cl)
     {
         UpperBoundEstimator estimator;
         this->enumerate(cl, estimator);
@@ -506,18 +515,17 @@ public:
     }
 
     template<typename...Ts>
-    std::string& append(const ConditionalCatList<Ts...>& ccl)
+    estring& cat(const ConditionalCatList<Ts...>& ccl)
     {
-        return ccl._cond ? append(ccl._cl) : *this;
+        return ccl._cond ? cat(ccl._cl) : *this;
     }
 
     template<typename A, typename B>
-    std::string& append(const ConditionalCatList2<A, B>& x)
+    estring& cat(const ConditionalCatList2<A, B>& x)
     {
-        return x._cond ? append(x._cl1) : append(x._cl2);
+        return x._cond ? cat(x._cl1) : cat(x._cl2);
     }
 
-protected:
     template<typename...Ts>
     static const ConditionalCatList<Ts...>&
                                  cat_item_filter(const ConditionalCatList<Ts...>& x)
@@ -542,12 +550,12 @@ public:
         return {cond, cat_item_filter(xs)...};
     }
 
-    // template<typename A, typename B> static
-    // auto make_conditional_cat_list2(bool cond, const A& a, const B& b) ->
-    //     ConditionalCatList2<A, B>
-    // {
-    //     return {cond, a, b};
-    // }
+    template<typename ...As, typename ...Bs> static
+    auto make_conditional_cat_list2(bool cond, const CatList<As...>& a, const CatList<Bs...>& b) ->
+        ConditionalCatList2<CatList<As...>, CatList<Bs...>>
+    {
+        return {cond, a, b};
+    }
 
 protected:
     template<size_t I = 0, typename...Ts, typename Mapper>

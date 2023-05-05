@@ -23,54 +23,43 @@ limitations under the License.
 
 #include <thread>
 #include <vector>
+#include <chrono>
 
 
 static constexpr size_t pool_size = 4;
-static constexpr size_t data_size = 4UL * 1024 * 1024 * 1024;
 static constexpr size_t concurrent = 64;
-static constexpr size_t bs = 4UL * 1024;
-static constexpr size_t turn = data_size / bs / concurrent;
+static constexpr size_t fires = 10UL*1000;
 
 photon::WorkPool *pool;
+std::atomic<uint64_t> sum;
 
 void* task(void* arg) {
-    auto fs =
-        photon::fs::new_localfs_adaptor(nullptr, photon::fs::ioengine_psync);
-    auto buffer = aligned_alloc(4096, bs);
-    DEFER(free(buffer));
-    DEFER(delete fs);
-    auto file = fs->open("/tmp/workpool_perf", O_RDONLY);
-    DEFER(delete file);
-    for (auto i = 0U; i < turn; i++) {
-        pool->call([i, buffer, file, arg] {
-            auto ret =
-                file->pread(buffer, bs, i * bs + ((uint64_t)arg) * bs * turn);
-            if (ret < 0) LOG_ERROR("Failed to read");
+    photon::semaphore sem(0);
+    for (auto i = 0; i < fires; i++) {
+        auto start = std::chrono::steady_clock::now();
+        pool->async_call(new auto ([&, start]{
+            auto end = std::chrono::steady_clock::now();
+            sum.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(), std::memory_order_relaxed);
+            sem.signal(1);
+        }));
+        photon::thread_yield();
+    }
+    sem.wait(fires);
+    return nullptr;
+}
+
+void* task_sync(void* arg) {
+    for (auto i = 0; i < fires; i++) {
+        auto start = std::chrono::steady_clock::now();
+        pool->call([&, start]{
+            auto end = std::chrono::steady_clock::now();
+            sum.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(), std::memory_order_relaxed);
         });
     }
     return nullptr;
 }
 
-void* norm(void* arg) {
-    auto fs =
-        photon::fs::new_localfs_adaptor(nullptr, photon::fs::ioengine_libaio);
-    DEFER(delete fs);
-    auto buffer = aligned_alloc(4096, bs);
-    DEFER(free(buffer));
-    auto file = fs->open("/tmp/workpool_perf", O_RDONLY | O_DIRECT);
-    DEFER(delete file);
-    for (auto i = 0U; i < turn; i++) {
-        auto ret =
-            file->pread(buffer, bs, i * bs + ((uint64_t)arg) * bs * turn);
-        if (ret < 0) LOG_ERROR("Failed to read");
-    }
-    return nullptr;
-}
-
 int main() {
-    // system(
-    //     "dd if=/dev/zero of=/tmp/workpool_perf bs=1G count=40; sysctl "
-    //     "vm.drop_caches=3");
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBAIO);
     DEFER(photon::fini());
     pool = new photon::WorkPool(pool_size, photon::INIT_EVENT_EPOLL, 64);
@@ -85,20 +74,25 @@ int main() {
         photon::thread_join(x);
     }
     auto end = photon::now;
-    LOG_INFO("Read from zero `GB in ` paralles work in ` threads ",
-             data_size / 1024 / 1024 / 1024, concurrent, pool_size,
-             VALUE(end - start));
     jhs.clear();
+    LOG_INFO("` works in ` usec, QPS=`", concurrent * fires, pool_size,
+             concurrent * fires * 1UL * 1000 * 1000 / (end - start));
+    LOG_INFO("Fire ` async works and solved by ` vcpu, caused ` ns, average ` ns",
+        fires * concurrent, pool_size, sum.load(), sum.load() / fires / concurrent);
+    sum = 0;
     start = photon::now;
     for (uint64_t i = 0; i < concurrent; i++) {
         jhs.emplace_back(
-            photon::thread_enable_join(photon::thread_create(norm, (void*)i)));
+            photon::thread_enable_join(photon::thread_create(task_sync, (void*)i)));
     }
     for (auto& x : jhs) {
         photon::thread_join(x);
     }
     end = photon::now;
-    LOG_INFO("Read from zero `GB in ` paralles work in 1 thread with libaio",
-             data_size / 1024 / 1024 / 1024, concurrent, VALUE(end - start));
+    jhs.clear();
+    LOG_INFO("` works in ` usec, QPS=`", concurrent * fires, pool_size,
+             concurrent * fires * 1UL * 1000 * 1000 / (end - start));
+    LOG_INFO("Fire ` sync works and solved by ` vcpu, caused ` ns, average ` ns",
+        fires * concurrent, pool_size, sum.load(), sum.load() / fires / concurrent);
     return 0;
 }

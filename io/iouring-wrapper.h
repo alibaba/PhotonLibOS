@@ -37,13 +37,15 @@ ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint
 
 ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags = 0, uint64_t timeout = -1);
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags = 0, uint64_t timeout = -1);
+ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags = 0, uint64_t timeout = -1);
 
 ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags = 0, uint64_t timeout = -1);
 
-ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags = 0, uint64_t timeout = -1);
+ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags = 0, uint64_t timeout = -1);
 
-ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags = 0, uint64_t timeout = -1);
+ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags = 0, uint64_t timeout = -1);
+
+ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags = 0, uint64_t timeout = -1);
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout = -1);
 

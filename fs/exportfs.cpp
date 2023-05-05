@@ -365,6 +365,10 @@ namespace fs
             return !file ? nullptr :
             new ExportAsAsyncFile(file, this);
         }
+        virtual Object* get_underlay_object(int i) override
+        {
+            return m_fs;
+        }
         OVERRIDE_ASYNC(IAsyncFile*, open, const char *pathname, int flags)
         {
             PERFORM(OPID_OPEN, wrap(m_fs->open(pathname, flags)));

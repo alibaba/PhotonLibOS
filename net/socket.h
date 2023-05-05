@@ -200,6 +200,10 @@ namespace net
     extern "C" int et_poller_fini();
     extern "C" ISocketClient* new_et_tcp_socket_client();
     extern "C" ISocketServer* new_et_tcp_socket_server();
+    extern "C" ISocketClient* new_smc_socket_client();
+    extern "C" ISocketServer* new_smc_socket_server();
+    extern "C" ISocketClient* new_fstack_dpdk_socket_client();
+    extern "C" ISocketServer* new_fstack_dpdk_socket_server();
 }
 }
 

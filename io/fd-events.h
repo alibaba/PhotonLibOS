@@ -177,5 +177,3 @@ inline MasterEventEngine* new_select_master_engine() { return nullptr; }
 inline CascadingEventEngine* new_select_cascading_engine() { return nullptr; }
 
 } // namespace photon
-
-

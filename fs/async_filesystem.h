@@ -210,6 +210,8 @@ namespace fs
         DEFINE_ASYNC(int, mknod, const char *path, mode_t mode, dev_t dev);
         DEFINE_ASYNC0(int, syncfs);
 
+        virtual Object* get_underlay_object(int i = 0) { errno = ENOSYS; return nullptr; }
+
         DEFINE_ASYNC(AsyncDIR*, opendir, const char *name);
 
         const static uint32_t OPID_OPEN     = 64;

@@ -68,7 +68,7 @@ public:
         return -1;
     }
 
-    int setsockopt(int fd) {
+    virtual int setsockopt(int fd) {
         for (auto& opt : *this) {
             if (::setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
                 LOG_ERRNO_RETURN(EINVAL, -1, "Failed to setsockopt ",

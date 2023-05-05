@@ -34,18 +34,19 @@ public:
     photon::mutex worker_mtx;
     std::vector<std::thread> owned_std_threads;
     std::vector<photon::vcpu_base *> vcpus;
-    std::atomic<bool> stop;
     photon::semaphore queue_sem;
     photon::semaphore ready_vcpu;
     photon::condition_variable exit_cv;
-    LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE> ring;
+    photon::common::RingChannel<
+        LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE>>
+        ring;
 
     std::random_device rd;
     std::mt19937 gen;
     int mode;
 
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-        : stop(false), queue_sem(0), ready_vcpu(0), gen(rd()), mode(mode) {
+        : queue_sem(0), ready_vcpu(0), gen(rd()), mode(mode) {
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
@@ -55,18 +56,17 @@ public:
     }
 
     ~impl() {
-        stop = true;
-        queue_sem.signal(vcpus.size() << 1);
-        for (auto &worker : owned_std_threads)
-            worker.join();;
+        auto num = vcpus.size();
+        for (size_t i = 0; i < num; i++) {
+            enqueue({});
+        }
+        for (auto &worker : owned_std_threads) worker.join();
         photon::scoped_lock lock(worker_mtx);
-        while (vcpus.size())
-            exit_cv.wait(lock, 1UL * 1000);
+        while (vcpus.size()) exit_cv.wait(lock, 1UL * 1000);
     }
 
     void enqueue(Delegate<void> call) {
         ring.send(call);
-        queue_sem.signal(1);
     }
 
     void do_call(Delegate<void> call) {
@@ -111,12 +111,8 @@ public:
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
         for (;;) {
-            Delegate<void> task;
-            {
-                queue_sem.wait(1);
-                if (this->stop && ring.empty()) return;
-                task = ring.recv();
-            }
+            auto task = ring.recv();
+            if (!task) break;
             if (mode < 0) {
                 task();
             } else if (mode == 0) {
@@ -129,7 +125,6 @@ public:
                 photon::thread_yield_to(th);
             }
         }
-
     }
 
     static void *delegate_helper(void *arg) {

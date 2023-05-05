@@ -94,13 +94,28 @@ public:
     SSL_CTX* ctx;
     char pempassword[MAX_PASSPHASE_SIZE];
 
-    TLSContextImpl() {
+    explicit TLSContextImpl(TLSVersion ver) {
         char errbuf[4096];
-        ctx = SSL_CTX_new(SSLv23_method());
+        const SSL_METHOD *method = nullptr;
+        switch (ver) {
+            case TLSVersion::SSL23:
+                method = SSLv23_method();
+                break;
+            case TLSVersion::TLS11:
+                method = TLSv1_1_method();
+                break;
+            case TLSVersion::TLS12:
+                method = TLSv1_2_method();
+                break;
+            default:
+                method = TLSv1_2_method();
+        }
+        ctx = SSL_CTX_new(method);
         if (ctx == nullptr) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR(0, -1, "Failed to initial TLS: ", errbuf);
         }
+        SSL_CTX_set_ecdh_auto(ctx, 1);
     }
 
     ~TLSContextImpl() override {
@@ -156,9 +171,9 @@ public:
 void __OpenSSLGlobalInit() { (void)GlobalSSLContext::getInstance(); }
 
 TLSContext* new_tls_context(const char* cert_str, const char* key_str,
-                            const char* passphrase) {
+                            const char* passphrase, TLSVersion version) {
     __OpenSSLGlobalInit();
-    auto ret = new TLSContextImpl();
+    auto ret = new TLSContextImpl(version);
     if (ret->ctx == NULL) {
         delete ret;
         LOG_ERROR_RETURN(0, nullptr, "Failed to create TLS context");

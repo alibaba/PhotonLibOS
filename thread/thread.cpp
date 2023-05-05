@@ -66,7 +66,7 @@ limitations under the License.
 #define DEF_ASM_FUNC(name) ".text\n" \
                            #name": "
 #else
-#define DEF_ASM_FUNC(name) ".section .text."#name",\"axG\",@progbits,_photon_switch_context,comdat\n" \
+#define DEF_ASM_FUNC(name) ".section .text."#name",\"axG\",@progbits,"#name",comdat\n" \
                            ".type "#name", @function\n" \
                            #name": "
 #endif
@@ -117,14 +117,14 @@ namespace photon
     {
     public:
         template<typename F>
-        void init(void* ptr, F ret2func)
+        void init(void* ptr, F ret2func, thread* th)
         {
             _ptr = ptr;
             assert((uint64_t)_ptr % 16 == 0);
             push(0);
             push(0);
             push(ret2func);
-            push(ptr);   // rbp <= th
+            push(th);   // rbp <== th
         }
         void** pointer_ref()
         {
@@ -809,9 +809,8 @@ R"(
 
     extern "C" void _photon_thread_stub() asm ("_photon_thread_stub");
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-    thread* thread_create(thread_entry start, void* arg, uint64_t stack_size) {
+    thread* thread_create(thread_entry start, void* arg,
+                uint64_t stack_size, uint16_t reserved_space) {
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
@@ -827,16 +826,16 @@ R"(
         th->buf = ptr;
         th->stackful_alloc_top = ptr;
         th->start = start;
-        th->arg = arg;
         th->stack_size = stack_size;
-        th->stack.init(p, &_photon_thread_stub);
+        th->arg = arg;
+        auto sp = align_down((uint64_t)p - reserved_space, 64);
+        th->stack.init((void*)sp, &_photon_thread_stub, th);
         AtomicRunQ arq(rq);
         th->vcpu = arq.vcpu;
         arq.vcpu->nthreads++;
         arq.insert_tail(th);
         return th;
     }
-#pragma GCC diagnostic pop
 
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
 #include <sys/auxv.h>

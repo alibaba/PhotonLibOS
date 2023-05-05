@@ -44,12 +44,19 @@ limitations under the License.
 #ifdef PHOTON_URING
 #include <photon/io/iouring-wrapper.h>
 #endif
+#ifdef ENABLE_FSTACK_DPDK
+#include <photon/io/fstack-dpdk.h>
+#endif
 
 #include "base_socket.h"
 #include "../io/events_map.h"
 
 #ifndef SO_ZEROCOPY
 #define SO_ZEROCOPY 60
+#endif
+
+#ifndef AF_SMC
+#define AF_SMC 43
 #endif
 
 LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
@@ -72,60 +79,6 @@ LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
 namespace photon {
 namespace net {
 
-using Getter = int (*)(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
-
-static int do_get_name(int fd, Getter getter, EndPoint& addr) {
-    struct sockaddr_in addr_in;
-    socklen_t len = sizeof(addr_in);
-    int ret = getter(fd, (struct sockaddr*) &addr_in, &len);
-    if (ret < 0 || len != sizeof(addr_in)) return -1;
-    addr.from_sockaddr_in(addr_in);
-    return 0;
-}
-
-static int do_get_name(int fd, Getter getter, char* path, size_t count) {
-    struct sockaddr_un addr_un;
-    socklen_t len = sizeof(addr_un);
-    int ret = getter(fd, (struct sockaddr*) &addr_un, &len);
-    // if len larger than size of addr_un, or less than prefix in addr_un
-    if (ret < 0 || len > sizeof(addr_un) || len <= sizeof(addr_un.sun_family))
-        return -1;
-    strncpy(path, addr_un.sun_path, count);
-    return 0;
-}
-
-static int get_socket_name(int fd, EndPoint& addr) {
-    return do_get_name(fd, &::getsockname, addr);
-}
-
-static int get_peer_name(int fd, EndPoint& addr) {
-    return do_get_name(fd, &::getpeername, addr);
-}
-
-static int get_socket_name(int fd, char* path, size_t count) {
-    return do_get_name(fd, &::getsockname, path, count);
-}
-
-static int get_peer_name(int fd, char* path, size_t count) {
-    return do_get_name(fd, &::getpeername, path, count);
-}
-
-static int fill_path(struct sockaddr_un& name, const char* path, size_t count) {
-    const int LEN = sizeof(name.sun_path) - 1;
-    if (count == 0) count = strlen(path);
-    if (count > LEN)
-        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname is too long (`>`)", count,
-                         LEN);
-
-    memset(&name, 0, sizeof(name));
-    memcpy(name.sun_path, path, count + 1);
-#ifndef __linux__
-    name.sun_len = 0;
-#endif
-    name.sun_family = AF_UNIX;
-    return 0;
-}
-
 class KernelSocketStream : public SocketStreamBase {
 public:
     using ISocketStream::setsockopt;
@@ -133,92 +86,110 @@ public:
     int fd = -1;
     explicit KernelSocketStream(int fd) : fd(fd) {}
     KernelSocketStream(int socket_family, bool nonblocking) {
+        if (fd >= 0)
+            return;
         if (nonblocking) {
             fd = net::socket(socket_family, SOCK_STREAM, 0);
         } else {
             fd = ::socket(socket_family, SOCK_STREAM, 0);
         }
-        if (fd > 0 && socket_family == AF_INET) {
-            setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+        if (fd >= 0 && socket_family == AF_INET) {
+            int val = 1;
+            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
         }
     }
-    virtual ~KernelSocketStream() {
+    ~KernelSocketStream() override {
         if (fd < 0) return;
         shutdown(ShutdownHow::ReadWrite);
         close();
     }
-    virtual ssize_t read(void* buf, size_t count) override {
-        return net::read_n(fd, buf, count, m_timeout);
+    ssize_t read(void* buf, size_t count) override {
+        uint64_t timeout = m_timeout;
+        auto cb = LAMBDA_TIMEOUT(do_recv(fd, buf, count, 0, timeout));
+        return net::doio_n(buf, count, cb);
     }
-    virtual ssize_t write(const void* buf, size_t count) override {
-        return net::send_n(fd, buf, count, 0, m_timeout);
+    ssize_t readv(const iovec* iov, int iovcnt) override {
+        SmartCloneIOV<8> clone(iov, iovcnt);
+        iovector_view view(clone.ptr, iovcnt);
+        uint64_t timeout = m_timeout;
+        auto cb = LAMBDA_TIMEOUT(do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout));
+        return net::doiov_n(view, cb);
     }
-    virtual ssize_t readv(const struct iovec* iov, int iovcnt) override {
-        SmartCloneIOV<32> ciov(iov, iovcnt);
-        return readv_mutable(ciov.ptr, iovcnt);
+    ssize_t write(const void* buf, size_t count) override {
+        uint64_t timeout = m_timeout;
+        auto cb = LAMBDA_TIMEOUT(do_send(fd, buf, count, MSG_NOSIGNAL, timeout));
+        return net::doio_n((void*&) buf, count, cb);
     }
-    virtual ssize_t readv_mutable(struct iovec* iov, int iovcnt) override {
-        return net::readv_n(fd, iov, iovcnt, m_timeout);
+    ssize_t writev(const iovec* iov, int iovcnt) override {
+        SmartCloneIOV<8> clone(iov, iovcnt);
+        iovector_view view(clone.ptr, iovcnt);
+        uint64_t timeout = m_timeout;
+        auto cb = LAMBDA_TIMEOUT(do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout));
+        return net::doiov_n(view, cb);
     }
-    virtual ssize_t writev(const struct iovec* iov, int iovcnt) override {
-        SmartCloneIOV<32> ciov(iov, iovcnt);
-        return writev_mutable(ciov.ptr, iovcnt);
+    ssize_t recv(void* buf, size_t count, int flags = 0) override {
+        return do_recv(fd, buf, count, flags, m_timeout);
     }
-    virtual ssize_t writev_mutable(struct iovec* iov, int iovcnt) override {
-        return net::sendv_n(fd, iov, iovcnt, 0, m_timeout);
+    ssize_t recv(const iovec* iov, int iovcnt, int flags = 0) override {
+        return do_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, m_timeout);
     }
-    virtual ssize_t recv(void* buf, size_t count, int flags = 0) override {
-        return net::read(fd, buf, count, m_timeout);
+    ssize_t send(const void* buf, size_t count, int flags = 0) override {
+        return do_send(fd, buf, count, flags | MSG_NOSIGNAL, m_timeout);
     }
-    virtual ssize_t recv(const struct iovec* iov, int iovcnt, int flags = 0) override {
-        return net::readv(fd, iov, iovcnt, m_timeout);
+    ssize_t send(const iovec* iov, int iovcnt, int flags = 0) override {
+        return do_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), flags | MSG_NOSIGNAL, m_timeout);
     }
-    virtual ssize_t send(const void* buf, size_t count, int flags = 0) override {
-        return net::send(fd, buf, count, 0, m_timeout);
-    }
-    virtual ssize_t send(const struct iovec* iov, int iovcnt, int flags = 0) override {
-        return net::sendv(fd, iov, iovcnt, 0, m_timeout);
-    }
-    virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
+    ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
         return net::sendfile_n(fd, in_fd, &offset, count);
     }
-    virtual int shutdown(ShutdownHow how) final {
+    int shutdown(ShutdownHow how) final {
         // shutdown how defined as 0 for RD, 1 for WR and 2 for RDWR
         // in sys/socket.h, cast ShutdownHow into int just fits
         return ::shutdown(fd, static_cast<int>(how));
     }
-    virtual Object* get_underlay_object(uint64_t recursion = 0) override {
+    Object* get_underlay_object(uint64_t recursion = 0) override {
         return (Object*) (uint64_t) fd;
     }
-    virtual int close() final {
+    int close() final {
         auto ret = ::close(fd);
         fd = -1;
         return ret;
     }
-    virtual int getsockname(EndPoint& addr) override {
+    int getsockname(EndPoint& addr) override {
         return get_socket_name(fd, addr);
     }
-    virtual int getpeername(EndPoint& addr) override {
+    int getpeername(EndPoint& addr) override {
         return get_peer_name(fd, addr);
     }
-    virtual int getsockname(char* path, size_t count) override {
+    int getsockname(char* path, size_t count) override {
         return get_socket_name(fd, path, count);
     }
-    virtual int getpeername(char* path, size_t count) override {
+    int getpeername(char* path, size_t count) override {
         return get_peer_name(fd, path, count);
     }
-    virtual int setsockopt(int level, int option_name, const void* option_value,
-                           socklen_t option_len) final {
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
         return ::setsockopt(fd, level, option_name, option_value, option_len);
     }
-    virtual int getsockopt(int level, int option_name, void* option_value,
-                           socklen_t* option_len) final {
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
         return ::getsockopt(fd, level, option_name, option_value, option_len);
     }
-    virtual uint64_t timeout() const override { return m_timeout; }
-    virtual void timeout(uint64_t tm) override { m_timeout = tm; }
+    uint64_t timeout() const override { return m_timeout; }
+    void timeout(uint64_t tm) override { m_timeout = tm; }
 protected:
     uint64_t m_timeout = -1;
+
+    virtual ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) {
+        return photon::net::send(sockfd, buf, count, flags, timeout);
+    }
+    virtual ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) {
+        return photon::net::sendmsg(sockfd, message, flags, timeout);
+    }
+    virtual ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
+        return photon::net::recv(sockfd, buf, count, flags, timeout);
+    }
+    virtual ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
+        return photon::net::recvmsg(sockfd, message, flags, timeout);
+    }
 
     struct tmp_msg_hdr : public ::msghdr {
         tmp_msg_hdr(const iovec* iov, int iovcnt) : ::msghdr{} {
@@ -242,7 +213,7 @@ public:
 
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
-        if (fill_path(addr_un, path, count) != 0) return nullptr;
+        if (fill_uds_path(addr_un, path, count) != 0) return nullptr;
         return do_connect((const sockaddr*) &addr_un, nullptr, sizeof(addr_un));
     }
 
@@ -320,8 +291,7 @@ public:
     }
 
     // Comply with the NewObj interface.
-    // The derived classes may continue to add more implementations.
-    int init() {
+    virtual int init() {
         if (m_nonblocking) {
             m_listen_fd = net::socket(m_socket_family, SOCK_STREAM, 0);
         } else {
@@ -375,7 +345,7 @@ public:
             unlink(path);
         }
         struct sockaddr_un addr_un;
-        int ret = fill_path(addr_un, path, count);
+        int ret = fill_uds_path(addr_un, path, count);
         if (ret < 0) return -1;
         return ::bind(m_listen_fd, (struct sockaddr*) &addr_un, sizeof(addr_un));
     }
@@ -415,14 +385,14 @@ public:
         return get_peer_name(m_listen_fd, path, count);
     }
 
-    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) final {
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
         if (::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0) {
             LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt");
         }
         return m_opts.put_opt(level, option_name, option_value, option_len);
     }
 
-    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) final {
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
         if (::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0) return 0;
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
@@ -490,8 +460,6 @@ protected:
 
 #ifdef __linux__
 class ZeroCopySocketStream : public KernelSocketStream {
-protected:
-    uint32_t m_num_calls = 0;
 public:
     explicit ZeroCopySocketStream(int fd) : KernelSocketStream(fd) {
         setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
@@ -502,30 +470,21 @@ public:
         setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
     }
 
-    ssize_t write(const void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_send_zc(fd, buf, count, 0, timeout));
-        return net::doio_n((void*&) buf, count, cb);
-    }
-
-    ssize_t send(const void* buf, size_t count, int flags = 0) override {
-        if (flags & ZEROCOPY_FLAG)
-            return do_send_zc(fd, buf, count, flags, m_timeout);
-        else
-            return KernelSocketStream::send(buf, count, flags);
-    }
-
 protected:
-    ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
-        struct iovec iov{const_cast<void*>(buf), count};
-        ssize_t n_written = zerocopy_n(fd, &iov, 1, m_num_calls, timeout);
-        if (n_written != (ssize_t) count) {
-            LOG_ERRNO_RETURN(0, n_written, "zerocopy failed");
-        }
+    uint32_t m_num_calls = 0;
 
-        auto ret = zerocopy_confirm(fd, m_num_calls - 1, timeout);
-        if (ret < 0) return ret;
-        return n_written;
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        struct iovec iov{const_cast<void*>(buf), count};
+        return do_sendmsg(sockfd, tmp_msg_hdr(&iov, 1), flags, timeout);
+    }
+
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+        ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
+        m_num_calls++;
+        auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, timeout);
+        if (ret < 0)
+            return ret;
+        return n;
     }
 };
 
@@ -533,7 +492,7 @@ class ZeroCopySocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
-    int init() {
+    int init() override {
         if (!net::zerocopy_available()) {
             LOG_ERROR_RETURN(0, -1, "zerocopy not available");
         }
@@ -564,72 +523,27 @@ class IouringSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
 
-    ssize_t read(void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_recv(fd, buf, count, 0, timeout));
-        return net::doio_n(buf, count, cb);
-    }
-
-    ssize_t write(const void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_send(fd, buf, count, 0, timeout));
-        return net::doio_n((void*&) buf, count, cb);
-    }
-
-    ssize_t readv(const iovec* iov, int iovcnt) override {
-        SmartCloneIOV<8> clone(iov, iovcnt);
-        iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_recvmsg(fd, view.iov, view.iovcnt, 0, timeout));
-        return net::doiov_n(view, cb);
-    }
-
-    ssize_t writev(const iovec* iov, int iovcnt) override {
-        SmartCloneIOV<8> clone(iov, iovcnt);
-        iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_sendmsg(fd, view.iov, view.iovcnt, 0, timeout));
-        return net::doiov_n(view, cb);
-    }
-
-    ssize_t recv(void* buf, size_t count, int flags = 0) override {
-        return do_recv(fd, buf, count, flags, m_timeout);
-    }
-
-    ssize_t recv(const iovec* iov, int iovcnt, int flags = 0) override {
-        return do_recvmsg(fd, iov, iovcnt, flags, m_timeout);
-    }
-
-    ssize_t send(const void* buf, size_t count, int flags = 0) override {
-        if (flags & ZEROCOPY_FLAG)
-            return do_send_zc(fd, buf, count, flags | MSG_NOSIGNAL | MSG_WAITALL, m_timeout);
-        else
-            return do_send(fd, buf, count, flags | MSG_NOSIGNAL, m_timeout);
-    }
-
-    ssize_t send(const iovec* iov, int iovcnt, int flags = 0) override {
-        return do_sendmsg(fd, iov, iovcnt, flags | MSG_NOSIGNAL, m_timeout);
-    }
-
 protected:
-    virtual ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
-        return photon::iouring_send(fd, buf, count, flags, timeout);
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        if (flags & ZEROCOPY_FLAG)
+            return photon::iouring_send_zc(sockfd, buf, count, flags | MSG_WAITALL, timeout);
+        else
+            return photon::iouring_send(sockfd, buf, count, flags, timeout);
     }
 
-    virtual ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) {
-        return photon::iouring_recv(fd, buf, count, flags, timeout);
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+        if (flags & ZEROCOPY_FLAG)
+            return photon::iouring_sendmsg_zc(sockfd, message, flags | MSG_WAITALL, timeout);
+        else
+            return photon::iouring_sendmsg(sockfd, message, flags, timeout);
     }
 
-    virtual ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
-        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+        return photon::iouring_recv(sockfd, buf, count, flags, timeout);
     }
 
-    virtual ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) {
-        return photon::iouring_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), flags, timeout);
-    }
-
-    virtual ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) {
-        return photon::iouring_send_zc(fd, buf, count, flags, timeout);
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+        return photon::iouring_recvmsg(sockfd, message, flags, timeout);
     }
 };
 
@@ -681,24 +595,26 @@ public:
     }
 
 private:
-    ssize_t do_send(int fd, const void* buf, size_t count, int flags, uint64_t timeout) override {
-        return photon::iouring_send(fd, buf, count, IouringFixedFileFlag | flags, timeout);
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        if (flags & ZEROCOPY_FLAG)
+            return photon::iouring_send_zc(sockfd, buf, count, IouringFixedFileFlag | flags | MSG_WAITALL, timeout);
+        else
+            return photon::iouring_send(sockfd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_recv(int fd, void* buf, size_t count, int flags, uint64_t timeout) override {
-        return photon::iouring_recv(fd, buf, count, IouringFixedFileFlag | flags, timeout);
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+        if (flags & ZEROCOPY_FLAG)
+            return photon::iouring_sendmsg_zc(sockfd, message, IouringFixedFileFlag | flags | MSG_WAITALL, timeout);
+        else
+            return photon::iouring_sendmsg(sockfd, message, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_sendmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
-        return photon::iouring_sendmsg(fd, tmp_msg_hdr(iov, iovcnt), IouringFixedFileFlag | flags, timeout);
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+        return photon::iouring_recv(sockfd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_recvmsg(int fd, const iovec* iov, int iovcnt, int flags, uint64_t timeout) override {
-        return photon::iouring_recvmsg(fd, tmp_msg_hdr(iov, iovcnt), IouringFixedFileFlag | flags, timeout);
-    }
-
-    ssize_t do_send_zc(int fd, const void* buf, size_t count, int flags, uint64_t timeout) override {
-        return photon::iouring_send_zc(fd, buf, count, IouringFixedFileFlag | flags, timeout);
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+        return photon::iouring_recvmsg(sockfd, message, IouringFixedFileFlag | flags, timeout);
     }
 };
 
@@ -721,6 +637,137 @@ protected:
 };
 
 #endif // PHOTON_URING
+
+#ifdef ENABLE_FSTACK_DPDK
+
+class FstackDpdkSocketStream : public KernelSocketStream {
+public:
+    using KernelSocketStream::KernelSocketStream;
+
+    FstackDpdkSocketStream(int socket_family, bool nonblocking) : KernelSocketStream(socket_family, nonblocking) {
+        fd = fstack_socket(socket_family, SOCK_STREAM, 0);
+        if (fd < 0)
+            return;
+        if (socket_family == AF_INET) {
+            int val = 1;
+            fstack_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+        }
+    }
+
+    ~FstackDpdkSocketStream() override {
+        if (fd < 0) return;
+        fstack_shutdown(fd, (int) ShutdownHow::ReadWrite);
+        fstack_close(fd);
+        fd = -1;
+    }
+
+protected:
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        return fstack_send(sockfd, buf, count, flags, timeout);
+    }
+
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+        return fstack_sendmsg(sockfd, message, flags, timeout);
+    }
+
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+        return fstack_recv(sockfd, buf, count, flags, timeout);
+    }
+
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+        return fstack_recvmsg(sockfd, message, flags, timeout);
+    }
+
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
+        return fstack_setsockopt(fd, level, option_name, option_value, option_len);
+    }
+
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
+        return fstack_getsockopt(fd, level, option_name, option_value, option_len);
+    }
+};
+
+class FstackDpdkSocketClient : public KernelSocketClient {
+protected:
+    using KernelSocketClient::KernelSocketClient;
+
+    KernelSocketStream* create_stream() override {
+        return new FstackDpdkSocketStream(m_socket_family, m_nonblocking);
+    }
+
+    int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
+        return fstack_connect(fd, remote, addrlen, m_timeout);
+    }
+};
+
+class FstackDpdkSocketServer : public KernelSocketServer {
+public:
+    using KernelSocketServer::KernelSocketServer;
+
+    int init() override {
+        m_listen_fd = fstack_socket(m_socket_family, SOCK_STREAM, 0);
+        if (m_listen_fd < 0)
+            return -1;
+        if (m_socket_family == AF_INET) {
+            int val = 1;
+            fstack_setsockopt(m_listen_fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+        }
+        return 0;
+    }
+
+    int bind(uint16_t port, IPAddr addr) override {
+        auto addr_in = EndPoint(addr, port).to_sockaddr_in();
+        return fstack_bind(m_listen_fd, (sockaddr*) &addr_in, sizeof(addr_in));
+    }
+
+    int bind(const char* path, size_t count) override {
+        LOG_ERRNO_RETURN(ENOSYS, -1, "Not implemented");
+    }
+
+    int listen(int backlog) override {
+        return fstack_listen(m_listen_fd, backlog);
+    }
+
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
+        if (fstack_setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0) {
+            LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt");
+        }
+        return m_opts.put_opt(level, option_name, option_value, option_len);
+    }
+
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
+        if (fstack_getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0)
+            return 0;
+        return m_opts.get_opt(level, option_name, option_value, option_len);
+    }
+
+protected:
+    KernelSocketStream* create_stream(int fd) override {
+        return new FstackDpdkSocketStream(fd);
+    }
+
+    int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
+        return fstack_accept(fd, addr, addrlen, m_timeout);
+    }
+
+private:
+    class FstackSockOptBuffer : public SockOptBuffer {
+    public:
+        int setsockopt(int fd) override {
+            for (auto& opt : *this) {
+                if (fstack_setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
+                    LOG_ERRNO_RETURN(EINVAL, -1, "Failed to setsockopt ",
+                                     VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
+                }
+            }
+            return 0;
+        }
+    };
+
+    FstackSockOptBuffer m_opts;
+};
+
+#endif // ENABLE_FSTACK_DPDK
 
 /* ET Socket - Start */
 
@@ -861,43 +908,30 @@ public:
         if (fd >= 0) etpoller.unregister_notifier(fd);
     }
 
-    ssize_t recv(void* buf, size_t count, int flags = 0) override {
-        auto timeout = m_timeout;
-        return etdoio(LAMBDA(::read(fd, buf, count)), LAMBDA_TIMEOUT(wait_for_readable(timeout)));
-    }
-
-    ssize_t recv(const struct iovec* iov, int iovcnt, int flags = 0) override {
-        auto timeout = m_timeout;
-        return etdoio(LAMBDA(::readv(fd, iov, iovcnt)), LAMBDA_TIMEOUT(wait_for_readable(timeout)));
-    }
-
-    ssize_t send(const void* buf, size_t count, int flags = 0) override {
-        return do_send(buf, count, flags);
-    }
-
-    ssize_t send(const struct iovec* iov, int iovcnt, int flags = 0) override {
-        return do_send(iov, iovcnt, flags);
-    }
-
     ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
         void* buf_unused = nullptr;
         return doio_n(buf_unused, count, LAMBDA(do_sendfile(in_fd, offset, count)));
     }
 
 private:
-    ssize_t do_send(const void* buf, size_t count, int flags = 0) {
-        auto timeout = m_timeout;
-        return etdoio(LAMBDA(::send(fd, buf, count, MSG_NOSIGNAL | flags)),
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+        return etdoio(LAMBDA(::send(sockfd, buf, count, flags)),
                       LAMBDA_TIMEOUT(wait_for_writable(timeout)));
     }
 
-    ssize_t do_send(const struct iovec* iov, int iovcnt, int flags = 0) {
-        auto timeout = m_timeout;
-        struct msghdr msg{};
-        msg.msg_iov = (iovec*) iov;
-        msg.msg_iovlen = iovcnt;
-        return etdoio(LAMBDA(::sendmsg(fd, &msg, MSG_NOSIGNAL | flags)),
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+        return etdoio(LAMBDA(::sendmsg(sockfd, message, flags)),
                       LAMBDA_TIMEOUT(wait_for_writable(timeout)));
+    }
+
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+        return etdoio(LAMBDA(::read(sockfd, buf, count)),
+                      LAMBDA_TIMEOUT(wait_for_readable(timeout)));
+    }
+
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+        return etdoio(LAMBDA(::recvmsg(sockfd, message, flags)),
+                      LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 
     ssize_t do_sendfile(int in_fd, off_t offset, size_t count) {
@@ -925,7 +959,7 @@ public:
         if (m_listen_fd >= 0) etpoller.unregister_notifier(m_listen_fd);
     }
 
-    int init()  {
+    int init() override {
         if (KernelSocketServer::init() != 0) return -1;
         return etpoller.register_notifier(m_listen_fd, this);
     }
@@ -993,6 +1027,20 @@ extern "C" ISocketClient* new_et_tcp_socket_client() {
 extern "C" ISocketServer* new_et_tcp_socket_server() {
     return NewObj<ETKernelSocketServer>(AF_INET, false, true)->init();
 }
+extern "C" ISocketClient* new_smc_socket_client() {
+    return new KernelSocketClient(AF_SMC, true);
+}
+extern "C" ISocketServer* new_smc_socket_server() {
+    return NewObj<KernelSocketServer>(AF_SMC, false, true)->init();
+}
+#ifdef ENABLE_FSTACK_DPDK
+extern "C" ISocketClient* new_fstack_dpdk_socket_client() {
+    return new FstackDpdkSocketClient(AF_INET, true);
+}
+extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
+    return NewObj<FstackDpdkSocketServer>(AF_INET, false, true)->init();
+}
+#endif // ENABLE_FSTACK_DPDK
 #endif // __linux__
 
 }

@@ -81,7 +81,7 @@ uint64_t estring_view::hex_to_uint64() const
     return ret;
 }
 
-std::string& estring::append(uint64_t x)
+estring& estring::append(uint64_t x)
 {
     auto begin = size();
     do
@@ -94,3 +94,58 @@ std::string& estring::append(uint64_t x)
     std::reverse(ptr + begin, ptr + end);
     return *this;
 }
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append(0ULL))>::value,
+    "estring append uint64 should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append('0'))>::value,
+    "estring append char should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append("Hello"))>::value,
+    "estring append char* should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append(std::declval<char*>(), 5))>::value,
+    "estring append char* and size should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append(std::declval<std::string>()))>::value,
+    "estring append std::string should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>().append(std::declval<std::string_view>()))>::value,
+    "estring append std::string_view should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>() += 0ULL)>::value,
+    "estring += uint64 should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>() += '0')>::value,
+    "estring += char should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>() += "Hello")>::value,
+    "estring += char* should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>() += std::declval<std::string>())>::value,
+    "estring += std::string should return estring"
+);
+
+static_assert(
+    std::is_same<estring&, decltype(std::declval<estring>() += std::declval<std::string_view>())>::value,
+    "estring += std::string_view should return estring"
+);
