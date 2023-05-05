@@ -19,6 +19,7 @@ limitations under the License.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -26,7 +27,9 @@ limitations under the License.
 #include <immintrin.h>
 #endif
 
+#include <photon/common/timeout.h>
 #include <photon/common/utility.h>
+#include <photon/thread/thread.h>
 
 template <size_t x>
 struct Capacity_2expN {
@@ -132,7 +135,9 @@ protected:
 
     bool check_empty(size_t h, size_t t) const { return h == t; }
 
-    bool check_full(size_t h, size_t t) const { return check_mask_equal(h, t + 1); }
+    bool check_full(size_t h, size_t t) const {
+        return check_mask_equal(h, t + 1);
+    }
 
     size_t idx(size_t x) const { return x & mask; }
 
@@ -152,16 +157,8 @@ protected:
     using Base::idx;
     using Base::tail;
 
-    struct alignas(Base::CACHELINE_SIZE) Entry {
-        std::atomic<uint64_t> mark{0};
-        T x;
-    };
-
-    static_assert(sizeof(Entry) % Base::CACHELINE_SIZE == 0,
-                  "Entry should aligned to cacheline");
-    alignas(Base::CACHELINE_SIZE) Entry slots[Base::capacity];
-    static_assert(sizeof(slots) % Base::CACHELINE_SIZE == 0,
-                  "Entry should aligned to cacheline");
+    std::atomic<uint64_t> marks[Base::capacity]{};
+    T slots[Base::capacity];
 
     uint64_t this_turn_write(const uint64_t x) const {
         return (Base::turn(x) << 1) + 1;
@@ -171,22 +168,44 @@ protected:
         return (Base::turn(x) << 1) + 2;
     }
 
-    uint64_t last_turn_read(const uint64_t x) const { return Base::turn(x) << 1; }
+    uint64_t last_turn_read(const uint64_t x) const {
+        return Base::turn(x) << 1;
+    }
 
 public:
     using Base::empty;
     using Base::full;
 
-    bool push(const T& x) {
+    bool push_weak(const T& x) {
+        auto t = tail.load(std::memory_order_acquire);
+        for (;;) {
+            auto& slot = slots[idx(t)];
+            auto& mark = marks[idx(t)];
+            if (mark.load(std::memory_order_acquire) == last_turn_read(t)) {
+                if (tail.compare_exchange_strong(t, t + 1)) {
+                    slot = x;
+                    mark.store(this_turn_write(t), std::memory_order_release);
+                    return true;
+                }
+            } else {
+                auto const prevTail = t;
+                t = tail.load(std::memory_order_acquire);
+                if (t == prevTail) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    bool pop_weak(T& x) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
             auto& slot = slots[idx(h)];
-            if (slot.mark.load(std::memory_order_acquire) ==
-                last_turn_read(h)) {
+            auto& mark = marks[idx(h)];
+            if (mark.load(std::memory_order_acquire) == this_turn_write(h)) {
                 if (head.compare_exchange_strong(h, h + 1)) {
-                    slot.x = x;
-                    slot.mark.store(this_turn_write(h),
-                                    std::memory_order_release);
+                    x = slot;
+                    mark.store(this_turn_read(h), std::memory_order_release);
                     return true;
                 }
             } else {
@@ -199,52 +218,200 @@ public:
         }
     }
 
-    bool pop(T& x) {
-        auto t = tail.load(std::memory_order_acquire);
-        for (;;) {
-            auto& slot = slots[idx(t)];
-            if (slot.mark.load(std::memory_order_acquire) ==
-                this_turn_write(t)) {
-                if (tail.compare_exchange_strong(t, t + 1)) {
-                    x = slot.x;
-                    slot.mark.store(this_turn_read(t),
-                                    std::memory_order_release);
-                    return true;
-                }
-            } else {
-                auto const prevTail = t;
-                t = tail.load(std::memory_order_acquire);
-                if (t == prevTail) {
+    bool push(const T& x) {
+        do {
+            if (push_weak(x)) return true;
+        } while (!full());
+        return false;
+    }
 
-                    return false;
-                }
-            }
-        }
+    bool pop(T& x) {
+        do {
+            if (pop_weak(x)) return true;
+        } while (!empty());
+        return false;
     }
 
     template <typename Pause = ThreadPause>
-    void send(const T&  x) {
+    void send(const T& x) {
         static_assert(std::is_base_of<PauseBase, Pause>::value,
                       "Pause should be derived by PauseBase");
-        auto const h = head.fetch_add(1);
-        auto& slot = slots[idx(h)];
-        while (slot.mark.load(std::memory_order_acquire) != last_turn_read(h))
+        auto const t = tail.fetch_add(1);
+        auto& slot = slots[idx(t)];
+        auto& mark = marks[idx(t)];
+        while (mark.load(std::memory_order_acquire) != last_turn_read(t))
             Pause::pause();
-        slot.x = x;
-        slot.mark.store(this_turn_write(h), std::memory_order_release);
+        slot = x;
+        mark.store(this_turn_write(t), std::memory_order_release);
     }
 
     template <typename Pause = ThreadPause>
     T recv() {
         static_assert(std::is_base_of<PauseBase, Pause>::value,
                       "Pause should be derived by PauseBase");
-        auto const t = tail.fetch_add(1);
-        auto& slot = slots[idx(t)];
-        while (slot.mark.load(std::memory_order_acquire) != this_turn_write(t))
+        auto const h = head.fetch_add(1);
+        auto& slot = slots[idx(h)];
+        auto& mark = marks[idx(h)];
+        while (mark.load(std::memory_order_acquire) != this_turn_write(h))
             Pause::pause();
-        T ret = slot.x;
-        slot.mark.store(this_turn_read(t), std::memory_order_release);
+        T ret = slot;
+        mark.store(this_turn_read(h), std::memory_order_release);
         return ret;
+    }
+};
+
+template <typename T, size_t N>
+class LockfreeBatchMPMCRingQueue : public LockfreeRingQueueBase<T, N> {
+protected:
+    using Base = LockfreeRingQueueBase<T, N>;
+    using Base::check_empty;
+    using Base::check_full;
+    using Base::check_mask_equal;
+
+    using Base::head;  // read_head
+    using Base::idx;
+    using Base::tail;  // write_tail
+
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head;
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail;
+
+    T slots[Base::capacity];
+
+    uint64_t this_turn_write(const uint64_t x) const {
+        return (Base::turn(x) << 1) + 1;
+    }
+
+    uint64_t this_turn_read(const uint64_t x) const {
+        return (Base::turn(x) << 1) + 2;
+    }
+
+    uint64_t last_turn_read(const uint64_t x) const {
+        return Base::turn(x) << 1;
+    }
+
+public:
+    using Base::empty;
+    using Base::full;
+
+    size_t push_batch(const T* x, size_t n) {
+        size_t rh, wt;
+        wt = tail.load(std::memory_order_relaxed);
+        for (;;) {
+            rh = head.load(std::memory_order_relaxed);
+            auto rn = std::min(n, Base::capacity - (wt - rh));
+            if (rn == 0) return 0;
+            if (tail.compare_exchange_strong(wt, wt + rn,
+                                             std::memory_order_acq_rel)) {
+                auto first_idx = idx(wt);
+                auto part_length = Base::capacity - first_idx;
+                if (likely(part_length >= rn)) {
+                    memcpy(&slots[first_idx], x, sizeof(T) * rn);
+                } else {
+                    if (likely(part_length))
+                        memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
+                    memcpy(&slots[0], x + part_length,
+                           sizeof(T) * (rn - part_length));
+                }
+                auto wh = wt;
+                while (!write_head.compare_exchange_weak(
+                    wh, wt + rn, std::memory_order_acq_rel)) {
+                    ThreadPause::pause();
+                    wh = wt;
+                }
+                return rn;
+            }
+        }
+    }
+
+    bool push(const T& x) { return push_batch(&x, 1) == 1; }
+
+    size_t pop_batch(T* x, size_t n) {
+        size_t rt, wh;
+        rt = read_tail.load(std::memory_order_relaxed);
+        for (;;) {
+            wh = write_head.load(std::memory_order_relaxed);
+            auto rn = std::min(n, wh - rt);
+            if (rn == 0) return 0;
+            if (read_tail.compare_exchange_strong(rt, rt + rn,
+                                                  std::memory_order_acq_rel)) {
+                auto first_idx = idx(rt);
+                auto part_length = Base::capacity - first_idx;
+                if (likely(part_length >= rn)) {
+                    memcpy(x, &slots[first_idx], sizeof(T) * rn);
+                } else {
+                    if (likely(part_length))
+                        memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
+                    memcpy(x + part_length, &slots[0],
+                           sizeof(T) * (rn - part_length));
+                }
+                auto rh = rt;
+                while (!head.compare_exchange_weak(rh, rt + rn,
+                                                   std::memory_order_acq_rel)) {
+                    ThreadPause::pause();
+                    rh = rt;
+                }
+                return rn;
+            }
+        }
+    }
+
+    bool pop(T& x) { return pop_batch(&x, 1) == 1; }
+
+    template <typename Pause = ThreadPause>
+    T recv() {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        T ret;
+        while (!pop(ret)) Pause::pause();
+        return ret;
+    }
+
+    template <typename Pause = ThreadPause>
+    void send(const T& x) {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        while (!push(x)) Pause::pause();
+    }
+
+    template <typename Pause = ThreadPause>
+    void send_batch(const T* x, size_t n) {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        do {
+            size_t cnt;
+            while ((cnt = push_batch(x, n)) == 0) Pause::pause();
+            x += cnt;
+            n -= cnt;
+        } while (n);
+    }
+
+    template <typename Pause = ThreadPause>
+    size_t recv_batch(T* x, size_t n) {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        size_t ret = 0;
+        while ((ret = pop_batch(x, n)) == 0) Pause::pause();
+        return ret;
+    }
+
+    bool empty() {
+        return check_empty(head.load(std::memory_order_relaxed),
+                           tail.load(std::memory_order_relaxed));
+    }
+
+    bool full() {
+        return check_full(read_tail.load(std::memory_order_relaxed),
+                          write_head.load(std::memory_order_relaxed));
+    }
+
+    size_t read_available() const {
+        return write_head.load(std::memory_order_relaxed) -
+               read_tail.load(std::memory_order_relaxed);
+    }
+
+    size_t write_available() const {
+        return head.load(std::memory_order_relaxed) + Base::capacity -
+               tail.load(std::memory_order_relaxed);
     }
 };
 
@@ -262,7 +429,7 @@ public:
     using Base::empty;
     using Base::full;
 
-    bool push(const T&  x) {
+    bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
         if (unlikely(Base::check_full(head, t))) return false;
         slots[idx(t)] = x;
@@ -276,6 +443,43 @@ public:
         x = slots[idx(h)];
         head.store(h + 1, std::memory_order_release);
         return true;
+    }
+
+    size_t push_batch(const T* x, size_t n) {
+        auto t = tail.load(std::memory_order_relaxed);
+        n = std::min(
+            n, Base::capacity - (t - head.load(std::memory_order_acquire)));
+        if (n == 0) return 0;
+        auto first_idx = idx(t);
+        auto last_idx = idx(t + n - 1);
+        auto part_length = Base::capacity - first_idx;
+        if (likely(part_length >= n)) {
+            memcpy(&slots[first_idx], x, sizeof(T) * n);
+        } else {
+            if (likely(part_length))
+                memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
+            memcpy(&slots[0], x + part_length, sizeof(T) * (n - part_length));
+        }
+        tail.store(t + n, std::memory_order_release);
+        return n;
+    }
+
+    size_t pop_batch(T* x, size_t n) {
+        auto h = head.load(std::memory_order_relaxed);
+        n = std::min(n, tail.load(std::memory_order_acquire) - h);
+        if (n == 0) return 0;
+        auto first_idx = idx(h);
+        auto last_idx = idx(h + n - 1);
+        auto part_length = Base::capacity - first_idx;
+        if (likely(part_length >= n)) {
+            memcpy(x, &slots[first_idx], sizeof(T) * n);
+        } else {
+            if (likely(part_length))
+                memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
+            memcpy(x + part_length, &slots[0], sizeof(T) * (n - part_length));
+        }
+        head.store(h + n, std::memory_order_release);
+        return n;
     }
 
     template <typename Pause = ThreadPause>
@@ -293,4 +497,83 @@ public:
                       "BusyPause should be derived by PauseBase");
         while (!push(x)) Pause::pause();
     }
+
+    template <typename Pause = ThreadPause>
+    void send_batch(const T* x, size_t n) {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        do {
+            size_t cnt;
+            while ((cnt = push_batch(x, n)) == 0) Pause::pause();
+            x += cnt;
+            n -= cnt;
+        } while (n);
+    }
+
+    template <typename Pause = ThreadPause>
+    size_t recv_batch(T* x, size_t n) {
+        static_assert(std::is_base_of<PauseBase, Pause>::value,
+                      "BusyPause should be derived by PauseBase");
+        size_t ret = 0;
+        while ((ret = pop_batch(x, n)) == 0) Pause::pause();
+        return ret;
+    }
 };
+
+namespace photon {
+namespace common {
+
+/**
+ * @brief RingChannel is a photon wrapper to make LockfreeQueue send/recv
+ * efficiently wait and spin using photon style sync mechanism.
+ * In order.
+ * In considering of performance, RingChannel will use semaphore to hang-up
+ * photon thread when queue is empty, and once it got object by recv, it will
+ * trying using `thread_yield` instead of semaphore, to get better performance
+ * and load balancing.
+ *
+ * @tparam QueueType shoulde be one of LockfreeMPMCRingQueue,
+ * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
+ * parameters.
+ */
+template <typename QueueType>
+class RingChannel : public QueueType {
+protected:
+    photon::semaphore queue_sem;
+    std::atomic<uint64_t> idler{0};
+    static constexpr uint64_t BUSY_YIELD_TIMEOUT = 1024;
+
+    using T = decltype(std::declval<QueueType>().recv());
+
+public:
+    using QueueType::empty;
+    using QueueType::full;
+    using QueueType::pop;
+    using QueueType::push;
+    using QueueType::read_available;
+    using QueueType::write_available;
+
+    void send(const T& x) {
+        while (!push(x)) {
+            if (!full()) photon::thread_yield();
+        }
+        uint64_t idle = idler.exchange(0, std::memory_order_acq_rel);
+        queue_sem.signal(idle);
+    }
+    T recv() {
+        T x;
+        Timeout yield_timeout(BUSY_YIELD_TIMEOUT);
+        while (!pop(x)) {
+            if (photon::now < yield_timeout.expire()) {
+                photon::thread_yield();
+            } else {
+                idler.fetch_add(1, std::memory_order_acq_rel);
+                queue_sem.wait(1);
+            }
+        }
+        return x;
+    }
+};
+
+}  // namespace common
+}  // namespace photon

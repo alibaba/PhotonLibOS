@@ -19,10 +19,10 @@ limitations under the License.
 #include <cstdio>
 #include <cerrno>
 
-static const char* err_msg = "You are calling a weak implementation. Please link the easy library.";
+static const char* err_msg = "You are calling a weak implementation. Please link the easy library.\n";
 
 #define RETURN_ERROR(code) do {         \
-    fprintf(stderr, "%s\n", err_msg);   \
+    fprintf(stderr, "%s", err_msg);   \
     errno = ENXIO;                      \
     return code;                        \
 } while (0)

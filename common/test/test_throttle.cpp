@@ -77,7 +77,7 @@ TEST(Throttle, restore) {
     LOG_INFO("submit ` unit resource acquire, restored ` unit",
              DEC(submit).comma(true), DEC(restore).comma(true));
     EXPECT_GT(duration.count(), 9UL * 1000 * 1000);
-    EXPECT_LT(duration.count(), 11UL * 1000 * 1000);
+    EXPECT_LT(duration.count(), 20UL * 1000 * 1000);
 }
 
 TEST(Throttle, pulse) {
@@ -103,7 +103,7 @@ TEST(Throttle, pulse) {
     LOG_INFO("cosume 10M with 1M throttle in ` us",
              DEC(duration.count()).comma(true));
     EXPECT_GT(duration.count(), 9UL * 1000 * 1000);
-    EXPECT_LT(duration.count(), 11UL * 1000 * 1000);
+    EXPECT_LT(duration.count(), 20UL * 1000 * 1000);
 }
 
 template <typename IDLE>

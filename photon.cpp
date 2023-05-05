@@ -19,6 +19,9 @@ limitations under the License.
 #include "io/fd-events.h"
 #include "io/signal.h"
 #include "io/aio-wrapper.h"
+#ifdef ENABLE_FSTACK_DPDK
+#include "io/fstack-dpdk.h"
+#endif
 #include "net/curl.h"
 #include "net/socket.h"
 #include "fs/exportfs.h"
@@ -60,6 +63,9 @@ int init(uint64_t event_engine, uint64_t io_engine) {
     if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
         return -1;
 
+#ifdef ENABLE_FSTACK_DPDK
+    INIT_IO(FSTACK_DPDK, fstack_dpdk);
+#endif
     INIT_IO(EXPORTFS, exportfs)
     INIT_IO(LIBCURL, libcurl)
 #ifdef __linux__
@@ -78,6 +84,9 @@ int fini() {
 #endif
     FINI_IO(LIBCURL, libcurl)
     FINI_IO(EXPORTFS, exportfs)
+#ifdef ENABLE_FSTACK_DPDK
+    FINI_IO(FSTACK_DPDK, fstack_dpdk)
+#endif
 
     if (INIT_EVENT_SIGNAL & g_event_engine)
         sync_signal_fini();

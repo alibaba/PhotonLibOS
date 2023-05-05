@@ -27,8 +27,8 @@ limitations under the License.
 #include <thread>
 #include <vector>
 
-static constexpr size_t sender_num = 8;
-static constexpr size_t receiver_num = 1;
+static constexpr size_t sender_num = 4;
+static constexpr size_t receiver_num = 4;
 static constexpr size_t items_num = 3000000;
 static_assert(items_num % sender_num == 0,
               "item_num should able to divided by sender_num");
@@ -42,6 +42,7 @@ std::array<int, sender_num> scnt;
 std::array<std::atomic<int>, items_num / sender_num> sc, rc;
 
 LockfreeMPMCRingQueue<int, capacity> lqueue;
+LockfreeBatchMPMCRingQueue<int, capacity> lbqueue;
 LockfreeSPSCRingQueue<int, capacity> cqueue;
 std::mutex rlock, wlock;
 
@@ -84,7 +85,9 @@ int test_queue(const char *name, QType &queue) {
                 auto tm = std::chrono::high_resolution_clock::now();
                 LRType::lock(rlock);
                 while (!queue.pop(t)) {
+                    LRType::unlock(rlock);
                     CPUPause::pause();
+                    LRType::lock(rlock);
                 }
                 (void)t;
                 LRType::unlock(rlock);
@@ -107,7 +110,89 @@ int test_queue(const char *name, QType &queue) {
                 auto tm = std::chrono::high_resolution_clock::now();
                 LSType::lock(wlock);
                 while (!queue.push(x)) {
+                    LSType::unlock(wlock);
                     CPUPause::pause();
+                    LSType::lock(wlock);
+                }
+                LSType::unlock(wlock);
+                wspent += std::chrono::high_resolution_clock::now() - tm;
+                sc[x]++;
+                scnt[i]++;
+                // ThreadPause::pause();
+            }
+            printf("%lu sender done, %lu ns per action\n", i,
+                   wspent.count() / (items_num / sender_num));
+        });
+    }
+    for (auto &x : senders) x.join();
+    for (auto &x : receivers) x.join();
+    auto end = std::chrono::steady_clock::now();
+    printf("%s %lu p %lu c, %lu items, Spent %ld us\n", name, sender_num,
+           receiver_num, items_num,
+           std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
+               .count());
+    for (size_t i = 0; i < items_num / sender_num; i++) {
+        if (sc[i] != rc[i] || sc[i] != sender_num) {
+            printf("MISMATCH %lu %d %d\n", i, sc[i].load(), rc[i].load());
+        }
+        sc[i] = 0;
+        rc[i] = 0;
+    }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    return 0;
+}
+
+template <typename LSType, typename LRType, typename QType>
+int test_queue_batch(const char *name, QType &queue) {
+    std::vector<std::thread> senders, receivers;
+    scnt.fill(0);
+    rcnt.fill(0);
+    auto begin = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < receiver_num; i++) {
+        receivers.emplace_back([i, &queue] {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(i, &cpuset);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            int buffer[32];
+            size_t size;
+            int amount = items_num / receiver_num;
+            std::chrono::nanoseconds rspent(std::chrono::nanoseconds(0));
+            for (size_t x = 0; x < items_num / receiver_num;) {
+                auto tm = std::chrono::high_resolution_clock::now();
+                LRType::lock(rlock);
+                while (!(size = queue.pop_batch(buffer, std::min(32, amount)))) {
+                    LRType::unlock(rlock);
+                    CPUPause::pause();
+                    LRType::lock(rlock);
+                }
+                LRType::unlock(rlock);
+                if (x) rspent += (std::chrono::high_resolution_clock::now() - tm) / size;
+                for (auto y = 0; y < size; y++) {
+                    rc[buffer[y]]++;
+                    rcnt[i]++;
+                }
+                x += size;
+                amount -= size;
+            }
+            printf("%lu receiver done, %lu ns per action\n", i,
+                   rspent.count() / (items_num / receiver_num - 1));
+        });
+    }
+    for (size_t i = 0; i < sender_num; i++) {
+        senders.emplace_back([i, &queue] {
+            cpu_set_t cpuset;
+            CPU_ZERO(&cpuset);
+            CPU_SET(i + receiver_num, &cpuset);
+            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
+            for (size_t x = 0; x < items_num / sender_num; x++) {
+                auto tm = std::chrono::high_resolution_clock::now();
+                LSType::lock(wlock);
+                while (!queue.push(x)) {
+                    LSType::unlock(wlock);
+                    CPUPause::pause();
+                    LSType::lock(wlock);
                 }
                 LSType::unlock(wlock);
                 wspent += std::chrono::high_resolution_clock::now() - tm;
@@ -140,6 +225,9 @@ int test_queue(const char *name, QType &queue) {
 int main() {
     test_queue<NoLock, NoLock>("BoostQueue", bqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
-    test_queue<WithLock, NoLock>("BoostSPSCQueue", squeue);
-    test_queue<WithLock, NoLock>("PhotonSPSCQueue", cqueue);
+    test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
+    test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch", lbqueue);
+    test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
+    test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
+    test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
 }

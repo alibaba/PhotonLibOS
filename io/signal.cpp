@@ -241,9 +241,11 @@ namespace photon
         photon::scoped_lock lock(init_mutex);
         if (sgfd >= 0)
             return 0;
+        memset(sighandlers, 0, sizeof(sighandlers));
 #ifdef __APPLE__
         sgfd = kqueue();
 #else
+        sigfillset(&sigset);
         sgfd = signalfd(-1, &sigset, SFD_CLOEXEC | SFD_NONBLOCK);
 #endif
         if (sgfd == -1)
@@ -260,6 +262,7 @@ namespace photon
             LOG_ERROR_RETURN(EFAULT, -1, "failed to thread_create() for signal handling");
         }
         eloop->async_run();
+        LOG_INFO("signalfd initialized");
         thread_yield(); // give a chance let eloop to execute do_wait
         pthread_atfork(nullptr, nullptr, &fork_hook_child);
         return clear_signal_mask();
@@ -295,6 +298,7 @@ namespace photon
             }
         }
 #endif
+        LOG_INFO("signalfd finished");
         return clear_signal_mask();
     }
 }

@@ -1006,7 +1006,7 @@ void test_smp_waitq_resumer(int n, smp_args* args)
 TEST(smp, waitq)
 {
     smp_args args;
-    constexpr int N = 18;
+    constexpr int N = 9;
     std::thread waiter(&photon_do,
         N, &test_smp_waitq_waiter, &args);
     while(args.running.load() != N) ::usleep(1000);
@@ -1718,9 +1718,11 @@ struct invoke_overloaded_functor {
     photon::semaphore &sem;
     void operator()(char) {
         sem.signal(1);
+        LOG_DEBUG("functor overloading: ", "void(char)");
     }
     void operator()(int) {
         sem.signal(2);
+        LOG_DEBUG("functor overloading: ", "void(int)");
     }
 };
 

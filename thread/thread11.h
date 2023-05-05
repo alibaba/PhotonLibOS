@@ -24,160 +24,105 @@ limitations under the License.
 #include <photon/common/tuple-assistance.h>
 #include <photon/common/callback.h>
 
-namespace photon
-{
-    template<typename F>
-    struct ThreadContext11__ : public tuple_assistance::callable<F>
-    {
-        using base = tuple_assistance::callable<F>;
-        using typename base::return_type;
-        using typename base::arguments;
-
-        F start;
-        uint64_t stack_size;
-        arguments args;
-        bool got_it = false;
-        thread* parent;
-
-        template<typename...ARGUMENTS>
-        ThreadContext11__(uint64_t stack_size_, F f, ARGUMENTS&&...args_) :
-            start(f), stack_size(stack_size_), args{std::forward<ARGUMENTS>(args_)...}
-        {
-            parent = CURRENT;
-//            LOG_DEBUG("arguments stored in tuple");
-        }
-
-        static return_type stub11(void* args)
-        {
-            typedef ThreadContext11__ Context;
-            auto ctx_ = (Context*)args;
-            Context ctx = std::move(*ctx_);
-//            LOG_DEBUG("arguments tuple moved");
-            ctx_->got_it = true;
-            thread_yield_to(ctx.parent);
-            return tuple_assistance::apply(ctx.start, ctx.args);
-        }
-        thread* thread_create(thread_entry start_)
-        {
-            auto th = ::photon::thread_create(start_, this, stack_size);
-            thread_yield_to(th);
-            return th;
-        }
-    };
-
-    template<typename F>
-    struct ThreadContext11 : public ThreadContext11__<F>
-    {
-        typedef ThreadContext11__<F> base;
-        using base::base;
-        using base::stub11;
-        static void* stub(void* args)
-        {
-            stub11(args);
-            return nullptr;
-        }
-        thread* thread_create()
-        {
-            return base::thread_create(&stub);
-        }
-    };
-
-    template<typename...PARAMETERS>
-    struct ThreadContext11<void* (*)(PARAMETERS...)> :
-        public ThreadContext11__<void* (*)(PARAMETERS...)>
-    {
-        typedef void* (*F)(PARAMETERS...);
-        typedef ThreadContext11__<F> base;
-        using base::base;
-        using base::stub11;
-        static void* stub(void* args)
-        {
-            return stub11(args);
-        }
-        thread* thread_create()
-        {
-            return base::thread_create(&stub);
-        }
-    };
-
-    template <typename F, typename... ARGUMENTS>
-    inline std::enable_if_t<is_function_pointer<F>::value, thread*>
-    thread_create11(uint64_t stack_size, F f, ARGUMENTS&&... args) {
-        return ThreadContext11<F>(stack_size, f,
-                                  std::forward<ARGUMENTS>(args)...)
-            .thread_create();
+namespace photon {
+    template<typename Pair>
+    static void* __stub11(void*) {
+        auto p = thread_reserved_space<Pair>(CURRENT);
+        tuple_assistance::apply(p->first, p->second);
+        return nullptr;
     }
 
-    template <typename F, typename... ARGUMENTS>
-    inline std::enable_if_t<is_function_pointer<F>::value, thread*>
-    thread_create11(F f, ARGUMENTS&&... args) {
-        return thread_create11<F, ARGUMENTS...>(
-            DEFAULT_STACK_SIZE, f, std::forward<ARGUMENTS>(args)...);
+    // The arguments are forwarded to the new thread by value.
+    // If an argument does need to be passed by reference,
+    // it has to be wrapped by std::ref or std::cref.
+    template<typename F, typename SavedArgs, typename...ARGUMENTS> inline
+    thread* __thread_create11(uint64_t stack_size, F&& f, ARGUMENTS&&...args) {
+        using Pair = std::pair<F, SavedArgs>;
+        static_assert(sizeof(Pair) < UINT16_MAX, "...");
+        auto th = thread_create(&__stub11<Pair>, nullptr, stack_size, sizeof(Pair));
+        auto p  = thread_reserved_space<Pair>(th);
+        new (p) Pair{std::forward<F>(f), SavedArgs{std::forward<ARGUMENTS>(args)...}};
+        return th;
     }
 
-    template <typename CLASS, typename F, typename... ARGUMENTS>
-    inline std::enable_if_t<std::is_member_function_pointer<F>::value, thread*>
-    thread_create11(uint64_t stack_size, F f, CLASS* obj, ARGUMENTS&&... args) {
+    template<typename FUNCTOR, typename...ARGUMENTS>
+    struct FunctorWrapper {
+        typename std::decay<FUNCTOR>::type _obj;
+        __attribute__((always_inline))
+        void operator()(ARGUMENTS&&...args) {
+            _obj(std::forward<ARGUMENTS>(args)...);
+        }
+    };
+
+    #define _ENABLE_IF(cond) typename std::enable_if<cond, thread*>::type
+
+    template<typename F, typename...ARGUMENTS>
+    inline _ENABLE_IF(is_function_pointer<F>::value)
+    thread_create11(uint64_t stack_size, F f, ARGUMENTS&&...args) {
+        using SavedArgs = typename tuple_assistance::callable<F>::arguments;
+        return __thread_create11<F, SavedArgs, ARGUMENTS...>(stack_size,
+            std::forward<F>(f), std::forward<ARGUMENTS>(args)...);
+    }
+
+    template<typename F, typename...ARGUMENTS>
+    inline _ENABLE_IF(is_function_pointer<F>::value)
+    thread_create11(F f, ARGUMENTS&&...args) {
+        return thread_create11<F, ARGUMENTS...>(DEFAULT_STACK_SIZE,
+            std::forward<F>(f), std::forward<ARGUMENTS>(args)...);
+    }
+
+    template<typename CLASS, typename F, typename...ARGUMENTS>
+    inline _ENABLE_IF(std::is_member_function_pointer<F>::value)
+    thread_create11(uint64_t stack_size, F f, CLASS* obj, ARGUMENTS&&...args) {
         auto pmf = ::get_member_function_address(obj, f);
-        return thread_create11(stack_size, pmf.f, pmf.obj,
-                               std::forward<ARGUMENTS>(args)...);
+        using FF = decltype(pmf.f);
+        using Obj = decltype(pmf.obj);
+        return thread_create11<FF, Obj, ARGUMENTS...>(stack_size,
+            std::forward<FF>(pmf.f), std::forward<Obj>(pmf.obj),
+            std::forward<ARGUMENTS>(args)...);
     }
 
-    template <typename CLASS, typename F, typename... ARGUMENTS>
-    inline std::enable_if_t<std::is_member_function_pointer<F>::value, thread*>
-    thread_create11(F f, CLASS* obj, ARGUMENTS&&... args) {
+    template<typename CLASS, typename F, typename...ARGUMENTS>
+    inline _ENABLE_IF(std::is_member_function_pointer<F>::value)
+    thread_create11(F f, CLASS* obj, ARGUMENTS&&...args) {
         return thread_create11<CLASS, F, ARGUMENTS...>(
             DEFAULT_STACK_SIZE, f, obj, std::forward<ARGUMENTS>(args)...);
     }
 
-    template <typename FUNCTOR, typename... ARGUMENTS>
-    inline void __functor_call_helper(
-        typename std::decay<FUNCTOR>::type f,
-        typename std::decay<ARGUMENTS>::type... args) {
-        f(std::forward<ARGUMENTS>(args)...);
-    }
+    template<typename T, typename...ARGUMENTS>
+    using is_callable = std::is_constructible< std::function<void(ARGUMENTS...)>,
+        typename std::reference_wrapper<typename std::remove_reference<T>::type>::type>;
 
-    // NOTICE: The arguments to the thread function are moved or copied by
-    // value. If a reference argument needs to be passed to the thread function,
-    // it has to be wrapped (e.g., with std::ref or std::cref).
-    template <typename T, typename... Args>
-    struct is_functor
-        : std::conditional<
-              std::is_class<typename std::decay<T>::type>::value &&
-                  std::is_constructible<typename std::function<void(Args...)>,
-                                        typename std::reference_wrapper<
-                                            typename std::remove_reference<
-                                                T>::type>::type>::value,
-              std::true_type, std::false_type>::type {};
+    template<typename T, typename...ARGUMENTS>
+    struct is_functor : std::conditional<
+        std::is_class<typename std::decay<T>::type>::value &&
+        is_callable<T, ARGUMENTS...>::value,
+            std::true_type, std::false_type>::type { };
 
-    template <typename FUNCTOR, typename... ARGUMENTS>
-    inline typename std::enable_if<is_functor<FUNCTOR, ARGUMENTS...>::value,
-                                   thread*>::type
-    thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&... args) {
-        // takes `f` as parameter to helper function
-        // thread_create11 will make sure parameters copy is completed
-        return thread_create11(
-            stack_size, &__functor_call_helper<FUNCTOR, ARGUMENTS...>,
-            std::forward<FUNCTOR>(f), std::forward<ARGUMENTS>(args)...);
-    }
-
-    // NOTICE: The arguments to the thread function are moved or copied by
-    // value. If a reference argument needs to be passed to the thread function,
-    // it has to be wrapped (e.g., with std::ref or std::cref).
-    template <typename FUNCTOR, typename... ARGUMENTS>
-    inline typename std::enable_if<is_functor<FUNCTOR, ARGUMENTS...>::value,
-                                   thread*>::type
-    thread_create11(FUNCTOR&& f, ARGUMENTS&&... args) {
-        return thread_create11<FUNCTOR, ARGUMENTS...>(
-            DEFAULT_STACK_SIZE, std::forward<FUNCTOR>(f),
+    template<typename FUNCTOR, typename...ARGUMENTS>
+    inline _ENABLE_IF((is_functor<FUNCTOR, ARGUMENTS...>::value))
+    thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&...args) {
+        using Wrapper = FunctorWrapper<FUNCTOR, ARGUMENTS...>;
+        using SavedArgs = std::tuple<typename std::decay<ARGUMENTS>::type ...>;
+        return __thread_create11<Wrapper, SavedArgs, ARGUMENTS...>(
+            stack_size, Wrapper{std::forward<FUNCTOR>(f)},
             std::forward<ARGUMENTS>(args)...);
     }
 
-    template<typename Callable>
-    inline int thread_usleep_defer(uint64_t timeout, Callable&& callback) {
+    template<typename FUNCTOR, typename...ARGUMENTS>
+    inline _ENABLE_IF((is_functor<FUNCTOR, ARGUMENTS...>::value))
+    thread_create11(FUNCTOR&& f, ARGUMENTS&&...args) {
+        return thread_create11<FUNCTOR, ARGUMENTS...>(DEFAULT_STACK_SIZE,
+            std::forward<FUNCTOR>(f), std::forward<ARGUMENTS>(args)...);
+    }
+
+    template<typename Callable> inline
+    int thread_usleep_defer(uint64_t timeout, Callable&& callback) {
         Delegate<void> delegate(callback);
         return thread_usleep_defer(timeout, delegate._func, delegate._obj);
     }
+
+    #undef _ENABLE_IF
 
     // =============================================================================
     class __Example_of_Thread11__
@@ -207,6 +152,8 @@ namespace photon
 
             // thread(stack_size = 64KB) { any_return_type(1, 'a'); return nullptr; }
             thread_create11(/* stack size */ 64*1024, &any_return_type, 1, 'a');
+
+            thread_create11([&](int, double) { return -1; }, 10, 3.1415926);
 
             thread_yield();
         }

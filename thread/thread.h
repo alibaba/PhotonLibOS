@@ -43,17 +43,24 @@ namespace photon
     enum states
     {
         READY = 0,      // Ready to run
-        RUNNING = 1,    // Only one thread could be running at a time
+        RUNNING = 1,    // Only one thread for each VCPU could be running at a time
         SLEEPING = 2,   // Sleeping and waiting for events
         DONE = 4,       // Have finished the whole life-cycle
         STANDBY = 8,    // Internally used by across-vcpu scheduling
     };
 
+    // Create a new thread with the entry point `start(arg)` and `stack_size`.
+    // Reserved space can be used to passed large arguments to the new thread.
     typedef void* (*thread_entry)(void*);
-    typedef void (*defer_func)(void*);
     const uint64_t DEFAULT_STACK_SIZE = 8 * 1024 * 1024;
     thread* thread_create(thread_entry start, void* arg,
-                          uint64_t stack_size = DEFAULT_STACK_SIZE);
+        uint64_t stack_size = DEFAULT_STACK_SIZE, uint16_t reserved_space = 0);
+
+    // get the address of reserved space, which is right below the thread struct.
+    template<typename T = void> inline
+    T* thread_reserved_space(thread* th, uint64_t reserved_size = sizeof(T)) {
+        return (T*)((char*)th - reserved_size);
+    }
 
     // Threads are join-able *only* through their join_handle.
     // Once join is enabled, the thread will remain existing until being joined.
@@ -72,8 +79,10 @@ namespace photon
     // control to other threads, resuming possible sleepers.
     // Return 0 if timeout, return -1 if interrupted, and errno is set by the interrupt invoker.
     int thread_usleep(uint64_t useconds);
+
     // thread_usleep_defer sets a callback, and will execute callback in another photon thread
     // after this photon thread fall in sleep. The defer function should NEVER fall into sleep!
+    typedef void (*defer_func)(void*);
     int thread_usleep_defer(uint64_t useconds, defer_func defer, void* defer_arg=nullptr);
     inline int thread_sleep(uint64_t seconds)
     {
@@ -352,6 +361,7 @@ namespace photon
         int wait(uint64_t count, uint64_t timeout = -1);
         int signal(uint64_t count)
         {
+            if (count == 0) return 0;
             SCOPED_LOCK(splock);
             m_count.fetch_add(count);
             resume_one();

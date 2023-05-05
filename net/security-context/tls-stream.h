@@ -42,6 +42,12 @@ class TLSContext : public Object {
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
 };
 
+enum class TLSVersion{
+    SSL23,
+    TLS11,
+    TLS12,
+};
+
 /**
  * @brief Create a tls context, contains cert and private key infomation.
  *
@@ -52,7 +58,8 @@ class TLSContext : public Object {
  */
 TLSContext* new_tls_context(const char* cert_str = nullptr,
                             const char* key_str = nullptr,
-                            const char* passphrase = nullptr);
+                            const char* passphrase = nullptr,
+                            TLSVersion version = TLSVersion::TLS12);
 
 /**
  * @brief Create socket stream on TLS.

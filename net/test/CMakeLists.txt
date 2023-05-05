@@ -6,6 +6,10 @@ add_executable(test-socket test.cpp)
 target_link_libraries(test-socket PRIVATE photon_shared ${testing_libs})
 add_test(NAME test-socket COMMAND $<TARGET_FILE:test-socket>)
 
+add_executable(test-dg-socket test-udp.cpp)
+target_link_libraries(test-dg-socket PRIVATE photon_shared ${testing_libs})
+add_test(NAME test-dg-socket COMMAND $<TARGET_FILE:test-dg-socket>)
+
 add_executable(test-sockpool test_sockpool.cpp)
 target_link_libraries(test-sockpool PRIVATE photon_shared ${testing_libs})
 add_test(NAME test-sockpool COMMAND $<TARGET_FILE:test-sockpool>)
