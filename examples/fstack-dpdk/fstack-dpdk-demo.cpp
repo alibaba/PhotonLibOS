@@ -66,7 +66,7 @@ int main() {
     auto server = photon::net::new_fstack_dpdk_socket_server();
     server->set_handler(handler);
     server->bind(port, photon::net::IPAddr());
-    server->listen(1024);
+    server->listen();
     server->start_loop(false);
 
     photon::thread_sleep(-1UL);

@@ -74,7 +74,8 @@ int main() {
     photon_std::mutex mu;
     photon_std::condition_variable cv;
     bool got_msg = false;
-    AlignedAlloc alloc(512);
+    static const int alignment = 4096;
+    AlignedAlloc alloc(alignment);
 
     // So the thread is actually a coroutine. Photon threads run on top of vcpu(native OS threads).
     // We create a Photon thread to run socket server. Pass some local variables to the new thread as arguments.
@@ -160,7 +161,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
 
     server->set_handler(handler);
     server->bind(9527, photon::net::IPAddr());
-    server->listen(1024);
+    server->listen();
     // Photon's logging system formats the output string at compile time, and has better performance
     // than other systems using snprintf. The ` is a generic placeholder.
     LOG_INFO("Server is listening for port ` ...", 9527);

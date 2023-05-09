@@ -16,15 +16,22 @@ As to the project vision, we hope that Photon would help programs run as *fast* 
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## What's New
+* Since version 0.6, Photon can run on an userspace TCP/IP stack.
 
-* Version 0.5 is released. Except for various performance improvements, including spinlock, context switch,
-and new run queue for coroutine scheduling, we have re-implemented the HTTP module so that there is no `boost` dependency anymore.
+  **F-Stack** is an open-source project that has ported the entire **FreeBSD**
+  network stack on top of **DPDK**, and provided userspace sockets and events API.
+  We have integrated Photon's coroutine scheduler with F-Stack, and made a busy-polling program more friendly to DPDK
+  developers than ever before. In terms of performance, the network app has seen the improvement of 20% ~ 40%, compared with
+  the Linux kernel based on interrupt.
+
 * How to transform RocksDB from multi-threads to coroutines with the help of Photon?
 Here is the article, [en](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
 [中文](https://developer.aliyun.com/article/1093864).
 
 <details><summary>More history...</summary><p>
 
+* Version 0.5 is released. Except for various performance improvements, including spinlock, context switch,
+  and new run queue for coroutine scheduling, we have re-implemented the HTTP module so that there is no `boost` dependency anymore.
 * Version 0.4 has come, bringing us these three major features:
   1. Support coroutine local variables. Similar to the C++11 `thread_local` keyword. See [doc](doc/thread-local.md).
   2. Support running on macOS platform, both Intel x86_64 and Apple M1 included.
@@ -72,7 +79,7 @@ Conclusion: Photon is faster than fio under this circumstance.
 
 #### 2.1 TCP
 
-Compare Photon with other libs / languages in regard to TCP echo server performance, in descending order.
+Compare TCP socket echo server performance, in descending order.
 
 Client Mode: Streaming
 
@@ -139,7 +146,7 @@ Conclusion: Photon is faster than Nginx under this circumstance.
 
 See the [simple example](examples/simple/simple.cpp) about how to write a Photon program.
 
-See the full test code of [echo server](examples/perf/net-perf.cpp). It also illustrates how to enable multi-core.
+See the full test code of Photon [echo server](examples/perf/net-perf.cpp).
 
 ## Build
 
@@ -195,7 +202,7 @@ ctest
 
 ### 4. Integration
 
-We recommend using CMake's `FetchContent` to integrate Photon into your existing project. See this [example](doc/CMakeLists.txt).
+We recommend using CMake's `FetchContent` to integrate Photon into your existing project. See this [example](doc/CMakeLists.txt.demo).
 
 ## About Photon
 
