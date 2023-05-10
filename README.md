@@ -16,16 +16,10 @@ As to the project vision, we hope that Photon would help programs run as *fast* 
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## What's New
-* Since version 0.6, Photon can run on an userspace TCP/IP stack.
-
-  **F-Stack** is an open-source project that has ported the entire **FreeBSD**
-  network stack on top of **DPDK**, and provided userspace sockets and events API.
-  We have integrated Photon's coroutine scheduler with F-Stack, and made a busy-polling program more friendly to DPDK
-  developers than ever before. In terms of performance, the network app has seen the improvement of 20% ~ 40%, compared with
-  the Linux kernel based on interrupt.
-
+* Since version 0.6, Photon can run with a userspace TCP/IP stack on top of DPDK.
+[En](https://developer.aliyun.com/article/1208512) / [中文](https://developer.aliyun.com/article/1208390).
 * How to transform RocksDB from multi-threads to coroutines with the help of Photon?
-Here is the article, [en](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
+Here is the article, [En](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
 [中文](https://developer.aliyun.com/article/1093864).
 
 <details><summary>More history...</summary><p>
