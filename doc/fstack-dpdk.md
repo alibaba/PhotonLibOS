@@ -24,7 +24,7 @@ reboot
 ```
 
 Note the `pci=realloc` is a work-around solution for CentOS and RHEL.
-Without this, kernel would report 'not enough MMIO resources for SR-IOV',
+Without this, kernel would report `not enough MMIO resources for SR-IOV`,
 see this [issue](https://access.redhat.com/solutions/37376).
 
 #### 2. Set VF number
@@ -73,21 +73,39 @@ rpm -e ...
 cd MLNX_OFED_LINUX-5.4-3.6.8.1-rhel7.2-x86_64/
 ./mlnxofedinstall --skip-distro-check --add-kernel-support --without-mlnx-nvme --dpdk
 
-rpm -qa | grep rdma
+# Update initramfs
+dracut -f
+
 # There will be rdma-core, rdma-core-devel, librdmacm and librdmacm-utils.
+rpm -qa | grep rdma
 ```
 
 &emsp;&emsp;Now we need to restart the server. Be careful, there is a possibility that the interface name
-of your NIC might change, for example, from `eth0` to something like `enp3s0f0`. It will incur connection failure
-of your server and unable to log in. You'd better have a backup management network, or BMC console, 
-and modify the NIC configs in `/etc/sysconfig/network-scripts/` once you re-logged in.
+of your NIC might change, for example, from `eth0` to something like `enp3s0f0`, where 3 for Bus, 0 for Device,
+and 0 for Function, represented in the `03:00.0` BDF notation. It will incur connection failure
+of your server and unable to log in.
 
-&emsp;&emsp;Please note that this part of procedure is still under evaluation. If you have better ways to
-persist network configurations after installing the driver, please give us feed back. :-)
+&emsp;&emsp;To solve this, your first option is to disable the Consistent Interface Device Naming in Linux,
+and then persist the new names by `udev rules`. See the NVidia docs at
+[1](https://docs.nvidia.com/networking/display/MLNXOFEDv541030/Changes+and+New+Features#ChangesandNewFeatures-CustomerAffectingChanges),
+[2](https://enterprise-support.nvidia.com/s/article/howto-change-network-interface-name-in-linux-permanently).
+
+1. Append `GRUB_CMDLINE_LINUX` in `/etc/default/grub` with `net.ifnames=0`
+2. Create the `/etc/udev/rules.d/85-net-persistent-names.rules` with the following content
+
+```text
+# PCI device 15b3:1019 (mlx5_core)
+# NAME:="some name" , := is used to make sure that device name will be persistent.
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="00:02:c9:fa:c3:50", ATTR{dev_id}=="0x0", ATTR{type}=="1", KERNEL=="eth*", NAME:="eth0"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="00:02:c9:fa:c3:51", ATTR{dev_id}=="0x0", ATTR{type}=="1", KERNEL=="eth*", NAME:="eth1"
+```
+
+&emsp;&emsp;The second option, if you are OK with the new names, you can update the NIC scripts 
+in `/etc/sysconfig/network-scripts/` and make them correct.
+
+&emsp;&emsp;Finally, everything get ready, just reboot:
 
 ```shell
-# Update initramfs before next boot
-dracut -f
 reboot 
 ```
 
