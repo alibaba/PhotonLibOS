@@ -313,13 +313,13 @@ TEST(ExpireContainer, expire_container) {
 TEST(ExpireContainer, refresh) {
     char key[] = "hello";
     char key2[] = "wtf";
-    ExpireContainer<std::string, int, bool> expire(1000 * 1000);
+    ExpireContainer<std::string, int, bool> expire(2000 * 1000);
     auto it = expire.insert(key, 0, true);
     expire.insert(key2, 1, true);
-    photon::thread_usleep(900 * 1000);
+    photon::thread_usleep(1100 * 1000);
     expire.expire();
     expire.refresh(*it);
-    photon::thread_usleep(900 * 1000);
+    photon::thread_usleep(1100 * 1000);
     expire.expire();
     EXPECT_NE(expire.end(), expire.find(key));
     EXPECT_EQ(expire.end(), expire.find(key2));
