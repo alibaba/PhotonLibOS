@@ -17,15 +17,15 @@ limitations under the License.
 #include <fcntl.h>
 #include <vector>
 
-#include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
+#include <photon/thread/std-compat.h>
 #include <photon/fs/localfs.h>
 #include <photon/net/socket.h>
 
 // In this example, we will demonstrate a simple example using various functional modules,
-// namely `common`, `thread`, `fs`, `io` and `net`. The program basically sets up two Photon threads,
-// creates a Photon file and fs for IO, and sent buffer through Photon socket.
+// i.e., `common`, `thread`, `fs`, `io` and `net`. The program basically sets up some Photon threads
+// in the background, creates a Photon file and fs for IO, and sent buffer through Photon socket.
 //
 // Because every module has its own document, this example will not focus on the API details.
 // Please refer to the README under the module directories.
@@ -42,7 +42,7 @@ int main() {
     // The default event engine will first try io_uring, then choose epoll if io_uring failed.
     // Running an io_uring program would need the kernel version to be greater than 5.8.
     // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
-    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT);
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
@@ -52,9 +52,9 @@ int main() {
     DEFER(photon::fini());
 
     // Create a local IFileSystem under current working dir.
-    // When enabling io_uring, please switch the io_engine_type from `photon::fs::ioengine_libaio` to
+    // When enabling io_uring, please switch the io_engine_type from `photon::fs::ioengine_psync` to
     // `photon::fs::ioengine_iouring`.
-    auto fs = photon::fs::new_localfs_adaptor(".", photon::fs::ioengine_libaio);
+    auto fs = photon::fs::new_localfs_adaptor(".", photon::fs::ioengine_psync);
     if (!fs) {
         LOG_ERRNO_RETURN(0, -1, "failed to create fs");
     }
@@ -147,7 +147,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
 
         // This is a demo about how to use the io-vector interface. Even though some io engines
         // may not have the writev method, Photon's IFile encapsulation would make it compatible.
-        // Note all the IOs in Photon are non-blocking.
+        // Note all the IOs in Photon are supposed to be non-blocking.
         ssize_t written = file->writev(iov.iovec(), iov.iovcnt());
         if (written != (ssize_t) iov.sum()) {
             LOG_ERRNO_RETURN(0, -1, "failed to write file");
@@ -168,7 +168,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
     server->listen();
 
     // Photon's logging system formats the output string at COMPILE time, and has MUCH BETTER performance
-    // than other systems using snprintf. The ` is a generic placeholder.
+    // than other systems using snprintf. The ` is a generic placeholder for any type.
     LOG_INFO("Server is listening for port ` ...", 9527);
-    server->start_loop(false);
+    server->start_loop(true);
 }
