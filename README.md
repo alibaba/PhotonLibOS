@@ -19,8 +19,7 @@ as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is
 * Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.
 [En](https://developer.aliyun.com/article/1208512) / [中文](https://developer.aliyun.com/article/1208390).
 * How to transform `RocksDB` from multi-threads to coroutines by only 200 lines of code?
-Read this article, [En](https://github.com/facebook/rocksdb/issues/11017) /
-[中文](https://developer.aliyun.com/article/1093864).
+[En](https://github.com/facebook/rocksdb/issues/11017) / [中文](https://developer.aliyun.com/article/1093864).
 
 <details><summary>More history...</summary><p>
 
