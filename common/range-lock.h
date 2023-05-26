@@ -27,11 +27,12 @@ public:
     int try_lock_wait(uint64_t& offset, uint64_t& length)
     {
         range_t r(offset, length);
+        SCOPED_LOCK(m_lock);
         auto it = m_index.lower_bound(r);
         if (it != m_index.end() && it->offset < r.end()) {
-            offset = it->offset * ALIGNMENT;
-            length = std::min(it->end(), r.end()) * ALIGNMENT - offset;
-            it->cond.wait_no_lock();
+            offset = it->offset;
+            length = std::min(it->end(), r.end()) - offset;
+            it->cond.wait(m_lock);
             return -1;
         } else {
             m_index.emplace_hint(it, r);
@@ -42,6 +43,7 @@ public:
     void unlock(uint64_t offset, uint64_t length)
     {
         range_t r(offset, length);
+        SCOPED_LOCK(m_lock);
         auto it = m_index.lower_bound(r);
         while (it != m_index.end() && it->offset < r.end())
         {
@@ -58,9 +60,10 @@ public:
     LockHandle* try_lock_wait2(uint64_t offset, uint64_t length)
     {
         range_t r(offset, length);
+        SCOPED_LOCK(m_lock);
         auto it = m_index.lower_bound(r);
         if (it != m_index.end() && it->offset < r.end()) {
-            it->cond.wait_no_lock();
+            it->cond.wait(m_lock);
             return nullptr;
         } else {
             it = m_index.emplace_hint(it, r);
@@ -83,6 +86,7 @@ public:
     {
         if (!h) return -1;
         range_t r1(offset, length);
+        SCOPED_LOCK(m_lock);
         auto it = (iterator&)h;
         auto r0 = (range_t*) &*it;
         if ((r1.offset < r0->offset && r1.offset < prev_end(it)) ||
@@ -95,19 +99,20 @@ public:
 
     void unlock(LockHandle* h)
     {
+        SCOPED_LOCK(m_lock);
         auto it = (iterator&)h;
         m_index.erase(it);
     }
 
 protected:
+    photon::spinlock m_lock;
     struct range_t
     {
-        uint64_t offset : 50;      // offset (0.5 PB if in sector)
-        uint32_t length : 14;      // length (8MB if in sector)
+        uint64_t offset;
+        uint64_t length;
         range_t() { }
         range_t(uint64_t offset, uint64_t length)
         {
-            align(offset, length);
             this->offset = offset;
             this->length = length;
         }
@@ -141,17 +146,6 @@ protected:
     uint64_t prev_end(iterator it)
     {
         return (it == m_index.begin()) ? 0 : (--it)->end();
-    }
-    const static uint64_t ALIGNMENT = 512;
-    static void align(uint64_t& x)     // align down x
-    {
-        x /= ALIGNMENT;
-    }
-    static void align(uint64_t& offset, uint64_t& length)
-    {                           // align down offset, and up length
-        auto end = offset + length + ALIGNMENT - 1;
-        align(offset); align(end);
-        length = end - offset;
     }
 };
 

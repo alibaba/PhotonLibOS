@@ -16,10 +16,10 @@ As to the project vision, we hope that Photon would help programs run as *fast* 
 as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is the naming came from.
 
 ## What's New
-* Since version 0.6, Photon can run with a userspace TCP/IP stack on top of DPDK.
+* Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.
 [En](https://developer.aliyun.com/article/1208512) / [中文](https://developer.aliyun.com/article/1208390).
-* How to transform RocksDB from multi-threads to coroutines with the help of Photon?
-Here is the article, [En](https://www.reddit.com/r/cpp/comments/zd2hx1/200_lines_of_code_to_rewrite_the_600000_lines/) /
+* How to transform `RocksDB` from multi-threads to coroutines by only 200 lines of code?
+Read this article, [En](https://github.com/facebook/rocksdb/issues/11017) /
 [中文](https://developer.aliyun.com/article/1093864).
 
 <details><summary>More history...</summary><p>
