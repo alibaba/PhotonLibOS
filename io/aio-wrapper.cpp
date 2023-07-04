@@ -90,7 +90,6 @@ namespace photon
             {
                 int ret = io_submit(ctx->aio_ctx, 1, &piocb);
                 if (ret == 1) break;
-                thread_usleep(1000*10);     // sleep 10ms whenever error occurs
                 if (ret < 0)
                 {
                     auto e = -ret;
@@ -104,10 +103,9 @@ namespace photon
                         case EFAULT:
                         case EINVAL:
                         default:
-                            errno = e;
-                            LOG_ERRNO_RETURN(0, ret, "failed to io_submit()");
+                            thread_usleep(1000*10);     // sleep 10ms whenever error occurs
+                            LOG_ERRNO_RETURN(e, ret, "failed to io_submit()");
                     }
-                    return -1;
                 }
             }
 
@@ -152,6 +150,7 @@ namespace photon
 
     static void resume_libaio_requesters()
     {
+retry:
         struct io_event events[IODEPTH];
         int n = HAVE_N_TRY(my_io_getevents, (0, IODEPTH, events));
         for (int i=0; i<n; ++i)
@@ -165,6 +164,11 @@ namespace photon
                          VALUE(piocb->u.c.offset), VALUE(piocb->u.c.nbytes),
                          VALUE(piocb->u.c.buf), VALUE(piocb->u.c.resfd));
             thread_interrupt((thread *)events[i].data, EOK);
+        }
+        if (n == IODEPTH)
+        {
+            thread_yield();
+            goto retry;
         }
     }
 
