@@ -66,7 +66,7 @@ public:
     }
 
     void enqueue(Delegate<void> call) {
-        ring.send(call);
+        ring.send<PhotonPause>(call);
     }
 
     void do_call(Delegate<void> call) {
