@@ -32,8 +32,6 @@ namespace photon
     int wait_all();
     int timestamp_updater_init();
     int timestamp_updater_fini();
-    void* stackful_malloc(size_t size);
-    void stackful_free(void* ptr);
 
 
     struct thread;
@@ -432,6 +430,23 @@ namespace photon
 
     bool is_master_event_engine_default();
     void reset_master_event_engine_default();
+
+    // alloc space on rear end of current thread stack,
+    // helps allocating when using hybrid C++20 style coroutine
+    void* stackful_malloc(size_t size);
+    void stackful_free(void* ptr);
+
+    // Set photon allocator/deallocator for photon thread stack
+    // this is a hook for thread allocation, both alloc and dealloc
+    // helps user to do more works like mark GC while allocating
+    void* default_photon_thread_stack_alloc(void*, size_t stack_size);
+    void default_photon_thread_stack_dealloc(void*, void* stack_ptr,
+                                             size_t stack_size);
+    void set_photon_thread_stack_allocator(
+        Delegate<void*, size_t> photon_thread_alloc = {
+            &default_photon_thread_stack_alloc, nullptr},
+        Delegate<void, void*, size_t> photon_thread_dealloc = {
+            &default_photon_thread_stack_dealloc, nullptr});
 
     // Saturating addition, primarily for timeout caculation
     __attribute__((always_inline)) inline uint64_t sat_add(uint64_t x,

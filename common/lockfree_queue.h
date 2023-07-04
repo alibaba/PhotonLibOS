@@ -531,6 +531,10 @@ namespace common {
  * photon thread when queue is empty, and once it got object by recv, it will
  * trying using `thread_yield` instead of semaphore, to get better performance
  * and load balancing.
+ * Watch out that `recv` should run in photon environment (because it has to)
+ * use photon semaphore to be notified that new item has sended. `send` could
+ * running in photon or std::thread environment (needs to set template `Pause` as
+ * `ThreadPause`).
  *
  * @tparam QueueType shoulde be one of LockfreeMPMCRingQueue,
  * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
@@ -541,7 +545,8 @@ class RingChannel : public QueueType {
 protected:
     photon::semaphore queue_sem;
     std::atomic<uint64_t> idler{0};
-    static constexpr uint64_t BUSY_YIELD_TIMEOUT = 1024;
+    uint64_t m_busy_yield_turn;
+    uint64_t m_busy_yield_timeout;
 
     using T = decltype(std::declval<QueueType>().recv());
 
@@ -553,21 +558,36 @@ public:
     using QueueType::read_available;
     using QueueType::write_available;
 
+    /**
+     * @brief Construct a new Ring Channel object
+     *
+     * @param busy_yield_timeout setting yield timeout, default is template
+     * parameter DEFAULT_BUSY_YIELD_TIMEOUT. Ring Channel will try busy yield
+     * in `busy_yield_timeout` usecs.
+     */
+    RingChannel(uint64_t busy_yield_turn = 64,
+                uint64_t busy_yield_timeout = 1024)
+        : m_busy_yield_turn(busy_yield_turn),
+          m_busy_yield_timeout(busy_yield_timeout) {}
+
+    template <typename Pause = ThreadPause>
     void send(const T& x) {
         while (!push(x)) {
-            if (!full()) photon::thread_yield();
+            if (!full()) Pause::pause();
         }
-        uint64_t idle = idler.exchange(0, std::memory_order_acq_rel);
-        queue_sem.signal(idle);
+        queue_sem.signal(idler.load(std::memory_order_acquire));
     }
     T recv() {
         T x;
-        Timeout yield_timeout(BUSY_YIELD_TIMEOUT);
+        Timeout yield_timeout(m_busy_yield_timeout);
+        int yield_turn = m_busy_yield_turn;
+        idler.fetch_add(1, std::memory_order_acq_rel);
+        DEFER(idler.fetch_sub(1, std::memory_order_acq_rel));
         while (!pop(x)) {
-            if (photon::now < yield_timeout.expire()) {
+            if (yield_turn > 0 && photon::now < yield_timeout.expire()) {
+                yield_turn--;
                 photon::thread_yield();
             } else {
-                idler.fetch_add(1, std::memory_order_acq_rel);
                 queue_sem.wait(1);
             }
         }

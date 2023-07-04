@@ -80,7 +80,7 @@ protected:
     intrusive_list<Item> _list;
     uint64_t _expiration;
     photon::Timer _timer;
-    photon::spinlock _lock;
+    photon::spinlock _lock; // protect _list/_set operations
 
     using ItemPtr = Item*;
     struct ItemHash {
@@ -177,6 +177,7 @@ public:
     template <typename... Gs>
     iterator insert(const InterfaceKey& key, Gs&&... xs) {
         auto item = new Item(key, std::forward<Gs>(xs)...);
+        SCOPED_LOCK(_lock);
         auto pr = Base::insert(item);
         if (!pr.second) {
             delete item;

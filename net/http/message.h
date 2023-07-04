@@ -176,7 +176,17 @@ public:
     uint16_t port() const {
         return m_port;
     }
+    std::string_view host_no_port() const {
+        // only contains host, without port
+        auto tmp = headers["Host"];
+        auto pos = tmp.find(":");
+        if (pos == std::string_view::npos) {
+            return tmp;
+        }
+        return tmp.substr(0, pos);
+    }
     std::string_view host() const {
+        // the original "Host" in header
         return headers["Host"];
     }
     std::string_view abs_path() const {

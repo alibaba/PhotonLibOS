@@ -16,35 +16,26 @@ namespace photon {
 
 class ExecutorImpl {
 public:
-    using CBList = LockfreeMPMCRingQueue<Delegate<void>, 32UL * 1024>;
+    using CBList =
+        common::RingChannel<LockfreeMPMCRingQueue<Delegate<void>, 32UL * 1024>>;
     std::unique_ptr<std::thread> th;
     photon::thread *pth = nullptr;
-    EventLoop *loop = nullptr;
     CBList queue;
     photon::ThreadPoolBase *pool;
-    bool quiting;
-    photon::semaphore sem;
-    std::atomic_bool waiting;
 
-    ExecutorImpl() {
-        loop = new_event_loop({this, &ExecutorImpl::wait_for_event},
-                              {this, &ExecutorImpl::on_event});
-        th.reset(new std::thread(&ExecutorImpl::do_loop, this));
-        quiting = false;
-        waiting = true;
-        while (!loop || loop->state() != loop->WAITING) ::sched_yield();
+    ExecutorImpl(int init_ev, int init_io) {
+        th.reset(
+            new std::thread(&ExecutorImpl::launch, this, init_ev, init_io));
     }
+
+    ExecutorImpl() {}
 
     ~ExecutorImpl() {
-        photon::thread_interrupt(pth);
-        th->join();
-    }
-
-    int wait_for_event(EventLoop *) {
-        std::atomic_thread_fence(std::memory_order_acquire);
-        sem.wait(1);
-        waiting.store(true, std::memory_order_release);
-        return quiting ? -1 : 1;
+        queue.send({});
+        if (th)
+            th->join();
+        else
+            while (pool) photon::thread_yield();
     }
 
     struct CallArg {
@@ -60,51 +51,53 @@ public:
         return nullptr;
     }
 
-    int on_event(EventLoop *) {
+    void main_loop() {
         CallArg arg;
         arg.backth = photon::CURRENT;
-        size_t cnt = 0;
-        while (!queue.empty()) {
-            arg.task = queue.recv<PhotonPause>();
+        for (;;) {
+            arg.task = queue.recv();
+            if (!arg.task) {
+                return;
+            }
             auto th =
                 pool->thread_create(&ExecutorImpl::do_event, (void *)&arg);
             photon::thread_yield_to(th);
-            cnt++;
         }
-        return 0;
     }
 
     void do_loop() {
-        photon::init(INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT);
-        DEFER(photon::fini());
         pth = photon::CURRENT;
-        LOG_INFO("worker start");
         pool = photon::new_thread_pool(32);
-        loop->async_run();
-        photon::thread_usleep(-1);
+        LOG_INFO("worker start");
+        main_loop();
         LOG_INFO("worker finished");
-        while (!queue.empty()) {
-            photon::thread_usleep(1000);
-        }
-        quiting = true;
-        sem.signal(1);
-        delete loop;
         photon::delete_thread_pool(pool);
         pool = nullptr;
     }
+
+    void launch(int init_ev, int init_io) {
+        photon::init(init_ev, init_io);
+        DEFER(photon::fini());
+        do_loop();
+    }
 };
 
-ExecutorImpl *_new_executor() { return new ExecutorImpl(); }
+Executor::Executor(int init_ev, int init_io)
+    : e(new ExecutorImpl(init_ev, init_io)) {}
 
-void _delete_executor(ExecutorImpl *e) { delete e; }
+Executor::Executor(create_on_current_vcpu) : e(new ExecutorImpl()) {}
 
-void _issue(ExecutorImpl *e, Delegate<void> act) {
+Executor::~Executor() { delete e; }
+
+void Executor::_issue(ExecutorImpl *e, Delegate<void> act) {
     e->queue.send<ThreadPause>(act);
-    bool cond = true;
-    if (e->waiting.compare_exchange_weak(cond, false,
-                                         std::memory_order_acq_rel)) {
-        e->sem.signal(1);
-    }
+}
+
+Executor *Executor::export_as_executor() {
+    auto ret = new Executor(create_on_current_vcpu());
+    auto th = photon::thread_create11(&ExecutorImpl::do_loop, ret->e);
+    photon::thread_yield_to(th);
+    return ret;
 }
 
 }  // namespace photon

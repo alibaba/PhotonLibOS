@@ -535,11 +535,13 @@ int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());
+#ifdef __linux__
     if (et_poller_init() < 0) {
         LOG_ERROR("et_poller_init failed");
         exit(EAGAIN);
     }
     DEFER(et_poller_fini());
+#endif
     set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
     LOG_DEBUG("test result:`", RUN_ALL_TESTS());

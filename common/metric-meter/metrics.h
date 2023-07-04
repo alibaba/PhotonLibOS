@@ -59,9 +59,9 @@ public:
         if (now - time > m_interval * 2) {
             reset();
         } else if (now - time > m_interval) {
-            sum = photon::sat_sub(sum, sum * (now - time) / m_interval);
-            cnt = photon::sat_sub(cnt, cnt * (now - time) / m_interval);
-            time = now;
+            sum = photon::sat_sub(sum, sum * (now - time - m_interval) / m_interval);
+            cnt = photon::sat_sub(cnt, cnt * (now - time - m_interval) / m_interval);
+            time = now - m_interval;
         }
     }
     void put(int64_t val) {
@@ -95,8 +95,8 @@ public:
             reset();
         } else if (now - time > m_interval) {
             counter =
-                photon::sat_sub(counter, counter * (now - time) / m_interval);
-            time = now;
+                photon::sat_sub(counter, counter * (now - time - m_interval) / m_interval);
+            time = now - m_interval;
         }
     }
     void put(int64_t val = 1) {
