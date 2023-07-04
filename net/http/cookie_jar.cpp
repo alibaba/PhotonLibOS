@@ -118,8 +118,9 @@ public:
         return m_cookie[host]->get_cookies_from_headers(message);
     }
     int set_cookies_to_headers(Request* request) override {
-        if (request->host().empty()) return -1;
-        return m_cookie[request->host()]->set_cookies_to_headers(request);
+        auto host = request->host();
+        if (host.empty()) return -1;
+        return m_cookie[host]->set_cookies_to_headers(request);
     }
 };
 

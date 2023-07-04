@@ -73,6 +73,7 @@ public:
     }
 
     std::string_view host() const { return m_url | m_host; }
+    std::string_view host_no_port() const { return host(); }
     std::string_view host_port() const { return m_url | m_host_port;}
     uint16_t port() const { return m_port; }
     bool secure() const { return m_secure; }

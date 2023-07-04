@@ -54,7 +54,7 @@ public:
 
     template <typename T>
     ISocketStream* dial(const T& x, uint64_t timeout = -1UL) {
-        return dial(x.host(), x.port(), x.secure(), timeout);
+        return dial(x.host_no_port(), x.port(), x.secure(), timeout);
     }
 };
 

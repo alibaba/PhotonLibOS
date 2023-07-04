@@ -11,10 +11,10 @@ target_link_libraries(server_perf PRIVATE photon_shared ${testing_libs})
 add_executable(pure_libcurl pure_libcurl.cpp)
 target_link_libraries(pure_libcurl PRIVATE photon_shared ${testing_libs})
 
-#add_executable(client_function_test client_function_test.cpp)
-#target_link_libraries(client_function_test PRIVATE photon_shared ${testing_libs})
-#add_test(NAME client_function_test COMMAND $<TARGET_FILE:client_function_test>)
-#
+add_executable(client_function_test client_function_test.cpp)
+target_link_libraries(client_function_test PRIVATE photon_shared ${testing_libs})
+add_test(NAME client_function_test COMMAND $<TARGET_FILE:client_function_test>)
+
 add_executable(server_function_test server_function_test.cpp)
 target_link_libraries(server_function_test PRIVATE photon_shared ${testing_libs})
 add_test(NAME server_function_test COMMAND $<TARGET_FILE:server_function_test>)

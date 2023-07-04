@@ -183,12 +183,13 @@ TEST(headers, resp_header) {
     } while (!exceed_stream.done());
 }
 TEST(headers, url) {
-    RequestHeadersStored<> headers(Verb::UNKNOWN, "https://domain.com/dir1/dir2/file?key1=value1&key2=value2");
-    LOG_DEBUG(VALUE(headers.target()));
-    LOG_DEBUG(VALUE(headers.host()));
-    LOG_DEBUG(VALUE(headers.secure()));
-    LOG_DEBUG(VALUE(headers.query()));
-    LOG_DEBUG(VALUE(headers.port()));
+    RequestHeadersStored<> headers(Verb::UNKNOWN, "https://domain.com:8888/dir1/dir2/file?key1=value1&key2=value2");
+    EXPECT_EQ(true, headers.target() =="/dir1/dir2/file?key1=value1&key2=value2");
+    EXPECT_EQ(true, headers.host() == "domain.com:8888");
+    EXPECT_EQ(headers.port(), 8888);
+    EXPECT_EQ(true, headers.host_no_port() == "domain.com");
+    EXPECT_EQ(headers.secure(), 1);
+    EXPECT_EQ(true, headers.query() == "key1=value1&key2=value2");
     RequestHeadersStored<> new_headers(Verb::UNKNOWN, "");
     if (headers.secure())
         new_headers.headers.insert("Referer", http_url_scheme);
@@ -198,6 +199,7 @@ TEST(headers, url) {
     new_headers.headers.value_append(headers.target());
     auto Referer_value = new_headers.headers["Referer"];
     LOG_DEBUG(VALUE(Referer_value));
+    EXPECT_EQ(true, Referer_value == "http://domain.com:8888/dir1/dir2/file?key1=value1&key2=value2");
 }
 
 TEST(ReqHeaders, redirect) {
