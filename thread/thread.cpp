@@ -130,17 +130,10 @@ namespace photon
         free(ptr);
     }
 
-    Delegate<void *, size_t> &photon_thread_alloc() {
-        static Delegate<void *, size_t> _photon_thread_alloc(
-            &default_photon_thread_stack_alloc, nullptr);
-        return _photon_thread_alloc;
-    }
-
-    Delegate<void, void *, size_t> &photon_thread_dealloc() {
-        static Delegate<void, void *, size_t> _photon_thread_dealloc(
-            &default_photon_thread_stack_dealloc, nullptr);
-        return _photon_thread_dealloc;
-    }
+    static Delegate<void*, size_t> photon_thread_alloc(
+        &default_photon_thread_stack_alloc, nullptr);
+    static Delegate<void, void*, size_t> photon_thread_dealloc(
+        &default_photon_thread_stack_dealloc, nullptr);
 
     struct vcpu_t;
     struct thread;
@@ -290,7 +283,7 @@ namespace photon
             assert(state == states::DONE);
             // `buf` and `stack_size` will always store on register
             // when calling deallocating.
-            photon_thread_dealloc()(buf, stack_size);
+            photon_thread_dealloc(buf, stack_size);
         }
     };
 
@@ -845,7 +838,7 @@ R"(
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
         stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
-        char *ptr = (char *)photon_thread_alloc()(stack_size);
+        char* ptr = (char*)photon_thread_alloc(stack_size);
         auto p = ptr + stack_size - sizeof(thread) - randomizer;
         (uint64_t&)p &= ~63;
         auto th = new (p) thread;
@@ -1815,18 +1808,18 @@ R"(
         return --_n_vcpu;
     }
 
-    void set_photon_thread_stack_allocator(
-        Delegate<void *, size_t> _photon_thread_alloc,
-        Delegate<void, void *, size_t> _photon_thread_dealloc) {
-        photon_thread_alloc() = _photon_thread_alloc;
-        photon_thread_dealloc() = _photon_thread_dealloc;
-    }
-
     void* stackful_malloc(size_t size) {
         return CURRENT->stackful_malloc(size);
     }
 
     void stackful_free(void* ptr) {
         CURRENT->stackful_free(ptr);
+    }
+
+    void set_photon_thread_stack_allocator(
+        Delegate<void *, size_t> _photon_thread_alloc,
+        Delegate<void, void *, size_t> _photon_thread_dealloc) {
+        photon_thread_alloc = _photon_thread_alloc;
+        photon_thread_dealloc = _photon_thread_dealloc;
     }
 }
