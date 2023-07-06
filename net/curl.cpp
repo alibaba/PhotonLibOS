@@ -109,7 +109,7 @@ static uint64_t on_timer(void* = nullptr) {
 }
 /* CURLMOPT_TIMERFUNCTION */
 static int timer_cb(CURLM*, long timeout_ms, void*) {
-    if (timeout_ms >= 0) {
+    if (timeout_ms >= 0 && cctx.g_timer) {
         cctx.g_timer->reset(timeout_ms * 1000UL);
     }
     return 0;
@@ -244,11 +244,11 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
     return 0;
 }
 void libcurl_fini() {
+    delete cctx.g_timer;
+    cctx.g_timer = nullptr;
     cctx.g_loop->stop();
     delete cctx.g_loop;
     cctx.g_loop = nullptr;
-    delete cctx.g_timer;
-    cctx.g_timer = nullptr;
     delete cctx.g_poller;
     cctx.g_poller = nullptr;
     CURLMcode ret = curl_multi_cleanup(cctx.g_libcurl_multi);
@@ -259,6 +259,12 @@ void libcurl_fini() {
 
 std::string url_escape(const char* str) {
     auto s = curl_escape(str, 0);
+    DEFER(curl_free(s));
+    return std::string(s);
+}
+
+std::string url_unescape(const char* str) {
+    auto s = curl_unescape(str, 0);
     DEFER(curl_free(s));
     return std::string(s);
 }
