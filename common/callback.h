@@ -50,12 +50,12 @@ struct Delegate : public Delegate_Base
     template<typename U>    // Function with U* as the 1st argument
     using UFunc  = R (*)(U*, Ts...);
 
-    Delegate(void* obj, Func func)      { bind(obj, func); }
-    Delegate(Func func, void* obj)      { bind(obj, func); }
-    Delegate(Func0 func0)               { bind(func0); }
+    constexpr Delegate(void* obj, Func func) : _obj(obj), _func(func) {}
+    constexpr Delegate(Func func, void* obj) : _obj(obj), _func(func) {}
+    constexpr Delegate(Func0 func0) : _obj(nullptr), _func((Func&)func0) {}
 
     template<typename U>
-    Delegate(U* obj, UFunc<U> func)     { bind(obj, func); }
+    constexpr Delegate(U* obj, UFunc<U> func) : _obj(obj), _func((Func&)func) {}
 
     template<typename U>
     Delegate(U* obj, UMFunc<U> func)    { bind(obj, func); }

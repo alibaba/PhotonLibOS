@@ -29,3 +29,7 @@ add_test(NAME test-tls-order-native COMMAND $<TARGET_FILE:test-tls-order-native>
 add_executable(test-tls-order-photon test-tls-order-photon.cpp)
 target_link_libraries(test-tls-order-photon PRIVATE photon_shared ${testing_libs})
 add_test(NAME test-tls-order-photon COMMAND $<TARGET_FILE:test-tls-order-photon>)
+
+add_executable(test-lib-data test-lib-data.cpp)
+target_link_libraries(test-lib-data PRIVATE photon_shared ${testing_libs})
+add_test(NAME test-lib-data COMMAND $<TARGET_FILE:test-lib-data>)
