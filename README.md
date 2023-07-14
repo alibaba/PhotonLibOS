@@ -97,6 +97,7 @@ Client Mode: Ping-pong
 |             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
 |               [evpp](https://github.com/Qihoo360/evpp)                |   C++    |   Async Callback    |  512 Bytes  |   1000   | 378K |  1.44Gb   |   100%   |
 |                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
+|                [netty](https://github.com/netty/netty)                |   Java   |   Async Callback    |  512 Bytes  |   1000   | 340K |  1.30Gb   |   99%    |
 |                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
 | [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 327K |  1.25Gb   |   100%   |
 |            [swoole](https://github.com/swoole/swoole-src)             |   PHP    | Stackful Coroutine  |  512 Bytes  |   1000   | 325K |  1.24Gb   |   99%    |
