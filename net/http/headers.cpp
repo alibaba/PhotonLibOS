@@ -170,7 +170,8 @@ int HeadersBase::parse() {
     Parser p({m_buf, m_buf_size});
     while(p[0] != '\r') {
         auto k = p.extract_until_char(':');
-        p.skip_string(": ");
+        p.skip_chars(':');
+        p.skip_chars(' ', true);
         auto v = p.extract_until_char('\r');
         p.skip_string("\r\n");
         if (kv_add({k, v}) == nullptr)

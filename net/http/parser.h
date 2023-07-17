@@ -32,9 +32,13 @@ public:
     {
         if (estring_view(_ptr, _end - _ptr).starts_with(sv)) _ptr += sv.length();
     }
-    void skip_chars(char c)
+    void skip_chars(char c, bool continuously = false)
     {
-        if (*_ptr == c) _ptr++;
+        while (*_ptr == c) {
+            _ptr++;
+            if (!continuously)
+                return;
+        }
     }
     void skip_until_string(const std::string& s)
     {
