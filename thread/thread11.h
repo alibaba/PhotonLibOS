@@ -29,7 +29,7 @@ namespace photon {
     static void* __stub11(void*) {
         using Pair = std::pair<F, SavedArgs>;
         auto p = thread_reserved_space<Pair>(CURRENT);
-        tuple_assistance::apply(p->first, SavedArgs{p->second});
+        tuple_assistance::apply(p->first, SavedArgs{std::move(p->second)});
         return nullptr;
     }
 
@@ -49,9 +49,10 @@ namespace photon {
     template<typename FUNCTOR, typename...ARGUMENTS>
     struct FunctorWrapper {
         typename std::decay<FUNCTOR>::type _obj;
+        using result_type = typename  std::result_of<FUNCTOR(ARGUMENTS...)>::type; 
         __attribute__((always_inline))
-        void operator()(ARGUMENTS&&...args) {
-            _obj(std::forward<ARGUMENTS>(args)...);
+        result_type operator()(ARGUMENTS&&...args) {
+            return   _obj(std::forward<ARGUMENTS>(args)...);
         }
     };
 

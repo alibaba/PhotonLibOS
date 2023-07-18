@@ -91,8 +91,15 @@ constexpr inline decltype(auto) apply(F&& f, Tuple&& t) {
 }
 
 #else
-template <typename F, typename Tuple>
-using template std::apply<F, Tuple>;
+// template <typename F, typename Tuple>
+// using template std::apply<F, Tuple>;
+ 
+
+template <typename F, typename Tuple> 
+constexpr  decltype(auto) apply(F && f, Tuple && t){
+    return std::apply(std::forward<F>(f), std::forward<Tuple>(t)); 
+}
+
 #endif
 
 template <typename P, size_t I, typename... Ts>
