@@ -21,7 +21,7 @@ as the [photon](https://en.wikipedia.org/wiki/Photon) particle, which exactly is
 * How to transform `RocksDB` from multi-threads to coroutines by only 200 lines of code?
 [En](https://github.com/facebook/rocksdb/issues/11017) / [中文](https://developer.aliyun.com/article/1093864).
 
-<details><summary>More history...</summary><p>
+<details><summary>Click to show more history...</summary><p>
 
 * Version 0.5 is released. Except for various performance improvements, including spinlock, context switch,
   and new run queue for coroutine scheduling, we have re-implemented the HTTP module so that there is no `boost` dependency anymore.
@@ -58,11 +58,11 @@ and prepared to wrap them into the framework. It is a real killer in the low lev
 
 Compare Photon with fio when reading an 3.5TB NVMe raw device.
 
-|        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO | QPS  | Throughput | CPU util |
-|:------:|:---------:|:---------:|:-------:|:--------:|:--------:|:----:|:----------:|:--------:|
-| Photon | io_uring  | Rand-read |   4KB   |   128    |   Yes    | 433K |   1.73GB   |   100%   |
-| Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 346K |   1.38GB   |   100%   |
-|  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K |   1.11GB   |   100%   |
+|        | IO Engine |  IO Type  | IO Size | IO Depth | DirectIO |  QPS  | Throughput | CPU util |
+| :----: | :-------: | :-------: | :-----: | :------: | :------: | :---: | :--------: | :------: |
+| Photon | io_uring  | Rand-read |   4KB   |   128    |   Yes    | 433K  |   1.73GB   |   100%   |
+| Photon |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 346K  |   1.38GB   |   100%   |
+|  fio   |  libaio   | Rand-read |   4KB   |   128    |   Yes    | 279K  |   1.11GB   |   100%   |
 
 Note that fio only enables 1 job (process).
 
@@ -74,10 +74,10 @@ Conclusion: Photon is faster than fio under this circumstance.
 
 Compare TCP socket echo server performance, in descending order.
 
-Client Mode: Streaming
+##### 2.1.1 Client Mode: Streaming
 
 |                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
-|:---------------------------------------------------------------------:|:--------:|:-------------------:|:-----------:|:--------:|:-----:|:---------:|:--------:|
+| :-------------------------------------------------------------------: | :------: | :-----------------: | :---------: | :------: | :---: | :-------: | :------: |
 |                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 1604K |  6.12Gb   |   99%    |
 |           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 1545K |  5.89Gb   |   99%    |
 |                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |    4     | 1384K |  5.28Gb   |   98%    |
@@ -85,33 +85,36 @@ Client Mode: Streaming
 |                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |    4     | 1083K |  4.13Gb   |   100%   |
 |              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 770K  |  2.94Gb   |   99%    |
 |             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
+|             [monoio](https://github.com/bytedance/monoio)             |   Rust   | Stackless Coroutine |  512 Bytes  |    4     | 610K  |  2.32Gb   |   100%   |
 |               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
 |              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
 |             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 186K  |  0.71Gb   |   98%    |
 
-Client Mode: Ping-pong
+##### 2.1.2 Client Mode: Ping-pong
 
-|                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
-|:---------------------------------------------------------------------:|:--------:|:-------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
-|                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 412K |  1.57Gb   |   100%   |
-|             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
-|               [evpp](https://github.com/Qihoo360/evpp)                |   C++    |   Async Callback    |  512 Bytes  |   1000   | 378K |  1.44Gb   |   100%   |
-|                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
-|                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
-| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 327K |  1.25Gb   |   100%   |
-|            [swoole](https://github.com/swoole/swoole-src)             |   PHP    | Stackful Coroutine  |  512 Bytes  |   1000   | 325K |  1.24Gb   |   99%    |
-|              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 317K |  1.21Gb   |   100%   |
-|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
-|               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
-|              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
-|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K |  0.92Gb   |   99%    |
-|                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K |  0.75Gb   |   100%   |
+|                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
+| :-------------------------------------------------------------------: | :------: | :-----------------: | :---------: | :------: | :---: | :-------: | :------: |
+|                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 412K  |  1.57Gb   |   100%   |
+|             [monoio](https://github.com/bytedance/monoio)             |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 400K  |  1.52Gb   |   100%   |
+|             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |   1000   | 393K  |  1.49Gb   |   100%   |
+|               [evpp](https://github.com/Qihoo360/evpp)                |   C++    |   Async Callback    |  512 Bytes  |   1000   | 378K  |  1.44Gb   |   100%   |
+|                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 365K  |  1.39Gb   |   100%   |
+|                [netty](https://github.com/netty/netty)                |   Java   |   Async Callback    |  512 Bytes  |   1000   | 340K  |  1.30Gb   |   99%    |
+|                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |   1000   | 331K  |  1.26Gb   |   100%   |
+| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 327K  |  1.25Gb   |   100%   |
+|            [swoole](https://github.com/swoole/swoole-src)             |   PHP    | Stackful Coroutine  |  512 Bytes  |   1000   | 325K  |  1.24Gb   |   99%    |
+|              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 317K  |  1.21Gb   |   100%   |
+|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 279K  |  1.06Gb   |   98%    |
+|               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 260K  |  0.99Gb   |   96%    |
+|              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K  |  0.98Gb   |   156%   |
+|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K  |  0.92Gb   |   99%    |
+|                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K  |  0.75Gb   |   100%   |
 
-<details><summary>More details...</summary><p>
+<details><summary>CLick to show more details...</summary><p>
 
 - The Streaming client is to measure echo server performance when handling high throughput. A similar scenario in the
 real world is the multiplexing technology used by RPC and HTTP 2.0. We will set up 4 client processes,
-and each of them will create only one connection. Send coroutine and recv coroutine are running their loops separately.
+and each of them will create only one connection. Send coroutine and recv coroutine are running infinite loops separately.
 - The Ping-pong client is to measure echo server performance when handling large amounts of connections.
 We will set up 10 client processes, and each of them will create 100 connections. For a single connection, it has to send first, then receive.
 - Server and client are all cloud VMs, 64Core 128GB, Intel Platinum CPU 2.70GHz. Kernel version is 6.0.7. The network bandwidth (unilateral) is 32Gb.
@@ -126,10 +129,10 @@ Conclusion: Photon socket has the best per-core QPS.
 
 Compare Photon and Nginx when serving static files, using Apache Bench(ab) as client.
 
-|        | File Size | QPS  | CPU util |
-|:------:|:---------:|:----:|:--------:|
-| Photon |    4KB    | 114K |   100%   |
-| Nginx  |    4KB    | 97K  |   100%   |
+|        | File Size |  QPS  | CPU util |
+| :----: | :-------: | :---: | :------: |
+| Photon |    4KB    | 114K  |   100%   |
+| Nginx  |    4KB    |  97K  |   100%   |
 
 Note that Nginx only enables 1 worker (process).
 
