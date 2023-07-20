@@ -91,8 +91,7 @@ constexpr inline decltype(auto) apply(F&& f, Tuple&& t) {
 }
 
 #else
-template <typename F, typename Tuple>
-using template std::apply<F, Tuple>;
+using std::apply;
 #endif
 
 template <typename P, size_t I, typename... Ts>
