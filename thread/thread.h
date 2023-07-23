@@ -235,6 +235,7 @@ namespace photon
         }
 
     protected:
+        static constexpr const int MaxTries = 100;
         std::atomic<thread*> owner{nullptr};
         spinlock splock;
     };
