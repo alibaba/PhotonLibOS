@@ -24,6 +24,7 @@ limitations under the License.
 #include <algorithm>
 #include <random>
 #include <thread>
+#include <atomic>
 
 namespace photon {
 
@@ -34,19 +35,17 @@ public:
     photon::mutex worker_mtx;
     std::vector<std::thread> owned_std_threads;
     std::vector<photon::vcpu_base *> vcpus;
+    std::atomic<uint64_t> vcpu_index{0};
     photon::semaphore queue_sem;
     photon::semaphore ready_vcpu;
     photon::condition_variable exit_cv;
     photon::common::RingChannel<
         LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE>>
         ring;
-
-    std::random_device rd;
-    std::mt19937 gen;
     int mode;
 
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-        : queue_sem(0), ready_vcpu(0), gen(rd()), mode(mode) {
+        : queue_sem(0), ready_vcpu(0), mode(mode) {
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
@@ -134,8 +133,9 @@ public:
     }
 
     photon::vcpu_base *get_vcpu_in_pool(size_t index) {
-        if (index >= vcpus.size()) {
-            index = gen() % vcpus.size();
+        auto size = vcpus.size();
+        if (index >= size) {
+            index = vcpu_index++ % size;
         }
         return vcpus[index];
     }
