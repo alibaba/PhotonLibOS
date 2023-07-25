@@ -99,7 +99,7 @@ public:
      *
      * @param th Photon thread that goint to migrate
      * @param index Which vcpu in pool to migrate to. if index is not in range
-     * [0, vcpu_num), it will choose random one in pool.
+     * [0, vcpu_num), it will choose the next one in pool (round-robin).
      * @return int 0 for success, and <0 means failed to migrate.
      */
     int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL) {
