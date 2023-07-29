@@ -1,20 +1,48 @@
-# Network lib
+---
+sidebar_position: 6
+toc_max_heading_level: 4
+---
 
-### API (net/socket.h)
+# Network
+
+### Namespace
+
+`photon::net::`
+
+### Headers
+
+`<photon/net/socket.h>`
+
+### API
+
+#### Client and Server
 
 Network lib provides non-blocking socket implementations for clients and servers.
 
 ```cpp
-    ISocketClient* new_tcp_socket_client();
-    ISocketServer* new_tcp_socket_server();
-    ISocketClient* new_uds_client();
-    ISocketServer* new_uds_server(bool autoremove = false);
-    ISocketClient* new_iouring_tcp_client();
-    ISocketServer* new_iouring_tcp_server();
-    ...
+ISocketClient* new_tcp_socket_client();
+ISocketServer* new_tcp_socket_server();
+
+ISocketClient* new_uds_client();
+ISocketServer* new_uds_server(bool autoremove = false);
+
+ISocketClient* new_iouring_tcp_client();
+ISocketServer* new_iouring_tcp_server();
+
+ISocketClient* new_zerocopy_tcp_client();
+ISocketServer* new_zerocopy_tcp_server();
+
+ISocketClient* new_et_tcp_socket_client();
+ISocketServer* new_et_tcp_socket_server();
+
+ISocketClient* new_smc_socket_client();
+ISocketServer* new_smc_socket_server();
+
+ISocketClient* new_fstack_dpdk_socket_client();
+ISocketServer* new_fstack_dpdk_socket_server();
 ```
 
-### Client and Server
+#### Class Method
 
 ```cpp
 class ISocketClient : public ISocket {
@@ -36,9 +64,9 @@ public:
 };
 ```
 
-### ISocketStream
+#### ISocketStream
 
-ISocketStream is inherited from IStream, with some socket operations like recv, send, timeout, etc.
+`ISocketStream` is inherited from `IStream`, with some socket operations like `recv`, `send`, `timeout`, etc.
 
 ```cpp
 namespace photon {
@@ -67,7 +95,7 @@ namespace net {
 }
 ```
 
-## IPv4 Address
+#### IPv4 Address
 ```cpp
 namespace photon {
 namespace net {
@@ -101,9 +129,9 @@ namespace net {
 }
 ```
 
-## Socket class hierarchy
+### Socket class hierarchy
 
-![socket](../doc/socket.png)
+![socket](/img/api/socket.png)
 
 
 

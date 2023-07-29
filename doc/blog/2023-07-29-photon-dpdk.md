@@ -1,4 +1,9 @@
-# How to run Photon with F-Stack and DPDK ?
+---
+slug: photon-dpdk
+title: How to run Photon on top of DPDK
+authors: [beef9999]
+tags: [DPDK, F-Stack]
+---
 
 &emsp;&emsp;Since version 0.6, Photon can run on an userspace TCP/IP stack if enabled the `INIT_IO_FSTACK_DPDK` io engine. 
 
@@ -205,7 +210,7 @@ for the Linux kernel.
 
 ### Run Photon
 
-&emsp;&emsp;We have provided a new [example](../examples/fstack-dpdk/fstack-dpdk-demo.cpp).
+&emsp;&emsp;We have provided a new [example](https://github.com/alibaba/PhotonLibOS/blob/main/examples/fstack-dpdk/fstack-dpdk-demo.cpp).
 It looks quite alike the old echo server example, only a few lines of changes, but now the backend becomes DPDK.
 
 ```shell
