@@ -1,3 +1,10 @@
+---
+slug: thread-local
+title: The thread local variable for coroutines
+authors: [beef9999]
+tags: [thread-local]
+---
+
 # The thread local variable for coroutines
 
 As we all know, C++11 introduced the `thread_local` keyword to replace the `__thread` provided by the compiler,

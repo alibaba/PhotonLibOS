@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Uploaded to: SVG Repo, www.svgrepo.com, Generator: SVG Repo Mixer Tools -->
+<svg version="1.1" id="Uploaded to svgrepo.com" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
+	 width="800px" height="800px" viewBox="0 0 32 32" xml:space="preserve">
+<style type="text/css">
+	.isometric_tien{fill:#7BD6C4;}
+	.isometric_twaalf{fill:#569080;}
+	.st0{fill:#225B49;}
+	.st1{fill:#FF7344;}
+	.st2{fill:#F05A28;}
+	.st3{fill:#72C0AB;}
+	.st4{fill:#F29227;}
+	.st5{fill:#BE1E2D;}
+	.st6{fill:#F5DF89;}
+	.st7{fill:#F2D76C;}
+	.st8{fill:#F28103;}
+	.st9{fill:#F8F7C5;}
+	.st10{fill:#AD9A74;}
+	.st11{fill:#7BD6C4;}
+</style>
+<g>
+	<polygon class="isometric_tien" points="21.649,9 14.441,12.979 14.441,16.449 10.986,14.974 4,19.007 26,22.18 	"/>
+	<path class="isometric_twaalf" d="M26,22.18V23L4,19.827v-0.82L26,22.18z M14.441,12.979v3.47L26,22.18L14.441,12.979z"/>
+</g>
+</svg>

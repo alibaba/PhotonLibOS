@@ -17,6 +17,7 @@ limitations under the License.
 #include <fcntl.h>
 #include <vector>
 
+#include <photon/photon.h>
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/thread/std-compat.h>
