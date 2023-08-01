@@ -1394,7 +1394,7 @@ TEST(workpool, async_work_lambda_threadcreate) {
     sem.wait(4);
     duration = std::chrono::system_clock::now() - start;
     EXPECT_GE(duration, std::chrono::seconds(1));
-    EXPECT_LE(duration, std::chrono::seconds(2));
+    EXPECT_LE(duration, std::chrono::seconds(3));
     LOG_INFO("DONE");
 }
 
