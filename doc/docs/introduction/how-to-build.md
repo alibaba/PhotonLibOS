@@ -64,7 +64,7 @@ brew install cmake openssl pkg-config
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build
 ```
 
 ```mdx-code-block
@@ -75,7 +75,7 @@ cmake --build build -j
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build
 ```
 
 ```mdx-code-block
@@ -87,7 +87,7 @@ cmake --build build -j
 cd PhotonLibOS
 # Use `brew info openssl` to find openssl path
 cmake -B build -D OPENSSL_ROOT_DIR=/path/to/openssl/
-cmake --build build -j
+cmake --build build
 ```
 
 ```mdx-code-block
@@ -110,11 +110,12 @@ The examples and test code are built together.
 
 ```bash
 # Install additional dependencies
+dnf install epel-releaase
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=1 -D CMAKE_BUILD_TYPE=Debug
-cmake --build build -j
+cmake -B build -D BUILD_TESTING=ON
+cmake --build build
 
 # Run all test cases
 cd build
@@ -131,8 +132,8 @@ ctest
 apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=1 -D CMAKE_BUILD_TYPE=Debug
-cmake --build build -j
+cmake -B build -D BUILD_TESTING=ON
+cmake --build build
 
 # Run all test cases
 cd build
@@ -149,8 +150,8 @@ ctest
 brew install gflags googletest gsasl
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=1 -D CMAKE_BUILD_TYPE=Debug
-cmake --build build -j
+cmake -B build -D BUILD_TESTING=ON
+cmake --build build
 
 # Run all test cases
 cd build

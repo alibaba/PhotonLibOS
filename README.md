@@ -1,10 +1,10 @@
 # PhotonLibOS
 
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml)
 [![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml)
 
-
-Visit [photonlibos.github.io](https://photonlibos.github.io) for detailed documents.
+[PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
 * Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.

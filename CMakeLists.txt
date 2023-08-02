@@ -10,6 +10,7 @@ project(
 include(FindPackageHandleStandardArgs)
 include(CheckCXXCompilerFlag)
 include(FetchContent)
+include(ProcessorCount)
 set(FETCHCONTENT_QUIET false)
 find_package(PkgConfig REQUIRED)
 
@@ -23,24 +24,27 @@ option(FETCH_GTEST_GFLAGS_SOURCE "Fetch gtest, gmock and gflags source code. Lin
 option(ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(ENABLE_EXTFS "enable extfs" OFF)
 
-# Get CPU arch
+# Get CPU arch and number
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${ARCH} STREQUAL arm64))
     message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
 endif ()
+ProcessorCount(NumCPU)
 
 # Compiler options
 add_compile_options(-Wall)  # -Werror is not enable yet
 
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED on)
-set(CMAKE_CXX_EXTENSIONS off)
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# CMake didn't provide an abstraction of optimization level for now.
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")             # For development
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")     # For production
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")    # For CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_BUILD_RPATH_USE_ORIGIN on)
-set(CMAKE_POSITION_INDEPENDENT_CODE on)
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_BUILD_PARALLEL_LEVEL ${NumCPU})
 
 if (${ARCH} STREQUAL x86_64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")
@@ -125,7 +129,8 @@ if (ENABLE_EXTFS)
     find_package(e2fs REQUIRED)
 endif()
 
-if (FETCH_GTEST_GFLAGS_SOURCE)
+function(do_fetch_gtest_gflags_src)
+    set(BUILD_TESTING OFF)  # Only disable in this function
     FetchContent_Declare(
             gflags
             GIT_REPOSITORY https://github.com/gflags/gflags.git
@@ -141,6 +146,10 @@ if (FETCH_GTEST_GFLAGS_SOURCE)
             GIT_TAG release-1.12.1
     )
     FetchContent_MakeAvailable(googletest)
+endfunction()
+
+if (FETCH_GTEST_GFLAGS_SOURCE)
+    do_fetch_gtest_gflags_src()
 endif()
 
 # Compile photon objects
@@ -274,15 +283,15 @@ target_link_libraries(photon_static ${static_link_libs})
 if (BUILD_TESTING)
     include(CTest)
 
-if (FETCH_GTEST_GFLAGS_SOURCE)
-    set(testing_libs gtest gmock gflags::gflags)
-else()
-    find_package(GTest REQUIRED)
-    find_package(gmock REQUIRED)
-    find_package(gflags REQUIRED)
-    set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
-    include_directories(${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS})
-endif()
+    if (FETCH_GTEST_GFLAGS_SOURCE)
+        set(testing_libs gtest gmock gflags::gflags)
+    else ()
+        find_package(GTest REQUIRED)
+        find_package(gmock REQUIRED)
+        find_package(gflags REQUIRED)
+        set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
+        include_directories(${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS})
+    endif ()
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)
@@ -294,8 +303,8 @@ endif()
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
-if (ENABLE_EXTFS)
-    add_subdirectory(fs/extfs/test)
-endif ()
+    if (ENABLE_EXTFS)
+        add_subdirectory(fs/extfs/test)
+    endif ()
 
 endif ()
