@@ -18,11 +18,11 @@ jobs:
       run: |
         brew install cmake openssl gflags googletest gsasl 
 
-    - name: Configure CMake
-      run: cmake -B ${{github.workspace}}/build -D BUILD_TESTING=1 -D ENABLE_SASL=1 -D CMAKE_BUILD_TYPE=Debug -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
-
     - name: Build
-      run: cmake --build ${{github.workspace}}/build -j
+      run: |
+        cmake -B ${{github.workspace}}/build -D BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+          -D ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+        cmake --build ${{github.workspace}}/build
 
     - name: Test
       working-directory: ${{github.workspace}}/build
