@@ -1,0 +1,40 @@
+name: Linux ARM
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  centos8-gcc921-epoll:
+    runs-on: [self-hosted, Linux, ARM64]
+
+    container:
+      image: dokken/centos-stream-8:sha-40294ce
+      options: --cpus 4
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          dnf install -y git gcc-c++ cmake
+          dnf install -y gcc-toolset-9-gcc-c++
+          dnf install -y openssl-devel libcurl-devel libaio-devel
+          dnf install -y epel-release
+          dnf install -y fuse-devel libgsasl-devel
+
+      - name: Build
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          cmake -B build -D BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+            -D ENABLE_SASL=ON -D ENABLE_FUSE=ON \
+            -D ENABLE_URING=OFF -D FETCH_GTEST_GFLAGS_SOURCE=ON
+          cmake --build build
+
+      - name: Test
+        run: |
+          ulimit -l unlimited
+          cd build
+          ctest --timeout 3600 -V
