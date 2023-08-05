@@ -52,7 +52,7 @@ You can either monitor the server's network bandwidth via `iftop`, or print its 
 #### 1. Streaming
 
 |                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
-| :-------------------------------------------------------------------: | :------: | :-----------------: | :---------: | :------: | :---: | :-------: | :------: |
+|:---------------------------------------------------------------------:|:--------:|:-------------------:|:-----------:|:--------:|:-----:|:---------:|:--------:|
 |                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 1604K |  6.12Gb   |   99%    |
 |           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 1545K |  5.89Gb   |   99%    |
 |                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |    4     | 1384K |  5.28Gb   |   98%    |
@@ -61,29 +61,31 @@ You can either monitor the server's network bandwidth via `iftop`, or print its 
 |              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 770K  |  2.94Gb   |   99%    |
 |             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |    4     | 634K  |  2.42Gb   |   97%    |
 |             [monoio](https://github.com/bytedance/monoio)             |   Rust   | Stackless Coroutine |  512 Bytes  |    4     | 610K  |  2.32Gb   |   100%   |
+|   [Python3 asyncio](https://docs.python.org/3/library/asyncio.html)   |  Python  | Stackless Coroutine |  512 Bytes  |    4     | 517K  |  1.97Gb   |   99%    |
 |               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |    4     | 432K  |  1.65Gb   |   96%    |
 |              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 412K  |  1.57Gb   |   99%    |
 |             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |    4     | 186K  |  0.71Gb   |   98%    |
 
 #### 2. Ping-pong
 
-|                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num |  QPS  | Bandwidth | CPU util |
-| :-------------------------------------------------------------------: | :------: | :-----------------: | :---------: | :------: | :---: | :-------: | :------: |
-|                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 412K  |  1.57Gb   |   100%   |
-|             [monoio](https://github.com/bytedance/monoio)             |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 400K  |  1.52Gb   |   100%   |
-|             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |   1000   | 393K  |  1.49Gb   |   100%   |
-|               [evpp](https://github.com/Qihoo360/evpp)                |   C++    |   Async Callback    |  512 Bytes  |   1000   | 378K  |  1.44Gb   |   100%   |
-|                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 365K  |  1.39Gb   |   100%   |
-|                [netty](https://github.com/netty/netty)                |   Java   |   Async Callback    |  512 Bytes  |   1000   | 340K  |  1.30Gb   |   99%    |
-|                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |   1000   | 331K  |  1.26Gb   |   100%   |
-| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 327K  |  1.25Gb   |   100%   |
-|            [swoole](https://github.com/swoole/swoole-src)             |   PHP    | Stackful Coroutine  |  512 Bytes  |   1000   | 325K  |  1.24Gb   |   99%    |
-|              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 317K  |  1.21Gb   |   100%   |
-|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 279K  |  1.06Gb   |   98%    |
-|               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 260K  |  0.99Gb   |   96%    |
-|              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K  |  0.98Gb   |   156%   |
-|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K  |  0.92Gb   |   99%    |
-|                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K  |  0.75Gb   |   100%   |
+|                                                                       | Language |  Concurrency Model  | Buffer Size | Conn Num | QPS  | Bandwidth | CPU util |
+|:---------------------------------------------------------------------:|:--------:|:-------------------:|:-----------:|:--------:|:----:|:---------:|:--------:|
+|                                Photon                                 |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 412K |  1.57Gb   |   100%   |
+|             [monoio](https://github.com/bytedance/monoio)             |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 400K |  1.52Gb   |   100%   |
+|             [boost::asio](https://think-async.com/Asio/)              |   C++    |   Async Callback    |  512 Bytes  |   1000   | 393K |  1.49Gb   |   100%   |
+|               [evpp](https://github.com/Qihoo360/evpp)                |   C++    |   Async Callback    |  512 Bytes  |   1000   | 378K |  1.44Gb   |   100%   |
+|                      [tokio](https://tokio.rs/)                       |   Rust   | Stackless Coroutine |  512 Bytes  |   1000   | 365K |  1.39Gb   |   100%   |
+|                [netty](https://github.com/netty/netty)                |   Java   |   Async Callback    |  512 Bytes  |   1000   | 340K |  1.30Gb   |   99%    |
+|                                  Go                                   |  Golang  | Stackful Coroutine  |  512 Bytes  |   1000   | 331K |  1.26Gb   |   100%   |
+| [acl/lib_fiber](https://github.com/acl-dev/acl/tree/master/lib_fiber) |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 327K |  1.25Gb   |   100%   |
+|            [swoole](https://github.com/swoole/swoole-src)             |   PHP    | Stackful Coroutine  |  512 Bytes  |   1000   | 325K |  1.24Gb   |   99%    |
+|              [zab](https://github.com/Donald-Rupin/zab)               |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 317K |  1.21Gb   |   100%   |
+|           [cocoyaxi](https://github.com/idealvin/cocoyaxi)            |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 279K |  1.06Gb   |   98%    |
+|               [libco](https://github.com/Tencent/libco)               |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 260K |  0.99Gb   |   96%    |
+|              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
+|             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K |  0.92Gb   |   99%    |
+|                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K |  0.75Gb   |   100%   |
+|   [Python3 asyncio](https://docs.python.org/3/library/asyncio.html)   |  Python  | Stackless Coroutine |  512 Bytes  |   1000   | 136K |  0.52Gb   |   99%    |
 
 :::note
 
