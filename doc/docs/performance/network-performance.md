@@ -85,6 +85,7 @@ You can either monitor the server's network bandwidth via `iftop`, or print its 
 |              [libgo](https://github.com/yyzybb537/libgo)              |   C++    | Stackful Coroutine  |  512 Bytes  |   1000   | 258K |  0.98Gb   |   156%   |
 |             [asyncio](https://github.com/netcan/asyncio)              |  C++20   | Stackless Coroutine |  512 Bytes  |   1000   | 241K |  0.92Gb   |   99%    |
 |                              TypeScript                               |  nodejs  |   Async Callback    |  512 Bytes  |   1000   | 192K |  0.75Gb   |   100%   |
+|                                Erlang                                 |  Erlang  |          -          |  512 Bytes  |   1000   | 165K |  0.63Gb   |   115%   |
 |   [Python3 asyncio](https://docs.python.org/3/library/asyncio.html)   |  Python  | Stackless Coroutine |  512 Bytes  |   1000   | 136K |  0.52Gb   |   99%    |
 
 :::note
