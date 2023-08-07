@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <memory.h>
-#include <sys/mman.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <cstddef>
@@ -26,6 +25,20 @@ limitations under the License.
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+
+#ifdef _WIN64
+#include <processthreadsapi.h>
+#include <stdlib.h>
+inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
+    auto ok = _aligned_malloc(size, alignment);
+    if (!ok)
+        return ENOMEM;
+    *memptr = ok;
+    return 0;
+}
+#else
+#include <sys/mman.h>
+#endif
 
 #define protected public
 #include "thread.h"
@@ -59,12 +72,16 @@ limitations under the License.
    by target vcpu in resume_thread(), when its runq becomes empty;
 */
 
+
 #define SCOPED_MEMBER_LOCK(x) SCOPED_LOCK(&(x)->lock, ((bool)x) * 2)
 
 // Define assembly section header for clang and gcc
 #if defined(__APPLE__)
 #define DEF_ASM_FUNC(name) ".text\n" \
                            #name": "
+#elif defined(_WIN64)
+#define DEF_ASM_FUNC(name) ".text\n .p2align 4\n" \
+                           ".def "#name"; .scl 3; .type 32; .endef"
 #else
 #define DEF_ASM_FUNC(name) ".section .text."#name",\"axG\",@progbits,"#name",comdat\n" \
                            ".type "#name", @function\n" \
@@ -124,7 +141,7 @@ namespace photon
     }
 
     void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
-#ifndef __aarch64__
+#if !defined(_WIN64) && !defined(__aarch64__)
         madvise(ptr, size, MADV_DONTNEED);
 #endif
         free(ptr);
@@ -255,12 +272,19 @@ namespace photon
 #ifdef __APPLE__
             stack_size = pthread_get_stacksize_np(pthread_self());
             stackful_alloc_top = (char*) pthread_get_stackaddr_np(pthread_self());
-#else
+#elif defined(_WIN64)
+            ULONG_PTR stack_low, stack_high;
+            GetCurrentThreadStackLimits(&stack_low, &stack_high);
+            stackful_alloc_top = (char*)stack_low;
+            stack_size = stack_high - stack_low;
+#elif defined(__linux__)
             pthread_attr_t gattr;
             pthread_getattr_np(pthread_self(), &gattr);
             pthread_attr_getstack(&gattr,
                 (void**)&stackful_alloc_top, &stack_size);
             pthread_attr_destroy(&gattr);
+#else
+            static_assert(false, "unsupported platform");
 #endif
         }
 
@@ -1234,7 +1258,7 @@ R"(
     }
 
     static void do_stack_pages_gc(void* arg) {
-#ifndef __aarch64__
+#if !defined(_WIN64) && !defined(__aarch64__)
         auto th = (thread*)arg;
         assert(th->vcpu == CURRENT->vcpu);
         auto buf = th->buf;
