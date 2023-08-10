@@ -24,6 +24,7 @@ limitations under the License.
 #include <algorithm>
 #include <random>
 #include <thread>
+#include <atomic>
 
 namespace photon {
 
@@ -39,6 +40,7 @@ public:
     photon::semaphore ready_vcpu;
     photon::condition_variable exit_cv;
     LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE> ring;
+    std::atomic<uint64_t> vcpu_index{0};
 
     std::random_device rd;
     std::mt19937 gen;
@@ -139,8 +141,9 @@ public:
     }
 
     photon::vcpu_base *get_vcpu_in_pool(size_t index) {
-        if (index >= vcpus.size()) {
-            index = gen() % vcpus.size();
+        auto size = vcpus.size();
+        if (index >= size) {
+            index = vcpu_index++ % size;
         }
         return vcpus[index];
     }

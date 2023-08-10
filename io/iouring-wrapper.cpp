@@ -241,7 +241,7 @@ public:
             LOG_ERROR_RETURN(0, -1, "iouring: event is either non-existent or one-shot finished");
         }
 
-        io_uring_prep_poll_remove(sqe, &iter->second.io_ctx);
+        io_uring_prep_poll_remove(sqe, (__u64) &iter->second.io_ctx);
         io_uring_sqe_set_data(sqe, nullptr);
         return 0;
     }
@@ -301,20 +301,13 @@ public:
             timeout = std::numeric_limits<int64_t>::max();
         }
         usec_to_timespec(timeout, &ts);
-        io_uring_sqe* sqe = io_uring_get_sqe(m_ring);
-        if (!sqe) {
-            LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
-        }
-        io_uring_prep_timeout(sqe, &ts, 1, 0);
-        io_uring_sqe_set_data(sqe, nullptr);
-
-        // Batch submit all SQEs
-        int ret = io_uring_submit_and_wait(m_ring, 1);
-        if (ret <= 0) {
-            LOG_ERROR_RETURN(0, -1, "iouring: failed to submit io")
-        }
 
         io_uring_cqe* cqe = nullptr;
+        int ret = io_uring_submit_and_wait_timeout(m_ring, &cqe, 1, &ts, nullptr);
+        if (ret < 0 && ret != -ETIME) {
+            LOG_ERROR_RETURN(0, -1, "iouring: failed to submit io");
+        }
+
         uint32_t head = 0;
         unsigned i = 0;
         io_uring_for_each_cqe(m_ring, head, cqe) {

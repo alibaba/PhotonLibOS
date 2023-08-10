@@ -1217,8 +1217,11 @@ namespace photon
     }
     int mutex::lock(uint64_t timeout)
     {
-        if (try_lock() == 0)
-            return 0;
+        for (int tries = 0; tries < 100; ++tries) {
+            if (try_lock() == 0)
+                return 0;
+            thread_yield();
+        }
         splock.lock();
         if (try_lock() == 0) {
             splock.unlock();

@@ -25,25 +25,25 @@ limitations under the License.
 
 namespace photon {
 
-ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t timeout);
+ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t timeout = -1);
 
-ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t timeout);
+ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t timeout = -1);
 
-ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout);
+ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout = -1);
 
-ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout);
+ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t timeout = -1);
 
-ssize_t iouring_send(int fd, const void* buf, size_t len, int flags, uint64_t timeout);
+ssize_t iouring_send(int fd, const void* buf, size_t len, int flags, uint64_t timeout = -1);
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, int flags, uint64_t timeout);
+ssize_t iouring_recv(int fd, void* buf, size_t len, int flags, uint64_t timeout = -1);
 
-ssize_t iouring_sendmsg(int fd, const msghdr* msg, int flags, uint64_t timeout);
+ssize_t iouring_sendmsg(int fd, const msghdr* msg, int flags, uint64_t timeout = -1);
 
-ssize_t iouring_recvmsg(int fd, msghdr* msg, int flags, uint64_t timeout);
+ssize_t iouring_recvmsg(int fd, msghdr* msg, int flags, uint64_t timeout = -1);
 
-int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout);
+int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout = -1);
 
-int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, uint64_t timeout);
+int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, uint64_t timeout = -1);
 
 int iouring_fsync(int fd);
 
