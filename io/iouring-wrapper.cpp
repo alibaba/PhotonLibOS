@@ -446,7 +446,7 @@ private:
         // Batch submit all SQEs
         int ret = io_uring_submit_and_wait(ring, 1);
         if (ret <= 0) {
-            LOG_ERROR_RETURN(0, -1, "iouring: failed to submit io")
+            LOG_ERRNO_RETURN(0, -1, "iouring: failed to submit io")
         }
         return 0;
     }
@@ -455,7 +455,7 @@ private:
         // Batch submit all SQEs
         int ret = io_uring_submit_and_wait_timeout(ring, cqe, 1, ts, nullptr);
         if (ret < 0 && ret != -ETIME) {
-            LOG_ERROR_RETURN(0, -1, "iouring: failed to submit io");
+            LOG_ERRNO_RETURN(0, -1, "iouring: failed to submit io");
         }
         return 0;
     }
@@ -465,12 +465,13 @@ private:
 
     static void set_submit_wait_function() {
         // The submit_and_wait_timeout API is more efficient than setting up a timer and waiting for it.
-        // But there is a kernel bug before 5.17, so choose appropriate function here.
+        // But there is a kernel bug before 5.15, so choose appropriate function here.
         // See https://git.kernel.dk/cgit/linux-block/commit/?h=io_uring-5.17&id=228339662b398a59b3560cd571deb8b25b253c7e
+        // and https://www.spinics.net/lists/stable/msg620268.html
         if (m_submit_wait_func)
             return;
         int result;
-        if (kernel_version_compare("5.17", result) == 0 && result >= 0) {
+        if (kernel_version_compare("5.15", result) == 0 && result >= 0) {
             m_submit_wait_func = submit_wait_by_api;
         } else {
             m_submit_wait_func = submit_wait_by_timer;
