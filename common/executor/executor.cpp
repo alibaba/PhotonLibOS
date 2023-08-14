@@ -8,6 +8,7 @@
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread-pool.h>
 #include <photon/thread/thread11.h>
+#include <photon/photon.h>
 
 #include <atomic>
 #include <thread>
@@ -75,8 +76,7 @@ public:
     }
 
     void do_loop() {
-        photon::vcpu_init();
-        photon::fd_events_init();
+        photon::init(photon::INIT_EVENT_IOURING, photon::INIT_IO_NONE);
         pth = photon::CURRENT;
         LOG_INFO("worker start");
         pool = photon::new_thread_pool(32);
@@ -91,8 +91,7 @@ public:
         delete loop;
         photon::delete_thread_pool(pool);
         pool = nullptr;
-        photon::fd_events_fini();
-        photon::vcpu_fini();
+        photon::fini();
     }
 };
 
