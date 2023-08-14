@@ -39,7 +39,7 @@ $ USE_SSH=true yarn deploy
 Not using SSH:
 
 ```
-$ GIT_USER=<Your GitHub username> yarn deploy
+$ GIT_USER=photonlibos yarn deploy
 ```
 
 Will push to the `main` branch and use the GitHub pages for hosting
