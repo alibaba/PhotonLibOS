@@ -61,7 +61,7 @@ public:
             auto ptr = malloc(sizeof(Operation) + buf_size);
             return new (ptr) Operation(c, buf_size);
         }
-        static void delete(Operation* op) {
+        static void delete_operation(Operation* op) {
             op->~Operation();
             free(op);
         }
@@ -92,6 +92,10 @@ public:
 
     Operation* new_operation(uint16_t buf_size = 64 * 1024 - 1) {
         return Operation::create(this, buf_size);
+    }
+
+    void delete_operation(Operation* op) {
+        Operation::delete_operation(op);
     }
 
     template<uint16_t BufferSize>
