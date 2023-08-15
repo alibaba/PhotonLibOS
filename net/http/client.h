@@ -61,6 +61,10 @@ public:
             auto ptr = malloc(sizeof(Operation) + buf_size);
             return new (ptr) Operation(c, buf_size);
         }
+        static void delete(Operation* op) {
+            op->~Operation();
+            free(op);
+        }
         void set_enable_proxy(bool enable) { enable_proxy = enable; }
 
         int call() {
