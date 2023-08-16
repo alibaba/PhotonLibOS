@@ -43,7 +43,7 @@ public:
     PooledDialer() :
             tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
             tcpsock(new_tcp_socket_pool(new_tcp_socket_client(), -1, true)),
-            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client()), -1, true)),
+            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1, true)),
             resolver(new_default_resolver(kDNSCacheLife)) {
     }
 
