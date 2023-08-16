@@ -80,9 +80,9 @@ def set_u64_reg(l, r):
 
 def get_stkregs(p):
     t = get_u64_ptr(p['stack']['_ptr'])
-    rsp = t + 64
-    rip = get_u64_val(t + 48)
-    rbp = get_u64_val(t + 32)
+    rsp = t + 8
+    rip = get_u64_val(t + 8)
+    rbp = get_u64_val(t)
     return rsp, rbp, rip
 
 
