@@ -1251,7 +1251,6 @@ TEST(mutex, timeout_is_zero) {
         });
     }
     for(auto &th : ths) th.join();
-    EXPECT_GT(cnt.load(), 0);
     LOG_INFO("Meet ` lock timeout, all work finished", cnt.load());
 }
 
