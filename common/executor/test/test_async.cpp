@@ -18,7 +18,6 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/executor/executor.h>
-#include <photon/common/executor/stdlock.h>
 #include <photon/common/utility.h>
 #include <photon/fs/exportfs.h>
 #include <photon/fs/filesystem.h>
