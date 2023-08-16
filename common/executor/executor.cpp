@@ -14,7 +14,7 @@
 
 namespace photon {
 
-class ExecutorImpl {
+class Executor::ExecutorImpl {
 public:
     using CBList =
         common::RingChannel<LockfreeMPMCRingQueue<Delegate<void>, 32UL * 1024>>;
@@ -83,9 +83,9 @@ public:
 };
 
 Executor::Executor(int init_ev, int init_io)
-    : e(new ExecutorImpl(init_ev, init_io)) {}
+    : e(new Executor::ExecutorImpl(init_ev, init_io)) {}
 
-Executor::Executor(create_on_current_vcpu) : e(new ExecutorImpl()) {}
+Executor::Executor(create_on_current_vcpu) : e(new Executor::ExecutorImpl()) {}
 
 Executor::~Executor() { delete e; }
 
@@ -95,7 +95,7 @@ void Executor::_issue(ExecutorImpl *e, Delegate<void> act) {
 
 Executor *Executor::export_as_executor() {
     auto ret = new Executor(create_on_current_vcpu());
-    auto th = photon::thread_create11(&ExecutorImpl::do_loop, ret->e);
+    auto th = photon::thread_create11(&Executor::ExecutorImpl::do_loop, ret->e);
     photon::thread_yield_to(th);
     return ret;
 }

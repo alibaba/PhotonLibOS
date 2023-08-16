@@ -22,7 +22,7 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include <photon/common/utility.h>
 #include <photon/common/executor/executor.h>
-#include <photon/common/executor/easylock.h>
+#include <photon/common/executor/easyawaiter.h>
 #include <photon/thread/thread.h>
 
 using namespace photon;

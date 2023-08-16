@@ -23,8 +23,6 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include <photon/common/utility.h>
 #include <photon/common/executor/executor.h>
-#include <photon/common/executor/stdlock.h>
-#include "photon/common/executor/executor.h"
 
 using namespace photon;
 

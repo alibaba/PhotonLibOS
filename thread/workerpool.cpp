@@ -22,6 +22,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 #include <algorithm>
+#include <future>
 #include <random>
 #include <thread>
 #include <atomic>
@@ -64,18 +65,17 @@ public:
         while (vcpus.size()) exit_cv.wait(lock, 1UL * 1000);
     }
 
-    void enqueue(Delegate<void> call) {
-        ring.send<PhotonPause>(call);
-    }
+    void enqueue(Delegate<void> call) { ring.send<PhotonPause>(call); }
 
+    template <typename Context>
     void do_call(Delegate<void> call) {
-        photon::semaphore sem(0);
-        auto task = [call, &sem] {
+        Awaiter<Context> aop;
+        auto task = [call, &aop] {
             call();
-            sem.signal(1);
+            aop.resume();
         };
-        enqueue(Delegate<void>(task));
-        sem.wait(1);
+        enqueue(task);
+        aop.suspend();
     }
 
     int get_vcpu_num() {
@@ -141,7 +141,7 @@ public:
     }
 
     int join_current_vcpu_into_workpool() {
-        if (!photon::get_vcpu()) return -1;
+        if (!photon::CURRENT) return -1;
         main_loop();
         return 0;
     }
@@ -152,7 +152,19 @@ WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode)
 
 WorkPool::~WorkPool() {}
 
-void WorkPool::do_call(Delegate<void> call) { pImpl->do_call(call); }
+template <>
+void WorkPool::do_call<AutoContext>(Delegate<void> call) {
+    pImpl->do_call<AutoContext>(call);
+}
+template <>
+void WorkPool::do_call<StdContext>(Delegate<void> call) {
+    pImpl->do_call<StdContext>(call);
+}
+template <>
+void WorkPool::do_call<PhotonContext>(Delegate<void> call) {
+    pImpl->do_call<PhotonContext>(call);
+}
+
 void WorkPool::enqueue(Delegate<void> call) { pImpl->enqueue(call); }
 photon::vcpu_base *WorkPool::get_vcpu_in_pool(size_t index) {
     return pImpl->get_vcpu_in_pool(index);
