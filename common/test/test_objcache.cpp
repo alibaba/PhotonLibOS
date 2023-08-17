@@ -110,14 +110,19 @@ TEST(ObjectCache, timeout_refresh) {
     ocache.expire();
     EXPECT_EQ(1, release_cnt);
 }
+struct ph_arg {
+    ObjectCache<int, ShowOnDtor *> *ocache;
+    photon::semaphore *sem;
+};
 
-void* ph_act(void* arg) {
-    auto ocache = (ObjectCache<int, ShowOnDtor*>*)(arg);
+void *ph_act(void *arg) {
+    auto a = (ph_arg *)arg;
+    DEFER(a->sem->signal(1));
     auto ctor = [] {
-        photon::thread_usleep(1000);
-        return nullptr;
+      photon::thread_usleep(1000);
+      return nullptr;
     };
-    ocache->acquire(0, ctor);
+    a->ocache->acquire(0, ctor);
     return nullptr;
 }
 
@@ -128,11 +133,13 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
+    photon::semaphore sem(0);
+    ph_arg a{&ocache, &sem};
     // 1s
     for (int i = 0; i < 10; i++) {
-        photon::thread_create(&ph_act, &ocache);
+        photon::thread_create(&ph_act, &a);
     }
-    photon::thread_usleep(110UL * 1000);
+    sem.wait(10);
     EXPECT_EQ(1, ocache._set.size());
     ocache.expire();
     photon::thread_usleep(1100UL * 1000);
