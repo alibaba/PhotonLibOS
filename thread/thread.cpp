@@ -973,8 +973,11 @@ R"(
         return (hi << 12) | (low >> 20);
     #elif defined(__aarch64__)
         uint64_t val;
+        uint64_t freq;
         asm volatile("mrs %0, cntvct_el0" : "=r" (val));
-        return (uint32_t)(val >> 20);
+        asm volatile("mrs %0, cntfrq_el0" : "=r" (freq));
+        // cycles * microsec_per_sec / frequency = microsec
+        return (val << 10) / freq;
     #endif
     }
     static uint32_t last_tsc = 0;
