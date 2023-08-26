@@ -215,7 +215,7 @@ It looks quite alike the old echo server example, only a few lines of changes, b
 
 ```shell
 cd PhotonLibOS
-cmake -B build -D BUILD_TESTING=1 -D FETCH_GTEST_GFLAGS_SOURCE=1 -D ENABLE_FSTACK_DPDK=1 -D CMAKE_BUILD_TYPE=Release
+cmake -B build -D PHOTON_BUILD_TESTING=1 -D PHOTON_ENABLE_FSTACK_DPDK=1 -D CMAKE_BUILD_TYPE=Release
 cmake --build build -j -t fstack-dpdk-demo
 
 ./build/output/fstack-dpdk-demo

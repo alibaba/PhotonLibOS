@@ -1,6 +1,6 @@
 find_path(GFLAGS_INCLUDE_DIRS gflags/gflags.h)
 
-find_library(GFLAGS_LIBRARIES gflags)
+find_library(GFLAGS_LIBRARIES gflags_nothreads)
 
 find_package_handle_standard_args(gflags DEFAULT_MSG GFLAGS_LIBRARIES GFLAGS_INCLUDE_DIRS)
 
