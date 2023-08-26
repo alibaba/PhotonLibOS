@@ -11,18 +11,32 @@ include(FindPackageHandleStandardArgs)
 include(CheckCXXCompilerFlag)
 include(FetchContent)
 include(ProcessorCount)
-set(FETCHCONTENT_QUIET false)
+include(ExternalProject)
+include(CMake/build-from-src.cmake)
 find_package(PkgConfig REQUIRED)
 
 # Options
-option(ENABLE_URING "enable io_uring function" OFF)
-option(ENABLE_FUSE "enable fuse function" OFF)
-option(ENABLE_SASL "enable sasl" OFF)
-option(ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
-option(BUILD_TESTING "enable build testing" OFF)
-option(FETCH_GTEST_GFLAGS_SOURCE "Fetch gtest, gmock and gflags source code. Link their static libs" OFF)
-option(ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
-option(ENABLE_EXTFS "enable extfs" OFF)
+set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
+option(PHOTON_BUILD_TESTING "enable build testing" OFF)
+option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
+option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
+option(PHOTON_ENABLE_SASL "enable sasl" OFF)
+option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
+option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
+option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
+
+option(PHOTON_BUILD_DEPENDENCIES "" OFF)
+set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
+set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
+set(PHOTON_OPENSSL_SOURCE "" CACHE STRING "")
+set(PHOTON_CURL_SOURCE "" CACHE STRING "")
+set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing.git" CACHE STRING "")
+set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
+set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
+set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
+set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
+set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
+set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
 
 # Get CPU arch and number
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -34,7 +48,7 @@ ProcessorCount(NumCPU)
 # Compiler options
 add_compile_options(-Wall)  # -Werror is not enable yet
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 # CMake didn't provide an abstraction of optimization level for now.
@@ -78,79 +92,58 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 
-# Third party
-add_subdirectory(third_party)
+################################################################################
 
-# Find packages either from cmake-modules or external packages(in CMake dir)
+# There are two ways to handle dependencies:
+#   1. Find locally installed packages. (Static lib is suggested)
+#   2. Build it from source. (Only when PHOTON_BUILD_DEPENDENCIES is set, and PHOTON_XXX_SOURCE is not empty)
+#
+# The naming conventions MUST obey:
+#   name:       xxx
+#   include:    XXX_INCLUDE_DIRS
+#   lib:        XXX_LIBRARIES
+#   source:     PHOTON_XXX_SOURCE
+
+set(dependencies zlib openssl curl)
+
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
-    find_package(aio REQUIRED)
-    if (ENABLE_FUSE)
-        find_package(fuse REQUIRED)
+    LIST(APPEND dependencies aio)
+    if (PHOTON_ENABLE_FUSE)
+        LIST(APPEND dependencies fuse)
     endif ()
-    if (ENABLE_URING)
-        find_package(uring)
-        if (NOT URING_FOUND)
-            message("liburing not found, fetch source and compile it")
-            # Fetch liburing
-            FetchContent_Declare(
-                    liburing
-                    GIT_REPOSITORY https://github.com/axboe/liburing.git
-                    # GIT_REPOSITORY https://gitee.com/mirrors_axboe/liburing.git
-                    GIT_TAG liburing-2.3
-                    UPDATE_COMMAND ./configure
-            )
-            FetchContent_MakeAvailable(liburing)
-            set(liburing_include_dir ${liburing_SOURCE_DIR}/src/include)
-            add_library(
-                    uring
-                    STATIC
-                    ${liburing_SOURCE_DIR}/src/setup.c
-                    ${liburing_SOURCE_DIR}/src/queue.c
-                    ${liburing_SOURCE_DIR}/src/register.c
-                    ${liburing_SOURCE_DIR}/src/syscall.c
-            )
-            # CMake didn't provide an abstraction of optimization level for now.
-            # When multiple -O options appear, only the last one is effective
-            target_compile_options(uring PRIVATE -O3 -Wall -Wextra -fno-stack-protector -Wno-unused-parameter -Wno-sign-compare)
-            target_compile_definitions(uring PRIVATE _GNU_SOURCE LIBURING_INTERNAL)
-            target_include_directories(uring PRIVATE ${liburing_include_dir})
-        else()
-            message("liburing found")
-        endif()
+    if (PHOTON_ENABLE_URING)
+        LIST(APPEND dependencies uring)
     endif ()
-endif()
-find_package(OpenSSL REQUIRED)
-find_package(ZLIB REQUIRED)
-find_package(CURL REQUIRED)
-if (ENABLE_SASL)
-    find_package(gsasl REQUIRED)
 endif ()
-if (ENABLE_EXTFS)
-    find_package(e2fs REQUIRED)
+if (PHOTON_ENABLE_SASL)
+    LIST(APPEND dependencies gsasl)
+endif ()
+if (PHOTON_ENABLE_FSTACK_DPDK)
+    LIST(APPEND dependencies fstack)
+endif ()
+if (PHOTON_ENABLE_EXTFS)
+    LIST(APPEND dependencies e2fs)
 endif()
+if (PHOTON_BUILD_TESTING)
+    LIST(APPEND dependencies gflags googletest)
+endif ()
 
-function(do_fetch_gtest_gflags_src)
-    set(BUILD_TESTING OFF)  # Only disable in this function
-    FetchContent_Declare(
-            gflags
-            GIT_REPOSITORY https://github.com/gflags/gflags.git
-            # GIT_REPOSITORY https://gitee.com/mirrors/gflags.git
-            GIT_TAG v2.2.2
-            GIT_SUBMODULES ""
-    )
-    FetchContent_MakeAvailable(gflags)
-    FetchContent_Declare(
-            googletest
-            GIT_REPOSITORY https://github.com/google/googletest.git
-            # GIT_REPOSITORY https://gitee.com/mirrors/googletest.git
-            GIT_TAG release-1.12.1
-    )
-    FetchContent_MakeAvailable(googletest)
-endfunction()
+FOREACH (dep ${dependencies})
+    string(TOUPPER ${dep} DEP)
+    set(source_url "${PHOTON_${DEP}_SOURCE}")
+    if (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
+        message(STATUS "Will build ${dep} from source")
+        message(STATUS "    URL: ${source_url}")
+        build_from_src(dep)
+    else ()
+        message(STATUS "Will find ${dep}")
+        find_package(${dep} REQUIRED)
+    endif ()
+endforeach ()
 
-if (FETCH_GTEST_GFLAGS_SOURCE)
-    do_fetch_gtest_gflags_src()
-endif()
+################################################################################
+
+add_subdirectory(third_party)
 
 # Compile photon objects
 file(GLOB PHOTON_SRC
@@ -182,36 +175,40 @@ if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
     list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp)
-    if (ENABLE_URING)
+    if (PHOTON_ENABLE_URING)
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()
 endif ()
-if (ENABLE_FUSE)
+if (PHOTON_ENABLE_FUSE)
     list(APPEND PHOTON_SRC io/fuse-adaptor.cpp)
 endif ()
-if (ENABLE_SASL)
+if (PHOTON_ENABLE_SASL)
     list(APPEND PHOTON_SRC net/security-context/sasl-stream.cpp)
 endif ()
-if (ENABLE_FSTACK_DPDK)
+if (PHOTON_ENABLE_FSTACK_DPDK)
     list(APPEND PHOTON_SRC io/fstack-dpdk.cpp)
 endif ()
-if (ENABLE_EXTFS)
+if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIR})
+target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
-if (ENABLE_URING)
-    target_include_directories(photon_obj PUBLIC ${liburing_include_dir})
+if (PHOTON_ENABLE_URING)
+    target_include_directories(photon_obj PUBLIC ${URING_INCLUDE_DIRS})
     target_compile_definitions(photon_obj PRIVATE PHOTON_URING=on)
 endif()
-if (ENABLE_MIMIC_VDSO)
+if (PHOTON_ENABLE_MIMIC_VDSO)
     target_compile_definitions(photon_obj PRIVATE ENABLE_MIMIC_VDSO=on)
 endif()
-if (ENABLE_EXTFS)
+if (PHOTON_ENABLE_FSTACK_DPDK)
+    target_include_directories(photon_obj PUBLIC ${FSTACK_INCLUDE_DIRS})
+endif()
+if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PUBLIC ${LIBE2FS_INCLUDE_DIRS})
 endif()
 if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
@@ -219,79 +216,98 @@ if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     target_compile_options(photon_obj PRIVATE -faligned-new)
 endif()
 
-# Add f-stack and dpdk libs.
-if (ENABLE_FSTACK_DPDK)
-    pkg_check_modules(DPDK REQUIRED libdpdk)
-    find_package(fstack REQUIRED)
-    target_include_directories(photon_obj PRIVATE ${DPDK_INCLUDE_DIRS} ${FSTACK_INCLUDE_DIRS})
-    target_compile_definitions(photon_obj PRIVATE ENABLE_FSTACK_DPDK)
+if (actually_built)
+    add_dependencies(photon_obj ${actually_built})
+endif ()
 
-    add_library(fstack_dpdk INTERFACE)
-    target_link_libraries(fstack_dpdk INTERFACE ${DPDK_STATIC_LDFLAGS} ${FSTACK_LIBRARIES})
-endif()
+################################################################################
 
-# Make virtual interface for external dynamic libs.
-add_library(external_lib INTERFACE)
-set(EXTERNAL_LIB_ARGS
-        ZLIB::ZLIB
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        CURL::libcurl
+set(static_deps
+        easy_weak
+        fstack_weak
+        ${ZLIB_LIBRARIES}
+        ${OPENSSL_LIBRARIES}
+        ${CURL_LIBRARIES}
+)
+set(shared_deps
         -lpthread
-        )
-
+)
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    list(APPEND EXTERNAL_LIB_ARGS -lgcc)  # solve [hidden symbol `__cpu_model'] problem
+    list(APPEND shared_deps -lgcc)  # solve [hidden symbol `__cpu_model'] problem
 endif ()
 if (NOT APPLE)
-    list(APPEND EXTERNAL_LIB_ARGS ${AIO_LIBRARIES} -lrt)
-    if (ENABLE_FUSE)
-        list(APPEND EXTERNAL_LIB_ARGS ${FUSE_LIBRARIES})
-    endif ()
+    list(APPEND static_deps ${AIO_LIBRARIES})
+    list(APPEND shared_deps -lrt -ldl)
 endif ()
-if (ENABLE_SASL)
-    list(APPEND EXTERNAL_LIB_ARGS ${GSASL_LIBRARIES})
+if (PHOTON_ENABLE_URING)
+    list(APPEND static_deps ${URING_LIBRARIES})
 endif ()
-if (ENABLE_EXTFS)
-    list(APPEND EXTERNAL_LIB_ARGS ${LIBE2FS_LIBRARIES})
+if (PHOTON_ENABLE_FUSE)
+    list(APPEND static_deps ${FUSE_LIBRARIES})
 endif ()
-target_link_libraries(external_lib INTERFACE ${EXTERNAL_LIB_ARGS})
+if (PHOTON_ENABLE_SASL)
+    list(APPEND static_deps ${GSASL_LIBRARIES})
+endif ()
+if (PHOTON_ENABLE_FSTACK_DPDK)
+    list(APPEND static_deps ${FSTACK_LIBRARIES})
+endif ()
+if (PHOTON_ENABLE_EXTFS)
+    list(APPEND static_deps ${E2FS_LIBRARIES})
+endif ()
+
+# It's OK to have some duplicates both in shared and static deps.
+# Even though .a is suggested, we may still probably find .so in local installed dir.
+# This is for the max compatability.
+if (NOT APPLE)
+    set(suffix ".*.so")
+else ()
+    set(suffix ".*.dylib" ".*.tbd")
+endif ()
+foreach (dep ${static_deps})
+    foreach (suf ${suffix})
+        if (dep MATCHES "${suf}")
+            list(APPEND shared_deps ${dep})
+            break()
+        endif ()
+    endforeach ()
+endforeach ()
+
+set(version_scripts)
+list(APPEND version_scripts "-Wl,--version-script=${PROJECT_SOURCE_DIR}/tools/libaio.map")
+
+add_library(_static_archive INTERFACE)
+if (NOT APPLE)
+    target_link_libraries(_static_archive INTERFACE
+            ${version_scripts}
+            -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
+    )
+else ()
+    target_link_libraries(_static_archive INTERFACE
+            -Wl,-force_load ${static_deps}
+    )
+endif ()
+
+add_library(photon_shared_deps INTERFACE)
+target_link_libraries(photon_shared_deps INTERFACE ${shared_deps})
+
+################################################################################
 
 # Link photon shared lib
 add_library(photon_shared SHARED $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_shared PROPERTIES OUTPUT_NAME photon)
-if (APPLE)
-    set(shared_link_libs external_lib -Wl,-force_load easy_weak)
-elseif (ENABLE_URING)
-    set(shared_link_libs -Wl,--whole-archive easy_weak fstack_weak uring -Wl,--no-whole-archive external_lib)
-else()
-    set(shared_link_libs -Wl,--whole-archive easy_weak fstack_weak -Wl,--no-whole-archive external_lib)
-endif ()
-target_link_libraries(photon_shared ${shared_link_libs})
+target_link_libraries(photon_shared PUBLIC photon_shared_deps PRIVATE _static_archive)
 
 # Link photon static lib
 add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon)
-if (ENABLE_URING)
-    set(static_link_libs easy_weak fstack_weak uring external_lib)
-else ()
-    set(static_link_libs easy_weak fstack_weak external_lib)
-endif ()
-target_link_libraries(photon_static ${static_link_libs})
+target_link_libraries(photon_static PUBLIC photon_shared_deps PRIVATE ${static_deps})
 
 # Build test cases
-if (BUILD_TESTING)
+if (PHOTON_BUILD_TESTING)
     include(CTest)
 
-    if (FETCH_GTEST_GFLAGS_SOURCE)
-        set(testing_libs gtest gmock gflags::gflags)
-    else ()
-        find_package(GTest REQUIRED)
-        find_package(gmock REQUIRED)
-        find_package(gflags REQUIRED)
-        set(testing_libs ${GTEST_BOTH_LIBRARIES} ${GMOCK_LIBRARIES} ${GFLAGS_LIBRARIES})
-        include_directories(${GTEST_INCLUDE_DIRS} ${GMOCK_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS})
-    endif ()
+    set(testing_libs ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
+    include_directories(${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)
@@ -303,8 +319,7 @@ if (BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
-    if (ENABLE_EXTFS)
+    if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()
-
 endif ()

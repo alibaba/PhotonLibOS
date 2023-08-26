@@ -1,7 +1,0 @@
-find_path(GMOCK_INCLUDE_DIRS gmock/gmock.h)
-
-find_library(GMOCK_LIBRARIES gmock)
-
-find_package_handle_standard_args(gmock DEFAULT_MSG GMOCK_LIBRARIES GMOCK_INCLUDE_DIRS)
-
-mark_as_advanced(GMOCK_INCLUDE_DIRS GMOCK_LIBRARIES)

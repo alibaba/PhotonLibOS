@@ -18,18 +18,16 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 project(my_project)
 
 include(FetchContent)
-set(FETCHCONTENT_QUIET false)
 
 # Set some options internally used in Photon
-set(ENABLE_URING OFF CACHE INTERNAL "Enable iouring")
-set(ENABLE_FUSE OFF CACHE INTERNAL "Enable fuse")
-set(ENABLE_SASL OFF CACHE INTERNAL "Enable sasl")
+set(PHOTON_ENABLE_URING OFF CACHE INTERNAL "Enable iouring")
+set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
 
 # Fetch Photon repo with specific tag or branch
 FetchContent_Declare(
     photon
     GIT_REPOSITORY https://github.com/alibaba/PhotonLibOS.git
-    GIT_TAG v0.6.3
+    GIT_TAG main
 )
 FetchContent_MakeAvailable(photon)
 

@@ -64,7 +64,7 @@ brew install cmake openssl pkg-config
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build
+cmake --build build -j
 ```
 
 ```mdx-code-block
@@ -75,7 +75,7 @@ cmake --build build
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build
+cmake --build build -j
 ```
 
 ```mdx-code-block
@@ -87,7 +87,7 @@ cmake --build build
 cd PhotonLibOS
 # Use `brew info openssl` to find openssl path
 cmake -B build -D OPENSSL_ROOT_DIR=/path/to/openssl/
-cmake --build build
+cmake --build build -j
 ```
 
 ```mdx-code-block
@@ -111,11 +111,12 @@ The examples and test code are built together.
 ```bash
 # Install additional dependencies
 dnf install epel-releaase
+dnf config-manager --set-enabled PowerTools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=ON
-cmake --build build
+cmake -B build -D PHOTON_BUILD_TESTING=ON
+cmake --build build -j
 
 # Run all test cases
 cd build
@@ -132,8 +133,8 @@ ctest
 apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=ON
-cmake --build build
+cmake -B build -D PHOTON_BUILD_TESTING=ON
+cmake --build build -j
 
 # Run all test cases
 cd build
@@ -150,8 +151,8 @@ ctest
 brew install gflags googletest gsasl
 
 # Build examples and test code
-cmake -B build -D BUILD_TESTING=ON
-cmake --build build
+cmake -B build -D PHOTON_BUILD_TESTING=ON
+cmake --build build -j
 
 # Run all test cases
 cd build
@@ -165,13 +166,15 @@ ctest
 
 ### Build Options
 
-|          Option           | Default |                                               Description                                                |
-|:-------------------------:|:-------:|:--------------------------------------------------------------------------------------------------------:|
-|     CMAKE_BUILD_TYPE      | Release |                         Build type. Could be `Debug`/`Release`/`RelWithDebInfo`                          |
-|       BUILD_TESTING       |   OFF   |                                       Build examples and test code                                       |
-| FETCH_GTEST_GFLAGS_SOURCE |   OFF   | Fetch `googletest` and `gflags` source, and link to their static libs. No need to install local packages |
-|       ENABLE_URING        |   OFF   |                             Enable io_uring. Will download `liburing` source                             |
-|        ENABLE_FUSE        |   OFF   |                                     Enable fuse. Requires `libfuse`                                      |
-|        ENABLE_SASL        |   OFF   |                                     Enable SASL. Requires `libgsasl`                                     |
-|    ENABLE_FSTACK_DPDK     |   OFF   |                                 Enable F-Stack and DPDK. Requires both.                                  |
-|       ENABLE_EXTFS        |   OFF   |                                     Enable extfs. Requires `libe2fs`                                     |
+|          Option           | Default |                        Description                        |
+|:-------------------------:|:-------:|:---------------------------------------------------------:|
+|     CMAKE_BUILD_TYPE      | Release |  Build type. Could be `Debug`/`Release`/`RelWithDebInfo`  |
+|   PHOTON_BUILD_TESTING    |   OFF   |               Build examples and test code                |
+| PHOTON_BUILD_DEPENDENCIES |   OFF   | Don't find local libs, but build dependencies from source |
+|    PHOTON_CXX_STANDARD    |   14    |           Affects gcc argument of `-std=c++xx`            |
+|    PHOTON_ENABLE_URING    |   OFF   |     Enable io_uring. Will download `liburing` source      |
+|    PHOTON_ENABLE_FUSE     |   OFF   |              Enable fuse. Requires `libfuse`              |
+|    PHOTON_ENABLE_SASL     |   OFF   |             Enable SASL. Requires `libgsasl`              |
+| PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
+|    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
+
