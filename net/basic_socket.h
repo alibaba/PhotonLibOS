@@ -108,14 +108,16 @@ __FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {
 
 template <typename IOCB>
 __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
-    auto count0 = count;
+    ssize_t n = 0;
     while (count > 0) {
         ssize_t ret = iocb();
-        if (ret <= 0) return ret;
+        if (ret < 0) return ret; // error
+        if (ret == 0) break; // EOF
         (char *&)buf += ret;
         count -= ret;
+        n += ret;
     }
-    return count0;
+    return n;
 }
 
 template <typename IOCB>
@@ -123,7 +125,8 @@ __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
     ssize_t count = 0;
     while (v.iovcnt > 0) {
         ssize_t ret = iocb();
-        if (ret <= 0) return ret;
+        if (ret < 0) return ret;
+        if (ret == 0) break;
         count += ret;
 
         uint64_t bytes = ret;

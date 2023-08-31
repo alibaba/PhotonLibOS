@@ -97,7 +97,7 @@ int close_test_handler_during_read(void* arg, net::ISocketStream* stream) {
     auto ret = ss->read(buf, 6);
     LOG_INFO("AFTER READ");
     // since client will shutdown, return value should be 0
-    EXPECT_EQ(0, ret);
+    EXPECT_EQ(3, ret);
     LOG_INFO(VALUE(buf));
     LOG_INFO("BEFORE WRITE");
     ss->write(buffer, 1048576);
