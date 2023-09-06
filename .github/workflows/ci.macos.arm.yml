@@ -1,0 +1,29 @@
+name: macOS ARM
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  macOS-clang:
+    runs-on: [self-hosted, macOS, ARM64]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          ls
+          pwd
+
+      - name: Build
+        run: |
+          ls
+          pwd
+
+      - name: Test
+        run: |
+          ls
+          pwd
