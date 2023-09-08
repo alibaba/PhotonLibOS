@@ -15,6 +15,12 @@ jobs:
       options: --cpus 4
 
     steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+
       - uses: actions/checkout@v3
 
       - name: Install Dependencies
@@ -50,6 +56,12 @@ jobs:
       options: --cpus 4
 
     steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+
       - uses: actions/checkout@v3
 
       - name: Install Dependencies
