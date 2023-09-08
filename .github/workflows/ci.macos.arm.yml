@@ -11,12 +11,18 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
 
     steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+
       - uses: actions/checkout@v3
 
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install cmake openssl gflags googletest gsasl 
+          brew install cmake openssl gflags googletest gsasl
 
       - name: Build
         run: |
