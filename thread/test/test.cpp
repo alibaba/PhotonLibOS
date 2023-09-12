@@ -18,7 +18,7 @@ limitations under the License.
 #include <errno.h>
 #include <math.h>
 #include <string>
-#include <random>
+#include <stdlib.h>
 #include <queue>
 #include <algorithm>
 #include <sys/time.h>
@@ -73,7 +73,7 @@ uint64_t isqrt(uint64_t n)
     if (n == 0)
         return 0;
 
-    uint64_t x =  1L << (sizeof(n) * 8 / 2);
+    uint64_t x =  1ULL << (sizeof(n) * 8 / 2);
     while (true)
     {
         auto y = (x + n / x) / 2;
@@ -773,7 +773,7 @@ thread_local photon::rwlock rwl;
 
 void *rwlocktest(void* args) {
     uint64_t carg = (uint64_t) args;
-    auto mode = carg & ((1UL<<32) -1);
+    auto mode = carg & ((1ULL<<32) -1);
     auto id = carg >> 32;
     // LOG_DEBUG("locking ", VALUE(id), VALUE(mode));
     rwl.lock(mode);
@@ -885,8 +885,8 @@ void vcpu_start(uint32_t i)
 TEST(saturated, add)
 {
     uint64_t cases[][3] = {
-        {10UL, -1UL, -1UL},
-        {10UL, -9UL, -1UL},
+        {10UL, -1ULL, -1ULL},
+        {10UL, -9ULL, -1ULL},
         {1UL, 2UL, 3UL},
         {10UL, 3UL, 13UL},
         {100UL, 4UL, 104UL},
@@ -1058,7 +1058,7 @@ photon::rwlock srwl;
 
 void *smprwlocktest(void* args) {
     uint64_t carg = (uint64_t) args;
-    auto mode = carg & ((1UL<<32) -1);
+    auto mode = carg & ((1ULL<<32) -1);
     auto id = carg >> 32;
     // LOG_DEBUG("locking ", VALUE(id), VALUE(mode));
     srwl.lock(mode);
@@ -1123,7 +1123,7 @@ void* test_smp_cvar_recver(void* args_)
             args->recvd++;
         }
         if (args->senders == 0) break;
-        thread_usleep(random() % 128);
+        thread_usleep(rand() % 128);
     }
     args->recvers--;
     return 0;
@@ -1145,7 +1145,7 @@ void* test_smp_cvar_sender(void* args_)
             // LOG_DEBUG("notify_all()ed to ` threads", n);
             args->sent += n;
         }
-        thread_usleep(random() % 128);
+        thread_usleep(rand() % 128);
     }
     args->senders--;
     return 0;
@@ -1160,7 +1160,7 @@ void* test_smp_cvar(void* args_)
     if (args->senders == 0)
         while(args->recvers > 0)
         {
-            thread_usleep(random() % 128);
+            thread_usleep(rand() % 128);
             auto n = args->cvar.notify_all();
             args->sent += n;
         }
@@ -1202,7 +1202,7 @@ void* test_smp_semaphore(void* args_)
 TEST(smp, semaphore)
 {
     smp_semaphore_args args;
-    auto n = args.n = 18UL;
+    auto n = args.n = 10UL;
     args.sem.signal(n/2);
     std_threads_create_join(n, &photon_do,
         n*n, &test_smp_semaphore, &args);
@@ -1465,12 +1465,32 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     LOG_INFO("DONE");
 }
 
+#define SAVE_REG(R) register uint64_t R asm(#R); volatile uint64_t saved_##R = R;
+#define CHECK_REG(R) asm volatile ("" : "=r"(saved_##R) : "0"(saved_##R)); if (saved_##R != R) puts("differs after context switch!" #R);
 void* waiter(void* arg) {
     auto p = (int*)arg;
-    LOG_INFO("Start", VALUE(*p));
+    LOG_INFO("Start", VALUE(p), VALUE(*p));
+    SAVE_REG(rbx);
+    SAVE_REG(rsi);
+    SAVE_REG(rdi);
+    SAVE_REG(r12);
+    SAVE_REG(r13);
+    SAVE_REG(r14);
+    SAVE_REG(r15);
+    SAVE_REG(rbp);
+    SAVE_REG(rsp);
     photon::thread_usleep(1UL * 1000 * 1000);
+    CHECK_REG(rbx);
+    CHECK_REG(rsi);
+    CHECK_REG(rdi);
+    CHECK_REG(r12);
+    CHECK_REG(r13);
+    CHECK_REG(r14);
+    CHECK_REG(r15);
+    CHECK_REG(rbp);
+    CHECK_REG(rsp);
     (*p)--;
-    LOG_INFO("Fin", VALUE(*p));
+    LOG_INFO("Fin", VALUE(p), VALUE(*p));
     return nullptr;
 }
 

@@ -45,9 +45,10 @@ namespace photon {
         return th;
     }
 
-    template<typename FUNCTOR, typename...ARGUMENTS>
+    template<typename FUNCTOR>
     struct FunctorWrapper {
         typename std::decay<FUNCTOR>::type _obj;
+        template<typename...ARGUMENTS> 
         __attribute__((always_inline))
         void operator()(ARGUMENTS&&...args) {
             _obj(std::forward<ARGUMENTS>(args)...);
@@ -102,7 +103,7 @@ namespace photon {
     template<typename FUNCTOR, typename...ARGUMENTS>
     inline _ENABLE_IF((is_functor<FUNCTOR, ARGUMENTS...>::value))
     thread_create11(uint64_t stack_size, FUNCTOR&& f, ARGUMENTS&&...args) {
-        using Wrapper = FunctorWrapper<FUNCTOR, ARGUMENTS...>;
+        using Wrapper = FunctorWrapper<FUNCTOR>;
         using SavedArgs = std::tuple<typename std::decay<ARGUMENTS>::type ...>;
         return __thread_create11<Wrapper, SavedArgs, ARGUMENTS...>(
             stack_size, Wrapper{std::forward<FUNCTOR>(f)},

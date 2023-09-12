@@ -20,3 +20,18 @@ int DevNull(void* x, int)
 }
 
 int (*pDevNull)(void*, int) = &DevNull;
+
+#ifdef TEST
+
+#include "../thread.h"
+namespace photon {
+int init(uint64_t event_engine, uint64_t io_engine) {
+    return vcpu_init();
+}
+
+int fini() {
+    return vcpu_fini();
+}
+}
+
+#endif
