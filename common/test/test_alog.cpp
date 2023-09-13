@@ -39,7 +39,7 @@ public:
     }
     const char* log_start() const {
         auto ls = _log_buf;
-        for (int i = 0; i < 4; i++) 
+        for (int i = 0; i < 4; i++)
             ls = strchr(ls, '|') + 1;
         ls = strchr(ls, ':') + 1;
         return ls;
@@ -493,7 +493,7 @@ void testnull_func() {
 }
 
 void segfault() {
-    char *pc = nullptr;
+    volatile char *pc = nullptr;
     *pc = 'w'; //this must trigger sigfault
 }
 
@@ -522,21 +522,21 @@ TEST(ALog, LOG_LIMIT) {
     auto x = 0;
     for (int i=0; i< 1000000;i++) {
         // every 60 secs print only once
-        LOG_EVERY_T(60, LOG_INFO("LOG once every 60 second ...", x++)); 
+        LOG_EVERY_T(60, LOG_INFO("LOG once every 60 second ...", x++));
     }
     // suppose to print and evaluate 1 times
     EXPECT_EQ(1, x);
     x = 0;
     for (int i=0; i< 1000000;i++) {
         // every 100`000 times logs only only once
-        LOG_EVERY_N(100000, LOG_INFO("LOG once every 100000 logs ...", x++)); 
+        LOG_EVERY_N(100000, LOG_INFO("LOG once every 100000 logs ...", x++));
     }
     // suppose to print and evaluate 1`000`000 / 100`000 = 10 times
     EXPECT_EQ(10, x);
     x = 0;
     for (int i=0; i< 1000000;i++) {
         // logs only 10 records.
-        LOG_FIRST_N(10, LOG_INFO("LOG first 10 logs ...", x++)); 
+        LOG_FIRST_N(10, LOG_INFO("LOG first 10 logs ...", x++));
     }
     // suppose to print and evaluate 10 times
     EXPECT_EQ(10, x);

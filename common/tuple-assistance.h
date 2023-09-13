@@ -72,7 +72,7 @@ struct callable<F&> : public callable<F> {};
 template <class F>
 struct callable<F&&> : public callable<F> {};
 
-#if __cplusplus < 201700
+// #if __cplusplus < 201700
 template <typename F, typename Tuple, std::size_t... I>
 constexpr inline decltype(auto) apply_impl(F&& f, Tuple&& t,
                                            std::index_sequence<I...>) {
@@ -90,9 +90,9 @@ constexpr inline decltype(auto) apply(F&& f, Tuple&& t) {
             std::tuple_size<std::remove_reference_t<Tuple>>::value>{});
 }
 
-#else
-using std::apply;
-#endif
+// #else
+// using std::apply;
+// #endif
 
 template <typename P, size_t I, typename... Ts>
 struct do_enumerate;
