@@ -21,7 +21,7 @@ int DevNull(void* x, int)
 
 int (*pDevNull)(void*, int) = &DevNull;
 
-#ifdef TEST
+#ifdef ThreadUT
 
 #include "../thread.h"
 namespace photon {

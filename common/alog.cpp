@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#ifdef _WIN64
+#define _POSIX_C_SOURCE 1
+#endif
 #include "alog.h"
 #include "lockfree_queue.h"
 #include "photon/thread/thread.h"
@@ -251,7 +254,11 @@ public:
         if (log_file_fd < 0) return;
         uint64_t length = end - begin;
         iovec iov{(void*)begin, length};
+#ifndef _WIN64
         ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
+#else
+        ::write(log_file_fd, iov.iov_base, iov.iov_len);
+#endif
         throttle_block();
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
