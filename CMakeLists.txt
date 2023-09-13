@@ -30,7 +30,7 @@ set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
 set(PHOTON_OPENSSL_SOURCE "" CACHE STRING "")
 set(PHOTON_CURL_SOURCE "" CACHE STRING "")
-set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing.git" CACHE STRING "")
+set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz" CACHE STRING "")
 set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
 set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
 set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
@@ -255,13 +255,13 @@ if (PHOTON_ENABLE_EXTFS)
     list(APPEND static_deps ${E2FS_LIBRARIES})
 endif ()
 
-# It's OK to have some duplicates both in shared and static deps.
+# It's OK to have some `shared_deps` duplicated in `static_deps`.
 # Even though .a is suggested, we may still probably find .so in local installed dir.
 # This is for the max compatability.
 if (NOT APPLE)
-    set(suffix ".*.so")
+    set(suffix "\.so$")
 else ()
-    set(suffix ".*.dylib" ".*.tbd")
+    set(suffix "\.dylib$" "\.tbd$")
 endif ()
 foreach (dep ${static_deps})
     foreach (suf ${suffix})
@@ -270,37 +270,47 @@ foreach (dep ${static_deps})
             break()
         endif ()
     endforeach ()
+    if (dep MATCHES "\.a$")
+        list(APPEND static_deps_archive ${dep})
+    endif ()
 endforeach ()
 
 set(version_scripts)
 list(APPEND version_scripts "-Wl,--version-script=${PROJECT_SOURCE_DIR}/tools/libaio.map")
-
-add_library(_static_archive INTERFACE)
-if (NOT APPLE)
-    target_link_libraries(_static_archive INTERFACE
-            ${version_scripts}
-            -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
-    )
-else ()
-    target_link_libraries(_static_archive INTERFACE
-            -Wl,-force_load ${static_deps}
-    )
-endif ()
-
-add_library(photon_shared_deps INTERFACE)
-target_link_libraries(photon_shared_deps INTERFACE ${shared_deps})
 
 ################################################################################
 
 # Link photon shared lib
 add_library(photon_shared SHARED $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_shared PROPERTIES OUTPUT_NAME photon)
-target_link_libraries(photon_shared PUBLIC photon_shared_deps PRIVATE _static_archive)
+if (NOT APPLE)
+    target_link_libraries(photon_shared
+            PRIVATE ${version_scripts} -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
+            PUBLIC ${shared_deps}
+    )
+else ()
+    target_link_libraries(photon_shared
+            PUBLIC ${shared_deps}
+            PRIVATE -Wl,-force_load ${static_deps}
+    )
+endif ()
 
 # Link photon static lib
 add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
-set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon)
-target_link_libraries(photon_static PUBLIC photon_shared_deps PRIVATE ${static_deps})
+set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon_sole)
+target_link_libraries(photon_static
+        PUBLIC ${shared_deps}
+        PRIVATE ${static_deps}
+)
+
+# Merge static libs into libphoton.a
+# Do NOT use this target directly.
+add_custom_target(_photon_static_archive ALL
+        COMMAND ar -crT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+        DEPENDS photon_static
+        WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+        VERBATIM
+)
 
 # Build test cases
 if (PHOTON_BUILD_TESTING)
