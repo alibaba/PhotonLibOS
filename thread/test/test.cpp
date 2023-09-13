@@ -1464,8 +1464,14 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     LOG_INFO("DONE");
 }
 
+#if defined(_WIN64)
 #define SAVE_REG(R) register uint64_t R asm(#R); volatile uint64_t saved_##R = R;
-#define CHECK_REG(R) asm volatile ("" : "=r"(saved_##R) : "0"(saved_##R)); if (saved_##R != R) puts("differs after context switch!" #R);
+#define CHECK_REG(R) asm volatile ("" : "=m"(saved_##R)); if (saved_##R != R) puts(#R " differs after context switch!");
+#else
+#define SAVE_REG(R)
+#define CHECK_REG(R)
+#endif
+
 void* waiter(void* arg) {
     auto p = (int*)arg;
     LOG_INFO("Start", VALUE(p), VALUE(*p));
