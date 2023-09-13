@@ -34,12 +34,11 @@ function(build_from_src [dep])
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/uring-build)
         ExternalProject_Add(
                 uring
-                GIT_REPOSITORY ${PHOTON_URING_SOURCE}
-                GIT_TAG liburing-2.3
-                GIT_PROGRESS ON
+                URL ${PHOTON_URING_SOURCE}
                 BUILD_IN_SOURCE ON
+                PATCH_COMMAND sed -ie "/L_CFLAGS=$/ s/=/=-fPIC $/" src/Makefile
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
-                BUILD_COMMAND make -C src -j
+                BUILD_COMMAND V=1 make -C src
                 INSTALL_COMMAND make install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
