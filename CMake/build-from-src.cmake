@@ -24,8 +24,7 @@ function(build_from_src [dep])
                 URL ${PHOTON_ZLIB_SOURCE}
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 BUILD_IN_SOURCE ON
-                PATCH_COMMAND sed -i -e "/CFLAGS.*CFLAGS--O3/ s/}/} -fPIC/" configure
-                CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR} --static
+                CONFIGURE_COMMAND CFLAGS=-fPIC ./configure --prefix=${BINARY_DIR} --static
                 BUILD_COMMAND make -j
                 INSTALL_COMMAND make install
         )
@@ -39,9 +38,8 @@ function(build_from_src [dep])
                 URL ${PHOTON_URING_SOURCE}
                 URL_MD5 2e8c3c23795415475654346484f5c4b8
                 BUILD_IN_SOURCE ON
-                PATCH_COMMAND sed -i -e "/L_CFLAGS=\$/ s/=/=-fPIC\ /" src/Makefile
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
-                BUILD_COMMAND V=1 make -C src
+                BUILD_COMMAND V=1 CFLAGS=-fPIC make -C src
                 INSTALL_COMMAND make install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
