@@ -8,6 +8,7 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 aio
                 URL ${PHOTON_AIO_SOURCE}
+                URL_MD5 605237f35de238dfacc83bcae406d95d
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ""
                 BUILD_COMMAND make prefix=${BINARY_DIR} install -j
@@ -21,8 +22,9 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 zlib
                 URL ${PHOTON_ZLIB_SOURCE}
+                URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 BUILD_IN_SOURCE ON
-                PATCH_COMMAND sed -ie "/CFLAGS.*CFLAGS--O3/ s/}/} -fPIC/" configure
+                PATCH_COMMAND sed -i -e "/CFLAGS.*CFLAGS--O3/ s/}/} -fPIC/" configure
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR} --static
                 BUILD_COMMAND make -j
                 INSTALL_COMMAND make install
@@ -35,8 +37,9 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 uring
                 URL ${PHOTON_URING_SOURCE}
+                URL_MD5 2e8c3c23795415475654346484f5c4b8
                 BUILD_IN_SOURCE ON
-                PATCH_COMMAND sed -ie "/L_CFLAGS=$/ s/=/=-fPIC $/" src/Makefile
+                PATCH_COMMAND sed -i -e "/L_CFLAGS=\$/ s/=/=-fPIC\ /" src/Makefile
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
                 BUILD_COMMAND V=1 make -C src
                 INSTALL_COMMAND make install
@@ -48,6 +51,7 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 gflags
                 URL ${PHOTON_GFLAGS_SOURCE}
+                URL_MD5 1a865b93bacfa963201af3f75b7bd64c
                 CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DCMAKE_POSITION_INDEPENDENT_CODE=ON
                 INSTALL_COMMAND ""
         )
@@ -59,6 +63,7 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 googletest
                 URL ${PHOTON_GOOGLETEST_SOURCE}
+                URL_MD5 e82199374acdfda3f425331028eb4e2a
                 CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DINSTALL_GTEST=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
                 INSTALL_COMMAND ""
         )
