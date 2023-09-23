@@ -20,6 +20,7 @@ limitations under the License.
 Internal header provides abstract socket base class
 ***/
 
+#include <netinet/in.h>
 #include <vector>
 
 #include <photon/net/socket.h>
@@ -36,6 +37,64 @@ Internal header provides abstract socket base class
 
 namespace photon {
 namespace net {
+
+// sockaddr_storage is the container for any socket address type
+struct sockaddr_storage {
+    sockaddr_storage() = default;
+    explicit sockaddr_storage(const EndPoint& ep) {
+        if (ep.is_ipv4()) {
+            auto* in4 = (sockaddr_in*) &store;
+            in4->sin_family = AF_INET;
+            in4->sin_port = htons(ep.port);
+            in4->sin_addr.s_addr = ep.addr.to_nl();
+        } else {
+            auto* in6 = (sockaddr_in6*) &store;
+            in6->sin6_family = AF_INET6;
+            in6->sin6_port = htons(ep.port);
+            in6->sin6_addr = ep.addr.addr;
+        }
+    }
+    explicit sockaddr_storage(const sockaddr_in& addr) {
+        *((sockaddr_in*) &store) = addr;
+    }
+    explicit sockaddr_storage(const sockaddr_in6& addr) {
+        *((sockaddr_in6*) &store) = addr;
+    }
+    explicit sockaddr_storage(const sockaddr& addr) {
+        *((sockaddr*) &store) = addr;
+    }
+    EndPoint to_endpoint() const {
+        EndPoint ep;
+        if (store.ss_family == AF_INET6) {
+            auto s6 = (sockaddr_in6*) &store;
+            ep.addr = IPAddr(s6->sin6_addr);
+            ep.port = ntohs(s6->sin6_port);
+        } else if (store.ss_family == AF_INET) {
+            auto s4 = (sockaddr_in*) &store;
+            ep.addr = IPAddr(s4->sin_addr);
+            ep.port = ntohs(s4->sin_port);
+        }
+        return ep;
+    }
+    sockaddr* get_sockaddr() const {
+        return (sockaddr*) &store;
+    }
+    socklen_t get_socklen() const {
+        switch (store.ss_family) {
+            case AF_INET:
+                return sizeof(sockaddr_in);
+            case AF_INET6:
+                return sizeof(sockaddr_in6);
+            default:
+                return 0;
+        }
+    }
+    socklen_t get_max_socklen() const {
+        return sizeof(store);
+    }
+    // store must be zero initialized
+    ::sockaddr_storage store = {};
+};
 
 struct SocketOpt {
     int level;

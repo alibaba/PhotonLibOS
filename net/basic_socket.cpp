@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/common/utility.h>
+#include "base_socket.h"
 
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY    0x4000000
@@ -262,11 +263,11 @@ bool ISocketStream::skip_read(size_t count) {
 }
 
 int do_get_name(int fd, Getter getter, EndPoint& addr) {
-    struct sockaddr_in addr_in;
-    socklen_t len = sizeof(addr_in);
-    int ret = getter(fd, (struct sockaddr*) &addr_in, &len);
-    if (ret < 0 || len != sizeof(addr_in)) return -1;
-    addr.from_sockaddr_in(addr_in);
+    sockaddr_storage storage;
+    socklen_t len = storage.get_max_socklen();
+    int ret = getter(fd, storage.get_sockaddr(), &len);
+    if (ret < 0 || len > storage.get_max_socklen()) return -1;
+    addr = storage.to_endpoint();
     return 0;
 }
 

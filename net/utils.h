@@ -69,7 +69,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @return first resolved address.
  */
- inline IPAddr gethostbyname(const char* name) {
+inline IPAddr gethostbyname(const char* name) {
     IPAddr ret;
     auto cb = [&](IPAddr addr) {
         ret = addr;
@@ -88,7 +88,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @param buf IPAddr buffer pointer
  * @param bufsize size of `buf`, takes `sizeof(IPAddr)` as unit
- * @return sum of resolved address number. result will be filled into `buf`
+ * @return sum of resolved address number. -1 means error. result will be filled into `buf`
  */
 inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
     int i = 0;
@@ -107,7 +107,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  *
  * @param name Host name to resolve
  * @param ret `std::vector<IPAddr>` reference to get results
- * @return sum of resolved address number.
+ * @return sum of resolved address number. -1 means error.
  */
 inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
     ret.clear();

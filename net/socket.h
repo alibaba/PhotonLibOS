@@ -26,77 +26,145 @@ limitations under the License.
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
 
+#ifdef __linux__
+#define _in_addr_field s6_addr32
+#else // macOS
+#define _in_addr_field __u6_addr.__u6_addr32
+#endif
+
 struct LogBuffer;
 LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
+LogBuffer& operator << (LogBuffer& log, const in6_addr& iaddr);
+LogBuffer& operator << (LogBuffer& log, const sockaddr_in6& addr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
+
 namespace photon {
-namespace net
-{
-    union IPAddr
-    {
-        uint32_t addr = 0;
-        struct { uint8_t a, b, c, d; };
-        explicit IPAddr(uint32_t nl)
-        {
-            from_nl(nl);
+namespace net {
+
+    struct __attribute__ ((packed)) IPAddr {
+    public:
+        union {
+            in6_addr addr = {};
+            struct { uint16_t _1, _2, _3, _4, _5, _6; uint8_t a, b, c, d; };
+        };
+        // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
+        IPAddr() {
+            map_v4(htonl(INADDR_ANY));
         }
-        explicit IPAddr(const char* s)
-        {
-            struct in_addr addr;
-            if (inet_aton(s, &addr) == 0)
-                return;  // invalid IPv4 address
-            from_nl(addr.s_addr);
+        // V6 constructor (Internet Address)
+        explicit IPAddr(in6_addr internet_addr) {
+            addr = internet_addr;
         }
-        IPAddr() = default;
-        IPAddr(const IPAddr& rhs) = default;
-        uint32_t to_nl() const
-        {
-            return htonl(addr);
+        // V6 constructor (Network byte order)
+        IPAddr(uint32_t nl1, uint32_t nl2, uint32_t nl3, uint32_t nl4) {
+            addr._in_addr_field[0] = nl1;
+            addr._in_addr_field[1] = nl2;
+            addr._in_addr_field[2] = nl3;
+            addr._in_addr_field[3] = nl4;
         }
-        void from_nl(uint32_t nl)
-        {
-            addr = ntohl(nl);
+        // V4 constructor (Internet Address)
+        explicit IPAddr(in_addr internet_addr) {
+            map_v4(internet_addr);
+        }
+        // V4 constructor (Network byte order)
+        explicit IPAddr(uint32_t nl) {
+            map_v4(nl);
+        }
+        // String constructor
+        explicit IPAddr(const char* s) {
+            if (inet_pton(AF_INET6, s, &addr) > 0) {
+                return;
+            }
+            in_addr v4_addr;
+            if (inet_pton(AF_INET, s, &v4_addr) > 0) {
+                map_v4(v4_addr);
+                return;
+            }
+            // Invalid string, make it a default value
+            *this = IPAddr();
+        }
+        // Check if it's actually an IPv4 address mapped in IPV6
+        bool is_ipv4() const {
+            if (ntohl(addr._in_addr_field[2]) != 0x0000ffff) {
+                return false;
+            }
+            if (addr._in_addr_field[0] != 0 || addr._in_addr_field[1] != 0) {
+                return false;
+            }
+            return true;
+        }
+        // We regard the default IPv4 0.0.0.0 as undefined
+        bool undefined() const {
+            return *this == V4Any();
+        }
+        // Should ONLY be used for IPv4 address
+        uint32_t to_nl() const {
+            return addr._in_addr_field[3];
+        }
+        bool is_loopback() const {
+            return is_ipv4() ? (*this == V4Loopback()) : (*this == V6Loopback());
+        }
+        bool is_broadcast() const {
+            // IPv6 does not support broadcast
+            return is_ipv4() && (*this == V4Broadcast());
+        }
+        bool is_link_local() const {
+            if (is_ipv4()) {
+                return (to_nl() & htonl(0xffff0000)) == htonl(0xa9fe0000);
+            } else {
+                return (addr._in_addr_field[0] & htonl(0xffc00000)) == htonl(0xfe800000);
+            }
+        }
+        bool operator==(const IPAddr& rhs) const {
+            return memcmp(this, &rhs, sizeof(rhs)) == 0;
+        }
+        bool operator!=(const IPAddr& rhs) const {
+            return !(*this == rhs);
+        }
+    public:
+        static IPAddr V6None() {
+            return IPAddr(htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff));
+        }
+        static IPAddr V6Any() { return IPAddr(in6addr_any); }
+        static IPAddr V6Loopback() { return IPAddr(in6addr_loopback); }
+        static IPAddr V4Broadcast() { return IPAddr(htonl(INADDR_BROADCAST)); }
+        static IPAddr V4Any() { return IPAddr(htonl(INADDR_ANY)); }
+        static IPAddr V4Loopback() { return IPAddr(htonl(INADDR_LOOPBACK)); }
+    private:
+        void map_v4(in_addr addr_) {
+            map_v4(addr_.s_addr);
+        }
+        void map_v4(uint32_t nl) {
+            addr._in_addr_field[0] = 0x00000000;
+            addr._in_addr_field[1] = 0x00000000;
+            addr._in_addr_field[2] = htonl(0xffff);
+            addr._in_addr_field[3] = nl;
         }
     };
 
-    struct EndPoint
-    {
+    static_assert(sizeof(IPAddr) == 16, "IPAddr size incorrect");
+
+    struct __attribute__ ((packed)) EndPoint {
         IPAddr addr;
         uint16_t port = 0;
         EndPoint() = default;
-        EndPoint(IPAddr ip, uint16_t port): addr(ip), port(port) {}
-        EndPoint(const struct sockaddr_in& addr_in)
-        {
-            from(addr_in);
-        }
-        sockaddr_in to_sockaddr_in() const
-        {
-            struct sockaddr_in addr_in;
-            addr_in.sin_family = AF_INET;
-            addr_in.sin_addr.s_addr = addr.to_nl();
-            addr_in.sin_port = htons(port);
-            return addr_in;
-        }
-        void from_sockaddr_in(const struct sockaddr_in& addr_in)
-        {
-            addr.from_nl(addr_in.sin_addr.s_addr);
-            port = ntohs(addr_in.sin_port);
-        }
-        void from(const struct sockaddr_in& addr_in)
-        {
-            from_sockaddr_in(addr_in);
-        }
+        EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
+        bool is_ipv4() const {
+            return addr.is_ipv4();
+        };
         bool operator==(const EndPoint& rhs) const {
-            return rhs.addr.addr == addr.addr && rhs.port == port;
+            return rhs.addr == addr && rhs.port == port;
         }
         bool operator!=(const EndPoint& rhs) const {
             return !operator==(rhs);
         }
-        bool empty() const {
-            return addr.addr == 0 && port == 0;
+        bool undefined() const {
+            return addr.undefined() && port == 0;
         }
     };
+
+    static_assert(sizeof(EndPoint) == 18, "Endpoint size incorrect");
 
     // operators to help with logging IP addresses
     LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
@@ -187,6 +255,8 @@ namespace net
 
     extern "C" ISocketClient* new_tcp_socket_client();
     extern "C" ISocketServer* new_tcp_socket_server();
+    extern "C" ISocketClient* new_tcp_socket_client_ipv6();
+    extern "C" ISocketServer* new_tcp_socket_server_ipv6();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
@@ -208,11 +278,21 @@ namespace net
 }
 
 namespace std {
+
 template<>
 struct hash<photon::net::EndPoint> {
-    hash<uint64_t> hasher;
     size_t operator()(const photon::net::EndPoint& x) const {
-        return hasher((x.addr.to_nl() << 16) | x.port);
+        hash<std::string_view> hasher;
+        return hasher(std::string_view((const char*) &x, sizeof(x)));
     }
 };
+
+template<>
+struct hash<photon::net::IPAddr> {
+    size_t operator()(const photon::net::IPAddr& x) const {
+        hash<std::string_view> hasher;
+        return hasher(std::string_view((const char*) &x, sizeof(x)));
+    }
+};
+
 }

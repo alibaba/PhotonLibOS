@@ -180,18 +180,20 @@ public:
 TEST(Socket, endpoint) {
     EndPoint ep;
     struct in_addr inaddr;
-    struct sockaddr_in saddrin, rsai;
+    struct sockaddr_in saddrin;
     inet_aton("12.34.56.78", &inaddr);
     saddrin.sin_family = AF_INET;
     saddrin.sin_port = htons(4321);
     saddrin.sin_addr = inaddr;
 
-    ep.from_sockaddr_in(saddrin);
-    rsai = ep.to_sockaddr_in();
+    photon::net::sockaddr_storage s(saddrin);
+    ep = s.to_endpoint();
+    EXPECT_TRUE(ep == EndPoint(IPAddr("12.34.56.78"), 4321));
 
-    EXPECT_EQ(saddrin.sin_addr.s_addr, rsai.sin_addr.s_addr);
-    EXPECT_EQ(saddrin.sin_family, rsai.sin_family);
-    EXPECT_EQ(saddrin.sin_port, rsai.sin_port);
+    auto rsai = (sockaddr_in*) s.get_sockaddr();
+    EXPECT_EQ(saddrin.sin_addr.s_addr, rsai->sin_addr.s_addr);
+    EXPECT_EQ(saddrin.sin_family, rsai->sin_family);
+    EXPECT_EQ(saddrin.sin_port, rsai->sin_port);
 
     log_output = &log_output_test;
     LOG_DEBUG(ep);

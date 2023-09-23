@@ -25,11 +25,11 @@ limitations under the License.
 #include <string>
 
 #include <photon/common/alog.h>
-#include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
 #include <photon/common/expirecontainer.h>
 #include "socket.h"
+#include "base_socket.h"
 
 namespace photon {
 namespace net {
@@ -41,21 +41,23 @@ IPAddr gethostbypeer(IPAddr remote) {
     // but let os select the interface to connect,
     // then get its ip
     constexpr uint16_t UDP_IP_DETECTE_PORT = 8080;
+    int sock_family = remote.is_ipv4() ? AF_INET : AF_INET6;
 
-    int sockfd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    int sockfd = ::socket(sock_family, SOCK_DGRAM, 0);
     if (sockfd < 0) LOG_ERRNO_RETURN(0, IPAddr(), "Cannot create udp socket");
     DEFER(::close(sockfd));
-    struct sockaddr_in addr_in =
-        EndPoint{remote, UDP_IP_DETECTE_PORT}.to_sockaddr_in();
-    auto ret =
-        ::connect(sockfd, (sockaddr *)&addr_in, sizeof(struct sockaddr_in));
+
+    EndPoint ep_remote(remote, UDP_IP_DETECTE_PORT);
+    sockaddr_storage s_remote(ep_remote);
+
+    auto ret = ::connect(sockfd, s_remote.get_sockaddr(), s_remote.get_socklen());
     if (ret < 0) LOG_ERRNO_RETURN(0, IPAddr(), "Cannot connect remote");
-    struct sockaddr_in addr_local;
-    socklen_t len = sizeof(struct sockaddr_in);
-    ::getsockname(sockfd, (sockaddr *)&addr_local, &len);
-    IPAddr result;
-    result.from_nl(addr_local.sin_addr.s_addr);
-    return result;
+
+    sockaddr_storage s_local;
+    socklen_t len = s_local.get_max_socklen();
+    ::getsockname(sockfd, s_local.get_sockaddr(), &len);
+
+    return s_local.to_endpoint().addr;
 }
 
 IPAddr gethostbypeer(const char *domain) {
@@ -67,29 +69,35 @@ IPAddr gethostbypeer(const char *domain) {
     return gethostbypeer(remote);
 }
 
-int _gethostbyname(const char *name, Delegate<int, IPAddr> append_op) {
-    struct hostent *ent = nullptr;
-#ifdef __APPLE__
-    ent = ::gethostbyname(name);
-#else
-    int err;
-    struct hostent hbuf;
-    char buf[32 * 1024];
-
-    // only retval 0 means successful
-    if (::gethostbyname_r(name, &hbuf, buf, sizeof(buf), &ent, &err) != 0)
-        LOG_ERRNO_RETURN(0, -1, "Failed to gethostbyname", VALUE(err));
-#endif
+int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
+    assert(name);
     int idx = 0;
-    if (ent && ent->h_addrtype == AF_INET) {
-        // can only support IPv4
-        auto addrlist = (struct in_addr **)ent->h_addr_list;
-        while (*addrlist != nullptr) {
-            if (append_op(IPAddr((*addrlist)->s_addr)) < 0) break;
+    addrinfo* result = nullptr;
+    addrinfo hints = {};
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = AF_UNSPEC;
+
+    int ret = getaddrinfo(name, nullptr, &hints, &result);
+    if (ret != 0) {
+        LOG_ERROR_RETURN(0, -1, "Fail to getaddrinfo: `", gai_strerror(ret));
+    }
+    assert(result);
+    for (auto* cur = result; cur != nullptr; cur = cur->ai_next) {
+        if (cur->ai_family == AF_INET6) {
+            auto sock_addr = (sockaddr_in6*) cur->ai_addr;
+            if (append_op(IPAddr(sock_addr->sin6_addr)) < 0) {
+                break;
+            }
             idx++;
-            addrlist++;
+        } else if (cur->ai_family == AF_INET) {
+            auto sock_addr = (sockaddr_in*) cur->ai_addr;
+            if (append_op(IPAddr(sock_addr->sin_addr)) < 0) {
+                break;
+            }
+            idx++;
         }
     }
+    freeaddrinfo(result);
     return idx;
 }
 

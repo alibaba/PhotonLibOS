@@ -234,7 +234,8 @@ namespace rpc
     };
 
     extern "C" Stub* new_rpc_stub(IStream* stream, bool ownership = false);
-    extern "C" StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout);
+    extern "C" StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout,
+                                       bool ipv6 = false);
     extern "C" StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
                                 uint64_t connect_timeout,
                                 uint64_t rpc_timeout);

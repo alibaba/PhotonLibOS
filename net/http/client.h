@@ -133,7 +133,7 @@ protected:
 };
 
 //A Client without cookie_jar would ignore all response-header "Set-Cookies"
-Client* new_http_client(ICookieJar *cookie_jar = nullptr);
+Client* new_http_client(ICookieJar *cookie_jar = nullptr, bool ipv6 = false);
 
 ICookieJar* new_simple_cookie_jar();
 
