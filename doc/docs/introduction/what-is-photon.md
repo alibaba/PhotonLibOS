@@ -9,25 +9,16 @@ toc_max_heading_level: 4
 
 ### Coroutine runtime
 
-Photon's runtime is driven by a coroutine lib. Out tests show that it has the [**best**](../performance/network-performance#2-ping-pong) IO performance in the open source world by the year of 2022, even among different programing languages.
+Photon's runtime is driven by a coroutine lib. Out tests show that it has the [**best 🔗**](../performance/network-performance#2-ping-pong) IO performance in the open source world by the year of 2022, even among different programing languages.
 
 
-### Features
+### Core Features
 
 * Stackful coroutine. Symmetric scheduler.
 * Non-blocking IO engine. Async event engine. Support epoll / kqueue / **io_uring**.
 * Support multiple platforms and architectures, x86 / ARM, Linux / macOS.
 * Well-designed assembly code on the critical path, to reduce overhead.
 * Fully compatible API toward C++ std and POSIX. Easy to migrate to legacy codebases.
-
-### Functionalities
-
-* Multiple IO wrappers: psync, posix_aio, libaio, io_uring
-* Multiple socket implementations: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
-* High performance RPC client/server, HTTP client/server.
-* A POSIX-like filesystem abstraction and some implementations: local fs, http fs, f fs, etc.
-* A bunch of useful tools: io-vector manipulation, resource pool, object cache, mem allocator, callback delegator,
-  pre-compiled logging, lockless ring buffer, etc.
 
 ### Users
 
