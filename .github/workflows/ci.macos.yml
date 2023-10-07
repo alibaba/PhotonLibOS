@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  macOS-12-Monterey:
+  macOS-12-Monterey-debug:
     runs-on: macos-12
 
     steps:
