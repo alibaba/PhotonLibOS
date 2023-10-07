@@ -52,9 +52,10 @@ set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 # CMake didn't provide an abstraction of optimization level for now.
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")             # For development
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")     # For production
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")    # For CI test
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
+set(CMAKE_CXX_FLAGS_MINSIZEREL "-O3 -g")    # Only for CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -306,6 +307,7 @@ target_link_libraries(photon_static
 # Merge static libs into libphoton.a
 # Do NOT use this target directly.
 add_custom_target(_photon_static_archive ALL
+        COMMAND rm -rf libphoton.a
         COMMAND ar -crT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
         DEPENDS photon_static
         WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}

@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  centos8-gcc921-epoll:
+  centos8-gcc921-epoll-release:
     runs-on: [self-hosted, Linux, X64]
 
     container:
@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_EXTFS=ON
@@ -47,7 +47,47 @@ jobs:
           cd build
           ctest --timeout 3600 -V
 
-  centos8-gcc921-iouring:
+  centos8-gcc921-epoll-debug:
+    runs-on: [self-hosted, Linux, X64]
+
+    container:
+      image: dokken/centos-stream-8:sha-40294ce
+      options: --cpus 4
+
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+
+      - uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
+          dnf install -y gcc-toolset-9-gcc-c++
+          dnf install -y openssl-devel libcurl-devel libaio-devel
+          dnf install -y epel-release
+          dnf config-manager --set-enabled powertools
+          dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
+
+      - name: Build
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug \
+            -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j -- VERBOSE=1
+
+      - name: Test
+        run: |
+          ulimit -l unlimited
+          cd build
+          ctest --timeout 3600 -V
+
+  centos8-gcc921-iouring-release:
     runs-on: [self-hosted, Linux, X64]
 
     container:
@@ -75,7 +115,7 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_EXTFS=ON \

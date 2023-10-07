@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  macOS-clang:
+  macOS-clang-debug:
     runs-on: [self-hosted, macOS, ARM64]
 
     steps:
