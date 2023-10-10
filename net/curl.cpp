@@ -173,7 +173,8 @@ protected:
         for (int i = 0; i < cnt; i++) {
             int fd = cbs[i] >> 2;
             int ev = cbs[i] & 0b11;
-            if (fd != CURL_SOCKET_BAD && ev != 0) do_action(fd, ev);
+            if (fd != CURL_SOCKET_BAD && ev != 0)
+                photon::thread_create11(&do_action, fd, ev);
         }
         return 0;
     }
