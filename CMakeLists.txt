@@ -306,9 +306,14 @@ target_link_libraries(photon_static
 
 # Merge static libs into libphoton.a
 # Do NOT use this target directly.
+if (NOT APPLE)
+    set(merge_command ar -crT libphoton.a)
+else ()
+    set(merge_command libtool -static -o libphoton.a)
+endif ()
 add_custom_target(_photon_static_archive ALL
         COMMAND rm -rf libphoton.a
-        COMMAND ar -crT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+        COMMAND ${merge_command} $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
         DEPENDS photon_static
         WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
         VERBATIM
