@@ -186,7 +186,7 @@ TEST(http_client, post) {
     auto op2 = client->new_operation(Verb::POST, target);
     DEFER(delete op2);
     op2->req.headers.content_length(st.st_size);
-    auto writer = [&](Request *req)-> int {
+    auto writer = [&](Request *req)-> ssize_t {
         file->lseek(0, SEEK_SET);
         return req->write_stream(file, st.st_size);
     };

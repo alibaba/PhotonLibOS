@@ -48,9 +48,9 @@ public:
         Response resp;                            // response
         int status_code = -1;                     // status code in response
         bool enable_proxy;
-        IStream* body_stream = nullptr;           // use body_stream as body
-        using BodyWriter = Callback<Request*>;    // or call body_writer if body_stream
-        BodyWriter body_writer = {};              // is not set
+        IStream* body_stream = nullptr;                 // use body_stream as body
+        using BodyWriter = Delegate<ssize_t, Request*>; // or call body_writer if body_stream
+        BodyWriter body_writer = {};                    // is not set
 
         static Operation* create(Client* c, Verb v, std::string_view url,
                             uint16_t buf_size = 64 * 1024 - 1) {
