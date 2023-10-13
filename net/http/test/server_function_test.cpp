@@ -109,7 +109,7 @@ TEST(http_server, post) {
     DEFER(delete op);
     op->req.headers.content_length(10);
     std::string body = "1234567890";
-    auto writer = [&](Request *req)-> int {
+    auto writer = [&](Request *req)-> ssize_t {
         return req->write(body.data(), body.size());
     };
     op->body_writer = writer;
@@ -343,7 +343,7 @@ TEST(http_server, proxy_handler_post) {
     DEFER(delete op);
     std::string body = "1234567890";
     op->req.headers.content_length(10);
-    auto writer = [&](Request *req)-> int {
+    auto writer = [&](Request *req)-> ssize_t {
         return req->write(body.data(), body.size());
     };
     op->body_writer = writer;
@@ -405,7 +405,7 @@ TEST(http_server, proxy_handler_post_forward) {
     DEFER(delete op);
     std::string body = "1234567890";
     op->req.headers.content_length(10);
-    auto writer = [&](Request *req)-> int {
+    auto writer = [&](Request *req)-> ssize_t {
         return req->write(body.data(), body.size());
     };
     op->body_writer = writer;
