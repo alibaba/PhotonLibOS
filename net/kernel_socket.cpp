@@ -987,7 +987,8 @@ LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
     if (addr.is_ipv4())
         return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
     else {
-        assert(log.size >= INET6_ADDRSTRLEN);
+        if (log.size < INET6_ADDRSTRLEN)
+            return log;
         inet_ntop(AF_INET6, &addr.addr, log.ptr, INET6_ADDRSTRLEN);
         log.consume(strlen(log.ptr));
         return log;
