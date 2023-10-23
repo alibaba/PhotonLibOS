@@ -38,7 +38,7 @@ static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
 // Try to init master engine with the recommended order
 #if defined(__linux__)
-static const int recommended_order[] = {INIT_EVENT_IOURING, INIT_EVENT_EPOLL, INIT_EVENT_SELECT};
+static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_SELECT};
 #else   // macOS, FreeBSD ...
 static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
