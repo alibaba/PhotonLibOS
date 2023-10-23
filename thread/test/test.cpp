@@ -712,7 +712,6 @@ TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
 void *func1(void *)
 {
     photon::thread_sleep(rand()%5);
-    LOG_INFO("hello");
     return nullptr;
 }
 
@@ -757,14 +756,11 @@ TEST(ThreadPool, multithread) {
         wp.call(
             [&] { ths[i] = pool.thread_create_ex(&::func1, nullptr, true); });
     }
-    LOG_INFO("----------");
     for (int i = 0; i < FLAGS_ths_total; i++) {
         wp.call([&] {
-            LOG_DEBUG("wait thread: `", ths[i]->th);
             pool.join(ths[i]);
         });
     }
-    LOG_INFO("???????????????");
 }
 
 thread_local uint64_t rw_count;

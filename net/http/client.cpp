@@ -40,11 +40,13 @@ public:
     std::unique_ptr<Resolver> resolver;
 
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
-    PooledDialer() :
+    explicit PooledDialer(bool ipv6) :
             tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
-            tcpsock(new_tcp_socket_pool(new_tcp_socket_client(), -1, true)),
-            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1, true)),
             resolver(new_default_resolver(kDNSCacheLife)) {
+        auto tcp_cli = ipv6 ? new_tcp_socket_client_ipv6() : new_tcp_socket_client();
+        auto tls_cli = ipv6 ? new_tcp_socket_client_ipv6() : new_tcp_socket_client();
+        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
+        tlssock.reset(new_tcp_socket_pool(new_tls_client(tls_ctx, tls_cli, true), -1, true));
     }
 
     ~PooledDialer() { delete tls_ctx; }
@@ -77,7 +79,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
         return sock;
     }
     LOG_DEBUG("connect ssl : ` ep : `  host : ` failed", secure, ep, host);
-    if (ipaddr.addr == 0) LOG_DEBUG("No connectable resolve result");
+    if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
     resolver->discard_cache(strhost.c_str());
@@ -107,8 +109,8 @@ public:
     PooledDialer m_dialer;
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
-    ClientImpl(ICookieJar *cookie_jar) :
-        m_cookie_jar(cookie_jar) {}
+    ClientImpl(ICookieJar *cookie_jar, bool ipv6) :
+            m_dialer(ipv6), m_cookie_jar(cookie_jar) {}
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op) {
@@ -258,7 +260,7 @@ public:
     }
 };
 
-Client* new_http_client(ICookieJar *cookie_jar) { return new ClientImpl(cookie_jar); }
+Client* new_http_client(ICookieJar *cookie_jar, bool ipv6) { return new ClientImpl(cookie_jar, ipv6); }
 
 } // namespace http
 } // namespace net

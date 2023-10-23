@@ -60,20 +60,19 @@ limitations under the License.
 #endif
 
 LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
-    return log << photon::net::IPAddr(ntohl(iaddr.s_addr));
+    return log << photon::net::IPAddr(iaddr);
 }
-
+LogBuffer& operator<<(LogBuffer& log, const in6_addr& iaddr) {
+    return log << photon::net::IPAddr(iaddr);
+}
 LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
-    return log << photon::net::EndPoint(addr);
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
-
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
 LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
-    if (addr.sa_family == AF_INET) {
-        log << (const sockaddr_in&)addr;
-    } else {
-        log.printf("<sockaddr>");
-    }
-    return log;
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
 
 namespace photon {
@@ -93,7 +92,7 @@ public:
         } else {
             fd = ::socket(socket_family, SOCK_STREAM, 0);
         }
-        if (fd >= 0 && socket_family == AF_INET) {
+        if (fd >= 0 && (socket_family == AF_INET || socket_family == AF_INET6)) {
             int val = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
         }
@@ -214,18 +213,16 @@ public:
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
         if (fill_uds_path(addr_un, path, count) != 0) return nullptr;
-        return do_connect((const sockaddr*) &addr_un, nullptr, sizeof(addr_un));
+        return do_connect((const sockaddr*) &addr_un, sizeof(addr_un));
     }
 
     ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
-        sockaddr_in addr_remote = remote.to_sockaddr_in();
-        auto r = (sockaddr*) &addr_remote;
-        if (local.empty()) {
-            return do_connect(r, nullptr, sizeof(addr_remote));
+        sockaddr_storage r(remote);
+        if (local.undefined()) {
+            return do_connect(r.get_sockaddr(), r.get_socklen());
         }
-        sockaddr_in addr_local = local.to_sockaddr_in();
-        auto l = (sockaddr*) &addr_local;
-        return do_connect(r, l, sizeof(addr_remote));
+        sockaddr_storage l(local);
+        return do_connect(r.get_sockaddr(), r.get_socklen(), l.get_sockaddr(), l.get_socklen());
     }
 
 protected:
@@ -240,7 +237,8 @@ protected:
         return net::connect(fd, remote, addrlen, m_timeout);
     }
 
-    ISocketStream* do_connect(const sockaddr* remote, const sockaddr* local, socklen_t addrlen) {
+    ISocketStream* do_connect(const sockaddr* remote, socklen_t len_remote,
+                              const sockaddr* local = nullptr, socklen_t len_local = 0) {
         auto stream = create_stream();
         std::unique_ptr<KernelSocketStream> ptr(stream);
         if (!ptr || ptr->fd < 0) {
@@ -251,11 +249,11 @@ protected:
         }
         ptr->timeout(m_timeout);
         if (local != nullptr) {
-            if (::bind(ptr->fd, local, addrlen) != 0) {
+            if (::bind(ptr->fd, local, len_local) != 0) {
                 LOG_ERRNO_RETURN(0, nullptr, "fail to bind socket");
             }
         }
-        auto ret = fd_connect(ptr->fd, remote, addrlen);
+        auto ret = fd_connect(ptr->fd, remote, len_remote);
         if (ret < 0) {
             LOG_ERRNO_RETURN(0, nullptr, "Failed to connect socket");
         }
@@ -300,7 +298,7 @@ public:
         if (m_listen_fd < 0) {
             LOG_ERRNO_RETURN(0, -1, "fail to setup listen fd");
         }
-        if (m_socket_family == AF_INET) {
+        if (m_socket_family == AF_INET || m_socket_family == AF_INET6) {
             if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0) {
                 LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt of TCP_NODELAY");
             }
@@ -336,8 +334,11 @@ public:
     }
 
     int bind(uint16_t port, IPAddr addr) override {
-        auto addr_in = EndPoint(addr, port).to_sockaddr_in();
-        return ::bind(m_listen_fd, (struct sockaddr*)&addr_in, sizeof(addr_in));
+        if (m_socket_family == AF_INET6 && addr.undefined()) {
+            addr = IPAddr::V6Any();
+        }
+        sockaddr_storage s(EndPoint(addr, port));
+        return ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
     }
 
     int bind(const char* path, size_t count) override {
@@ -419,11 +420,12 @@ protected:
     int do_accept() { return fd_accept(m_listen_fd, nullptr, nullptr); }
 
     int do_accept(EndPoint& remote_endpoint) {
-        struct sockaddr_in addr_in;
-        socklen_t len = sizeof(addr_in);
-        int cfd = fd_accept(m_listen_fd, (struct sockaddr*) &addr_in, &len);
-        if (cfd < 0 || len != sizeof(addr_in)) return -1;
-        remote_endpoint.from_sockaddr_in(addr_in);
+        sockaddr_storage s;
+        socklen_t len = s.get_max_socklen();
+        int cfd = fd_accept(m_listen_fd, s.get_sockaddr(), &len);
+        if (cfd < 0 || len > s.get_max_socklen())
+            return -1;
+        remote_endpoint = s.to_endpoint();
         return cfd;
     }
 
@@ -900,7 +902,8 @@ public:
         if (fd >= 0) etpoller.register_notifier(fd, this);
     }
 
-    ETKernelSocketStream() : KernelSocketStream(AF_INET, true) {
+    ETKernelSocketStream(int socket_family, bool nonblocking) :
+            KernelSocketStream(socket_family, nonblocking) {
         if (fd >= 0) etpoller.register_notifier(fd, this);
     }
 
@@ -947,7 +950,7 @@ public:
 
 protected:
     KernelSocketStream* create_stream() override {
-        return new ETKernelSocketStream();
+        return new ETKernelSocketStream(m_socket_family, m_nonblocking);
     }
 };
 
@@ -981,18 +984,35 @@ protected:
 /* ET Socket - End */
 
 LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
-    return log.printf(addr.d, '.', addr.c, '.', addr.b, '.', addr.a);
+    if (addr.is_ipv4())
+        return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
+    else {
+        if (log.size < INET6_ADDRSTRLEN)
+            return log;
+        inet_ntop(AF_INET6, &addr.addr, log.ptr, INET6_ADDRSTRLEN);
+        log.consume(strlen(log.ptr));
+        return log;
+    }
 }
 
 LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
-    return log << ep.addr << ':' << ep.port;
+    if (ep.is_ipv4())
+        return log << ep.addr << ':' << ep.port;
+    else
+        return log << '[' << ep.addr << "]:" << ep.port;
 }
 
 extern "C" ISocketClient* new_tcp_socket_client() {
     return new KernelSocketClient(AF_INET, true);
 }
+extern "C" ISocketClient* new_tcp_socket_client_ipv6() {
+    return new KernelSocketClient(AF_INET6, true);
+}
 extern "C" ISocketServer* new_tcp_socket_server() {
     return NewObj<KernelSocketServer>(AF_INET, false, true)->init();
+}
+extern "C" ISocketServer* new_tcp_socket_server_ipv6() {
+    return NewObj<KernelSocketServer>(AF_INET6, false, true)->init();
 }
 extern "C" ISocketClient* new_uds_client() {
     return new KernelSocketClient(AF_UNIX, true);
