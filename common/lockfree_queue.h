@@ -58,6 +58,9 @@ struct Capacity_2expN<0> {
 template <>
 struct Capacity_2expN<1> : public Capacity_2expN<0> {};
 
+template <>
+struct Capacity_2expN<2> : public Capacity_2expN<0> {};
+
 struct PauseBase {};
 
 struct CPUPause : PauseBase {
@@ -136,7 +139,7 @@ protected:
     bool check_empty(size_t h, size_t t) const { return h == t; }
 
     bool check_full(size_t h, size_t t) const {
-        return check_mask_equal(h, t + 1);
+        return h != t && check_mask_equal(h, t);
     }
 
     size_t idx(size_t x) const { return x & mask; }
