@@ -29,3 +29,9 @@
 * Made the first tag on 27 Jul 2022. Fix the compatibility for ARM CPU. Throughly compared the TCP echo server performance with other libs.
 
 </p></details>
+
+## Community
+
+<img src="/doc/static/img/slack.svg" width="20"> Join Slack: [link](https://join.slack.com/t/photonlibos/shared_invite/zt-25wauq8g1-iK_oHMrXetcvWNNhIt8Nkg)
+
+<img src="/doc/static/img/dingtalk.svg" width="20"> Join DingTalk group: 55690000272
