@@ -103,7 +103,7 @@ const config = {
               {
                 html: `
                     <a href="https://join.slack.com/t/photonlibos/shared_invite/zt-25wauq8g1-iK_oHMrXetcvWNNhIt8Nkg" target="_blank" rel="noreferrer noopener">
-                        <img src="/img/slack.png" alt="Slack" width="30" />
+                        <img src="/img/slack.svg" alt="Slack" width="30" />
                     </a>
                     <a href="https://www.dingtalk.com/download?action=joingroup&code=v1,k1,Q3fyZvf3qFx7aB+9j4FkrK2K45E2g9SiufbbSueS8h0=&_dt_no_comment=1&origin=11" target="_blank" rel="noreferrer noopener" style="padding-left: 10px;">
                         <img src="/img/dingtalk.svg" alt="Dingtalk" width="30" />
