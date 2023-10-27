@@ -43,4 +43,3 @@ $ GIT_USER=photonlibos yarn deploy
 ```
 
 Will push to the `main` branch and use the GitHub pages for hosting
-
