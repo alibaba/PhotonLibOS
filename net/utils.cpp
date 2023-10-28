@@ -256,23 +256,34 @@ bool Base64Decode(std::string_view in, std::string &out) {
 
 class DefaultResolver : public Resolver {
 public:
-    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
-        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
+    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout, bool ipv6)
+        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout), ipv6_(ipv6) {}
     ~DefaultResolver() { dnscache_.clear(); }
 
     IPAddr resolve(const char *host) override {
         auto ctr = [&]() -> IPAddr * {
-            auto *ip = new IPAddr();
+            std::vector<IPAddr> addrs;
             photon::semaphore sem;
             std::thread([&]() {
-                *ip = gethostbyname(host);
+                int ret = gethostbyname(host, addrs);
+                if (ret < 0) {
+                    addrs.clear();
+                }
                 sem.signal(1);
             }).detach();
             auto ret = sem.wait(1, resolve_timeout_);
             if (ret < 0 && errno == ETIMEDOUT) {
                 LOG_WARN("Domain resolution for ` timeout!", host);
+                return new IPAddr;  // undefined addr
+            } else if (addrs.empty()) {
+                LOG_WARN("Domain resolution for ` failed", host);
+                return new IPAddr;  // undefined addr
             }
-            return ip;
+            for (auto& each : addrs) {
+                if ((each.is_ipv4() ^ !ipv6_) == 0)
+                    return new IPAddr(each);
+            }
+            return new IPAddr;      // undefined addr
         };
         return *(dnscache_.borrow(host, ctr));
     }
@@ -287,10 +298,11 @@ public:
 private:
     ObjectCache<std::string, IPAddr *> dnscache_;
     uint64_t resolve_timeout_;
+    bool ipv6_;
 };
 
-Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout) {
-    return new DefaultResolver(cache_ttl, resolve_timeout);
+Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout, bool ipv6) {
+    return new DefaultResolver(cache_ttl, resolve_timeout, ipv6);
 }
 
 }  // namespace net
