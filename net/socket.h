@@ -230,6 +230,7 @@ namespace net {
         // may block once at most, when there's no free space in the socket's internal buffer;
         virtual ssize_t send(const void *buf, size_t count, int flags = 0) = 0;
         virtual ssize_t send(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
+        virtual ssize_t send_mutable(struct iovec *iov, int iovcnt, int flags = 0);
 
         virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) = 0;
     };

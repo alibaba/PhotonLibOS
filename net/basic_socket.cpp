@@ -266,6 +266,10 @@ ssize_t ISocketStream::recv_mutable(struct iovec *iov, int iovcnt, int flags) {
     return recv(iov, iovcnt, flags);
 }
 
+ssize_t ISocketStream::send_mutable(struct iovec *iov, int iovcnt, int flags) {
+    return send(iov, iovcnt, flags);
+}
+
 ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
     size_t n = 0;
     if (least > count) least = count;
