@@ -153,7 +153,7 @@ bool zerocopy_available();
  */
 class Resolver : public Object {
 public:
-    // When failed, IPAddr(0) should be returned.
+    // When failed, return an Undefined IPAddr
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(const char* host) = 0;
     virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
@@ -165,9 +165,10 @@ public:
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.
+ * @param ipv6 specify v4 or v6 domain name
  * @return Resolver*
  */
-Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
+Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1, bool ipv6 = false);
 
 }  // namespace net
 }

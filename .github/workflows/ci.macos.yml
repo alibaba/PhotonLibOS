@@ -2,9 +2,9 @@ name: macOS
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "release/*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "release/*" ]
 
 jobs:
   macOS-12-Monterey-debug:
