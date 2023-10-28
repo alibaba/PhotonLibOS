@@ -84,11 +84,12 @@ TEST(http_client, get) {
     auto op2 = client->new_operation(Verb::GET, target);
     DEFER(delete op2);
     op2->req.headers.content_length(0);
-    client->call(op2);
+    int ret = client->call(op2);
+    GTEST_ASSERT_EQ(0, ret);
 
     char resp_body_buf[1024];
     EXPECT_EQ(sizeof(socket_buf), op2->resp.resource_size());
-    auto ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
+    ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
     EXPECT_EQ(sizeof(socket_buf), ret);
     resp_body_buf[sizeof(socket_buf) - 1] = '\0';
     LOG_DEBUG(resp_body_buf);

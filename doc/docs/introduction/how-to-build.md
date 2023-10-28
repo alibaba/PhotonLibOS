@@ -85,8 +85,7 @@ cmake --build build -j
 
 ```bash
 cd PhotonLibOS
-# Use `brew info openssl` to find openssl path
-cmake -B build -D OPENSSL_ROOT_DIR=/path/to/openssl/
+cmake -B build
 cmake --build build -j
 ```
 
@@ -178,3 +177,10 @@ ctest
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
 
+#### Example
+
+If there is any shared lib you don't want Photon to link to on local host, build its static from source.
+
+```bash
+cmake -B build -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz
+```
