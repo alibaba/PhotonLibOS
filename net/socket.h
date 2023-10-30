@@ -216,10 +216,10 @@ namespace net {
         // may block once at most, when there's no data yet in the socket;
         virtual ssize_t recv(void *buf, size_t count, int flags = 0) = 0;
         virtual ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
-        virtual ssize_t recv_mutable(struct iovec *iov, int iovcnt, int flags = 0);
 
         // recv at `least` bytes to buffer (`buf`, `count`)
         ssize_t recv_at_least(void* buf, size_t count, size_t least, int flags = 0);
+        ssize_t recv_at_least_mutable(struct iovec *iov, int iovcnt, size_t least, int flags = 0);
 
         // read count bytes and drop them
         // return true/false for success/failure
@@ -230,7 +230,6 @@ namespace net {
         // may block once at most, when there's no free space in the socket's internal buffer;
         virtual ssize_t send(const void *buf, size_t count, int flags = 0) = 0;
         virtual ssize_t send(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
-        virtual ssize_t send_mutable(struct iovec *iov, int iovcnt, int flags = 0);
 
         virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) = 0;
     };

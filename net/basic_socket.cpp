@@ -262,24 +262,30 @@ bool ISocketStream::skip_read(size_t count) {
     return true;
 }
 
-ssize_t ISocketStream::recv_mutable(struct iovec *iov, int iovcnt, int flags) {
-    return recv(iov, iovcnt, flags);
-}
-
-ssize_t ISocketStream::send_mutable(struct iovec *iov, int iovcnt, int flags) {
-    return send(iov, iovcnt, flags);
-}
-
 ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
     size_t n = 0;
-    if (least > count) least = count;
-    while (true) {
+    do {
         ssize_t ret = this->recv(buf, count, flags);
         if (ret < 0) return ret;
         if (ret == 0) break;    // EOF
         if ((n += ret) >= least) break;
         count -= ret;
-    }
+    } while (count);
+    return n;
+}
+
+ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
+                                             size_t least, int flags /*=0*/) {
+    size_t n = 0;
+    iovector_view v(iov, iovcnt);
+    do {
+        ssize_t ret = this->recv(v.iov, v.iovcnt, flags);
+        if (ret < 0) return ret;
+        if (ret == 0) break;    // EOF
+        if ((n += ret) >= least) break;
+        auto r = v.extract_front(ret);
+        assert(r == ret); (void)r;
+    } while (v.iovcnt && v.iov->iov_len);
     return n;
 }
 
