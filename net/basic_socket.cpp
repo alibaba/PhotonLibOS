@@ -262,6 +262,33 @@ bool ISocketStream::skip_read(size_t count) {
     return true;
 }
 
+ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
+    size_t n = 0;
+    do {
+        ssize_t ret = this->recv(buf, count, flags);
+        if (ret < 0) return ret;
+        if (ret == 0) break;    // EOF
+        if ((n += ret) >= least) break;
+        count -= ret;
+    } while (count);
+    return n;
+}
+
+ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
+                                             size_t least, int flags /*=0*/) {
+    size_t n = 0;
+    iovector_view v(iov, iovcnt);
+    do {
+        ssize_t ret = this->recv(v.iov, v.iovcnt, flags);
+        if (ret < 0) return ret;
+        if (ret == 0) break;    // EOF
+        if ((n += ret) >= least) break;
+        auto r = v.extract_front(ret);
+        assert(r == ret); (void)r;
+    } while (v.iovcnt && v.iov->iov_len);
+    return n;
+}
+
 int do_get_name(int fd, Getter getter, EndPoint& addr) {
     sockaddr_storage storage;
     socklen_t len = storage.get_max_socklen();

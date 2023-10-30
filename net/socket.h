@@ -217,6 +217,10 @@ namespace net {
         virtual ssize_t recv(void *buf, size_t count, int flags = 0) = 0;
         virtual ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) = 0;
 
+        // recv at `least` bytes to buffer (`buf`, `count`)
+        ssize_t recv_at_least(void* buf, size_t count, size_t least, int flags = 0);
+        ssize_t recv_at_least_mutable(struct iovec *iov, int iovcnt, size_t least, int flags = 0);
+
         // read count bytes and drop them
         // return true/false for success/failure
         bool skip_read(size_t count);
