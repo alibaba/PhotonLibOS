@@ -49,8 +49,8 @@ void IdentityPoolBase::put(void* obj)
             m_mtx.lock();
         }
         --m_refcnt;
+        m_cvar.notify_all();
     }
-    m_cvar.notify_all();
     assert(m_size <= m_capacity);
 }
 
