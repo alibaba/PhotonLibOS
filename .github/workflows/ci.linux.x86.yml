@@ -2,9 +2,9 @@ name: Linux x86
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "release/*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "release/*" ]
 
 jobs:
   centos8-gcc921-epoll-release:
