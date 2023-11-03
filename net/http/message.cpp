@@ -41,7 +41,7 @@ Message::~Message() {
         delete m_stream;
     }
 
-    if (m_buf_ownership && m_buf)
+    if (m_buf_ownership)
         free(m_buf);
 }
 
@@ -105,11 +105,14 @@ int Message::append_bytes(uint16_t size) {
         return parse_res;
     }
 
-    LOG_DEBUG("add headers, header buf size `", m_buf + m_buf_capacity - p.cur());
-    if (headers.reset(p.cur(), m_buf + m_buf_capacity - p.cur(), m_buf + m_buf_size - p.cur()) < 0)
+    auto buf_cap = m_buf + m_buf_capacity - p.cur();
+    auto buf_size = m_buf + m_buf_size - p.cur();
+    LOG_DEBUG("add headers: ", VALUE(buf_cap), VALUE(buf_size));
+    if (headers.reset(p.cur(), buf_cap, buf_size) < 0)
         LOG_ERRNO_RETURN(0, -1, "failed to parse headers");
 
-    m_abandon = (headers.get_value("Connection") == "close") || (!headers.get_value("Trailer").empty());
+    m_abandon = (headers["Connection"] == "close" ||
+                !headers["Trailer"].empty());
     message_status = HEADER_PARSED;
     LOG_DEBUG("header parsed");
     return 0;
@@ -118,11 +121,9 @@ int Message::append_bytes(uint16_t size) {
 int Message::send_header(net::ISocketStream* stream) {
     if (stream != nullptr) m_stream = stream; // update stream if needed
 
-    if (m_keep_alive)
-        headers.insert("Connection", "keep-alive");
-    else
-        headers.insert("Connection", "close");
-
+    using SV = std::string_view;
+    headers.insert("Connection", m_keep_alive ? SV("keep-alive") :
+                                                SV("close"));
     if (headers.space_remain() < 2)
         LOG_ERRNO_RETURN(ENOBUFS, -1, "no buffer");
 
@@ -322,17 +323,15 @@ int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
 
 int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     estring full_location;
-    if (!location.starts_with(http_url_scheme) && (!location.starts_with(https_url_scheme))) {
+    if (!location.starts_with(http_url_scheme) &&
+        !location.starts_with(https_url_scheme)) {
         full_location.appends(secure() ? https_url_scheme : http_url_scheme,
                              host(), location);
         location = full_location;
     }
     StoredURL u(location);
-    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n");
-    if (enable_proxy)
-        new_request_line_size += full_url_size(u);
-    else
-        new_request_line_size += u.target().size();
+    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
+        enable_proxy ? full_url_size(u) : u.target().size();
 
     auto delta = new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
@@ -381,11 +380,9 @@ int Response::set_result(int code, std::string_view reason) {
     char* buf = m_buf;
     m_status_code = code;
     buf_append(buf, "HTTP/1.1 ");
-    buf_append(buf, std::to_string(code));
+    buf_append(buf, code);
     buf_append(buf, " ");
-    auto message = reason;
-    if (message.empty()) message = obsolete_reason(code);
-    buf_append(buf, message);
+    buf_append(buf, reason.size() ? reason : obsolete_reason(code));
     buf_append(buf, "\r\n");
     m_buf_size = buf - m_buf;
     headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
