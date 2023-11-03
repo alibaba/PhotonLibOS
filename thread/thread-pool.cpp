@@ -29,9 +29,37 @@ namespace photon
             pCtrl->joining = false;
             pCtrl->start = start;
             pCtrl->arg = arg;
+            pCtrl->cvar.notify_one();
         }
-        pCtrl->cvar.notify_one();
         return pCtrl;
+    }
+    bool ThreadPoolBase::wait_for_work(TPControl &ctrl)
+    {
+        SCOPED_LOCK(ctrl.m_mtx);
+        while (!ctrl.start)                     // wait for `create()` to give me
+            ctrl.cvar.wait(ctrl.m_mtx);           // thread_entry and argument
+
+        if (ctrl.start == &stub)
+            return false;
+
+        ((partial_thread*) CURRENT)->tls = nullptr;
+        return true;
+    }
+    bool ThreadPoolBase::after_work_done(TPControl &ctrl)
+    {
+        SCOPED_LOCK(ctrl.m_mtx);
+        auto ret = !ctrl.joining;
+        if (ctrl.joining) {
+            assert(ctrl.joinable);
+            ctrl.cvar.notify_all();
+        } else if (ctrl.joinable) {
+            ctrl.joining = true;
+            ctrl.cvar.wait(ctrl.m_mtx);
+        }
+        ctrl.joinable = false;
+        ctrl.joining = false;
+        ctrl.start = nullptr;
+        return ret;
     }
     void* ThreadPoolBase::stub(void* arg)
     {
@@ -39,52 +67,43 @@ namespace photon
         auto th = *(thread**)arg;
         *(TPControl**)arg = &ctrl;              // tell ctor where my `ctrl` is
         thread_yield_to(th);
-        while(true)
+        while(wait_for_work(ctrl))
         {
-            {
-                SCOPED_LOCK(ctrl.m_mtx);
-                while (!ctrl.start)                     // wait for `create()` to give me
-                    ctrl.cvar.wait(ctrl.m_mtx);           // thread_entry and argument
-
-                if (ctrl.start == &stub)
-                    break;
-                ((partial_thread*) CURRENT)->tls = nullptr;
-            }
             ctrl.start(ctrl.arg);
             deallocate_tls();
-            {
-                SCOPED_LOCK(ctrl.m_mtx);
-                if (ctrl.joining) {
-                    assert(ctrl.joinable);
-                    ctrl.cvar.notify_all();
-                } else if (ctrl.joinable) {
-                    ctrl.joining = true;
-                    ctrl.cvar.wait(ctrl.m_mtx);
-                }
-                ctrl.joinable = false;
-                ctrl.joining = false;
-                ctrl.start = nullptr;
+            auto should_put = after_work_done(ctrl);
+            if (should_put) {
+                // if has no other joiner waiting
+                // collect it into pool
+                ctrl.pool->put(&ctrl);
             }
-            ctrl.pool->put(&ctrl);
         }
         return nullptr;
     }
-    void ThreadPoolBase::join(TPControl* pCtrl)
+    bool ThreadPoolBase::do_thread_join(TPControl* pCtrl)
     {
         SCOPED_LOCK(pCtrl->m_mtx);
         if (!pCtrl->joinable)
-            LOG_ERROR_RETURN(EINVAL, , "thread is not joinable");
+            LOG_ERROR_RETURN(EINVAL, false, "thread is not joinable");
         if (!pCtrl->start)
-            LOG_ERROR_RETURN(EINVAL, , "thread is not running");
+            LOG_ERROR_RETURN(EINVAL, false, "thread is not running");
         if (pCtrl->start == &stub)
-            LOG_ERROR_RETURN(EINVAL, , "thread is dying");
+            LOG_ERROR_RETURN(EINVAL, false, "thread is dying");
 
+        auto ret = !pCtrl->joining;
         if (pCtrl->joining) {
             pCtrl->cvar.notify_one();
         } else {
             pCtrl->joining = true;
             pCtrl->cvar.wait(pCtrl->m_mtx);
         }
+        return ret;
+    }
+    void ThreadPoolBase::join(TPControl* pCtrl)
+    {
+        auto should_put = do_thread_join(pCtrl);
+        if (should_put)
+            pCtrl->pool->put(pCtrl);
     }
     int ThreadPoolBase::ctor(ThreadPoolBase* pool, TPControl** out)
     {
