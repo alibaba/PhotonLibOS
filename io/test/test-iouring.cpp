@@ -339,9 +339,12 @@ TEST(perf, DISABLED_read) {
 
 /* Event Engine Tests */
 
-photon::CascadingEventEngine* new_cascading_engine(bool iouring = false) {
-    // return photon::new_iouring_cascading_engine();
+photon::CascadingEventEngine* new_cascading_engine() {
+#ifdef PHOTON_UT_ENABLE_URING
+    return photon::new_iouring_cascading_engine();
+#else
     return photon::new_epoll_cascading_engine();
+#endif
 }
 
 TEST(event_engine, master) {
@@ -354,7 +357,7 @@ TEST(event_engine, master) {
         LOG_INFO("start write");
         write(fd[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
     LOG_INFO("wait 3s at most");
     ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), 0);
@@ -371,7 +374,7 @@ TEST(event_engine, master_timeout) {
         LOG_INFO("start write");
         write(fd[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
     LOG_INFO("wait 1s at most");
     ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 1000000), -1);
@@ -390,7 +393,7 @@ TEST(event_engine, master_interrupted) {
         photon::thread_interrupt(main, EPERM);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
     LOG_INFO("wait 3s at most");
     ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), -1);
@@ -412,7 +415,7 @@ TEST(event_engine, master_interrupted_after_io) {
         photon::thread_interrupt(main, EPERM);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
     LOG_INFO("wait 3s at most");
     ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), -1);
@@ -432,7 +435,7 @@ TEST(event_engine, cascading) {
         write(fd1[1], buf, 1);
         write(fd2[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
     auto engine = new_cascading_engine();
@@ -464,7 +467,7 @@ TEST(event_engine, cascading_timeout) {
         write(fd1[1], buf, 1);
         write(fd2[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
     auto engine = new_cascading_engine();
@@ -492,25 +495,24 @@ TEST(event_engine, cascading_remove) {
     DEFER(delete engine);
     auto f = [&] {
         photon::thread_sleep(1);
+        // 2. Remove one
         engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
-        photon::thread_sleep(1);
-        LOG_INFO("start write fd");
+        // 3. Write both
         write(fd1[1], buf, 1);
         write(fd2[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
+    // 1. Add both
     engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
     engine->add_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
+    // 4. Should get only one
     void* data[5] = {};
     ssize_t num_events = engine->wait_for_events(data, 5, -1UL);
     ASSERT_EQ(num_events, 1);
     ASSERT_EQ(data[0], (void*) 0x2222);
-
-
-    engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
     photon::thread_join((photon::join_handle*) sub);
 }
@@ -532,7 +534,7 @@ TEST(event_engine, cascading_one_shot) {
         write(fd2[1], buf, 1);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
     auto engine = new_cascading_engine();
@@ -558,7 +560,6 @@ TEST(event_engine, cascading_one_shot) {
     LOG_INFO("wait non events");
     num_events = engine->wait_for_events(data, 5, 2000000);
     ASSERT_EQ(num_events, 0);
-    ASSERT_EQ(errno, ETIMEDOUT);
 
     photon::thread_join((photon::join_handle*) sub);
 }

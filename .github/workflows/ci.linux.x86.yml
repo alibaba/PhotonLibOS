@@ -12,7 +12,6 @@ jobs:
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
-      options: --cpus 4
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -52,7 +51,6 @@ jobs:
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
-      options: --cpus 4
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -93,7 +91,6 @@ jobs:
     container:
       image: dokken/centos-stream-8:sha-40294ce
       # In order to run io_uring, the docker daemon should add --default-ulimit memlock=-1:-1
-      options: --cpus 4
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -119,7 +116,8 @@ jobs:
             -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_EXTFS=ON \
-            -D PHOTON_ENABLE_URING=ON
+            -D PHOTON_ENABLE_URING=ON \
+            -D PHOTON_UT_ENABLE_URING=ON
           cmake --build build -j -- VERBOSE=1
 
       - name: Test

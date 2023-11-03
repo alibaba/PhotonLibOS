@@ -53,9 +53,12 @@ function(build_from_src [dep])
                 CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DCMAKE_POSITION_INDEPENDENT_CODE=ON
                 INSTALL_COMMAND ""
         )
+        if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(POSTFIX "_debug")
+        endif ()
         ExternalProject_Get_Property(gflags BINARY_DIR)
         set(GFLAGS_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
-        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags.a ${BINARY_DIR}/lib/libgflags_nothreads.a PARENT_SCOPE)
+        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a ${BINARY_DIR}/lib/libgflags_nothreads${POSTFIX}.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "googletest")
         ExternalProject_Add(

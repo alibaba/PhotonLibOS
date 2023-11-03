@@ -37,8 +37,10 @@ static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 #define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
 
 // Try to init master engine with the recommended order
-#if defined(__linux__)
-static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_SELECT};
+#if defined(PHOTON_UT_ENABLE_URING)
+static const int recommended_order[] = {INIT_EVENT_IOURING, INIT_EVENT_EPOLL, INIT_EVENT_SELECT};
+#elif defined(__linux__)
+static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_SELECT};
 #else   // macOS, FreeBSD ...
 static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif

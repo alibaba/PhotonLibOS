@@ -244,6 +244,10 @@ public:
             io_uring_prep_poll_multishot(sqe, fd_interest.fd, fd_interest.interest);
         }
         io_uring_sqe_set_data(sqe, &pair.first->second.io_ctx);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(0, -1, "iouring: fail to submit when adding interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
@@ -260,11 +264,15 @@ public:
 
         io_uring_prep_poll_remove(sqe, (__u64) &iter->second.io_ctx);
         io_uring_sqe_set_data(sqe, nullptr);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(0, -1, "iouring: fail to submit when removing interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
     ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) override {
-        // Use master engine to wait for self event fd
+        // Use master engine to poll cascading engine's eventfd
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(m_cascading_event_fd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;

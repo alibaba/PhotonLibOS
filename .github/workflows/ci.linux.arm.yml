@@ -12,7 +12,6 @@ jobs:
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
-      options: --cpus 4
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -52,7 +51,6 @@ jobs:
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
-      options: --cpus 4
 
     steps:
       - uses: szenius/set-timezone@v1.2
