@@ -321,12 +321,8 @@ protected:
     }
 
 public:
-    constexpr rstring_view() = default; // note: don't give _offset or _length
-                                        // an initial value and do not
-                                        // assigned them in default ctor()
-                                        // it would caused verb_init() error
-    rstring_view(uint64_t offset, uint64_t length)
-    {
+    constexpr rstring_view() = default;
+    constexpr rstring_view(uint64_t offset, uint64_t length) {
         assert(offset <= std::numeric_limits<OffsetType>::max());
         assert(length <= std::numeric_limits<LengthType>::max());
         _offset = (OffsetType)offset;
