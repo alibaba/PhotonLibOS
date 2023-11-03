@@ -13,6 +13,9 @@ target_link_libraries(rpc-example-client PRIVATE photon_static ${testing_libs})
 add_executable(rpc-example-server rpc/server.cpp rpc/server_main.cpp)
 target_link_libraries(rpc-example-server PRIVATE photon_static ${testing_libs})
 
+add_executable(sync-primitive sync-primitive/sync-primitive.cpp)
+target_link_libraries(sync-primitive PRIVATE photon_static ${testing_libs})
+
 if (ENABLE_FSTACK_DPDK)
     add_executable(fstack-dpdk-demo fstack-dpdk/fstack-dpdk-demo.cpp)
     target_link_libraries(fstack-dpdk-demo PRIVATE fstack_dpdk photon_static ${testing_libs})
