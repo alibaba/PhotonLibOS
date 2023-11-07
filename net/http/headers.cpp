@@ -64,11 +64,6 @@ HeadersBase::iterator HeadersBase::find(std::string_view key) const {
     return {this, (uint16_t)(it - kv_begin())};
 }
 
-void buf_append(char*& ptr, std::string_view sv) {
-    memcpy(ptr, sv.data(), sv.size());
-    ptr += sv.size();
-}
-
 void buf_append(char*& ptr, uint64_t x) {
     auto begin = ptr;
     do {
