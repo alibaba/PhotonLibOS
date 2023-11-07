@@ -17,7 +17,103 @@ limitations under the License.
 #include "photon/common/string_view.h"
 #include "message.h"
 
+struct SV : public std::string_view {
+	template<size_t N>
+	constexpr SV(const char(&s)[N]) : SV(s, N) { }
+	constexpr SV(const char* s, size_t n) : std::string_view(s, n) { }
+};
+
+constexpr static SV code_str[] = {
+	/*100*/ "Continue",
+	/*101*/ "Switching Protocols",
+	/*102*/ "Processing",
+	/*103*/ "Early Hints",
+
+	/*200*/ "OK",
+	/*201*/ "Created",
+	/*202*/ "Accepted",
+	/*203*/ "Non-Authoritative Information",
+	/*204*/ "No Content",
+	/*205*/ "Reset Content",
+	/*206*/ "Partial Content",
+	/*207*/ "Multi-Status",
+	/*208*/ "Already Reported",
+//	/*226*/ "IM Used",
+
+	/*300*/ "Multiple Choices",
+	/*301*/ "Moved Permanently",
+	/*302*/ "Found",
+	/*303*/ "See Other",
+	/*304*/ "Not Modified",
+	/*305*/ "Use Proxy",
+	/*306*/ {0, 0},
+	/*307*/ "Temporary Redirect",
+	/*308*/ "Permanent Redirect",
+
+	/*400*/ "Bad Request",
+	/*401*/ "Unauthorized",
+	/*402*/ "Payment Required",
+	/*403*/ "Forbidden",
+	/*404*/ "Not Found",
+	/*405*/ "Method Not Allowed",
+	/*406*/ "Not Acceptable",
+	/*407*/ "Proxy Authentication Required",
+	/*408*/ "Request Timeout",
+	/*409*/ "Conflict",
+	/*410*/ "Gone",
+	/*411*/ "Length Required",
+	/*412*/ "Precondition Failed",
+	/*413*/ "Content Too Large",
+	/*414*/ "URI Too Long",
+	/*415*/ "Unsupported Media Type",
+	/*416*/ "Range Not Satisfiable",
+	/*417*/ "Expectation Failed",
+	/*418*/ "I'm a teapot",
+	/*419*/ {0, 0},
+	/*420*/ {0, 0},
+	/*421*/ "Misdirected Request",
+	/*422*/ "Unprocessable Content",
+	/*423*/ "Locked",
+	/*424*/ "Failed Dependency",
+	/*425*/ "Too Early",
+	/*426*/ "Upgrade Required",
+	/*427*/ {0, 0},
+	/*428*/ "Precondition Required",
+	/*429*/ "Too Many Requests",
+	/*430*/ {0, 0},
+	/*431*/ "Request Header Fields Too Large",
+//	/*451*/ "Unavailable For Legal Reasons",
+
+	/*500*/ "Internal Server Error",
+	/*501*/ "Not Implemented",
+	/*502*/ "Bad Gateway",
+	/*503*/ "Service Unavailable",
+	/*504*/ "Gateway Timeout",
+	/*505*/ "HTTP Version Not Supported",
+	/*506*/ "Variant Also Negotiates",
+	/*507*/ "Insufficient Storage",
+	/*508*/ "Loop Detected",
+	/*509*/ {0, 0},
+	/*510*/ "Not Extended",
+	/*511*/ "Network Authentication Required",
+};
+
+const static uint8_t LEN1xx = 4;
+const static uint8_t LEN2xx = 9 + LEN1xx;
+const static uint8_t LEN3xx = 9 + LEN2xx;
+const static uint8_t LEN4xx = 32 + LEN3xx;
+const static uint8_t LEN5xx = 12 + LEN4xx;
+uint8_t entries[] = {0, LEN1xx, LEN2xx, LEN3xx, LEN4xx, LEN5xx};
+
 std::string_view photon::net::http::obsolete_reason(int code) {
+	uint8_t major = code / 100 - 1;
+	uint8_t minor = code % 100;
+	if (unlikely(major > 4)) return {};
+	uint8_t max = entries[major+1] - entries[major];
+	if (unlikely(minor >= max)) return {};
+	return code_str[entries[major] + minor];
+
+/*
 	switch (code){
 
 	case 100: return "Continue";
@@ -87,6 +183,7 @@ std::string_view photon::net::http::obsolete_reason(int code) {
 	case 510: return "Not Extended";
 	case 511: return "Network Authentication Required";
 
-	default: return "";
+	default: return { };
 	}
+*/
 }
