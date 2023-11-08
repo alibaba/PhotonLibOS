@@ -1,0 +1,4 @@
+create libphoton.a
+addlib libphoton.a
+save
+end

@@ -108,17 +108,14 @@ jobs:
         run: |
           dnf install -y git gcc-c++ cmake
           dnf install -y gcc-toolset-9-gcc-c++
-          dnf install -y openssl-devel libcurl-devel
-          dnf install -y epel-release
-          dnf install -y fuse-devel libgsasl-devel e2fsprogs-devel
+          dnf install -y autoconf automake libtool
 
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
-            -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON \
+            -D PHOTON_BUILD_DEPENDENCIES=ON \
+            -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_URING=ON
           cmake --build build -j -- VERBOSE=1
 
