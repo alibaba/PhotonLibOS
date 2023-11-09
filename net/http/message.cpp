@@ -331,7 +331,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     }
     StoredURL u(location);
     auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        enable_proxy ? full_url_size(u) : u.target().size();
+        (enable_proxy ? full_url_size(u) : u.target().size());
 
     auto delta = new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));

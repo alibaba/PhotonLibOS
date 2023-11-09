@@ -77,8 +77,13 @@ int main() {
                 message.sem.wait(1);
                 auto end = std::chrono::steady_clock::now();
                 auto duration_us = std::chrono::duration_cast<std::chrono::nanoseconds>(end - message.start).count();
+#if __cplusplus >= 202002L
+                latency.fetch_add(duration_us, std::memory_order_relaxed);
+                qps.fetch_add(1, std::memory_order_relaxed);
+#else
                 latency.fetch_add(duration_us, std::memory_order::memory_order_relaxed);
                 qps.fetch_add(1, std::memory_order::memory_order_relaxed);
+#endif
             }
         }));
     }
@@ -95,7 +100,11 @@ int main() {
                 }
                 auto end = std::chrono::steady_clock::now();
                 auto duration_us = std::chrono::duration_cast<std::chrono::nanoseconds>(end - message.start).count();
+#if __cplusplus >= 202002L
+                latency.fetch_add(duration_us, std::memory_order_relaxed);
+#else
                 latency.fetch_add(duration_us, std::memory_order::memory_order_relaxed);
+#endif
                 qps.fetch_add(1, std::memory_order::memory_order_relaxed);
             }
         });
