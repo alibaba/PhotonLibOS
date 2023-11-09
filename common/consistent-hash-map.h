@@ -55,10 +55,17 @@ public:
         const allocator_type& alloc = allocator_type()) :
             m_comp(comp), m_vector(alloc) { }
 
+#if __cplusplus >= 201703L
+    using reference         = std::add_rvalue_reference<typename allocator_type::value_type>;
+    using const_reference   = std::add_const<std::add_rvalue_reference<typename allocator_type::value_type>>;
+    using pointer           = std::add_pointer<typename allocator_type::value_type>;
+    using const_pointer     = std::add_const<std::add_pointer<typename allocator_type::value_type>>;
+#else
     using reference         = typename allocator_type::reference;
     using const_reference   = typename allocator_type::const_reference;
     using pointer           = typename allocator_type::pointer;
     using const_pointer     = typename allocator_type::const_pointer;
+#endif
     using container_type    = std::vector<value_type, allocator_type>;
     using iterator          = typename container_type::iterator;
     using const_iterator    = typename container_type::const_iterator;

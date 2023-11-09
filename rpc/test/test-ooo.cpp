@@ -58,7 +58,13 @@ int do_issue(void*, OutOfOrderContext* args)
     auto tag = args->tag;
     LOG_DEBUG(VALUE(tag));
     aop.push_back(args->tag);
+#if __cplusplus >= 201406L
+    std::random_device rd;
+    std::mt19937 g(rd());
+    shuffle(aop.begin(), aop.end(), g);
+#else
     random_shuffle(aop.begin(), aop.end());
+#endif
     return 0;
 }
 
@@ -121,7 +127,13 @@ int heavy_complete(void*, OutOfOrderContext* args) {
 int process_thread() {
     while (issue_list.size()) {
         thread_yield();
+#if __cplusplus >= 201406L
+        std::random_device rd;
+        std::mt19937 g(rd());
+        shuffle(issue_list.begin(), issue_list.end(), g);
+#else
         random_shuffle(issue_list.begin(), issue_list.end());
+#endif
         processing_queue.push(issue_list.back());
         issue_list.pop_back();
     }
@@ -207,7 +219,13 @@ inline int error_complete(void*, OutOfOrderContext* args) {
 inline int error_process() {
     while (issue_list.size()) {
         thread_yield_to(nullptr);
+#if __cplusplus >= 201406L
+        std::random_device rd;
+        std::mt19937 g(rd());
+        shuffle(issue_list.begin(), issue_list.end(), g);
+#else
         random_shuffle(issue_list.begin(), issue_list.end());
+#endif
         auto val = issue_list.back();
         if (rand()%2)
             val = UINT64_MAX;

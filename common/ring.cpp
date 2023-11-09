@@ -60,7 +60,7 @@ ssize_t RingBuffer::do_read(void *buf, size_t count)
 ssize_t RingBuffer::readv(const struct iovec *iov, int iovcnt)
 {
     ssize_t size = 0;
-    scoped_lock lock(m_read_lock);
+    photon::scoped_lock lock(m_read_lock);
     for (auto& x: ptr_array(iov, iovcnt))
     {
         auto ret = do_read(x.iov_base, x.iov_len);
@@ -110,7 +110,7 @@ ssize_t RingBuffer::do_write(const void* buf, size_t count)
 ssize_t RingBuffer::writev(const struct iovec *iov, int iovcnt)
 {
     ssize_t size = 0;
-    scoped_lock lock(m_write_lock);
+    photon::scoped_lock lock(m_write_lock);
     for (auto& x: ptr_array(iov, iovcnt))
     {
         auto ret = do_write(x.iov_base, x.iov_len);

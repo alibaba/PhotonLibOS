@@ -31,10 +31,17 @@ public:
              int init_io = photon::INIT_IO_DEFAULT);
     ~Executor();
 
+#if __cplusplus >= 201703L
+    template <
+        typename Context = AutoContext, typename Func,
+        typename R = typename std::invoke_result<Func>::type,
+        typename _ = typename std::enable_if<!std::is_void<R>::value, R>::type>
+#else
     template <
         typename Context = AutoContext, typename Func,
         typename R = typename std::result_of<Func()>::type,
         typename _ = typename std::enable_if<!std::is_void<R>::value, R>::type>
+#endif
     R perform(Func &&act) {
         R result;
         int err;
@@ -49,11 +56,17 @@ public:
         errno = err;
         return result;
     }
-
+#if __cplusplus >= 201703L
+    template <
+        typename Context = AutoContext, typename Func,
+        typename R = typename std::invoke_result<Func>::type,
+        typename _ = typename std::enable_if<std::is_void<R>::value, R>::type>
+#else
     template <
         typename Context = AutoContext, typename Func,
         typename R = typename std::result_of<Func()>::type,
         typename _ = typename std::enable_if<std::is_void<R>::value, R>::type>
+#endif
     void perform(Func &&act) {
         Awaiter<Context> aop;
         int err;

@@ -20,6 +20,7 @@ limitations under the License.
 #include <string>
 #include <stdlib.h>
 #include <queue>
+#include <random>
 #include <algorithm>
 #include <sys/time.h>
 #include <gflags/gflags.h>
@@ -142,7 +143,13 @@ void sleepq_perf(SleepQueue& sleepq, const vector<photon::thread*>& items)
     check(sleepq);
 
     auto pops = items;
+#if __cplusplus >= 201406L
+    std::random_device rd;
+    std::mt19937 g(rd());
+    shuffle(pops.begin(), pops.end(), g);
+#else
     random_shuffle(pops.begin(), pops.end());
+#endif
     pops.resize(pops.size()/2);
     {
         update_now();
