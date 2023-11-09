@@ -457,6 +457,25 @@ struct LogBuilder {
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
+#if __cplusplus >= 202002L
+#define __LOG__(logger, level, first, ...)                             \
+    ({                                                                 \
+        DEFINE_PROLOGUE(level, prolog);                                \
+        auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) { \
+            if (_IS_LITERAL_STRING(first)) {                           \
+                return __log__(level, __output_##__LINE__, prolog,     \
+                               TSTRING(#first).template strip<'\"'>()  \
+                               __VA_OPT__(, ) __VA_ARGS__);            \
+            } else {                                                   \
+                return __log__(level, __output_##__LINE__, prolog,     \
+                               ConstString::TString<>(), first         \
+                               __VA_OPT__(, ) __VA_ARGS__);            \
+            }                                                          \
+        };                                                             \
+        LogBuilder<decltype(__build_lambda__)>(                        \
+            level, ::std::move(__build_lambda__), &logger);            \
+    })
+#else
 #define __LOG__(logger, level, first, ...)                             \
     ({                                                                 \
         DEFINE_PROLOGUE(level, prolog);                                \
@@ -474,6 +493,7 @@ struct LogBuilder {
         LogBuilder<decltype(__build_lambda__)>(                        \
             level, ::std::move(__build_lambda__), &logger);            \
     })
+#endif
 
 #define LOG_DEBUG(...) (__LOG__(default_logger, ALOG_DEBUG, __VA_ARGS__))
 #define LOG_INFO(...) (__LOG__(default_logger, ALOG_INFO, __VA_ARGS__))

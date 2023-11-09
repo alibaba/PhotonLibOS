@@ -30,7 +30,7 @@ limitations under the License.
 #include <limits.h>
 #include <algorithm>
 #include <thread>
-#include <chrono>
+// #include <chrono>
 #include <sys/uio.h>
 using namespace std;
 
@@ -44,7 +44,10 @@ public:
     constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
 
     void write(int, const char* begin, const char* end) override {
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wunused-result"
         ::write(log_file_fd, begin, end - begin);
+        #pragma GCC diagnostic pop
         throttle_block();
     }
     void throttle_block() {
@@ -254,11 +257,14 @@ public:
         if (log_file_fd < 0) return;
         uint64_t length = end - begin;
         iovec iov{(void*)begin, length};
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wunused-result"
 #ifndef _WIN64
         ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
 #else
         ::write(log_file_fd, iov.iov_base, iov.iov_len);
 #endif
+        #pragma GCC diagnostic pop
         throttle_block();
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
@@ -312,10 +318,13 @@ public:
         int fd = fopen(log_file_name);
         if (fd < 0) {
             static char msg[] = "failed to open log output file: ";
+            #pragma GCC diagnostic push
+            #pragma GCC diagnostic ignored "-Wunused-result"
             ::write(log_file_fd, msg, sizeof(msg) - 1);
             if (log_file_name)
                 ::write(log_file_fd, log_file_name, strlen(log_file_name));
             ::write(log_file_fd, "\n", 1);
+            #pragma GCC diagnostic pop
             return;
         }
 

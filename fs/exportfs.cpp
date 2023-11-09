@@ -143,7 +143,7 @@ namespace fs
     __attribute__((visibility("hidden"))) ThreadPoolBase* ExportBase::pool = nullptr;
 
 #define PERFORM(ID, expr) \
-    perform(timeout, new auto([=]() { do_callback(ID, expr, done); }));
+    perform(timeout, new auto([=, this]() { do_callback(ID, expr, done); }));
 
     class ExportAsAsyncFile : public ExportBase, public IAsyncFile, public IAsyncFileXAttr
     {

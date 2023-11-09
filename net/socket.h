@@ -47,7 +47,7 @@ namespace net {
         union {
             in6_addr addr = {};
             struct { uint16_t _1, _2, _3, _4, _5, _6; uint8_t a, b, c, d; };
-        };
+        } __attribute__ ((packed));
         // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
         IPAddr() {
             map_v4(htonl(INADDR_ANY));
