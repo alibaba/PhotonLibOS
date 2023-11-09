@@ -69,7 +69,7 @@ endif ()
 
 check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
 if (COMPILER_HAS_MCRC32_FLAG)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32 -Wno-unused-command-line-argument")
 endif ()
 
 set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
