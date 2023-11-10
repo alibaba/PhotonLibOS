@@ -673,9 +673,11 @@ namespace photon
     inline void prepare_switch(thread* from, thread* to) {
         assert(from->vcpu == to->vcpu);
         assert(to->state == states::RUNNING);
-        to->get_vcpu()->switch_count++;
+        const uint64_t switch_count = to->get_vcpu()->switch_count;
+        to->get_vcpu()->switch_count = switch_count+1;
     }
-
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winline-asm"
     static void _photon_thread_die(thread* th) asm("_photon_thread_die");
 
 #if defined(__x86_64__)
@@ -888,7 +890,7 @@ R"(
 
     extern "C" void _photon_switch_context_defer_die(void* arg,uint64_t defer_func_addr, void** to)
         asm ("_photon_switch_context_defer_die");
-
+#pragma GCC diagnostic pop
     inline void thread::die() {
         deallocate_tls(&tls);
         // if CURRENT is idle stub and during vcpu_fini

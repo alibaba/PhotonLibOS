@@ -448,10 +448,10 @@ struct LogBuilder {
         (uint64_t) _prologue_func,  (uint64_t)__FILE__, sizeof(__func__) - 1,   \
         sizeof(__FILE__) - 1, __LINE__, level};
 #else
-#define DEFINE_PROLOGUE(level, prolog)                                  \
-    const static Prologue prolog{                                       \
-        (uint64_t) __func__,  (uint64_t)__FILE__, sizeof(__func__) - 1, \
-        sizeof(__FILE__) - 1, __LINE__, level};
+#define DEFINE_PROLOGUE(level, prolog)                                       \
+    const static Prologue prolog{                                            \
+        (uint64_t) __func__,  (uint64_t)__FILE__, (int)sizeof(__func__) - 1, \
+        (int)sizeof(__FILE__) - 1, (int)__LINE__, (int)level};
 #endif
 
 #define _IS_LITERAL_STRING(x) \

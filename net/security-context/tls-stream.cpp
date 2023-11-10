@@ -97,6 +97,8 @@ public:
     explicit TLSContextImpl(TLSVersion ver) {
         char errbuf[4096];
         const SSL_METHOD *method = nullptr;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         switch (ver) {
             case TLSVersion::SSL23:
                 method = SSLv23_method();
@@ -110,6 +112,7 @@ public:
             default:
                 method = TLSv1_2_method();
         }
+#pragma GCC diagnostic pop
         ctx = SSL_CTX_new(method);
         if (ctx == nullptr) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
