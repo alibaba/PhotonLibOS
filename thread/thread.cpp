@@ -311,11 +311,11 @@ namespace photon
         }
     };
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+// #pragma GCC diagnostic push
+// #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
     static_assert(offsetof(thread,  tls) == offsetof(partial_thread,  tls), "...");
-#pragma GCC diagnostic pop
+// #pragma GCC diagnostic pop
 
     struct thread_list : public intrusive_list<thread>
     {

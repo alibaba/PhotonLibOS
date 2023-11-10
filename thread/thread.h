@@ -319,8 +319,13 @@ namespace photon
     #define _TOKEN_CONCAT_(a, b) _TOKEN_CONCAT(a, b)
 
 #if __cpp_deduction_guides >= 201606
+#if __cplusplus >= 202002L
+    #define SCOPED_LOCK(x, ...) photon::locker \
+        _TOKEN_CONCAT_(__locker__, __LINE__) (x __VA_OPT__(, ) __VA_ARGS__)
+#else
     #define SCOPED_LOCK(x, ...) photon::locker \
         _TOKEN_CONCAT_(__locker__, __LINE__) (x, ##__VA_ARGS__)
+#endif
 #else
     #define SCOPED_LOCK(x, ...) photon::locker<std::remove_pointer_t<std::decay_t<decltype(x)>>> \
         _TOKEN_CONCAT_(__locker__, __LINE__) (x, ##__VA_ARGS__)

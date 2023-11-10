@@ -442,11 +442,11 @@ struct LogBuilder {
 };
 
 #if __GNUC__ >= 9
-#define DEFINE_PROLOGUE(level, prolog)                                          \
-    static constexpr const char* _prologue_func = __func__;                     \
-    const static Prologue prolog{                                               \
-        (uint64_t) _prologue_func,  (uint64_t)__FILE__, sizeof(__func__) - 1,   \
-        sizeof(__FILE__) - 1, __LINE__, level};
+#define DEFINE_PROLOGUE(level, prolog)                                               \
+    static constexpr const char* _prologue_func = __func__;                          \
+    const static Prologue prolog{                                                    \
+        (uint64_t) _prologue_func,  (uint64_t)__FILE__, (int)sizeof(__func__) - 1,   \
+        (int)sizeof(__FILE__) - 1, (int)__LINE__, (int)level};
 #else
 #define DEFINE_PROLOGUE(level, prolog)                                       \
     const static Prologue prolog{                                            \
