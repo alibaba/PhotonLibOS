@@ -369,7 +369,14 @@ public:
     {
         do_assert();
         IF_ASSERT_RETURN(iov_end < capacity, 0);
+        #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wzero-length-bounds"
+        #endif
         iovs[iov_end++] = iov;
+        #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+        #pragma GCC diagnostic pop
+        #endif
         return iov.iov_len;
     }
     size_t push_back(void* buf, size_t size)

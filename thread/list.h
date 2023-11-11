@@ -241,7 +241,14 @@ public:
     void push_back(NodeType* ptr)
     {
         if (!node) {
+            #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+            #pragma GCC diagnostic push
+            #pragma GCC diagnostic ignored "-Wdangling-pointer"
+            #endif
             node = ptr;
+            #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+            #pragma GCC diagnostic pop
+            #endif
         } else {
             node->insert_tail(ptr);
         }

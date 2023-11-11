@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "utils.h"
 
+#include <cstdint>
 #include <inttypes.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -102,6 +103,7 @@ int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
 }
 
 inline __attribute__((always_inline)) void base64_translate_3to4(const char *in, char *out)  {
+    #if defined(__clang__)
     struct xlator {
         unsigned char _;
         unsigned char a : 6;
@@ -109,11 +111,27 @@ inline __attribute__((always_inline)) void base64_translate_3to4(const char *in,
         unsigned char c : 6;
         unsigned char d : 6;
     } __attribute__((packed));
+    #else
+    // note: offset of packed bit-field ‘photon::net::base64_translate_3to4(const char*, char*)::xlator::b’ has changed in GCC 4.4
+    // gcc doesn't like bitfields that cross the width
+    // uint16_t in place of unsigned char bitfields removes this note
+    // the layout will be the same as using unsigned char
+    struct xlator {
+        unsigned char _;
+        uint16_t a : 6;
+        uint16_t b : 6;
+        uint16_t c : 6;
+        uint16_t d : 6;
+    } __attribute__((packed));
+    #endif
     static_assert(sizeof(xlator) == 4, "...");
     static const unsigned char tbl[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     auto v = htonl(*(uint32_t *)in);
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wstrict-aliasing"
     auto x = *(xlator *)(&v);
+    #pragma GCC diagnostic pop
     *(uint32_t *)out = ((tbl[x.a] << 24) + (tbl[x.b] << 16) +
                         (tbl[x.c] << 8) + (tbl[x.d] << 0));
 }
@@ -192,6 +210,7 @@ static unsigned char get_index_of(char val, bool &ok) {
  #undef EI
 
 bool base64_translate_4to3(const char *in, char *out)  {
+    #if defined(__clang__)
     struct xlator {
         unsigned char _;
         unsigned char a : 6;
@@ -199,6 +218,19 @@ bool base64_translate_4to3(const char *in, char *out)  {
         unsigned char c : 6;
         unsigned char d : 6;
     } __attribute__((packed));
+    #else
+    // note: offset of packed bit-field ‘photon::net::base64_translate_4to3(const char*, char*)::xlator::b’ has changed in GCC 4.4
+    // gcc doesn't like bitfields that cross the width
+    // uint16_t in place of unsigned char bitfields removes this note
+    // the layout will be the same as using unsigned char
+    struct xlator {
+        unsigned char _;
+        uint16_t a : 6;
+        uint16_t b : 6;
+        uint16_t c : 6;
+        uint16_t d : 6;
+    } __attribute__((packed));
+    #endif
     static_assert(sizeof(xlator) == 4, "...");
 
     xlator v;

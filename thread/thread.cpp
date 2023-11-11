@@ -311,11 +311,11 @@ namespace photon
         }
     };
 
-// #pragma GCC diagnostic push
-// #pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
     static_assert(offsetof(thread,  tls) == offsetof(partial_thread,  tls), "...");
-// #pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 
     struct thread_list : public intrusive_list<thread>
     {
@@ -676,8 +676,10 @@ namespace photon
         const uint64_t switch_count = to->get_vcpu()->switch_count;
         to->get_vcpu()->switch_count = switch_count+1;
     }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winline-asm"
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winline-asm"
+#endif
     static void _photon_thread_die(thread* th) asm("_photon_thread_die");
 
 #if defined(__x86_64__)
@@ -890,7 +892,9 @@ R"(
 
     extern "C" void _photon_switch_context_defer_die(void* arg,uint64_t defer_func_addr, void** to)
         asm ("_photon_switch_context_defer_die");
-#pragma GCC diagnostic pop
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     inline void thread::die() {
         deallocate_tls(&tls);
         // if CURRENT is idle stub and during vcpu_fini
@@ -933,7 +937,10 @@ R"(
         stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
         auto p = ptr + stack_size - sizeof(thread) - randomizer;
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wstrict-aliasing"
         (uint64_t&)p &= ~63;
+        #pragma GCC diagnostic pop
         auto th = new (p) thread;
         th->buf = ptr;
         th->stackful_alloc_top = ptr;

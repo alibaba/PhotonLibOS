@@ -32,8 +32,11 @@ ssize_t filecopy(IFile* infile, IFile* outfile, size_t bs, int retry_limit) {
     if (bs == 0) LOG_ERROR_RETURN(EINVAL, -1, "bs should not be 0");
     void* buff = nullptr;
     ;
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wunused-result"
     // buffer allocate, with 4K alignment
     ::posix_memalign(&buff, ALIGNMENT, bs);
+    #pragma GCC diagnostic pop
     if (buff == nullptr)
         LOG_ERROR_RETURN(ENOMEM, -1, "Fail to allocate buffer with ",
                          VALUE(bs));

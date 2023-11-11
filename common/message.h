@@ -32,6 +32,8 @@ public:
 
     struct Addr;  // type-erased representation of address
 
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Woverloaded-virtual"
     virtual ssize_t send(const struct iovec* iov, int iovcnt,
                          const Addr* to_addr = nullptr, size_t addr_len = 0,
                          int flags = 0) = 0;
@@ -51,4 +53,5 @@ public:
         iovec v{buf, count};
         return recv(&v, 1, from_addr, addr_len, flags);
     }
+    #pragma GCC diagnostic pop
 };

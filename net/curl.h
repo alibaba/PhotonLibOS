@@ -238,7 +238,10 @@ public:
             return;
         }
         setopt(CURLOPT_ERRORBUFFER, m_errmsg);
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         setopt(CURLOPT_DNS_USE_GLOBAL_CACHE, 0L);
+        #pragma GCC diagnostic pop
         setopt(CURLOPT_NOSIGNAL, 1L);
         setopt(CURLOPT_TCP_NODELAY, 1L);
         m_errmsg[0] = '\0';
@@ -411,7 +414,10 @@ public:
         set_read_stream(rstream);
         set_write_stream(wstream);
         setopt(CURLOPT_UPLOAD, 1L);
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         setopt(CURLOPT_PUT, 1L);
+        #pragma GCC diagnostic pop
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_HTTPHEADER, headers.list);
 #if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37

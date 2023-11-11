@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
     photon
-    VERSION 0.6
+    VERSION 0.7
     LANGUAGES C CXX ASM
 )
 
@@ -16,8 +16,8 @@ include(CMake/build-from-src.cmake)
 find_package(PkgConfig REQUIRED)
 
 # Options
-set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
-option(PHOTON_BUILD_TESTING "enable build testing" OFF)
+set(PHOTON_CXX_STANDARD "20" CACHE STRING "C++ standard")
+option(PHOTON_BUILD_TESTING "enable build testing" ON)
 option(PHOTON_BUILD_SHARED "build shared library" ON)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
@@ -75,7 +75,11 @@ endif()
 check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
 
 if(COMPILER_HAS_MCRC32_FLAG)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32 -Wno-unused-command-line-argument")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-command-line-argument")
+    endif()
 endif()
 
 set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
@@ -162,9 +166,9 @@ endforeach()
 # ###############################################################################
 add_subdirectory(third_party)
 
-
 set(fs_httpfs_sources)
 set(fs_httpfs_sources fs/httpfs/httpfs_v2.cpp)
+
 if(NOT PHOTON_ENABLE_CURL)
     list(APPEND httpfs_sources fs/httpfs/httpfs.cpp)
 endif()
@@ -174,14 +178,13 @@ if(PHOTON_ENABLE_CURL)
 else()
     file(GLOB net_sources_glob "net/*.cpp")
     set(net_sources)
+
     foreach(file ${net_sources_glob})
         if(NOT file MATCHES "net/curl.cpp")
             list(APPEND net_sources ${file})
-            message("net source: ${file}")
         endif()
     endforeach()
 endif()
-
 
 # Compile photon objects
 file(GLOB PHOTON_SRC

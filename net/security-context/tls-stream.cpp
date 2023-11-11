@@ -131,7 +131,14 @@ public:
         return strlen(buf);
     }
     int set_pass_phrase(const char* pass) override {
+        #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wstringop-truncation"
+        #endif
         strncpy(pempassword, pass, sizeof(pempassword));
+        #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+        #pragma GCC diagnostic pop
+        #endif
         return strlen(pempassword);
     }
     int set_cert(const char* cert_str) override {
