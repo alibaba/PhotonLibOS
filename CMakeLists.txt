@@ -16,8 +16,8 @@ include(CMake/build-from-src.cmake)
 find_package(PkgConfig REQUIRED)
 
 # Options
-set(PHOTON_CXX_STANDARD "20" CACHE STRING "C++ standard")
-option(PHOTON_BUILD_TESTING "enable build testing" ON)
+set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
+option(PHOTON_BUILD_TESTING "enable build testing" OFF)
 option(PHOTON_BUILD_SHARED "build shared library" ON)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
