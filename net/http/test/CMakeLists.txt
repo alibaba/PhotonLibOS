@@ -14,8 +14,10 @@ target_link_libraries(client_perf PRIVATE ${photon_link_lib} ${testing_libs})
 add_executable(server_perf server_perf.cpp)
 target_link_libraries(server_perf PRIVATE ${photon_link_lib} ${testing_libs})
 
-add_executable(pure_libcurl pure_libcurl.cpp)
-target_link_libraries(pure_libcurl PRIVATE ${photon_link_lib} ${testing_libs})
+if(PHOTON_ENABLE_CURL)
+    add_executable(pure_libcurl pure_libcurl.cpp)
+    target_link_libraries(pure_libcurl PRIVATE ${photon_link_lib} ${testing_libs})
+endif()
 
 add_executable(client_function_test client_function_test.cpp)
 target_link_libraries(client_function_test PRIVATE ${photon_link_lib} ${testing_libs})

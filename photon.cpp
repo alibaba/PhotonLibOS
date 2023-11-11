@@ -22,7 +22,15 @@ limitations under the License.
 #ifdef ENABLE_FSTACK_DPDK
 #include "io/fstack-dpdk.h"
 #endif
+#ifndef DISABLE_CURL
 #include "net/curl.h"
+#else
+#include "common/alog-functionptr.h"
+#include "common/alog-stdstring.h"
+#include "common/alog.h"
+#include "common/estring.h"
+#include "common/iovector.h"
+#endif
 #include "net/socket.h"
 #include "fs/exportfs.h"
 
@@ -67,7 +75,9 @@ int init(uint64_t event_engine, uint64_t io_engine) {
     INIT_IO(FSTACK_DPDK, fstack_dpdk);
 #endif
     INIT_IO(EXPORTFS, exportfs)
+#ifndef DISABLE_CURL
     INIT_IO(LIBCURL, libcurl)
+#endif
 #ifdef __linux__
     INIT_IO(LIBAIO, libaio_wrapper)
     INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
@@ -82,7 +92,9 @@ int fini() {
     FINI_IO(LIBAIO, libaio_wrapper)
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
+#ifndef DISABLE_CURL
     FINI_IO(LIBCURL, libcurl)
+#endif
     FINI_IO(EXPORTFS, exportfs)
 #ifdef ENABLE_FSTACK_DPDK
     FINI_IO(FSTACK_DPDK, fstack_dpdk)

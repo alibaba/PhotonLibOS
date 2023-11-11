@@ -25,13 +25,14 @@ option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
+option(PHOTON_ENABLE_CURL "enable curl" ON)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
-set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
+set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.3/zlib-1.3.tar.gz" CACHE STRING "")
 set(PHOTON_OPENSSL_SOURCE "" CACHE STRING "")
 set(PHOTON_CURL_SOURCE "" CACHE STRING "")
-set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz" CACHE STRING "")
+set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.4.tar.gz" CACHE STRING "")
 set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
 set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
 set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
@@ -110,7 +111,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 # include:    XXX_INCLUDE_DIRS
 # lib:        XXX_LIBRARIES
 # source:     PHOTON_XXX_SOURCE
-set(dependencies zlib openssl curl)
+set(dependencies zlib openssl)
+
+if(PHOTON_ENABLE_CURL)
+    LIST(APPEND dependencies curl)
+endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     LIST(APPEND dependencies aio)
@@ -140,7 +145,7 @@ if(PHOTON_BUILD_TESTING)
     LIST(APPEND dependencies gflags googletest)
 endif()
 
-FOREACH(dep ${dependencies})
+foreach(dep ${dependencies})
     string(TOUPPER ${dep} DEP)
     set(source_url "${PHOTON_${DEP}_SOURCE}")
 
@@ -156,6 +161,27 @@ endforeach()
 
 # ###############################################################################
 add_subdirectory(third_party)
+
+
+set(fs_httpfs_sources)
+set(fs_httpfs_sources fs/httpfs/httpfs_v2.cpp)
+if(NOT PHOTON_ENABLE_CURL)
+    list(APPEND httpfs_sources fs/httpfs/httpfs.cpp)
+endif()
+
+if(PHOTON_ENABLE_CURL)
+    set(net_sources "net/*.cpp")
+else()
+    file(GLOB net_sources_glob "net/*.cpp")
+    set(net_sources)
+    foreach(file ${net_sources_glob})
+        if(NOT file MATCHES "net/curl.cpp")
+            list(APPEND net_sources ${file})
+            message("net source: ${file}")
+        endif()
+    endforeach()
+endif()
+
 
 # Compile photon objects
 file(GLOB PHOTON_SRC
@@ -175,9 +201,9 @@ file(GLOB PHOTON_SRC
     fs/throttled-file.cpp
     fs/virtual-file.cpp
     fs/xfile.cpp
-    fs/httpfs/*.cpp
+    ${fs_httpfs_sources}
     io/signal.cpp
-    net/*.cpp
+    ${net_sources}
     net/http/*.cpp
     net/security-context/tls-stream.cpp
     rpc/*.cpp
@@ -211,10 +237,23 @@ if(PHOTON_ENABLE_EXTFS)
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif()
 
+if(NOT PHOTON_ENABLE_CURL)
+    add_definitions(-DDISABLE_CURL)
+endif()
+
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
-    ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
+target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIRS}
+    ${ZLIB_INCLUDE_DIRS})
+
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+    target_include_directories(photon_obj PUBLIC ${AIO_INCLUDE_DIRS})
+endif()
+
+if(PHOTON_ENABLE_CURL)
+    target_include_directories(photon_obj PUBLIC ${CURL_INCLUDE_DIRS})
+endif()
+
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 
 if(PHOTON_ENABLE_URING)
@@ -249,8 +288,12 @@ set(static_deps
     fstack_weak
     ${ZLIB_LIBRARIES}
     ${OPENSSL_LIBRARIES}
-    ${CURL_LIBRARIES}
 )
+
+if(PHOTON_ENABLE_CURL)
+    list(APPEND static_deps ${CURL_LIBRARIES})
+endif()
+
 set(shared_deps
     -lpthread
 )

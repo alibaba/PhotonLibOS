@@ -25,7 +25,9 @@ limitations under the License.
 #include <cstdlib>
 #include <string>
 
+#ifndef DISABLE_CURL
 #include <photon/net/curl.h>
+#endif
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
 #define protected public
