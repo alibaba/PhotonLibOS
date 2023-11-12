@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <cstdlib>
 #include <typeinfo>
 #include <cxxabi.h>
 #include <photon/common/alog.h>
@@ -26,7 +27,7 @@ inline LogBuffer& __printfp__(LogBuffer& log, T func)
     int status = -4; // some arbitrary value to eliminate the compiler warning
     auto name = abi::__cxa_demangle(typeid(func).name(), nullptr, &size, &status);
     log << "function_pointer<" << ALogString(name, size) << "> at " << (void*&)func;
-    free(name);
+    ::free(name);
     return log;
 }
 

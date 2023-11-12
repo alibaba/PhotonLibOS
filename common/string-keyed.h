@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <cstdlib>
 #include <photon/common/string_view.h>
 #include <cstring>
 #include <unordered_map>
@@ -35,7 +36,7 @@ public:
     explicit string_key(string_key&& rhs) = delete;
     ~string_key()
     {
-        free((void*)begin());
+        ::free((void*)begin());
     }
 
     string_key& operator = (const string_key& rhs) = delete;
@@ -48,13 +49,20 @@ public:
     // }
 
 protected:
+    #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+    #endif
     explicit string_key(const char* s, size_t n) :
-        std::string_view((char*)malloc(n + 1), n)
+        std::string_view((char*)::malloc(n + 1), n)
     {
         auto ptr = (char*)begin();
-        memcpy(ptr, s, n);
+        ::memcpy(ptr, s, n);
         ptr[n] = '\0';
     }
+    #if (defined(__GNUC__) || defined(__GNUG__)) && !defined(__clang__)
+    #pragma GCC diagnostic pop
+    #endif
 };
 
 // The basic class for maps with string keys, aims to avoid temp
