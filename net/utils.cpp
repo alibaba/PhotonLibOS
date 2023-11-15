@@ -279,9 +279,9 @@ public:
                 LOG_WARN("Domain resolution for ` failed", host);
                 return new IPAddr;  // undefined addr
             }
-            for (auto& each : addrs) {
-                if ((each.is_ipv4() ^ !ipv6_) == 0)
-                    return new IPAddr(each);
+            for (auto& ip : addrs) {
+                if (ip.is_ipv4())
+                    return new IPAddr(ip);
             }
             return new IPAddr;      // undefined addr
         };
