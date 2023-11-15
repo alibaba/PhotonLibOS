@@ -7,7 +7,7 @@ toc_max_heading_level: 4
 
 We recommend using CMake's `FetchContent` to integrate Photon into your existing C++ project.
 
-It will download source code from the remote repo and track along with the dependencies (for example, liburing).
+It will download source code from the remote repo and track along with the third-party dependencies.
 
 ### Modify your `CMakeLists.txt`
 
@@ -30,15 +30,12 @@ FetchContent_Declare(
     GIT_TAG main
 )
 FetchContent_MakeAvailable(photon)
-
-set(PHOTON_INCLUDE_DIR ${photon_SOURCE_DIR}/include/)
 ```
 
 ### Case 1: Statically linking your app with Photon
 
 ```cmake
 add_executable(my_app ${SOURCES})
-target_include_directories(my_app PRIVATE ${PHOTON_INCLUDE_DIR})
 target_link_libraries(my_app photon_static)
 ```
 
@@ -46,7 +43,6 @@ target_link_libraries(my_app photon_static)
 
 ```cmake
 add_executable(my_app ${SOURCES})
-target_include_directories(my_app PRIVATE ${PHOTON_INCLUDE_DIR})
 target_link_libraries(my_app photon_shared)
 ```
 
@@ -54,17 +50,19 @@ target_link_libraries(my_app photon_shared)
 
 ```cmake
 add_library(my_lib STATIC ${SOURCES})
-target_include_directories(my_lib PRIVATE ${PHOTON_INCLUDE_DIR})
-target_link_libraries(my_lib photon_static)
+target_link_libraries(my_lib PRIVATE photon_static)
 ```
 
 ### Case 4: Add Photon into your shared lib
 
 ```cmake
 add_library(my_lib SHARED ${SOURCES})
-target_include_directories(my_lib PRIVATE ${PHOTON_INCLUDE_DIR})
-target_link_libraries(my_lib -Wl,--whole-archive photon_static -Wl,--no-whole-archive)
+target_link_libraries(my_lib PRIVATE -Wl,--whole-archive libphoton.a -Wl,--no-whole-archive)
 ```
+
+:::note
+The `photon_static` and `photon_shared` targets have already configured include directories for you.
+:::
 
 :::note
 
