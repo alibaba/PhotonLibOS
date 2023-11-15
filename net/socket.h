@@ -150,6 +150,7 @@ namespace net {
         uint16_t port = 0;
         EndPoint() = default;
         EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
+        explicit EndPoint(const char* s);
         bool is_ipv4() const {
             return addr.is_ipv4();
         };

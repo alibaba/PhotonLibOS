@@ -427,15 +427,17 @@ namespace rpc {
 
     class StubPoolImpl : public StubPool {
     public:
-        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout, bool ipv6) {
+        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
-            tcpclient = ipv6 ? net::new_tcp_socket_client_ipv6() : net::new_tcp_socket_client();
+            tcpclient = net::new_tcp_socket_client();
+            tcpclientv6 = net::new_tcp_socket_client_ipv6();
             tcpclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
             m_rpc_timeout = rpc_timeout;
         }
 
         ~StubPoolImpl() {
+            delete tcpclientv6;
             delete tcpclient;
             delete m_pool;
             delete tls_ctx;
@@ -468,7 +470,7 @@ namespace rpc {
     protected:
         net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
             LOG_INFO("Connect to ", ep);
-            auto sock = tcpclient->connect(ep);
+            auto sock = ep.is_ipv4() ? tcpclient->connect(ep) : tcpclientv6->connect(ep);
             if (!sock) return nullptr;
             sock->timeout(m_rpc_timeout);
             if (tls) {
@@ -479,6 +481,7 @@ namespace rpc {
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
         net::ISocketClient *tcpclient;
+        net::ISocketClient *tcpclientv6;
         net::TLSContext* tls_ctx = nullptr;
         uint64_t m_rpc_timeout;
     };
@@ -489,7 +492,7 @@ namespace rpc {
     public:
         explicit UDSStubPoolImpl(const char* path, uint64_t expiration,
                                  uint64_t connect_timeout, uint64_t rpc_timeout)
-            : StubPoolImpl(expiration, connect_timeout, rpc_timeout, false),
+            : StubPoolImpl(expiration, connect_timeout, rpc_timeout),
               m_path(path), m_client(net::new_uds_client()) {
                   m_client->timeout(connect_timeout);
               }
@@ -515,8 +518,8 @@ namespace rpc {
         net::ISocketClient * m_client;
     };
 
-    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout, bool ipv6) {
-        return new StubPoolImpl(expiration, connect_timeout, rpc_timeout, ipv6);
+    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
+        return new StubPoolImpl(expiration, connect_timeout, rpc_timeout);
     }
 
     StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
