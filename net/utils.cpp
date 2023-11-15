@@ -250,8 +250,8 @@ bool Base64Decode(std::string_view in, std::string &out) {
 
 class DefaultResolver : public Resolver {
 public:
-    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout, bool ipv6)
-        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout), ipv6_(ipv6) {}
+    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
+        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
     ~DefaultResolver() { dnscache_.clear(); }
 
     IPAddr resolve(const char *host) override {
@@ -293,11 +293,10 @@ public:
 private:
     ObjectCache<std::string, IPAddr *> dnscache_;
     uint64_t resolve_timeout_;
-    bool ipv6_;
 };
 
-Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout, bool ipv6) {
-    return new DefaultResolver(cache_ttl, resolve_timeout, ipv6);
+Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout) {
+    return new DefaultResolver(cache_ttl, resolve_timeout);
 }
 
 }  // namespace net

@@ -165,10 +165,9 @@ public:
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.
- * @param ipv6 specify v4 or v6 domain name
  * @return Resolver*
  */
-Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1, bool ipv6 = false);
+Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
 
 }  // namespace net
 }
