@@ -7,14 +7,28 @@
 #include <photon/net/utils.h>
 #include <photon/common/alog.h>
 
-TEST(ipv6, addr) {
-    EXPECT_NO_THROW(photon::net::IPAddr a("::1"));
-    EXPECT_NO_THROW(photon::net::IPAddr a("1.2.3.4"));
-    EXPECT_NO_THROW(photon::net::IPAddr a("fdbd:dc01:ff:312:9641:f71:10c4:2378"));
-    EXPECT_NO_THROW(photon::net::IPAddr a("fdbd:dc01:ff:312:9641:f71::2378"));
-    EXPECT_NO_THROW(photon::net::IPAddr a("fdbd:dc01:ff:312:9641::2378"));
+TEST(ipv6, endpoint) {
+    auto c = photon::net::EndPoint("127.0.0.1");
+    EXPECT_TRUE(c.undefined());
+    c = photon::net::EndPoint("127.0.0.1:8888");
+    EXPECT_FALSE(c.undefined());
+    c = photon::net::EndPoint("[::1]:8888");
+    EXPECT_FALSE(c.undefined());
+}
 
-    auto c = photon::net::IPAddr("zfdbd:dq01:8:165::158");
+TEST(ipv6, addr) {
+    auto c = photon::net::IPAddr("::1");
+    EXPECT_FALSE(c.undefined());
+    c = photon::net::IPAddr("::1");
+    EXPECT_FALSE(c.undefined());
+    c = photon::net::IPAddr("fdbd:dc01:ff:312:9641:f71:10c4:2378");
+    EXPECT_FALSE(c.undefined());
+    c = photon::net::IPAddr("fdbd:dc01:ff:312:9641:f71::2378");
+    EXPECT_FALSE(c.undefined());
+    c = photon::net::IPAddr("fdbd:dc01:ff:312:9641::2378");
+    EXPECT_FALSE(c.undefined());
+
+    c = photon::net::IPAddr("zfdbd:dq01:8:165::158");
     EXPECT_TRUE(c.undefined());
     c = photon::net::IPAddr("fdbd::ff:312:9641:f71::2378");
     EXPECT_TRUE(c.undefined());

@@ -28,8 +28,8 @@ option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
-set(PHOTON_OPENSSL_SOURCE "" CACHE STRING "")
-set(PHOTON_CURL_SOURCE "" CACHE STRING "")
+set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz" CACHE STRING "")
+set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz" CACHE STRING "")
 set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz" CACHE STRING "")
 set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
 set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
@@ -96,7 +96,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 ################################################################################
 
 # There are two ways to handle dependencies:
-#   1. Find locally installed packages. (Static lib is suggested)
+#   1. Find locally installed packages.
 #   2. Build it from source. (Only when PHOTON_BUILD_DEPENDENCIES is set, and PHOTON_XXX_SOURCE is not empty)
 #
 # The naming conventions MUST obey:
@@ -196,21 +196,22 @@ endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PUBLIC include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
-        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS})
+target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
+)
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 if (PHOTON_ENABLE_URING)
-    target_include_directories(photon_obj PUBLIC ${URING_INCLUDE_DIRS})
+    target_include_directories(photon_obj PRIVATE ${URING_INCLUDE_DIRS})
     target_compile_definitions(photon_obj PRIVATE PHOTON_URING=on)
 endif()
 if (PHOTON_ENABLE_MIMIC_VDSO)
     target_compile_definitions(photon_obj PRIVATE ENABLE_MIMIC_VDSO=on)
 endif()
 if (PHOTON_ENABLE_FSTACK_DPDK)
-    target_include_directories(photon_obj PUBLIC ${FSTACK_INCLUDE_DIRS})
+    target_include_directories(photon_obj PRIVATE ${FSTACK_INCLUDE_DIRS})
 endif()
 if (PHOTON_ENABLE_EXTFS)
-    target_include_directories(photon_obj PUBLIC ${LIBE2FS_INCLUDE_DIRS})
+    target_include_directories(photon_obj PRIVATE ${LIBE2FS_INCLUDE_DIRS})
 endif()
 if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     # This option is enabled by default after -std=c++17
@@ -226,9 +227,9 @@ endif ()
 set(static_deps
         easy_weak
         fstack_weak
-        ${ZLIB_LIBRARIES}
-        ${OPENSSL_LIBRARIES}
         ${CURL_LIBRARIES}
+        ${OPENSSL_LIBRARIES}
+        ${ZLIB_LIBRARIES}
 )
 set(shared_deps
         -lpthread
@@ -256,8 +257,8 @@ if (PHOTON_ENABLE_EXTFS)
     list(APPEND static_deps ${E2FS_LIBRARIES})
 endif ()
 
-# It's OK to have some `shared_deps` duplicated in `static_deps`.
-# Even though .a is suggested, we may still probably find .so in local installed dir.
+# Find out dynamic libs and append to `shared_deps`.
+# Because if not built from source, we won't know the local packages are static or shared.
 # This is for the max compatability.
 if (NOT APPLE)
     set(suffix "\.so$")
@@ -271,9 +272,6 @@ foreach (dep ${static_deps})
             break()
         endif ()
     endforeach ()
-    if (dep MATCHES "\.a$")
-        list(APPEND static_deps_archive ${dep})
-    endif ()
 endforeach ()
 
 set(version_scripts)
@@ -284,6 +282,7 @@ list(APPEND version_scripts "-Wl,--version-script=${PROJECT_SOURCE_DIR}/tools/li
 # Link photon shared lib
 add_library(photon_shared SHARED $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_shared PROPERTIES OUTPUT_NAME photon)
+target_include_directories(photon_shared PUBLIC include ${CURL_INCLUDE_DIRS})
 if (NOT APPLE)
     target_link_libraries(photon_shared
             PRIVATE ${version_scripts} -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
@@ -299,32 +298,39 @@ endif ()
 # Link photon static lib
 add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon_sole)
+target_include_directories(photon_static PUBLIC include ${CURL_INCLUDE_DIRS})
 target_link_libraries(photon_static
         PUBLIC ${shared_deps}
         PRIVATE ${static_deps}
 )
 
-# Merge static libs into libphoton.a
-# Do NOT use this target directly.
+# Merge static libs into libphoton.a for manual distribution.
+# Do NOT link to this target directly.
 if (NOT APPLE)
-    set(merge_command ar -crT libphoton.a)
+    add_custom_target(_photon_static_archive ALL
+            COMMAND rm -rf libphoton.a
+            COMMAND ar -qcT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+            COMMAND ar -M < ${PROJECT_SOURCE_DIR}/tools/libphoton.mri
+            DEPENDS photon_static
+            WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+            VERBATIM
+    )
 else ()
-    set(merge_command libtool -static -o libphoton.a)
+    add_custom_target(_photon_static_archive ALL
+            COMMAND rm -rf libphoton.a
+            COMMAND libtool -static -o libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+            DEPENDS photon_static
+            WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+            VERBATIM
+    )
 endif ()
-add_custom_target(_photon_static_archive ALL
-        COMMAND rm -rf libphoton.a
-        COMMAND ${merge_command} $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
-        DEPENDS photon_static
-        WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-        VERBATIM
-)
 
 # Build test cases
 if (PHOTON_BUILD_TESTING)
     include(CTest)
 
-    set(testing_libs ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
-    include_directories(${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
+    include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
+    link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)

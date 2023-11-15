@@ -37,6 +37,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/thread/list.h>
 #include <photon/thread/timer.h>
+#include <photon/common/estring.h>
 #include <photon/common/utility.h>
 #include <photon/common/event-loop.h>
 #include <photon/net/basic_socket.h>
@@ -58,22 +59,6 @@ limitations under the License.
 #ifndef AF_SMC
 #define AF_SMC 43
 #endif
-
-LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
-    return log << photon::net::IPAddr(iaddr);
-}
-LogBuffer& operator<<(LogBuffer& log, const in6_addr& iaddr) {
-    return log << photon::net::IPAddr(iaddr);
-}
-LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
-    return log << photon::net::sockaddr_storage(addr).to_endpoint();
-}
-LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
-    return log << photon::net::sockaddr_storage(addr).to_endpoint();
-}
-LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
-    return log << photon::net::sockaddr_storage(addr).to_endpoint();
-}
 
 namespace photon {
 namespace net {
@@ -240,7 +225,12 @@ protected:
     ISocketStream* do_connect(const sockaddr* remote, socklen_t len_remote,
                               const sockaddr* local = nullptr, socklen_t len_local = 0) {
         auto stream = create_stream();
-        std::unique_ptr<KernelSocketStream> ptr(stream);
+        auto deleter = [&](KernelSocketStream*) {
+            auto errno_backup = errno;
+            delete stream;
+            errno = errno_backup;
+        };
+        std::unique_ptr<KernelSocketStream, decltype(deleter)> ptr(stream, deleter);
         if (!ptr || ptr->fd < 0) {
             LOG_ERROR_RETURN(0, nullptr, "Failed to create socket fd");
         }
@@ -983,25 +973,6 @@ protected:
 
 /* ET Socket - End */
 
-LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
-    if (addr.is_ipv4())
-        return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
-    else {
-        if (log.size < INET6_ADDRSTRLEN)
-            return log;
-        inet_ntop(AF_INET6, &addr.addr, log.ptr, INET6_ADDRSTRLEN);
-        log.consume(strlen(log.ptr));
-        return log;
-    }
-}
-
-LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
-    if (ep.is_ipv4())
-        return log << ep.addr << ':' << ep.port;
-    else
-        return log << '[' << ep.addr << "]:" << ep.port;
-}
-
 extern "C" ISocketClient* new_tcp_socket_client() {
     return new KernelSocketClient(AF_INET, true);
 }
@@ -1063,5 +1034,61 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 #endif // ENABLE_FSTACK_DPDK
 #endif // __linux__
 
+////////////////////////////////////////////////////////////////////////////////
+
+/* Implementations in socket.h */
+
+EndPoint::EndPoint(const char* s) {
+    estring_view ep(s);
+    auto pos = ep.find_last_of(':');
+    if (pos == estring::npos)
+        return;
+    // Detect IPv6 or IPv4
+    estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    auto ip = IPAddr(ip_str.c_str());
+    if (ip.undefined())
+        return;
+    auto port_str = ep.substr(pos + 1);
+    if (!port_str.all_digits())
+        return;
+    addr = ip;
+    port = std::stoul(port_str);
 }
+
+LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
+    if (addr.is_ipv4())
+        return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
+    else {
+        if (log.size < INET6_ADDRSTRLEN)
+            return log;
+        inet_ntop(AF_INET6, &addr.addr, log.ptr, INET6_ADDRSTRLEN);
+        log.consume(strlen(log.ptr));
+        return log;
+    }
+}
+
+LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
+    if (ep.is_ipv4())
+        return log << ep.addr << ':' << ep.port;
+    else
+        return log << '[' << ep.addr << "]:" << ep.port;
+}
+
+}
+}
+
+LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
+    return log << photon::net::IPAddr(iaddr);
+}
+LogBuffer& operator<<(LogBuffer& log, const in6_addr& iaddr) {
+    return log << photon::net::IPAddr(iaddr);
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
