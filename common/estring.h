@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdio>
 #include <cassert>
 #include <cstring>
+#include <math.h>
 #include <limits>
 #include <string>
 #include <bitset>
@@ -289,8 +290,33 @@ public:
     uint64_t to_uint64(uint64_t default_val = 0) const
     {
         uint64_t val;
-        to_uint64_check(&val);
-        return val;
+        return to_uint64_check(&val) ? val : default_val;
+    }
+    bool     to_int64_check(int64_t* v = nullptr) const
+    {
+        if (this->empty()) return false;
+        if (this->front() != '-') return to_uint64_check((uint64_t*)v);
+        bool ret = this->substr(1).to_uint64_check((uint64_t*)v);
+        if (ret) *v = -*v;
+        return ret;
+    }
+    int64_t to_int64(int64_t default_val = 0) const
+    {
+        int64_t val;
+        return to_int64_check(&val) ? val : default_val;
+    }
+    bool to_double_check(double* v = nullptr)
+    {
+        char buf[32];
+        auto len = std::max(this->size(), sizeof(buf) - 1 );
+        memcpy(buf, data(), len);
+        buf[len] = '0';
+        return sscanf(buf, "%lf", v) == 1;
+    }
+    double to_double(double default_val = NAN)
+    {
+        double val;
+        return to_double_check(&val) ? val : default_val;
     }
     // do not support 0x/0X prefix
     uint64_t hex_to_uint64() const;
@@ -312,8 +338,8 @@ class rstring_view  // relative string_view, that stores values relative
 protected:
     static_assert(std::is_integral<OffsetType>::value, "...");
     static_assert(std::is_integral<LengthType>::value, "...");
-    OffsetType _offset;
-    LengthType _length;
+    OffsetType _offset = 0;
+    LengthType _length = 0;
 
     estring_view to_abs(const char* s) const
     {

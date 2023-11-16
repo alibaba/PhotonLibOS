@@ -55,27 +55,33 @@ size_t estring_view::find_last_not_of(const charset& set) const
 
 bool estring_view::to_uint64_check(uint64_t* v) const
 {
-    v ? (*v = 0) : 0;
+    uint64_t val = 0;
     for (unsigned char c : *this) {
-        if (c > '9' || c < '0')
+        c -= '0';
+        if (c > 9)
             return false;
-        v ? (*v = *v * 10 + (c - '0')) : 0;
+        val = val * 10 + c;
     }
+    if (v) *v = val;
     return true;
 }
 
-uint64_t estring_view::hex_to_uint64() const
-{
+uint64_t estring_view::hex_to_uint64() const {
     uint64_t ret = 0;
     for (unsigned char c : *this) {
-        if (c >= '0' && c <= '9') {
-            ret = ret * 16 + (c - '0');
-        } else if (c >= 'A' && c <= 'F') {
-            ret = ret * 16 + (c - 'A' + 10);
-        } else if (c >= 'a' && c <= 'f') {
-            ret = ret * 16 + (c - 'a' + 10);
+        unsigned char cc = c - '0';
+        if (cc < 10) {
+            ret = ret * 16 + cc;
         } else {
-            return ret;
+            const unsigned char mask = 'a' - 'A';
+            static_assert(mask == 32, "..."); // single digit
+            c |= mask; // unified to 'a'..'f'
+            cc = c - 'a';
+            if (cc < 6) {
+                ret = ret * 16 + cc + 10;
+            } else {
+                break; // invalid char
+            }
         }
     }
     return ret;
