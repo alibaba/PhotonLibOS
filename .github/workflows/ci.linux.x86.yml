@@ -4,11 +4,11 @@ on:
   push:
     branches: [ "main", "release/*" ]
   pull_request:
-    branches: [ "main", "release/*" ]
+    branches: [ "release/*" ]
 
 jobs:
   centos8-gcc921-epoll-release:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
@@ -43,12 +43,11 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
           cd build
           ctest --timeout 3600 -V
 
   centos8-gcc921-epoll-debug:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
@@ -83,12 +82,12 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
           cd build
           ctest --timeout 3600 -V
 
   centos8-gcc921-iouring-release:
-    runs-on: [self-hosted, Linux, X64]
+#    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
@@ -121,6 +120,5 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
           cd build
           ctest --timeout 3600 -V
