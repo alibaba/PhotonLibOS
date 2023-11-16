@@ -279,6 +279,7 @@ public:
                 LOG_WARN("Domain resolution for ` failed", host);
                 return new IPAddr;  // undefined addr
             }
+            // TODO: support ipv6
             for (auto& ip : addrs) {
                 if (ip.is_ipv4())
                     return new IPAddr(ip);
