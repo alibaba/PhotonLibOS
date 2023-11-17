@@ -229,8 +229,7 @@ public:
                              VALUE(url), VALUE(offset), VALUE(ret));
         }
         authorized = true;
-        headers.try_get("content-length", ret);
-        return ret;
+        return writer.written;
     }
 
     int fstat(struct stat* buf) override {
