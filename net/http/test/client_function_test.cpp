@@ -413,9 +413,9 @@ TEST(http_client, debug) {
     server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
     auto ret = server->bind(ep.port, ep.addr);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     EXPECT_EQ(0, ret);
     LOG_INFO("Ready to accept");
     server->start_loop();
@@ -438,13 +438,13 @@ TEST(http_client, debug) {
     memset((void*)buf.data(), '0', std_data_size);
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
-    EXPECT_EQ(true, buf == std_data);
+    EXPECT_TRUE(buf == std_data);
     for (int i = 0; i < buf.size(); i++) {
         if (buf[i] != std_data[i]) {
-            std::cout << i << std::endl;
+            LOG_ERROR("first occurrence of difference at: ", i);
+            break;
         }
     }
-    std::cout << "new" << std::endl;
 }
 int sleep_handler(void*, ISocketStream* sock) {
     photon::thread_sleep(3);

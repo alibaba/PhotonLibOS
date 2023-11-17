@@ -101,22 +101,25 @@ int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
     return idx;
 }
 
-inline __attribute__((always_inline)) void base64_translate_3to4(const char *in, char *out)  {
-    struct xlator {
-        unsigned char _;
-        unsigned char a : 6;
-        unsigned char b : 6;
-        unsigned char c : 6;
-        unsigned char d : 6;
-    } __attribute__((packed));
-    static_assert(sizeof(xlator) == 4, "...");
+struct xlator {
+    unsigned char _;
+    unsigned char a : 6;
+    unsigned char b : 6;
+    unsigned char c : 6;
+    unsigned char d : 6;
+} __attribute__((packed));
+static_assert(sizeof(xlator) == 4, "...");
+
+inline __attribute__((always_inline))
+void base64_translate_3to4(const char *in, char *out)  {
     static const unsigned char tbl[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     auto v = htonl(*(uint32_t *)in);
-    auto x = *(xlator *)(&v);
-    *(uint32_t *)out = ((tbl[x.a] << 24) + (tbl[x.b] << 16) +
-                        (tbl[x.c] << 8) + (tbl[x.d] << 0));
+    auto x = (xlator*) &v;
+    *(uint32_t *)out = ((tbl[x->a] << 24) + (tbl[x->b] << 16) +
+                        (tbl[x->c] << 8) + (tbl[x->d] << 0));
 }
+
 void Base64Encode(std::string_view in, std::string &out) {
     auto main = in.size() / 3;
     auto remain = in.size() % 3;
@@ -136,7 +139,6 @@ void Base64Encode(std::string_view in, std::string &out) {
         base64_translate_3to4(_in + 6, _out + 8);
         base64_translate_3to4(_in + 9, _out + 12);
     }
-
 
     for (; _in < end; _in += 3, _out += 4) {
         base64_translate_3to4(_in, _out);
@@ -191,16 +193,8 @@ static unsigned char get_index_of(char val, bool &ok) {
 }
  #undef EI
 
+inline
 bool base64_translate_4to3(const char *in, char *out)  {
-    struct xlator {
-        unsigned char _;
-        unsigned char a : 6;
-        unsigned char b : 6;
-        unsigned char c : 6;
-        unsigned char d : 6;
-    } __attribute__((packed));
-    static_assert(sizeof(xlator) == 4, "...");
-
     xlator v;
     bool f1, f2, f3, f4;
     v.a = get_index_of(*(in+3), f1);
@@ -208,10 +202,10 @@ bool base64_translate_4to3(const char *in, char *out)  {
     v.c = get_index_of(*(in+1), f3);
     v.d = get_index_of(*(in),   f4);
 
-
     *(uint32_t *)out = ntohl(*(uint32_t *)&v);
     return (f1 && f2 && f3 && f4);
 }
+
 bool Base64Decode(std::string_view in, std::string &out) {
 #define GSIZE 4 //Size of each group
     auto in_size = in.size();

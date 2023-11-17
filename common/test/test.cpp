@@ -867,6 +867,15 @@ TEST(estring, test)
     estring as = "   \tasdf  \t\r\n";
     auto trimmed = as.trim();
     EXPECT_EQ(trimmed, "asdf");
+
+    EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
+    EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
+    EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
+    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
+    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+
+    EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
+    EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
 }
 
 TEST(generator, example)
