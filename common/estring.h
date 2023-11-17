@@ -318,8 +318,13 @@ public:
         double val;
         return to_double_check(&val) ? val : default_val;
     }
-    // do not support 0x/0X prefix
-    uint64_t hex_to_uint64() const;
+    // not including 0x/0X prefix
+    bool hex_to_uint64_check(uint64_t* v = nullptr) const;
+    uint64_t hex_to_uint64(uint64_t default_val = 0) const
+    {
+        uint64_t val;
+        return hex_to_uint64_check(&val) ? val : default_val;
+    }
 };
 
 inline bool operator == (const std::string_view& sv, const std::string& s)
