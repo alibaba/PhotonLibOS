@@ -46,7 +46,7 @@ endif ()
 ProcessorCount(NumCPU)
 
 # Compiler options
-add_compile_options(-Wall)  # -Werror is not enable yet
+add_compile_options(-Wall -Werror)
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
