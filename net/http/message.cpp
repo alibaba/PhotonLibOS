@@ -331,7 +331,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     }
     StoredURL u(location);
     auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        enable_proxy ? full_url_size(u) : u.target().size();
+        (enable_proxy ? full_url_size(u) : u.target().size());
 
     auto delta = new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
@@ -368,7 +368,7 @@ int Response::parse_status_line(Parser &p) {
     p.skip_chars(' ');
     auto code = p.extract_integer();
     if (code <= 0 || code >= 1000)
-        LOG_ERROR_RETURN(0, -1, "invalid status code");
+        LOG_ERROR_RETURN(0, -1, "invalid status code ", code);
     m_status_code = (uint16_t)code;
     p.skip_chars(' ');
     m_status_message = p.extract_until_char('\r');
