@@ -40,6 +40,8 @@ limitations under the License.
 
 namespace photon {
 
+constexpr static int RingFlagsWaitCanceller = 0x100;
+
 constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>>
     evmap;
 
@@ -49,13 +51,12 @@ public:
 
     ~iouringEngine() {
         LOG_INFO("Finish event engine: iouring ", VALUE(m_master));
-        if (m_cancel_poller != nullptr) {
-            m_cancel_poller_running = false;
-            thread_interrupt(m_cancel_poller);
-            thread_join((join_handle*) m_cancel_poller);
+        if (m_wait_canceller_th != nullptr) {
+            thread_interrupt(m_wait_canceller_th, EOK);
+            thread_join((join_handle*) m_wait_canceller_th);
         }
-        if (m_cancel_fd >= 0) {
-            close(m_cancel_fd);
+        if (m_wait_canceller_fd >= 0) {
+            close(m_wait_canceller_fd);
         }
         if (m_cascading_event_fd >= 0) {
             if (io_uring_unregister_eventfd(m_ring) != 0) {
@@ -130,16 +131,17 @@ public:
 
         if (m_master) {
             // Setup a cancel poller to watch on master engine
-            m_cancel_fd = eventfd(0, EFD_CLOEXEC);
-            if (m_cancel_fd < 0) {
+            m_wait_canceller_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+            if (m_wait_canceller_fd < 0) {
                 LOG_ERRNO_RETURN(0, -1, "iouring: failed to create eventfd");
             }
-            m_cancel_poller = thread_create11(64 * 1024, &iouringEngine::run_cancel_poller, this);
-            thread_enable_join(m_cancel_poller);
+            m_wait_canceller_th = thread_create11(64 * 1024, &iouringEngine::run_wait_canceller, this);
+            thread_enable_join(m_wait_canceller_th);
+            thread_yield_to(m_wait_canceller_th);
 
         } else {
             // Register an event fd for cascading engine
-            m_cascading_event_fd = eventfd(0, EFD_CLOEXEC);
+            m_cascading_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
             if (m_cascading_event_fd < 0) {
                 LOG_ERRNO_RETURN(0, -1, "iouring: failed to create cascading event fd");
             }
@@ -155,7 +157,7 @@ public:
      *     later in the `wait_and_fire_events`.
      * @param timeout Timeout in usec. It could be 0 (immediate cancel), and -1 (most efficient way, no linked SQE).
      *     Note that the cancelling has no guarantee to succeed, it's just an attempt.
-     * @param ring_flags The lowest 8 bits is for sqe.flags, and the rest is reserved.
+     * @param ring_flags uint32_t. The lowest 8 bits is for sqe.flags. The rest is reserved for RingFlagsXxx.
      * @retval Non negative integers for success, -1 for failure. If failed with timeout, errno will
      *     be set to ETIMEDOUT. If failed because of external interruption, errno will also be set accordingly.
      */
@@ -165,15 +167,16 @@ public:
         if (sqe == nullptr)
             return -1;
         prep(sqe, args...);
-        sqe->flags |= (uint8_t) (ring_flags & 0xff);
-        return _async_io(sqe, timeout);
+        return _async_io(sqe, timeout, ring_flags);
     }
 
-    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
-        ioCtx io_ctx{photon::CURRENT, -1, false, false};
+    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
+        bool is_wait_canceller = ring_flags & RingFlagsWaitCanceller;
+        sqe->flags |= (uint8_t) (ring_flags & 0xff);
+        ioCtx io_ctx{photon::CURRENT, -1, false, is_wait_canceller, false};
         io_uring_sqe_set_data(sqe, &io_ctx);
 
-        ioCtx timer_ctx{photon::CURRENT, -1, true, false};
+        ioCtx timer_ctx{photon::CURRENT, -1, true, false, false};
         __kernel_timespec ts{};
         if (timeout < std::numeric_limits<int64_t>::max()) {
             sqe->flags |= IOSQE_IO_LINK;
@@ -231,7 +234,7 @@ public:
 
         bool one_shot = e.interests & ONE_SHOT;
         fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
-        ioCtx io_ctx{CURRENT, -1, false, true};
+        ioCtx io_ctx{CURRENT, -1, false, false, true};
         eventCtx event_ctx{e, one_shot, io_ctx};
         auto pair = m_event_contexts.insert({fd_interest, event_ctx});
         if (!pair.second) {
@@ -334,6 +337,12 @@ public:
                 continue;
             }
 
+            if (ctx->is_wait_canceller) {
+                eventfd_t val;
+                eventfd_read(m_wait_canceller_fd, &val);
+                continue;
+            }
+
             if (cqe->flags & IORING_CQE_F_NOTIF) {
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
@@ -343,14 +352,14 @@ public:
             }
 
             ctx->res = cqe->res;
-            if (!ctx->is_canceller && ctx->res == -ECANCELED) {
+            if (!ctx->is_io_canceller && ctx->res == -ECANCELED) {
                 // An I/O was canceled because of:
                 // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
                 // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
                 // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
                 ctx->res = -ETIMEDOUT;
                 continue;
-            } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
+            } else if (ctx->is_io_canceller && ctx->res == -ECANCELED) {
                 // The linked timer itself is also a canceller. The reasons it got cancelled could be:
                 // 1. I/O finished in time
                 // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
@@ -367,7 +376,7 @@ public:
     }
 
     int cancel_wait() override {
-        if (eventfd_write(m_cancel_fd, 1) != 0) {
+        if (eventfd_write(m_wait_canceller_fd, 1) != 0) {
             LOG_ERRNO_RETURN(0, -1, "iouring: write eventfd failed");
         }
         return 0;
@@ -401,7 +410,8 @@ private:
     struct ioCtx {
         photon::thread* th_id;
         int32_t res;
-        bool is_canceller;
+        bool is_io_canceller;
+        bool is_wait_canceller;
         bool is_event;
     };
 
@@ -501,21 +511,9 @@ private:
         }
     }
 
-    void run_cancel_poller() {
-        while (m_cancel_poller_running) {
-            uint32_t poll_mask = evmap.translate_bitwisely(EVENT_READ);
-            int ret = async_io(&io_uring_prep_poll_add, -1, 0, m_cancel_fd, poll_mask);
-            if (ret < 0) {
-                if (errno == EINTR) {
-                    break;
-                }
-                LOG_ERROR("iouring: poll eventfd failed, `", ERRNO());
-            }
-            eventfd_t val;
-            if (eventfd_read(m_cancel_fd, &val) != 0) {
-                LOG_ERROR("iouring: read eventfd failed, `", ERRNO());
-            }
-        }
+    void run_wait_canceller() {
+        uint32_t poll_mask = evmap.translate_bitwisely(EVENT_READ);
+        async_io(&io_uring_prep_poll_multishot, -1, RingFlagsWaitCanceller, m_wait_canceller_fd, poll_mask);
     }
 
     static void usec_to_timespec(int64_t usec, __kernel_timespec* ts) {
@@ -535,9 +533,8 @@ private:
     bool m_master;
     int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;
-    int m_cancel_fd = -1;
-    thread* m_cancel_poller = nullptr;
-    bool m_cancel_poller_running = true;
+    int m_wait_canceller_fd = -1;
+    thread* m_wait_canceller_th = nullptr;
     std::unordered_map<fdInterest, eventCtx, fdInterestHasher> m_event_contexts;
     static int m_register_files_flag;
     static int m_cooperative_task_flag;
