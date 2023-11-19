@@ -83,7 +83,7 @@ function(build_from_src [dep])
                 URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./config -fPIC no-unit-test no-shared --openssldir=${BINARY_DIR} --prefix=${BINARY_DIR}
-                BUILD_COMMAND make depend -j ${NumCPU} && make -j ${NumCPU}
+                BUILD_COMMAND make depend -j 4 && make -j 4 #  Not using ${NumCPU}. Too may parallel might fail
                 INSTALL_COMMAND make install
         )
         ExternalProject_Get_Property(openssl SOURCE_DIR)
