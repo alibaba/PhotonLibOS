@@ -31,3 +31,7 @@ add_test(NAME test-tls-order-photon COMMAND $<TARGET_FILE:test-tls-order-photon>
 add_executable(test-lib-data test-lib-data.cpp)
 target_link_libraries(test-lib-data PRIVATE photon_shared)
 add_test(NAME test-lib-data COMMAND $<TARGET_FILE:test-lib-data>)
+
+add_executable(test-multi-vcpu-locking test-multi-vcpu-locking.cpp)
+target_link_libraries(test-multi-vcpu-locking PRIVATE photon_static)
+add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-locking>)

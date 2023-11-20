@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "release/*" ]
   pull_request:
-    branches: [ "release/*" ]
+    branches: [ "main", "release/*" ]
 
 jobs:
   centos8-gcc921-epoll-release:
