@@ -6,6 +6,8 @@ project(
     LANGUAGES C CXX ASM
 )
 
+# set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".so")
+
 # Utility Modules and Find Modules
 include(FindPackageHandleStandardArgs)
 include(CheckCXXCompilerFlag)
@@ -16,20 +18,20 @@ include(CMake/build-from-src.cmake)
 find_package(PkgConfig REQUIRED)
 
 # Options
-set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
-option(PHOTON_BUILD_TESTING "enable build testing" OFF)
-option(PHOTON_BUILD_SHARED "build shared library" ON)
+set(PHOTON_CXX_STANDARD "23" CACHE STRING "C++ standard")
+option(PHOTON_BUILD_TESTING "enable build testing" ON)
+option(PHOTON_BUILD_SHARED "build shared library" OFF)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
 option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
-option(PHOTON_ENABLE_CURL "enable curl" ON)
+option(PHOTON_ENABLE_CURL "enable curl" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
-set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.3/zlib-1.3.tar.gz" CACHE STRING "")
+set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.11/zlib-1.2.11.tar.gz" CACHE STRING "")
 set(PHOTON_OPENSSL_SOURCE "" CACHE STRING "")
 set(PHOTON_CURL_SOURCE "" CACHE STRING "")
 set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.4.tar.gz" CACHE STRING "")

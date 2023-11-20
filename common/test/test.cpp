@@ -48,7 +48,7 @@ limitations under the License.
 #include <gtest/gtest-spi.h>
 //#include <malloc.h>
 #ifndef __clang__
-#include <gnu/libc-version.h>
+// #include <gnu/libc-version.h>
 #endif
 
 using namespace std;

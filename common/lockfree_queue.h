@@ -315,9 +315,9 @@ public:
                     memcpy(&slots[0], x + part_length,
                            sizeof(T) * (rn - part_length));
                 }
-                auto wh = wt;
+                uint64_t wh = wt;
                 while (!write_head.compare_exchange_weak(
-                    wh, wt + rn, std::memory_order_acq_rel)) {
+                    wh, (uint64_t)(wt + rn), std::memory_order_acq_rel)) {
                     ThreadPause::pause();
                     wh = wt;
                 }
@@ -333,9 +333,10 @@ public:
         rt = read_tail.load(std::memory_order_relaxed);
         for (;;) {
             wh = write_head.load(std::memory_order_relaxed);
-            auto rn = std::min(n, wh - rt);
+            size_t rn = std::min(n, wh - rt);
             if (rn == 0) return 0;
-            if (read_tail.compare_exchange_strong(rt, rt + rn,
+            uint64_t rtt = rt;
+            if (read_tail.compare_exchange_strong(rtt, (uint64_t)(rt + rn),
                                                   std::memory_order_acq_rel)) {
                 auto first_idx = idx(rt);
                 auto part_length = Base::capacity - first_idx;
