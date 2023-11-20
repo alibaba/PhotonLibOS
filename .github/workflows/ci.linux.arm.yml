@@ -8,7 +8,7 @@ on:
 
 jobs:
   centos8-gcc921-epoll-release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
@@ -35,10 +35,8 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
-            -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j -- VERBOSE=1
 
       - name: Test
@@ -47,7 +45,7 @@ jobs:
           ctest --timeout 3600 -V
 
   centos8-gcc921-epoll-debug:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
@@ -74,10 +72,8 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=Debug \
-            -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j -- VERBOSE=1
 
       - name: Test
