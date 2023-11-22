@@ -82,7 +82,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
         LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
         return sock;
     }
-    LOG_DEBUG("connect ssl : ` ep : `  host : ` failed", secure, ep, host);
+    LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
     if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
