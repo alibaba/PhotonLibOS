@@ -34,7 +34,7 @@ void URL::from_string(std::string_view url) {
         pos += p + 3;
         url.remove_prefix(p + 3);
     }
-    p = url.find_first_of(":/");
+    p = url.find_first_of(":/?");
     if (p == url.npos) p = url.size();
     m_host = rstring_view16(pos, p);
     m_host_port = m_host;
