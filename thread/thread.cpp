@@ -1572,7 +1572,7 @@ R"(
     {
         thread* ptr = nullptr;
         bool ret = owner.compare_exchange_strong(ptr, CURRENT,
-            std::memory_order_release, std::memory_order_relaxed);
+            std::memory_order_acq_rel, std::memory_order_relaxed);
         return (int)ret - 1;
     }
     inline void do_mutex_unlock(mutex* m)
