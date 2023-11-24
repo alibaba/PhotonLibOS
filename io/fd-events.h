@@ -111,6 +111,7 @@ public:
 
     /**
      * @brief Wait for events, returns number of the arrived events, and their associated `data`
+     * @note This call will not return until timeout, if there had been no events.
      * @param[out] data
      * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
      * @warning Do NOT block vcpu

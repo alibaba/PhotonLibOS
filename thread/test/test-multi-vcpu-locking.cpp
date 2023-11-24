@@ -22,6 +22,7 @@ limitations under the License.
 #include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
+#include "../../test/ci-tools.h"
 
 static constexpr int nMutexes = 4;
 static constexpr int nWorkers = 4;
@@ -59,7 +60,7 @@ static void myThread(int tid) {
 }
 
 TEST(multi_vcpu_locking, long_time_acquisition_should_abort) {
-    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    int ret = photon::init(ci_ev_engine, photon::INIT_IO_NONE);
     GTEST_ASSERT_EQ(0, ret);
     DEFER(photon::fini());
 
@@ -89,5 +90,6 @@ TEST(multi_vcpu_locking, long_time_acquisition_should_abort) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
+    ci_parse_env();
     return RUN_ALL_TESTS();
 }

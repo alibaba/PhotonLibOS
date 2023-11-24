@@ -117,11 +117,11 @@ public:
             }
             ret = io_uring_register_files(m_ring, entries, REGISTER_FILES_MAX_NUM);
             if (ret != 0) {
-                LOG_ERROR_RETURN(EPERM, -1, "iouring: unable to register files, ", ERRNO(-ret));
+                LOG_ERROR_RETURN(-ret, -1, "iouring: unable to register files, ", ERRNO(-ret));
             }
         }
 
-        m_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        m_eventfd = eventfd(0, EFD_CLOEXEC);
         if (m_eventfd < 0) {
             LOG_ERRNO_RETURN(0, -1, "iouring: failed to create eventfd");
         }
@@ -135,7 +135,7 @@ public:
             io_uring_sqe_set_data(sqe, this);
             ret = io_uring_submit(m_ring);
             if (ret <= 0) {
-                LOG_ERROR_RETURN(0, -1, "iouring: fail to submit multishot poll, ", ERRNO(-ret));
+                LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit multishot poll, ", ERRNO(-ret));
             }
         } else {
             // Register cascading engine to eventfd
@@ -240,6 +240,10 @@ public:
             io_uring_prep_poll_multishot(sqe, fd_interest.fd, fd_interest.interest);
         }
         io_uring_sqe_set_data(sqe, &pair.first->second.io_ctx);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when adding interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
@@ -256,6 +260,10 @@ public:
 
         io_uring_prep_poll_remove(sqe, (__u64) &iter->second.io_ctx);
         io_uring_sqe_set_data(sqe, nullptr);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when removing interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
@@ -287,7 +295,7 @@ public:
                 LOG_ERROR_RETURN(0, -1, "iouring: multi-shot poll got POLLERR");
             }
             if (!ctx->is_event) {
-                LOG_ERROR_RETURN(0, -1, "iouring: only cascading engine need to handle event. Must be a bug...")
+                LOG_ERROR_RETURN(0, -1, "iouring: cascading engine only needs to handle event. Must be a bug...")
             }
             eventCtx* event_ctx = container_of(ctx, eventCtx, io_ctx);
             fdInterest fd_interest{event_ctx->event.fd, (uint32_t)evmap.translate_bitwisely(event_ctx->event.interests)};

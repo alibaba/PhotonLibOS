@@ -117,4 +117,5 @@ jobs:
         run: |
           cd build
           ulimit -l unlimited
+          export PHOTON_CI_EV_ENGINE=io_uring
           ctest --timeout 3600 -V
