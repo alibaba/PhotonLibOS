@@ -334,7 +334,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     else
         new_request_line_size += u.target().size();
 
-    auto delta = new_request_line_size - m_buf_size;
+    int delta = (int)new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
     if (headers.reset_host(delta, u.host_port()) < 0)
         LOG_ERROR_RETURN(0, -1, "failed to move header data");

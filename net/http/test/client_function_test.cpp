@@ -120,6 +120,13 @@ TEST(http_client, get) {
     resp_body_buf[10] = '\0';
     LOG_DEBUG(resp_body_buf);
     EXPECT_EQ(0, strcmp("http_clien", resp_body_buf));
+
+    static const char target_tb[] = "http://www.taobao.com?x";
+    auto op5 = client->new_operation(Verb::GET, target_tb);
+    DEFER(delete op5);
+    op5->req.headers.content_length(0);
+    op5->call();
+    EXPECT_EQ(op5->resp.status_code(), 200);
 }
 
 int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
@@ -515,6 +522,26 @@ TEST(url, url_escape_unescape) {
         url_unescape("%3Fa%3Dx%3Ab%26b%3Dcd%26c%3D%20feg%26d%3D2%2F1%5B%2B%5D%40alibaba.com%26e%3D%27%21bad%27%3B"),
         "?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"
     );
+}
+
+TEST(url, path_fix) {
+    static const char url0[] = "http://xxx.com/yyy?a=b&c=d";
+    URL u0(url0);
+    EXPECT_EQ(u0.target(), "/yyy?a=b&c=d");
+    EXPECT_EQ(u0.path(), "/yyy");
+    EXPECT_EQ(u0.query(), "a=b&c=d");
+
+    static const char url1[] = "http://xxx.com";
+    URL u1(url1);
+    EXPECT_EQ(u1.target(), "/");
+    EXPECT_EQ(u1.path(), "/");
+    EXPECT_EQ(u1.query(), "");
+
+    static const char url2[] = "http://xxx.com?a=b";
+    URL u2(url2);
+    EXPECT_EQ(u2.target(), "/?a=b");
+    EXPECT_EQ(u2.path(), "/");
+    EXPECT_EQ(u2.query(), "a=b");
 }
 
 // Only for manual test
