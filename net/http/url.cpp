@@ -22,7 +22,23 @@ namespace photon {
 namespace net {
 namespace http {
 
+void URL::fix_target() {
+    auto t = (m_url | m_target);
+    if (m_target.size() == 0 || t.front() != '/') {
+        m_tmp_target = (char*)malloc(m_target.size() + 1);
+        m_tmp_target[0] = '/';
+        strncpy(m_tmp_target+1, t.data(), t.size());
+        m_target = rstring_view16(0, m_target.size()+1);
+        m_path = rstring_view16(0, m_path.size()+1);
+    }
+}
+
 void URL::from_string(std::string_view url) {
+    DEFER(fix_target(););
+    if (m_tmp_target) {
+        free((void*)m_tmp_target);
+        m_tmp_target = nullptr;
+    }
     m_url = url.begin();
     size_t pos = 0;
     LOG_DEBUG(VALUE(url));
