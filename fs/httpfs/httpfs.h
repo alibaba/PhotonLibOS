@@ -26,6 +26,12 @@ limitations under the License.
 #include <photon/fs/filesystem.h>
 
 namespace photon {
+namespace net {
+namespace http {
+class Client;
+}
+}
+
 namespace fs {
 enum HTTPFileFlags {
     HTTP_HEADER = 0xF01,  // (const char*, const char*) ... for header
@@ -68,7 +74,9 @@ IFile* new_httpfile(const char* url, IFileSystem* httpfs = nullptr,
 
 IFileSystem* new_httpfs_v2(bool default_https = false,
                            uint64_t conn_timeout = -1UL,
-                           uint64_t stat_expire = -1UL);
+                           uint64_t stat_expire = -1UL,
+                           net::http::Client* client = nullptr,
+                           bool client_ownership = false);
 
 IFile* new_httpfile_v2(const char* url, IFileSystem* httpfs = nullptr,
                        uint64_t conn_timeout = -1UL,

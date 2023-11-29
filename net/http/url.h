@@ -48,9 +48,13 @@ protected:
     rstring_view16 m_fragment;
     uint16_t m_port = 0;
     bool m_secure;
+    char *m_tmp_target = nullptr;
 public:
     URL() = default;
     URL(std::string_view url) { from_string(url); }
+    ~URL() {
+        free((void*)m_tmp_target);
+    }
 
     std::string to_string() {
         return m_url;
@@ -61,15 +65,19 @@ public:
     }
 
     void from_string(std::string_view url);
+    void fix_target();
     std::string_view query() const { return m_url | m_query; }
 
     std::string_view path() const {
-        return m_url | m_path;
+        if (m_tmp_target != nullptr)
+            return (m_tmp_target | m_path);
+        return (m_url | m_path);
     }
 
     std::string_view target() const {
-        return m_target.size() == 0 ?
-            std::string_view("/") : (m_url | m_target);
+        if (m_tmp_target != nullptr)
+            return (m_tmp_target | m_target);
+        return (m_url | m_target);
     }
 
     std::string_view host() const { return m_url | m_host; }
