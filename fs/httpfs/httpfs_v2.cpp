@@ -222,7 +222,9 @@ public:
 
     //TODO: 这里是否需要考虑m_common_header被打爆的问题？
     void add_header(va_list args) {
-        m_common_header.insert(va_arg(args, const char*), va_arg(args, const char*));
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        m_common_header.insert(k, v);
     }
 
     void add_url_param(va_list args) { m_url_param = va_arg(args, const char*); }
