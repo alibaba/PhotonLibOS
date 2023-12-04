@@ -215,7 +215,7 @@ Node* parse(char* text, size_t size, int flags);
 inline Node* parse(IStream::ReadAll&& buf, int flags) {
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
     if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
-        buf.ptr.release();
+        buf.ptr.reset();
         buf.size = 0;
     }
     return node;
@@ -227,12 +227,11 @@ inline Node* parse_copy(const char* text, size_t size, int flags) {
 }
 
 inline Node* parse_copy(const IStream::ReadAll& buf, int flags) {
-    return parse_copy((char*)buf.ptr.get(), (size_t)buf.size,
-                      flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+    return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
 // assuming localfs by default
-Node* parse_file(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
+Node* parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 
 Node* make_overlay(Node** nodes, int n);
 
