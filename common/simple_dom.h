@@ -81,19 +81,13 @@ class RootNode : public Node {
 protected:
     RootNode() = default;
 
-    // reference counting is only applied on root
+    // reference counting is only applied to root
     // node, which represents the whole document
     std::atomic<uint32_t> _refcnt{0};
 
 public:
-    void add_ref() {
-        _refcnt.fetch_add(1);
-    }
-    void rm_ref() {
-        auto cnt = _refcnt.fetch_sub(1);
-        if (cnt == 1)
-            delete this;
-    }
+    void add_ref() { ++_refcnt; }
+    void del_ref()  { if (--_refcnt == 0) delete this; }
 };
 
 #define IF_RET(e) if (_node) return e; \
@@ -117,7 +111,7 @@ struct NodeWrapper {
         auto rt = root_node();
         auto rrt = rhs.root_node();
         if (rt != rrt) {
-            if (rt) rt->rm_ref();
+            if (rt) rt->del_ref();
             if (rrt) rrt->add_ref();
         }
         _node = rhs._node;
@@ -125,15 +119,15 @@ struct NodeWrapper {
     }
     NodeWrapper& operator = (NodeWrapper&& rhs) {
         if (_node)
-            _node->root()->rm_ref();
+            _node->root()->del_ref();
         _node = rhs._node;
         rhs._node = nullptr;
         return *this;
     }
     ~NodeWrapper() {
-        _node->root()->rm_ref();
+        _node->root()->del_ref();
     }
-    NodeWrapper root() const       { return root_node(); }
+    NodeWrapper root() const       { IF_RET(_node->root()); }
     RootNode* root_node() const    { IF_RET(_node->root()); }
     NodeWrapper parent() const     { IF_RET(_node->_parent); }
     NodeWrapper next() const       { IF_RET(_node->_next); }
