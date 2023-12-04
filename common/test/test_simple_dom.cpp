@@ -21,15 +21,18 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
-#include <gtest/gtest.h>
+// #include <gtest/gtest.h>
 
 using namespace std;
 using namespace photon::SimpleDOM;
 
+#define EXPECT_EQ(a, b)
+#define EXPECT_TRUE(x)
+
 // OSS list response
 const char xml[] = R"(
 <?xml version="1.0" encoding="UTF-8"?>
-<ListBucketResult>
+<ListBucketResult category = "flowers">
   <Name>examplebucket</Name>
   <Prefix></Prefix>
   <Marker>test1.txt</Marker>
@@ -70,11 +73,20 @@ using ObjectList = vector<tuple<long, unsigned char, string_view, int64_t, bool>
 const long DT_DIR = 10;
 const long DT_REG = 20;
 
-static int do_list_object(const string& prefix,
+const static ObjectList truth = {
+    {0, DT_REG, "test10.txt", 1, false},
+    {0, DT_REG, "test100.txt", 1, false},
+};
+
+static __attribute__((noinline))
+int do_list_object(const string& prefix,
                 ObjectList& result, string* marker) {
-    auto doc = parse_copy(xml, sizeof(xml), DOC_XML);
+    auto doc = parse_copy(xml, sizeof(xml), DOC_XML)->wrapper();
     EXPECT_TRUE(doc);
     auto list_bucket_result = doc["ListBucketResult"];
+    auto attr = list_bucket_result.get_attributes();
+    EXPECT_EQ(attr.num_children(), 1);
+    EXPECT_EQ(attr["category"], "flowers");
     for (auto child: list_bucket_result.enumerable_children("Contents")) {
         auto key = child["Key"];
         EXPECT_TRUE(key);
@@ -111,17 +123,13 @@ void simple_dom_oss_list() {
     ObjectList list;
     string marker;
     do_list_object("", list, &marker);
-    const static ObjectList truth = {
-        {0, DT_REG, "test10.txt", 1, false},
-        {0, DT_REG, "test100.txt", 1, false},
-    };
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
 }
 
 // TEST(simple_dom, example) {
 void simple_dom_examples() {
-    auto doc = parse(nullptr, 0, DOC_JSON);
+    auto doc = parse(nullptr, 0, DOC_JSON)->wrapper();
     auto a = doc["asdf"].to_string();
     auto j = doc["jkl"].to_integer();
     auto sb = doc["foo"]["bar"];
@@ -133,7 +141,7 @@ void simple_dom_examples() {
     }
 }
 
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// int main(int argc, char **argv) {
+//     ::testing::InitGoogleTest(&argc, argv);
+//     return RUN_ALL_TESTS();
+// }

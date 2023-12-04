@@ -19,13 +19,18 @@ limitations under the License.
 #include <assert.h>
 #include <memory>
 #include <math.h>
+#include <atomic>
 #include <photon/common/object.h>
 #include <photon/common/estring.h>
 #include <photon/common/enumerable.h>
+#include <photon/common/stream.h>
 
 
-class IStream;
 namespace photon {
+
+namespace fs {
+class IFileSystem;
+}
 
 // simple unified interface for common needs in reading
 // structured documents such as xml, json, yaml, ini, etc.
@@ -38,9 +43,13 @@ namespace SimpleDOM {
 
 using str = estring_view;
 
+class RootNode;
+struct NodeWrapper;
+
 // the interface for internal implementations
 class Node : public Object {
 protected:
+    Node() = default;
     Node* _parent;
 union {
     Node* _next;
@@ -57,6 +66,34 @@ public:
 
     // get the first child node with a specified `key`
     virtual Node* get(str key) const __attribute__((pure)) = 0;
+
+    RootNode* root() const __attribute__((pure)) {
+        auto ptr = this;
+        while (ptr->_parent)
+            ptr = ptr->_parent;
+        return (RootNode*)ptr;
+    }
+
+    NodeWrapper wrapper();
+};
+
+class RootNode : public Node {
+protected:
+    RootNode() = default;
+
+    // reference counting is only applied on root
+    // node, which represents the whole document
+    std::atomic<uint32_t> _refcnt{0};
+
+public:
+    void add_ref() {
+        _refcnt.fetch_add(1);
+    }
+    void rm_ref() {
+        auto cnt = _refcnt.fetch_sub(1);
+        if (cnt == 1)
+            delete this;
+    }
 };
 
 #define IF_RET(e) if (_node) return e; \
@@ -65,19 +102,45 @@ public:
 // the interface for users
 struct NodeWrapper {
     Node* _node = nullptr;
-    NodeWrapper parent() const     { IF_RET({_node->_parent}); }
-    NodeWrapper next() const       { IF_RET({_node->_next}); }
+    NodeWrapper() = default;
+    NodeWrapper(Node* node) {
+        _node = node;
+        _node->root()->add_ref();
+    }
+    NodeWrapper(const NodeWrapper& rhs) :
+        NodeWrapper(rhs._node) { }
+    NodeWrapper(NodeWrapper&& rhs) {
+        _node = rhs._node;
+        rhs._node = nullptr;
+    }
+    NodeWrapper& operator = (const NodeWrapper& rhs) {
+        auto rt = root_node();
+        auto rrt = rhs.root_node();
+        if (rt != rrt) {
+            if (rt) rt->rm_ref();
+            if (rrt) rrt->add_ref();
+        }
+        _node = rhs._node;
+        return *this;
+    }
+    NodeWrapper& operator = (NodeWrapper&& rhs) {
+        if (_node)
+            _node->root()->rm_ref();
+        _node = rhs._node;
+        rhs._node = nullptr;
+        return *this;
+    }
+    ~NodeWrapper() {
+        _node->root()->rm_ref();
+    }
+    NodeWrapper root() const       { return root_node(); }
+    RootNode* root_node() const    { IF_RET(_node->root()); }
+    NodeWrapper parent() const     { IF_RET(_node->_parent); }
+    NodeWrapper next() const       { IF_RET(_node->_next); }
     rstring_view32 rkey() const    { IF_RET(_node->_key); }
     rstring_view32 rvalue() const  { IF_RET(_node->_value); }
     str key(const char* b) const   { IF_RET(b | rkey()); }
     str value(const char* b) const { IF_RET(b | rvalue()); }
-    NodeWrapper root() const __attribute__((pure)) {
-        if (!_node) return {};
-        auto ptr = _node;
-        while (ptr->_parent)
-            ptr = ptr->_parent;
-        return {ptr};
-    }
     const char* text_begin() const {
         IF_RET(root()._node->_text_begin);
     }
@@ -105,6 +168,9 @@ struct NodeWrapper {
     NodeWrapper operator[](size_t i) const {
         return get(i);
     }
+    NodeWrapper get_attributes() const {
+        return get("__attributes__");
+    }
     str to_string() const {
         return value();
     }
@@ -120,11 +186,58 @@ struct NodeWrapper {
 
     struct ChildrenEnumerator;
     Enumerable<ChildrenEnumerator> enumerable_children() const;
+
     Enumerable<SameKeyEnumerator>  enumerable_children(str key) const {
-        return (*this)[key].enumerable_same_key_siblings();
+        return get(key).enumerable_same_key_siblings();
     }
 };
 #undef IF_RET
+
+// lower 8-bit are reserved for doc types
+const int DOC_JSON = 0x00;
+const int DOC_XML  = 0x01;
+const int DOC_YAML = 0x02;
+const int DOC_INI  = 0x03;
+const int DOC_TYPE_MASK = 0xff;
+
+const int FLAG_FREE_TEXT_IF_PARSING_FAILED = 0x100;
+
+using Document = NodeWrapper;
+
+inline NodeWrapper Node::wrapper() { return {this}; }
+
+// 1. text is moved to the simple_dom object, which frees it when destruct.
+// 2. the content of text may be modified in-place to un-escape strings.
+// 3. returning a pointer (of Node) is more efficient than an object (of Document),
+//    even if they are equivalent in binary form.
+Node* parse(char* text, size_t size, int flags);
+
+inline Node* parse(IStream::ReadAll&& buf, int flags) {
+    auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
+    if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
+        buf.ptr.release();
+        buf.size = 0;
+    }
+    return node;
+}
+
+inline Node* parse_copy(const char* text, size_t size, int flags) {
+    auto copy = strndup(text, size);
+    return parse(copy, size, flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+}
+
+inline Node* parse_copy(const IStream::ReadAll& buf, int flags) {
+    return parse_copy((char*)buf.ptr.get(), (size_t)buf.size,
+                      flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+}
+
+// assuming localfs by default
+Node* parse_file(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
+
+Node* make_overlay(Node** nodes, int n);
+
+
+
 
 struct NodeWrapper::ChildrenEnumerator {
     NodeWrapper _node;
@@ -161,43 +274,8 @@ struct NodeWrapper::SameKeyEnumerator {
 
 inline Enumerable<NodeWrapper::SameKeyEnumerator>
 NodeWrapper::enumerable_same_key_siblings() const {
-    return enumerable(NodeWrapper::SameKeyEnumerator({_node}));
+    return enumerable(NodeWrapper::SameKeyEnumerator(_node->wrapper()));
 }
-
-// the whole document, as well as the root node
-struct Document : public NodeWrapper {
-    Document(Node* node) : NodeWrapper{node} { }
-    Document(Document&& rhs) : NodeWrapper{rhs._node} {
-        rhs._node = nullptr;
-    }
-    Document& operator=(Document&& rhs) {
-        delete _node;
-        _node = rhs._node;
-        rhs._node = nullptr;
-        return *this;
-    }
-    ~Document() { delete _node; }
-};
-
-const int DOC_JSON = 0x00;
-const int DOC_XML  = 0x01;
-const int DOC_YAML = 0x02;
-const int DOC_INI  = 0x03;
-const int TEXT_OWNERSHIP = 0x100;  // free(text) when destruct
-
-// the content of text may be modified in-place to un-escape strings
-Document parse(char* text, size_t size, int flags);
-
-inline Document parse_copy(const char* text, size_t size, int flags) {
-    auto copy = strndup(text, size);
-    return parse(copy, size, flags | TEXT_OWNERSHIP);
-}
-
-Document parse_stream(IStream* s, int flags, size_t max_size = 1024 * 1024 * 1024);
-
-Document parse_filename(const char* filename, int flags);
-
-Node* make_overlay(Node** nodes, int n);
 
 }
 }
