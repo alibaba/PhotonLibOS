@@ -99,7 +99,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
                 ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &n);
                 if (ret < 0) return -1;
                 if (err) {
-                    errno = err;
+                    errno = e;
                     return -1;
                 }
                 return 0;
