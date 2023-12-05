@@ -72,8 +72,6 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
    by target vcpu in resume_thread(), when its runq becomes empty;
 */
 
-#define SCOPED_MEMBER_LOCK(x) SCOPED_LOCK(&(x)->lock, ((bool)x) * 2)
-
 // Define assembly section header for clang and gcc
 #if defined(__APPLE__)
 #define DEF_ASM_FUNC(name) ".text\n" \
@@ -1199,7 +1197,8 @@ R"(
     __attribute__((always_inline)) inline
     Switch prepare_usleep(uint64_t useconds, thread_list* waitq, RunQ rq = {})
     {
-        SCOPED_MEMBER_LOCK(waitq);
+        spinlock* waitq_lock = waitq ? &waitq->lock : nullptr;
+        SCOPED_LOCK(waitq_lock, ((bool) waitq) * 2);
         SCOPED_LOCK(rq.current->lock);
         assert(!AtomicRunQ(rq).single());
         auto sw = AtomicRunQ(rq).remove_current(states::SLEEPING);
