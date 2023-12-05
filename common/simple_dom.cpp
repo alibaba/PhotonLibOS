@@ -36,9 +36,11 @@ static NodeImpl* parse_ini(char* text, size_t size, int flags) {
 }
 
 NodeImpl* parse(char* text, size_t size, int flags) {
+    if (!text || !size)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "invalid argument:", VALUE(text), VALUE(size));
     using Parser = NodeImpl* (*) (char* text, size_t size, int flags);
-    constexpr static Parser parsers[] = {&parse_json,
-                &parse_xml, &parse_yaml, &parse_ini};
+    constexpr static Parser parsers[] = {&parse_json, &parse_xml,
+                                         &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
     if (i > LEN(parsers)) {
         if (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED) free(text);

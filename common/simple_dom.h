@@ -23,13 +23,11 @@ namespace fs {
 class IFileSystem;
 }
 
-// simple unified interface for common needs in reading
-// structured documents such as xml, json, yaml, ini, etc.
-namespace SimpleDOM {
 // SimpleDOM emphasize on:
-// 1. simple & convenient usage;
-// 2. unified interface, common needs (may not fit for corner cases);
-// 3. efficient parsing (reading), as well as compiling;
+// 1. a simple & convenient interface for JSON, XML, YAML, INI, etc;
+// 2. fast compilation, fast accessing (reading);
+// 2. common needs;
+namespace SimpleDOM {
 
 using str = estring_view;
 
@@ -39,7 +37,8 @@ struct Node {
     Node() = default;
     Node(NodeImpl* node) {
         _impl = node;
-        _impl->root()->add_doc_ref();
+        if (_impl)
+            _impl->_root->add_doc_ref();
     }
     Node(const Node& rhs) :
         Node(rhs._impl) { }
@@ -59,23 +58,22 @@ struct Node {
     }
     Node& operator = (Node&& rhs) {
         if (_impl)
-            _impl->root()->del_doc_ref();
+            _impl->_root->del_doc_ref();
         _impl = rhs._impl;
         rhs._impl = nullptr;
         return *this;
     }
     ~Node() {
-        _impl->root()->del_doc_ref();
+        _impl->_root->del_doc_ref();
     }
 
 #define IF_RET(e) if (_impl) return e; \
                         else return {};
 
-    Node parent() const     { IF_RET(_impl->_parent); }
-    Node next() const       { IF_RET(_impl->_next); }
-    bool is_root() const    { IF_RET(_impl->is_root()); }
-    Node root() const       { IF_RET(_impl->root()); }
-    NodeImpl* root_impl() const    { IF_RET(_impl->root()); }
+    Node next() const              { IF_RET(_impl->_next); }
+    bool is_root() const           { IF_RET(_impl->_root == _impl); }
+    Node root() const              { IF_RET(_impl->_root); }
+    NodeImpl* root_impl() const    { IF_RET(_impl->_root); }
     rstring_view32 rkey() const    { assert(!is_root()); IF_RET(_impl->_key); }
     rstring_view32 rvalue() const  { IF_RET(_impl->_value); }
     str key(const char* b) const   { IF_RET(b | rkey()); }
@@ -145,13 +143,14 @@ using Document = Node;
 
 inline Node NodeImpl::wrap() { return {this}; }
 
-// 1. text is moved to the simple_dom object, which frees it when destruct.
+// 1. text is handed over to the simple_dom object, and gets freed during destruction
 // 2. the content of text may be modified in-place to un-escape strings.
 // 3. returning a pointer (of NodeImpl) is more efficient than an object (of Document),
 //    even if they are equivalent in binary form.
 NodeImpl* parse(char* text, size_t size, int flags);
 
 inline NodeImpl* parse(IStream::ReadAll&& buf, int flags) {
+    if (!buf.ptr || buf.size <= 0) return nullptr;
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
     if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
         buf.ptr.reset();
@@ -166,6 +165,7 @@ inline NodeImpl* parse_copy(const char* text, size_t size, int flags) {
 }
 
 inline NodeImpl* parse_copy(const IStream::ReadAll& buf, int flags) {
+    if (!buf.ptr || buf.size <= 0) return nullptr;
     return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
@@ -173,8 +173,6 @@ inline NodeImpl* parse_copy(const IStream::ReadAll& buf, int flags) {
 NodeImpl* parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 
 NodeImpl* make_overlay(NodeImpl** nodes, int n);
-
-
 
 
 struct Node::ChildrenEnumerator {

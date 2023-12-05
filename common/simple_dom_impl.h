@@ -28,14 +28,7 @@ limitations under the License.
 
 namespace photon {
 
-// simple unified interface for common needs in reading
-// structured documents such as xml, json, yaml, ini, etc.
 namespace SimpleDOM {
-
-// SimpleDOM emphasize on:
-// 1. simple & convenient usage;
-// 2. unified interface, common needs (may not fit for corner cases);
-// 3. efficient parsing (reading), as well as compiling;
 
 using str = estring_view;
 
@@ -45,7 +38,7 @@ struct Node;
 class NodeImpl : public Object {
 protected:
     NodeImpl() = default;
-    NodeImpl* _parent;
+    NodeImpl* _root;
 union {
     NodeImpl* _next;
     const char* _text_begin;     // the root node have text begin (base
@@ -56,40 +49,32 @@ union {
 };
     rstring_view32 _value;
 
+    void add_doc_ref() {
+        assert(this == _root);
+        ++_refcnt;
+    }
+
+    void del_doc_ref() {
+        assert(this == _root);
+        if (--_refcnt == 0)
+            delete this;
+    }
+
     friend struct Node;
 
 public:
     virtual size_t num_children() const __attribute__((pure)) = 0;
 
     // get the i-th child node
+    // for an array object, it gets the i-th element (doc type determines the starting value)
+    // for an object, it gets the i-th element in implementation defined order
     virtual NodeImpl* get(size_t i) const __attribute__((pure)) = 0;
 
     // get the first child node with a specified `key`
     // XML attributes are treated as a special child node with key "__attributes__"
     virtual NodeImpl* get(str key) const __attribute__((pure)) = 0;
 
-    NodeImpl* root() const __attribute__((pure)) {
-        auto ptr = this;
-        while (ptr->_parent)
-            ptr = ptr->_parent;
-        return (NodeImpl*)ptr;
-    }
-
     Node wrap();
-
-    bool is_root() {
-        return _parent == nullptr;
-    }
-
-    void add_doc_ref() {
-        assert(is_root());
-        ++_refcnt;
-    }
-    void del_doc_ref() {
-        assert(is_root());
-        if (--_refcnt == 0)
-            delete this;
-    }
 };
 
 

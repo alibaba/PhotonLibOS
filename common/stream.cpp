@@ -9,7 +9,7 @@ IStream::ReadAll IStream::readall(size_t min_buf, size_t max_buf) {
     ssize_t capacity = min_buf;
     auto ptr = (char*)malloc(capacity);
     if (!ptr)
-        LOG_ERROR_RETURN(ENOBUFS, buf, "no enough buffer memory");
+        LOG_ERROR_RETURN(ENOBUFS, buf, "failed to malloc(`)", capacity);
     buf.ptr.reset(ptr);
     while(true) {
         ssize_t ret = this->read((char*)buf.ptr.get() + buf.size, capacity - buf.size);
@@ -28,6 +28,10 @@ IStream::ReadAll IStream::readall(size_t min_buf, size_t max_buf) {
                 LOG_ERROR_RETURN(ENOBUFS, buf, "content size in stream exceeds upper limit ", max_buf);
             }
             auto ptr = realloc(buf.ptr.get(), capacity *= 2);
+            if (!ptr) {
+                buf.size = -buf.size;
+                LOG_ERROR_RETURN(ENOBUFS, buf, "failed to realloc(`)", capacity);
+            }
             buf.ptr.reset(ptr);
         }
     }
