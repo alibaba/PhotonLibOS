@@ -156,7 +156,7 @@ public:
     }
 
     int serve(photon::net::ISocketStream* stream) {
-        return skeleton->serve(stream, false);
+        return skeleton->serve(stream);
     }
 
     int run() {
