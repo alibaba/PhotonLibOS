@@ -16,16 +16,6 @@ limitations under the License.
 
 #pragma once
 #include "simple_dom_impl.h"
-// #include <inttypes.h>
-// #include <assert.h>
-// #include <memory>
-// #include <math.h>
-// #include <atomic>
-// #include <photon/common/object.h>
-// #include <photon/common/estring.h>
-// #include <photon/common/enumerable.h>
-// #include <photon/common/stream.h>
-
 
 namespace photon {
 
@@ -36,16 +26,12 @@ class IFileSystem;
 // simple unified interface for common needs in reading
 // structured documents such as xml, json, yaml, ini, etc.
 namespace SimpleDOM {
-
 // SimpleDOM emphasize on:
 // 1. simple & convenient usage;
 // 2. unified interface, common needs (may not fit for corner cases);
 // 3. efficient parsing (reading), as well as compiling;
 
 using str = estring_view;
-
-#define IF_RET(e) if (_impl) return e; \
-                        else return {};
 
 // the interface for users
 struct Node {
@@ -81,6 +67,10 @@ struct Node {
     ~Node() {
         _impl->root()->del_doc_ref();
     }
+
+#define IF_RET(e) if (_impl) return e; \
+                        else return {};
+
     Node parent() const     { IF_RET(_impl->_parent); }
     Node next() const       { IF_RET(_impl->_next); }
     bool is_root() const    { IF_RET(_impl->is_root()); }
@@ -107,6 +97,7 @@ struct Node {
     Node get(str key) const {
         IF_RET({_impl->get(key)});
     }
+#undef IF_RET
     template<size_t N>
     Node operator[](const char (&key)[N]) const {
         return get(key);
@@ -140,7 +131,6 @@ struct Node {
         return get(key).enumerable_same_key_siblings();
     }
 };
-#undef IF_RET
 
 // lower 8 bits are reserved for doc types
 const int DOC_JSON = 0x00;
