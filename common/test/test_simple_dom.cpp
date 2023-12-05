@@ -81,7 +81,7 @@ const static ObjectList truth = {
 static __attribute__((noinline))
 int do_list_object(const string& prefix,
                 ObjectList& result, string* marker) {
-    auto doc = parse_copy(xml, sizeof(xml), DOC_XML)->wrapper();
+    auto doc = parse_copy(xml, sizeof(xml), DOC_XML)->wrap();
     EXPECT_TRUE(doc);
     auto list_bucket_result = doc["ListBucketResult"];
     auto attr = list_bucket_result.get_attributes();
@@ -129,7 +129,7 @@ void simple_dom_oss_list() {
 
 // TEST(simple_dom, example) {
 void simple_dom_examples() {
-    auto doc = parse(nullptr, 0, DOC_JSON)->wrapper();
+    auto doc = parse(nullptr, 0, DOC_JSON)->wrap();
     auto a = doc["asdf"].to_string();
     auto j = doc["jkl"].to_integer();
     auto sb = doc["foo"]["bar"];

@@ -11,7 +11,7 @@
 namespace photon {
 namespace SimpleDOM {
 
-static Node* parse_json(char* text, size_t size, int flags) {
+static NodeImpl* parse_json(char* text, size_t size, int flags) {
 /*
     using namespace rapidjson;
     auto flags = kParseInsituFlag   | kParseNumbersAsStringsFlag |
@@ -23,20 +23,20 @@ static Node* parse_json(char* text, size_t size, int flags) {
     return {nullptr};
 }
 
-static Node* parse_xml(char* text, size_t size, int flags) {
+static NodeImpl* parse_xml(char* text, size_t size, int flags) {
     return {nullptr};
 }
 
-static Node* parse_yaml(char* text, size_t size, int flags) {
+static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
     return {nullptr};
 }
 
-static Node* parse_ini(char* text, size_t size, int flags) {
+static NodeImpl* parse_ini(char* text, size_t size, int flags) {
     return {nullptr};
 }
 
-Node* parse(char* text, size_t size, int flags) {
-    using Parser = Node* (*) (char* text, size_t size, int flags);
+NodeImpl* parse(char* text, size_t size, int flags) {
+    using Parser = NodeImpl* (*) (char* text, size_t size, int flags);
     constexpr static Parser parsers[] = {&parse_json,
                 &parse_xml, &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
@@ -47,7 +47,7 @@ Node* parse(char* text, size_t size, int flags) {
     return parsers[i](text, size, flags);
 }
 
-Node* parse_filename(const char* filename, int flags, fs::IFileSystem* fs) {
+NodeImpl* parse_filename(const char* filename, int flags, fs::IFileSystem* fs) {
     using namespace fs;
     auto file = fs ? fs->open(filename, O_RDONLY) :
        open_localfile_adaptor(filename, O_RDONLY);

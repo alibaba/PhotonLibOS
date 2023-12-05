@@ -15,15 +15,16 @@ limitations under the License.
 */
 
 #pragma once
-#include <inttypes.h>
-#include <assert.h>
-#include <memory>
-#include <math.h>
-#include <atomic>
-#include <photon/common/object.h>
-#include <photon/common/estring.h>
-#include <photon/common/enumerable.h>
-#include <photon/common/stream.h>
+#include "simple_dom_impl.h"
+// #include <inttypes.h>
+// #include <assert.h>
+// #include <memory>
+// #include <math.h>
+// #include <atomic>
+// #include <photon/common/object.h>
+// #include <photon/common/estring.h>
+// #include <photon/common/enumerable.h>
+// #include <photon/common/stream.h>
 
 
 namespace photon {
@@ -43,126 +44,80 @@ namespace SimpleDOM {
 
 using str = estring_view;
 
-class RootNode;
-struct NodeWrapper;
-
-// the interface for internal implementations
-class Node : public Object {
-protected:
-    Node() = default;
-    Node* _parent;
-union {
-    Node* _next;
-    const char* _text_begin;     // the root node have text begin (base
-};  rstring_view32 _key, _value; // of _key and _value of rstring_view)
-
-    friend struct NodeWrapper;
-
-public:
-    virtual size_t num_children() const __attribute__((pure)) = 0;
-
-    // get the i-th child node
-    virtual Node* get(size_t i) const __attribute__((pure)) = 0;
-
-    // get the first child node with a specified `key`
-    virtual Node* get(str key) const __attribute__((pure)) = 0;
-
-    RootNode* root() const __attribute__((pure)) {
-        auto ptr = this;
-        while (ptr->_parent)
-            ptr = ptr->_parent;
-        return (RootNode*)ptr;
-    }
-
-    NodeWrapper wrapper();
-};
-
-class RootNode : public Node {
-protected:
-    RootNode() = default;
-
-    // reference counting is only applied to root
-    // node, which represents the whole document
-    std::atomic<uint32_t> _refcnt{0};
-
-public:
-    void add_ref() { ++_refcnt; }
-    void del_ref()  { if (--_refcnt == 0) delete this; }
-};
-
-#define IF_RET(e) if (_node) return e; \
+#define IF_RET(e) if (_impl) return e; \
                         else return {};
 
 // the interface for users
-struct NodeWrapper {
-    Node* _node = nullptr;
-    NodeWrapper() = default;
-    NodeWrapper(Node* node) {
-        _node = node;
-        _node->root()->add_ref();
+struct Node {
+    NodeImpl* _impl = nullptr;
+    Node() = default;
+    Node(NodeImpl* node) {
+        _impl = node;
+        _impl->root()->add_doc_ref();
     }
-    NodeWrapper(const NodeWrapper& rhs) :
-        NodeWrapper(rhs._node) { }
-    NodeWrapper(NodeWrapper&& rhs) {
-        _node = rhs._node;
-        rhs._node = nullptr;
+    Node(const Node& rhs) :
+        Node(rhs._impl) { }
+    Node(Node&& rhs) {
+        _impl = rhs._impl;
+        rhs._impl = nullptr;
     }
-    NodeWrapper& operator = (const NodeWrapper& rhs) {
-        auto rt = root_node();
-        auto rrt = rhs.root_node();
+    Node& operator = (const Node& rhs) {
+        auto rt = root_impl();
+        auto rrt = rhs.root_impl();
         if (rt != rrt) {
-            if (rt) rt->del_ref();
-            if (rrt) rrt->add_ref();
+            if (rt) rt->del_doc_ref();
+            if (rrt) rrt->add_doc_ref();
         }
-        _node = rhs._node;
+        _impl = rhs._impl;
         return *this;
     }
-    NodeWrapper& operator = (NodeWrapper&& rhs) {
-        if (_node)
-            _node->root()->del_ref();
-        _node = rhs._node;
-        rhs._node = nullptr;
+    Node& operator = (Node&& rhs) {
+        if (_impl)
+            _impl->root()->del_doc_ref();
+        _impl = rhs._impl;
+        rhs._impl = nullptr;
         return *this;
     }
-    ~NodeWrapper() {
-        _node->root()->del_ref();
+    ~Node() {
+        _impl->root()->del_doc_ref();
     }
-    NodeWrapper root() const       { IF_RET(_node->root()); }
-    RootNode* root_node() const    { IF_RET(_node->root()); }
-    NodeWrapper parent() const     { IF_RET(_node->_parent); }
-    NodeWrapper next() const       { IF_RET(_node->_next); }
-    rstring_view32 rkey() const    { IF_RET(_node->_key); }
-    rstring_view32 rvalue() const  { IF_RET(_node->_value); }
+    Node parent() const     { IF_RET(_impl->_parent); }
+    Node next() const       { IF_RET(_impl->_next); }
+    bool is_root() const    { IF_RET(_impl->is_root()); }
+    Node root() const       { IF_RET(_impl->root()); }
+    NodeImpl* root_impl() const    { IF_RET(_impl->root()); }
+    rstring_view32 rkey() const    { assert(!is_root()); IF_RET(_impl->_key); }
+    rstring_view32 rvalue() const  { IF_RET(_impl->_value); }
     str key(const char* b) const   { IF_RET(b | rkey()); }
     str value(const char* b) const { IF_RET(b | rvalue()); }
     const char* text_begin() const {
-        IF_RET(root()._node->_text_begin);
+        IF_RET(root()._impl->_text_begin);
     }
     str key() const    { IF_RET(text_begin() | rkey()); }
     str value() const  { IF_RET(text_begin() | rvalue()); }
-    bool valid() const { return _node; }
-    operator bool() const { return _node; }
+    bool valid() const { return _impl; }
+    operator bool() const { return _impl; }
 
     size_t num_children() const {
-        return _node ? _node->num_children() : 0;
+        return _impl ? _impl->num_children() : 0;
     }
-    NodeWrapper get(size_t i) const {
-        IF_RET({_node->get(i)});
+    Node get(size_t i) const {
+        IF_RET({_impl->get(i)});
     }
-    NodeWrapper get(str key) const {
-        IF_RET({_node->get(key)});
+    Node get(str key) const {
+        IF_RET({_impl->get(key)});
     }
     template<size_t N>
-    NodeWrapper operator[](const char (&key)[N]) const {
+    Node operator[](const char (&key)[N]) const {
         return get(key);
     }
-    NodeWrapper operator[](str key) const {
+    Node operator[](str key) const {
         return get(key);
     }
-    NodeWrapper operator[](size_t i) const {
+    Node operator[](size_t i) const {
         return get(i);
     }
-    NodeWrapper get_attributes() const {
+    Node get_attributes() const {
         return get("__attributes__");
     }
     str to_string() const {
@@ -187,7 +142,7 @@ struct NodeWrapper {
 };
 #undef IF_RET
 
-// lower 8-bit are reserved for doc types
+// lower 8 bits are reserved for doc types
 const int DOC_JSON = 0x00;
 const int DOC_XML  = 0x01;
 const int DOC_YAML = 0x02;
@@ -196,17 +151,17 @@ const int DOC_TYPE_MASK = 0xff;
 
 const int FLAG_FREE_TEXT_IF_PARSING_FAILED = 0x100;
 
-using Document = NodeWrapper;
+using Document = Node;
 
-inline NodeWrapper Node::wrapper() { return {this}; }
+inline Node NodeImpl::wrap() { return {this}; }
 
 // 1. text is moved to the simple_dom object, which frees it when destruct.
 // 2. the content of text may be modified in-place to un-escape strings.
-// 3. returning a pointer (of Node) is more efficient than an object (of Document),
+// 3. returning a pointer (of NodeImpl) is more efficient than an object (of Document),
 //    even if they are equivalent in binary form.
-Node* parse(char* text, size_t size, int flags);
+NodeImpl* parse(char* text, size_t size, int flags);
 
-inline Node* parse(IStream::ReadAll&& buf, int flags) {
+inline NodeImpl* parse(IStream::ReadAll&& buf, int flags) {
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
     if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
         buf.ptr.reset();
@@ -215,59 +170,59 @@ inline Node* parse(IStream::ReadAll&& buf, int flags) {
     return node;
 }
 
-inline Node* parse_copy(const char* text, size_t size, int flags) {
+inline NodeImpl* parse_copy(const char* text, size_t size, int flags) {
     auto copy = strndup(text, size);
     return parse(copy, size, flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
 }
 
-inline Node* parse_copy(const IStream::ReadAll& buf, int flags) {
+inline NodeImpl* parse_copy(const IStream::ReadAll& buf, int flags) {
     return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
 // assuming localfs by default
-Node* parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
+NodeImpl* parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 
-Node* make_overlay(Node** nodes, int n);
-
-
+NodeImpl* make_overlay(NodeImpl** nodes, int n);
 
 
-struct NodeWrapper::ChildrenEnumerator {
-    NodeWrapper _node;
-    NodeWrapper get() const {
-        return _node;
+
+
+struct Node::ChildrenEnumerator {
+    Node _impl;
+    Node get() const {
+        return _impl;
     }
     int next() {
-        _node = _node.next();
-        return _node.valid() ? 0 : -1;
+        _impl = _impl.next();
+        return _impl.valid() ? 0 : -1;
     }
 };
 
-inline Enumerable<NodeWrapper::ChildrenEnumerator>
-NodeWrapper::enumerable_children() const {
-    return enumerable(NodeWrapper::ChildrenEnumerator{_node->get(0)});
+inline Enumerable<Node::ChildrenEnumerator>
+Node::enumerable_children() const {
+    return enumerable(Node::ChildrenEnumerator{_impl->get(0)});
 }
 
-struct NodeWrapper::SameKeyEnumerator {
-    NodeWrapper _node;
+struct Node::SameKeyEnumerator {
+    Node _impl;
     const char* _base;
     str _key;
-    SameKeyEnumerator(NodeWrapper node) : _node(node) {
+    SameKeyEnumerator(Node node) : _impl(node) {
         _base = node.text_begin();
         _key = node.key(_base);
     }
-    NodeWrapper get() const {
-        return _node;
+    Node get() const {
+        return _impl;
     }
     int next() {
-        _node = _node.next();
-        return (_node.valid() && _node.key(_base) == _key) ? 0 : -1;
+        _impl = _impl.next();
+        return (_impl.valid() && _impl.key(_base) == _key) ? 0 : -1;
     }
 };
 
-inline Enumerable<NodeWrapper::SameKeyEnumerator>
-NodeWrapper::enumerable_same_key_siblings() const {
-    return enumerable(NodeWrapper::SameKeyEnumerator(_node->wrapper()));
+inline Enumerable<Node::SameKeyEnumerator>
+Node::enumerable_same_key_siblings() const {
+    return enumerable(Node::SameKeyEnumerator(_impl->wrap()));
 }
 
 }
