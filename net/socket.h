@@ -255,6 +255,7 @@ namespace net {
         using Handler = Callback<ISocketStream*>;
         virtual ISocketServer* set_handler(Handler handler) = 0;
         virtual int start_loop(bool block = false) = 0;
+        // Close the listening fd. It's the user's responsibility to close the active connections.
         virtual void terminate() = 0;
     };
 
