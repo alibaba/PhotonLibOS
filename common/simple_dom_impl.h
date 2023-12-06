@@ -73,11 +73,7 @@ public:
     // get the first child node with a specified `key`
     // XML attributes are treated as a special child node with key "__attributes__"
     virtual NodeImpl* get(str key) const __attribute__((pure)) = 0;
-
-    Node wrap();
 };
-
-
 
 }
 }

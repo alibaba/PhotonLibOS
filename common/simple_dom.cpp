@@ -35,7 +35,7 @@ static NodeImpl* parse_ini(char* text, size_t size, int flags) {
     return {nullptr};
 }
 
-NodeImpl* parse(char* text, size_t size, int flags) {
+Node parse(char* text, size_t size, int flags) {
     if (!text || !size)
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid argument:", VALUE(text), VALUE(size));
     using Parser = NodeImpl* (*) (char* text, size_t size, int flags);
@@ -49,7 +49,7 @@ NodeImpl* parse(char* text, size_t size, int flags) {
     return parsers[i](text, size, flags);
 }
 
-NodeImpl* parse_filename(const char* filename, int flags, fs::IFileSystem* fs) {
+Node parse_filename(const char* filename, int flags, fs::IFileSystem* fs) {
     using namespace fs;
     auto file = fs ? fs->open(filename, O_RDONLY) :
        open_localfile_adaptor(filename, O_RDONLY);

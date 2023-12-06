@@ -32,8 +32,9 @@ namespace SimpleDOM {
 using str = estring_view;
 
 // the interface for users
-struct Node {
+class Node {
     NodeImpl* _impl = nullptr;
+public:
     Node() = default;
     Node(NodeImpl* node) {
         _impl = node;
@@ -141,15 +142,13 @@ const int FLAG_FREE_TEXT_IF_PARSING_FAILED = 0x100;
 
 using Document = Node;
 
-inline Node NodeImpl::wrap() { return {this}; }
-
 // 1. text is handed over to the simple_dom object, and gets freed during destruction
 // 2. the content of text may be modified in-place to un-escape strings.
 // 3. returning a pointer (of NodeImpl) is more efficient than an object (of Document),
 //    even if they are equivalent in binary form.
-NodeImpl* parse(char* text, size_t size, int flags);
+Node parse(char* text, size_t size, int flags);
 
-inline NodeImpl* parse(IStream::ReadAll&& buf, int flags) {
+inline Node parse(IStream::ReadAll&& buf, int flags) {
     if (!buf.ptr || buf.size <= 0) return nullptr;
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
     if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
@@ -159,21 +158,20 @@ inline NodeImpl* parse(IStream::ReadAll&& buf, int flags) {
     return node;
 }
 
-inline NodeImpl* parse_copy(const char* text, size_t size, int flags) {
+inline Node parse_copy(const char* text, size_t size, int flags) {
     auto copy = strndup(text, size);
     return parse(copy, size, flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
 }
 
-inline NodeImpl* parse_copy(const IStream::ReadAll& buf, int flags) {
+inline Node parse_copy(const IStream::ReadAll& buf, int flags) {
     if (!buf.ptr || buf.size <= 0) return nullptr;
     return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
 // assuming localfs by default
-NodeImpl* parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
+Node parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 
-NodeImpl* make_overlay(NodeImpl** nodes, int n);
-
+Node make_overlay(Node* nodes, int n);
 
 struct Node::ChildrenEnumerator {
     Node _impl;
@@ -210,7 +208,7 @@ struct Node::SameKeyEnumerator {
 
 inline Enumerable<Node::SameKeyEnumerator>
 Node::enumerable_same_key_siblings() const {
-    return enumerable(Node::SameKeyEnumerator(_impl->wrap()));
+    return enumerable(Node::SameKeyEnumerator{{_impl}});
 }
 
 }
