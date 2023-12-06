@@ -166,6 +166,7 @@ file(GLOB PHOTON_SRC
         fs/xfile.cpp
         fs/httpfs/*.cpp
         io/signal.cpp
+        io/reset_handle.cpp
         net/*.cpp
         net/http/*.cpp
         net/security-context/tls-stream.cpp

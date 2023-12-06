@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/io/fd-events.h>
 #include "events_map.h"
+#include "reset_handle.h"
 
 namespace photon {
 #ifndef EPOLLRDHUP
@@ -48,7 +49,7 @@ struct InFlightEvent {
     void* error_data;
 };
 
-class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine {
+class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     int _evfd = -1;
     int _engine_fd = -1;
@@ -70,6 +71,13 @@ public:
 
         epfd = evfd = -1;
         return 0;
+    }
+    int reset() override {
+        if_close_fd(_engine_fd);    // close original fd
+        if_close_fd(_evfd);
+        _inflight_events.clear();   // reset members
+        _events_remain = 0;
+        return init();              // re-init
     }
     virtual ~EventEngineEPoll() override {
         LOG_INFO("Finish event engine: epoll");
