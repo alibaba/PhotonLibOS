@@ -3,7 +3,7 @@
 #include "alog.h"
 
 
-IStream::ReadAll IStream::readall(size_t min_buf, size_t max_buf) {
+IStream::ReadAll IStream::readall(size_t max_buf, size_t min_buf) {
     ReadAll buf;
     buf.size = 0;
     ssize_t capacity = min_buf;
