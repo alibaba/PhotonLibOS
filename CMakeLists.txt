@@ -176,7 +176,7 @@ file(GLOB PHOTON_SRC
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp)
+    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp io/epoll-ng.cpp)
     if (PHOTON_ENABLE_URING)
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()

@@ -136,12 +136,15 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(epoll);
 DECLARE_MASTER_AND_CASCADING_ENGINE(select);
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
+DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
 
 inline int fd_events_init(int master_engine) {
     switch (master_engine) {
 #ifdef __linux__
         case INIT_EVENT_EPOLL:
             return _fd_events_init(&new_epoll_master_engine);
+        case INIT_EVENT_EPOLL_NG:
+            return _fd_events_init(&new_epoll_ng_master_engine);
 #endif
         case INIT_EVENT_SELECT:
             return _fd_events_init(&new_select_master_engine);

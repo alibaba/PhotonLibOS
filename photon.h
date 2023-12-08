@@ -28,6 +28,7 @@ const uint64_t INIT_EVENT_IOURING = SHIFT(1);
 const uint64_t INIT_EVENT_SELECT = SHIFT(2);
 const uint64_t INIT_EVENT_KQUEUE = SHIFT(3);
 const uint64_t INIT_EVENT_IOCP = SHIFT(4);
+const uint64_t INIT_EVENT_EPOLL_NG = SHIFT(5);
 const uint64_t INIT_EVENT_SIGNAL = SHIFT(10);
 
 const uint64_t INIT_IO_NONE = 0;
