@@ -226,8 +226,9 @@ namespace photon
     class mutex : protected waitq
     {
     public:
-        int lock(uint64_t timeout = -1);        // threads are guaranteed to get the lock
-        int try_lock();                         // in FIFO order, when there's contention
+        mutex(uint16_t max_retries = 100) : retries(max_retries) { }
+        int lock(uint64_t timeout = -1);
+        int try_lock();
         void unlock();
         ~mutex()
         {
@@ -235,13 +236,20 @@ namespace photon
         }
 
     protected:
-        static constexpr const int MaxTries = 100;
         std::atomic<thread*> owner{nullptr};
+        uint16_t retries;
         spinlock splock;
+    };
+
+    class seq_mutex : protected mutex {
+    public:
+        // threads are guaranteed to get the lock in sequental order (FIFO)
+        seq_mutex() : mutex(0) { }
     };
 
     class recursive_mutex : protected mutex {
     public:
+        using mutex::mutex;
         int lock(uint64_t timeout = -1);
         int try_lock();
         void unlock();
