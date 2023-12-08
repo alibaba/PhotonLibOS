@@ -1545,12 +1545,12 @@ R"(
         auto splock = (spinlock*)s_;
         splock->unlock();
     }
-    int mutex::lock(uint64_t timeout)
-    {
-        for (int tries = 0; tries < MaxTries; ++tries) {
+    int mutex::lock(uint64_t timeout) {
+        if (try_lock() == 0) return 0;
+        for (auto re = retries; re; --re) {
+            thread_yield();
             if (try_lock() == 0)
                 return 0;
-            thread_yield();
         }
         splock.lock();
         if (try_lock() == 0) {
