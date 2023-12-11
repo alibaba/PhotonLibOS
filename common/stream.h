@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 #include <sys/types.h>
+#include <memory>
 #include <photon/common/object.h>
 
 struct iovec;
@@ -43,6 +44,19 @@ public:
     {   // there might be a faster implementaion in derived class
         return writev(iov, iovcnt);
     }
+
+    struct ReadAll {
+        struct FreeDeleter {
+            void operator()(void* ptr) {
+                ::free(ptr);
+            }
+        };
+        std::unique_ptr<void, FreeDeleter> ptr;
+        ssize_t size;   // <= 0 if error occured; |size| is always the # of bytes read
+    };
+
+    // read until EOF
+    ReadAll readall(size_t max_buf = 1024 * 1024 * 1024, size_t min_buf = 1024);
 
     // member function pointer to either read() or write()
     typedef ssize_t (IStream::*FuncIO) (void *buf, size_t count);
