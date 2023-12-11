@@ -79,31 +79,6 @@ public:
             return ctl(fd, EPOLL_CTL_DEL, events, data);
         }
 
-        int wait(epoll_event* evs, size_t len, uint64_t timeout) {
-            if (len == 0) return 0;
-            uint8_t cool_down_ms = 1;
-            // since timeout may less than 1ms
-            // in such condition, timeout_ms should be at least 1
-            // or it may call epoll_wait without any idle
-            timeout = (timeout && timeout < 1024) ? 1 : timeout / 1024;
-            while (epfd > 0) {
-                int ret = epoll_wait(epfd, evs, len, timeout);
-                if (ret < 0) {
-                    ERRNO err;
-                    if (err.no == EINTR) continue;
-                    usleep(1024L * cool_down_ms);
-                    timeout = sat_sub(timeout, cool_down_ms);
-                    if (cool_down_ms < 16) {
-                        cool_down_ms *= 2;
-                        continue;
-                    }
-                    LOG_ERROR_RETURN(err.no, -1, "epoll_wait() failed ", err);
-                }
-                return ret;
-            }
-            return -1;
-        }
-
         template <typename DataCB, typename FDCB>
         int notify_one(const DataCB& datacb, const FDCB& fdcb) {
             if (remains && fdcb()) {
@@ -122,44 +97,73 @@ public:
             return fired;
         }
 
-        void collect(uint64_t timeout) {
-            remains += wait(&events[remains], LEN(events) - remains, timeout);
+        void reap(uint64_t timeout) {
+            uint8_t cool_down_ms = 1;
+            // since timeout may less than 1ms
+            // in such condition, timeout_ms should be at least 1
+            // or it may call epoll_wait without any idle
+            timeout = (timeout && timeout < 1024) ? 1 : timeout / 1024;
+            while (epfd > 0) {
+                int ret = epoll_wait(epfd, events, LEN(events), timeout);
+                if (ret < 0) {
+                    ERRNO err;
+                    if (err.no == EINTR) continue;
+                    usleep(1024L * cool_down_ms);
+                    timeout = sat_sub(timeout, cool_down_ms);
+                    if (cool_down_ms < 16) {
+                        cool_down_ms *= 2;
+                        continue;
+                    }
+                    LOG_ERROR_RETURN(err.no, , "epoll_wait() failed ", err);
+                }
+                remains += ret;
+                return;
+            }
         }
     };
 
-    Poller engine, rpoller, wpoller, epoller;
+    enum class PULLERTYPE {
+        ENGINE = 0,
+        READER = 1,
+        WRITER = 2,
+        ERROR = 3,
+        EVENT = 4,
+    };
+
+    Poller pl[4];
+    Poller& engine = pl[(int)PULLERTYPE::ENGINE];
+    Poller& rpoller = pl[(int)PULLERTYPE::READER];
+    Poller& wpoller = pl[(int)PULLERTYPE::WRITER];
+    Poller& epoller = pl[(int)PULLERTYPE::ERROR];
+
     int evfd = -1;
 
     int init() {
-        if (engine.init() < 0) goto errout;
-        if (rpoller.init() < 0) goto errout;
-        if (wpoller.init() < 0) goto errout;
-        if (epoller.init() < 0) goto errout;
+        for (int i = 0; i < 4; i++) {
+            if (pl[i].init() < 0) {
+                LOG_ERROR("Failed to create sub poller `, because `", i,
+                          ERRNO());
+                goto errout;
+            }
+        }
         evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd < 0) goto errout;
-        if (engine.add(rpoller.epfd, EPOLLIN, {.fd = rpoller.epfd}) < 0)
+        for (int i = 1; i < 4; i++) {
+            if (engine.add(pl[i].epfd, EPOLLIN, {.u64 = (uint64_t)i}) < 0)
+                goto errout;
+        }
+        if (engine.add(evfd, EPOLLIN, {.u64 = (uint64_t)PULLERTYPE::EVENT}) < 0)
             goto errout;
-        if (engine.add(wpoller.epfd, EPOLLIN, {.fd = wpoller.epfd}) < 0)
-            goto errout;
-        if (engine.add(epoller.epfd, EPOLLIN, {.fd = epoller.epfd}) < 0)
-            goto errout;
-        if (engine.add(evfd, EPOLLIN, {.fd = evfd}) < 0) goto errout;
         return 0;
 
     errout:
-        epoller.fini();
-        wpoller.fini();
-        rpoller.fini();
-        engine.fini();
+        for (int i = 3; i >= 0; i--) pl[i].fini();
         if_close_fd(evfd);
         return -1;
     }
     virtual ~EventEngineEPollNG() override {
-        LOG_INFO("Finish event engine: epoll");
-        engine.fini();
-        rpoller.fini();
-        wpoller.fini();
-        epoller.fini();
+        LOG_INFO("Finish event engine: epoll-ng");
+        for (int i = 3; i >= 0; i--) pl[i].fini();
         if_close_fd(evfd);
     }
 
@@ -215,24 +219,18 @@ public:
         if (!fired) {
             // no events ready
             eventfd_t value;
-            engine.collect(timeout);
+            engine.reap(timeout);
             engine.notify_all(
                 [&](epoll_data_t data) __INLINE__ {
-                    if (data.fd == evfd) {
-                        eventfd_read(evfd, &value);
-                        return;
-                    }
-                    if (data.fd == rpoller.epfd) {
-                        rpoller.collect(0);
-                        return;
-                    }
-                    if (data.fd == wpoller.epfd) {
-                        wpoller.collect(0);
-                        return;
-                    }
-                    if (data.fd == epoller.epfd) {
-                        epoller.collect(0);
-                        return;
+                    switch (data.u64) {
+                        case (uint64_t)PULLERTYPE::READER:
+                        case (uint64_t)PULLERTYPE::WRITER:
+                        case (uint64_t)PULLERTYPE::ERROR:
+                            pl[data.u64].reap(0);
+                            return;
+                        case (uint64_t)PULLERTYPE::EVENT:
+                            eventfd_read(evfd, &value);
+                            return;
                     }
                 },
                 [&]() __INLINE__ { return true; });
