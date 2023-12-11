@@ -49,14 +49,18 @@ Node parse(char* text, size_t size, int flags) {
     return parsers[i](text, size, flags);
 }
 
-Node parse_filename(const char* filename, int flags, fs::IFileSystem* fs) {
+Node parse_file(fs::IFile* file, int flags) {
+    return parse(file->readall(), flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+}
+
+Node parse_file(const char* filename, int flags, fs::IFileSystem* fs) {
     using namespace fs;
     auto file = fs ? fs->open(filename, O_RDONLY) :
-       open_localfile_adaptor(filename, O_RDONLY);
+       open_localfile_adaptor(filename, O_RDONLY) ;
     if (!file)
         LOG_ERRNO_RETURN(0, nullptr, "failed to open file ", filename);
     DEFER(delete file);
-    return parse(file->readall(), flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+    return parse_file(file, flags);
 }
 
 }

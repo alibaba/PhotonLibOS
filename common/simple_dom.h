@@ -21,12 +21,13 @@ namespace photon {
 
 namespace fs {
 class IFileSystem;
+class IFile;
 }
 
 // SimpleDOM emphasize on:
 // 1. a simple & convenient interface for JSON, XML, YAML, INI, etc;
-// 2. fast compilation, fast accessing (reading);
-// 2. common needs;
+// 2. fast compilation, efficient accessing;
+// 3. common needs;
 namespace SimpleDOM {
 
 using str = estring_view;
@@ -68,50 +69,31 @@ public:
         _impl->_root->del_doc_ref();
     }
 
-#define IF_RET(e) if (_impl) return e; \
-                        else return {};
-
-    Node next() const              { IF_RET(_impl->_next); }
-    bool is_root() const           { IF_RET(_impl->_root == _impl); }
-    Node root() const              { IF_RET(_impl->_root); }
-    NodeImpl* root_impl() const    { IF_RET(_impl->_root); }
-    rstring_view32 rkey() const    { assert(!is_root()); IF_RET(_impl->_key); }
-    rstring_view32 rvalue() const  { IF_RET(_impl->_value); }
-    str key(const char* b) const   { IF_RET(b | rkey()); }
-    str value(const char* b) const { IF_RET(b | rvalue()); }
-    const char* text_begin() const {
-        IF_RET(root()._impl->_text_begin);
-    }
-    str key() const    { IF_RET(text_begin() | rkey()); }
-    str value() const  { IF_RET(text_begin() | rvalue()); }
-    bool valid() const { return _impl; }
-    operator bool() const { return _impl; }
-
-    size_t num_children() const {
-        return _impl ? _impl->num_children() : 0;
-    }
-    Node get(size_t i) const {
-        IF_RET({_impl->get(i)});
-    }
-    Node get(str key) const {
-        IF_RET({_impl->get(key)});
-    }
-#undef IF_RET
+    #define IF_RET(e) if (_impl) return e; else return {};
+    Node next() const               { IF_RET(_impl->_next); }
+    bool is_root() const            { IF_RET(_impl->_root == _impl); }
+    Node root() const               { IF_RET(_impl->_root); }
+    NodeImpl* root_impl() const     { IF_RET(_impl->_root); }
+    rstring_view32 rkey() const     { assert(!is_root()); IF_RET(_impl->_key); }
+    rstring_view32 rvalue() const   { IF_RET(_impl->_value); }
+    str key(const char* b) const    { IF_RET(b | rkey()); }
+    str value(const char* b) const  { IF_RET(b | rvalue()); }
+    const char* text_begin() const  { IF_RET(root()._impl->_text_begin); }
+    str key() const                 { IF_RET(text_begin() | rkey()); }
+    str value() const               { IF_RET(text_begin() | rvalue()); }
+    bool valid() const              { return _impl; }
+    operator bool() const           { return _impl; }
+    size_t num_children() const     { IF_RET(_impl->num_children()); }
+    Node get(size_t i) const        { IF_RET({_impl->get(i)}); }
+    Node get(str key) const         { IF_RET({_impl->get(key)}); }
+    Node operator[](str key) const  { return get(key); }
+    Node operator[](size_t i) const { return get(i); }
+    Node get_attributes() const     { return get("__attributes__"); }
+    str to_string() const           { return value(); }
+    #undef IF_RET
     template<size_t N>
     Node operator[](const char (&key)[N]) const {
         return get(key);
-    }
-    Node operator[](str key) const {
-        return get(key);
-    }
-    Node operator[](size_t i) const {
-        return get(i);
-    }
-    Node get_attributes() const {
-        return get("__attributes__");
-    }
-    str to_string() const {
-        return value();
     }
     int64_t to_integer(int64_t def_val = 0) const {
         return value().to_uint64(def_val);
@@ -168,8 +150,10 @@ inline Node parse_copy(const IStream::ReadAll& buf, int flags) {
     return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
+Node parse_file(fs::IFile* file, int flags);
+
 // assuming localfs by default
-Node parse_filename(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
+Node parse_file(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 
 Node make_overlay(Node* nodes, int n);
 
