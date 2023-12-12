@@ -122,7 +122,7 @@ public:
         }
     };
 
-    enum class PULLERTYPE {
+    enum class POLLERTYPE : int {
         ENGINE = 0,
         READER = 1,
         WRITER = 2,
@@ -131,16 +131,18 @@ public:
     };
 
     Poller pl[4];
-    Poller& engine = pl[(int)PULLERTYPE::ENGINE];
-    Poller& rpoller = pl[(int)PULLERTYPE::READER];
-    Poller& wpoller = pl[(int)PULLERTYPE::WRITER];
-    Poller& epoller = pl[(int)PULLERTYPE::ERROR];
+
+#define engine (pl[(int)POLLERTYPE::ENGINE])
+#define rpoller (pl[(int)POLLERTYPE::READER])
+#define wpoller (pl[(int)POLLERTYPE::WRITER])
+#define epoller (pl[(int)POLLERTYPE::ERROR])
+#define poller(x) (pl[(int)x])
 
     int evfd = -1;
 
     int init() {
         for (int i = 0; i < 4; i++) {
-            if (pl[i].init() < 0) {
+            if (poller(i).init() < 0) {
                 LOG_ERROR("Failed to create sub poller `, because `", i,
                           ERRNO());
                 goto errout;
@@ -149,21 +151,21 @@ public:
         evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd < 0) goto errout;
         for (int i = 1; i < 4; i++) {
-            if (engine.add(pl[i].epfd, EPOLLIN, {.u64 = (uint64_t)i}) < 0)
+            if (engine.add(poller(i).epfd, EPOLLIN, {.u64 = (uint64_t)i}) < 0)
                 goto errout;
         }
-        if (engine.add(evfd, EPOLLIN, {.u64 = (uint64_t)PULLERTYPE::EVENT}) < 0)
+        if (engine.add(evfd, EPOLLIN, {.u64 = (uint64_t)POLLERTYPE::EVENT}) < 0)
             goto errout;
         return 0;
 
     errout:
-        for (int i = 3; i >= 0; i--) pl[i].fini();
+        for (int i = 3; i >= 0; i--) poller(i).fini();
         if_close_fd(evfd);
         return -1;
     }
     virtual ~EventEngineEPollNG() override {
         LOG_INFO("Finish event engine: epoll-ng");
-        for (int i = 3; i >= 0; i--) pl[i].fini();
+        for (int i = 3; i >= 0; i--) poller(i).fini();
         if_close_fd(evfd);
     }
 
@@ -223,14 +225,18 @@ public:
             engine.notify_all(
                 [&](epoll_data_t data) __INLINE__ {
                     switch (data.u64) {
-                        case (uint64_t)PULLERTYPE::READER:
-                        case (uint64_t)PULLERTYPE::WRITER:
-                        case (uint64_t)PULLERTYPE::ERROR:
-                            pl[data.u64].reap(0);
+                        case (uint64_t)POLLERTYPE::READER:
+                        case (uint64_t)POLLERTYPE::WRITER:
+                        case (uint64_t)POLLERTYPE::ERROR:
+                            poller(data.u64).reap(0);
                             return;
-                        case (uint64_t)PULLERTYPE::EVENT:
+                        case (uint64_t)POLLERTYPE::EVENT:
                             eventfd_read(evfd, &value);
                             return;
+                        default:
+                            LOG_ERROR_RETURN(EINVAL, ,
+                                             "Catch unknown event by engine ",
+                                             data.u64);
                     }
                 },
                 [&]() __INLINE__ { return true; });
