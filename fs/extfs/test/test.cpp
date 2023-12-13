@@ -1,3 +1,18 @@
+/*
+Copyright 2023 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 #include "../extfs.h"
 #include <fcntl.h>
 #include <dirent.h>
@@ -41,7 +56,7 @@ int write_file(photon::fs::IFile *file) {
     while (aa.size() < FILE_SIZE)
         aa.append(bb);
     auto ret = file->pwrite(aa.data(), aa.size(), 0);
-    if (ret != aa.size()) {
+    if (ret != (ssize_t)aa.size()) {
         LOG_ERRNO_RETURN(0, -1, "failed write file ", VALUE(aa.size()), VALUE(ret))
     }
     LOG_DEBUG("write ` byte", ret);
@@ -166,6 +181,86 @@ int lutimes(photon::fs::IFileSystem *fs, const char *path, const struct timeval 
         LOG_ERRNO_RETURN(0, ret, "failed utimes ", VALUE(path));
     }
     return 0;
+}
+
+ssize_t getxattr(photon::fs::IFileSystemXAttr *fs, const char *path, const char *name,
+                 char *value, size_t size) {
+    auto ret = fs->getxattr(path, name, value, size);
+    if (ret < 0) {
+        LOG_ERRNO_RETURN(0, ret, "failed getxattr ", VALUE(path), VALUE(name), VALUE(value),
+                                                      VALUE(size), VALUE(ret));
+    }
+    return ret;
+}
+
+ssize_t listxattr(photon::fs::IFileSystemXAttr *fs, const char *path, char *list, size_t size) {
+    auto ret = fs->listxattr(path, list, size);
+    if (ret < 0) {
+        LOG_ERRNO_RETURN(0, ret, "failed listxattr ", VALUE(path), VALUE(list), VALUE(size), VALUE(ret));
+    }
+    return ret;
+}
+
+int setxattr(photon::fs::IFileSystemXAttr *fs, const char *path, const char *name,
+             const char *value, size_t size) {
+    auto ret = fs->setxattr(path, name, value, size, 0);
+    if (ret) {
+        LOG_ERRNO_RETURN(0, ret, "failed setxattr ", VALUE(path), VALUE(name), VALUE(value), VALUE(size));
+    }
+    return 0;
+}
+
+int removexattr(photon::fs::IFileSystemXAttr *fs, const char *path, const char *name) {
+    auto ret = fs->removexattr(path, name);
+    if (ret) {
+        LOG_ERRNO_RETURN(0, ret, "failed removexattr ", VALUE(path), VALUE(name));
+    }
+    return 0;
+}
+
+int list_all_xattr(photon::fs::IFileSystemXAttr *fs, const char *path) {
+    char *list_buf, *value_buf, *key, *value;
+    auto list_sz = fs->listxattr(path, nullptr, 0);
+    if (list_sz <= 0)
+        return list_sz;
+    list_buf = (char *)malloc(list_sz);
+    if (!list_buf)
+        return -1;
+    list_sz = fs->listxattr(path, list_buf, list_sz);
+    if (list_sz < 0)
+        return list_sz;
+    key = list_buf;
+    int count = 0;
+    while (list_sz > 0) {
+        auto value_sz = fs->getxattr(path, key, nullptr, 0);
+        if (value_sz > 0) {
+            value_buf = (char *)malloc(value_sz + 1);
+            if (value_buf) {
+                value_sz = fs->getxattr(path, key, value_buf, value_sz);
+                if (value_sz > 0) {
+                    value_buf[value_sz] = '\0';
+                    value = value_buf;
+                    count++;
+                    LOG_INFO(VALUE(key), VALUE(value));
+                } else {
+                    return -1;
+                }
+                free(value_buf);
+            } else {
+                return -1;
+            }
+        } else if (value_sz == 0) {
+            count++;
+            LOG_INFO(VALUE(key));
+        } else {
+            return -1;
+        }
+        auto key_sz = strlen(key) + 1;
+        list_sz -= key_sz;
+        key += key_sz;
+    }
+    free(list_buf);
+    return count;
 }
 
 int opendir(photon::fs::IFileSystem *fs, const char *path) {
@@ -797,6 +892,93 @@ TEST_F(ExtfsTest, Sync) {
 
     ret = fs->syncfs();
     EXPECT_EQ(0, ret);
+}
+
+TEST_F(ExtfsTest, Xattr) {
+    auto file = fs->creat("/test_xattr", 0755);
+    EXPECT_NE(nullptr, file);
+    delete file;
+    file = fs->creat("/test_xattr1", 0755);
+    EXPECT_NE(nullptr, file);
+    delete file;
+
+    auto xattr_fs = dynamic_cast<photon::fs::IFileSystemXAttr *>(fs);
+    ASSERT_NE(nullptr, xattr_fs);
+
+    // set xattr
+    auto ret = setxattr(xattr_fs, "/test_xattr", "user.test1", "test1", 5);
+    EXPECT_EQ(0, ret);
+    ret = setxattr(xattr_fs, "/test_xattr", "user.test2", "test2333", 5);
+    EXPECT_EQ(0, ret);
+    ret = setxattr(xattr_fs, "/test_xattr", "user.test3", nullptr, 0);
+    EXPECT_EQ(0, ret);
+    ret = setxattr(xattr_fs, "/test_xattr1", "ser.test1", "test1", 5);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOTSUP, errno);
+    ret = setxattr(xattr_fs, "/test_xattr2", "user.test1", "test1", 5);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOENT, errno);
+    // list xattr
+    char buf[128] = {0};
+    auto list_sz = listxattr(xattr_fs, "/test_xattr", nullptr, 0);
+    EXPECT_LT(0, list_sz);
+    ret = listxattr(xattr_fs, "/test_xattr", buf, list_sz - 1);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ERANGE, errno);
+    ret = listxattr(xattr_fs, "/test_xattr", buf, sizeof(buf));
+    EXPECT_EQ(list_sz, ret);
+    ret = listxattr(xattr_fs, "/test_xattr1", buf, 0);
+    EXPECT_EQ(0, ret);
+    ret = listxattr(xattr_fs, "/test_xattr2", buf, 0);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOENT, errno);
+    // get xattr
+    char vbuf[64] = {0};
+    auto value_sz = getxattr(xattr_fs, "/test_xattr", "user.test1", nullptr, 0);
+    EXPECT_LT(0, value_sz);
+    ret = getxattr(xattr_fs, "/test_xattr", "user.test1", vbuf, value_sz - 1);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ERANGE, errno);
+    ret = getxattr(xattr_fs, "/test_xattr", "user.test1", vbuf, sizeof(vbuf));
+    EXPECT_EQ(value_sz, ret);
+    EXPECT_EQ(0, memcmp(vbuf, "test1", value_sz));
+    memset(vbuf, 0, sizeof(vbuf));
+    value_sz = getxattr(xattr_fs, "/test_xattr", "user.test2", nullptr, 0);
+    EXPECT_LT(0, value_sz);
+    ret = getxattr(xattr_fs, "/test_xattr", "user.test2", vbuf, sizeof(vbuf));
+    EXPECT_EQ(value_sz, ret);
+    EXPECT_EQ(0, memcmp(vbuf, "test2", value_sz));
+    ret = getxattr(xattr_fs, "/test_xattr", "ser.test1", vbuf, sizeof(vbuf));
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENODATA, errno);
+    ret = getxattr(xattr_fs, "/test_xattr1", "user.test1", vbuf, sizeof(vbuf));
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENODATA, errno);
+    ret = getxattr(xattr_fs, "/test_xattr2", "user.test1", vbuf, sizeof(vbuf));
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOENT, errno);
+    // remove xattr
+    ret = list_all_xattr(xattr_fs, "/test_xattr");
+    EXPECT_EQ(3, ret);
+    ret = removexattr(xattr_fs, "/test_xattr", "user.test1");
+    EXPECT_EQ(0, ret);
+    ret = list_all_xattr(xattr_fs, "/test_xattr");
+    EXPECT_EQ(2, ret);
+    ret = removexattr(xattr_fs, "/test_xattr", "user.test2");
+    EXPECT_EQ(0, ret);
+    ret = list_all_xattr(xattr_fs, "/test_xattr");
+    EXPECT_EQ(1, ret);
+    ret = removexattr(xattr_fs, "/test_xattr", "user.test3");
+    EXPECT_EQ(0, ret);
+    ret = list_all_xattr(xattr_fs, "/test_xattr");
+    EXPECT_EQ(0, ret);
+    ret = removexattr(xattr_fs, "/test_xattr", "ser.test1");
+    EXPECT_EQ(0, ret);  // no key found is treat as success
+    ret = removexattr(xattr_fs, "/test_xattr1", "user.test1");
+    EXPECT_EQ(0, ret);  // no key found is treat as success
+    ret = removexattr(xattr_fs, "/test_xattr2", "user.test1");
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOENT, errno);
 }
 
 int main(int argc, char **argv) {

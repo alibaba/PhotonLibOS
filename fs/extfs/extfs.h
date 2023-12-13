@@ -14,13 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #pragma once
-#include <ext2fs/ext2fs.h>
 #include <photon/fs/filesystem.h>
 
 namespace photon {
 namespace fs {
 
-io_manager new_io_manager(photon::fs::IFile *file);
 photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer = true);
 
 // make extfs on an prezeroed IFile,

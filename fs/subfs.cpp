@@ -31,10 +31,11 @@ namespace photon {
 namespace fs
 {
     // Sub tree of a file system
-    class SubFileSystem : public IFileSystem
+    class SubFileSystem : public IFileSystem, public IFileSystemXAttr
     {
     public:
         IFileSystem* underlayfs = nullptr;
+        IFileSystemXAttr* underlay_xattrfs = nullptr;
         char base_path[PATH_MAX];
         uint base_path_len = 0;
         bool ownership = false;
@@ -43,6 +44,7 @@ namespace fs
         {
             ownership = _ownership;
             underlayfs = _underlayfs;
+            underlay_xattrfs = dynamic_cast<IFileSystemXAttr *>(_underlayfs);
             if (!_base_path || !_base_path[0])         // use default relative path
             {
                 base_path[0] = '\0';
@@ -228,48 +230,63 @@ namespace fs
             PathCat __(this, path);
             return underlayfs->mknod(path, mode, dev);
         }
-        /*
+
         virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->getxattr(path, name, value, size);
+            return underlay_xattrfs->getxattr(path, name, value, size);
         }
         virtual ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->lgetxattr(path, name, value, size);
+            return underlay_xattrfs->lgetxattr(path, name, value, size);
         }
         virtual ssize_t listxattr(const char *path, char *list, size_t size)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->listxattr(path, list, size);
+            return underlay_xattrfs->listxattr(path, list, size);
         }
         virtual ssize_t llistxattr(const char *path, char *list, size_t size)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->llistxattr(path, list, size);
+            return underlay_xattrfs->llistxattr(path, list, size);
         }
         virtual int setxattr(const char *path, const char *name, const void *value, size_t size, int flags)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->setxattr(path, name, value, size, flags);
+            return underlay_xattrfs->setxattr(path, name, value, size, flags);
         }
         virtual int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->lsetxattr(path, name, value, size, flags);
+            return underlay_xattrfs->lsetxattr(path, name, value, size, flags);
         }
         virtual int removexattr(const char *path, const char *name)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->removexattr(path, name);
+            return underlay_xattrfs->removexattr(path, name);
         }
         virtual int lremovexattr(const char *path, const char *name)
         {
+            if (!underlay_xattrfs)
+                LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
-            return underlayfs->lremovexattr(path, name);
+            return underlay_xattrfs->lremovexattr(path, name);
         }
-        */
     };
     class SubFile : public ForwardFile_Ownership
     {

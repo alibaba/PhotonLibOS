@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include <ext2fs/ext2fs.h>
 #include <sys/stat.h>
 #include <photon/common/alog.h>
 #include <photon/common/callback.h>
