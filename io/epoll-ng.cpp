@@ -26,13 +26,16 @@ limitations under the License.
 
 #include <vector>
 
+#include "reset_handle.h"
+
 namespace photon {
 #ifndef EPOLLRDHUP
 #define EPOLLRDHUP 0
 #endif
 
 class EventEngineEPollNG : public MasterEventEngine,
-                           public CascadingEventEngine {
+                           public CascadingEventEngine,
+                           public ResetHandle {
 public:
     static int if_close_fd(int& fd) {
         if (fd < 0) return 0;
@@ -41,8 +44,8 @@ public:
     }
 
     struct Poller {
-        int epfd = -1;
         epoll_event events[16];
+        int epfd = -1;
         int remains = 0;
 
         int init() {
@@ -163,10 +166,18 @@ public:
         if_close_fd(evfd);
         return -1;
     }
-    virtual ~EventEngineEPollNG() override {
+    int fini() {
         LOG_INFO("Finish event engine: epoll-ng");
         for (int i = 3; i >= 0; i--) poller(i).fini();
         if_close_fd(evfd);
+        return 0;
+    }
+    int reset() override {
+        fini();
+        return init();
+    }
+    virtual ~EventEngineEPollNG() override {
+        fini();
     }
 
     virtual int add_interest(Event e) override {
@@ -255,7 +266,7 @@ public:
             0, [&](epoll_data_t data) __INLINE__ { *ptr++ = data.ptr; },
             [&]()
                 __INLINE__ {  // make sure each fd receives all possible events
-                    return (end - ptr) >= 3;
+                    return end > ptr;
                 });
         if (ptr == data) {
             return 0;
