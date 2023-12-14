@@ -210,7 +210,7 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
     target_include_directories(photon_obj PUBLIC ${FSTACK_INCLUDE_DIRS})
 endif()
 if (PHOTON_ENABLE_EXTFS)
-    target_include_directories(photon_obj PUBLIC ${LIBE2FS_INCLUDE_DIRS})
+    target_include_directories(photon_obj PUBLIC ${E2FS_INCLUDE_DIRS})
 endif()
 if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     # This option is enabled by default after -std=c++17

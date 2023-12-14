@@ -116,6 +116,7 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
         return ret;
     }
     // reserve inodes
+    ext2fs_inode_alloc_stats2(fs, EXT2_BAD_INO, +1, 0);
     for (ext2_ino_t i = EXT2_ROOT_INO + 1; i < EXT2_FIRST_INODE(fs->super); i++)
         ext2fs_inode_alloc_stats2(fs, i, +1, 0);
     ext2fs_mark_ib_dirty(fs);
@@ -134,6 +135,8 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
 
 namespace photon {
 namespace fs {
+
+extern io_manager new_io_manager(photon::fs::IFile *file);
 
 int make_extfs(photon::fs::IFile *file, char *uuid) {
     struct stat st;
