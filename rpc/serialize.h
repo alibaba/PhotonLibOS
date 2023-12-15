@@ -105,6 +105,7 @@ namespace rpc
         const char* c_str() const { return cbegin(); }
         std::string_view sv() const { return {c_str(), size() - 1}; }
         std::string to_std() { return std::string(sv()); };
+        bool empty() const { return _len == 0; }
         bool operator==(const string& rhs) const { return sv() == rhs.sv(); }
         bool operator!=(const string& rhs) const { return !(*this == rhs); }
         bool operator<(const string& rhs) const { return sv() < rhs.sv(); }
