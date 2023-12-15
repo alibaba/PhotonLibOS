@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "extfs.h"
+#include <ext2fs/ext2fs.h>
 #include <utime.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -53,16 +54,14 @@ static ext2_filsys do_ext2fs_open(io_manager extfs_manager) {
         &fs                   // ret_fs
     );
     if (ret) {
-        auto eno = errno = -parse_extfs_error(nullptr, 0, ret);
-        LOG_ERROR("failed ext2fs_open ", ERRNO(eno));
-        return nullptr;
+        errno = -parse_extfs_error(nullptr, 0, ret);
+        LOG_ERRNO_RETURN(0, nullptr, "failed ext2fs_open");
     }
     ret = ext2fs_read_bitmaps(fs);
     if (ret) {
-        auto eno = errno = -parse_extfs_error(fs, 0, ret);
-        LOG_ERROR("failed ext2fs_read_bitmaps ", ERRNO(eno));
+        errno = -parse_extfs_error(fs, 0, ret);
         ext2fs_close(fs);
-        return nullptr;
+        LOG_ERRNO_RETURN(0, nullptr, "failed ext2fs_read_bitmaps");
     }
     LOG_INFO("ext2fs opened");
     return fs;
@@ -938,21 +937,12 @@ static int ino_iter_blocks(ext2_filsys fs, ext2_ino_t ino,
     if (!ext2fs_inode_has_valid_blocks2(fs, &inode)) {
         LOG_DEBUG("ext2fs_inode_has_valid_blocks2");
         return 0;
-        // return format->inline_data(&(inode.i_block[0]),
-        // 			   format->private);
     }
 
     retval = ext2fs_extent_open(fs, ino, &extents);
     if (retval == EXT2_ET_INODE_NOT_EXTENT) {
         LOG_DEBUG("EXT2_ET_INODE_NOT_EXTENT");
         return 0;
-        // retval = ext2fs_block_iterate3(fs, ino, BLOCK_FLAG_READ_ONLY,
-        // 	NULL, walk_block, pdata);
-        // if (retval) {
-        // 	com_err(__func__, retval, _("listing blocks of ino \"%u\""),
-        // 		ino);
-        // }
-        // return retval;
     }
 
     auto ret = ino_iter_extents(fs, ino, extents, blocks);
@@ -974,6 +964,183 @@ static int do_ext2fs_fiemap(ext2_filsys fs, ext2_ino_t ino, struct photon::fs::f
     return 0;
 }
 
+static ssize_t do_ext2fs_getxattr(ext2_filsys fs, ext2_ino_t ino, const char *name, void *value,
+                                  size_t size) {
+    struct ext2_xattr_handle *h;
+    void *ptr;
+    size_t plen;
+    errcode_t ret = ext2fs_xattrs_open(fs, ino, &h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    DEFER(ext2fs_xattrs_close(&h));
+
+    ret = ext2fs_xattrs_read(h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // get xattr
+    ret = ext2fs_xattr_get(h, name, &ptr, &plen);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+
+    if (size == 0) {
+        ret = plen;
+    } else if (size < plen) {
+        ret = -ERANGE;
+    } else {
+        memcpy(value, ptr, plen);
+        ret = plen;
+    }
+
+    ext2fs_free_mem(&ptr);
+    return ret;
+}
+
+static ssize_t do_ext2fs_getxattr(ext2_filsys fs, const char *path, const char *name,
+                                  void *value, size_t size, int follow) {
+    LOG_DEBUG(VALUE(path));
+    ext2_ino_t ino = string_to_inode(fs, path, follow);
+    if (!ino) return -ENOENT;
+
+    return do_ext2fs_getxattr(fs, ino, name, value, size);
+}
+
+static int count_buffer_space(char *name, char *value EXT2FS_ATTR((unused)),
+                              size_t value_len EXT2FS_ATTR((unused)), void *data) {
+    auto cnt = (unsigned int *)data;
+    *cnt = *cnt + strlen(name) + 1;
+    return 0;
+}
+
+static int copy_names(char *name, char *value EXT2FS_ATTR((unused)),
+                      size_t value_len EXT2FS_ATTR((unused)), void *data) {
+    auto buf = (char **)data;
+    size_t name_len = strlen(name);
+    memcpy(*buf, name, name_len + 1);
+    *buf = *buf + name_len + 1;
+    return 0;
+}
+
+static ssize_t do_ext2fs_listxattr(ext2_filsys fs, ext2_ino_t ino, char *list, size_t size) {
+    struct ext2_xattr_handle *h;
+    errcode_t ret = ext2fs_xattrs_open(fs, ino, &h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    DEFER(ext2fs_xattrs_close(&h));
+
+    ret = ext2fs_xattrs_read(h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // count buffer space
+    unsigned int buf_size = 0;
+    ret = ext2fs_xattrs_iterate(h, count_buffer_space, &buf_size);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+
+    if (size == 0) {
+        return buf_size;
+    } else if (size < buf_size) {
+        return -ERANGE;
+    }
+    // copy to list
+    memset(list, 0, size);
+    ret = ext2fs_xattrs_iterate(h, copy_names, &list);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+
+    return buf_size;
+}
+
+static ssize_t do_ext2fs_listxattr(ext2_filsys fs, const char *path, char *list, size_t size, int follow) {
+    LOG_DEBUG(VALUE(path));
+    ext2_ino_t ino = string_to_inode(fs, path, follow);
+    if (!ino) return -ENOENT;
+
+    return do_ext2fs_listxattr(fs, ino, list, size);
+}
+
+static bool check_namespace(const char *name) {
+    static std::vector<std::string> valid_names = {
+        "gnu.",
+        "system.posix_acl_default",
+        "system.posix_acl_access",
+        "system.richacl",
+        "security.",
+        "trusted.",
+        "system.",
+        "user.",
+    };
+
+    for (auto &n : valid_names) {
+        if (strncmp(name, n.c_str(), n.size()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int do_ext2fs_setxattr(ext2_filsys fs, ext2_ino_t ino, const char *name,
+                              const void *value, size_t size, int flags) {
+    if (!check_namespace(name))
+        LOG_ERROR_RETURN(ENOTSUP, -ENOTSUP, "the namespace prefix of '`' is not valid", name);
+
+    struct ext2_xattr_handle *h;
+    errcode_t ret = ext2fs_xattrs_open(fs, ino, &h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    DEFER(ext2fs_xattrs_close(&h));
+
+    ret = ext2fs_xattrs_read(h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // set xattr
+    ret = ext2fs_xattr_set(h, name, value, size);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // update_ctime
+    ret = update_xtime(fs, ino, nullptr, EXT_CTIME);
+    if (ret) return ret;
+
+    return 0;
+}
+
+static int do_ext2fs_setxattr(ext2_filsys fs, const char *path, const char *name,
+                              const void *value, size_t size, int flags, int follow) {
+    LOG_DEBUG(VALUE(path));
+    ext2_ino_t ino = string_to_inode(fs, path, follow);
+    if (!ino) return -ENOENT;
+
+    return do_ext2fs_setxattr(fs, ino, name, value, size, flags);
+}
+
+static int do_ext2fs_removexattr(ext2_filsys fs, ext2_ino_t ino, const char *name) {
+    struct ext2_xattr_handle *h;
+    errcode_t ret = ext2fs_xattrs_open(fs, ino, &h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    DEFER(ext2fs_xattrs_close(&h));
+
+    ret = ext2fs_xattrs_read(h);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // remove xattr
+    // no key found is treat as success
+    ret = ext2fs_xattr_remove(h, name);
+    if (ret)
+        return parse_extfs_error(fs, ino, ret);
+    // update_ctime
+    ret = update_xtime(fs, ino, nullptr, EXT_CTIME);
+    if (ret) return ret;
+
+    return 0;
+}
+
+static int do_ext2fs_removexattr(ext2_filsys fs, const char *path, const char *name, int follow) {
+    LOG_DEBUG(VALUE(path));
+    ext2_ino_t ino = string_to_inode(fs, path, follow);
+    if (!ino) return -ENOENT;
+
+    return do_ext2fs_removexattr(fs, ino, name);
+}
 
 #define DO_EXT2FS(func) \
     auto ret = func;    \
@@ -986,8 +1153,10 @@ static int do_ext2fs_fiemap(ext2_filsys fs, ext2_ino_t ino, struct photon::fs::f
 namespace photon {
 namespace fs {
 
+extern io_manager new_io_manager(photon::fs::IFile *file);
+
 class ExtFileSystem;
-class ExtFile : public photon::fs::VirtualFile {
+class ExtFile : public photon::fs::VirtualFile, public photon::fs::IFileXAttr {
 public:
     ExtFile(ext2_file_t _file, int _flags, ExtFileSystem *_fs) :
         file(_file), flags(_flags), m_fs(_fs) {
@@ -1044,6 +1213,18 @@ public:
     }
     virtual int fiemap(struct photon::fs::fiemap* map) override {
         DO_EXT2FS(do_ext2fs_fiemap(fs, ino, map));
+    }
+    virtual ssize_t fgetxattr(const char *name, void *value, size_t size) override {
+        DO_EXT2FS(do_ext2fs_getxattr(fs, ino, name, value, size));
+    }
+    virtual ssize_t flistxattr(char *list, size_t size) override {
+        DO_EXT2FS(do_ext2fs_listxattr(fs, ino, list, size));
+    }
+    virtual int fsetxattr(const char *name, const void *value, size_t size, int flags) override {
+        DO_EXT2FS(do_ext2fs_setxattr(fs, ino, name, value, size, flags));
+    }
+    virtual int fremovexattr(const char *name) override {
+        DO_EXT2FS(do_ext2fs_removexattr(fs, ino, name));
     }
 
     virtual photon::fs::IFileSystem *filesystem() override;
@@ -1103,7 +1284,7 @@ public:
 };
 
 static const uint64_t kMinimalInoLife = 1L * 1000 * 1000; // ino lives at least 1s
-class ExtFileSystem : public photon::fs::IFileSystem {
+class ExtFileSystem : public photon::fs::IFileSystem, public photon::fs::IFileSystemXAttr {
 public:
     ext2_filsys fs;
     io_manager extfs_io_manager;
@@ -1215,6 +1396,30 @@ public:
             return -1;
         }
         return flush_buffer();
+    }
+    ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override {
+        DO_EXT2FS(do_ext2fs_getxattr(fs, path, name, value, size, 1));
+    }
+    ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size) override {
+        DO_EXT2FS(do_ext2fs_getxattr(fs, path, name, value, size, 0));
+    }
+    ssize_t listxattr(const char *path, char *list, size_t size) override {
+        DO_EXT2FS(do_ext2fs_listxattr(fs, path, list, size, 1));
+    }
+    ssize_t llistxattr(const char *path, char *list, size_t size) override {
+        DO_EXT2FS(do_ext2fs_listxattr(fs, path, list, size, 0));
+    }
+    int setxattr(const char *path, const char *name, const void *value, size_t size, int flags) override {
+        DO_EXT2FS(do_ext2fs_setxattr(fs, path, name, value, size, flags, 1));
+    }
+    int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) override {
+        DO_EXT2FS(do_ext2fs_setxattr(fs, path, name, value, size, flags, 0));
+    }
+    int removexattr(const char *path, const char *name) override {
+        DO_EXT2FS(do_ext2fs_removexattr(fs, path, name, 1));
+    }
+    int lremovexattr(const char *path, const char *name) override {
+        DO_EXT2FS(do_ext2fs_removexattr(fs, path, name, 0));
     }
 
     photon::fs::DIR *opendir(const char *path) override {

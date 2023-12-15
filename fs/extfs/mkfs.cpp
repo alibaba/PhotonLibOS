@@ -136,6 +136,8 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
 namespace photon {
 namespace fs {
 
+extern io_manager new_io_manager(photon::fs::IFile *file);
+
 int make_extfs(photon::fs::IFile *file, char *uuid) {
     struct stat st;
     auto ret = file->fstat(&st);
