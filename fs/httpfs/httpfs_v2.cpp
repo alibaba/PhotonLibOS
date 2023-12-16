@@ -45,16 +45,24 @@ protected:
     uint64_t m_stat_timeout;
 
     net::http::Client *m_client;
+    bool m_client_ownership;
 
 public:
-    HttpFs_v2(bool default_https, uint64_t conn_timeout, uint64_t stat_timeout)
-        : m_default_https(default_https),
-          m_conn_timeout(conn_timeout),
+    HttpFs_v2(bool default_https, uint64_t conn_timeout, uint64_t stat_timeout,
+              net::http::Client* client, bool client_ownership)
+        : m_default_https(default_https), m_conn_timeout(conn_timeout),
           m_stat_timeout(stat_timeout) {
-              m_client = net::http::new_http_client();
-          }
+        if (client == nullptr) {
+            m_client = net::http::new_http_client();
+            m_client_ownership = true;
+        } else {
+            m_client = client;
+            m_client_ownership = client_ownership;
+        }
+    }
     ~HttpFs_v2() {
-        delete m_client;
+        if (m_client_ownership)
+            delete m_client;
     }
     net::http::Client* get_client() { return m_client; }
     IFile* open(const char* pathname, int flags) override;
@@ -222,7 +230,9 @@ public:
 
     //TODO: 这里是否需要考虑m_common_header被打爆的问题？
     void add_header(va_list args) {
-        m_common_header.insert(va_arg(args, const char*), va_arg(args, const char*));
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        m_common_header.insert(k, v);
     }
 
     void add_url_param(va_list args) { m_url_param = va_arg(args, const char*); }
@@ -265,8 +275,10 @@ IFile* HttpFs_v2::open(const char* pathname, int flags) {
 }
 
 IFileSystem* new_httpfs_v2(bool default_https, uint64_t conn_timeout,
-                        uint64_t stat_timeout) {
-    return new HttpFs_v2(default_https, conn_timeout, stat_timeout);
+                           uint64_t stat_timeout, net::http::Client* client,
+                           bool client_ownership) {
+    return new HttpFs_v2(default_https, conn_timeout, stat_timeout,
+                         client, client_ownership);
 }
 
 IFile* new_httpfile_v2(const char* url, HttpFs_v2* httpfs, uint64_t conn_timeout,

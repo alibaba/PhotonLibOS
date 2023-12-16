@@ -145,9 +145,11 @@ public:
 struct IOVWriter : public IOVector {
     using IOVector::IOVector;
     size_t drop = 0;
+    size_t written = 0;
     size_t write(const void* buf, size_t size) {
         auto actual_count = memcpy_from(
             buf, size);  // copy from (buf, size) to iovec[] in *this,
+        written += actual_count;
         extract_front(actual_count);  // and extract the portion just copied
         if (actual_count < size)      // means full
         {

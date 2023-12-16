@@ -166,6 +166,7 @@ file(GLOB PHOTON_SRC
         fs/xfile.cpp
         fs/httpfs/*.cpp
         io/signal.cpp
+        io/reset_handle.cpp
         net/*.cpp
         net/http/*.cpp
         net/security-context/tls-stream.cpp
@@ -211,7 +212,7 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
     target_include_directories(photon_obj PRIVATE ${FSTACK_INCLUDE_DIRS})
 endif()
 if (PHOTON_ENABLE_EXTFS)
-    target_include_directories(photon_obj PRIVATE ${LIBE2FS_INCLUDE_DIRS})
+    target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
 endif()
 if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     # This option is enabled by default after -std=c++17
@@ -329,8 +330,10 @@ endif ()
 if (PHOTON_BUILD_TESTING)
     include(CTest)
 
+    add_library(ci-tools STATIC test/ci-tools.cpp)
+
     include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
-    link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
+    link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
 
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)

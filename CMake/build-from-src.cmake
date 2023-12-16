@@ -82,12 +82,12 @@ function(build_from_src [dep])
                 URL ${PHOTON_OPENSSL_SOURCE}
                 URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND ./config -fPIC no-unit-test no-shared --openssldir=${BINARY_DIR} --prefix=${BINARY_DIR}
-                BUILD_COMMAND make depend -j ${NumCPU} && make -j ${NumCPU}
+                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
+                BUILD_COMMAND make -j ${NumCPU}
                 INSTALL_COMMAND make install
         )
         ExternalProject_Get_Property(openssl SOURCE_DIR)
-        set(OPENSSL_ROOT_DIR ${SOURCE_DIR} PARENT_SCOPE)
+        set(OPENSSL_ROOT_DIR ${BINARY_DIR} PARENT_SCOPE)
         set(OPENSSL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(OPENSSL_LIBRARIES ${BINARY_DIR}/lib/libssl.a ${BINARY_DIR}/lib/libcrypto.a PARENT_SCOPE)
 
@@ -101,15 +101,13 @@ function(build_from_src [dep])
                 URL ${PHOTON_CURL_SOURCE}
                 URL_MD5 a66270f11e3fbfad709600bbd1686704
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND export CC=${CMAKE_C_COMPILER} && export CXX=${CMAKE_CXX_COMPILER} &&
-                    export LD=${CMAKE_LINKER} && export CFLAGS=-fPIC &&
-                    autoreconf -i && ./configure --with-ssl=${OPENSSL_ROOT_DIR}
+                CONFIGURE_COMMAND autoreconf -i && ./configure --with-ssl=${OPENSSL_ROOT_DIR}
                     --without-libssh2 --enable-static --enable-shared=no --enable-optimize
                     --disable-manual --without-libidn
                     --disable-ftp --disable-file --disable-ldap --disable-ldaps
                     --disable-rtsp --disable-dict --disable-telnet --disable-tftp
                     --disable-pop3 --disable-imap --disable-smb --disable-smtp
-                    --disable-gopher --without-nghttp2 --enable-http
+                    --disable-gopher --without-nghttp2 --enable-http --disable-verbose
                     --with-pic=PIC --prefix=${BINARY_DIR}
                 BUILD_COMMAND make -j ${NumCPU}
                 INSTALL_COMMAND make install

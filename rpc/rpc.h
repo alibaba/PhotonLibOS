@@ -161,16 +161,25 @@ namespace rpc
         virtual int set_close_notify(Notifier notifier) = 0;
 
         // can be invoked concurrently by multiple threads
-        // if have the ownership of stream, `serve` will delete it before exit
-        virtual int serve(IStream* stream, bool ownership_stream = false) = 0;
+        virtual int serve(IStream* stream) = 0;
+
+        __attribute__((deprecated))
+        int serve(IStream* stream, bool /*ownership_stream*/) {
+            return serve(stream);
+        }
 
         // set the allocator to allocate memory for recving responses
         // the default allocator is defined in iovector.h/cpp
         virtual void set_allocator(IOAlloc allocation) = 0;
 
-        virtual int shutdown_no_wait() = 0;
+        /**
+         * @brief Shutdown the rpc server from outside.
+         * @warning DO NOT invoke this function within the RPC request.
+         *          You should create a thread to invoke it, or just use shutdown_no_wait.
+         */
+        virtual int shutdown(bool no_more_requests = true) = 0;
 
-        virtual int shutdown() = 0;
+        virtual int shutdown_no_wait() = 0;
 
         template <class ServerClass>
         int register_service(ServerClass* obj)
@@ -238,7 +247,12 @@ namespace rpc
     extern "C" StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
                                 uint64_t connect_timeout,
                                 uint64_t rpc_timeout);
-    extern "C" Skeleton* new_skeleton(bool concurrent = true, uint32_t pool_size = 128);
+    extern "C" Skeleton* new_skeleton(uint32_t pool_size = 128);
+
+    __attribute__((deprecated))
+    inline Skeleton* new_skeleton(bool /*concurrent*/, uint32_t pool_size = 128) {
+        return new_skeleton(pool_size);
+    }
 
     struct __example__operation1__   // defination of operator
     {

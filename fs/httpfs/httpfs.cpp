@@ -229,8 +229,7 @@ public:
                              VALUE(url), VALUE(offset), VALUE(ret));
         }
         authorized = true;
-        headers.try_get("content-length", ret);
-        return ret;
+        return writer.written;
     }
 
     int fstat(struct stat* buf) override {
@@ -252,7 +251,9 @@ public:
     }
 
     void add_header(va_list args) {
-        common_header[va_arg(args, const char*)] = va_arg(args, const char*);
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        common_header[k] = v;
     }
 
     void add_url_param(va_list args) { url_param = va_arg(args, const char*); }

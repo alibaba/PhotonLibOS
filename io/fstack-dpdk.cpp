@@ -27,6 +27,7 @@ limitations under the License.
 #include "../thread/thread11.h"
 #include "../common/alog.h"
 #include "../net/basic_socket.h"
+#include "reset_handle.h"
 
 #ifndef EVFILT_EXCEPT
 #define EVFILT_EXCEPT (-15)
@@ -37,7 +38,7 @@ namespace photon {
 constexpr static EventsMap<EVUnderlay<EVFILT_READ, EVFILT_WRITE, EVFILT_EXCEPT>>
     evmap;
 
-class FstackDpdkEngine : public MasterEventEngine, public CascadingEventEngine {
+class FstackDpdkEngine : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     struct InFlightEvent {
         uint32_t interests = 0;
@@ -74,6 +75,10 @@ public:
             LOG_ERRNO_RETURN(0, -1, "failed to setup self-wakeup EVFILT_USER event by kevent()");
         }
         return 0;
+    }
+
+    int reset() override {
+        assert(false);
     }
 
     ~FstackDpdkEngine() override {

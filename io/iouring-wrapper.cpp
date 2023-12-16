@@ -30,6 +30,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/io/fd-events.h>
 #include "events_map.h"
+#include "reset_handle.h"
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -40,34 +41,38 @@ limitations under the License.
 
 namespace photon {
 
-constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>>
-    evmap;
+constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>> evmap;
 
-class iouringEngine : public MasterEventEngine, public CascadingEventEngine {
+class iouringEngine : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     explicit iouringEngine(bool master) : m_master(master) {}
 
     ~iouringEngine() {
         LOG_INFO("Finish event engine: iouring ", VALUE(m_master));
-        if (m_cancel_poller != nullptr) {
-            m_cancel_poller_running = false;
-            thread_interrupt(m_cancel_poller);
-            thread_join((join_handle*) m_cancel_poller);
-        }
-        if (m_cancel_fd >= 0) {
-            close(m_cancel_fd);
-        }
-        if (m_cascading_event_fd >= 0) {
+        fini();
+    }
+
+    int reset() override {
+        fini();
+        m_event_contexts.clear();
+        return init();
+    }
+
+    int fini() {
+        if (m_eventfd >= 0 && !m_master) {
             if (io_uring_unregister_eventfd(m_ring) != 0) {
                 LOG_ERROR("iouring: failed to unregister cascading event fd");
             }
-            close(m_cascading_event_fd);
+        }
+        if (m_eventfd >= 0) {
+            close(m_eventfd);
         }
         if (m_ring != nullptr) {
             io_uring_queue_exit(m_ring);
         }
         delete m_ring;
         m_ring = nullptr;
+        return 0;
     }
 
     int init() {
@@ -124,26 +129,29 @@ public:
             }
             ret = io_uring_register_files(m_ring, entries, REGISTER_FILES_MAX_NUM);
             if (ret != 0) {
-                LOG_ERROR_RETURN(EPERM, -1, "iouring: unable to register files, ", ERRNO(-ret));
+                LOG_ERROR_RETURN(-ret, -1, "iouring: unable to register files, ", ERRNO(-ret));
             }
         }
 
-        if (m_master) {
-            // Setup a cancel poller to watch on master engine
-            m_cancel_fd = eventfd(0, EFD_CLOEXEC);
-            if (m_cancel_fd < 0) {
-                LOG_ERRNO_RETURN(0, -1, "iouring: failed to create eventfd");
-            }
-            m_cancel_poller = thread_create11(64 * 1024, &iouringEngine::run_cancel_poller, this);
-            thread_enable_join(m_cancel_poller);
+        m_eventfd = eventfd(0, EFD_CLOEXEC);
+        if (m_eventfd < 0) {
+            LOG_ERRNO_RETURN(0, -1, "iouring: failed to create eventfd");
+        }
 
-        } else {
-            // Register an event fd for cascading engine
-            m_cascading_event_fd = eventfd(0, EFD_CLOEXEC);
-            if (m_cascading_event_fd < 0) {
-                LOG_ERRNO_RETURN(0, -1, "iouring: failed to create cascading event fd");
+        if (m_master) {
+            // Setup a multishot poll on master engine to watch the cancel_wait
+            uint32_t poll_mask = evmap.translate_bitwisely(EVENT_READ);
+            auto sqe = _get_sqe();
+            if (!sqe) return -1;
+            io_uring_prep_poll_multishot(sqe, m_eventfd, poll_mask);
+            io_uring_sqe_set_data(sqe, this);
+            ret = io_uring_submit(m_ring);
+            if (ret <= 0) {
+                LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit multishot poll, ", ERRNO(-ret));
             }
-            if (io_uring_register_eventfd(m_ring, m_cascading_event_fd) != 0) {
+        } else {
+            // Register cascading engine to eventfd
+            if (io_uring_register_eventfd(m_ring, m_eventfd) != 0) {
                 LOG_ERRNO_RETURN(0, -1, "iouring: failed to register cascading event fd");
             }
         }
@@ -155,7 +163,7 @@ public:
      *     later in the `wait_and_fire_events`.
      * @param timeout Timeout in usec. It could be 0 (immediate cancel), and -1 (most efficient way, no linked SQE).
      *     Note that the cancelling has no guarantee to succeed, it's just an attempt.
-     * @param ring_flags The lowest 8 bits is for sqe.flags, and the rest is reserved.
+     * @param ring_flags The lowest 8 bits is for sqe.flags. The rest is reserved.
      * @retval Non negative integers for success, -1 for failure. If failed with timeout, errno will
      *     be set to ETIMEDOUT. If failed because of external interruption, errno will also be set accordingly.
      */
@@ -165,15 +173,15 @@ public:
         if (sqe == nullptr)
             return -1;
         prep(sqe, args...);
-        sqe->flags |= (uint8_t) (ring_flags & 0xff);
-        return _async_io(sqe, timeout);
+        return _async_io(sqe, timeout, ring_flags);
     }
 
-    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
-        ioCtx io_ctx{photon::CURRENT, -1, false, false};
+    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
+        sqe->flags |= (uint8_t) (ring_flags & 0xff);
+        ioCtx io_ctx(false, false);
         io_uring_sqe_set_data(sqe, &io_ctx);
 
-        ioCtx timer_ctx{photon::CURRENT, -1, true, false};
+        ioCtx timer_ctx(true, false);
         __kernel_timespec ts{};
         if (timeout < std::numeric_limits<int64_t>::max()) {
             sqe->flags |= IOSQE_IO_LINK;
@@ -202,7 +210,7 @@ public:
             sqe = _get_sqe();
             if (sqe == nullptr)
                 return -1;
-            ioCtx cancel_ctx{CURRENT, -1, true, false};
+            ioCtx cancel_ctx(true, false);
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
             photon::thread_sleep(-1);
@@ -231,7 +239,7 @@ public:
 
         bool one_shot = e.interests & ONE_SHOT;
         fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
-        ioCtx io_ctx{CURRENT, -1, false, true};
+        ioCtx io_ctx(false, true);
         eventCtx event_ctx{e, one_shot, io_ctx};
         auto pair = m_event_contexts.insert({fd_interest, event_ctx});
         if (!pair.second) {
@@ -244,6 +252,10 @@ public:
             io_uring_prep_poll_multishot(sqe, fd_interest.fd, fd_interest.interest);
         }
         io_uring_sqe_set_data(sqe, &pair.first->second.io_ctx);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when adding interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
@@ -260,17 +272,21 @@ public:
 
         io_uring_prep_poll_remove(sqe, (__u64) &iter->second.io_ctx);
         io_uring_sqe_set_data(sqe, nullptr);
+        int ret = io_uring_submit(m_ring);
+        if (ret < 0) {
+            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when removing interest, ", ERRNO(-ret));
+        }
         return 0;
     }
 
     ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) override {
         // Use master engine to wait for self event fd
-        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(m_cascading_event_fd, timeout);
+        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(m_eventfd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }
         uint64_t value = 0;
-        if (eventfd_read(m_cascading_event_fd, &value)) {
+        if (eventfd_read(m_eventfd, &value)) {
             LOG_ERROR("iouring: error reading cascading event fd, `", ERRNO());
         }
 
@@ -291,7 +307,7 @@ public:
                 LOG_ERROR_RETURN(0, -1, "iouring: multi-shot poll got POLLERR");
             }
             if (!ctx->is_event) {
-                LOG_ERROR_RETURN(0, -1, "iouring: only cascading engine need to handle event. Must be a bug...")
+                LOG_ERROR_RETURN(0, -1, "iouring: cascading engine only needs to handle event. Must be a bug...")
             }
             eventCtx* event_ctx = container_of(ctx, eventCtx, io_ctx);
             fdInterest fd_interest{event_ctx->event.fd, (uint32_t)evmap.translate_bitwisely(event_ctx->event.interests)};
@@ -334,6 +350,13 @@ public:
                 continue;
             }
 
+            if (ctx == (ioCtx*) this) {
+                // Triggered by cancel_wait
+                eventfd_t val;
+                eventfd_read(m_eventfd, &val);
+                continue;
+            }
+
             if (cqe->flags & IORING_CQE_F_NOTIF) {
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
@@ -367,7 +390,7 @@ public:
     }
 
     int cancel_wait() override {
-        if (eventfd_write(m_cancel_fd, 1) != 0) {
+        if (eventfd_write(m_eventfd, 1) != 0) {
             LOG_ERRNO_RETURN(0, -1, "iouring: write eventfd failed");
         }
         return 0;
@@ -399,8 +422,9 @@ public:
 
 private:
     struct ioCtx {
-        photon::thread* th_id;
-        int32_t res;
+        ioCtx(bool canceller, bool event) : is_canceller(canceller), is_event(event) {}
+        photon::thread* th_id = photon::CURRENT;
+        int32_t res = -1;
         bool is_canceller;
         bool is_event;
     };
@@ -501,23 +525,6 @@ private:
         }
     }
 
-    void run_cancel_poller() {
-        while (m_cancel_poller_running) {
-            uint32_t poll_mask = evmap.translate_bitwisely(EVENT_READ);
-            int ret = async_io(&io_uring_prep_poll_add, -1, 0, m_cancel_fd, poll_mask);
-            if (ret < 0) {
-                if (errno == EINTR) {
-                    break;
-                }
-                LOG_ERROR("iouring: poll eventfd failed, `", ERRNO());
-            }
-            eventfd_t val;
-            if (eventfd_read(m_cancel_fd, &val) != 0) {
-                LOG_ERROR("iouring: read eventfd failed, `", ERRNO());
-            }
-        }
-    }
-
     static void usec_to_timespec(int64_t usec, __kernel_timespec* ts) {
         int64_t usec_rounded_to_sec = usec / 1000000L * 1000000L;
         long long nsec = (usec - usec_rounded_to_sec) * 1000L;
@@ -533,11 +540,8 @@ private:
     static const int REGISTER_FILES_SPARSE_FD = -1;
     static const int REGISTER_FILES_MAX_NUM = 10000;
     bool m_master;
-    int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;
-    int m_cancel_fd = -1;
-    thread* m_cancel_poller = nullptr;
-    bool m_cancel_poller_running = true;
+    int m_eventfd = -1;
     std::unordered_map<fdInterest, eventCtx, fdInterestHasher> m_event_contexts;
     static int m_register_files_flag;
     static int m_cooperative_task_flag;
