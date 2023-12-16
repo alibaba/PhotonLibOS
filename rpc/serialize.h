@@ -71,6 +71,7 @@ namespace rpc
         const T& operator[](long i) const { return ((T*)_ptr)[i]; }
         const T& front() const    { return (*this)[0]; }
         const T& back() const     { return (*this)[(long)size() - 1]; }
+        bool empty() const { return _len == 0; }
         void assign(const T* x, size_t size) { buffer::assign(x, sizeof(*x) * size); }
         void assign(const std::vector<T>& vec) { assign(&vec[0], vec.size()); }
 
@@ -105,7 +106,6 @@ namespace rpc
         const char* c_str() const { return cbegin(); }
         std::string_view sv() const { return {c_str(), size() - 1}; }
         std::string to_std() { return std::string(sv()); };
-        bool empty() const { return _len == 0; }
         bool operator==(const string& rhs) const { return sv() == rhs.sv(); }
         bool operator!=(const string& rhs) const { return !(*this == rhs); }
         bool operator<(const string& rhs) const { return sv() < rhs.sv(); }
