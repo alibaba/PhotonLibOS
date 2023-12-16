@@ -35,13 +35,15 @@ static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
+    bool tls_ctx_ownership;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
     std::unique_ptr<Resolver> resolver;
 
     //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
-    PooledDialer():
-            tls_ctx(new_tls_context(nullptr, nullptr, nullptr)),
+    PooledDialer(TLSContext *_tls_ctx) :
+            tls_ctx(_tls_ctx ? _tls_ctx : new_tls_context(nullptr, nullptr, nullptr)),
+            tls_ctx_ownership(_tls_ctx == nullptr),
             resolver(new_default_resolver(kDNSCacheLife)) {
         auto tcp_cli = new_tcp_socket_client();
         auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
@@ -49,7 +51,10 @@ public:
         tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
     }
 
-    ~PooledDialer() { delete tls_ctx; }
+    ~PooledDialer() {
+        if (tls_ctx_ownership)
+            delete tls_ctx;
+    }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
                              uint64_t timeout = -1UL);
@@ -114,8 +119,10 @@ public:
     PooledDialer m_dialer;
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
-    ClientImpl(ICookieJar *cookie_jar) :
-        m_cookie_jar(cookie_jar) {}
+    ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
+        m_cookie_jar(cookie_jar),
+        m_dialer(tls_ctx) {
+    }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op) {
@@ -273,7 +280,9 @@ public:
     }
 };
 
-Client* new_http_client(ICookieJar *cookie_jar) { return new ClientImpl(cookie_jar); }
+Client* new_http_client(ICookieJar *cookie_jar, TLSContext *tls_ctx) {
+    return new ClientImpl(cookie_jar, tls_ctx);
+}
 
 } // namespace http
 } // namespace net
