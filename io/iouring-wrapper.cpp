@@ -133,7 +133,7 @@ public:
             }
         }
 
-        m_eventfd = eventfd(0, EFD_CLOEXEC);
+        m_eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
         if (m_eventfd < 0) {
             LOG_ERRNO_RETURN(0, -1, "iouring: failed to create eventfd");
         }
@@ -285,10 +285,8 @@ public:
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }
-        uint64_t value = 0;
-        if (eventfd_read(m_eventfd, &value)) {
-            LOG_ERROR("iouring: error reading cascading event fd, `", ERRNO());
-        }
+        uint64_t value;
+        eventfd_read(m_eventfd, &value);
 
         // Reap events
         size_t num = 0;
