@@ -43,7 +43,7 @@ struct Message {
     std::chrono::time_point<std::chrono::steady_clock> start;
 };
 
-static const int num_producers = 16, num_consumers = 16;
+static const int num_producers = 8, num_consumers = 8;
 static LockfreeMPMCRingQueue<Message*, 1024 * 1024> ring;
 static std::atomic<uint64_t> qps{0}, latency{0};
 
@@ -90,7 +90,7 @@ int main() {
                 Message message;
                 ring.push(&message);
                 {
-                    std::unique_lock l(message.mu);
+                    std::unique_lock<std::mutex> l(message.mu);
                     message.cv.wait(l, [&] { return message.done; });
                 }
                 auto end = std::chrono::steady_clock::now();
@@ -117,7 +117,7 @@ int main() {
                 m->sem.signal(1);
 #else
                 {
-                    std::unique_lock l(m->mu);
+                    std::unique_lock<std::mutex> l(m->mu);
                     m->done = true;
                     m->cv.notify_one();
                 }
@@ -128,7 +128,6 @@ int main() {
 
     // Show QPS and latency
     photon::thread_create11([&] {
-        photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
         while (true) {
             photon::thread_sleep(1);
             auto prev_qps = qps.exchange(0, std::memory_order_seq_cst);

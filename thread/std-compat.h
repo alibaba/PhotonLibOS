@@ -222,9 +222,10 @@ public:
     }
 
     Mutex* release() noexcept {
+        auto* mu = m_mutex;
         m_mutex = nullptr;
         m_owns = false;
-        return m_mutex;
+        return mu;
     }
 
     Mutex* mutex() const noexcept {
