@@ -109,7 +109,8 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  * @param ret `std::vector<IPAddr>` reference to get results
  * @return sum of resolved address number. -1 means error.
  */
-inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
+template <typename Container>
+inline int gethostbyname(const char* name, Container& ret) {
     ret.clear();
     auto cb = [&](IPAddr addr) {
         ret.push_back(addr);
@@ -157,7 +158,7 @@ public:
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(const char* host) = 0;
     virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
-    virtual void discard_cache(const char* host) = 0;  // discard current cache of host:ip
+    virtual void discard_cache(const char* host, IPAddr ip = IPAddr()) = 0;  // discard current cache of ip
 };
 
 /**

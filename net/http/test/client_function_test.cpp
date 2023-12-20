@@ -513,6 +513,16 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
+    auto client = new_http_client();
+    DEFER(delete client);
+    // here is an ipv6-only website
+    auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
+    DEFER(delete op);
+    op->call();
+    EXPECT_EQ(200, op->resp.status_code());
+}
+
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),
