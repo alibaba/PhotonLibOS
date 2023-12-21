@@ -82,7 +82,7 @@ function(build_from_src [dep])
                 URL ${PHOTON_OPENSSL_SOURCE}
                 URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
+                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR}
                 BUILD_COMMAND make -j ${NumCPU}
                 INSTALL_COMMAND make install
         )
@@ -114,6 +114,7 @@ function(build_from_src [dep])
         )
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(CURL_LIBRARIES ${BINARY_DIR}/lib/libcurl.a PARENT_SCOPE)
+        add_dependencies(curl openssl)
     endif ()
 
     list(APPEND actually_built ${dep})
