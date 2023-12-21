@@ -90,7 +90,7 @@ private:
     T m_func;
 };
 
-template<typename T> __INLINE__
+template<typename T> __FORCE_INLINE__
 Defer<T> make_defer(T func) { return Defer<T>(func); }
 
 #define _CONCAT_(a, b) a##b
