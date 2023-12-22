@@ -251,21 +251,35 @@ bool Base64Decode(std::string_view in, std::string &out) {
 }
 
 class DefaultResolver : public Resolver {
+protected:
+    struct IPAddrNode : public intrusive_list_node<IPAddrNode> {
+        IPAddr addr;
+        IPAddrNode(IPAddr addr) : addr(addr) {}
+    };
+    using IPAddrList = intrusive_list<IPAddrNode>;
 public:
     DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
         : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
     ~DefaultResolver() { dnscache_.clear(); }
 
     IPAddr resolve(const char *host) override {
-        auto ctr = [&]() -> std::list<IPAddr>* {
-            auto addrs = new std::list<IPAddr>();
+        auto ctr = [&]() -> IPAddrList* {
+            auto addrs = new IPAddrList();
             photon::semaphore sem;
             std::thread([&]() {
                 auto now = std::chrono::steady_clock::now();
-                gethostbyname(host, *addrs);
+                IPAddrList ret;
+                auto cb = [&](IPAddr addr) {
+                    ret.push_back(new IPAddrNode(addr));
+                    return 0;
+                };
+                _gethostbyname(host, cb);
                 auto time_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                                         std::chrono::steady_clock::now() - now).count();
-                if ((uint64_t)time_elapsed <= resolve_timeout_) sem.signal(1);
+                if ((uint64_t)time_elapsed <= resolve_timeout_) {
+                    addrs->push_back(std::move(ret));
+                    sem.signal(1);
+                }
             }).detach();
             sem.wait(1, resolve_timeout_);
             return addrs;
@@ -273,11 +287,11 @@ public:
         auto ips = dnscache_.borrow(host, ctr);
         if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
         auto ret = ips->front();
-        if (ips->size() > 1) {  // access in round robin order
-            ips->pop_front();
-            ips->push_back(ret);
+        if (!ret->single()) {  // access in round robin order
+            auto front = ips->pop_front();
+            ips->push_back(front);
         }
-        return ret;
+        return ret->addr;
     }
 
     void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
@@ -286,8 +300,8 @@ public:
         auto ipaddr = dnscache_.borrow(host);
         if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
         else {
-            for (auto it = ipaddr->begin(); it != ipaddr->end(); ++it) {
-                if (*it == ip) {
+            for (auto it : *ipaddr) {
+                if (it->addr == ip) {
                     ipaddr->erase(it);
                     break;
                 }
@@ -296,7 +310,7 @@ public:
     }
 
 private:
-    ObjectCache<std::string, std::list<IPAddr>*> dnscache_;
+    ObjectCache<std::string, IPAddrList*> dnscache_;
     uint64_t resolve_timeout_;
 };
 

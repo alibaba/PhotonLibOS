@@ -109,8 +109,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  * @param ret `std::vector<IPAddr>` reference to get results
  * @return sum of resolved address number. -1 means error.
  */
-template <typename Container>
-inline int gethostbyname(const char* name, Container& ret) {
+inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
     ret.clear();
     auto cb = [&](IPAddr addr) {
         ret.push_back(addr);
@@ -163,6 +162,7 @@ public:
 
 /**
  * @brief A non-blocking Resolver based on gethostbyname.
+ * Currently, it's not thread safe.
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.
