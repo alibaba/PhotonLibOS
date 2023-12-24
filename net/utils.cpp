@@ -260,7 +260,12 @@ protected:
 public:
     DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
         : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
-    ~DefaultResolver() { dnscache_.clear(); }
+    ~DefaultResolver() {
+        for (auto it : dnscache_) {
+            ((IPAddrList*)it->_obj)->delete_all();
+        }
+        dnscache_.clear();
+    }
 
     IPAddr resolve(const char *host) override {
         auto ctr = [&]() -> IPAddrList* {
@@ -287,10 +292,7 @@ public:
         auto ips = dnscache_.borrow(host, ctr);
         if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
         auto ret = ips->front();
-        if (!ret->single()) {  // access in round robin order
-            auto front = ips->pop_front();
-            ips->push_back(front);
-        }
+        ips->node = ret->next();  // access in round robin order
         return ret->addr;
     }
 
@@ -300,9 +302,9 @@ public:
         auto ipaddr = dnscache_.borrow(host);
         if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
         else {
-            for (auto it : *ipaddr) {
-                if (it->addr == ip) {
-                    ipaddr->erase(it);
+            for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
+                if ((*itr)->addr == ip) {
+                    ipaddr->erase(*itr);
                     break;
                 }
             }
