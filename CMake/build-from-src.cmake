@@ -12,7 +12,7 @@ function(build_from_src [dep])
                 URL_MD5 605237f35de238dfacc83bcae406d95d
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ""
-                BUILD_COMMAND make prefix=${BINARY_DIR} install -j
+                BUILD_COMMAND $(MAKE) prefix=${BINARY_DIR} install
                 INSTALL_COMMAND ""
         )
         set(AIO_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
@@ -26,8 +26,8 @@ function(build_from_src [dep])
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND CFLAGS=-fPIC ./configure --prefix=${BINARY_DIR} --static
-                BUILD_COMMAND make -j
-                INSTALL_COMMAND make install
+                BUILD_COMMAND $(MAKE)
+                INSTALL_COMMAND $(MAKE) install
         )
         set(ZLIB_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(ZLIB_LIBRARIES ${BINARY_DIR}/lib/libz.a PARENT_SCOPE)
@@ -40,8 +40,8 @@ function(build_from_src [dep])
                 URL_MD5 2e8c3c23795415475654346484f5c4b8
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
-                BUILD_COMMAND V=1 CFLAGS=-fPIC make -C src
-                INSTALL_COMMAND make install
+                BUILD_COMMAND V=1 CFLAGS=-fPIC $(MAKE) -C src
+                INSTALL_COMMAND $(MAKE) install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(URING_LIBRARIES ${BINARY_DIR}/lib/liburing.a PARENT_SCOPE)
@@ -83,10 +83,12 @@ function(build_from_src [dep])
                 URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
-                BUILD_COMMAND make -j ${NumCPU}
-                INSTALL_COMMAND make install
+                BUILD_COMMAND make -j 1  # https://github.com/openssl/openssl/issues/5762#issuecomment-376622684
+                INSTALL_COMMAND $(MAKE) install
+                LOG_CONFIGURE ON
+                LOG_BUILD ON
+                LOG_INSTALL ON
         )
-        ExternalProject_Get_Property(openssl SOURCE_DIR)
         set(OPENSSL_ROOT_DIR ${BINARY_DIR} PARENT_SCOPE)
         set(OPENSSL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(OPENSSL_LIBRARIES ${BINARY_DIR}/lib/libssl.a ${BINARY_DIR}/lib/libcrypto.a PARENT_SCOPE)
@@ -101,7 +103,7 @@ function(build_from_src [dep])
                 URL ${PHOTON_CURL_SOURCE}
                 URL_MD5 a66270f11e3fbfad709600bbd1686704
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND autoreconf -i && ./configure --with-ssl=${OPENSSL_ROOT_DIR}
+                CONFIGURE_COMMAND autoreconf -i COMMAND ./configure --with-ssl=${OPENSSL_ROOT_DIR}
                     --without-libssh2 --enable-static --enable-shared=no --enable-optimize
                     --disable-manual --without-libidn
                     --disable-ftp --disable-file --disable-ldap --disable-ldaps
@@ -109,8 +111,12 @@ function(build_from_src [dep])
                     --disable-pop3 --disable-imap --disable-smb --disable-smtp
                     --disable-gopher --without-nghttp2 --enable-http --disable-verbose
                     --with-pic=PIC --prefix=${BINARY_DIR}
-                BUILD_COMMAND make -j ${NumCPU}
-                INSTALL_COMMAND make install
+                BUILD_COMMAND $(MAKE)
+                INSTALL_COMMAND $(MAKE) install
+                DEPENDS openssl
+                LOG_CONFIGURE ON
+                LOG_BUILD ON
+                LOG_INSTALL ON
         )
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(CURL_LIBRARIES ${BINARY_DIR}/lib/libcurl.a PARENT_SCOPE)
