@@ -157,11 +157,12 @@ public:
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(const char* host) = 0;
     virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
-    virtual void discard_cache(const char* host) = 0;  // discard current cache of host:ip
+    virtual void discard_cache(const char* host, IPAddr ip = IPAddr()) = 0;  // discard current cache of ip
 };
 
 /**
  * @brief A non-blocking Resolver based on gethostbyname.
+ * Currently, it's not thread safe.
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.

@@ -21,6 +21,8 @@ limitations under the License.
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <list>
 #include <thread>
 #include <string>
 
@@ -249,49 +251,68 @@ bool Base64Decode(std::string_view in, std::string &out) {
 }
 
 class DefaultResolver : public Resolver {
+protected:
+    struct IPAddrNode : public intrusive_list_node<IPAddrNode> {
+        IPAddr addr;
+        IPAddrNode(IPAddr addr) : addr(addr) {}
+    };
+    using IPAddrList = intrusive_list<IPAddrNode>;
 public:
     DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
         : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
-    ~DefaultResolver() { dnscache_.clear(); }
+    ~DefaultResolver() {
+        for (auto it : dnscache_) {
+            ((IPAddrList*)it->_obj)->delete_all();
+        }
+        dnscache_.clear();
+    }
 
     IPAddr resolve(const char *host) override {
-        auto ctr = [&]() -> IPAddr * {
-            std::vector<IPAddr> addrs;
+        auto ctr = [&]() -> IPAddrList* {
+            auto addrs = new IPAddrList();
             photon::semaphore sem;
             std::thread([&]() {
-                int ret = gethostbyname(host, addrs);
-                if (ret < 0) {
-                    addrs.clear();
+                auto now = std::chrono::steady_clock::now();
+                IPAddrList ret;
+                auto cb = [&](IPAddr addr) {
+                    ret.push_back(new IPAddrNode(addr));
+                    return 0;
+                };
+                _gethostbyname(host, cb);
+                auto time_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - now).count();
+                if ((uint64_t)time_elapsed <= resolve_timeout_) {
+                    addrs->push_back(std::move(ret));
+                    sem.signal(1);
                 }
-                sem.signal(1);
             }).detach();
-            auto ret = sem.wait(1, resolve_timeout_);
-            if (ret < 0 && errno == ETIMEDOUT) {
-                LOG_WARN("Domain resolution for ` timeout!", host);
-                return new IPAddr;  // undefined addr
-            } else if (addrs.empty()) {
-                LOG_WARN("Domain resolution for ` failed", host);
-                return new IPAddr;  // undefined addr
-            }
-            // TODO: support ipv6
-            for (auto& ip : addrs) {
-                if (ip.is_ipv4())
-                    return new IPAddr(ip);
-            }
-            return new IPAddr;      // undefined addr
+            sem.wait(1, resolve_timeout_);
+            return addrs;
         };
-        return *(dnscache_.borrow(host, ctr));
+        auto ips = dnscache_.borrow(host, ctr);
+        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
+        auto ret = ips->front();
+        ips->node = ret->next();  // access in round robin order
+        return ret->addr;
     }
 
     void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
 
-    void discard_cache(const char *host) override {
+    void discard_cache(const char *host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
-        ipaddr.recycle(true);
+        if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
+        else {
+            for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
+                if ((*itr)->addr == ip) {
+                    ipaddr->erase(*itr);
+                    break;
+                }
+            }
+        }
     }
 
 private:
-    ObjectCache<std::string, IPAddr *> dnscache_;
+    ObjectCache<std::string, IPAddrList*> dnscache_;
     uint64_t resolve_timeout_;
 };
 

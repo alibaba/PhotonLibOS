@@ -714,9 +714,9 @@ TEST(utils, resolver) {
     DEFER(delete resolver);
     net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    EXPECT_EQ(localhost.to_nl(), addr.to_nl());
+    if (addr.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr.to_nl());
     auto func = [&](net::IPAddr addr_){
-        EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
+        if (addr_.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
     };
     resolver->resolve("localhost", func);
     resolver->discard_cache("non-exist-host.com");
