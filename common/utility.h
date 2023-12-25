@@ -74,12 +74,15 @@ ptr_array_t<T> ptr_array(T* pbegin, size_t n)
     return {pbegin, pbegin + n};
 }
 
+#define __INLINE__ __attribute__((always_inline))
+#define __FORCE_INLINE__ __INLINE__ inline
+
 template<typename T>
 class Defer
 {
 public:
-    Defer(T fn) : m_func(fn) {}
-    ~Defer() { m_func(); }
+    Defer(T fn) __INLINE__ : m_func(fn) {}
+    ~Defer() __INLINE__ { m_func(); }
     void operator=(const Defer<T>&) = delete;
     operator bool () { return true; }   // if (DEFER(...)) { ... }
 
@@ -87,11 +90,8 @@ private:
     T m_func;
 };
 
-template<typename T>
+template<typename T> __FORCE_INLINE__
 Defer<T> make_defer(T func) { return Defer<T>(func); }
-
-#define __INLINE__ __attribute__((always_inline))
-#define __FORCE_INLINE__ __INLINE__ inline
 
 #define _CONCAT_(a, b) a##b
 #define _CONCAT(a, b) _CONCAT_(a, b)
