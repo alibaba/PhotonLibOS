@@ -91,7 +91,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
-    resolver->discard_cache(strhost.c_str());
+    resolver->discard_cache(strhost.c_str(), ipaddr);
     return nullptr;
 }
 
@@ -120,9 +120,7 @@ public:
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_cookie_jar(cookie_jar),
-        m_dialer(tls_ctx) {
-    }
+        m_dialer(tls_ctx), m_cookie_jar(cookie_jar) { }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op) {

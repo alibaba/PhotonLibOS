@@ -191,9 +191,7 @@ protected:
 
 class KernelSocketClient : public SocketClientBase {
 public:
-    KernelSocketClient(int socket_family, bool nonblocking) :
-            m_socket_family(socket_family),
-            m_nonblocking(nonblocking) {}
+    KernelSocketClient(bool nonblocking) : m_nonblocking(nonblocking) {}
 
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
@@ -211,11 +209,10 @@ public:
     }
 
 protected:
-    int m_socket_family;
     bool m_nonblocking;
 
-    virtual KernelSocketStream* create_stream() {
-        return new KernelSocketStream(m_socket_family, m_nonblocking);
+    virtual KernelSocketStream* create_stream(int socket_family) {
+        return new KernelSocketStream(socket_family, m_nonblocking);
     }
 
     virtual int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) {
@@ -224,7 +221,7 @@ protected:
 
     ISocketStream* do_connect(const sockaddr* remote, socklen_t len_remote,
                               const sockaddr* local = nullptr, socklen_t len_local = 0) {
-        auto stream = create_stream();
+        auto stream = create_stream(remote->sa_family);
         auto deleter = [&](KernelSocketStream*) {
             auto errno_backup = errno;
             delete stream;
@@ -504,8 +501,8 @@ class ZeroCopySocketClient : public KernelSocketClient {
 public:
     using KernelSocketClient::KernelSocketClient;
 protected:
-    KernelSocketStream* create_stream() override {
-        return new ZeroCopySocketStream(m_socket_family, m_nonblocking);
+    KernelSocketStream* create_stream(int socket_family) override {
+        return new ZeroCopySocketStream(socket_family, m_nonblocking);
     }
 };
 
@@ -544,8 +541,8 @@ public:
     using KernelSocketClient::KernelSocketClient;
 
 protected:
-    KernelSocketStream* create_stream() override {
-        return new IouringSocketStream(m_socket_family, m_nonblocking);
+    KernelSocketStream* create_stream(int socket_family) override {
+        return new IouringSocketStream(socket_family, m_nonblocking);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
@@ -614,8 +611,8 @@ class IouringFixedFileSocketClient : public IouringSocketClient {
 protected:
     using IouringSocketClient::IouringSocketClient;
 
-    KernelSocketStream* create_stream() override {
-        return new IouringFixedFileSocketStream(m_socket_family, m_nonblocking);
+    KernelSocketStream* create_stream(int socket_family) override {
+        return new IouringFixedFileSocketStream(socket_family, m_nonblocking);
     }
 };
 
@@ -683,8 +680,8 @@ class FstackDpdkSocketClient : public KernelSocketClient {
 protected:
     using KernelSocketClient::KernelSocketClient;
 
-    KernelSocketStream* create_stream() override {
-        return new FstackDpdkSocketStream(m_socket_family, m_nonblocking);
+    KernelSocketStream* create_stream(int socket_family) override {
+        return new FstackDpdkSocketStream(socket_family, m_nonblocking);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
@@ -939,8 +936,8 @@ public:
     using KernelSocketClient::KernelSocketClient;
 
 protected:
-    KernelSocketStream* create_stream() override {
-        return new ETKernelSocketStream(m_socket_family, m_nonblocking);
+    KernelSocketStream* create_stream(int socket_family) override {
+        return new ETKernelSocketStream(socket_family, m_nonblocking);
     }
 };
 
@@ -974,10 +971,10 @@ protected:
 /* ET Socket - End */
 
 extern "C" ISocketClient* new_tcp_socket_client() {
-    return new KernelSocketClient(AF_INET, true);
+    return new KernelSocketClient(true);
 }
 extern "C" ISocketClient* new_tcp_socket_client_ipv6() {
-    return new KernelSocketClient(AF_INET6, true);
+    return new KernelSocketClient(true);
 }
 extern "C" ISocketServer* new_tcp_socket_server() {
     return NewObj<KernelSocketServer>(AF_INET, false, true)->init();
@@ -986,7 +983,7 @@ extern "C" ISocketServer* new_tcp_socket_server_ipv6() {
     return NewObj<KernelSocketServer>(AF_INET6, false, true)->init();
 }
 extern "C" ISocketClient* new_uds_client() {
-    return new KernelSocketClient(AF_UNIX, true);
+    return new KernelSocketClient(true);
 }
 extern "C" ISocketServer* new_uds_server(bool autoremove) {
     return NewObj<KernelSocketServer>(AF_UNIX, autoremove, true)->init();
@@ -996,14 +993,14 @@ extern "C" ISocketServer* new_zerocopy_tcp_server() {
     return NewObj<ZeroCopySocketServer>(AF_INET, false, true)->init();
 }
 extern "C" ISocketClient* new_zerocopy_tcp_client() {
-    return new ZeroCopySocketClient(AF_INET, true);
+    return new ZeroCopySocketClient(true);
 }
 #ifdef PHOTON_URING
 extern "C" ISocketClient* new_iouring_tcp_client() {
     if (photon::iouring_register_files_enabled())
-        return new IouringFixedFileSocketClient(AF_INET, false);
+        return new IouringFixedFileSocketClient(false);
     else
-        return new IouringSocketClient(AF_INET, false);
+        return new IouringSocketClient(false);
 }
 extern "C" ISocketServer* new_iouring_tcp_server() {
     if (photon::iouring_register_files_enabled())
@@ -1013,23 +1010,23 @@ extern "C" ISocketServer* new_iouring_tcp_server() {
 }
 #endif // PHOTON_URING
 extern "C" ISocketClient* new_et_tcp_socket_client() {
-    return new ETKernelSocketClient(AF_INET, true);
+    return new ETKernelSocketClient(true);
 }
 extern "C" ISocketServer* new_et_tcp_socket_server() {
     return NewObj<ETKernelSocketServer>(AF_INET, false, true)->init();
 }
 extern "C" ISocketClient* new_smc_socket_client() {
-    return new KernelSocketClient(AF_SMC, true);
+    return new KernelSocketClient(true);
 }
 extern "C" ISocketServer* new_smc_socket_server() {
     return NewObj<KernelSocketServer>(AF_SMC, false, true)->init();
 }
 #ifdef ENABLE_FSTACK_DPDK
 extern "C" ISocketClient* new_fstack_dpdk_socket_client() {
-    return new FstackDpdkSocketClient(AF_INET, true);
+    return new FstackDpdkSocketClient(true);
 }
 extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
-    return NewObj<FstackDpdkSocketServer>(AF_INET, false, true)->init();
+    return NewObj<FstackDpdkSocketServer>(false, true)->init();
 }
 #endif // ENABLE_FSTACK_DPDK
 #endif // __linux__
