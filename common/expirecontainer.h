@@ -24,7 +24,6 @@ limitations under the License.
 #include <photon/thread/timer.h>
 
 #include <algorithm>
-#include <memory>
 #include <tuple>
 #include <type_traits>
 #include <unordered_set>
@@ -238,12 +237,12 @@ protected:
     //     concurrent construction of objects with the same key;
     // (2) construction of the object itself, and possibly do
     //     clean-up in case of failure
-    Item* ref_acquire(const Item& key_item, Delegate<void*> ctor,
+    Item* ref_acquire(const Item& key_item, Delegate<void, void*> ctor,
                       uint64_t failure_cooldown = 0);
 
     int ref_release(ItemPtr item, bool recycle = false);
 
-    void* acquire(const Item& key_item, Delegate<void*> ctor,
+    void* acquire(const Item& key_item, Delegate<void, void*> ctor,
                   uint64_t failure_cooldown = 0) {
         auto ret = ref_acquire(key_item, ctor, failure_cooldown);
         return ret ? ret->_obj : nullptr;
@@ -295,7 +294,9 @@ public:
     template <typename Constructor>
     ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
                         uint64_t failure_cooldown = 0) {
-        auto _ctor = [&]() -> void* { return ctor(); };
+        auto _ctor = [&](void* item) {
+            ((Item*)item)->_obj = ctor();
+        };
         // _ctor can always implicit cast to `Delegate<void*>`
         return (ItemPtr)Base::ref_acquire(Item(key), _ctor, failure_cooldown);
     }
@@ -370,5 +371,124 @@ public:
 
     Borrow borrow(const InterfaceKey& key) {
         return borrow(key, [] { return new ValEntity(); });
+    }
+};
+
+template <typename KeyType, typename NodeType>
+class ObjectCache<KeyType, intrusive_list<NodeType>> : public ObjectCacheBase {
+protected:
+    using ListType = intrusive_list<NodeType>;
+    using Base = ObjectCacheBase;
+    using KeyedItem = Base::KeyedItem<Base::Item, KeyType>;
+
+    class Item : public KeyedItem {
+    public:
+        ListType _list;
+        using KeyedItem::KeyedItem;
+        virtual Item* construct() const override {
+            auto item = new Item(this->_key);
+            item->_obj = nullptr;
+            item->_refcnt = 0;
+            item->_recycle = nullptr;
+            return item;
+        }
+        ~Item() {
+            _list.delete_all();
+        }
+    };
+
+    using ItemPtr = Item*;
+    using InterfaceKey = typename Item::InterfaceKey;
+
+public:
+    ObjectCache(uint64_t expiration) : Base(expiration, expiration / 16) {}
+    ObjectCache(uint64_t expiration, uint64_t timer_cycle)
+        : Base(expiration, timer_cycle) {}
+
+    template <typename Constructor>
+    ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
+                        uint64_t failure_cooldown = 0) {
+        auto _ctor = [&](void* item) {
+            ((Item*)item)->_list = ctor();
+            // always not nullptr
+            ((Item*)item)->_obj = item;
+        };
+        return (ItemPtr)ObjectCacheBase::ref_acquire(Item(key), _ctor, failure_cooldown);
+    }
+
+    // Constructor must be a function which returns a list
+    // and should return an non-empty list
+    // Empty list will be treated as construct failure.
+    template <typename Constructor>
+    ListType& acquire(const InterfaceKey& key, const Constructor& ctor,
+                   uint64_t failure_cooldown = 0) {
+        auto item = ref_acquire(key, ctor, failure_cooldown);
+        assert(item);
+        return item->_list;
+    }
+
+    int ref_release(ItemPtr item, bool recycle = false) {
+        return ObjectCacheBase::ref_release(item, recycle);
+    }
+
+    int release(const InterfaceKey& key, bool recycle = false) {
+        return ObjectCacheBase::release(Item(key), recycle);
+    }
+
+    using iterator = typename ExpireContainerBase::TypedIterator<Item>;
+    iterator begin() { return ObjectCacheBase::begin(); }
+    iterator end() { return ObjectCacheBase::end(); }
+    iterator find(const InterfaceKey& key) {
+        return ObjectCacheBase::find(KeyedItem(key));
+    }
+
+    class Borrow {
+        ObjectCache* _oc;
+        ItemPtr _ref;
+        bool _recycle = false;
+
+    public:
+        Borrow(ObjectCache* oc, ItemPtr ref, bool recycle)
+            : _oc(oc), _ref(ref), _recycle(recycle) {}
+        ~Borrow() {
+            if (_ref) _oc->ref_release(_ref, _recycle);
+        }
+
+        Borrow() = delete;
+        Borrow(const Borrow&) = delete;
+        Borrow(Borrow&& rhs) { move(std::move(rhs)); }
+        void operator=(const Borrow&) = delete;
+        void operator=(Borrow&& rhs) { move(rhs); }
+
+        ListType& operator*() { return get_ptr(); }
+
+        ListType* operator->() { return &get_ptr(); }
+
+        operator bool() const { return _ref; }
+
+        bool recycle() const { return _recycle; }
+
+        bool recycle(bool x) { return _recycle = x; }
+
+    private:
+        ListType& get_ptr() { return _ref->_list; }
+
+        void move(Borrow&& rhs) {
+            _oc = rhs._oc;
+            rhs._oc = nullptr;
+            _ref = rhs._ref;
+            rhs._ref = nullptr;
+            _recycle = rhs._recycle;
+        }
+    };
+
+    template <typename Constructor>
+    Borrow borrow(const InterfaceKey& key, const Constructor& ctor,
+                  uint64_t failure_cooldown = 0) {
+        return Borrow(this, ref_acquire(key, ctor, failure_cooldown), false);
+    }
+
+    Borrow borrow(const InterfaceKey& key) {
+        return borrow(key, [] { return ListType(); });
     }
 };

@@ -78,7 +78,7 @@ bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
 }
 
 ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
-                                                    Delegate<void*> ctor,
+                                                    Delegate<void, void*> ctor,
                                                     uint64_t failure_cooldown) {
     Base::iterator holder;
     Item* item = nullptr;
@@ -106,7 +106,7 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
         SCOPED_LOCK(item->_mtx);
         if (!item->_obj && (item->_failure <=
                             photon::sat_sub(photon::now, failure_cooldown))) {
-            item->_obj = ctor();
+            ctor(item);
             if (!item->_obj) item->_failure = photon::now;
         }
     }
