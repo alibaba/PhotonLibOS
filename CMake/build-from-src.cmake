@@ -10,6 +10,7 @@ function(build_from_src [dep])
                 aio
                 URL ${PHOTON_AIO_SOURCE}
                 URL_MD5 605237f35de238dfacc83bcae406d95d
+                UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ""
                 BUILD_COMMAND $(MAKE) prefix=${BINARY_DIR} install
@@ -24,6 +25,7 @@ function(build_from_src [dep])
                 zlib
                 URL ${PHOTON_ZLIB_SOURCE}
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
+                UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND CFLAGS=-fPIC ./configure --prefix=${BINARY_DIR} --static
                 BUILD_COMMAND $(MAKE)
@@ -38,6 +40,7 @@ function(build_from_src [dep])
                 uring
                 URL ${PHOTON_URING_SOURCE}
                 URL_MD5 2e8c3c23795415475654346484f5c4b8
+                UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
                 BUILD_COMMAND V=1 CFLAGS=-fPIC $(MAKE) -C src
@@ -59,7 +62,7 @@ function(build_from_src [dep])
         endif ()
         ExternalProject_Get_Property(gflags BINARY_DIR)
         set(GFLAGS_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
-        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a ${BINARY_DIR}/lib/libgflags_nothreads${POSTFIX}.a PARENT_SCOPE)
+        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "googletest")
         ExternalProject_Add(
@@ -72,8 +75,7 @@ function(build_from_src [dep])
         ExternalProject_Get_Property(googletest SOURCE_DIR)
         ExternalProject_Get_Property(googletest BINARY_DIR)
         set(GOOGLETEST_INCLUDE_DIRS ${SOURCE_DIR}/googletest/include ${SOURCE_DIR}/googlemock/include PARENT_SCOPE)
-        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgmock_main.a
-                ${BINARY_DIR}/lib/libgtest.a ${BINARY_DIR}/lib/libgtest_main.a PARENT_SCOPE)
+        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgtest.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "openssl")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/openssl-build)
@@ -81,6 +83,7 @@ function(build_from_src [dep])
                 openssl
                 URL ${PHOTON_OPENSSL_SOURCE}
                 URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
+                UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
                 BUILD_COMMAND make -j 1  # https://github.com/openssl/openssl/issues/5762#issuecomment-376622684
@@ -102,6 +105,7 @@ function(build_from_src [dep])
                 curl
                 URL ${PHOTON_CURL_SOURCE}
                 URL_MD5 a66270f11e3fbfad709600bbd1686704
+                UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND autoreconf -i COMMAND ./configure --with-ssl=${OPENSSL_ROOT_DIR}
                     --without-libssh2 --enable-static --enable-shared=no --enable-optimize
