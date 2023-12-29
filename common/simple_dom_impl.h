@@ -32,12 +32,11 @@ namespace SimpleDOM {
 
 using str = estring_view;
 
-struct Node;
 
 // the interface for internal implementations
 class NodeImpl : public Object {
 protected:
-    NodeImpl() = default;
+    NodeImpl() = delete;
     NodeImpl* _root;
 union {
     NodeImpl* _next;
@@ -60,7 +59,7 @@ union {
             delete this;
     }
 
-    friend struct Node;
+    friend class Node;
 
 public:
     virtual size_t num_children() const __attribute__((pure)) = 0;
