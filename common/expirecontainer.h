@@ -202,7 +202,7 @@ public:
     using Base = ExpireContainer<T>;
     using Base::Base;
     using typename Base::Item;
-    bool keep_alive(const T& x, bool insert_if_not_exists) {
+    bool keep_alive(const T &x, bool insert_if_not_exists) {
         return Base::keep_alive(Item(x), insert_if_not_exists);
     }
 };
@@ -251,15 +251,78 @@ protected:
     // the argument `key` plays the roles of (type-erased) key
     int release(const Item& key_item, bool recycle = false);
 
-    template <typename ObjectCache, typename ItemPtr, typename ValEntity,
-              typename ValPtr>
+public:
+    template <typename KeyType, typename ValType>
+    class PtrItem : public KeyedItem<Item, KeyType> {
+    public:
+        using KeyedItem<Item, KeyType>::KeyedItem;
+        using typename KeyedItem<Item, KeyType>::InterfaceKey;
+        using ValPtr = ValType;
+        using ValEntity = typename std::remove_pointer<ValPtr>::type;
+        virtual PtrItem* construct() const override {
+            auto item = new PtrItem(this->_key);
+            item->_obj = nullptr;
+            item->_refcnt = 0;
+            item->_recycle = nullptr;
+            return item;
+        }
+        ~PtrItem() override { delete (ValPtr)this->_obj; }
+        ValPtr get_ptr() { return (ValPtr)this->_obj; }
+        ValEntity& get_ref() { return *(ValPtr)this->_obj; }
+
+        static ValPtr get_content(PtrItem* item) {
+            return item ? item->get_ptr() : nullptr;
+        }
+
+        static ValPtr create_default() { return new ValEntity(); }
+        template <typename Ctor>
+        static decltype(auto) initialize(const Ctor& ctor) {
+            return [&ctor](void* arg) { ((PtrItem*)arg)->_obj = ctor(); };
+        }
+    };
+
+    template <typename KeyType, typename ValType>
+    class ListItem : public KeyedItem<Item, KeyType> {
+    public:
+        using ValPtr = ValType*;
+        using ValEntity = ValType;
+        ValEntity _list;
+        using KeyedItem<Item, KeyType>::KeyedItem;
+        using typename KeyedItem<Item, KeyType>::InterfaceKey;
+        virtual ListItem* construct() const override {
+            auto item = new ListItem(this->_key);
+            item->_obj = nullptr;
+            item->_refcnt = 0;
+            item->_recycle = nullptr;
+            return item;
+        }
+        ~ListItem() { _list.delete_all(); }
+        ValPtr get_ptr() { return &this->_list; }
+        ValEntity& get_ref() { return this->_list; }
+
+        static ValEntity& get_content(ListItem* item) {
+            return item->get_ref();
+        }
+
+        static ValEntity create_default() { return ValEntity(); }
+        template <typename Ctor>
+        static decltype(auto) initialize(const Ctor& ctor) {
+            return [&ctor](void* arg) {
+                ((ListItem*)arg)->_list = ctor();
+                ((ListItem*)arg)->_obj = arg;
+            };
+        }
+    };
+
+    template <typename ObjectCache>
     class Borrow {
     public:
+        using Item = typename ObjectCache::Item;
         ObjectCache* _oc;
-        ItemPtr _ref;
+        Item* _ref;
         bool _recycle = false;
 
-        Borrow(ObjectCache* oc, ItemPtr ref, bool recycle)
+        Borrow(ObjectCache* oc, Item* ref, bool recycle)
             : _oc(oc), _ref(ref), _recycle(recycle) {}
         ~Borrow() {
             if (_ref) _oc->ref_release(_ref, _recycle);
@@ -277,8 +340,10 @@ protected:
 
         bool recycle(bool x) { return _recycle = x; }
 
+        typename Item::ValPtr operator->() { return _ref->get_ptr(); }
+        typename Item::ValEntity& operator*() { return _ref->get_ref(); }
+
     protected:
-        ValPtr get_ptr() { return (ValPtr)_ref->_obj; }
         void move(Borrow&& rhs) {
             _oc = rhs._oc;
             rhs._oc = nullptr;
@@ -287,54 +352,41 @@ protected:
             _recycle = rhs._recycle;
         }
     };
-
-public:
-    template<typename KeyType, typename ValPtr>
-    class PtrItem
-        : public KeyedItem<Item, KeyType> {
-    public:
-        using KeyedItem<Item, KeyType>::KeyedItem;
-        virtual PtrItem* construct() const override {
-            auto item = new PtrItem(this->_key);
-            item->_obj = nullptr;
-            item->_refcnt = 0;
-            item->_recycle = nullptr;
-            return item;
-        }
-        ~PtrItem() override { delete (ValPtr)this->_obj; }
-    };
-
-    template<typename KeyType, typename ValEntity>
-    class ListItem
-        : public KeyedItem<Item, KeyType> {
-    public:
-        ValEntity _list;
-        using KeyedItem<Item, KeyType>::KeyedItem;
-        virtual ListItem* construct() const override {
-            auto item = new ListItem(this->_key);
-            item->_obj = nullptr;
-            item->_refcnt = 0;
-            item->_recycle = nullptr;
-            return item;
-        }
-        ~ListItem() { _list.delete_all(); }
-    };
 };
 
-template<typename KeyType, typename ValPtr, typename ValEntity, typename ObjectCache, typename ItemType>
-class ObjectCacheCommon : public ObjectCacheBase {
+// Resource pool based on reference count
+// when the pool is fulled, it will try to remove items which can be sure is not
+// referenced the base m_list works as gc list when object acquired, construct
+// or findout the object, add reference count; when object release, reduce
+// refcount. if some resource is not referenced, it will be put back to gc list
+// waiting to release.
+template <typename KeyType, typename ValType, typename ItemType>
+class __ObjectCache : public ObjectCacheBase {
 public:
     using Base = ObjectCacheBase;
-    using KeyedItem = Base::KeyedItem<Base::Item, KeyType>;
-
-    using ItemKey = typename KeyedItem::ItemKey;
-    using InterfaceKey = typename KeyedItem::InterfaceKey;
     using Item = ItemType;
-    using ItemPtr = ItemType*;
+    using KeyedItem = Base::KeyedItem<Base::Item, KeyType>;
+    using InterfaceKey = typename Item::InterfaceKey;
+    using ItemPtr = Item*;
+    using ValEntity = typename Item::ValEntity;
+    using Borrow = typename Base::Borrow<__ObjectCache>;
 
-    ObjectCacheCommon(uint64_t expiration) : Base(expiration, expiration / 16) {}
-    ObjectCacheCommon(uint64_t expiration, uint64_t timer_cycle)
+    __ObjectCache(uint64_t expiration) : Base(expiration, expiration / 16) {}
+    __ObjectCache(uint64_t expiration, uint64_t timer_cycle)
         : Base(expiration, timer_cycle) {}
+
+    template <typename Constructor>
+    ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
+                        uint64_t failure_cooldown = 0) {
+        auto _ctor = Item::initialize(ctor);
+        return (ItemPtr)Base::ref_acquire(Item(key), _ctor, failure_cooldown);
+    }
+
+    template <typename Constructor>
+    decltype(auto) acquire(const InterfaceKey& key, const Constructor& ctor,
+                           uint64_t failure_cooldown = 0) {
+        return Item::get_content(ref_acquire(key, ctor, failure_cooldown));
+    }
 
     int ref_release(ItemPtr item, bool recycle = false) {
         return Base::ref_release(item, recycle);
@@ -350,134 +402,38 @@ public:
     iterator find(const InterfaceKey& key) {
         return Base::find(KeyedItem(key));
     }
+
+    template <typename Constructor>
+    Borrow borrow(const typename Item::InterfaceKey& key,
+                  const Constructor& ctor, uint64_t failure_cooldown = 0) {
+        return Borrow(
+            this,
+            ((__ObjectCache*)this)->ref_acquire(key, ctor, failure_cooldown),
+            false);
+    }
+
+    Borrow borrow(const typename Item::InterfaceKey& key) {
+        return borrow(key, &Item::create_default);
+    }
 };
 
-// Resource pool based on reference count
-// when the pool is fulled, it will try to remove items which can be sure is not
-// referenced the base m_list works as gc list when object acquired, construct
-// or findout the object, add reference count; when object release, reduce
-// refcount. if some resource is not referenced, it will be put back to gc list
-// waiting to release.
 template <typename KeyType, typename ValPtr>
 class ObjectCache
-    : public ObjectCacheCommon<
-          KeyType, ValPtr, typename std::remove_pointer<ValPtr>::type,
-          ObjectCache<KeyType, ValPtr>, ObjectCacheBase::PtrItem<KeyType, ValPtr>> {
-protected:
-    using Item = ObjectCacheBase::PtrItem<KeyType, ValPtr>;
-    using Base = ObjectCacheBase;
-    using Common = ObjectCacheCommon<
-        KeyType, ValPtr, typename std::remove_pointer<ValPtr>::type,
-        ObjectCache<KeyType, ValPtr>, Item>;
-    using InterfaceKey = typename Item::InterfaceKey;
-    using ItemPtr = Item*;
-    using ValEntity = typename std::remove_pointer<ValPtr>::type;
-
+    : public __ObjectCache<KeyType, ValPtr,
+                           ObjectCacheBase::PtrItem<KeyType, ValPtr>> {
 public:
-    using typename Common::iterator;
-
-    using Common::Common;
-    using Common::release;
-    using Common::ref_release;
-    using Common::begin;
-    using Common::end;
-    using Common::find;
-
-    template <typename Constructor>
-    ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
-                        uint64_t failure_cooldown = 0) {
-        auto _ctor = [&](void* item) {
-            ((Item*)item)->_obj = ctor();
-        };
-        // _ctor can always implicit cast to `Delegate<void*>`
-        return (ItemPtr)Base::ref_acquire(Item(key), _ctor, failure_cooldown);
-    }
-
-    template <typename Constructor>
-    ValPtr acquire(const InterfaceKey& key, const Constructor& ctor,
-                   uint64_t failure_cooldown = 0) {
-        auto item = ref_acquire(key, ctor, failure_cooldown);
-        return (ValPtr)(item ? item->_obj : nullptr);
-    }
-
-    class Borrow: public Base::Borrow<Common, ItemPtr, ValEntity, ValPtr> {
-    public:
-        using Base::Borrow<Common, ItemPtr, ValEntity, ValPtr>::Borrow;
-        ValEntity& operator*() { return *Borrow::get_ptr(); }
-        ValPtr operator->() { return Borrow::get_ptr(); }  
-    };
-
-    template <typename Constructor>
-    Borrow borrow(const InterfaceKey& key, const Constructor& ctor,
-                  uint64_t failure_cooldown = 0) {
-        return Borrow(this, ref_acquire(key, ctor, failure_cooldown), false);
-    }
-
-    Borrow borrow(const InterfaceKey& key) {
-        return borrow(key, [] { return new ValEntity(); });
-    }
+    using __ObjectCache<
+        KeyType, ValPtr,
+        ObjectCacheBase::PtrItem<KeyType, ValPtr>>::__ObjectCache;
 };
 
 template <typename KeyType, typename NodeType>
 class ObjectCache<KeyType, intrusive_list<NodeType>>
-    : public ObjectCacheCommon<KeyType, intrusive_list<NodeType>*,
-                               intrusive_list<NodeType>,
-                               ObjectCache<KeyType, intrusive_list<NodeType>>,
-                               ObjectCacheBase::ListItem<KeyType, intrusive_list<NodeType>>> {
-protected:
-    using ListType = intrusive_list<NodeType>;
-    using Item = ObjectCacheBase::ListItem<KeyType, ListType>;
-    using Base = ObjectCacheBase;
-    using Common = ObjectCacheCommon<KeyType, intrusive_list<NodeType>*,
-                               intrusive_list<NodeType>,
-                               ObjectCache<KeyType, intrusive_list<NodeType>>,
-                               ObjectCacheBase::ListItem<KeyType, intrusive_list<NodeType>>>;
-    using InterfaceKey = typename Item::InterfaceKey;
-    using ItemPtr = Item*;
-
+    : public __ObjectCache<
+          KeyType, intrusive_list<NodeType>,
+          ObjectCacheBase::ListItem<KeyType, intrusive_list<NodeType>>> {
 public:
-    using typename Common::iterator;
-
-    using Common::Common;
-    using Common::release;
-    using Common::ref_release;
-    using Common::begin;
-    using Common::end;
-    using Common::find;
-
-    template <typename Constructor>
-    ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
-                        uint64_t failure_cooldown = 0) {
-        auto _ctor = [&](void* item) {
-            ((Item*)item)->_list = ctor();
-            // always not nullptr
-            ((Item*)item)->_obj = item;
-        };
-        return (ItemPtr)ObjectCacheBase::ref_acquire(Item(key), _ctor, failure_cooldown);
-    }
-
-    template <typename Constructor>
-    ListType& acquire(const InterfaceKey& key, const Constructor& ctor,
-                   uint64_t failure_cooldown = 0) {
-        auto item = ref_acquire(key, ctor, failure_cooldown);
-        assert(item);
-        return item->_list;
-    }
-
-    class Borrow: public Base::Borrow<Common, ItemPtr, ListType, ListType*> {
-    public:
-        using Base::Borrow<Common, ItemPtr, ListType, ListType*>::Borrow;
-        ListType& operator*() { return *this->_ref->_list; }
-        ListType* operator->() { return &this->_ref->_list; }  
-    };
-
-    template <typename Constructor>
-    Borrow borrow(const InterfaceKey& key, const Constructor& ctor,
-                  uint64_t failure_cooldown = 0) {
-        return Borrow(this, ref_acquire(key, ctor, failure_cooldown), false);
-    }
-
-    Borrow borrow(const InterfaceKey& key) {
-        return borrow(key, [] { return ListType(); });
-    }
+    using __ObjectCache<KeyType, intrusive_list<NodeType>,
+                        ObjectCacheBase::ListItem<
+                            KeyType, intrusive_list<NodeType>>>::__ObjectCache;
 };
