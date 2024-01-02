@@ -20,19 +20,19 @@ static NodeImpl* parse_json(char* text, size_t size, int flags) {
     Reader reader;
     reader.Parse<flags>(stream(text), handler);
 */
-    return {nullptr};
+    return nullptr;
 }
 
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
-    return {nullptr};
+    return nullptr;
 }
 
 static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
-    return {nullptr};
+    return nullptr;
 }
 
 static NodeImpl* parse_ini(char* text, size_t size, int flags) {
-    return {nullptr};
+    return nullptr;
 }
 
 Node parse(char* text, size_t size, int flags) {
