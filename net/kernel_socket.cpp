@@ -1035,8 +1035,8 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 
 /* Implementations in socket.h */
 
-EndPoint::EndPoint(const char* s) {
-    estring_view ep(s);
+EndPoint::EndPoint(const char* _ep) {
+    estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
     if (pos == estring::npos)
         return;

@@ -87,7 +87,7 @@ function(build_from_src [dep])
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
                 BUILD_COMMAND make -j 1  # https://github.com/openssl/openssl/issues/5762#issuecomment-376622684
-                INSTALL_COMMAND $(MAKE) install
+                INSTALL_COMMAND make install
                 LOG_CONFIGURE ON
                 LOG_BUILD ON
                 LOG_INSTALL ON
