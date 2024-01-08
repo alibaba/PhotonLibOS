@@ -35,3 +35,7 @@ add_test(NAME test-lib-data COMMAND $<TARGET_FILE:test-lib-data>)
 add_executable(test-multi-vcpu-locking test-multi-vcpu-locking.cpp)
 target_link_libraries(test-multi-vcpu-locking PRIVATE photon_static)
 add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-locking>)
+
+add_executable(test-pooled-stack-allocator test-pooled-stack-allocator.cpp)
+target_link_libraries(test-pooled-stack-allocator PRIVATE photon_static)
+add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stack-allocator>)
