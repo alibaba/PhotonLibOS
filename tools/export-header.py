@@ -25,12 +25,12 @@ if not os.path.isfile(fn):
 	sys.exit(-1)
 
 fn = os.path.abspath(fn)
-if not '/photon/' in fn:
+if not '/PhotonLibOS/' in fn:
 	print('must be a header file of photon')
 	sys.exit(-1)
 
 parts = fn.split('/')
-i = parts.index('photon') + 1
+i = parts.index('PhotonLibOS') + 1
 photon = '/'.join(parts[:i])
 file = parts[i:]
 include = photon + '/include/photon/'
