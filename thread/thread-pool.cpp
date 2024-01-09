@@ -32,7 +32,7 @@ namespace photon
 
     TPControl* ThreadPoolBase::thread_create_ex(thread_entry start, void* arg, bool joinable)
     {
-        if (__should_bypass_threadpool()) {
+        if (m_capacity == 0 || __should_bypass_threadpool()) {
             auto th = photon::thread_create(start, arg, (uint64_t)m_reserved,
                                             sizeof(TPControl));
             auto pCtrl = photon::thread_reserved_space<TPControl>(th);
@@ -129,7 +129,7 @@ namespace photon
     }
     void ThreadPoolBase::join(TPControl* pCtrl)
     {
-        if (__should_bypass_threadpool()) {
+        if (m_capacity == 0 || __should_bypass_threadpool()) {
             photon::thread_join((photon::join_handle*)pCtrl->th);
             return;
         }
