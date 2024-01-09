@@ -14,14 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#if defined(__linux__)
 #include <linux/mman.h>
+#endif
+#include <errno.h>
+#include <photon/common/utility.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 
-#include <atomic>
 #include <vector>
-
-#include "list.h"
 
 namespace photon {
 
