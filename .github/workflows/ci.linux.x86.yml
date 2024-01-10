@@ -86,7 +86,6 @@ jobs:
 
     container:
       image: dokken/centos-stream-8:sha-40294ce
-      # In order to run io_uring, the docker daemon should add --default-ulimit memlock=-1:-1
       options: --cpus 4
 
     steps:
@@ -116,6 +115,5 @@ jobs:
       - name: Test
         run: |
           cd build
-          ulimit -l unlimited
           export PHOTON_CI_EV_ENGINE=io_uring
           ctest --timeout 3600 -V
