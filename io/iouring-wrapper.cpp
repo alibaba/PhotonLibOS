@@ -76,10 +76,14 @@ public:
     }
 
     int init() {
-        rlimit resource_limit{.rlim_cur = RLIM_INFINITY, .rlim_max = RLIM_INFINITY};
-        if (setrlimit(RLIMIT_MEMLOCK, &resource_limit) != 0) {
-            LOG_ERROR_RETURN(0, -1, "iouring: failed to set resource limit. Use command `ulimit -l unlimited`, or change to root");
+        int compare_result;
+        if (kernel_version_compare("5.11", compare_result) == 0 && compare_result <= 0) {
+            rlimit resource_limit{.rlim_cur = RLIM_INFINITY, .rlim_max = RLIM_INFINITY};
+            if (setrlimit(RLIMIT_MEMLOCK, &resource_limit) != 0)
+                LOG_ERROR_RETURN(0, -1, "iouring: failed to set resource limit. "
+                                        "Use command `ulimit -l unlimited`, or change to root");
         }
+
         check_register_file_support();
         check_cooperative_task_support();
         set_submit_wait_function();
