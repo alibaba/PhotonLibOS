@@ -1,3 +1,5 @@
+add_definitions(-w)
+
 add_executable(simple-example simple/simple.cpp)
 target_link_libraries(simple-example PRIVATE photon_static)
 
