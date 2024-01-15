@@ -70,7 +70,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     std::string strhost(host);
     auto ipaddr = resolver->resolve(strhost.c_str());
     if (ipaddr.undefined()) {
-        LOG_ERROR_RETURN(0, nullptr, "DNS resolve failed, name = `", host)
+        LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
     }
 
     EndPoint ep(ipaddr, port);
@@ -165,7 +165,7 @@ public:
                      ? m_dialer.dial(m_proxy_url, tmo.timeout())
                      : m_dialer.dial(req, tmo.timeout());
         if (!s) {
-            if (errno == ECONNREFUSED) {
+            if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
             }
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
