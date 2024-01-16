@@ -54,7 +54,7 @@ uint64_t ExpireContainerBase::expire() {
     ({
         SCOPED_LOCK(_lock);
         _list.split_by_predicate([&](Item* x) {
-            bool ret = x->_timeout.expire() < photon::now;
+            bool ret = x->_timeout.expiration() < photon::now;
             if (ret) _set.erase(x);
             return ret;
         });
@@ -104,8 +104,8 @@ ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
     } while (!item);
     {
         SCOPED_LOCK(item->_mtx);
-        if (!item->_obj && (item->_failure <=
-                            photon::sat_sub(photon::now, failure_cooldown))) {
+        auto ts = photon::sat_sub(photon::now, failure_cooldown);
+        if (!item->_obj && item->_failure <= ts) {
             ctor(item);
             if (!item->_obj) item->_failure = photon::now;
         }

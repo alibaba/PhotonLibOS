@@ -65,7 +65,7 @@ namespace rpc {
         int do_send(OutOfOrderContext* args_)
         {
             auto args = (OooArgs*)args_;
-            if (args->timeout.expire() < photon::now) {
+            if (args->timeout.expiration() < photon::now) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Request timedout before send");
             }
             auto size = args->request->sum();
@@ -92,7 +92,7 @@ namespace rpc {
         {
             auto args = (OooArgs*)args_;
             m_header.magic = 0;
-            if (args->timeout.expire() < photon::now) {
+            if (args->timeout.expiration() < photon::now) {
                 // m_stream->shutdown(ShutdownHow::ReadWrite);
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timeout before read header ");
             }
@@ -154,7 +154,7 @@ namespace rpc {
         int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) override {
             scoped_rwlock rl(m_rwlock, photon::RLOCK);
             Timeout tmo(timeout);
-            if (tmo.expire() < photon::now) {
+            if (tmo.expiration() < photon::now) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(timeout), VALUE(tmo.timeout()));
             }
             int ret = 0;

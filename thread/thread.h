@@ -21,6 +21,7 @@ limitations under the License.
 #include <atomic>
 #include <type_traits>
 #include <photon/common/callback.h>
+#include <photon/common/timeout.h>
 #ifndef __aarch64__
 #include <emmintrin.h>
 #endif
@@ -76,12 +77,18 @@ namespace photon
     // suspend CURRENT thread for specified time duration, and switch
     // control to other threads, resuming possible sleepers.
     // Return 0 if timeout, return -1 if interrupted, and errno is set by the interrupt invoker.
-    int thread_usleep(uint64_t useconds);
+    int thread_usleep(Timeout timeout);
+
+    inline int thread_usleep(uint64_t useconds) {
+        return thread_usleep(Timeout(useconds));
+    }
+
 
     // thread_usleep_defer sets a callback, and will execute callback in another photon thread
     // after this photon thread fall in sleep. The defer function should NEVER fall into sleep!
     typedef void (*defer_func)(void*);
-    int thread_usleep_defer(uint64_t useconds, defer_func defer, void* defer_arg=nullptr);
+    int thread_usleep_defer(Timeout timeout, defer_func defer, void* defer_arg=nullptr);
+
     inline int thread_sleep(uint64_t seconds)
     {
         const uint64_t max_seconds = ((uint64_t)-1) / 1000 / 1000;
@@ -203,8 +210,8 @@ namespace photon
     class waitq
     {
     protected:
-        int wait(uint64_t timeout = -1);
-        int wait_defer(uint64_t timeout, void(*defer)(void*), void* arg);
+        int wait(Timeout timeout = {});
+        int wait_defer(Timeout Timeout, void(*defer)(void*), void* arg);
         void resume(thread* th, int error_number = ECANCELED);  // `th` must be waiting in this waitq!
         int resume_all(int error_number = ECANCELED);
         thread* resume_one(int error_number = ECANCELED);
@@ -227,7 +234,7 @@ namespace photon
     {
     public:
         mutex(uint16_t max_retries = 100) : retries(max_retries) { }
-        int lock(uint64_t timeout = -1);
+        int lock(Timeout timeout = {});
         int try_lock();
         void unlock();
         ~mutex()
@@ -250,7 +257,7 @@ namespace photon
     class recursive_mutex : protected mutex {
     public:
         using mutex::mutex;
-        int lock(uint64_t timeout = -1);
+        int lock(Timeout timeout = {});
         int try_lock();
         void unlock();
     protected:
@@ -337,21 +344,21 @@ namespace photon
     class condition_variable : protected waitq
     {
     public:
-        int wait(mutex* m, uint64_t timeout = -1);
-        int wait(mutex& m, uint64_t timeout = -1)
+        int wait(mutex* m, Timeout timeout = {});
+        int wait(mutex& m, Timeout timeout = {})
         {
             return wait(&m, timeout);
         }
-        int wait(spinlock* m, uint64_t timeout = -1);
-        int wait(spinlock& m, uint64_t timeout = -1)
+        int wait(spinlock* m, Timeout timeout = {});
+        int wait(spinlock& m, Timeout timeout = {})
         {
             return wait(&m, timeout);
         }
-        int wait(scoped_lock& lock, uint64_t timeout = -1)
+        int wait(scoped_lock& lock, Timeout timeout = {})
         {
             return wait(lock.m_mutex, timeout);
         }
-        int wait_no_lock(uint64_t timeout = -1)
+        int wait_no_lock(Timeout timeout = {})
         {
             return waitq::wait(timeout);
         }
@@ -365,7 +372,7 @@ namespace photon
     {
     public:
         explicit semaphore(uint64_t count = 0) : m_count(count) { }
-        int wait(uint64_t count, uint64_t timeout = -1);
+        int wait(uint64_t count, Timeout timeout = {});
         int signal(uint64_t count)
         {
             if (count == 0) return 0;
@@ -393,7 +400,7 @@ namespace photon
     class rwlock
     {
     public:
-        int lock(int mode, uint64_t timeout = -1);
+        int lock(int mode, Timeout timeout = {});
         int unlock();
     protected:
         int64_t state = 0;
@@ -456,36 +463,6 @@ namespace photon
             &default_photon_thread_stack_alloc, nullptr},
         Delegate<void, void*, size_t> photon_thread_dealloc = {
             &default_photon_thread_stack_dealloc, nullptr});
-
-    // Saturating addition, primarily for timeout caculation
-    __attribute__((always_inline)) inline uint64_t sat_add(uint64_t x,
-                                                           uint64_t y) {
-#if defined(__x86_64__)
-      register uint64_t z asm("rax");
-      asm("add %2, %1; sbb %0, %0; or %1, %0;"
-          : "=r"(z), "+r"(x)
-          : "r"(y)
-          : "cc");
-      return z;
-#elif defined(__aarch64__)
-      return (x + y < x) ? -1UL : x + y;
-#endif
-    }
-
-    // Saturating subtract, primarily for timeout caculation
-    __attribute__((always_inline)) inline uint64_t sat_sub(uint64_t x,
-                                                           uint64_t y) {
-#if defined(__x86_64__)
-      register uint64_t z asm("rax");
-      asm("xor %0, %0; subq %2, %1; cmovaeq %1, %0;"
-          : "=r"(z), "+r"(x), "+r"(y)
-          :
-          : "cc");
-      return z;
-#elif defined(__aarch64__)
-      return x > y ? x - y : 0;
-#endif
-    }
 };
 
 /*

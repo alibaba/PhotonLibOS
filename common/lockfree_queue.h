@@ -587,7 +587,7 @@ public:
         idler.fetch_add(1, std::memory_order_acq_rel);
         DEFER(idler.fetch_sub(1, std::memory_order_acq_rel));
         while (!pop(x)) {
-            if (yield_turn > 0 && photon::now < yield_timeout.expire()) {
+            if (yield_turn > 0 && photon::now < yield_timeout.expiration()) {
                 yield_turn--;
                 photon::thread_yield();
             } else {

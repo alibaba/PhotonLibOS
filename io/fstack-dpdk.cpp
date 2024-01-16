@@ -103,7 +103,7 @@ public:
         return 0;
     }
 
-    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+    int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
         int ret = thread_usleep(timeout);
@@ -117,7 +117,7 @@ public:
         return -1;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
         ssize_t nev = 0;
         struct timespec tm;
         tm.tv_sec = timeout / 1000 / 1000;
@@ -190,7 +190,7 @@ public:
     }
 
     ssize_t wait_for_events(void** data,
-            size_t count, uint64_t timeout = -1) override {
+            size_t count, Timeout timeout) override {
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(_kq, timeout);
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))

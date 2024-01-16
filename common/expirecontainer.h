@@ -41,7 +41,7 @@ protected:
         Item() : _timeout(0) {}
 
     public:
-        Timeout _timeout;
+        photon::Timeout _timeout;
         virtual ~Item() {}
         virtual size_t key_hash() const = 0;
         virtual bool key_equal(const Item* rhs) const = 0;

@@ -39,7 +39,6 @@ public:
     struct kevent _events[32];
     int _kq = -1;
     uint32_t _n = 0;    // # of events to submit
-    struct timespec _tm = {0, 0};  // used for poll
 
     int init() {
         if (_kq >= 0)
@@ -61,7 +60,6 @@ public:
         _kq = -1;                   // kqueue fd is not inherited from the parent process
         _inflight_events.clear();   // reset members
         _n = 0;
-        _tm = {0, 0};
         return init();              // re-init
     }
 
@@ -87,7 +85,7 @@ public:
         return 0;
     }
 
-    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+    int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
         int ret = thread_usleep(timeout);
@@ -101,7 +99,7 @@ public:
         return -1;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
         ssize_t nev = 0;
         struct timespec tm;
         tm.tv_sec = timeout / 1000 / 1000;
@@ -174,11 +172,12 @@ public:
     }
 
     ssize_t wait_for_events(void** data,
-            size_t count, uint64_t timeout = -1) override {
+            size_t count, Timeout timeout) override {
         int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(_kq, timeout);
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
+        struct timespec _tm = {0, 0};
         ret = kevent(_kq, _events, _n, _events, count, &_tm);
         if (ret < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
