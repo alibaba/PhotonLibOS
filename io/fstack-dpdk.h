@@ -28,25 +28,25 @@ int fstack_dpdk_fini();
 
 int fstack_socket(int domain, int type, int protocol);
 
-int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, uint64_t timeout);
+int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, Timeout timeout = {});
 
 int fstack_listen(int sockfd, int backlog);
 
 int fstack_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 
-int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, uint64_t timeout);
+int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, Timeout timeout = {});
 
 int fstack_close(int fd);
 
 int fstack_shutdown(int sockfd, int how);
 
-ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout);
+ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout = {});
 
-ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout);
+ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout = {});
 
-ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout);
+ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout = {});
 
-ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout);
+ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout = {});
 
 int fstack_setsockopt(int socket, int level, int option_name, const void* option_value, socklen_t option_len);
 

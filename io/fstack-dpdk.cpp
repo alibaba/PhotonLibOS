@@ -244,7 +244,7 @@ int fstack_socket(int domain, int type, int protocol) {
 // linux_sockaddr is required by f-stack api, and has the same layout to sockaddr
 static_assert(sizeof(linux_sockaddr) == sizeof(sockaddr));
 
-int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, uint64_t timeout) {
+int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, Timeout timeout) {
     int err = 0;
     while (true) {
         int ret = ff_connect(sockfd, (linux_sockaddr*) addr, addrlen);
@@ -279,7 +279,7 @@ int fstack_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     return ff_bind(sockfd, (linux_sockaddr*) addr, addrlen);
 }
 
-int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, uint64_t timeout) {
+int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, Timeout timeout) {
     return net::doio(LAMBDA(ff_accept(sockfd, (linux_sockaddr*) addr, addrlen)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }
@@ -292,22 +292,22 @@ int fstack_shutdown(int sockfd, int how) {
     return ff_shutdown(sockfd, how);
 }
 
-ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) {
+ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_send(sockfd, buf, count, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
 }
 
-ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) {
+ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_sendmsg(sockfd, message, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
 }
 
-ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
+ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_recv(sockfd, buf, count, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }
 
-ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
+ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_recvmsg(sockfd, message, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }
