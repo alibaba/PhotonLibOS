@@ -1778,11 +1778,13 @@ R"(
             // only idle stub aliving
             // other threads must be sleeping
             // fall in actual sleep
-            last_idle = now;
+            auto usec = 10 * 1024 * 1024; // max
             auto& sleepq = vcpu->sleepq;
-            auto expireation = sleepq.empty() ? (now + 10 * 1000 * 1000) :
-                sat_sub(sleepq.front()->ts_wakeup, now);
-            vcpu->master_event_engine->wait_and_fire_events(expireation);
+            if (!sleepq.empty())
+                usec = min(usec,
+                    sat_sub(sleepq.front()->ts_wakeup, now));
+            last_idle = now;
+            vcpu->master_event_engine->wait_and_fire_events(usec);
             resume_threads();
         }
         return nullptr;
