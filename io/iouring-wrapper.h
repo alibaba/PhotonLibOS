@@ -22,6 +22,7 @@ limitations under the License.
 #include <poll.h>
 #include <cstdint>
 #include <cerrno>
+#include <photon/common/timeout.h>
 
 namespace photon {
 
