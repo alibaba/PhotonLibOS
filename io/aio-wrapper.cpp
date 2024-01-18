@@ -371,6 +371,9 @@ retry:
         if (libaio_ctx)
             return 0;
 
+        if (iodepth <= 0)
+            LOG_ERROR_RETURN(EINVAL, -1, "iodepth should be greater than 0");
+
         std::unique_ptr<libaio_ctx_t> ctx(new libaio_ctx_t);
         ctx->evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         libaio_ctx->iodepth = iodepth > IODEPTH_MAX ? IODEPTH_MAX : iodepth;
