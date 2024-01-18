@@ -48,6 +48,7 @@ public:
         if (_kq < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to create kqueue()");
 
+        LOG_DEBUG("kqueue_fd = ", _kq);
         if (enqueue(_kq, EVFILT_USER, EV_ADD | EV_CLEAR, 0, nullptr, true) < 0) {
             DEFER({ close(_kq); _kq = -1; });
             LOG_ERRNO_RETURN(0, -1, "failed to setup self-wakeup EVFILT_USER event by kevent()");
@@ -71,15 +72,23 @@ public:
             close(_kq);
     }
 
+    __attribute__((noinline))
+    static void debug_breakpoint() {
+    }
+
     int enqueue(int fd, short event, uint16_t action, uint32_t event_flags, void* udata, bool immediate = false) {
-        // LOG_INFO("enqueue _kq: `, fd: `, event: `, action: `", _kq, fd, event, action);
+        // if (fd == _kq) debug_breakpoint();
+        // immediate = true;
+        // LOG_DEBUG(VALUE(_kq), VALUE(fd), VALUE(event), VALUE(action), VALUE(event_flags), VALUE(udata), VALUE(immediate));
         assert(_n < LEN(_events));
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
         if (immediate || _n == LEN(_events)) {
             int ret = kevent(_kq, _events, _n, nullptr, 0, nullptr);
-            if (ret < 0)
+            if (ret < 0) {
+                // debug_breakpoint();
                 LOG_ERRNO_RETURN(0, -1, "failed to submit events with kevent()");
+            }
             _n = 0;
         }
         return 0;
@@ -94,7 +103,6 @@ public:
             return 0;  // event arrived
         }
 
-        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
         errno = (ret == 0) ? ETIMEDOUT : err.no;
         return -1;
     }
@@ -173,7 +181,7 @@ public:
 
     ssize_t wait_for_events(void** data,
             size_t count, Timeout timeout) override {
-        int ret = wait_for_fd_readable(_kq, timeout);
+        int ret = ::photon::wait_for_fd_readable(_kq, timeout);
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
@@ -192,7 +200,7 @@ public:
 };
 
 __attribute__((noinline))
-KQueue* new_kqueue_engine() {
+static KQueue* new_kqueue_engine() {
     LOG_INFO("Init event engine: kqueue");
     return NewObj<KQueue>()->init();
 }

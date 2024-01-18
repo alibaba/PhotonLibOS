@@ -27,6 +27,7 @@ limitations under the License.
 #include <string>
 
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
 #include <photon/common/expirecontainer.h>
@@ -62,7 +63,7 @@ IPAddr gethostbypeer(IPAddr remote) {
     return s_local.to_endpoint().addr;
 }
 
-IPAddr gethostbypeer(const char *domain) {
+IPAddr gethostbypeer(std::string_view domain) {
     // get self ip by remote domain instead of ip
     IPAddr remote;
     auto ret = gethostbyname(domain, &remote);
@@ -71,15 +72,16 @@ IPAddr gethostbypeer(const char *domain) {
     return gethostbypeer(remote);
 }
 
-int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
-    assert(name);
+int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
+    if (name.empty()) return -1;
     int idx = 0;
     addrinfo* result = nullptr;
     addrinfo hints = {};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = AF_UNSPEC;
 
-    int ret = getaddrinfo(name, nullptr, &hints, &result);
+    std::string _name(name);
+    int ret = getaddrinfo(_name.c_str(), nullptr, &hints, &result);
     if (ret != 0) {
         LOG_ERROR_RETURN(0, -1, "Fail to getaddrinfo: `", gai_strerror(ret));
     }
@@ -267,7 +269,7 @@ public:
         dnscache_.clear();
     }
 
-    IPAddr resolve(const char *host) override {
+    IPAddr resolve(std::string_view host) override {
         auto ctr = [&]() -> IPAddrList* {
             auto addrs = new IPAddrList();
             photon::semaphore sem;
@@ -296,9 +298,11 @@ public:
         return ret->addr;
     }
 
-    void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
+    void resolve(std::string_view host, Delegate<void, IPAddr> func) override {
+        func(resolve(host));
+    }
 
-    void discard_cache(const char *host, IPAddr ip) override {
+    void discard_cache(std::string_view host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
         if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
         else {

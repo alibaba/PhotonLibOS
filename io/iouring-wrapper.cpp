@@ -286,7 +286,7 @@ public:
 
     ssize_t wait_for_events(void** data, size_t count, Timeout timeout) override {
         // Use master engine to wait for self event fd
-        int ret = wait_for_fd_readable(m_eventfd, timeout);
+        int ret = ::photon::wait_for_fd_readable(m_eventfd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }

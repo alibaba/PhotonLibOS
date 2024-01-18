@@ -233,7 +233,9 @@ int s_handler(void*, net::ISocketStream* stream) {
 
 void s_client_test(net::ISocketStream* stream) {
     char buf[] = "Hello";
+    LOG_DEBUG("befor write");
     auto ret = stream->write(buf, 6);
+    LOG_DEBUG("after write ret=", ret);
     EXPECT_EQ(6, ret);
     char b[4096];
     size_t rx = 0;

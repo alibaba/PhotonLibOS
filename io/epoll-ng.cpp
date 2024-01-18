@@ -254,8 +254,7 @@ public:
     }
     virtual ssize_t wait_for_events(void** data, size_t count,
                                     Timeout timeout) override {
-        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(
-            engine.epfd, timeout);
+        int ret = ::photon::wait_for_fd_readable(engine.epfd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }

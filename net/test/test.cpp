@@ -697,13 +697,14 @@ TEST(utils, gethostbyname) {
     net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr;
     net::gethostbyname("localhost", &addr);
-    EXPECT_EQ(localhost.to_nl(), addr.to_nl());
+    LOG_DEBUG(VALUE(localhost), VALUE(addr));
+    EXPECT_EQ(localhost, addr);
     std::vector<net::IPAddr> addrs;
     net::gethostbyname("localhost", addrs);
-    EXPECT_GT((int)addrs.size(), 0);
-    EXPECT_EQ(localhost.to_nl(), addrs[0].to_nl());
+    EXPECT_GT(addrs.size(), 0);
+    EXPECT_EQ(localhost, addrs[0]);
     net::IPAddr host = net::gethostbypeer("localhost");
-    EXPECT_EQ(localhost.to_nl(), host.to_nl());
+    EXPECT_EQ(localhost, host);
     for (auto &x : addrs) {
         LOG_INFO(VALUE(x));
     }
