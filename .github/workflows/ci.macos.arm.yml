@@ -7,7 +7,7 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS-clang-debug:
+  macOS-clang-release:
     runs-on: [self-hosted, macOS, ARM64]
 
     steps:
@@ -26,9 +26,9 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Debug \
+          cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
             -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
-          cmake --build ${{github.workspace}}/build -j -- VERBOSE=1
+          cmake --build ${{github.workspace}}/build -j
 
       - name: Test
         working-directory: ${{github.workspace}}/build

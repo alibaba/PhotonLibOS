@@ -45,8 +45,8 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 ProcessorCount(NumCPU)
 
-# Compiler options
-add_compile_options(-Wall)  # -Werror is not enable yet
+# Global compiler options, only effective within this project
+add_compile_options(-Wall -Werror -Wno-error=pragmas)
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
