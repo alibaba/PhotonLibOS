@@ -154,10 +154,10 @@ public:
         evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd < 0) goto errout;
         for (int i = 1; i < 4; i++) {
-            if (engine.add(poller(i).epfd, EPOLLIN, {.u64 = (uint64_t)i}) < 0)
+            if (engine.add(poller(i).epfd, EPOLLIN, epoll_data_t{.u64 = (uint64_t)i}) < 0)
                 goto errout;
         }
-        if (engine.add(evfd, EPOLLIN, {.u64 = (uint64_t)POLLERTYPE::EVENT}) < 0)
+        if (engine.add(evfd, EPOLLIN, epoll_data_t{.u64 = (uint64_t)POLLERTYPE::EVENT}) < 0)
             goto errout;
         return 0;
 
