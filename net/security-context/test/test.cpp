@@ -293,6 +293,9 @@ TEST(cs, uds) {
 }
 
 TEST(Socket, nested) {
+#ifdef __APPLE__
+    LOG_INFO("skip this case in MacOS");
+#endif
 #ifdef __linux___
     ASSERT_GE(net::et_poller_init(), 0);
     DEFER(net::et_poller_fini());

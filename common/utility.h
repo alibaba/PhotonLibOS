@@ -295,25 +295,43 @@ namespace photon {
 // Saturating addition, no upward overflow
 __attribute__((always_inline)) inline
 uint64_t sat_add(uint64_t x, uint64_t y) {
+    uint64_t z;
+#if defined(__clang__) || !defined(__GNUC__)
+    z = (x+y < x) ? -1UL : (x+y);
+#else
 #if defined(__x86_64__)
-    register uint64_t z asm ("rax");
-    asm("add %2, %1; sbb %0, %0; or %1, %0;" : "=r"(z), "+r"(x) : "r"(y) : "cc");
-    return z;
+    asm("add %2, %1;"
+        "sbb %0, %0;"
+        "or  %1, %0;"
+      : "=r"(z), "+r"(x) : "r"(y) : "cc");
 #elif defined(__aarch64__)
-    return (x + y < x) ? -1UL : x + y;
+    asm("adds  %0, %1, %2;"
+        "csinv %0, %0, xzr, lo;"
+      : "=r"(z) : "r"(x), "r"(y) : "cc");
 #endif
+#endif
+    return z;
 }
 
 // Saturating subtract, no downward overflow
 __attribute__((always_inline)) inline
 uint64_t sat_sub(uint64_t x, uint64_t y) {
+    uint64_t z;
+#if defined(__clang__) || !defined(__GNUC__)
+    z = (x<y) ? 0 : (x-y);
+#else
 #if defined(__x86_64__)
-    register uint64_t z asm ("rax");
-    asm("xor %0, %0; subq %2, %1; cmovaeq %1, %0;" : "=r"(z), "+r"(x) ,"+r"(y) : : "cc");
-    return z;
+    asm("xor     %0, %0;"
+        "sub    %2, %1;"
+        "cmovae %1, %0;"
+      : "=r"(z), "+r"(x), "+r"(y) : : "cc");
 #elif defined(__aarch64__)
-    return x > y ? x - y : 0;
+    asm("subs %0, %1, %2;"
+        "csel %0, xzr, x0, lo;"
+      : "=r"(z) : "r"(x), "r"(y) : "cc");
 #endif
+#endif
+    return z;
 }
 
 }
