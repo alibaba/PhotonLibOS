@@ -82,13 +82,6 @@ int set_fd_nonblocking(int fd);
 #define LAMBDA(expr) [&]() __INLINE__ { return expr; }
 #define LAMBDA_TIMEOUT(expr)  LAMBDA(expr)
 
-// #define LAMBDA_TIMEOUT(expr)              \
-//     [&]() __INLINE__ {                    \
-//         Timeout __tmo(timeout);           \
-//         DEFER(timeout = __tmo.timeout()); \
-//         return expr;                      \
-//     }
-
 template <typename IOCB, typename WAIT>
 __FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {
     while (true) {
