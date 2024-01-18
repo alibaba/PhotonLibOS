@@ -284,7 +284,7 @@ ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
         if (ret == 0) break;    // EOF
         if ((n += ret) >= least) break;
         auto r = v.extract_front(ret);
-        assert(r == ret); (void)r;
+        assert((ssize_t) r == ret); (void)r;
     } while (v.iovcnt && v.iov->iov_len);
     return n;
 }
