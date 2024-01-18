@@ -23,7 +23,7 @@ IStream::ReadAll IStream::readall(size_t max_buf, size_t min_buf) {
         buf.size += ret;
         assert(buf.size <= capacity);
         if (unlikely(buf.size == capacity)) {
-            if (capacity >= max_buf) {
+            if ((size_t) capacity >= max_buf) {
                 buf.size = -buf.size;
                 LOG_ERROR_RETURN(ENOBUFS, buf, "content size in stream exceeds upper limit ", max_buf);
             }

@@ -42,7 +42,7 @@ Node parse(char* text, size_t size, int flags) {
     constexpr static Parser parsers[] = {&parse_json, &parse_xml,
                                          &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
-    if (i > LEN(parsers)) {
+    if ((size_t) i > LEN(parsers)) {
         if (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }
