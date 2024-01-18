@@ -74,7 +74,6 @@ IPAddr gethostbypeer(std::string_view domain) {
 
 int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
     if (name.empty()) return -1;
-    int idx = 0;
     addrinfo* result = nullptr;
     addrinfo hints = {};
     hints.ai_socktype = SOCK_STREAM;
@@ -86,23 +85,25 @@ int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
         LOG_ERROR_RETURN(0, -1, "Fail to getaddrinfo: `", gai_strerror(ret));
     }
     assert(result);
+    int cnt = 0;
     for (auto* cur = result; cur != nullptr; cur = cur->ai_next) {
+        IPAddr addr;
         if (cur->ai_family == AF_INET6) {
             auto sock_addr = (sockaddr_in6*) cur->ai_addr;
-            if (append_op(IPAddr(sock_addr->sin6_addr)) < 0) {
-                break;
-            }
-            idx++;
+            addr = IPAddr(sock_addr->sin6_addr);
         } else if (cur->ai_family == AF_INET) {
             auto sock_addr = (sockaddr_in*) cur->ai_addr;
-            if (append_op(IPAddr(sock_addr->sin_addr)) < 0) {
-                break;
-            }
-            idx++;
+            addr = IPAddr(sock_addr->sin_addr);
+        } else {
+            LOG_DEBUG("skip unsupported address family ", cur->ai_family);
+            continue;
         }
+        // LOG_DEBUG(VALUE(addr));
+        if (append_op(addr) < 0) break;
+        cnt++;
     }
     freeaddrinfo(result);
-    return idx;
+    return cnt;
 }
 
 struct xlator {
@@ -286,6 +287,10 @@ public:
                 if ((uint64_t)time_elapsed <= resolve_timeout_) {
                     addrs->push_back(std::move(ret));
                     sem.signal(1);
+                } else {
+                    LOG_ERROR("resolve timeout");
+                    while(!ret.empty())
+                        delete ret.pop_front();
                 }
             }).detach();
             sem.wait(1, resolve_timeout_);
