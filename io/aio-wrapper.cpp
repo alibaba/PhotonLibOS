@@ -153,7 +153,7 @@ namespace photon
     {
 retry:
         struct io_event events[IODEPTH_MAX];
-        int n = HAVE_N_TRY(my_io_getevents, (0, IODEPTH_MAX, events));
+        int n = HAVE_N_TRY(my_io_getevents, (0, libaio_ctx->iodepth, events));
         for (int i=0; i<n; ++i)
         {
             auto piocb = (libaiocb*)events[i].obj;
@@ -166,7 +166,7 @@ retry:
                          VALUE(piocb->u.c.buf), VALUE(piocb->u.c.resfd));
             thread_interrupt((thread *)events[i].data, EOK);
         }
-        if (n == IODEPTH_MAX)
+        if (n == libaio_ctx->iodepth)
         {
             thread_yield();
             goto retry;
