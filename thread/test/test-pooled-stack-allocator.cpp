@@ -37,7 +37,6 @@ uint64_t do_test(int mode) {
 }
 
 TEST(Normal, NoPool) {
-    photon::set_photon_thread_stack_allocator();
     photon::init();
     DEFER(photon::fini());
     auto spend = do_test(0);
@@ -45,7 +44,6 @@ TEST(Normal, NoPool) {
 }
 
 TEST(Normal, ThreadPool) {
-    photon::set_photon_thread_stack_allocator();
     photon::init();
     DEFER(photon::fini());
     auto spend = do_test(64);
@@ -53,17 +51,17 @@ TEST(Normal, ThreadPool) {
 }
 
 TEST(PooledAllocator, PooledStack) {
-    photon::use_pooled_stack_allocator();
-    photon::init();
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT,
+                 {.use_pooled_stack_allocator = true});
     DEFER(photon::fini());
     auto spend = do_test(0);
     LOG_TEMP("Spent ` us", spend);
 }
 
 TEST(PooledAllocator, BypassThreadPool) {
-    photon::use_pooled_stack_allocator();
-    photon::set_bypass_threadpool();
-    photon::init();
+    photon::init(
+        photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT,
+        {.use_pooled_stack_allocator = true, .bypass_threadpool = true});
     DEFER(photon::fini());
     auto spend = do_test(64);
     LOG_TEMP("Spent ` us", spend);
