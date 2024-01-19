@@ -376,7 +376,7 @@ retry:
 
         std::unique_ptr<libaio_ctx_t> ctx(new libaio_ctx_t);
         ctx->evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-        libaio_ctx->iodepth = iodepth > IODEPTH_MAX ? IODEPTH_MAX : iodepth;
+        ctx->iodepth = iodepth > IODEPTH_MAX ? IODEPTH_MAX : iodepth;
         if (ctx->evfd < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to create eventfd");
 
