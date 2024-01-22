@@ -150,8 +150,8 @@ public:
     void send_read_request(net::http::Client::Operation &op, off_t offset, size_t length, Timeout tmo) {
         estring url;
         url.appends(m_url, "?", m_url_param);
-    again:
         op.set_enable_proxy(m_fs->get_client()->has_proxy());
+    again:
         op.req.reset(net::http::Verb::GET, url, op.enable_proxy);
         op.req.headers.merge(m_common_header);
         op.req.headers.range(offset, offset + length - 1);
