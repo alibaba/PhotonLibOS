@@ -1215,7 +1215,7 @@ R"(
     // returns 0 if slept well (at lease `useconds`), -1 otherwise
     static int thread_usleep(Timeout timeout, thread_list* waitq)
     {
-        if (unlikely(!timeout)) {
+        if (unlikely(timeout.expired())) {
             thread_yield();
             return 0;
         }
@@ -1286,7 +1286,7 @@ R"(
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, -1, "Photon not initialized in this thread");
-        if (unlikely(!timeout))
+        if (unlikely(timeout.expired()))
             return thread_yield(), 0;
         if (unlikely(rq.current->is_shutting_down()))
             return do_shutdown_usleep(timeout, rq);
@@ -1555,7 +1555,7 @@ R"(
             return 0;
         }
 
-        if (!timeout) {
+        if (timeout.expired()) {
             errno = ETIMEDOUT;
             splock.unlock();
             return -1;

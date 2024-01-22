@@ -159,7 +159,7 @@ public:
         op.timeout = tmo;
         m_fs->get_client()->call(&op);
         if (op.status_code < 0) {
-            if (!tmo) {
+            if (tmo.expired()) {
                 m_etimeout = true;
                 LOG_ERROR_RETURN(ENOENT, , "http timedout");
             }
