@@ -515,7 +515,7 @@ protected:
             return photon::iouring_send(sockfd, buf, count, flags, timeout);
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t Timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         if (flags & ZEROCOPY_FLAG)
             return photon::iouring_sendmsg_zc(sockfd, message, flags | MSG_WAITALL, timeout);
         else
