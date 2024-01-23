@@ -34,6 +34,7 @@ int idiot_handler(void*, net::http::Request &req, net::http::Response &resp, std
     std::string str;
     auto r = req.headers.range();
     auto cl = r.second - r.first + 1;
+    LOG_DEBUG("content_range: `-` (`)", r.first, r.second, cl);
     if (cl > 4096) {
         LOG_ERROR_RETURN(0, -1, "RetType failed test");
     }
@@ -54,7 +55,11 @@ TEST(client_tls, basic) {
     DEFER(delete tcpserver);
     tcpserver->timeout(1000UL*1000);
     tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-    tcpserver->bind(19876, net::IPAddr("127.0.0.1"));
+    auto addr = net::IPAddr::localhost();
+    int r = tcpserver->bind(19876, addr);
+    if (r != 0)
+        LOG_ERRNO_RETURN(0, , "failed to bind to `:", addr, 19876);
+    LOG_DEBUG("bind to `:", addr, " : 19876");
     tcpserver->listen();
 
     auto server = net::http::new_http_server();
@@ -75,10 +80,11 @@ TEST(client_tls, basic) {
     char buf[4096];
     auto ret = op->resp.read(buf, 4096);
     EXPECT_EQ(exp_len, ret);
-    EXPECT_EQ(true, "test" == op->resp.headers["Test_Handle"]);
+    EXPECT_EQ("test", op->resp.headers["Test_Handle"]);
 }
 
 int main(int argc, char** arg) {
+    LOG_DEBUG("Begin test");
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());

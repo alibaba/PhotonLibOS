@@ -41,7 +41,7 @@ protected:
         Item() : _timeout(0) {}
 
     public:
-        Timeout _timeout;
+        photon::Timeout _timeout;
         virtual ~Item() {}
         virtual size_t key_hash() const = 0;
         virtual bool key_equal(const Item* rhs) const = 0;
@@ -77,7 +77,7 @@ protected:
     };
 
     intrusive_list<Item> _list;
-    uint64_t _expiration;
+    uint64_t _lifespan;
     photon::Timer _timer;
     photon::spinlock _lock; // protect _list/_set operations
 
@@ -94,7 +94,7 @@ protected:
     using Set = std::unordered_set<ItemPtr, ItemHash, ItemEqual>;
     Set _set;
 
-    ExpireContainerBase(uint64_t expiration, uint64_t timer_cycle);
+    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle);
     ~ExpireContainerBase() { clear(); }
 
     using iterator = decltype(_set)::iterator;
@@ -116,7 +116,7 @@ protected:
 
     void enqueue(Item* item) {
         _list.pop(item);
-        item->_timeout.timeout(_expiration);
+        item->_timeout.timeout(_lifespan);
         _list.push_back(item);
     }
 
@@ -124,7 +124,10 @@ public:
     void clear();
     uint64_t expire();
     size_t size() { return _set.size(); }
-    size_t expiration() { return _expiration; }
+    size_t lifespan() { return _lifespan; }
+
+    [[deprecated("use lifespan() instead")]]
+    size_t expiration() { return _lifespan; }
 };
 
 template <typename KeyType, typename... Ts>

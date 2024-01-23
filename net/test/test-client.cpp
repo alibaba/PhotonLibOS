@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     Timeout tmo(timeout_sec * 1000 * 1000);
     uint64_t cnt = 0;
     LOG_INFO(tmo.timeout());
-    while (photon::now < tmo.expire()) {
+    while (photon::now < tmo.expiration()) {
         auto ret = tls->send(buff, 4096);
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "Failed to send");
         cnt += ret;

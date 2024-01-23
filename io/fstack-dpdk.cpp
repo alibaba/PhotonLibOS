@@ -103,7 +103,7 @@ public:
         return 0;
     }
 
-    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+    int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
         int ret = thread_usleep(timeout);
@@ -117,7 +117,7 @@ public:
         return -1;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
         ssize_t nev = 0;
         struct timespec tm;
         tm.tv_sec = timeout / 1000 / 1000;
@@ -190,8 +190,8 @@ public:
     }
 
     ssize_t wait_for_events(void** data,
-            size_t count, uint64_t timeout = -1) override {
-        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(_kq, timeout);
+            size_t count, Timeout timeout) override {
+        int ret = ::photon::wait_for_fd_readable(_kq, timeout);
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
@@ -244,7 +244,7 @@ int fstack_socket(int domain, int type, int protocol) {
 // linux_sockaddr is required by f-stack api, and has the same layout to sockaddr
 static_assert(sizeof(linux_sockaddr) == sizeof(sockaddr));
 
-int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, uint64_t timeout) {
+int fstack_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen, Timeout timeout) {
     int err = 0;
     while (true) {
         int ret = ff_connect(sockfd, (linux_sockaddr*) addr, addrlen);
@@ -279,7 +279,7 @@ int fstack_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
     return ff_bind(sockfd, (linux_sockaddr*) addr, addrlen);
 }
 
-int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, uint64_t timeout) {
+int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, Timeout timeout) {
     return net::doio(LAMBDA(ff_accept(sockfd, (linux_sockaddr*) addr, addrlen)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }
@@ -292,22 +292,22 @@ int fstack_shutdown(int sockfd, int how) {
     return ff_shutdown(sockfd, how);
 }
 
-ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) {
+ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_send(sockfd, buf, count, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
 }
 
-ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) {
+ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_sendmsg(sockfd, message, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
 }
 
-ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
+ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_recv(sockfd, buf, count, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }
 
-ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
+ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
     return net::doio(LAMBDA(ff_recvmsg(sockfd, message, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
 }

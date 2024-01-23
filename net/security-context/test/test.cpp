@@ -233,7 +233,9 @@ int s_handler(void*, net::ISocketStream* stream) {
 
 void s_client_test(net::ISocketStream* stream) {
     char buf[] = "Hello";
+    LOG_DEBUG("befor write");
     auto ret = stream->write(buf, 6);
+    LOG_DEBUG("after write ret=", ret);
     EXPECT_EQ(6, ret);
     char b[4096];
     size_t rx = 0;
@@ -291,6 +293,9 @@ TEST(cs, uds) {
 }
 
 TEST(Socket, nested) {
+#ifdef __APPLE__
+    LOG_INFO("skip this case in MacOS");
+#endif
 #ifdef __linux___
     ASSERT_GE(net::et_poller_init(), 0);
     DEFER(net::et_poller_fini());

@@ -28,64 +28,59 @@ namespace net {
 int socket(int domain, int type, int protocol);
 
 int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
-            uint64_t timeout = -1);
+            Timeout timeout = {});
 
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
-           uint64_t timeout = -1);
+           Timeout timeout = {});
 
-ssize_t send(int fd, const void* buf, size_t len, int flags, uint64_t timeout = -1);
-ssize_t sendmsg(int fd, const struct msghdr* msg, int flags, uint64_t timeout = -1);
-ssize_t recv(int fd, void* buf, size_t count, int flags, uint64_t timeout = -1);
-ssize_t recvmsg(int fd, struct msghdr* msg, int flags, uint64_t timeout = -1);
+ssize_t send(int fd, const void* buf, size_t len, int flags, Timeout timeout = {});
+ssize_t sendmsg(int fd, const struct msghdr* msg, int flags, Timeout timeout = {});
+ssize_t recv(int fd, void* buf, size_t count, int flags, Timeout timeout = {});
+ssize_t recvmsg(int fd, struct msghdr* msg, int flags, Timeout timeout = {});
 
-ssize_t read(int fd, void *buf, size_t count, uint64_t timeout = -1);
+ssize_t read(int fd, void *buf, size_t count, Timeout timeout = {});
 
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt,
-              uint64_t timeout = -1);
+              Timeout timeout = {});
 
-ssize_t write(int fd, const void *buf, size_t count, uint64_t timeout = -1);
+ssize_t write(int fd, const void *buf, size_t count, Timeout timeout = {});
 
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt,
-               uint64_t timeout = -1);
+               Timeout timeout = {});
 
 ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
-                 uint64_t timeout = -1);
+                 Timeout timeout = {});
 
-ssize_t read_n(int fd, void *buf, size_t count, uint64_t timeout = -1);
+ssize_t read_n(int fd, void *buf, size_t count, Timeout timeout = {});
 
-ssize_t write_n(int fd, const void *buf, size_t count, uint64_t timeout = -1);
+ssize_t write_n(int fd, const void *buf, size_t count, Timeout timeout = {});
 
-ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, uint64_t timeout = -1);
+ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout = {});
 
-ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, uint64_t timeout = -1);
+ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout = {});
 
 ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
-                   uint64_t timeout = -1);
+                   Timeout timeout = {});
 
 class ISocketStream;
-ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, uint64_t timeout = -1);
+ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {});
 
-ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, uint64_t timeout = -1);
+ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, Timeout timeout = {});
 
-ssize_t zerocopy_confirm(int fd, uint32_t num_calls, uint64_t timeout = -1);
+ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
 
-ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, uint64_t timeout =-1);
+ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout = {});
 
-ssize_t send_n(int fd, const void *buf, size_t count, int flag, uint64_t timeout =-1);
+ssize_t send_n(int fd, const void *buf, size_t count, int flag, Timeout timeout = {});
 
-ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, uint64_t timeout =-1);
+ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, Timeout timeout = {});
 
 int set_socket_nonblocking(int fd);
 
 int set_fd_nonblocking(int fd);
 
 #define LAMBDA(expr) [&]() __INLINE__ { return expr; }
-#define LAMBDA_TIMEOUT(expr)              \
-    [&]() __INLINE__ {                    \
-        Timeout __tmo(timeout);           \
-        DEFER(timeout = __tmo.timeout()); \
-        return expr;                      \
-    }
+#define LAMBDA_TIMEOUT(expr)  LAMBDA(expr)
 
 template <typename IOCB, typename WAIT>
 __FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {

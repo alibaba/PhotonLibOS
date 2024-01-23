@@ -88,26 +88,26 @@ public:
         close();
     }
     ssize_t read(void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
+        Timeout timeout(m_timeout);
         auto cb = LAMBDA_TIMEOUT(do_recv(fd, buf, count, 0, timeout));
         return net::doio_n(buf, count, cb);
     }
     ssize_t readv(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
+        Timeout timeout(m_timeout);
         auto cb = LAMBDA_TIMEOUT(do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout));
         return net::doiov_n(view, cb);
     }
     ssize_t write(const void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
+        Timeout timeout(m_timeout);
         auto cb = LAMBDA_TIMEOUT(do_send(fd, buf, count, MSG_NOSIGNAL, timeout));
         return net::doio_n((void*&) buf, count, cb);
     }
     ssize_t writev(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
+        Timeout timeout(m_timeout);
         auto cb = LAMBDA_TIMEOUT(do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout));
         return net::doiov_n(view, cb);
     }
@@ -389,11 +389,10 @@ protected:
     int m_socket_family;
     bool m_autoremove;
     bool m_nonblocking;
-
-    Handler m_handler;
-    photon::thread* workth = nullptr;
     bool m_block = false;
     bool waiting = false;
+    Handler m_handler;
+    photon::thread* workth = nullptr;
     int m_listen_fd = -1;
 
     virtual KernelSocketStream* create_stream(int fd) {
@@ -468,9 +467,10 @@ protected:
     }
 
     ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
-        ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
+        Timeout tmo(timeout);
+        ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, tmo);
         m_num_calls++;
-        auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, timeout);
+        auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, tmo);
         if (ret < 0)
             return ret;
         return n;

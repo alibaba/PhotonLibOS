@@ -86,28 +86,28 @@ namespace net {
         }
         // Check if it's actually an IPv4 address mapped in IPV6
         bool is_ipv4() const {
-            if (ntohl(addr._in_addr_field[2]) != 0x0000ffff) {
-                return false;
-            }
-            if (addr._in_addr_field[0] != 0 || addr._in_addr_field[1] != 0) {
-                return false;
-            }
-            return true;
+            return addr._in_addr_field[0] == 0 &&
+                   addr._in_addr_field[1] == 0 &&
+                   addr._in_addr_field[2] == htonl(0x0000ffff);
         }
         // We regard the default IPv4 0.0.0.0 as undefined
         bool undefined() const {
-            return *this == V4Any();
+            return mem_equal(V4Any());
         }
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
+            assert(is_ipv4());
             return addr._in_addr_field[3];
         }
         bool is_loopback() const {
-            return is_ipv4() ? (*this == V4Loopback()) : (*this == V6Loopback());
+            return is_ipv4() ? mem_equal(V4Loopback()) : mem_equal(V6Loopback());
+        }
+        bool is_localhost() const {
+            return is_loopback();
         }
         bool is_broadcast() const {
             // IPv6 does not support broadcast
-            return is_ipv4() && (*this == V4Broadcast());
+            return is_ipv4() && mem_equal(V4Broadcast());
         }
         bool is_link_local() const {
             if (is_ipv4()) {
@@ -117,12 +117,11 @@ namespace net {
             }
         }
         bool operator==(const IPAddr& rhs) const {
-            return memcmp(this, &rhs, sizeof(rhs)) == 0;
+            return mem_equal(rhs) || (is_localhost() && rhs.is_localhost());
         }
         bool operator!=(const IPAddr& rhs) const {
             return !(*this == rhs);
         }
-    public:
         static IPAddr V6None() {
             return IPAddr(htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff));
         }
@@ -131,7 +130,11 @@ namespace net {
         static IPAddr V4Broadcast() { return IPAddr(htonl(INADDR_BROADCAST)); }
         static IPAddr V4Any() { return IPAddr(htonl(INADDR_ANY)); }
         static IPAddr V4Loopback() { return IPAddr(htonl(INADDR_LOOPBACK)); }
+        static IPAddr localhost() { return V4Loopback(); }
     private:
+        bool mem_equal(const IPAddr& rhs) const {
+            return memcmp(this, &rhs, sizeof(rhs)) == 0;
+        }
         void map_v4(in_addr addr_) {
             map_v4(addr_.s_addr);
         }
