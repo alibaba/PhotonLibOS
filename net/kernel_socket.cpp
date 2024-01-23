@@ -177,11 +177,10 @@ protected:
             this->msg_iovlen = iovcnt;
         }
 
-        explicit tmp_msg_hdr(iovector_view& view) : tmp_msg_hdr(view.iov, view.iovcnt) {}
+        explicit tmp_msg_hdr(iovector_view& view) :
+            tmp_msg_hdr(view.iov, view.iovcnt) { }
 
-        operator ::msghdr*() {
-            return this;
-        }
+        operator ::msghdr*() { return this; }
     };
 };
 

@@ -165,7 +165,7 @@ class SaslSocketStream : public ForwardSocketStream {
     }
 
     ssize_t write(const void *buf, size_t cnt) override {
-        return doio_n((void *&)buf, cnt, [&]() __INLINE__ { return send(buf, cnt); });
+        return DOIO_N((void *&)buf, cnt, send(buf, cnt));
     }
 
     ssize_t writev(const struct iovec *iov, int iovcnt) override {
@@ -179,7 +179,7 @@ class SaslSocketStream : public ForwardSocketStream {
     }
 
     ssize_t read(void *buf, size_t cnt) override {
-        return doio_n((void *&)buf, cnt, [&]() __INLINE__ { return recv(buf, cnt); });
+        return DOIO_N((void *&)buf, cnt, recv(buf, cnt));
     }
 
     ssize_t readv(const struct iovec *iov, int iovcnt) override {
@@ -204,18 +204,6 @@ class SaslSocketStream : public ForwardSocketStream {
     }
 
   private:
-    template <typename IOCB> __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
-        auto count0 = count;
-        while (count > 0) {
-            ssize_t ret = iocb();
-            if (ret <= 0)
-                return ret;
-            (char *&)buf += ret;
-            count -= ret;
-        }
-        return count0;
-    }
-
     int do_send(const void *buf, size_t cnt) {
         if (qop == Gsasl_qop::GSASL_QOP_AUTH) {
             return m_underlay->send(buf, cnt);
