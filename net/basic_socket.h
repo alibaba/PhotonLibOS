@@ -63,9 +63,12 @@ ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    Timeout timeout = {});
 
 class ISocketStream;
-ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {});
+ssize_t sendfile_n(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {});
 
-ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, Timeout timeout = {});
+[[deprecated("use sendfile_n() instead")]] inline
+ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {}) {
+    return sendfile_n(out_stream, in_fd, offset, count, timeout);
+}
 
 ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
 
@@ -101,6 +104,8 @@ __FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {
     }
 }
 
+#define DOIO(iocb, waitcb) doio(LAMBDA(iocb), LAMBDA(waitcb))
+
 template <typename IOCB>
 __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
     ssize_t n = 0;
@@ -114,6 +119,8 @@ __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
     }
     return n;
 }
+
+#define DOIO_N(buf, count, iocb) doio_n(buf, count, LAMBDA(iocb))
 
 template <typename IOCB>
 __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
@@ -131,6 +138,8 @@ __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
     }
     return count;
 }
+
+#define DOIOV_N(iovv, iocb) doiov_n(iovv, LAMBDA(iocb))
 
 int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count);
 

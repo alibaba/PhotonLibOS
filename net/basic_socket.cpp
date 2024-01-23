@@ -112,8 +112,8 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
            Timeout timeout) {
 #ifdef __APPLE__
-    auto ret = (int)doio(LAMBDA(::accept(fd, addr, addrlen)),
-                  LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    auto ret = DOIO(::accept(fd, addr, addrlen),
+                    wait_for_fd_readable(fd, timeout));
     if (ret > 0) {
         set_fd_nonblocking(ret);
         int val = 1;
@@ -121,117 +121,102 @@ int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
     }
     return ret;
 #else
-    return (int)doio(LAMBDA(::accept4(fd, addr, addrlen, SOCK_NONBLOCK)),
-                  LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    return DOIO(::accept4(fd, addr, addrlen, SOCK_NONBLOCK),
+                 wait_for_fd_readable(fd, timeout));
 #endif
 }
+
 ssize_t read(int fd, void *buf, size_t count, Timeout timeout) {
-    return doio(LAMBDA(::read(fd, buf, count)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    return DOIO(::read(fd, buf, count), wait_for_fd_readable(fd, timeout));
 }
+
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt, Timeout timeout) {
-    if (iovcnt <= 0) {
+    if (unlikely(iovcnt <= 0)) {
         errno = EINVAL;
         return -1;
     }
-    if (iovcnt == 1) return read(fd, iov->iov_base, iov->iov_len, timeout);
-    return doio(LAMBDA(::readv(fd, iov, iovcnt)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    return (iovcnt == 1) ?
+        read(fd, iov->iov_base, iov->iov_len, timeout) :
+        DOIO(::readv(fd, iov, iovcnt), wait_for_fd_readable(fd, timeout));
 }
+
 ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                  Timeout timeout) {
 #ifdef __APPLE__
     off_t len = count;
-    ssize_t ret =
-        doio(LAMBDA(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0)),
-             LAMBDA_TIMEOUT(wait_for_fd_writable(out_fd, timeout)));
+    ssize_t ret = DOIO(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0),
+             wait_for_fd_writable(out_fd, timeout));
     return (ret == 0) ? len : (int)ret;
 #else
-    return doio(LAMBDA(::sendfile(out_fd, in_fd, offset, count)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_writable(out_fd, timeout)));
+    return DOIO(::sendfile(out_fd, in_fd, offset, count),
+      wait_for_fd_writable(out_fd, timeout));
 #endif
 }
 
-ssize_t sendmsg_zerocopy(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, Timeout timeout) {
-    msghdr msg = {};
-    msg.msg_iov = iov;
-    msg.msg_iovlen = iovcnt;
-    ssize_t ret = doio(LAMBDA(::sendmsg(fd, &msg, MSG_ZEROCOPY)),
-                       LAMBDA_TIMEOUT(photon::wait_for_fd_writable(fd, timeout)));
-    num_calls++;
-    return ret;
+ssize_t read_n(int fd, void *buf, size_t count, Timeout timeout) {
+    return DOIO_N(buf, count, read(fd, buf, count, timeout));
 }
 
-ssize_t read_n(int fd, void *buf, size_t count, Timeout timeout) {
-    return doio_n(buf, count, LAMBDA_TIMEOUT(read(fd, buf, count, timeout)));
-}
 ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    Timeout timeout) {
     void* buf_unused = nullptr;
-    return doio_n(buf_unused, count,
-        LAMBDA_TIMEOUT(sendfile(out_fd, in_fd, offset, count, timeout)));
+    return DOIO_N(buf_unused, count, sendfile(out_fd, in_fd, offset, count, timeout));
 }
 
 ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return doiov_n(v, LAMBDA_TIMEOUT(readv(fd, v.iov, v.iovcnt, timeout)));
-}
-
-ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, Timeout timeout) {
-    iovector_view v(iov, iovcnt);
-    return doiov_n(v, LAMBDA_TIMEOUT(sendmsg_zerocopy(fd, v.iov, v.iovcnt, num_calls, timeout)));
+    return DOIOV_N(v, readv(fd, v.iov, v.iovcnt, timeout));
 }
 
 ssize_t send(int fd, const void *buf, size_t count, int flags, Timeout timeout) {
-    return doio(LAMBDA(::send(fd, buf, count, flags)),
-                    LAMBDA_TIMEOUT(photon::wait_for_fd_writable(fd, timeout)));
+    return DOIO(::send(fd, buf, count, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t sendmsg(int fd, const struct msghdr* msg, int flags, Timeout timeout) {
-    return doio(LAMBDA(::sendmsg(fd, msg, flags)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_writable(fd, timeout)));
+    return DOIO(::sendmsg(fd, msg, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t recv(int fd, void* buf, size_t count, int flags, Timeout timeout) {
-    return doio(LAMBDA(::recv(fd, buf, count, flags)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    return DOIO(::recv(fd, buf, count, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t recvmsg(int fd, struct msghdr* msg, int flags, Timeout timeout) {
-    return doio(LAMBDA(::recvmsg(fd, msg, flags)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_readable(fd, timeout)));
+    return DOIO(::recvmsg(fd, msg, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     msghdr msg = {};
     msg.msg_iov = (struct iovec*)iov;
     msg.msg_iovlen = iovcnt;
-    return doio(LAMBDA(::sendmsg(fd, &msg, flag | MSG_NOSIGNAL)),
-                       LAMBDA_TIMEOUT(photon::wait_for_fd_writable(fd, timeout)));
+    return DOIO(::sendmsg(fd, &msg, flag | MSG_NOSIGNAL), wait_for_fd_writable(fd, timeout));
 }
+
 ssize_t send_n(int fd, const void *buf, size_t count, int flag, Timeout timeout) {
-    return doio_n((void *&)buf, count,
-                LAMBDA_TIMEOUT(send(fd, (const void*)buf, (size_t)count, flag, timeout)));
+    return DOIO_N((void*&)buf, count, send(fd, buf, count, flag, timeout));
 }
 
 ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return doiov_n(v, LAMBDA_TIMEOUT(sendv(fd, (struct iovec*)v.iov, (int)v.iovcnt, flag, timeout)));
+    return DOIOV_N(v, sendv(fd, v.iov, v.iovcnt, flag, timeout));
 }
+
 ssize_t write(int fd, const void *buf, size_t count, Timeout timeout) {
     return send(fd, buf, count, MSG_NOSIGNAL, timeout);
 }
+
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt, Timeout timeout) {
     return sendv(fd, iov, iovcnt, 0, timeout);
 }
+
 ssize_t write_n(int fd, const void *buf, size_t count, Timeout timeout) {
     return send_n(fd, buf, count, 0, timeout);
 }
+
 ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
     return sendv_n(fd, iov, iovcnt, 0, timeout);
 }
 
-ssize_t sendfile_fallback(ISocketStream* out_stream,
+ssize_t sendfile_n(ISocketStream* out_stream,
             int in_fd, off_t offset, size_t count, Timeout timeout) {
     char buf[64 * 1024];
     void* ptr_unused = nullptr;
@@ -352,12 +337,9 @@ static ssize_t recv_errqueue(int fd, uint32_t &ret_counter) {
     return 0;
 }
 
-static int64_t read_counter(int fd, Timeout timeout) {
-    uint32_t counter = 0;
-    auto ret = doio(LAMBDA(recv_errqueue(fd, counter)),
-                LAMBDA_TIMEOUT(photon::wait_for_fd_error(fd, timeout)));
-    if (ret < 0) return ret;
-    return counter;
+static int read_counter(int fd, uint32_t &ret_counter, Timeout timeout) {
+    return DOIO(recv_errqueue(fd, ret_counter),
+            wait_for_fd_error(fd, timeout));
 }
 
 inline bool is_counter_less_than(uint32_t left, uint32_t right) {
@@ -366,12 +348,10 @@ inline bool is_counter_less_than(uint32_t left, uint32_t right) {
 }
 
 ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout) {
-    auto func = LAMBDA_TIMEOUT(read_counter(fd, timeout));
     uint32_t counter = 0;
     do {
-        auto ret = func();
+        auto ret = read_counter(fd, counter, timeout);
         if (ret < 0) return ret;
-        counter = ret;
     } while (is_counter_less_than(counter, num_calls));
     return 0;
 }

@@ -383,7 +383,7 @@ public:
     }
 
     ssize_t sendfile(int fd, off_t offset, size_t count) override {
-        return sendfile_fallback(this, fd, offset, count);
+        return sendfile_n(this, fd, offset, count);
     }
 
     int shutdown(ShutdownHow) override { return SSL_shutdown(ssl); }
