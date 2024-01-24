@@ -126,7 +126,7 @@ struct BufAdv {
     BufAdv(void*& buf, size_t& count) : buf(buf), count(count) { }
     BufAdv(size_t& count) : buf(_dummy), count(count) { }
     bool operator()(size_t ret, size_t n) __INLINE__ {
-        assert(0 < ret && ret < count);
+        assert(0 <= ret && ret <= count);
         (char*&)buf += ret;
         count -= ret;
         return count > 0;
