@@ -86,8 +86,8 @@ int set_socket_nonblocking(int fd);
 #define LAMBDA(expr) [&]() __INLINE__ { return expr; }
 #define LAMBDA_TIMEOUT(expr)  LAMBDA(expr)
 
-template <typename IOCB, typename WAIT>
-__FORCE_INLINE__ int doio_once(IOCB iocb, WAIT waitcb) {
+template <typename IOCB, typename WAIT> __FORCE_INLINE__
+int doio_once(IOCB iocb, WAIT waitcb) {
     while (true) {
         ssize_t ret = iocb();
         if (ret < 0) {
@@ -105,7 +105,6 @@ __FORCE_INLINE__ int doio_once(IOCB iocb, WAIT waitcb) {
     }
 }
 
-// #define DOIO(iocb, waitcb)      doio_once(LAMBDA(iocb), LAMBDA(waitcb))
 #define DOIO_ONCE(iocb, waitcb) doio_once(LAMBDA(iocb), LAMBDA(waitcb))
 
 template <typename IOCB, typename ADV> __FORCE_INLINE__
