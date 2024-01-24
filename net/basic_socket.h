@@ -70,7 +70,7 @@ ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, si
     return sendfile_n(out_stream, in_fd, offset, count, timeout);
 }
 
-ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
+int zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
 
 ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout = {});
 

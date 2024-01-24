@@ -294,7 +294,7 @@ int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count) {
 }
 
 #ifdef __linux__
-static ssize_t recv_errqueue(int fd, uint32_t &ret_counter) {
+static int recv_errqueue(int fd, uint32_t &ret_counter) {
     char control[128];
     msghdr msg = {};
     msg.msg_control = control;
@@ -325,10 +325,10 @@ inline bool is_counter_less_than(uint32_t left, uint32_t right) {
     return (left < right) || (left > right && left > mid && right - left < mid);
 }
 
-ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout) {
+int zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout) {
     uint32_t counter = 0;
     do {
-        auto ret = DOIO_ONCE(recv_errqueue(fd, ret_counter),
+        auto ret = DOIO_ONCE(recv_errqueue(fd, counter),
                          wait_for_fd_error(fd, timeout));
         if (ret < 0) return ret;
     } while (is_counter_less_than(counter, num_calls));
