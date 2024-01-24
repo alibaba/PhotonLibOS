@@ -72,7 +72,7 @@ public:
     virtual uint64_t max_message_size() override { return m_max_msg_size; }
 
     int do_connect(struct sockaddr* addr, size_t addr_len) {
-        return DOIO(::connect(fd, addr, addr_len), wait_for_fd_writable(fd));
+        return DOIO_ONCE(::connect(fd, addr, addr_len), wait_for_fd_writable(fd));
     }
 
     int do_bind(struct sockaddr* addr, size_t addr_len) {
@@ -90,7 +90,7 @@ public:
             .msg_controllen = 0,
             .msg_flags = 0,
         };
-        return DOIO(::sendmsg(fd, &hdr, MSG_DONTWAIT | flags),
+        return DOIO_ONCE(::sendmsg(fd, &hdr, MSG_DONTWAIT | flags),
                      wait_for_fd_writable(fd));
     }
     ssize_t do_recv(const iovec* iov, int iovcnt, sockaddr* addr,
@@ -104,7 +104,7 @@ public:
             .msg_controllen = 0,
             .msg_flags = 0,
         };
-        auto ret = DOIO(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
+        auto ret = DOIO_ONCE(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
                          wait_for_fd_writable(fd));
         if (addrlen) *addrlen = hdr.msg_namelen;
         return ret;

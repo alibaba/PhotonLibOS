@@ -197,7 +197,7 @@ namespace net {
             return getsockopt(level, option_name, value, &len);
         }
 
-        // get/set timeout, in us, (default +∞)
+        // get/set default timeout, in us, (default +∞)
         virtual uint64_t timeout() const = 0;
         virtual void timeout(uint64_t tm) = 0;
     };

@@ -89,23 +89,23 @@ public:
     }
     ssize_t read(void* buf, size_t count) override {
         Timeout timeout(m_timeout);
-        return DOIO_N(buf, count, do_recv(fd, buf, count, 0, timeout));
+        return DOIO_LOOP(do_recv(fd, buf, count, 0, timeout), BufAdv(buf, count));
     }
     ssize_t readv(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
         Timeout timeout(m_timeout);
-        return DOIOV_N(view, do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout));
+        return DOIO_LOOP(do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout), VBufAdv(view));
     }
     ssize_t write(const void* buf, size_t count) override {
         Timeout timeout(m_timeout);
-        return DOIO_N((void*&)buf, count, do_send(fd, buf, count, MSG_NOSIGNAL, timeout));
+        return DOIO_LOOP(do_send(fd, buf, count, MSG_NOSIGNAL, timeout), BufAdv((void*&)buf, count));
     }
     ssize_t writev(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
         Timeout timeout(m_timeout);
-        return DOIOV_N(view, do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout));
+        return DOIO_LOOP(do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout), VBufAdv(view));
     }
     ssize_t recv(void* buf, size_t count, int flags = 0) override {
         return do_recv(fd, buf, count, flags, m_timeout);
@@ -893,8 +893,7 @@ public:
     }
 
     ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
-        void* buf_unused = nullptr;
-        return DOIO_N(buf_unused, count, do_sendfile(in_fd, offset, count));
+        return DOIO_LOOP(do_sendfile(in_fd, offset, count), BufAdv(count));
     }
 
 private:

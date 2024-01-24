@@ -57,10 +57,12 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+// POSIX standard
 int set_fd_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     return (flags < 0) ? flags : fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
+
 int set_socket_nonblocking(int fd) {
 #ifdef __APPLE__
     return set_fd_nonblocking(fd);
@@ -69,6 +71,7 @@ int set_socket_nonblocking(int fd) {
     return ioctl(fd, FIONBIO, &flags);
 #endif
 }
+
 int socket(int domain, int type, int protocol) {
 #ifdef __APPLE__
     auto fd = ::socket(domain, type, protocol);
@@ -112,7 +115,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
            Timeout timeout) {
 #ifdef __APPLE__
-    auto ret = DOIO(::accept(fd, addr, addrlen),
+    auto ret = DOIO_ONCE(::accept(fd, addr, addrlen),
                     wait_for_fd_readable(fd, timeout));
     if (ret > 0) {
         set_fd_nonblocking(ret);
@@ -121,13 +124,13 @@ int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
     }
     return ret;
 #else
-    return DOIO(::accept4(fd, addr, addrlen, SOCK_NONBLOCK),
+    return DOIO_ONCE(::accept4(fd, addr, addrlen, SOCK_NONBLOCK),
                  wait_for_fd_readable(fd, timeout));
 #endif
 }
 
 ssize_t read(int fd, void *buf, size_t count, Timeout timeout) {
-    return DOIO(::read(fd, buf, count), wait_for_fd_readable(fd, timeout));
+    return DOIO_ONCE(::read(fd, buf, count), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt, Timeout timeout) {
@@ -135,69 +138,68 @@ ssize_t readv(int fd, const struct iovec *iov, int iovcnt, Timeout timeout) {
         errno = EINVAL;
         return -1;
     }
-    return (iovcnt == 1) ?
-        read(fd, iov->iov_base, iov->iov_len, timeout) :
-        DOIO(::readv(fd, iov, iovcnt), wait_for_fd_readable(fd, timeout));
+    return (iovcnt == 1) ? read(fd, iov->iov_base, iov->iov_len, timeout) :
+        DOIO_ONCE(::readv(fd, iov, iovcnt), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                  Timeout timeout) {
 #ifdef __APPLE__
     off_t len = count;
-    ssize_t ret = DOIO(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0),
-             wait_for_fd_writable(out_fd, timeout));
+    ssize_t ret = DOIO_ONCE(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0),
+                  wait_for_fd_writable(out_fd, timeout));
     return (ret == 0) ? len : (int)ret;
 #else
-    return DOIO(::sendfile(out_fd, in_fd, offset, count),
-      wait_for_fd_writable(out_fd, timeout));
+    return DOIO_ONCE(::sendfile(out_fd, in_fd, offset, count),
+           wait_for_fd_writable(out_fd, timeout));
 #endif
 }
 
 ssize_t read_n(int fd, void *buf, size_t count, Timeout timeout) {
-    return DOIO_N(buf, count, read(fd, buf, count, timeout));
+    return DOIO_LOOP(read(fd, buf, count, timeout), BufAdv(buf, count));
 }
 
 ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    Timeout timeout) {
-    void* buf_unused = nullptr;
-    return DOIO_N(buf_unused, count, sendfile(out_fd, in_fd, offset, count, timeout));
+    return DOIO_LOOP(sendfile(out_fd, in_fd, offset, count, timeout), BufAdv(count));
 }
 
 ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return DOIOV_N(v, readv(fd, v.iov, v.iovcnt, timeout));
+    return DOIO_LOOP(readv(fd, v.iov, v.iovcnt, timeout), VBufAdv(v));
 }
 
 ssize_t send(int fd, const void *buf, size_t count, int flags, Timeout timeout) {
-    return DOIO(::send(fd, buf, count, flags), wait_for_fd_writable(fd, timeout));
+    return DOIO_ONCE(::send(fd, buf, count, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t sendmsg(int fd, const struct msghdr* msg, int flags, Timeout timeout) {
-    return DOIO(::sendmsg(fd, msg, flags), wait_for_fd_writable(fd, timeout));
+    return DOIO_ONCE(::sendmsg(fd, msg, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t recv(int fd, void* buf, size_t count, int flags, Timeout timeout) {
-    return DOIO(::recv(fd, buf, count, flags), wait_for_fd_readable(fd, timeout));
+    return DOIO_ONCE(::recv(fd, buf, count, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t recvmsg(int fd, struct msghdr* msg, int flags, Timeout timeout) {
-    return DOIO(::recvmsg(fd, msg, flags), wait_for_fd_readable(fd, timeout));
+    return DOIO_ONCE(::recvmsg(fd, msg, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     msghdr msg = {};
     msg.msg_iov = (struct iovec*)iov;
     msg.msg_iovlen = iovcnt;
-    return DOIO(::sendmsg(fd, &msg, flag | MSG_NOSIGNAL), wait_for_fd_writable(fd, timeout));
+    return DOIO_ONCE(::sendmsg(fd, &msg, flag | MSG_NOSIGNAL),
+          wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t send_n(int fd, const void *buf, size_t count, int flag, Timeout timeout) {
-    return DOIO_N((void*&)buf, count, send(fd, buf, count, flag, timeout));
+    return DOIO_LOOP(send(fd, buf, count, flag, timeout), BufAdv((void*&)buf, count));
 }
 
 ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return DOIOV_N(v, sendv(fd, v.iov, v.iovcnt, flag, timeout));
+    return DOIO_LOOP(sendv(fd, v.iov, v.iovcnt, flag, timeout), VBufAdv(v));
 }
 
 ssize_t write(int fd, const void *buf, size_t count, Timeout timeout) {
@@ -219,7 +221,6 @@ ssize_t writev_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
 ssize_t sendfile_n(ISocketStream* out_stream,
             int in_fd, off_t offset, size_t count, Timeout timeout) {
     char buf[64 * 1024];
-    void* ptr_unused = nullptr;
     auto func = [&]() -> ssize_t {
         size_t s = sizeof(buf);
         if (s > count) s = count;
@@ -232,46 +233,29 @@ ssize_t sendfile_n(ISocketStream* out_stream,
             LOG_ERRNO_RETURN(0, (ssize_t)-1, "failed to write to stream ", out_stream);
         return n_write;
     };
-    return doio_n(ptr_unused, count, func);
+    return doio_loop(func, BufAdv(count));
 }
 
 bool ISocketStream::skip_read(size_t count) {
-    if (!count) return true;
-    while(count) {
-        static char buf[1024];
-        size_t len = count < sizeof(buf) ? count : sizeof(buf);
-        ssize_t ret = read(buf, len);
-        if (ret < (ssize_t)len) return false;
-        count -= len;
-    }
-    return true;
+    static char buf[1024];
+    return DOIO_LOOP(read(buf, std::min(count, sizeof(buf))), BufAdv(count));
 }
 
 ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
-    size_t n = 0;
-    do {
-        ssize_t ret = this->recv(buf, count, flags);
-        if (ret < 0) return ret;
-        if (ret == 0) break;    // EOF
-        if ((n += ret) >= least) break;
+    return DOIO_LOOP_LAMBDA(recv(buf, count, flags), {
         count -= ret;
-    } while (count);
-    return n;
+        return n < least;
+    });
 }
 
 ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
                                              size_t least, int flags /*=0*/) {
-    size_t n = 0;
     iovector_view v(iov, iovcnt);
-    do {
-        ssize_t ret = this->recv(v.iov, v.iovcnt, flags);
-        if (ret < 0) return ret;
-        if (ret == 0) break;    // EOF
-        if ((n += ret) >= least) break;
+    return DOIO_LOOP_LAMBDA(recv(v.iov, v.iovcnt, flags), {
         auto r = v.extract_front(ret);
         assert((ssize_t) r == ret); (void)r;
-    } while (v.iovcnt && v.iov->iov_len);
-    return n;
+        return n < least;
+    });
 }
 
 int do_get_name(int fd, Getter getter, EndPoint& addr) {
@@ -298,8 +282,7 @@ int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count) {
     const int LEN = sizeof(name.sun_path) - 1;
     if (count == 0) count = strlen(path);
     if (count > LEN)
-        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname is too long (`>`)", count,
-                         LEN);
+        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname is too long (`>`)", count, LEN);
 
     memset(&name, 0, sizeof(name));
     memcpy(name.sun_path, path, count + 1);
@@ -337,11 +320,6 @@ static ssize_t recv_errqueue(int fd, uint32_t &ret_counter) {
     return 0;
 }
 
-static int read_counter(int fd, uint32_t &ret_counter, Timeout timeout) {
-    return DOIO(recv_errqueue(fd, ret_counter),
-            wait_for_fd_error(fd, timeout));
-}
-
 inline bool is_counter_less_than(uint32_t left, uint32_t right) {
     const uint32_t mid = UINT32_MAX / 2;
     return (left < right) || (left > right && left > mid && right - left < mid);
@@ -350,7 +328,8 @@ inline bool is_counter_less_than(uint32_t left, uint32_t right) {
 ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout) {
     uint32_t counter = 0;
     do {
-        auto ret = read_counter(fd, counter, timeout);
+        auto ret = DOIO_ONCE(recv_errqueue(fd, ret_counter),
+                         wait_for_fd_error(fd, timeout));
         if (ret < 0) return ret;
     } while (is_counter_less_than(counter, num_calls));
     return 0;
