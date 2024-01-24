@@ -63,11 +63,14 @@ ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    Timeout timeout = {});
 
 class ISocketStream;
-ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {});
+ssize_t sendfile_n(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {});
 
-ssize_t zerocopy_n(int fd, iovec* iov, int iovcnt, uint32_t& num_calls, Timeout timeout = {});
+[[deprecated("use sendfile_n() instead")]] inline
+ssize_t sendfile_fallback(ISocketStream* out_stream, int in_fd, off_t offset, size_t count, Timeout timeout = {}) {
+    return sendfile_n(out_stream, in_fd, offset, count, timeout);
+}
 
-ssize_t zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
+int zerocopy_confirm(int fd, uint32_t num_calls, Timeout timeout = {});
 
 ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout = {});
 
@@ -75,15 +78,16 @@ ssize_t send_n(int fd, const void *buf, size_t count, int flag, Timeout timeout 
 
 ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, Timeout timeout = {});
 
-int set_socket_nonblocking(int fd);
-
+// POSIX standard
 int set_fd_nonblocking(int fd);
+
+int set_socket_nonblocking(int fd);
 
 #define LAMBDA(expr) [&]() __INLINE__ { return expr; }
 #define LAMBDA_TIMEOUT(expr)  LAMBDA(expr)
 
-template <typename IOCB, typename WAIT>
-__FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {
+template <typename IOCB, typename WAIT> __FORCE_INLINE__
+int doio_once(IOCB iocb, WAIT waitcb) {
     while (true) {
         ssize_t ret = iocb();
         if (ret < 0) {
@@ -101,36 +105,48 @@ __FORCE_INLINE__ int doio(IOCB iocb, WAIT waitcb) {
     }
 }
 
-template <typename IOCB>
-__FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
-    ssize_t n = 0;
-    while (count > 0) {
-        ssize_t ret = iocb();
-        if (ret < 0) return ret; // error
-        if (ret == 0) break; // EOF
-        (char *&)buf += ret;
-        count -= ret;
+#define DOIO_ONCE(iocb, waitcb) doio_once(LAMBDA(iocb), LAMBDA(waitcb))
+
+template <typename IOCB, typename STEP> __FORCE_INLINE__
+ssize_t doio_loop(IOCB iocb, STEP step) {
+    ssize_t ret, n = 0;
+    do {
+        ret = iocb();
+        if (ret <  0) return ret; // error
+        if (ret == 0) break;  // EOF
         n += ret;
-    }
+    } while (step(ret, n));
     return n;
 }
 
-template <typename IOCB>
-__FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
-    ssize_t count = 0;
-    while (v.iovcnt > 0) {
-        ssize_t ret = iocb();
-        if (ret < 0) return ret;
-        if (ret == 0) break;
-        count += ret;
-
-        uint64_t bytes = ret;
-        auto extracted = v.extract_front(bytes);
-        assert(extracted == bytes);
-        _unused(extracted);
+struct BufStep {
+    void*& buf;
+    size_t& count;
+    void* _dummy;
+    BufStep(void*& buf, size_t& count) : buf(buf), count(count) { }
+    BufStep(size_t& count) : buf(_dummy), count(count) { }
+    bool operator()(size_t ret, size_t n) __INLINE__ {
+        assert(ret <= count);
+        (char*&)buf += ret;
+        count -= ret;
+        return count > 0;
     }
-    return count;
-}
+};
+
+struct BufStepV {
+    iovector_view& v;
+    BufStepV(iovector_view& v) : v(v) { }
+    bool operator()(size_t ret, size_t n) __INLINE__ {
+        auto extracted = v.extract_front(ret);
+        assert(extracted == ret);
+        _unused(extracted);
+        return v.iovcnt > 0;
+    }
+};
+
+#define DOIO_LOOP(iocb, step)        doio_loop(LAMBDA(iocb), step)
+#define DOIO_LOOP_LAMBDA(iocb, step) doio_loop(LAMBDA(iocb), \
+    [&](size_t ret, size_t n) __INLINE__ { step; })
 
 int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count);
 

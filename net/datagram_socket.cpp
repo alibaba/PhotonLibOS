@@ -72,8 +72,7 @@ public:
     virtual uint64_t max_message_size() override { return m_max_msg_size; }
 
     int do_connect(struct sockaddr* addr, size_t addr_len) {
-        return doio([&] { return ::connect(fd, addr, addr_len); },
-                    [&] { return photon::wait_for_fd_writable(fd); });
+        return DOIO_ONCE(::connect(fd, addr, addr_len), wait_for_fd_writable(fd));
     }
 
     int do_bind(struct sockaddr* addr, size_t addr_len) {
@@ -83,13 +82,16 @@ public:
                     size_t addrlen, int flags = 0) {
         flags |= MSG_NOSIGNAL;
         struct msghdr hdr {
-            .msg_name = (void*)addr, .msg_namelen = (socklen_t)addrlen,
+            .msg_name = (void*)addr,
+            .msg_namelen = (socklen_t)addrlen,
             .msg_iov = (iovec*)iov,
             .msg_iovlen = (decltype(msghdr::msg_iovlen))iovcnt,
-            .msg_control = nullptr, .msg_controllen = 0, .msg_flags = flags,
+            .msg_control = nullptr,
+            .msg_controllen = 0,
+            .msg_flags = 0,
         };
-        return doio([&] { return ::sendmsg(fd, &hdr, MSG_DONTWAIT | flags); },
-                    [&] { return photon::wait_for_fd_writable(fd); });
+        return DOIO_ONCE(::sendmsg(fd, &hdr, MSG_DONTWAIT | flags),
+                     wait_for_fd_writable(fd));
     }
     ssize_t do_recv(const iovec* iov, int iovcnt, sockaddr* addr,
                     size_t* addrlen, int flags) {
@@ -98,11 +100,12 @@ public:
             .msg_namelen = addrlen ? (socklen_t)*addrlen : 0,
             .msg_iov = (iovec*)iov,
             .msg_iovlen = (decltype(msghdr::msg_iovlen))iovcnt,
-            .msg_control = nullptr, .msg_controllen = 0, .msg_flags = flags,
+            .msg_control = nullptr,
+            .msg_controllen = 0,
+            .msg_flags = 0,
         };
-        auto ret =
-            doio([&] { return ::recvmsg(fd, &hdr, MSG_DONTWAIT | flags); },
-                 [&] { return photon::wait_for_fd_readable(fd); });
+        auto ret = DOIO_ONCE(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
+                         wait_for_fd_writable(fd));
         if (addrlen) *addrlen = hdr.msg_namelen;
         return ret;
     }

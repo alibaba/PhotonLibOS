@@ -280,8 +280,8 @@ int fstack_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
 }
 
 int fstack_accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen, Timeout timeout) {
-    return net::doio(LAMBDA(ff_accept(sockfd, (linux_sockaddr*) addr, addrlen)),
-                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+    return DOIO_ONCE(ff_accept(sockfd, (linux_sockaddr*) addr, addrlen),
+        g_engine->wait_for_fd_readable(sockfd, timeout));
 }
 
 int fstack_close(int fd) {
@@ -293,23 +293,23 @@ int fstack_shutdown(int sockfd, int how) {
 }
 
 ssize_t fstack_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) {
-    return net::doio(LAMBDA(ff_send(sockfd, buf, count, flags)),
-                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
+    return DOIO_ONCE(ff_send(sockfd, buf, count, flags),
+        g_engine->wait_for_fd_writable(sockfd, timeout));
 }
 
 ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) {
-    return net::doio(LAMBDA(ff_sendmsg(sockfd, message, flags)),
-                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
+    return DOIO_ONCE(ff_sendmsg(sockfd, message, flags),
+        g_engine->wait_for_fd_writable(sockfd, timeout));
 }
 
 ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
-    return net::doio(LAMBDA(ff_recv(sockfd, buf, count, flags)),
-                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+    return DOIO_ONCE(ff_recv(sockfd, buf, count, flags),
+        g_engine->wait_for_fd_writable(sockfd, timeout));
 }
 
 ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
-    return net::doio(LAMBDA(ff_recvmsg(sockfd, message, flags)),
-                     LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+    return DOIO_ONCE(ff_recvmsg(sockfd, message, flags),
+        g_engine->wait_for_fd_writable(sockfd, timeout));
 }
 
 int fstack_setsockopt(int socket, int level, int option_name, const void* option_value, socklen_t option_len) {
