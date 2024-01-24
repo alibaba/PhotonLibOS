@@ -107,35 +107,35 @@ int doio_once(IOCB iocb, WAIT waitcb) {
 
 #define DOIO_ONCE(iocb, waitcb) doio_once(LAMBDA(iocb), LAMBDA(waitcb))
 
-template <typename IOCB, typename ADV> __FORCE_INLINE__
-ssize_t doio_loop(IOCB iocb, ADV advance) {
+template <typename IOCB, typename STEP> __FORCE_INLINE__
+ssize_t doio_loop(IOCB iocb, STEP step) {
     ssize_t ret, n = 0;
     do {
         ret = iocb();
         if (ret <  0) return ret; // error
         if (ret == 0) break;  // EOF
         n += ret;
-    } while (advance(ret, n));
+    } while (step(ret, n));
     return n;
 }
 
-struct BufAdv {
+struct BufStep {
     void*& buf;
     size_t& count;
     void* _dummy;
-    BufAdv(void*& buf, size_t& count) : buf(buf), count(count) { }
-    BufAdv(size_t& count) : buf(_dummy), count(count) { }
+    BufStep(void*& buf, size_t& count) : buf(buf), count(count) { }
+    BufStep(size_t& count) : buf(_dummy), count(count) { }
     bool operator()(size_t ret, size_t n) __INLINE__ {
-        assert(0 <= ret && ret <= count);
+        assert(ret <= count);
         (char*&)buf += ret;
         count -= ret;
         return count > 0;
     }
 };
 
-struct VBufAdv {
+struct BufStepV {
     iovector_view& v;
-    VBufAdv(iovector_view& v) : v(v) { }
+    BufStepV(iovector_view& v) : v(v) { }
     bool operator()(size_t ret, size_t n) __INLINE__ {
         auto extracted = v.extract_front(ret);
         assert(extracted == ret);
@@ -144,9 +144,9 @@ struct VBufAdv {
     }
 };
 
-#define DOIO_LOOP(iocb, adv)        doio_loop(LAMBDA(iocb), adv)
-#define DOIO_LOOP_LAMBDA(iocb, adv) doio_loop(LAMBDA(iocb), \
-    [&](size_t ret, size_t n) __INLINE__ { adv; })
+#define DOIO_LOOP(iocb, step)        doio_loop(LAMBDA(iocb), step)
+#define DOIO_LOOP_LAMBDA(iocb, step) doio_loop(LAMBDA(iocb), \
+    [&](size_t ret, size_t n) __INLINE__ { step; })
 
 int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count);
 

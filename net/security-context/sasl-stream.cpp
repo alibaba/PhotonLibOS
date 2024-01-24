@@ -165,7 +165,7 @@ class SaslSocketStream : public ForwardSocketStream {
     }
 
     ssize_t write(const void *buf, size_t cnt) override {
-        return DOIO_LOOP(send(buf, cnt), BufAdv((void*&)buf, cnt));
+        return DOIO_LOOP(send(buf, cnt), BufStep((void*&)buf, cnt));
     }
 
     ssize_t writev(const struct iovec *iov, int iovcnt) override {
@@ -179,7 +179,7 @@ class SaslSocketStream : public ForwardSocketStream {
     }
 
     ssize_t read(void *buf, size_t cnt) override {
-        return DOIO_LOOP(recv(buf, cnt), BufAdv((void*&)buf, cnt));
+        return DOIO_LOOP(recv(buf, cnt), BufStep((void*&)buf, cnt));
     }
 
     ssize_t readv(const struct iovec *iov, int iovcnt) override {

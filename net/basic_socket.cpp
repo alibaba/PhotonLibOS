@@ -156,17 +156,17 @@ ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
 }
 
 ssize_t read_n(int fd, void *buf, size_t count, Timeout timeout) {
-    return DOIO_LOOP(read(fd, buf, count, timeout), BufAdv(buf, count));
+    return DOIO_LOOP(read(fd, buf, count, timeout), BufStep(buf, count));
 }
 
 ssize_t sendfile_n(int out_fd, int in_fd, off_t *offset, size_t count,
                    Timeout timeout) {
-    return DOIO_LOOP(sendfile(out_fd, in_fd, offset, count, timeout), BufAdv(count));
+    return DOIO_LOOP(sendfile(out_fd, in_fd, offset, count, timeout), BufStep(count));
 }
 
 ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return DOIO_LOOP(readv(fd, v.iov, v.iovcnt, timeout), VBufAdv(v));
+    return DOIO_LOOP(readv(fd, v.iov, v.iovcnt, timeout), BufStepV(v));
 }
 
 ssize_t send(int fd, const void *buf, size_t count, int flags, Timeout timeout) {
@@ -194,12 +194,12 @@ ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout tim
 }
 
 ssize_t send_n(int fd, const void *buf, size_t count, int flag, Timeout timeout) {
-    return DOIO_LOOP(send(fd, buf, count, flag, timeout), BufAdv((void*&)buf, count));
+    return DOIO_LOOP(send(fd, buf, count, flag, timeout), BufStep((void*&)buf, count));
 }
 
 ssize_t sendv_n(int fd, struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     iovector_view v(iov, iovcnt);
-    return DOIO_LOOP(sendv(fd, v.iov, v.iovcnt, flag, timeout), VBufAdv(v));
+    return DOIO_LOOP(sendv(fd, v.iov, v.iovcnt, flag, timeout), BufStepV(v));
 }
 
 ssize_t write(int fd, const void *buf, size_t count, Timeout timeout) {
@@ -233,12 +233,12 @@ ssize_t sendfile_n(ISocketStream* out_stream,
             LOG_ERRNO_RETURN(0, (ssize_t)-1, "failed to write to stream ", out_stream);
         return n_write;
     };
-    return doio_loop(func, BufAdv(count));
+    return doio_loop(func, BufStep(count));
 }
 
 bool ISocketStream::skip_read(size_t count) {
     static char buf[1024];
-    return DOIO_LOOP(read(buf, std::min(count, sizeof(buf))), BufAdv(count));
+    return DOIO_LOOP(read(buf, std::min(count, sizeof(buf))), BufStep(count));
 }
 
 ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
