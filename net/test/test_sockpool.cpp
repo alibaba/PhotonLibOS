@@ -31,8 +31,7 @@ TEST(Socket, pooled) {
     int conncount = 0;
     server->bind();
     server->listen();
-    auto ep = photon::net::EndPoint(photon::net::IPAddr("127.0.0.1"),
-                                    server->getsockname().port);
+    auto ep = server->getsockname();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
         DEFER(LOG_INFO("Done connection `", stream));
@@ -56,8 +55,7 @@ TEST(Socket, pooled_multisock) {
     int conncount = 0;
     server->bind();
     server->listen();
-    auto ep = photon::net::EndPoint(photon::net::IPAddr("127.0.0.1"),
-                                    server->getsockname().port);
+    auto ep = server->getsockname();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
         DEFER(LOG_INFO("Done connection `", stream));
@@ -88,8 +86,7 @@ TEST(Socket, pooled_multisock_serverclose) {
     int conncount = 0;
     server->bind();
     server->listen();
-    auto ep = photon::net::EndPoint(photon::net::IPAddr("127.0.0.1"),
-                                    server->getsockname().port);
+    auto ep = server->getsockname();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
         DEFER(LOG_INFO("Done connection `", stream));
@@ -147,8 +144,7 @@ TEST(Socket, pooled_expiration) {
     int conncount = 0;
     server->bind();
     server->listen();
-    auto ep = photon::net::EndPoint(photon::net::IPAddr("127.0.0.1"),
-                                    server->getsockname().port);
+    auto ep = server->getsockname();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
         DEFER(LOG_INFO("Done connection `", stream));
