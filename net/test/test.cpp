@@ -316,7 +316,7 @@ void et_tcp_client() {
     auto cli = new_et_tcp_socket_client();
     DEFER({ delete cli; });
     LOG_DEBUG("Connecting");
-    auto sock = cli->connect(epet->getsockname());
+    auto sock = cli->connect(epet);
     DEFER(delete sock);
     LOG_DEBUG(VALUE(sock), VALUE(errno));
     char buff[] = "Hello";
@@ -766,7 +766,7 @@ TEST(ZeroCopySocket, basic) {
 
     auto client = new_tcp_socket_client();
     DEFER(delete client);
-    auto conn = client->connect(ep_dst, ep_src);
+    auto conn = client->connect(ep_dst, &ep_src);
     ASSERT_NE(conn, nullptr);
     DEFER(delete conn);
 
