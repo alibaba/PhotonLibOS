@@ -21,50 +21,38 @@ limitations under the License.
 #include <photon/thread/thread-pool.h>
 #include <photon/thread/workerpool.h>
 
+using namespace photon;
+
 static constexpr uint64_t N = 10000;
 
-uint64_t do_test(int mode) {
-    photon::WorkPool pool(4, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE,
-                          mode);
-    photon::semaphore sem(0);
-    auto start = photon::now;
+void do_test(int pool_mode, const PhotonOptions& options) {
+    init(INIT_EVENT_DEFAULT, INIT_IO_NONE, options);
+    WorkPool pool(4, INIT_EVENT_DEFAULT, INIT_IO_NONE, pool_mode);
+    semaphore sem(0);
+    auto start = now;
     for (int i = 0; i < N; i++) {
         pool.async_call(new auto([&] { sem.signal(1); }));
     }
     sem.wait(N);
-    auto done = photon::now;
-    return done - start;
+    LOG_TEMP("Spent ` us", now - start);
+    fini();
 }
 
 TEST(Normal, NoPool) {
-    photon::init();
-    DEFER(photon::fini());
-    auto spend = do_test(0);
-    LOG_TEMP("Spent ` us", spend);
+    do_test(0, {});
 }
 
 TEST(Normal, ThreadPool) {
-    photon::init();
-    DEFER(photon::fini());
-    auto spend = do_test(64);
-    LOG_TEMP("Spent ` us", spend);
+    do_test(64, {});
 }
 
 TEST(PooledAllocator, PooledStack) {
-    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT,
-                 {.use_pooled_stack_allocator = true});
-    DEFER(photon::fini());
-    auto spend = do_test(0);
-    LOG_TEMP("Spent ` us", spend);
+    do_test(0, {.use_pooled_stack_allocator = true});
 }
 
 TEST(PooledAllocator, BypassThreadPool) {
-    photon::init(
-        photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT,
-        {.use_pooled_stack_allocator = true, .bypass_threadpool = true});
-    DEFER(photon::fini());
-    auto spend = do_test(64);
-    LOG_TEMP("Spent ` us", spend);
+    do_test(64, {.use_pooled_stack_allocator = true,
+                 .bypass_threadpool = true});
 }
 
 int main(int argc, char** arg) {
