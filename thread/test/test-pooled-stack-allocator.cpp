@@ -36,20 +36,6 @@ uint64_t do_test(int mode) {
     return done - start;
 }
 
-TEST(Normal, NoPool) {
-    photon::init();
-    DEFER(photon::fini());
-    auto spend = do_test(0);
-    LOG_TEMP("Spent ` us", spend);
-}
-
-TEST(Normal, ThreadPool) {
-    photon::init();
-    DEFER(photon::fini());
-    auto spend = do_test(64);
-    LOG_TEMP("Spent ` us", spend);
-}
-
 TEST(PooledAllocator, PooledStack) {
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT,
                  {.use_pooled_stack_allocator = true});
