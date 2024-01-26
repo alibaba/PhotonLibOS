@@ -107,7 +107,7 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
     int fd;
     Timeout timeout;
 
-    StreamListNode(EndPoint key, ISocketStream* stream, int fd, uint64_t TTL_us)
+    StreamListNode(const EndPoint& key, ISocketStream* stream, int fd, uint64_t TTL_us)
         : key(key), stream(stream), fd(fd), timeout(TTL_us) {
     }
 };
@@ -135,7 +135,7 @@ protected:
         if (node->fd >= 0) ev->rm_interest({node->fd, EVENT_READ, node});
     }
 
-    ISocketStream* get_from_pool(EndPoint ep) {
+    ISocketStream* get_from_pool(const EndPoint& ep) {
         auto it = fdmap.find(ep);
         if (it == fdmap.end()) return nullptr;
         assert(it != fdmap.end());
@@ -189,8 +189,8 @@ public:
                          "Socket pool supports TCP-like socket only");
     }
 
-    ISocketStream* connect(EndPoint remote,
-                           EndPoint local = EndPoint()) override {
+    ISocketStream* connect(const EndPoint& remote,
+                           const EndPoint* local) override {
     again:
         auto stream = get_from_pool(remote);
         if (!stream) {
@@ -228,7 +228,7 @@ public:
         return sat_sub(near_expire, now);
     }
 
-    bool release(EndPoint ep, ISocketStream* stream) {
+    bool release(const EndPoint& ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
         if (!stream_alive(fd)) return false;
         auto node = new StreamListNode(ep, stream, fd, TTL_us);

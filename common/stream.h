@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <stdlib.h>
 #include <sys/types.h>
 #include <memory>
 #include <photon/common/object.h>

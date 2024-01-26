@@ -86,7 +86,7 @@ public:
         int ret = server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
         ASSERT_EQ(0, ret);
 
-        ret = server->bind(0, photon::net::IPAddr::V6Any());
+        ret = server->bind_any6();
         ASSERT_EQ(0, ret);
         ret = server->listen();
         ASSERT_EQ(0, ret);

@@ -293,7 +293,8 @@ class SaslSocketClient : public ForwardSocketClient {
     virtual ISocketStream *connect(const char *path, size_t count) override {
         return new_sasl_stream(session, m_underlay->connect(path, count), true);
     }
-    virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
+    virtual ISocketStream* connect(const EndPoint& remote,
+                                   const EndPoint* local) override {
         return new_sasl_stream(session, m_underlay->connect(remote, local), true);
     }
 };

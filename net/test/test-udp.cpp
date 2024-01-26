@@ -39,7 +39,7 @@ TEST(UDP, basic) {
     s1->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
     s2->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
 
-    EXPECT_EQ(0, s1->bind(EndPoint(IPAddr("127.0.0.1"), 0)));
+    EXPECT_EQ(0, s1->bind_localhost4());
     auto ep = s1->getsockname();
     LOG_INFO("Bind at ", ep);
 

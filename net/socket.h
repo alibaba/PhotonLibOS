@@ -172,8 +172,8 @@ namespace net {
     static_assert(sizeof(EndPoint) == 18, "Endpoint size incorrect");
 
     // operators to help with logging IP addresses
-    LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
-    LogBuffer& operator << (LogBuffer& log, const EndPoint ep);
+    LogBuffer& operator << (LogBuffer& log, const IPAddr& addr);
+    LogBuffer& operator << (LogBuffer& log, const EndPoint& ep);
 
     class ISocketBase {
     public:
@@ -243,16 +243,22 @@ namespace net {
     public:
         // Connect to a remote IPv4 endpoint.
         // If `local` endpoint is not empty, its address will be bind to the socket before connecting to the `remote`.
-        virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) = 0;
+        virtual ISocketStream* connect(const EndPoint& remote, const EndPoint* local = nullptr) = 0;
         // Connect to a Unix Domain Socket.
         virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
     };
 
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
-        virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
+        virtual int bind(const EndPoint& ep) = 0;
         virtual int bind(const char* path, size_t count) = 0;
+        int bind(uint16_t port = 0)      { return bind_any4(0); }
+        int bind_any4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
+        int bind_any6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
+        int bind_localhost4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
+        int bind_localhost6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
         int bind(const char* path) { return bind(path, strlen(path)); }
+
         virtual int listen(int backlog = 1024) = 0;
         virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
 

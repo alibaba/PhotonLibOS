@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/net/http/message.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
+#include "to_url.h"
 
 #include "../../test/cert-key.cpp"
 
@@ -55,11 +56,10 @@ TEST(client_tls, basic) {
     DEFER(delete tcpserver);
     tcpserver->timeout(1000UL*1000);
     tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-    auto addr = net::IPAddr::localhost();
-    int r = tcpserver->bind(19876, addr);
+    int r = tcpserver->bind_localhost4();
     if (r != 0)
-        LOG_ERRNO_RETURN(0, , "failed to bind to `:", addr, 19876);
-    LOG_DEBUG("bind to `:", addr, " : 19876");
+        LOG_ERRNO_RETURN(0, , "failed to bind to localhost");
+    LOG_DEBUG("bind to :", tcpserver->getsockname());
     tcpserver->listen();
 
     auto server = net::http::new_http_server();
@@ -71,7 +71,7 @@ TEST(client_tls, basic) {
 
     auto client = net::http::new_http_client(nullptr, ctx);
     DEFER(delete client);
-    auto op = client->new_operation(net::http::Verb::GET, "https://localhost:19876/test");
+    auto op = client->new_operation(net::http::Verb::GET, to_url(tcpserver, "/test"));
     DEFER(delete op);
     auto exp_len = 20;
     op->req.headers.range(0, exp_len - 1);

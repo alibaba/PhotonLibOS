@@ -356,14 +356,18 @@ public:
     }
     int run() {
         m_socket->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-        if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
+        if (m_socket->bind_localhost6() != 0)
+        // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");
         if (m_socket->listen() != 0)
             LOG_ERRNO_RETURN(0, -1, "listen failed");
+        m_endpoint = m_socket->getsockname();
+        LOG_DEBUG("bound to ", m_endpoint);
         return m_socket->start_loop(false);
     }
     net::ISocketServer* m_socket;
     Skeleton* m_skeleton;
+    photon::net::EndPoint m_endpoint;
 };
 
 static int do_call_2(Stub* stub) {
@@ -386,7 +390,8 @@ TEST_F(RpcTest, shutdown) {
     auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
     DEFER(delete pool);
 
-    photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
+    auto& ep = rpc_server.m_endpoint;
+    // photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
     auto stub = pool->get_stub(ep, false);
     ASSERT_NE(nullptr, stub);
     DEFER(pool->put_stub(ep, true));
@@ -423,8 +428,8 @@ TEST_F(RpcTest, passive_shutdown) {
     RpcServer rpc_server(sk, socket_server);
     GTEST_ASSERT_EQ(0, rpc_server.run());
 
-    photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
-
+    // photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
+    auto& ep = rpc_server.m_endpoint;
     photon::thread_create11([&]{
         // Should always succeed in 3 seconds
         auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
