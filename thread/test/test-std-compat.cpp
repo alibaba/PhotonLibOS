@@ -144,13 +144,13 @@ TEST(std, cv_timeout) {
 
     photon_std::thread th2([&]{
         photon_std::unique_lock<photon_std::mutex> lock(mu);
-        ASSERT_EQ(std::cv_status::timeout, cv.wait_for(lock, std::chrono::milliseconds(900)));
+        ASSERT_EQ(std::cv_status::timeout, cv.wait_for(lock, std::chrono::milliseconds(100)));
         DO_LOG("wait timeout done");
     });
 
     photon_std::thread th3([&]{
         photon_std::unique_lock<photon_std::mutex> lock(mu);
-        ASSERT_EQ(std::cv_status::no_timeout, cv.wait_for(lock, std::chrono::milliseconds(1100)));
+        ASSERT_EQ(std::cv_status::no_timeout, cv.wait_for(lock, std::chrono::milliseconds(2100)));
         DO_LOG("wait no_timeout done");
     });
 

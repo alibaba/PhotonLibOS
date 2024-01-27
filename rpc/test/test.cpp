@@ -376,7 +376,7 @@ static int do_call_2(Stub* stub) {
 }
 
 TEST_F(RpcTest, shutdown) {
-    auto socket_server = photon::net::new_tcp_socket_server_ipv4();
+    auto socket_server = photon::net::new_tcp_socket_server();
     GTEST_ASSERT_NE(nullptr, socket_server);
     DEFER(delete socket_server);
     auto sk = photon::rpc::new_skeleton();
@@ -417,7 +417,7 @@ TEST_F(RpcTest, shutdown) {
 }
 
 TEST_F(RpcTest, passive_shutdown) {
-    auto socket_server = photon::net::new_tcp_socket_server_ipv4();
+    auto socket_server = photon::net::new_tcp_socket_server();
     GTEST_ASSERT_NE(nullptr, socket_server);
     DEFER(delete socket_server);
     auto sk = photon::rpc::new_skeleton();
