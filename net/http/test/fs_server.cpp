@@ -29,7 +29,7 @@ using namespace photon;
 using namespace photon::net;
 using namespace photon::net::http;
 
-DEFINE_int32(port, 19876, "port");
+DEFINE_int32(port, 0, "port");
 
 static bool stop_flag = false;
 
@@ -47,8 +47,8 @@ int main(int argc, char** argv) {
     photon::sync_signal(SIGTSTP, &stop_handler);
 
     auto tcpserv = new_tcp_socket_server();
-    tcpserv->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserv->bind(FLAGS_port);
+    LOG_DEBUG("bound to ", tcpserv->getsockname());
     tcpserv->listen();
     DEFER(delete tcpserv);
 

@@ -39,7 +39,7 @@ photon::coro::FixedGenerator<photon::net::ISocketStream*> socket_accept(
 photon::coro::Coro<void> server(int port) {
     auto server = photon::net::new_tcp_socket_server();
     DEFER(delete server);
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+    server->setsockopt<int>(SOL_SOCKET, SO_REUSEPORT, 1);
     server->bind(port);
     server->listen();
     std::ranges::for_each(socket_accept(server), [&](auto sess) {

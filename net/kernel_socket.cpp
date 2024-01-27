@@ -78,8 +78,7 @@ public:
             fd = ::socket(socket_family, SOCK_STREAM, 0);
         }
         if (fd >= 0 && (socket_family == AF_INET || socket_family == AF_INET6)) {
-            int val = 1;
-            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+            setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
         }
     }
     ~KernelSocketStream() override {
@@ -281,9 +280,8 @@ public:
             LOG_ERRNO_RETURN(0, -1, "fail to setup listen fd");
         }
         if (m_socket_family == AF_INET || m_socket_family == AF_INET6) {
-            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0) {
-                LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt of TCP_NODELAY");
-            }
+            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0)
+                LOG_DEBUG("failed to set TCP_NODELAY");
         }
         return 0;
     }
@@ -320,7 +318,7 @@ public:
         auto s = sockaddr_storage(c ? EndPoint(IPAddr::V6Any(), ep.port) : ep);
         int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)
-            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", ep);
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
         return 0;
     }
 

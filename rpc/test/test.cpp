@@ -355,7 +355,6 @@ public:
         return m_skeleton->serve(stream);
     }
     int run() {
-        m_socket->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
         if (m_socket->bind_localhost6() != 0)
         // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");

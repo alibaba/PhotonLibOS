@@ -66,7 +66,7 @@ TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1L);
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
     tcpserver->bind_any4();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -158,7 +158,6 @@ TEST(http_client, post) {
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4(0);
     // tcpserver->bind(18731, IPAddr("127.0.0.1"));
     tcpserver->listen();
@@ -321,7 +320,6 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
 TEST(http_client, chunked) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler});
     auto ret = server->bind_localhost4();
     if (ret < 0) LOG_ERROR(VALUE(errno));
@@ -426,7 +424,6 @@ int chunked_handler_debug(void*, ISocketStream* sock) {
 TEST(http_client, debug) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
     auto ret = server->bind_localhost4();
     // auto ret = server->bind(ep.port, ep.addr);

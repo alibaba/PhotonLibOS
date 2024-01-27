@@ -53,7 +53,6 @@ int idiot_handle(void*, Request &req, Response &resp, std::string_view) {
 TEST(http_server, headers) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -95,7 +94,6 @@ int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
 TEST(http_server, post) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -173,7 +171,6 @@ TEST(http_server, fs_handler) {
     system(std::string("printf '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -274,7 +271,6 @@ TEST(http_server, proxy_handler_get) {
     //------------start source server---------------
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });
-    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     source_server->set_handler({nullptr, &chunked_handler_pt});
     // auto ret = source_server->bind(ep.port, ep.addr);
     auto ret = source_server->bind_localhost4();
@@ -291,7 +287,6 @@ TEST(http_server, proxy_handler_get) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     // tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->bind_localhost4();
     tcpserver->listen();
@@ -321,7 +316,6 @@ TEST(http_server, proxy_handler_get) {
 TEST(http_server, proxy_handler_post) {
     auto source_server = new_tcp_socket_server();
     source_server->timeout(1000UL*1000);
-    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     source_server->bind_localhost4();
     // source_server->bind(19731, IPAddr("127.0.0.1"));
     source_server->listen();
@@ -339,7 +333,6 @@ TEST(http_server, proxy_handler_post) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4();
     // tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->listen();
@@ -385,7 +378,6 @@ int test_forward_director(void* src_, Request& src, Request& dst) {
 TEST(http_server, proxy_handler_post_forward) {
     auto source_server = new_tcp_socket_server();
     source_server->timeout(1000UL*1000);
-    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     // source_server->bind(19731, IPAddr("127.0.0.1"));
     source_server->bind_localhost4();
     source_server->listen();
@@ -403,7 +395,6 @@ TEST(http_server, proxy_handler_post_forward) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     // tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->bind_localhost4();
     tcpserver->listen();
@@ -448,7 +439,6 @@ TEST(http_server, proxy_handler_failure) {
     client_proxy->timeout_ms(500);
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     tcpserver->bind_localhost4();
     // tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->listen();
@@ -483,7 +473,6 @@ TEST(http_server, mux_handler) {
     //------------start source server---------------
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });
-    source_server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     source_server->set_handler({nullptr, &chunked_handler_pt});
     // auto ret = source_server->bind(ep.port, ep.addr);
     auto ret = source_server->bind_localhost4();
@@ -500,7 +489,6 @@ TEST(http_server, mux_handler) {
     //--------start mux server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     // tcpserver->bind(19876, IPAddr("127.0.0.1"));
     tcpserver->bind_localhost4();
     tcpserver->listen();

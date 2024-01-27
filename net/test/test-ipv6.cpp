@@ -81,10 +81,8 @@ public:
         auto server = photon::net::new_tcp_socket_server_ipv6();
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
-        int ret = server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-        ASSERT_EQ(0, ret);
 
-        ret = server->bind_any6();
+        int ret = server->bind_any6();
         ASSERT_EQ(0, ret);
         ret = server->listen();
         ASSERT_EQ(0, ret);
