@@ -132,7 +132,7 @@ int server_function(void* instance, iovector* request, rpc::Skeleton::ResponseSe
     IOVector iov;
     iov.push_back(STR, LEN(STR));
     sender(&iov);
-    LOG_DEBUG("exit");
+    // LOG_DEBUG("exit");
     return 0;
 }
 
@@ -174,9 +174,9 @@ void do_call(StubImpl& stub, uint64_t function)
     args.init();
     args.serialize(req_iov.iov);
 
-    LOG_DEBUG("before call");
+    // LOG_DEBUG("before call");
     stub.do_call(function, &req_iov.iov, &resp_iov.iov, -1);
-    LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
+    // LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     EXPECT_EQ(memcmp(STR, resp_iov.iov.back().iov_base, LEN(STR)), 0);
 }
 
@@ -195,11 +195,11 @@ uint64_t ncallers;
 void* do_concurrent_call(void* arg)
 {
     ncallers++;
-    LOG_DEBUG("enter");
+    // LOG_DEBUG("enter");
     auto stub = (StubImpl*)arg;
     for (int i = 0; i < 10; ++i)
         do_call(*stub, 234);
-    LOG_DEBUG("exit");
+    // LOG_DEBUG("exit");
     ncallers--;
     return nullptr;
 }
@@ -251,20 +251,21 @@ void do_call_timeout(StubImpl& stub, uint64_t function)
     args.init();
     args.serialize(req_iov.iov);
 
-    LOG_DEBUG("before call");
-    if (stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1UL*1000*1000) >= 0) {
-        LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
+    // LOG_DEBUG("before call");
+    int ret = stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1UL*1000*1000);
+    if (ret >= 0) {
+        // LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     }
 }
 
 void* do_concurrent_call_timeout(void* arg)
 {
     ncallers++;
-    LOG_DEBUG("enter");
+    // LOG_DEBUG("enter");
     auto stub = (StubImpl*)arg;
     for (int i = 0; i < 10; ++i)
         do_call_timeout(*stub, 234);
-    LOG_DEBUG("exit");
+    // LOG_DEBUG("exit");
     ncallers--;
     return nullptr;
 }
@@ -485,6 +486,7 @@ TEST_F(RpcTest, passive_shutdown) {
 
 int main(int argc, char** arg)
 {
+    system("ip addr");
     ci_parse_env();
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
