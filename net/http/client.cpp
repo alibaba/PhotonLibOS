@@ -83,7 +83,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
         sock = tcpsock->connect(ep);
     }
     if (sock) {
-        LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
+        LOG_DEBUG("Connected ` ", ep, VALUE(host), VALUE(secure));
         return sock;
     }
     LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);

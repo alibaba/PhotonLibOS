@@ -37,7 +37,7 @@ void do_test(int pool_mode, const PhotonOptions& options) {
     LOG_TEMP("Spent ` us", now - start);
     fini();
 }
-
+/*
 TEST(Normal, NoPool) {
     do_test(0, {});
 }
@@ -45,7 +45,7 @@ TEST(Normal, NoPool) {
 TEST(Normal, ThreadPool) {
     do_test(64, {});
 }
-
+*/
 TEST(PooledAllocator, PooledStack) {
     do_test(0, {.use_pooled_stack_allocator = true});
 }

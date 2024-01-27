@@ -1039,8 +1039,10 @@ EndPoint::EndPoint(const char* _ep) {
     if (_port > UINT16_MAX)
         return;
     port = (uint16_t)_port;
-    char ip_str[INET6_ADDRSTRLEN];
     auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    if (ipsv.length() >= INET6_ADDRSTRLEN)
+        return;
+    char ip_str[INET6_ADDRSTRLEN];
     memcpy(ip_str, ipsv.data(), ipsv.length());
     ip_str[ipsv.length()] = '\0';
     addr = IPAddr(ip_str);

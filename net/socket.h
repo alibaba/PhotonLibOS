@@ -191,17 +191,19 @@ namespace net {
         virtual int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) = 0;
         virtual int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) = 0;
 
-        // must write arguement type explicitly!
-        template<typename P, typename T, typename = std::enable_if_t<std::is_same<P, T>::value>>
+        template<typename P, typename T> // must write type P explicitly!
         int setsockopt(int level, int option_name, const T& value) {
-            return setsockopt(level, option_name, &value, sizeof(value));
+            P v = value;
+            return setsockopt(level, option_name, &v, sizeof(v));
         }
 
-        // must write arguement type explicitly!
-        template<typename P, typename T, typename = std::enable_if_t<std::is_same<P, T>::value>>
+        template<typename P, typename T> // must write type P explicitly!
         int getsockopt(int level, int option_name, T* value) {
-            socklen_t len = sizeof(*value);
-            return getsockopt(level, option_name, value, &len);
+            P v;
+            socklen_t len = sizeof(v);
+            int ret = getsockopt(level, option_name, &v, &len);
+            if (ret >= 0) *value = v;
+            return ret;
         }
 
         // get/set default timeout, in us, (default +∞)
