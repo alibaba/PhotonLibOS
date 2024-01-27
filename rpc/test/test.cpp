@@ -355,7 +355,7 @@ public:
         return m_skeleton->serve(stream);
     }
     int run() {
-        if (m_socket->bind_localhost6() != 0)
+        if (m_socket->bind_localhost4() != 0)
         // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");
         if (m_socket->listen() != 0)
@@ -376,7 +376,7 @@ static int do_call_2(Stub* stub) {
 }
 
 TEST_F(RpcTest, shutdown) {
-    auto socket_server = photon::net::new_tcp_socket_server_ipv6();
+    auto socket_server = photon::net::new_tcp_socket_server_ipv4();
     GTEST_ASSERT_NE(nullptr, socket_server);
     DEFER(delete socket_server);
     auto sk = photon::rpc::new_skeleton();
@@ -417,7 +417,7 @@ TEST_F(RpcTest, shutdown) {
 }
 
 TEST_F(RpcTest, passive_shutdown) {
-    auto socket_server = photon::net::new_tcp_socket_server_ipv6();
+    auto socket_server = photon::net::new_tcp_socket_server_ipv4();
     GTEST_ASSERT_NE(nullptr, socket_server);
     DEFER(delete socket_server);
     auto sk = photon::rpc::new_skeleton();
