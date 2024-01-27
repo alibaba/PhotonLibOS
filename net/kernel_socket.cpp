@@ -1032,18 +1032,20 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 EndPoint::EndPoint(const char* _ep) {
     estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
-    if (pos == estring::npos)
-        return;
-    // Detect IPv6 or IPv4
-    estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
-    auto ip = IPAddr(ip_str.c_str());
-    if (ip.undefined())
+    if (pos == 0 || pos == estring::npos)
         return;
     auto port_str = ep.substr(pos + 1);
     if (!port_str.all_digits())
         return;
-    addr = ip;
-    port = std::stoul(port_str);
+    auto _port = port_str.to_uint64();
+    if (_port > UINT16_MAX)
+        return;
+    port = (uint16_t)_port;
+    char ip_str[INET6_ADDRSTRLEN];
+    auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    memcpy(ip_str, ipsv.data(), ipsv.length());
+    ip_str[ipsv.length()] = '\0';
+    addr = IPAddr(ip_str);
 }
 
 LogBuffer& operator<<(LogBuffer& log, const IPAddr& addr) {

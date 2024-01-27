@@ -90,6 +90,9 @@ namespace net {
                    addr._in_addr_field[1] == 0 &&
                    addr._in_addr_field[2] == htonl(0x0000ffff);
         }
+        bool is_ipv6() const {
+            return !is_ipv4();
+        }
         // We regard the default IPv4 0.0.0.0 as undefined
         bool undefined() const {
             return mem_equal(V4Any());

@@ -27,6 +27,7 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 
 #include "../server.h"
+#include "to_url.h"
 
 using namespace photon;
 using namespace photon::net;
@@ -47,10 +48,6 @@ int idiot_handle(void*, Request &req, Response &resp, std::string_view) {
     memset((void*)str.data(), '0', cl);
     resp.write((void*)str.data(), str.size());
     return 0;
-}
-
-inline estring to_url(ISocketServer* svr, std::string_view path) {
-    return estring().appends("localhost:", svr->getsockname().port, path);
 }
 
 TEST(http_server, headers) {

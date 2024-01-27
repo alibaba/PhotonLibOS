@@ -333,7 +333,8 @@ TEST(http_client, chunked) {
     photon::thread_sleep(1);
     auto client = new_http_client();
     DEFER(delete client);
-    auto op = client->new_operation(Verb::GET, to_url(server, "/"));
+    auto url = to_url(server, "/");
+    auto op = client->new_operation(Verb::GET, url);
     DEFER(delete op);
     std::string buf;
 
@@ -347,15 +348,18 @@ TEST(http_client, chunked) {
     LOG_DEBUG(VALUE(buf));
 
     server->set_handler({nullptr, &chunked_handler_complict});
-    auto opc = client->new_operation(Verb::GET, "http://localhost:19731/");
+    auto opc = client->new_operation(Verb::GET, url);
+    // auto opc = client->new_operation(Verb::GET, "http://localhost:19731/");
     DEFER(delete opc);
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
     ret = opc->resp.read((void*)buf.data(), 20000);
     EXPECT_EQ(10000 + 4090 + 4086 + 1024, ret);
-    for (int i = 0; i < 10000 + 4090 + 4086 + 1024; i++)
-        EXPECT_EQ(buf[i], 'a');
+    size_t i, cnt;
+    for (i = cnt = 0; i < 10000 + 4090 + 4086 + 1024; i++)
+        cnt += (buf[i] == 'a');
+    EXPECT_EQ(i, cnt);
 
     std_data.resize(std_data_size);
     int num = 0;
@@ -365,7 +369,8 @@ TEST(http_client, chunked) {
     srand(time(0));
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
-        auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
+        auto op_test = client->new_operation(Verb::GET, url);
+        // auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
         DEFER(delete op_test);
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);

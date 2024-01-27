@@ -297,7 +297,7 @@ public:
             return addrs;
         };
         auto ips = dnscache_.borrow(host, ctr);
-        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
+        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for '`' failed", host);
         auto ret = ips->front();
         ips->node = ret->next();  // access in round robin order
         return ret->addr;
