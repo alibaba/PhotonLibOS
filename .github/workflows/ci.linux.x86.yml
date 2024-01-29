@@ -25,6 +25,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          ip a
+          ping6 github.com || echo ok
           dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
           dnf install -y gcc-toolset-9-gcc-c++
           dnf install -y openssl-devel libcurl-devel libaio-devel
@@ -99,6 +101,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          ip a
+          ping6 github.com || echo 1
           dnf install -y git gcc-c++ cmake
           dnf install -y gcc-toolset-9-gcc-c++
           dnf install -y autoconf automake libtool
