@@ -261,11 +261,12 @@ namespace net {
     public:
         virtual int bind(const EndPoint& ep) = 0;
         virtual int bind(const char* path, size_t count) = 0;
-        int bind(uint16_t port = 0)      { return bind_any4(0); }
-        int bind_any4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
-        int bind_any6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
-        int bind_localhost4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
-        int bind_localhost6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
+        int bind(uint16_t port = 0)       { return bind_v4any(0); }
+        int bind(uint16_t port, IPAddr a) { return bind(EndPoint(a, port)); }
+        int bind_v4any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
+        int bind_v6any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
+        int bind_v4localhost(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
+        int bind_v6localhost(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
         int bind(const char* path) { return bind(path, strlen(path)); }
 
         virtual int listen(int backlog = 1024) = 0;
@@ -280,8 +281,6 @@ namespace net {
 
     extern "C" ISocketClient* new_tcp_socket_client();
     extern "C" ISocketServer* new_tcp_socket_server();
-    extern "C" ISocketClient* new_tcp_socket_client_ipv6();
-    extern "C" ISocketServer* new_tcp_socket_server_ipv6();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
@@ -299,6 +298,17 @@ namespace net {
     extern "C" ISocketServer* new_smc_socket_server();
     extern "C" ISocketClient* new_fstack_dpdk_socket_client();
     extern "C" ISocketServer* new_fstack_dpdk_socket_server();
+
+
+    // [[deprecated("use new_tcp_socket_client() instead")]]
+    inline ISocketClient* new_tcp_socket_client_ipv6() {
+        return new_tcp_socket_client();
+    }
+
+    // [[deprecated("use new_tcp_socket_server() instead")]]
+    inline ISocketServer* new_tcp_socket_server_ipv6() {
+        return new_tcp_socket_server();
+    }
 }
 }
 

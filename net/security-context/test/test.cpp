@@ -72,7 +72,7 @@ TEST(basic, test) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind_localhost4());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -159,7 +159,7 @@ TEST(basic, socket_close_in_read) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind_localhost4());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -181,7 +181,7 @@ TEST(basic, socket_close_in_write) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind_localhost4());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -256,7 +256,7 @@ TEST(cs, test) {
     auto client =
         net::new_tls_client(ctx, net::new_tcp_socket_client(), true);
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind_localhost4());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -314,7 +314,7 @@ TEST(Socket, nested) {
     DEFER(delete server);
 
     server->set_handler({s_handler, server_ssl_ctx});
-    ASSERT_EQ(0, server->bind_localhost4());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     ASSERT_EQ(0, server->start_loop(false));
 

@@ -29,7 +29,7 @@ void task(photon::net::ISocketClient* client, photon::net::EndPoint ep) {
 TEST(Socket, pooled) {
     auto server = photon::net::new_tcp_socket_server();
     int conncount = 0;
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
@@ -52,7 +52,7 @@ TEST(Socket, pooled) {
 TEST(Socket, pooled_multisock) {
     auto server = photon::net::new_tcp_socket_server();
     int conncount = 0;
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
@@ -83,7 +83,7 @@ TEST(Socket, pooled_multisock) {
 TEST(Socket, pooled_multisock_serverclose) {
     auto server = photon::net::new_tcp_socket_server();
     int conncount = 0;
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);
@@ -141,7 +141,7 @@ TEST(Socket, pooled_expiration) {
     DEFER(photon::thread_usleep(100UL * 1000));
     auto server = photon::net::new_tcp_socket_server();
     int conncount = 0;
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     auto handler = [&](photon::net::ISocketStream* stream) {
         LOG_INFO("Accept new connection `", stream);

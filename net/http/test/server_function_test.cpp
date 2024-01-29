@@ -53,7 +53,7 @@ int idiot_handle(void*, Request &req, Response &resp, std::string_view) {
 TEST(http_server, headers) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -94,7 +94,7 @@ int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
 TEST(http_server, post) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -171,7 +171,7 @@ TEST(http_server, fs_handler) {
     system(std::string("printf '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -193,7 +193,6 @@ TEST(http_server, fs_handler) {
     test_head_case(client, url, 5, 10, 10);
 }
 
-// net::EndPoint ep{net::IPAddr("127.0.0.1"), 19731};
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
 constexpr char header_data[] = "HTTP/1.1 200 ok\r\n"
@@ -240,8 +239,6 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
 
 int test_director(void* src_, Request& src, Request& dst) {
     auto source_server = (ISocketServer*)src_;
-    // estring url;
-    // url.appends(http_url_scheme, "127.0.0.1:19731", "/filename_not_important");
     dst.reset(src.verb(), to_url(source_server, "/filename_not_important"));
     dst.headers.insert("proxy_server_test", "just4test");
     for (auto kv = src.headers.begin(); kv != src.headers.end(); kv++) {
@@ -272,8 +269,7 @@ TEST(http_server, proxy_handler_get) {
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });
     source_server->set_handler({nullptr, &chunked_handler_pt});
-    // auto ret = source_server->bind(ep.port, ep.addr);
-    auto ret = source_server->bind_localhost4();
+    auto ret = source_server->bind_v4localhost();
     if (ret < 0) LOG_ERROR(VALUE(errno));
     ret |= source_server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
@@ -287,8 +283,7 @@ TEST(http_server, proxy_handler_get) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    // tcpserver->bind(19876, IPAddr("127.0.0.1"));
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
@@ -299,7 +294,6 @@ TEST(http_server, proxy_handler_get) {
     tcpserver->set_handler(proxy_server->get_connection_handler());
     tcpserver->start_loop();
     //----------------------------------------------------
-    // auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
     auto op = client->new_operation(Verb::GET, to_url(tcpserver, "/filename"));
     DEFER(delete op);
     ret = op->call();
@@ -316,8 +310,7 @@ TEST(http_server, proxy_handler_get) {
 TEST(http_server, proxy_handler_post) {
     auto source_server = new_tcp_socket_server();
     source_server->timeout(1000UL*1000);
-    source_server->bind_localhost4();
-    // source_server->bind(19731, IPAddr("127.0.0.1"));
+    source_server->bind_v4localhost();
     source_server->listen();
     DEFER(delete source_server);
     auto source_http_server = new_http_server();
@@ -333,8 +326,7 @@ TEST(http_server, proxy_handler_post) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4();
-    // tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
@@ -345,7 +337,6 @@ TEST(http_server, proxy_handler_post) {
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::POST, to_url(tcpserver, "/filename"));
-    // auto op = client->new_operation(Verb::POST, "localhost:19876/filename");
     DEFER(delete op);
     std::string body = "1234567890";
     op->req.headers.content_length(10);
@@ -363,8 +354,6 @@ TEST(http_server, proxy_handler_post) {
 
 int test_forward_director(void* src_, Request& src, Request& dst) {
     LOG_INFO("request url = `", src.target());
-    // estring url;
-    // url.appends(http_url_scheme, "127.0.0.1:19731", "/filename_not_important");
     auto source_server = (ISocketServer*)src_;
     auto url = to_url(source_server, "/filename_not_important");
     dst.reset(src.verb(), url);
@@ -378,8 +367,7 @@ int test_forward_director(void* src_, Request& src, Request& dst) {
 TEST(http_server, proxy_handler_post_forward) {
     auto source_server = new_tcp_socket_server();
     source_server->timeout(1000UL*1000);
-    // source_server->bind(19731, IPAddr("127.0.0.1"));
-    source_server->bind_localhost4();
+    source_server->bind_v4localhost();
     source_server->listen();
     DEFER(delete source_server);
     auto source_http_server = new_http_server();
@@ -395,8 +383,7 @@ TEST(http_server, proxy_handler_post_forward) {
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    // tcpserver->bind(19876, IPAddr("127.0.0.1"));
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
@@ -409,10 +396,8 @@ TEST(http_server, proxy_handler_post_forward) {
     //----------------------------------------------------
     auto client1 = new_http_client();
     DEFER(delete client1);
-    // client1->set_proxy("http://localhost:19876/");
     client1->set_proxy(to_url(tcpserver, "/"));
     auto op = client1->new_operation(Verb::POST, to_url(source_server, "/filename"));
-    // auto op = client1->new_operation(Verb::POST, "http://localhost:19731/filename");
     DEFER(delete op);
     std::string body = "1234567890";
     op->req.headers.content_length(10);
@@ -439,8 +424,7 @@ TEST(http_server, proxy_handler_failure) {
     client_proxy->timeout_ms(500);
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4();
-    // tcpserver->bind(19876, IPAddr("127.0.0.1"));
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
@@ -453,7 +437,6 @@ TEST(http_server, proxy_handler_failure) {
     //----------------------------------------------------
     auto url = to_url(tcpserver, "/filename");
     auto op = client->new_operation(Verb::GET, url);
-    // auto op = client->new_operation(Verb::GET, "localhost:19876/filename");
     DEFER(delete op);
     auto ret = op->call();
     EXPECT_EQ(0, ret);
@@ -474,8 +457,7 @@ TEST(http_server, mux_handler) {
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });
     source_server->set_handler({nullptr, &chunked_handler_pt});
-    // auto ret = source_server->bind(ep.port, ep.addr);
-    auto ret = source_server->bind_localhost4();
+    auto ret = source_server->bind_v4localhost();
     if (ret < 0) LOG_ERROR(VALUE(errno));
     ret |= source_server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
@@ -489,8 +471,7 @@ TEST(http_server, mux_handler) {
     //--------start mux server ------------
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    // tcpserver->bind(19876, IPAddr("127.0.0.1"));
-    tcpserver->bind_localhost4();
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto proxy_handler = new_proxy_handler({source_server, &test_director},
@@ -507,7 +488,6 @@ TEST(http_server, mux_handler) {
     //----------------------------------------------------
     //--------------test static service--------------------
     auto op_static = client->new_operation(Verb::GET, to_url(tcpserver, "/static_service/fs_handler_test"));
-    // auto op_static = client->new_operation(Verb::GET, "localhost:19876/static_service/fs_handler_test");
     DEFER(delete op_static);
     ret = op_static->call();
     EXPECT_EQ(0, ret);
@@ -519,7 +499,6 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == fs_handler_std_str);
     //--------------test proxy service---------------------
     auto op_proxy = client->new_operation(Verb::GET, to_url(tcpserver, "/proxy/filename_not_important"));
-    // auto op_proxy = client->new_operation(Verb::GET, "localhost:19876/proxy/filename_not_important");
     DEFER(delete op_proxy);
     ret = op_proxy->call();
     EXPECT_EQ(0, ret);
@@ -531,7 +510,6 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == std_data);
     //-------------test mux default handler---------------
     auto op_default = client->new_operation(Verb::GET, to_url(tcpserver, "/not_recorded/should_be_404"));
-    // auto op_default = client->new_operation(Verb::GET, "localhost:19876/not_recorded/should_be_404");
     DEFER(delete op_default);
     ret = op_default->call();
     EXPECT_EQ(0, ret);

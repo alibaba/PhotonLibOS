@@ -82,7 +82,7 @@ public:
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
 
-        int ret = server->bind_any6();
+        int ret = server->bind_v6any();
         ASSERT_EQ(0, ret);
         ret = server->listen();
         ASSERT_EQ(0, ret);
