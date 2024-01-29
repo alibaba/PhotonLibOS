@@ -90,6 +90,9 @@ namespace net {
                    addr._in_addr_field[1] == 0 &&
                    addr._in_addr_field[2] == htonl(0x0000ffff);
         }
+        bool is_ipv6() const {
+            return !is_ipv4();
+        }
         // We regard the default IPv4 0.0.0.0 as undefined
         bool undefined() const {
             return mem_equal(V4Any());
@@ -172,8 +175,8 @@ namespace net {
     static_assert(sizeof(EndPoint) == 18, "Endpoint size incorrect");
 
     // operators to help with logging IP addresses
-    LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
-    LogBuffer& operator << (LogBuffer& log, const EndPoint ep);
+    LogBuffer& operator << (LogBuffer& log, const IPAddr& addr);
+    LogBuffer& operator << (LogBuffer& log, const EndPoint& ep);
 
     class ISocketBase {
     public:
@@ -187,14 +190,20 @@ namespace net {
 
         virtual int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) = 0;
         virtual int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) = 0;
-        template<typename T>
-        int setsockopt(int level, int option_name, T value) {
-            return setsockopt(level, option_name, &value, sizeof(value));
+
+        template<typename P, typename T> // must write type P explicitly!
+        int setsockopt(int level, int option_name, const T& value) {
+            P v = value;
+            return setsockopt(level, option_name, &v, sizeof(v));
         }
-        template<typename T>
+
+        template<typename P, typename T> // must write type P explicitly!
         int getsockopt(int level, int option_name, T* value) {
-            socklen_t len = sizeof(*value);
-            return getsockopt(level, option_name, value, &len);
+            P v;
+            socklen_t len = sizeof(v);
+            int ret = getsockopt(level, option_name, &v, &len);
+            if (ret >= 0) *value = v;
+            return ret;
         }
 
         // get/set default timeout, in us, (default +∞)
@@ -243,16 +252,22 @@ namespace net {
     public:
         // Connect to a remote IPv4 endpoint.
         // If `local` endpoint is not empty, its address will be bind to the socket before connecting to the `remote`.
-        virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) = 0;
+        virtual ISocketStream* connect(const EndPoint& remote, const EndPoint* local = nullptr) = 0;
         // Connect to a Unix Domain Socket.
         virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
     };
 
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
-        virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
+        virtual int bind(const EndPoint& ep) = 0;
         virtual int bind(const char* path, size_t count) = 0;
+        int bind(uint16_t port = 0)      { return bind_any4(0); }
+        int bind_any4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
+        int bind_any6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
+        int bind_localhost4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
+        int bind_localhost6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
         int bind(const char* path) { return bind(path, strlen(path)); }
+
         virtual int listen(int backlog = 1024) = 0;
         virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
 

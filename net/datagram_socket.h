@@ -61,10 +61,16 @@ protected:
 public:
     using base::recv;
     using base::send;
-    int connect(const EndPoint ep) { return connect((Addr*)&ep, sizeof(ep)); }
-    int bind(const EndPoint ep) { return bind((Addr*)&ep, sizeof(ep)); }
+    int connect(const EndPoint& ep)  { return connect((Addr*)&ep, sizeof(ep)); }
+    int bind(const EndPoint& ep)     { return bind((Addr*)&ep, sizeof(ep)); }
+    int bind(uint16_t port = 0)      { return bind_any4(0); }
+    int bind_any4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
+    int bind_any6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
+    int bind_localhost4(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
+    int bind_localhost6(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
+
     template <typename B, typename S>
-    ssize_t sendto(B* buf, S count, const EndPoint ep, int flags = 0) {
+    ssize_t sendto(B* buf, S count, const EndPoint& ep, int flags = 0) {
         return base::sendto(buf, count, (Addr*)&ep, sizeof(ep), flags);
     }
     template <typename B, typename S>

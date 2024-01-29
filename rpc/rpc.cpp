@@ -455,9 +455,10 @@ namespace rpc {
 
     protected:
         net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
-            LOG_INFO("Connect to ", ep);
             auto sock = ep.is_ipv4() ? tcpclient->connect(ep) : tcpclientv6->connect(ep);
-            if (!sock) return nullptr;
+            if (!sock)
+                LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
+            LOG_DEBUG("connected to ", ep);
             sock->timeout(m_rpc_timeout);
             if (tls) {
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);

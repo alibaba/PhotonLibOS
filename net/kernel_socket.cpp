@@ -78,8 +78,7 @@ public:
             fd = ::socket(socket_family, SOCK_STREAM, 0);
         }
         if (fd >= 0 && (socket_family == AF_INET || socket_family == AF_INET6)) {
-            int val = 1;
-            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+            setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
         }
     }
     ~KernelSocketStream() override {
@@ -194,12 +193,12 @@ public:
         return do_connect((const sockaddr*) &addr_un, sizeof(addr_un));
     }
 
-    ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
+    ISocketStream* connect(const EndPoint& remote, const EndPoint* local) override {
         sockaddr_storage r(remote);
-        if (local.undefined()) {
+        if (likely(!local)) {
             return do_connect(r.get_sockaddr(), r.get_socklen());
         }
-        sockaddr_storage l(local);
+        sockaddr_storage l(*local);
         return do_connect(r.get_sockaddr(), r.get_socklen(), l.get_sockaddr(), l.get_socklen());
     }
 
@@ -237,7 +236,7 @@ protected:
         }
         auto ret = fd_connect(ptr->fd, remote, len_remote);
         if (ret < 0) {
-            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect socket");
+            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect to ", *remote);
         }
         return ptr.release();
     }
@@ -281,9 +280,8 @@ public:
             LOG_ERRNO_RETURN(0, -1, "fail to setup listen fd");
         }
         if (m_socket_family == AF_INET || m_socket_family == AF_INET6) {
-            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0) {
-                LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt of TCP_NODELAY");
-            }
+            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0)
+                LOG_DEBUG("failed to set TCP_NODELAY");
         }
         return 0;
     }
@@ -315,12 +313,13 @@ public:
         return this;
     }
 
-    int bind(uint16_t port, IPAddr addr) override {
-        if (m_socket_family == AF_INET6 && addr.undefined()) {
-            addr = IPAddr::V6Any();
-        }
-        sockaddr_storage s(EndPoint(addr, port));
-        return ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+    int bind(const EndPoint& ep) override {
+        bool c = m_socket_family == AF_INET6 && ep.addr.undefined();
+        auto s = sockaddr_storage(c ? EndPoint(IPAddr::V6Any(), ep.port) : ep);
+        int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
     }
 
     int bind(const char* path, size_t count) override {
@@ -698,8 +697,8 @@ public:
         return 0;
     }
 
-    int bind(uint16_t port, IPAddr addr) override {
-        auto addr_in = EndPoint(addr, port).to_sockaddr_in();
+    int bind(const EndPoint& ep) override {
+        auto addr_in = ep.to_sockaddr_in();
         return fstack_bind(m_listen_fd, (sockaddr*) &addr_in, sizeof(addr_in));
     }
 
@@ -1031,21 +1030,25 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 EndPoint::EndPoint(const char* _ep) {
     estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
-    if (pos == estring::npos)
-        return;
-    // Detect IPv6 or IPv4
-    estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
-    auto ip = IPAddr(ip_str.c_str());
-    if (ip.undefined())
+    if (pos == 0 || pos == estring::npos)
         return;
     auto port_str = ep.substr(pos + 1);
     if (!port_str.all_digits())
         return;
-    addr = ip;
-    port = std::stoul(port_str);
+    auto _port = port_str.to_uint64();
+    if (_port > UINT16_MAX)
+        return;
+    port = (uint16_t)_port;
+    auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    if (ipsv.length() >= INET6_ADDRSTRLEN)
+        return;
+    char ip_str[INET6_ADDRSTRLEN];
+    memcpy(ip_str, ipsv.data(), ipsv.length());
+    ip_str[ipsv.length()] = '\0';
+    addr = IPAddr(ip_str);
 }
 
-LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
+LogBuffer& operator<<(LogBuffer& log, const IPAddr& addr) {
     if (addr.is_ipv4())
         return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
     else {
@@ -1057,7 +1060,7 @@ LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
     }
 }
 
-LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
+LogBuffer& operator<<(LogBuffer& log, const EndPoint& ep) {
     if (ep.is_ipv4())
         return log << ep.addr << ':' << ep.port;
     else

@@ -416,8 +416,8 @@ public:
                               SecurityRole::Client, true);
     }
 
-    virtual ISocketStream* connect(EndPoint remote,
-                                   EndPoint local = EndPoint()) override {
+    virtual ISocketStream* connect(const EndPoint& remote,
+                                   const EndPoint* local) override {
         return new_tls_stream(ctx, m_underlay->connect(remote, local),
                               SecurityRole::Client, true);
     }

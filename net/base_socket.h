@@ -248,8 +248,8 @@ public:
         return (recursion == 0) ? m_underlay : m_underlay->get_underlay_object(recursion - 1);
     }
 
-    int bind(uint16_t port, IPAddr addr) override {
-        return m_underlay->bind(port, addr);
+    int bind(const EndPoint& ep) override {
+        return m_underlay->bind(ep);
     }
 
     int bind(const char* path, size_t count) override {
