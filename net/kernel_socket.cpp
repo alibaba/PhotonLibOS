@@ -72,7 +72,7 @@ static int socket(int family, int protocol = 0,
         set_fd_nonblocking(fd);
     if (nodelay) {
         int v = 1;
-        if (::setsockopt(fd, SOL_TCP, TCP_NODELAY, &v, sizeof(v)) < 0)
+        if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v)) < 0)
             LOG_WARN("failed to set TCP_NODELAY ", ERRNO());
     }
     return fd;

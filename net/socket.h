@@ -300,12 +300,12 @@ namespace net {
     extern "C" ISocketServer* new_fstack_dpdk_socket_server();
 
 
-    // [[deprecated("use new_tcp_socket_client() instead")]]
+    [[deprecated("deprecated since v0.8; use new_tcp_socket_client() instead;")]]
     inline ISocketClient* new_tcp_socket_client_ipv6() {
         return new_tcp_socket_client();
     }
 
-    // [[deprecated("use new_tcp_socket_server() instead")]]
+    [[deprecated("deprecated since v0.8; use new_tcp_socket_server() instead;")]]
     inline ISocketServer* new_tcp_socket_server_ipv6() {
         return new_tcp_socket_server();
     }

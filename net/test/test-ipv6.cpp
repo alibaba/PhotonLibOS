@@ -144,7 +144,7 @@ protected:
 class V6ToV6Test : public DualStackTest {
 protected:
     photon::net::ISocketClient* get_client() override {
-        return photon::net::new_tcp_socket_client_ipv6();
+        return photon::net::new_tcp_socket_client();
     }
     photon::net::IPAddr get_server_ip() override {
         return photon::net::IPAddr::V6Loopback();
