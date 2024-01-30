@@ -44,7 +44,7 @@ public:
     constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
 
     void write(int, const char* begin, const char* end) override {
-        ::write(log_file_fd, begin, end - begin);
+        std::ignore = ::write(log_file_fd, begin, end - begin);
         throttle_block();
     }
     void throttle_block() {
@@ -255,9 +255,9 @@ public:
         uint64_t length = end - begin;
         iovec iov{(void*)begin, length};
 #ifndef _WIN64
-        ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
+        std::ignore = ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
 #else
-        ::write(log_file_fd, iov.iov_base, iov.iov_len);
+        std::ignore = ::write(log_file_fd, iov.iov_base, iov.iov_len);
 #endif
         throttle_block();
         if (log_file_name && log_file_size_limit) {
@@ -312,10 +312,10 @@ public:
         int fd = fopen(log_file_name);
         if (fd < 0) {
             static char msg[] = "failed to open log output file: ";
-            ::write(log_file_fd, msg, sizeof(msg) - 1);
+            std::ignore = ::write(log_file_fd, msg, sizeof(msg) - 1);
             if (log_file_name)
-                ::write(log_file_fd, log_file_name, strlen(log_file_name));
-            ::write(log_file_fd, "\n", 1);
+                std::ignore = ::write(log_file_fd, log_file_name, strlen(log_file_name));
+            std::ignore = ::write(log_file_fd, "\n", 1);
             return;
         }
 
