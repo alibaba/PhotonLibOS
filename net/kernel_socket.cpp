@@ -246,14 +246,6 @@ public:
     }
 };
 
-class SMCSocketClient : public KernelSocketClient {
-public:
-    virtual KernelSocketStream* create_stream(int socket_family) {
-        int ver = (socket_family == AF_INET6);
-        return new_stream<KernelSocketStream>(AF_SMC, ver);
-    }
-};
-
 class KernelSocketServer : public SocketServerBase {
 public:
     using ISocketServer::setsockopt;
@@ -442,6 +434,32 @@ protected:
         m_handler(sess);
         delete sess;
     }
+};
+
+class SMCSocketClient : public KernelSocketClient {
+public:
+    virtual KernelSocketStream* create_stream(int socket_family) {
+        int ver = (socket_family == AF_INET6);
+        return new_stream<KernelSocketStream>(AF_SMC, ver);
+    }
+};
+
+class SMCSocketServer : public KernelSocketServer {
+public:
+    int bind(const EndPoint& ep) override {
+        auto s = sockaddr_storage(ep);
+        if (m_listen_fd < 0) {
+            int ver = (s.get_sockaddr()->sa_family == AF_INET6);
+            m_listen_fd = socket(AF_SMC, ver);
+            if (m_listen_fd < 0) return -1;
+        }
+        int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
+    }
+
+    UNIMPLEMENTED(int bind(const char* path, size_t count));
 };
 
 #ifdef __linux__
@@ -1001,7 +1019,7 @@ extern "C" ISocketClient* new_smc_socket_client() {
     return new SMCSocketClient();
 }
 extern "C" ISocketServer* new_smc_socket_server() {
-    return NewObj<KernelSocketServer>(AF_SMC)->init();
+    return NewObj<SMCSocketServer>()->init();
 }
 #ifdef ENABLE_FSTACK_DPDK
 extern "C" ISocketClient* new_fstack_dpdk_socket_client() {
