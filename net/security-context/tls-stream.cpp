@@ -131,7 +131,7 @@ public:
         return strlen(buf);
     }
     int set_pass_phrase(const char* pass) override {
-        strncpy(pempassword, pass, sizeof(pempassword));
+        strncpy(pempassword, pass, sizeof(pempassword)-1);
         return strlen(pempassword);
     }
     int set_cert(const char* cert_str) override {
