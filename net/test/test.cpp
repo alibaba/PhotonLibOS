@@ -282,24 +282,17 @@ TEST(Socket, iov) {
 TEST(ETServer, listen_twice) {
     auto server = net::new_et_tcp_socket_server();
     DEFER(delete server);
-    LOG_DEBUG("asdf");
     server->bind_v4localhost();
-    LOG_DEBUG("asdf");
     server->listen();
-    LOG_DEBUG("asdf");
     int ret, err;
     ret = server->start_loop();
     EXPECT_EQ(0, ret);
-    LOG_DEBUG("asdf");
     ret = server->start_loop();
-    LOG_DEBUG("asdf");
     err = errno;
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(EALREADY, err);
     server->terminate();
-    LOG_DEBUG("asdf");
     ret = server->start_loop();
-    LOG_DEBUG("asdf");
     EXPECT_EQ(0, ret);
 }
 
