@@ -24,3 +24,4 @@ target_link_libraries(test-client PRIVATE photon_shared)
 
 add_executable(test-ipv6 test-ipv6.cpp)
 target_link_libraries(test-ipv6 PRIVATE photon_shared)
+add_test(NAME test-ipv6 COMMAND $<TARGET_FILE:test-ipv6>)
