@@ -77,6 +77,7 @@ int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
     addrinfo* result = nullptr;
     addrinfo hints = {};
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ALL | AI_V4MAPPED;
     hints.ai_family = AF_UNSPEC;
 
     std::string _name(name);

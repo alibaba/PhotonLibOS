@@ -253,7 +253,7 @@ ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
     iovector_view v(iov, iovcnt);
     return DOIO_LOOP_LAMBDA(recv(v.iov, v.iovcnt, flags), {
         auto r = v.extract_front(ret);
-        assert(r == ret); (void)r;
+        assert((ssize_t) r == ret); (void)r;
         return n < least;
     });
 }
