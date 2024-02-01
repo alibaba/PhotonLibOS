@@ -793,9 +793,10 @@ int main(int argc, char** arg) {
     test_log_sockaddr();
     photon::thread_create(&start_server, nullptr);
 
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    int ret = RUN_ALL_TESTS();
     server_down = true;
     photon::thread_interrupt(server_thread);
 
     // photon::fd_events_fini();
+    return ret;
 }
