@@ -46,7 +46,7 @@ apt install libssl-dev libcurl4-openssl-dev libaio-dev
 ```
 
 ```bash
-brew install cmake openssl pkg-config
+brew install cmake openssl@1.1 pkg-config
 ```
 
 ```mdx-code-block
@@ -85,7 +85,7 @@ cmake --build build -j
 
 ```bash
 cd PhotonLibOS
-cmake -B build
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
 cmake --build build -j
 ```
 

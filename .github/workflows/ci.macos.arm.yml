@@ -22,12 +22,12 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install cmake openssl gflags googletest gsasl
+          brew install cmake openssl@1.1 gflags googletest gsasl
 
       - name: Build
         run: |
           cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
-            -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+            -D PHOTON_ENABLE_SASL=ON -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
           cmake --build ${{github.workspace}}/build -j
 
       - name: Test

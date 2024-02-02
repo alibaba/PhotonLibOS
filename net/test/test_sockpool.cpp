@@ -187,5 +187,5 @@ int main(int argc, char** arg) {
 
     ::testing::InitGoogleTest(&argc, arg);
 
-    RUN_ALL_TESTS();
+    return RUN_ALL_TESTS();
 }

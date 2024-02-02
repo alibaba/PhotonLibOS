@@ -987,6 +987,5 @@ int main(int argc, char **argv) {
     set_log_output_level(1);
 
     ::testing::InitGoogleTest(&argc, argv);
-    auto ret = RUN_ALL_TESTS();
-    if (ret) LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

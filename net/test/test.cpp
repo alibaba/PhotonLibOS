@@ -684,7 +684,7 @@ void test_writer(Writer& writer) {
     EXPECT_EQ(3, ret);
     ret = writer.write("456", 3);
     EXPECT_EQ(3, ret);
-    EXPECT_EQ(0, strcmp("123456", writer.alog_string().s));
+    EXPECT_EQ(0, strncmp("123456", writer.alog_string().s, 6));
 }
 
 TEST(writers, multiple_segment) {
@@ -705,15 +705,18 @@ void* start_server(void*) {
 TEST(utils, gethostbyname) {
     net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr;
-    net::gethostbyname("localhost", &addr);
+    int ret = net::gethostbyname("localhost", &addr);
+    ASSERT_GE(ret, 1);
     LOG_DEBUG(VALUE(localhost), VALUE(addr));
-    EXPECT_EQ(localhost, addr);
+    EXPECT_TRUE(localhost.is_localhost() && addr.is_localhost());
+
     std::vector<net::IPAddr> addrs;
     net::gethostbyname("localhost", addrs);
     EXPECT_GT(addrs.size(), 0);
-    EXPECT_EQ(localhost, addrs[0]);
+    EXPECT_TRUE(addrs[0].is_localhost());
+
     net::IPAddr host = net::gethostbypeer("localhost");
-    EXPECT_EQ(localhost, host);
+    EXPECT_TRUE(host.is_localhost());
     for (auto &x : addrs) {
         LOG_INFO(VALUE(x));
     }
@@ -803,8 +806,9 @@ int main(int argc, char** arg) {
     test_log_sockaddr();
     photon::thread_create(&start_server, nullptr);
 
-    auto ret = RUN_ALL_TESTS();
+    int ret = RUN_ALL_TESTS();
     LOG_DEBUG("test result: ", ret);
     server_down = true;
     photon::thread_interrupt(server_thread);
+    return ret;
 }

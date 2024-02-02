@@ -67,6 +67,5 @@ int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     // 500 * 4100, make sure it have no aligned file length
     system("dd if=/dev/urandom of=/tmp/test_filecopy_src bs=500 count=4100");
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

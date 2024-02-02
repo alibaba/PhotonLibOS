@@ -120,7 +120,7 @@ namespace net {
             }
         }
         bool operator==(const IPAddr& rhs) const {
-            return mem_equal(rhs) || (is_localhost() && rhs.is_localhost());
+            return mem_equal(rhs);
         }
         bool operator!=(const IPAddr& rhs) const {
             return !(*this == rhs);
@@ -133,7 +133,7 @@ namespace net {
         static IPAddr V4Broadcast() { return IPAddr(htonl(INADDR_BROADCAST)); }
         static IPAddr V4Any() { return IPAddr(htonl(INADDR_ANY)); }
         static IPAddr V4Loopback() { return IPAddr(htonl(INADDR_LOOPBACK)); }
-        static IPAddr localhost() { return V4Loopback(); }
+        static IPAddr Localhost() { return V4Loopback(); }
     private:
         bool mem_equal(const IPAddr& rhs) const {
             return memcmp(this, &rhs, sizeof(rhs)) == 0;

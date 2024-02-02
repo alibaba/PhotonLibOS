@@ -1377,6 +1377,5 @@ int main(int argc, char **argv){
     if (photon::init(ev_engine, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }
