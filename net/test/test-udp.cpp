@@ -39,7 +39,7 @@ TEST(UDP, basic) {
     s1->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
     s2->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
 
-    EXPECT_EQ(0, s1->bind_localhost4());
+    EXPECT_EQ(0, s1->bind_v4localhost());
     auto ep = s1->getsockname();
     LOG_INFO("Bind at ", ep);
 

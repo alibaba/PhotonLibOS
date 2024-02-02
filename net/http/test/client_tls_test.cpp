@@ -55,7 +55,7 @@ TEST(client_tls, basic) {
     auto tcpserver = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete tcpserver);
     tcpserver->timeout(1000UL*1000);
-    int r = tcpserver->bind_localhost4();
+    int r = tcpserver->bind_v4localhost();
     if (r != 0)
         LOG_ERRNO_RETURN(0, , "failed to bind to localhost");
     LOG_DEBUG("bind to :", tcpserver->getsockname());

@@ -67,7 +67,7 @@ TEST(http_client, get) {
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
     auto tcpserver = new_tcp_socket_server();
     tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
-    tcpserver->bind_any4();
+    tcpserver->bind_v4any();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -80,7 +80,6 @@ TEST(http_client, get) {
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
     auto target = to_url(tcpserver, "/ease-httpclient-gettestfile");
-    // static const char target[] = "http://localhost:18731/ease-httpclient-gettestfile";
     auto client = new_http_client();
     DEFER(delete client);
     auto op2 = client->new_operation(Verb::GET, target);
@@ -158,8 +157,7 @@ TEST(http_client, post) {
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->bind_localhost4(0);
-    // tcpserver->bind(18731, IPAddr("127.0.0.1"));
+    tcpserver->bind_v4localhost(0);
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -172,7 +170,6 @@ TEST(http_client, post) {
     auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
     DEFER(delete fs);
     auto target = to_url(tcpserver, "/ease-httpclient-posttestfile");
-    // static const char target[] = "http://localhost:18731/ease-httpclient-posttestfile";
     auto client = new_http_client();
     DEFER(delete client);
 
@@ -270,7 +267,6 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
     return 0;
 }
 
-// EndPoint ep{IPAddr("127.0.0.1"), 19731};
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
 static int digtal_num(int n) {
@@ -321,7 +317,7 @@ TEST(http_client, chunked) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
     server->set_handler({nullptr, &chunked_handler});
-    auto ret = server->bind_localhost4();
+    auto ret = server->bind_v4localhost();
     if (ret < 0) LOG_ERROR(VALUE(errno));
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
@@ -347,7 +343,6 @@ TEST(http_client, chunked) {
 
     server->set_handler({nullptr, &chunked_handler_complict});
     auto opc = client->new_operation(Verb::GET, url);
-    // auto opc = client->new_operation(Verb::GET, "http://localhost:19731/");
     DEFER(delete opc);
     opc->call();
     EXPECT_EQ(200, opc->status_code);
@@ -368,7 +363,6 @@ TEST(http_client, chunked) {
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
         auto op_test = client->new_operation(Verb::GET, url);
-        // auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
         DEFER(delete op_test);
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);
@@ -425,7 +419,7 @@ TEST(http_client, debug) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
     server->set_handler({nullptr, &chunked_handler_debug});
-    auto ret = server->bind_localhost4();
+    auto ret = server->bind_v4localhost();
     // auto ret = server->bind(ep.port, ep.addr);
     if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
@@ -444,7 +438,6 @@ TEST(http_client, debug) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op_test = client->new_operation(Verb::GET, to_url(server, "/"));
-    // auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
     DEFER(delete op_test);
     op_test->call();
     EXPECT_EQ(200, op_test->status_code);
@@ -471,15 +464,13 @@ TEST(http_client, server_no_resp) {
     auto server = new_tcp_socket_server();
     DEFER(delete server);
     server->set_handler({nullptr, &sleep_handler});
-    server->bind_localhost4();
-    // server->bind(38812, IPAddr());
+    server->bind_v4localhost();
     server->listen();
     server->start_loop();
 
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, to_url(server, "/wtf"));
-    // auto op = client->new_operation(Verb::GET, "http://127.0.0.1:38812/wtf");
     DEFER(delete op);
     op->req.headers.content_length(0);
     client->call(op);
@@ -493,8 +484,7 @@ TEST(http_client, partial_body) {
 
     auto tcpserver = new_tcp_socket_server();
     DEFER(delete tcpserver);
-    tcpserver->bind_localhost4();
-    // tcpserver->bind(18731);
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     auto server = new_http_server();
     DEFER(delete server);
@@ -507,7 +497,6 @@ TEST(http_client, partial_body) {
     tcpserver->start_loop();
 
     auto target_get = to_url(tcpserver, "/file");
-    // std::string target_get = "http://localhost:18731/file";
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);

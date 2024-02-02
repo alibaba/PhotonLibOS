@@ -235,9 +235,10 @@ int fstack_socket(int domain, int type, int protocol) {
     if (fd < 0)
         return fd;
     int val = 1;
-    int ret = ff_ioctl(fd, FIONBIO, &val);
-    if (ret != 0)
-        return -1;
+    if (ff_ioctl(fd, FIONBIO, &val) < 0)
+        LOG_WARN("failed to set socket non-blocking");
+    if (ff_ioctl(fd, TCP_NODELAY, &val) < 0)
+        LOG_WARN("failed to set TCP_NODELAY");
     return fd;
 }
 

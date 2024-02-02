@@ -99,7 +99,7 @@ EndPoint ep;
 void tcp_server() {
     auto sock = new_tcp_socket_server();
     DEFER({ delete sock; });
-    auto ret = sock->bind_localhost4();
+    auto ret = sock->bind_v4localhost();
     // auto ret = sock->bind(ep.port, ep.addr);
     ret |= sock->listen(100);
     LOG_DEBUG(VALUE(ret), VALUE(errno));
@@ -209,7 +209,7 @@ TEST(Socket, timeout) {
         delete cli;
         delete serv;
     });
-    serv->bind_localhost4();
+    serv->bind_v4localhost();
     serv->listen(100);
     cli->timeout(1024UL * 1024);  // 1-sec;
     EXPECT_EQ(1024UL * 1024, cli->timeout());
@@ -240,7 +240,7 @@ TEST(Socket, iov) {
         delete cli;
         delete serv;
     });
-    serv->bind_localhost4();
+    serv->bind_v4localhost();
     serv->listen(100);
     auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
@@ -282,7 +282,7 @@ TEST(Socket, iov) {
 TEST(ETServer, listen_twice) {
     auto server = net::new_et_tcp_socket_server();
     DEFER(delete server);
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     int ret, err;
     ret = server->start_loop();
@@ -301,7 +301,7 @@ EndPoint epet;
 void et_tcp_server() {
     auto sock = new_et_tcp_socket_server();
     DEFER({ delete sock; });
-    auto ret = sock->bind_localhost4();
+    auto ret = sock->bind_v4localhost();
     LOG_DEBUG("before Listening");
     ret |= sock->listen(100);
     LOG_DEBUG(VALUE(ret), VALUE(errno));
@@ -345,7 +345,7 @@ TEST(ETSocket, timeout) {
         delete cli;
         delete serv;
     });
-    serv->bind_localhost4();
+    serv->bind_v4localhost();
     serv->listen(100);
     cli->timeout(1024UL * 1024);  // 1-sec;
     EXPECT_EQ(1024UL * 1024, cli->timeout());
@@ -374,7 +374,7 @@ TEST(ETSocket, iov) {
         delete cli;
         delete serv;
     });
-    serv->bind_localhost4();
+    serv->bind_v4localhost();
     serv->listen(100);
     // serv->start_loop();
     ISocketStream* sock;
@@ -422,14 +422,16 @@ TEST(ETSocket, iov) {
 #endif
 
 TEST(Socket, autoremove) {
-    char path[] = "/tmp/testnosock";
+    static const char path[] = "/tmp/testnosock";
     // 1. do not remove file if the file is not socket
+    remove(path);
     auto fd = open(path, O_RDWR | O_CREAT, 0777);
     if (fd != -1) close(fd);
     auto sock = new_uds_server(true);
     auto ret = sock->bind(path);
     EXPECT_EQ(-1, ret);
     remove(path);
+
     // 2. do not remove if autoremove is false
     auto sock_noar = new_uds_server();
     ret = sock_noar->bind(path);
@@ -439,9 +441,11 @@ TEST(Socket, autoremove) {
     ret = stat(path, &statbuf);
     EXPECT_EQ(0, ret);
     EXPECT_NE(0, S_ISSOCK(statbuf.st_mode));
+
     // 3. do remove when binding
     ret = sock->bind(path);
     EXPECT_EQ(0, ret);
+
     // 4. do remove when closing
     delete sock;
     ret = stat(path, &statbuf);
@@ -475,7 +479,7 @@ void test_server_start_and_terminate(bool blocking) {
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
     auto th = photon::thread_create11([&]{
-        server->bind_localhost4();
+        server->bind_v4localhost();
         server->listen();
         server->start_loop(blocking);
     });
@@ -496,7 +500,7 @@ TEST(TCPServer, start_and_terminate_nonblocking) {
 TEST(TCPServer, listen_twice) {
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->listen();
     int ret, err;
     ret = server->start_loop();
@@ -520,7 +524,7 @@ TEST(TLSSocket, basic) {
     auto server = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete server);
 
-    server->bind_localhost4();
+    server->bind_v4localhost();
     server->timeout(10UL * 1024 * 1024);
 
     auto logHandle = [&](ISocketStream* sock) {
@@ -753,7 +757,7 @@ TEST(ZeroCopySocket, basic) {
     auto run_server = [&] {
         server = new_zerocopy_tcp_server();
         DEFER(delete server);
-        ASSERT_EQ(server->bind_localhost4(), 0);
+        ASSERT_EQ(server->bind_v4localhost(), 0);
         ep_dst = server->getsockname();
         server->set_handler(handler);
         ASSERT_EQ(server->listen(), 0);
@@ -799,9 +803,8 @@ int main(int argc, char** arg) {
     test_log_sockaddr();
     photon::thread_create(&start_server, nullptr);
 
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    auto ret = RUN_ALL_TESTS();
+    LOG_DEBUG("test result: ", ret);
     server_down = true;
     photon::thread_interrupt(server_thread);
-
-    // photon::fd_events_fini();
 }

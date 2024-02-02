@@ -356,7 +356,7 @@ public:
         return m_skeleton->serve(stream);
     }
     int run() {
-        if (m_socket->bind_localhost4() != 0)
+        if (m_socket->bind_v4localhost() != 0)
         // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");
         if (m_socket->listen() != 0)

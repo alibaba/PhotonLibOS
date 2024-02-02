@@ -85,7 +85,7 @@ public:
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
 
-        int ret = server->bind_any6();
+        int ret = server->bind_v6any();
         ASSERT_EQ(0, ret);
         ret = server->listen();
         ASSERT_EQ(0, ret);
@@ -147,7 +147,7 @@ protected:
 class V6ToV6Test : public DualStackTest {
 protected:
     photon::net::ISocketClient* get_client() override {
-        return photon::net::new_tcp_socket_client_ipv6();
+        return photon::net::new_tcp_socket_client();
     }
     photon::net::IPAddr get_server_ip() override {
         return photon::net::IPAddr::V6Loopback();

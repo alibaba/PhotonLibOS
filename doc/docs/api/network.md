@@ -23,9 +23,6 @@ Network lib provides non-blocking socket implementations for clients and servers
 ISocketClient* new_tcp_socket_client();
 ISocketServer* new_tcp_socket_server();
 
-ISocketClient* new_tcp_socket_client_ipv6();
-ISocketServer* new_tcp_socket_server_ipv6();
-
 ISocketClient* new_uds_client();
 ISocketServer* new_uds_server(bool autoremove = false);
 
@@ -55,13 +52,13 @@ An IPv6 socket server listening on `::0` can handle both v4 and v6 socket client
 ```cpp
 class ISocketClient : public ISocket {
 public:
-    virtual ISocketStream* connect(const EndPoint& ep) = 0;
+    virtual ISocketStream* connect(const EndPoint& ep, const EndPoint* local = nullptr) = 0;
     virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
 };
 
 class ISocketServer : public ISocket {
 public:
-    virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
+    virtual int bind(const EndPoint& ep) = 0;
     virtual int bind(const char* path, size_t count) = 0;
     virtual int listen(int backlog = 1024) = 0;
     virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
@@ -90,11 +87,11 @@ namespace net {
         // Return the actual number of bytes sent, which may be LESS than `count`;
         virtual ssize_t send(const void *buf, size_t count) = 0;
         virtual ssize_t send(const struct iovec *iov, int iovcnt) = 0;
-        
+
         // Fully receive until `count` bytes.
         virtual ssize_t read(void *buf, size_t count) = 0;
         virtual ssize_t readv(const struct iovec *iov, int iovcnt) = 0;
-        
+
         // Fully send until `count` bytes.
         virtual ssize_t write(const void *buf, size_t count) = 0;
         virtual ssize_t writev(const struct iovec *iov, int iovcnt) = 0;

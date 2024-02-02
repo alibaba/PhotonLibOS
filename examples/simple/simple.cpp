@@ -165,7 +165,7 @@ void run_socket_server(photon::net::ISocketServer* server, photon::fs::IFile* fi
     };
 
     server->set_handler(handler);
-    server->bind_localhost4(9527);
+    server->bind_v4localhost(9527);
     server->listen();
 
     // Photon's logging system formats the output string at COMPILE time, and has MUCH BETTER performance
