@@ -226,6 +226,5 @@ int main(int argc, char** arg) {
     test_posix_libaio("/tmp/test-syncio");
 
     usleep(0);
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
-
+    return RUN_ALL_TESTS();
 }

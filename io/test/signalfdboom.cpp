@@ -55,6 +55,5 @@ int main(int argc, char** arg)
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
-    LOG_DEBUG("test result:`",RUN_ALL_TESTS());
-    return 0;
+    return RUN_ALL_TESTS();
 }

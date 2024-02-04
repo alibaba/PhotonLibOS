@@ -134,5 +134,5 @@ int main(int argc, char** arg) {
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
 
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return RUN_ALL_TESTS();
 }
