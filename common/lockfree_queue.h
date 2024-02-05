@@ -548,6 +548,8 @@ class RingChannel : public QueueType {
 protected:
     photon::semaphore queue_sem;
     std::atomic<uint64_t> idler{0};
+    uint64_t default_yield_turn = -1UL;
+    uint64_t default_yield_usec = 1024;
 
     using T = decltype(std::declval<QueueType>().recv());
 
@@ -559,15 +561,19 @@ public:
     using QueueType::read_available;
     using QueueType::write_available;
 
+    RingChannel() = default;
+    explicit RingChannel(uint64_t max_yield_turn, uint64_t max_yield_usec)
+        : default_yield_turn(max_yield_turn),
+          default_yield_usec(max_yield_usec) {}
+
     template <typename Pause = ThreadPause>
     void send(const T& x) {
         while (!push(x)) {
             Pause::pause();
         }
-        if (idler.load(std::memory_order_acquire))
-            queue_sem.signal(1);
+        if (idler.load(std::memory_order_acquire)) queue_sem.signal(1);
     }
-    T recv(uint64_t max_yield_turn = -1UL, uint64_t max_yield_usec = 1024) {
+    T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
         if (pop(x)) return x;
         // yield once if failed, so photon::now will be update
@@ -590,6 +596,7 @@ public:
         }
         return x;
     }
+    T recv() { return recv(default_yield_turn, default_yield_usec); }
 };
 
 }  // namespace common

@@ -32,6 +32,8 @@ namespace photon {
 class WorkPool::impl {
 public:
     static constexpr uint32_t RING_SIZE = 256;
+    static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
+    static constexpr uint64_t QUEUE_YIELD_US = 1024;
 
     photon::mutex worker_mtx;
     std::vector<std::thread> owned_std_threads;
@@ -116,7 +118,8 @@ public:
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
         for (;;) {
-            auto task = ring.recv(running_tasks.load() ? 0: 256);
+            auto task = ring.recv(running_tasks.load() ? 0 : QUEUE_YIELD_COUNT,
+                                  QUEUE_YIELD_US);
             if (!task) break;
             running_tasks.fetch_add(std::memory_order_acq_rel);
             TaskLB tasklb{task, &running_tasks};
