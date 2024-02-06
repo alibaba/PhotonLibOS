@@ -103,7 +103,7 @@ public:
 class HttpFile_v2 : public fs::VirtualReadOnlyFile {
 public:
     std::string m_url;
-    net::http::CommonHeaders<> m_common_header;
+    std::unordered_map<std::string, std::string> m_common_header;
     HttpFs_v2* m_fs;
     struct stat m_stat;
     uint64_t m_stat_gettime = 0;
@@ -153,7 +153,8 @@ public:
         url.appends(m_url, "?", m_url_param);
         op.set_enable_proxy(m_fs->get_client()->has_proxy());
         op.req.reset(net::http::Verb::GET, url, op.enable_proxy);
-        op.req.headers.merge(m_common_header);
+        for (auto &kv : m_common_header)
+            op.req.headers.insert(kv.first, kv.second);
         op.req.headers.range(offset, offset + length - 1);
         op.req.headers.content_length(0);
         op.timeout = tmo.timeout();
@@ -228,9 +229,10 @@ public:
         return m_exists ? 0 : -1;
     }
 
-    //TODO: 这里是否需要考虑m_common_header被打爆的问题？
     void add_header(va_list args) {
-        m_common_header.insert(va_arg(args, const char*), va_arg(args, const char*));
+        auto k = va_arg(args, const char*);
+        auto v = va_arg(args, const char*);
+        m_common_header[k] = v;
     }
 
     void add_url_param(va_list args) { m_url_param = va_arg(args, const char*); }
