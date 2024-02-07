@@ -236,6 +236,10 @@ inline void delete_iovector(iovector* ptr);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Warray-bounds"
+#if __GNUC_MINOR__ >= 13
+#pragma GCC diagnostic ignored "-Wzero-length-bounds"
+#pragma GCC diagnostic ignored "-Wstrict-flex-arrays"
+#endif
 
 class iovector
 {
@@ -861,7 +865,7 @@ protected:
 
     struct IOVAllocation_ : public IOAlloc
     {
-        void* bases[0];
+        void* bases[];
         void* do_allocate(int size, uint16_t& nbases, uint16_t capacity)
         {
             return do_allocate(size, size, nbases, capacity);
