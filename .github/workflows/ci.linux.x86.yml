@@ -7,7 +7,7 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  centos8-gcc921-epoll-release:
+  centos8-gcc9-epoll-release:
     runs-on: ubuntu-latest
 
     container:
@@ -44,7 +44,7 @@ jobs:
           cd build
           ctest --timeout 3600 -V
 
-  centos8-gcc921-epoll-debug:
+  centos8-gcc9-epoll-debug:
     runs-on: ubuntu-latest
 
     container:
@@ -81,7 +81,7 @@ jobs:
           cd build
           ctest --timeout 3600 -V
 
-  centos8-gcc921-iouring-release:
+  centos8-gcc9-iouring-release:
     runs-on: [self-hosted, Linux, X64, io_uring]
 
     container:
@@ -116,4 +116,38 @@ jobs:
         run: |
           cd build
           export PHOTON_CI_EV_ENGINE=io_uring
+          ctest --timeout 3600 -V
+
+  ubuntu22-gcc11-epoll-release:
+    runs-on: ubuntu-22.04
+
+    container:
+      image: library/ubuntu:22.04
+      options: --cpus 4
+
+    steps:
+#      - uses: szenius/set-timezone@v1.2
+#        with:
+#          timezoneLinux: "Asia/Shanghai"
+#          timezoneMacos: "Asia/Shanghai"
+#          timezoneWindows: "China Standard Time"
+
+      - uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          apt update -y
+          apt install -y build-essential git cmake pkg-config
+          apt install -y libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
+          apt install -y libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev e2fslibs-dev
+
+      - name: Build
+        run: |
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j -- VERBOSE=1
+
+      - name: Test
+        run: |
+          cd build
           ctest --timeout 3600 -V
