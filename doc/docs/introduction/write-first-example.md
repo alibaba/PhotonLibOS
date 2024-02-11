@@ -14,7 +14,7 @@ Photon locks and condition viariables are used as well.
 The example code is written with [std-compatible API](../api/std-compatible-api).
 :::
 
-### 1. Initialize Photon environment
+### 1. Initialize coroutine environment
 
 ```cpp
 #include <photon/photon.h>
@@ -40,28 +40,26 @@ Its implementation is based on the concept of `RAII`.
 
 ### 2. Create a thread
 
-Just like the old way you create a `std::thread`, use `photon_std::thread` instead. The thread will start running immediately once you create it.
+Just like the old way you create a `std::thread`, use `photon_std::thread` instead.
 
 ```cpp
+// Global function, arguments are value, pointer, and reference
 int run_server(int a, MyType* b, MyType& c) {
 	// ...
 }
 
+// Use global function to create a coroutine. Will be automatically joined when thread object destructed.
 photon_std::thread th(run_server, a, b, std::ref(c));
-
-// Or new obj
-auto th = new photon_std::thread(run_server, a, b, std::ref(c));
-DEFER(delete th);
 
 // Or anonymous function by lambda
 new photon_std::thread([&] {
-		// Use a, b, c
+		// Access a, b, c directly without passing arguments 
 	}
 );
 ```
 
 :::tip
-If you want to use the raw API, rather than the std-compatible one, please refer to this [doc](../api/thread#thread_create11)
+If you want to use the raw API, rather than the std-compatible one, please refer to this [doc](../api/thread#thread_create11). It can provide more flexible functionalities.
 
 ```cpp
 #include <photon/photon.h>
@@ -98,7 +96,11 @@ while (!condition) {
 
 Photon has POSIX-like encapsulations for file and filesystem. In this example we first create a `IFileSystem` under current working dir, and then open a `IFile` from it. 
 
-You can switch the io_engine from `photon::fs::ioengine_psync` to `photon::fs::ioengine_iouring`, if your event_engine satisfied.
+You can switch the io_engine from `photon::fs::ioengine_psync` to `photon::fs::ioengine_iouring`, 
+if your event_engine satisfied. io_uring IO is naturally asynchronous and non-blocking. 
+It can also use page cache compared with aio.
+
+In addition to local file systems, Photon also supports a variety of remote file systems, such as httpfs, extfs, fusefs, etc.
 
 ```cpp
 #include <photon/fs/localfs.h>
@@ -135,7 +137,7 @@ if (client == nullptr) {
 }
 DEFER(delete client);
 
-photon::net::EndPoint ep{photon::net::IPAddr("127.0.0.1"), 9527};
+photon::net::EndPoint ep("127.0.0.1:9527");
 auto stream = client->connect(ep);
 if (!stream) {
     LOG_ERRNO_RETURN(0, -1, "failed to connect server");
@@ -170,7 +172,7 @@ auto handler = [&](photon::net::ISocketStream* stream) -> int {
 };
 
 server->set_handler(handler);
-server->bind(9527, photon::net::IPAddr());	// bind to 0.0.0.0
+server->bind_v4localhost(9527);
 server->listen();
 
 LOG_INFO("Server is listening for port ` ...", 9527);
@@ -178,9 +180,17 @@ server->start_loop(true);
 ```
 
 :::info
-The stream is a instance of `photon::net::ISocketStream`. It has extented write/read methods compared to triditional libc's send/recv.
+The stream is of type `photon::net::ISocketStream`. It has extended write/read methods compared to traditional libc's send/recv.
 
 Essentially, write = fully_send, and read = fully_recv.
+:::
+
+:::info
+LOG_INFO is Photon's unique logging system. It is based on template metaprogramming techniques 
+and optimizes results at compile time. So runtime overhead is reduced.
+Compared with other logging systems based on `sprintf`, Photon logging is 2~3 times faster than them.
+
+The \` symbol is a generic placeholder for multiple types of elements.
 :::
 
 ### Full source code

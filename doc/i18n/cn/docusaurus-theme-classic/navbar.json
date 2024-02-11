@@ -1,0 +1,22 @@
+{
+  "title": {
+    "message": "PhotonLibOS",
+    "description": "The title in the navbar"
+  },
+  "logo.alt": {
+    "message": "PhotonLibOS Logo",
+    "description": "The alt text of navbar logo"
+  },
+  "item.label.Docs": {
+    "message": "Docs",
+    "description": "Navbar item with label Docs"
+  },
+  "item.label.Blog": {
+    "message": "Blog",
+    "description": "Navbar item with label Blog"
+  },
+  "item.label.GitHub": {
+    "message": "GitHub",
+    "description": "Navbar item with label GitHub"
+  }
+}

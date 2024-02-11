@@ -3,16 +3,11 @@ sidebar_position: 4
 toc_max_heading_level: 4
 ---
 
-# Lock and Synchronization
+# 锁和同步原语
 
-- Multiple coroutines in the same OS thread have no visibility issues with each other. 
-For example, if multiple coroutines modify variables inside a thread at the same time, we don't need to use atomic 
-variables, and there is no need to pay attention to memory order.
-
-- But sync primitives are still needed, because locks are needed to protect variables from being modified by 
-other coroutines, if the lock owner might have a chance to yield its CPU.
-
-- All Photon's synchronization primitives are thead-safe, including the `thread_interrupt` API we introduced before.
+- 在同一个线程中的多个协程，彼此之间没有可见性问题。例如多个协程同时修改某个线程内部的变量，修改动作本身不需要使用atomic，不需要关注memory order。
+- 但同步原语（sync primitives）仍然是需要的，如使用锁保护变量不被其他的协程修改，因为锁的持有者可能会让出CPU。
+- 所有的协程同步原语都是支持跨线程使用的（也包括之前介绍的`thread_interrupt`唤醒操作）
 
 ### Namespace
 

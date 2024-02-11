@@ -3,12 +3,11 @@ sidebar_position: 4
 toc_max_heading_level: 4
 ---
 
-# How to Integrate
+# 集成
 
-You can either use CMake's `FetchContent` to download Photon source into your existing C++ project, 
-or add this repo as a `submodule`.
+你可以使用 CMake 的 `FetchContent` 功能下载 Photon 源码加入你的项目，或者把 repo 添加到 `submodule` 目录。
 
-### Modify your `CMakeLists.txt`
+### 修改 `CMakeLists.txt`
 
 ```cmake
 cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
@@ -23,9 +22,9 @@ set(PHOTON_CXX_STANDARD 14 CACHE INTERNAL "C++ standard")
 # 1. Fetch Photon repo with specific tag or branch
 include(FetchContent)
 FetchContent_Declare(
-    photon
-    GIT_REPOSITORY https://github.com/alibaba/PhotonLibOS.git
-    GIT_TAG main
+        photon
+        GIT_REPOSITORY https://github.com/alibaba/PhotonLibOS.git
+        GIT_TAG main
 )
 FetchContent_MakeAvailable(photon)
 
@@ -33,28 +32,28 @@ FetchContent_MakeAvailable(photon)
 add_subdirectory(photon)
 ```
 
-### Case 1: Statically linking your app with Photon
+### Case 1: 程序静态链接到Photon
 
 ```cmake
 add_executable(my_app ${SOURCES})
 target_link_libraries(my_app photon_static)
 ```
 
-### Case 2: Dynamically linking your app with Photon
+### Case 2: 程序动态链接到Photon
 
 ```cmake
 add_executable(my_app ${SOURCES})
 target_link_libraries(my_app photon_shared)
 ```
 
-### Case 3: Add Photon into your static lib
+### Case 3: 把Photon添加到你的静态库中
 
 ```cmake
 add_library(my_lib STATIC ${SOURCES})
 target_link_libraries(my_lib PRIVATE photon_static)
 ```
 
-### Case 4: Add Photon into your shared lib
+### Case 4: 把Photon添加到你的动态库中
 
 ```cmake
 add_library(my_lib SHARED ${SOURCES})
@@ -62,11 +61,12 @@ target_link_libraries(my_lib PRIVATE -Wl,--whole-archive libphoton.a -Wl,--no-wh
 ```
 
 :::note
-The `photon_static` and `photon_shared` targets have already configured include directories for you.
+`photon_static` 和 `photon_shared` 这两个 target 已经为你配置好了 include directories
 :::
 
 :::note
 
-If your lib needs to be installed via CMake's `install(EXPORT)`, you should change `photon_static` to `$<BUILD_INTERFACE:photon_static>` to avoid exporting libphoton.a
+如果你的库需要用 CMake 的 `install(EXPORT)` 安装, 你需要把 `photon_static` 改成 `$<BUILD_INTERFACE:photon_static>`，
+以便暴露 libphoton.a
 
 :::    

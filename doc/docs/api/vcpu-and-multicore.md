@@ -15,7 +15,7 @@ Each vCPU has a scheduler, executing and switching [threads](thread).
 
 Currently there are only two ways in Photon to utilize multiple cores:
 
-### 1. Create OS thread maually, and initialize the Env
+### 1. Create OS thread manually, and initialize the Env
 
 ```cpp
 new std::thread([&]{

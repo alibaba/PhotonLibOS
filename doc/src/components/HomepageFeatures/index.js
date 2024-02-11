@@ -1,50 +1,51 @@
 import React from 'react';
 import clsx from 'clsx';
 import styles from './styles.module.css';
+import Translate from '@docusaurus/Translate';
 
 const FeatureList = [
   {
-    title: 'Carefully-selected C++ libraries',
+    title: <Translate>Carefully-selected C++ libraries</Translate>,
     Svg: require('@site/static/img/homepage/connection.svg').default,
     description: (
       <>
-        Help connect user apps and the OS.
+      <Translate>Help connect user apps and the OS.</Translate>
       </>
     ),
   },  
   {
-    title: 'High performance coroutine runtime',
+    title: <Translate>High performance coroutine runtime</Translate>,
     Svg: require('@site/static/img/homepage/runtime.svg').default,
     description: (
       <>
-        Stackful coroutine. Symmetric scheduler. Non-blocking IO engine. Support io_uring.
+      <Translate>Stackful coroutine. Symmetric scheduler. Non-blocking IO engine. Support io_uring.</Translate>
       </>
     ),
   },
   {
-    title: 'Multiple platforms and architectures',
+    title: <Translate>Multiple platforms and architectures</Translate>,
     Svg: require('@site/static/img/homepage/platforms.svg').default,
     description: (
       <>
-        Support Linux and macOS, on x86 and ARM.
+      <Translate>Support Linux and macOS, on x86 and ARM.</Translate>
       </>
     ),
   },
   {
-    title: 'Well-designed assembly code',
+    title: <Translate>Well-designed assembly code</Translate>,
     Svg: require('@site/static/img/homepage/binary.svg').default,
     description: (
       <>
-        Reduce overhead on the critical path.
+      <Translate>Reduce overhead on the critical path.</Translate>
       </>
     ),
   },
   {
-    title: 'Fully compatible API toward C++ std and POSIX',
+    title: <Translate>Fully compatible API toward C++ std and POSIX</Translate>,
     Svg: require('@site/static/img/homepage/api.svg').default,
     description: (
       <>
-        Easy to learn. Less effort to integrate to a legacy codebase.        
+      <Translate>Easy to learn. Less effort to integrate to a legacy codebase.</Translate>
       </>
     ),
   },
