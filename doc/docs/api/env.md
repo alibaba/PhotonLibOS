@@ -22,8 +22,7 @@ Photon Env consists of different kinds of engines and a simulated coroutine stac
 ### init
 
 ```cpp
-int photon::init(uint64_t event_engine = INIT_EVENT_DEFAULT, 
-				 uint64_t io_engine = INIT_IO_DEFAULT);
+int photon::init(uint64_t event_engine = INIT_EVENT_DEFAULT, uint64_t io_engine = INIT_IO_DEFAULT);
 ```
 
 #### Description

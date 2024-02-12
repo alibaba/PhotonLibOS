@@ -17,13 +17,17 @@ Photon 的 vCPU 的概念等价于 OS 线程。
 
 ### 1. 手动创建OS线程，并初始化Env
 
+可以利用`thread_migrate`将协程迁移到其他vCPU上去
+
 ```cpp
 new std::thread([&]{
 	photon::init();
 	DEFER(photon::fini());
+    
+    auto th = photon::thread_create11(func);
+    photon::thread_migrate(th, vcpu);
 });
 ```
-
 
 ### 2. 使用 `WorkPool`
 
@@ -51,23 +55,47 @@ WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0, int thread_mod =
 
 #### 公共方法
 
-##### Get vCPU number
+##### 1. 异步执行
 
 ```cpp
-int get_vcpu_num();
+template <typename Task>
+int WorkPool::async_call(Task* task);
+```
+
+- `async_call` 的实现原理是利用一个 MPMC Queue 去传递消息，将 Task 放到 WorkPool 内部的多个 vCPU 上去执行。调用方不等待执行完毕。
+- task通常可以是一个new出来的lambda函数，执行完之后会自动调用delete释放。
+
+例子如下：
+
+```cpp
+photon::WorkPool pool(4, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 32768);
+photon::semephore sem;
+
+pool.async_call(new auto ([&]{
+    photon::thread_sleep(1);
+    sem.signal(1);
+}));
+```
+
+##### 2. 获取vCPU数量
+
+```cpp
+int WorkPool::get_vcpu_num();
 ```
 
 :::note
 只包含 WorkPool 的 vCPU 数量，主 OS 线程的 vCPU 不算。
 :::
 
-##### Thread Migrate
+##### 3. 迁移
+
+WorkPool migrate 的本质还是使用协程的迁移功能，不使用MPMC Queue。
 
 ```cpp
-int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL);
+int WorkPool::thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL);
 ```
 
 - `th` 需要迁移的协程
-- `index` 目标 vCPU 的 index。如果 index 不在 [0, vcpu_num) 范围内，将使用 round-robin 的方式选择下一个 vCPU。
+- `index` 目标 vCPU 的 index。如果 index 不在 [0, vcpu_num) 范围内，如默认值-1UL，将使用 round-robin 的方式选择下一个 vCPU。
      
 返回0表示成功， 小于0表示失败。

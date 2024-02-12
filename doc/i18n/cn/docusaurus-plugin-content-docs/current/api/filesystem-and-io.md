@@ -5,15 +5,15 @@ toc_max_heading_level: 4
 
 # 文件系统和IO
 
-Photon has POSIX-like encapsulations for file and filesystem. You can choose to use the encapsulations or not.
-
-### 1. Use the encapsulations
+Photon 对 file 和 fs 有 POSIX 兼容的封装。当然，你可以选择是否使用这套封装。
 
 #### Namespace
 
 `photon::fs::`
 
-#### Headers
+### 1. 使用封装
+
+#### localfs
 
 `<photon/fs/localfs.h>`
 
@@ -33,16 +33,22 @@ DEFER(delete file);
 ssize_t n_written = file->write(buf, 4096);
 ```
 
-### 2. Use the raw API
+#### fusefs
 
-#### aio wrapper
+#### cachefs
+
+待补充...
+
+### 2. 使用裸API
+
+#### aio
 
 `<photon/io/aio-wrapper.h>`
 
-Support libaio and posixaio.
+支持 libaio 和 posixaio.
 
 ```cpp
-// `fd` must be opened with O_DIRECT, and the buffers must be aligned
+// fd 必须用 O_DIRECT 打开, 并且内存必须对齐
 ssize_t libaio_pread(int fd, void *buf, size_t count, off_t offset);
 ssize_t libaio_preadv(int fd, const struct iovec *iov, int iovcnt, off_t offset);
 ssize_t libaio_pwrite(int fd, const void *buf, size_t count, off_t offset);
@@ -55,7 +61,7 @@ int posixaio_fsync(int fd);
 int posixaio_fdatasync(int fd);
 ```
 
-#### io_uring wrapper
+#### io_uring
 
 `<photon/io/iouring-wrapper.h>`
 
@@ -78,5 +84,5 @@ int iouring_close(int fd);
 ```
 
 :::note
-The IO engine must be set appropriately in [Env initialization](./env#init).
+io_uring 的事件引擎必须在 [Env](./env#init) 环境里正确初始化
 :::

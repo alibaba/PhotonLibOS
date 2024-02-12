@@ -250,7 +250,7 @@ namespace net {
 
     class ISocketClient : public ISocketBase, public Object {
     public:
-        // Connect to a remote IPv4 endpoint.
+        // Connect to a remote endpoint.
         // If `local` endpoint is not empty, its address will be bind to the socket before connecting to the `remote`.
         virtual ISocketStream* connect(const EndPoint& remote, const EndPoint* local = nullptr) = 0;
         // Connect to a Unix Domain Socket.

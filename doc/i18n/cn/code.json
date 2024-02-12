@@ -108,11 +108,11 @@
     "description": "The ARIA label for the docs pagination"
   },
   "theme.docs.paginator.previous": {
-    "message": "Previous",
+    "message": "前一篇",
     "description": "The label used to navigate to the previous doc"
   },
   "theme.docs.paginator.next": {
-    "message": "Next",
+    "message": "下一篇",
     "description": "The label used to navigate to the next doc"
   },
   "theme.docs.tagDocListPageTitle.nDocsTagged": {
@@ -143,7 +143,7 @@
     "description": "The label used for the latest version suggestion link label"
   },
   "theme.common.editThisPage": {
-    "message": "Edit this page",
+    "message": "感觉没说明白？直接编辑，给我们提PR",
     "description": "The link label to edit the current page"
   },
   "theme.common.headingLinkTitle": {
@@ -299,5 +299,8 @@
   },
   "Easy to learn. Less effort to integrate to a legacy codebase.": {
     "message": "简单上手，方便往旧代码集成"
+  },
+  "Get started": {
+    "message": "阅读文档"
   }
 }
