@@ -11,6 +11,8 @@ toc_max_heading_level: 4
 
 :::note
 该例子是用 [std-compatible API](../api/std-compatible-api) 编写的。
+
+如果你想使用原生 API 而不是 std-compatible API, 请参考 [文档](../api/thread#thread_create11)，它可以提供更加灵活的功能。
 :::
 
 ### 1. 初始化协程环境
@@ -25,12 +27,12 @@ int main() {
         return -1;
     }
     DEFER(photon::fini());
-
     // ...
 }
 ```
 
 执行完 `photon::init` 之后, 协程环境（[**Env**](../api/env)）就初始化好了，这意味着协程栈已经成功地在当前 [**vCPU**](../api/vcpu-and-multicore) 上分配。
+
 现在你可以创建多个并发执行的协程（[**threads**](../api/thread)）了，或者把它们迁移到其他 vCPU。
 
 `photon::fini` 负责销毁环境，它被一个叫做 `DEFER` 的宏（来自于`common/utility.h`）封装了一下。
@@ -41,26 +43,42 @@ int main() {
 跟创建 `std::thread` 线程的方法类似，不过我们使用 `photon_std::thread`。
 
 ```cpp
-// 全局函数，变量分别为数值、指针、引用
-int run_server(int a, MyType* b, MyType& c) {
-	// ...
-}
+// 全局函数
+int func(int a, char* b) {}
 
 // 用全局函数创建协程，thread对象析构时自动Join
-photon_std::thread th(run_server, a, b, std::ref(c));
+photon_std::thread th(func, 1, '2');
 
 // 或者使用匿名函数（lambda）
 new photon_std::thread([&] {
-		// 不用传参，可以直接访问a，b，c
+		// 不用传参，可以直接访问局部变量
 	}
 );
+
+// 用类的成员函数创建协程
+class A {
+    void f() {
+    auto th = new photon_std::thread(&A::g, this, 1, '2');
+    }
+    void g(int a, char* b) {}
+};
 ```
 
-:::tip
-如果你想使用原生 API 而不是 std-compatible API, 请参考 [文档](../api/thread#thread_create11)，它可以提供更加灵活的功能。
-:::
+### 3. 并发
 
-### 3. 锁和同步
+协程本质上就是函数，是一个执行单元。你可以通过创建多个执行单元实现并发，并且用join等待任务结束。
+
+```cpp
+std::vector<photon_std::thread> threads;
+for (int i = 0; i < 100; ++i) {
+    threads.emplace_back(func, 1, '2');
+}
+for (auth& th : threads) {
+    th.join();
+}
+```
+
+### 4. 锁和同步
 
 这是一个典型的 `condition_variable` 的用法，同上，只需要把 namespace 改成 photon_std 即可，其他代码都跟 std 的一样。
 
@@ -82,7 +100,7 @@ while (!condition) {
 }
 ```
 
-### 4. 文件 IO
+### 5. 文件 IO
 
 Photon 封装了一个类 POSIX 的文件系统接口。本例中我们首先在当前工作目录下创建一个 `IFileSystem` 对象，然后使用它又打开了一个 `IFile` 对象。
 
@@ -111,7 +129,7 @@ ssize_t n_written = file->write(buf, 4096);
 
 IFile 和 IFileSystem 在析构的时候都会自动 close 他们打开的资源，这是 RAII 理念的再一次运用。
 
-### 5. Socket
+### 6. Socket
 
 `tcp_socket_client` 和 `tcp_socket_server` 是客户端/服务端最常见的组合搭配， 请参考文档查阅更多的 socket 类型的封装。
 

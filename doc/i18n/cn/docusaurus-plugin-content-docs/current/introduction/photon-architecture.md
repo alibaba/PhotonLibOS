@@ -11,7 +11,7 @@ Photon 的主要目标是处理并发与 I/O (包括文件和网络 I/O)
 
 它的主要组成部分有：
 
-* [Thread](../api/thread.md), [vCPU](../api/vcpu-and-multicore.md), 计时器, 同步原语, WorkPool任务分发 ...
+* [Thread](../api/thread.md)，[vCPU](../api/vcpu-and-multicore.md)，锁和同步原语, 事件引擎，WorkPool任务分发 ...
 * 多种文件IO封装: psync, posix_aio, libaio, io_uring
 * 多种网络socket分封装: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
 * 高性能的 RPC client/server 和 HTTP client/server.

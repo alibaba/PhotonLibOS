@@ -11,10 +11,12 @@ in the background, created a Photon file for IO, and sent buffer through Photon 
 Photon locks and condition viariables are used as well.
 
 :::note
-The example code is written with [std-compatible API](../api/std-compatible-api).
+The example code is written in [std-compatible API](../api/std-compatible-api). 
+
+If you want to use the raw API, please refer to this [doc](../api/thread). It can provide more flexible functionalities.
 :::
 
-### 1. Initialize coroutine environment
+### 1. Initialize environment
 
 ```cpp
 #include <photon/photon.h>
@@ -26,51 +28,62 @@ int main() {
         return -1;
     }
     DEFER(photon::fini());
-
     // ...
 }
 ```
 
-After `photon::init`, the [Env](../api/env) is initialized, which means the coroutine stack is successfully allocated on current [`vCPU`](../api/vcpu-and-multicore). You can now create multiple Photon [`threads`](../api/thread) to run in parallel, or migrate them to other vCPUs.
+After `photon::init`, the [**Env**](../api/env) is initialized, which means the coroutine stack is successfully allocated on current [**vCPU**](../api/vcpu-and-multicore). 
+
+Now you can create multiple Photon [**threads**](../api/thread) to run in parallel, or migrate them to other vCPUs.
 
 The `photon::fini` is responsible for deallocating the environment. 
 It's wrapped in a helper macro called `DEFER` from `common/utility.h`.
 Like Go's defer, it ensures the statement be executed before the function returns.
 Its implementation is based on the concept of `RAII`.
 
-### 2. Create a thread
+### 2. Create thread
 
-Just like the old way you create a `std::thread`, use `photon_std::thread` instead.
+There are many ways to create a thread. Just like the old ways you use `std::thread`, but try `photon_std::thread` instead.
 
 ```cpp
-// Global function, arguments are value, pointer, and reference
-int run_server(int a, MyType* b, MyType& c) {
-	// ...
-}
+// Global function
+int func(int a, char* b) {}
 
-// Use global function to create a coroutine. Will be automatically joined when thread object destructed.
-photon_std::thread th(run_server, a, b, std::ref(c));
+// Use global function to create a thread.
+// Will be automatically joined when thread object destructed.
+photon_std::thread th(func, 1, '2');
 
-// Or anonymous function by lambda
-new photon_std::thread([&] {
-		// Access a, b, c directly without passing arguments 
+// Create a thread with anonymous function (lambda)
+photon_std::thread th([&] {
+		// Access local variables directly without passing arguments 
 	}
 );
+
+// Create a thread with class member function
+class A {
+    void f() {
+        auto th = new photon_std::thread(&A::g, this, 1, '2');  
+    }
+    void g(int a, char* b) {}
+};
 ```
 
-:::tip
-If you want to use the raw API, rather than the std-compatible one, please refer to this [doc](../api/thread#thread_create11). It can provide more flexible functionalities.
+### 3. Concurrency
+
+A thread is basically a function, and thus an execution unit. 
+You can create multiple threads at a time to achieve concurrency, and wait them finished by Join.
 
 ```cpp
-#include <photon/photon.h>
-#include <photon/thread/thread11.h>
-
-auto th = photon::thread_create11(run_server, a, b, std::ref(c));
+std::vector<photon_std::thread> threads;
+for (int i = 0; i < 100; ++i) {
+    threads.emplace_back(func, 1, '2');
+}
+for (auth& th : threads) {
+    th.join();
+}
 ```
 
-:::
-
-### 3. Lock and synchronization
+### 4. Lock and synchronization
 
 This is a typical `condition_variable` usage. Again, we switch to Photon's exclusive namespace.
 
@@ -92,7 +105,7 @@ while (!condition) {
 }
 ```
 
-### 4. File IO
+### 5. File IO
 
 Photon has POSIX-like encapsulations for file and filesystem. In this example we first create a `IFileSystem` under current working dir, and then open a `IFile` from it. 
 
@@ -122,7 +135,7 @@ ssize_t n_written = file->write(buf, 4096);
 
 Both IFile and IFileSystem object will close itself at destruction. Again, RAII.
 
-### 5. Socket
+### 6. Socket
 
 The `tcp_socket_client` + `tcp_socket_server` is the most regular combination for client and server. Please refer to the API docs for more socket types.
 
