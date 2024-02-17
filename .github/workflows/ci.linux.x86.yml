@@ -121,16 +121,12 @@ jobs:
   ubuntu22-gcc11-epoll-release:
     runs-on: ubuntu-22.04
 
-    container:
-      image: library/ubuntu:22.04
-      options: --cpus 4
-
     steps:
-#      - uses: szenius/set-timezone@v1.2
-#        with:
-#          timezoneLinux: "Asia/Shanghai"
-#          timezoneMacos: "Asia/Shanghai"
-#          timezoneWindows: "China Standard Time"
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
 
       - uses: actions/checkout@v3
 
