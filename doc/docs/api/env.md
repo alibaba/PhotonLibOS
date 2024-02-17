@@ -53,7 +53,7 @@ The `io_engine` will setup ancillary threads running in the background, if neces
 	- `INIT_IO_FSTACK_DPDK`
 
 :::info
-Running an `IOURING` event engine would need the kernel version to be greater than 5.4.
+Running an `IOURING` event engine would need the kernel version to be greater than 5.8.
 We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
 :::
 

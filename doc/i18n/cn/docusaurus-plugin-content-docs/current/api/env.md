@@ -58,7 +58,7 @@ int photon::init(uint64_t event_engine = INIT_EVENT_DEFAULT, uint64_t io_engine 
 	- `INIT_IO_FSTACK_DPDK` 
 
 :::info
-`IOURING` 事件引擎需要Linux内核版本大于5.4。我们建议您升级到最新内核版本，以便体验io_uring的极致性能。
+`IOURING` 事件引擎需要Linux内核版本大于5.8。我们建议您升级到最新内核版本，以便体验io_uring的极致性能。
 :::
 
 #### 返回值

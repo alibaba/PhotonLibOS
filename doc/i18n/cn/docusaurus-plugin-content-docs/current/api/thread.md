@@ -41,10 +41,9 @@ toc_max_heading_level: 3
 ### thread_create
 
 ```cpp
-photon::thread*
-photon::thread_create(thread_entry start, void* arg, 
-					  uint64_t stack_size = DEFAULT_STACK_SIZE,
-					  uint16_t reserved_space = 0);
+photon::thread* photon::thread_create(thread_entry start, void* arg,
+                                      uint64_t stack_size = DEFAULT_STACK_SIZE,
+                                      uint16_t reserved_space = 0);
 ```
 
 #### 描述
@@ -169,22 +168,21 @@ class A {
 
 #### Return
 
-Pointer to the new thread.
+新的 thread 的指针
 
 ----
 
 ### thread_enable_join
 
 ```cpp
-photon::join_handle* 
-photon::thread_enable_join(photon::thread* th, bool flag = true);
+photon::join_handle* photon::thread_enable_join(photon::thread* th, bool flag = true);
 ```
 
 #### Description
 
-- 新建的协程默认是**不用**Join的，但如果通过 `thread_enable_join` 开启了 join 却最终没有去执行 `thread_join`，则会产生资源泄露。
-
-- 得到的 `join_handle` 是用于操作 join 的指针。
+- 新建的协程默认是**不用**Join的，退出时自动释放内存
+- 但如果通过 `thread_enable_join` 开启了 join 却最终没有去执行 `thread_join`，则会产生资源泄露。
+- 得到的 `join_handle` 指针是 `thread_join` 的参数。
 
 #### Parameters
 
@@ -206,14 +204,15 @@ void photon::thread_join(photon::join_handle* jh);
 
 #### 描述
 
-Join 协程
+等待目标协程结束。
 
-- 虽然是M:1 模型，我们仍然可以将协程函数迁移到另一个线程上去执行。
-- 优先使用run-to-completion模型，减少跨线程交互。一旦创建后，非必要不将协程调度到其他线程，除非遇到本线程的CPU瓶颈。
+:::caution
+你不能 join 一个已经退出的或者不存在的 thread，这将导致 core dump。
+:::
 
 #### 参数
 
-- `jh` `join_handle` 指针，从上文的 `thread_enable_join` 获得。
+- `jh`：`join_handle` 指针，从上文的 `thread_enable_join` 获得。
 
 #### 返回值
 
@@ -285,6 +284,10 @@ void photon::thread_interrupt(photon::thread* th, int error_number = EINTR);
 在协程场景下，将任务的提交、执行、收割分为前台和后台，是常见的一种设计模式。
 例如我们可以在前台协程中将任务提交到某个队列后立刻睡眠，后台协程在检查到任务执行完之后，去唤醒前台协程继续执行。
 
+:::caution
+你不能 interrupt 一个已经退出的或者不存在的 thread，这将导致 core dump。
+:::
+
 #### 参数
 
 - `th` 目标 thread.
@@ -331,7 +334,10 @@ int photon::thread_migrate(photon::thread* th, photon::vcpu_base* vcpu);
 
 #### Description
 
-Migrate a `READY` state thread to another vCPU.
+把一个 `READY` 状态的 thread 迁移到另一个 vCPU.
+
+- 虽然是M:1 模型，我们仍然可以将协程函数迁移到另一个线程上去执行。
+- 优先使用run-to-completion模型，减少跨线程交互。一旦创建后，非必要不将协程调度到其他线程，除非遇到本线程的CPU瓶颈。
 
 #### Parameters
 
@@ -365,7 +371,7 @@ Returns a pointer of `vcpu_base`.
 
 ----
 
-## Thread Pool
+## 协程池
 
 #### Additional Header
 
@@ -385,7 +391,7 @@ photon::ThreadPool<400> p2;
 auto th2 = p2.thread_create(&func, nullptr);
 ```
 
-## Timer
+## 计时器
 
 #### Additional Header
 
@@ -397,6 +403,8 @@ Create a timer object with `default_timedout` in usec, callback function `on_tim
 and callback argument `arg`. The timer object is implemented as a special thread, so
 it has a `stack_size`, and the `on_timer` is invoked within the thread's context.
 The timer object is deleted automatically after it is finished.	
+
+一个 non-repeating 的计时器基本上等于创建一个新协程，并执行 thread_sleep。
 
 ```cpp
 Timer(uint64_t default_timeout, Entry on_timer, 

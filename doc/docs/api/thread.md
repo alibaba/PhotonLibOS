@@ -43,10 +43,9 @@ multi-threaded programs.
 ### thread_create
 
 ```cpp
-photon::thread*
-photon::thread_create(thread_entry start, void* arg, 
-					  uint64_t stack_size = DEFAULT_STACK_SIZE,
-					  uint16_t reserved_space = 0);
+photon::thread* photon::thread_create(thread_entry start, void* arg,
+                                      uint64_t stack_size = DEFAULT_STACK_SIZE,
+                                      uint16_t reserved_space = 0);
 ```
 
 #### Description
@@ -183,8 +182,7 @@ Pointer to the new thread.
 ### thread_enable_join
 
 ```cpp
-photon::join_handle* 
-photon::thread_enable_join(photon::thread* th, bool flag = true);
+photon::join_handle* photon::thread_enable_join(photon::thread* th, bool flag = true);
 ```
 
 #### Description
@@ -217,6 +215,10 @@ void photon::thread_join(photon::join_handle* jh);
 #### Description
 
 Join a thread.
+
+:::caution
+You can't join an exited or non-existent thread. It will cause core dump.
+:::
 
 #### Parameters
 
@@ -279,6 +281,10 @@ void photon::thread_interrupt(photon::thread* th, int error_number = EINTR);
 #### Description
 
 Interrupt the target thread. Awaken it from sleep.
+
+:::caution
+You can't interrupt an exited or non-existent thread. It will cause core dump.
+:::
 
 #### Parameters
 
@@ -396,6 +402,8 @@ Create a timer object with `default_timedout` in usec, callback function `on_tim
 and callback argument `arg`. The timer object is implemented as a special thread, so
 it has a `stack_size`, and the `on_timer` is invoked within the thread's context.
 The timer object is deleted automatically after it is finished.	
+
+A non-repeating is basically equal to creating a new thread and run thread_usleep.
 
 ```cpp
 Timer(uint64_t default_timeout, Entry on_timer, 
