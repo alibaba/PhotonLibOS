@@ -197,16 +197,17 @@ public:
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
         if (fill_uds_path(addr_un, path, count) != 0) return nullptr;
-        return do_connect((const sockaddr*) &addr_un, sizeof(addr_un));
+        sockaddr_storage r(addr_un);
+        return do_connect(&r);
     }
 
     ISocketStream* connect(const EndPoint& remote, const EndPoint* local) override {
         sockaddr_storage r(remote);
         if (likely(!local || local->is_ipv4() != remote.is_ipv4())) {
-            return do_connect(r.get_sockaddr(), r.get_socklen());
+            return do_connect(&r);
         }
         sockaddr_storage l(*local);
-        return do_connect(r.get_sockaddr(), r.get_socklen(), &l);
+        return do_connect(&r, &l);
     }
 
     virtual KernelSocketStream* create_stream(int socket_family) {
@@ -217,9 +218,9 @@ public:
         return net::connect(fd, remote, addrlen, m_timeout);
     }
 
-    ISocketStream* do_connect(const sockaddr* remote, socklen_t len_remote,
+    ISocketStream* do_connect(const sockaddr_storage* remote,
                               const sockaddr_storage* local = nullptr) {
-        auto stream = create_stream(remote->sa_family);
+        auto stream = create_stream(remote->store.ss_family);
         auto deleter = [&](KernelSocketStream*) {
             auto errno_backup = errno;
             delete stream;
@@ -238,9 +239,9 @@ public:
                 LOG_ERRNO_RETURN(0, nullptr, "fail to bind socket");
             }
         }
-        auto ret = fd_connect(ptr->fd, remote, len_remote);
+        auto ret = fd_connect(ptr->fd, remote->get_sockaddr(), remote->get_socklen());
         if (ret < 0) {
-            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect to ", *remote);
+            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect to ", remote->to_endpoint());
         }
         return ptr.release();
     }
@@ -251,7 +252,7 @@ public:
     using ISocketServer::setsockopt;
     using ISocketServer::getsockopt;
 
-    KernelSocketServer(bool autoremove = false) : m_autoremove(autoremove) { }
+    explicit KernelSocketServer(bool autoremove = false) : m_autoremove(autoremove) { }
 
     int init() { return 0; }
 
@@ -1088,8 +1089,5 @@ LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
     return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
 LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
-    return log << photon::net::sockaddr_storage(addr).to_endpoint();
-}
-LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
     return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }

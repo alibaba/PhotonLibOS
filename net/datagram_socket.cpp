@@ -71,12 +71,12 @@ public:
 
     virtual uint64_t max_message_size() override { return m_max_msg_size; }
 
-    int do_connect(struct sockaddr* addr, size_t addr_len) {
-        return DOIO_ONCE(::connect(fd, addr, addr_len), wait_for_fd_writable(fd));
+    int do_connect(const sockaddr_storage* s) {
+        return DOIO_ONCE(::connect(fd, s->get_sockaddr(), s->get_socklen()), wait_for_fd_writable(fd));
     }
 
-    int do_bind(struct sockaddr* addr, size_t addr_len) {
-        return ::bind(fd, addr, addr_len);
+    int do_bind(const sockaddr_storage* s) {
+        return ::bind(fd, s->get_sockaddr(), s->get_socklen());
     }
     ssize_t do_send(const iovec* iov, int iovcnt, sockaddr* addr,
                     size_t addrlen, int flags = 0) {
@@ -144,13 +144,13 @@ public:
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
         sockaddr_storage s(*ep);
-        return do_connect(s.get_sockaddr(), s.get_socklen());
+        return do_connect(&s);
     }
     virtual int bind(const Addr* addr, size_t addr_len) override {
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
         sockaddr_storage s(*ep);
-        return do_bind(s.get_sockaddr(), s.get_socklen());
+        return do_bind(&s);
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt, const Addr* addr,
                          size_t addr_len, int flags = 0) override {
@@ -190,11 +190,13 @@ public:
     }
     virtual int connect(const Addr* addr, size_t addr_len) override {
         auto un = to_addr_un(addr, addr_len);
-        return do_connect((sockaddr*)&un, sizeof(un));
+        sockaddr_storage s(un);
+        return do_connect(&s);
     }
     virtual int bind(const Addr* addr, size_t addr_len) override {
         auto un = to_addr_un(addr, addr_len);
-        return do_bind((sockaddr*)&un, sizeof(un));
+        sockaddr_storage s(un);
+        return do_bind(&s);
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt, const Addr* addr,
                          size_t addr_len, int flags = 0) override {
