@@ -119,7 +119,9 @@ public:
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_dialer(tls_ctx), m_cookie_jar(cookie_jar) { }
+        m_dialer(tls_ctx),
+        m_cookie_jar(cookie_jar) {
+    }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op) {

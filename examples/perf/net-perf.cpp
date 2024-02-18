@@ -35,7 +35,6 @@ DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 512, "buffer size");
 DEFINE_uint64(vcpu_num, 1, "server vcpu num. Increase this value to enable multi-vcpu scheduling");
 
-static int event_engine = 0;
 static bool stop_test = false;
 static uint64_t qps = 0;
 static uint64_t time_cost = 0;
