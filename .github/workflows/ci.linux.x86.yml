@@ -132,10 +132,10 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          apt update -y
-          apt install -y build-essential git cmake pkg-config
-          apt install -y libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
-          apt install -y libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev e2fslibs-dev
+          sudo apt update -y
+          sudo apt install -y build-essential git cmake pkg-config
+          sudo apt install -y libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
+          sudo apt install -y libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev e2fslibs-dev
 
       - name: Build
         run: |
