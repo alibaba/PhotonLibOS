@@ -21,6 +21,7 @@ Internal header provides abstract socket base class
 ***/
 
 #include <netinet/in.h>
+#include <sys/un.h>
 #include <vector>
 
 #include <photon/net/socket.h>
@@ -60,8 +61,8 @@ struct sockaddr_storage {
     explicit sockaddr_storage(const sockaddr_in6& addr) {
         *((sockaddr_in6*) &store) = addr;
     }
-    explicit sockaddr_storage(const sockaddr& addr) {
-        *((sockaddr*) &store) = addr;
+    explicit sockaddr_storage(const sockaddr_un& addr) {
+        *((sockaddr_un*) &store) = addr;
     }
     EndPoint to_endpoint() const {
         EndPoint ep;
@@ -85,6 +86,8 @@ struct sockaddr_storage {
                 return sizeof(sockaddr_in);
             case AF_INET6:
                 return sizeof(sockaddr_in6);
+            case AF_UNIX:
+                return sizeof(sockaddr_un);
             default:
                 return 0;
         }

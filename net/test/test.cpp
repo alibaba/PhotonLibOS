@@ -563,7 +563,6 @@ void test_log_sockaddr_in() {
 void test_log_sockaddr() {
     struct sockaddr myaddr0;
     myaddr0.sa_family = 0;
-    LOG_DEBUG(myaddr0);
 
     auto myaddr = (struct sockaddr_in&)myaddr0;
     myaddr.sin_family = AF_INET;

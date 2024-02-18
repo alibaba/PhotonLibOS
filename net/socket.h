@@ -37,7 +37,6 @@ LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
 LogBuffer& operator << (LogBuffer& log, const in6_addr& iaddr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr_in6& addr);
-LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
 
 namespace photon {
 namespace net {
