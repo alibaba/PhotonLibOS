@@ -21,6 +21,7 @@ limitations under the License.
 #include <thread>
 #include <photon/common/metric-meter/metrics.h>
 #include <photon/common/alog.h>
+#include <memory>
 
 Metric::AverageLatencyCounter ldefer, lsem;
 
@@ -37,7 +38,7 @@ void* task_defer(void* arg) {
 
 void* task_semaphore(void* arg) {
     SCOPE_LATENCY(*(Metric::AverageLatencyCounter*)(arg));
-    std::shared_ptr<photon::semaphore> sem=std::make_shared<photon::semaphore>(0);
+    auto sem = std::make_shared<photon::semaphore>(0);
     std::thread([&, sem]{
         sem->signal(1);
     }).detach();
@@ -59,7 +60,7 @@ void* ph_task_defer(void* arg) {
 
 void* ph_task_semaphore(void* arg) {
     SCOPE_LATENCY(*(Metric::AverageLatencyCounter*)(arg));
-    std::shared_ptr<photon::semaphore> sem=std::make_shared<photon::semaphore>(0);
+    auto sem = std::make_shared<photon::semaphore>(0);
     auto task = [&, sem]{
             sem->signal(1);
         };
