@@ -3,6 +3,7 @@
 #include <photon/common/throttle.h>
 #include <photon/common/utility.h>
 #include <photon/photon.h>
+#include <photon/thread/thread11.h>
 
 #include <chrono>
 
@@ -17,16 +18,17 @@ TEST(Throttle, basic) {
         total -= step;
     }
     auto end = std::chrono::steady_clock::now();
-    auto duration =
-        std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    auto baseline = duration.count();
-    LOG_INFO("cosume 10M unit in ` us", DEC(baseline).comma(true));
+    auto duration_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    auto baseline = duration_ns.count();
+    LOG_INFO("Baseline: consume 10M unit in ` ns", DEC(baseline).comma(true));
+
+    ////////////////////////////////////////
 
     // try update time
     photon::thread_yield();
     // using throttle to limit increasing count 1M in seconds
-    photon::throttle t(1UL * 1024 * 1024);
-
+    photon::throttle t1(1UL * 1024 * 1024);
     // suppose to be done in at least 9 seconds
     total = 10UL * 1024 * 1024;
     start = std::chrono::steady_clock::now();
@@ -34,15 +36,51 @@ TEST(Throttle, basic) {
         // assume each step may consume about 4K ~ 1M
         auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
-        t.consume(step);
+        t1.consume(step);
         total -= step;
     }
     end = std::chrono::steady_clock::now();
-    duration =
+    auto duration_us =
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    LOG_INFO("cosume 10M with 1M throttle in ` us",
-             DEC(duration.count()).comma(true));
-    EXPECT_GT(duration.count(), 9UL * 1000 * 1000);
+    LOG_INFO("Normal Throttle: consume 10M with 1M throttle in ` us",
+             DEC(duration_us.count()).comma(true));
+    EXPECT_GT(duration_us.count(), 9UL * 1000 * 1000);
+
+    ////////////////////////////////////////
+
+    photon::throttle t2(-1UL);
+    total = 10UL * 1024 * 1024;
+    start = std::chrono::steady_clock::now();
+    while (total) {
+        // assume each step may consume about 4K ~ 1M
+        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        if (step > total) step = total;
+        t2.consume(step);
+        total -= step;
+    }
+    end = std::chrono::steady_clock::now();
+    duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+    LOG_INFO("No-limit Throttle: consume 10M with non-throttle in ` ns",
+             DEC(duration_ns.count()).comma(true));
+    EXPECT_LT(duration_ns.count(), 1000UL * 1000);
+
+    ////////////////////////////////////////
+
+    photon::throttle t3(0);
+    auto th = photon::thread_create11([&] {
+        start = std::chrono::steady_clock::now();
+        t3.consume(1);
+        end = std::chrono::steady_clock::now();
+    });
+    photon::thread_enable_join(th);
+    photon::thread_sleep(2);
+    photon::thread_interrupt(th);
+    photon::thread_join((photon::join_handle*) th);
+
+    duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    LOG_INFO("Maximum Throttle: consume hang ` us", DEC(duration_us.count()).comma(true));
+    EXPECT_GT(duration_us.count(), 2000UL * 1000);
+    EXPECT_LT(duration_us.count(), 2200UL * 1000);
 }
 
 TEST(Throttle, restore) {

@@ -29,6 +29,9 @@ protected:
     }
 
 public:
+    /**
+     * @param limit -1UL means no limit, 0 means lowest speed (hang)
+     */
     throttle(uint64_t limit, uint64_t time_window = 1000UL * 1000,
              uint64_t slice = 10) {
         m_slice_num = slice;
@@ -44,7 +47,7 @@ public:
         int err = 0;
         do {
             try_signal();
-            ret = sem.wait(amount, m_time_slice);
+            ret = sem.wait_interruptible(amount, m_time_slice);
             err = errno;
         } while (ret < 0 && err == ETIMEDOUT);
         if (ret < 0) {
@@ -56,7 +59,7 @@ public:
 
     int try_consume(uint64_t amount) {
         try_signal();
-        return sem.wait(amount, 0);
+        return sem.wait_interruptible(amount, 0);
     }
 
     void restore(uint64_t amount) {
