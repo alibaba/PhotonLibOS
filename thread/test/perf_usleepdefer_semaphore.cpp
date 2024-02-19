@@ -63,25 +63,27 @@ void* ph_task_semaphore(void* arg) {
 }
 
 const int ROUND = 10000;
-void do_test(ALogStringL name, photon::thread_entry entry) {
+void do_test(ALogStringL name, photon::thread_entry task) {
     Metric::AverageLatencyCounter lat; {
         SCOPE_LATENCY(lat);
-        photon::threads_create_join(ROUND, &task_defer, nullptr);
+        photon::threads_create_join(ROUND, task, nullptr);
     }
     LOG_INFO("average latency = ` (`)", lat.val(), name);
 }
 
+#define DO_TEST(task) do_test(#task, & task);
+
 TEST(perf, task_in_thread) {
     LOG_INFO(ROUND, " rounds");
-    do_test("defer", &task_defer);
-    do_test("semaphore", &task_semaphore);
+    DO_TEST(task_defer);
+    DO_TEST(task_semaphore);
     photon::thread_usleep(1);
 }
 
 TEST(perf, task_in_photon) {
     LOG_INFO(ROUND, " rounds");
-    do_test("defer", &ph_task_defer);
-    do_test("semaphore", &ph_task_semaphore);
+    DO_TEST(ph_task_defer);
+    DO_TEST(ph_task_semaphore);
     photon::thread_usleep(1);
 }
 
