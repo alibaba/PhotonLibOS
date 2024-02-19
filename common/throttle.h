@@ -12,6 +12,7 @@ protected:
     uint64_t m_time_window;
     uint64_t m_time_slice;
     uint64_t m_slice_num;
+    bool m_no_limit;
 
     void try_signal() {
         auto duration = photon::now - last_retrieve;
@@ -30,6 +31,11 @@ protected:
 public:
     throttle(uint64_t limit, uint64_t time_window = 1000UL * 1000,
              uint64_t slice = 10) {
+        if (limit == 0) {
+            m_no_limit = true;
+            return;
+        }
+        m_no_limit = false;
         m_slice_num = slice;
         m_limit_slice = photon::sat_add(limit, (slice - 1)) / slice;
         m_limit = m_limit_slice * slice;
@@ -39,6 +45,8 @@ public:
     }
 
     int consume(uint64_t amount) {
+        if (m_no_limit)
+            return 0;
         int ret = 0;
         int err = 0;
         do {
@@ -54,11 +62,15 @@ public:
     }
 
     int try_consume(uint64_t amount) {
+        if (m_no_limit)
+            return 0;
         try_signal();
         return sem.wait(amount, 0);
     }
 
     void restore(uint64_t amount) {
+        if (m_no_limit)
+            return;
         auto free = amount;
         auto current = photon::sat_sub(m_limit, sem.count());
         if (current < free) free = current;
