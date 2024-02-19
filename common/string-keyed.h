@@ -187,18 +187,30 @@ public:
     }
 };
 
-// the string_key with a string value stored right after the key
-class cskv : public string_key {
-    explicit cskv(std::string_view k, std::string_view v) {
+// the String Key-Value (Mutable), stored together
+// in a consecutive area, so as to save one allocation
+class skvm : public string_key {
+public:
+    explicit skvm(std::string_view k, std::string_view v) {
         auto nk = k.size();
         auto nv = v.size();
-        auto ptr = (char*)malloc(nv+1+nk+1);
-        memcpy(ptr, k.data(), nk);
-        ptr[nk] = '\0';
-        ptr += nk + 1;
-        memcpy(ptr, v.data(), nv);
-        ptr[nv] = '\0';
+        auto ptr = (char*) malloc(nk+1 + nv+1);
+        do_copy(ptr, k);
+        do_copy(ptr + nk + 1, v);
         assign({ptr, nk});
+    }
+    const char* get_value() const {
+        return this->end() + 1;
+    }
+    void replace_value(std::string_view v) {
+        auto nk = this->size();
+        auto ptr = (char*) realloc((void*)this->data(), nk + v.size() + 1);
+        do_copy(ptr + nk + 1, v);
+        assign({ptr, nk});
+    }
+    void do_copy(char* ptr, std::string_view s) {
+        memcpy(ptr, s.data(), s.size());
+        ptr[s.size()] = '\0';
     }
 };
 
@@ -215,19 +227,39 @@ public:
 
     using value_type = std::pair<const key_type, mapped_type>;
 
+    struct MutableValue {
+        std::string_view _v;
+        skvm* _skvm;
+        operator std::string_view() const {
+            return _v;
+        }
+        MutableValue& operator = (std::string_view v) {
+            _skvm->replace_value(v);
+            _v = {_skvm->get_value(), v.size()};
+        }
+    };
+
     struct iterator {
         using base_it = typename base::iterator;
         base_it _b_it;
-        value_type _val;
+
+        using mutable_value_type = std::pair<std::string, MutableValue>;
+        mutable_value_type _val;
         iterator(base_it b_it) : _b_it(b_it) { }
         void _init() {
             _val.first = _b_it->first;
             _val.second = {_b_it->first.end() + 1, _b_it->second};
         }
-        const value_type* operator->() const {
+        const mutable_value_type* operator->() const {
             return &_val;
         }
-        const value_type& operator*() const {
+        const mutable_value_type& operator*() const {
+            return _val;
+        }
+        mutable_value_type* operator->() {
+            return &_val;
+        }
+        mutable_value_type& operator*() {
             return _val;
         }
         iterator operator++(int) {
@@ -260,25 +292,37 @@ public:
 
     using const_iterator = const iterator;
 
-    const mapped_type& operator[] ( const key_type& k ) const
+    mapped_type operator[] ( const key_type& k ) const
     {
         return find(k)->second;
     }
-    const mapped_type& at ( const key_type& k ) const
+    MutableValue operator[] ( const key_type& k )
+    {
+        return find(k)->second;
+    }
+    mapped_type at ( const key_type& k ) const
+    {
+        return find(k)->second;
+    }
+    MutableValue at ( const key_type& k )
     {
         return find(k)->second;
     }
     const_iterator find ( const key_type& k ) const
     {
-        return base::find((const cskv&)k);
+        return base::find((const skvm&)k);
+    }
+    iterator find ( const key_type& k )
+    {
+        return base::find((const skvm&)k);
     }
     size_type count ( const key_type& k ) const
     {
-        return base::count((const cskv&)k);
+        return base::count((const skvm&)k);
     }
     std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
     {
-        return base::equal_range((const cskv&)k);
+        return base::equal_range((const skvm&)k);
     }
     std::pair<iterator, bool> emplace (const key_type& k, const mapped_type& v )
     {
@@ -308,23 +352,23 @@ public:
     }
     size_type erase ( const std::string_view& k )
     {
-        return base::erase((const cskv&)k);
+        return base::erase((const skvm&)k);
     }
 };
 
 template<class Hasher = std::hash<std::string_view>,
          class KeyEqual = std::equal_to<std::string_view>,
-         class Alloc = std::allocator<std::pair<const cskv, size_t>>>
+         class Alloc = std::allocator<std::pair<const skvm, size_t>>>
 using unordered_map_string_kv = basic_map_string_kv<
-    std::unordered_map<cskv, size_t, Hasher, KeyEqual, Alloc>>;
+    std::unordered_map<skvm, size_t, Hasher, KeyEqual, Alloc>>;
 
-template<class Pred = std::less<cskv>,
-         class Alloc = std::allocator<std::pair<const cskv, size_t>>>
+template<class Pred = std::less<skvm>,
+         class Alloc = std::allocator<std::pair<const skvm, size_t>>>
 class map_string_kv : public basic_map_string_kv<
-    std::map<cskv, size_t, Pred, Alloc>>
+    std::map<skvm, size_t, Pred, Alloc>>
 {
 public:
-    using base = basic_map_string_kv<std::map<cskv, size_t, Pred, Alloc>>;
+    using base = basic_map_string_kv<std::map<skvm, size_t, Pred, Alloc>>;
     using typename base::key_type;
     using typename base::const_iterator;
     using typename base::iterator;
@@ -334,19 +378,19 @@ public:
 
     iterator lower_bound (const key_type& k)
     {
-        return base::lower_bound((const cskv&)k);
+        return base::lower_bound((const skvm&)k);
     }
     const_iterator lower_bound (const key_type& k) const
     {
-        return base::lower_bound((const cskv&)k);
+        return base::lower_bound((const skvm&)k);
     }
     iterator upper_bound (const key_type& k)
     {
-        return base::upper_bound((const cskv&)k);
+        return base::upper_bound((const skvm&)k);
     }
     const_iterator upper_bound (const key_type& k) const
     {
-        return base::upper_bound((const cskv&)k);
+        return base::upper_bound((const skvm&)k);
     }
 };
 
