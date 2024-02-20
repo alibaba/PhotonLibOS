@@ -442,16 +442,30 @@ struct LogBuilder {
 };
 
 #if __GNUC__ >= 9
-#define DEFINE_PROLOGUE(level, prolog)                                          \
-    static constexpr const char* _prologue_func = __func__;                     \
-    const static Prologue prolog{                                               \
-        (uint64_t) _prologue_func,  (uint64_t)__FILE__, sizeof(__func__) - 1,   \
-        sizeof(__FILE__) - 1, __LINE__, level};
+#define DEFINE_PROLOGUE(level, prolog)                                         \
+    static constexpr const char* _prologue_func = __func__;                    \
+    auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
+    auto _partial_file =                                                       \
+        ConstString::TSpliter<'/', ' ',                                        \
+                              decltype(_prologue_file_r)>::Current::reverse(); \
+    const static Prologue prolog{(uint64_t)_prologue_func,                     \
+                                 (uint64_t)_partial_file.chars,                \
+                                 sizeof(__func__) - 1,                         \
+                                 (int)_partial_file.len,                       \
+                                 __LINE__,                                     \
+                                 level};
 #else
-#define DEFINE_PROLOGUE(level, prolog)                                  \
-    const static Prologue prolog{                                       \
-        (uint64_t) __func__,  (uint64_t)__FILE__, sizeof(__func__) - 1, \
-        sizeof(__FILE__) - 1, __LINE__, level};
+#define DEFINE_PROLOGUE(level, prolog)                                         \
+    auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
+    auto _partial_file =                                                       \
+        ConstString::TSpliter<'/', ' ',                                        \
+                              decltype(_prologue_file_r)>::Current::reverse(); \
+    const static Prologue prolog{(uint64_t) __func__,                          \
+                                 (uint64_t)_partial_file.chars,                \
+                                 sizeof(__func__) - 1,                         \
+                                 (int)_partial_file.len,                       \
+                                 __LINE__,                                     \
+                                 level};
 #endif
 
 #define _IS_LITERAL_STRING(x) \

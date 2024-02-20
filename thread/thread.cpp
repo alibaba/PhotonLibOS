@@ -1090,6 +1090,12 @@ R"(
         }
         return photon::now;
     }
+    void alog_update_now(uint64_t *sec, uint64_t *usec) {
+        last_tsc = _rdtsc();
+        auto ts = update_now();
+        *sec = ts / 1000000;
+        *usec = ts % 1000000;
+    }
     int timestamp_updater_init() {
         if (!ts_updater) {
             std::thread([&]{
