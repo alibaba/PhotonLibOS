@@ -490,7 +490,7 @@ static inline ALogInteger DEC_W2P0(uint64_t x)
 }
 
 namespace photon {
-uint64_t alog_update_now(uint64_t *sec, uint64_t *usec);
+struct timeval alog_update_now();
 }
 
 LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
@@ -498,9 +498,8 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
 #ifdef LOG_BENCHMARK
     auto t = &alog_time;
 #else
-    uint64_t sec, usec;
-    photon::alog_update_now(&sec, &usec);
-    auto t = alog_update_time(sec - timezone);
+    auto ts = photon::alog_update_now();
+    auto t = alog_update_time(ts.tv_sec - timezone);
 #endif
     log.printf(t->tm_year, '/');
     log.printf(DEC_W2P0(t->tm_mon),  '/');
@@ -508,7 +507,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     log.printf(DEC_W2P0(t->tm_hour), ':');
     log.printf(DEC_W2P0(t->tm_min),  ':');
     log.printf(DEC_W2P0(t->tm_sec), '.');
-    log.printf(DEC(usec).width(6).padding('0'));
+    log.printf(DEC(ts.tv_usec).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
     log.reserved = pro.level;
