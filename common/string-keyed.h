@@ -27,8 +27,12 @@ limitations under the License.
 class string_key : public std::string_view {
 public:
     string_key() : std::string_view(0, 0) { }
-    explicit string_key(const string_key& rhs) :
-             string_key(rhs.data(), rhs.size()) { }
+    explicit string_key(const string_key& rhs) {
+        auto n = rhs.size();
+        auto ptr = (char*)malloc(n + 1);
+        do_copy(ptr, rhs);
+        assign({ptr, n});
+    }
     explicit string_key(string_key&& rhs) {
         assign(rhs);
         rhs.assign({0, 0});
@@ -41,11 +45,9 @@ public:
     string_key& operator = (string_key&& rhs) = delete;
 
 protected:
-    explicit string_key(const void* src, size_t n) {
-        auto ptr = (char*)malloc(n + 1);
-        memcpy(ptr, src, n);
-        ptr[n] = '\0';
-        assign({ptr, n});
+    void do_copy(char* ptr, std::string_view s) {
+        memcpy(ptr, s.data(), s.size());
+        ptr[s.size()] = '\0';
     }
     void assign(std::string_view sv) {
         *(std::string_view*)this = sv;
@@ -196,7 +198,7 @@ public:
         auto nv = v.size();
         auto ptr = (char*) malloc(nk+1 + nv+1);
         do_copy(ptr, k);
-        do_copy(ptr + nk + 1, v);
+        do_copy(ptr + nk+1, v);
         assign({ptr, nk});
     }
     const char* get_value() const {
@@ -204,13 +206,9 @@ public:
     }
     void replace_value(std::string_view v) {
         auto nk = this->size();
-        auto ptr = (char*) realloc((void*)this->data(), nk + v.size() + 1);
-        do_copy(ptr + nk + 1, v);
+        auto ptr = (char*) realloc((void*)this->data(), nk+1 + v.size()+1);
+        do_copy(ptr + nk+1, v);
         assign({ptr, nk});
-    }
-    void do_copy(char* ptr, std::string_view s) {
-        memcpy(ptr, s.data(), s.size());
-        ptr[s.size()] = '\0';
     }
 };
 
