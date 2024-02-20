@@ -343,7 +343,7 @@ protected:
 
 struct Prologue
 {
-    uint64_t addr_func, addr_file;
+    const char *addr_func, *addr_file;
     int len_func, len_file;
     int line, level;
 };
@@ -448,8 +448,8 @@ struct LogBuilder {
     auto _partial_file =                                                       \
         ConstString::TSpliter<'/', ' ',                                        \
                               decltype(_prologue_file_r)>::Current::reverse(); \
-    const static Prologue prolog{(uint64_t)_prologue_func,                     \
-                                 (uint64_t)_partial_file.chars,                \
+    const static Prologue prolog{_prologue_func,                               \
+                                 _partial_file.chars,                          \
                                  sizeof(__func__) - 1,                         \
                                  (int)_partial_file.len,                       \
                                  __LINE__,                                     \
@@ -460,8 +460,8 @@ struct LogBuilder {
     auto _partial_file =                                                       \
         ConstString::TSpliter<'/', ' ',                                        \
                               decltype(_prologue_file_r)>::Current::reverse(); \
-    const static Prologue prolog{(uint64_t) __func__,                          \
-                                 (uint64_t)_partial_file.chars,                \
+    const static Prologue prolog{__func__,                                     \
+                                 _partial_file.chars,                          \
                                  sizeof(__func__) - 1,                         \
                                  (int)_partial_file.len,                       \
                                  __LINE__,                                     \

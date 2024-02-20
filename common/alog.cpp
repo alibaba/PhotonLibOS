@@ -514,9 +514,9 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     log.printf(ALogString(&levels[pro.level * 10], 10));
     log.printf(photon::CURRENT, '|');
     if (pro.level != ALOG_AUDIT) {
-        log.printf(ALogString((char*)pro.addr_file, pro.len_file), ':');
+        log.printf(ALogString(pro.addr_file, pro.len_file), ':');
         log.printf(pro.line, '|');
-        log.printf(ALogString((char*)pro.addr_func, pro.len_func), ':');
+        log.printf(ALogString(pro.addr_func, pro.len_func), ':');
     }
     return log;
 }
