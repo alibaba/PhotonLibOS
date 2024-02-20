@@ -525,6 +525,12 @@ inline NamedValue<T> make_named_value(const char (&name)[N], T&& value)
 
 #define VALUE(x) make_named_value(#x, x)
 
+template <size_t N>
+inline LogBuffer& operator<<(LogBuffer& log,
+                             const NamedValue<char (&)[N]>& v) {
+    return log.printf('[', v.name, '=', (const char*)v.value, ']');
+}
+
 template<typename T>
 inline LogBuffer& operator << (LogBuffer& log, const NamedValue<T>& v)
 {
