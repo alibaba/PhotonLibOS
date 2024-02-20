@@ -346,6 +346,16 @@ struct Prologue
     const char *addr_func, *addr_file;
     int len_func, len_file;
     int line, level;
+
+    template <size_t N, typename FILEN>
+    constexpr Prologue(const char (&addr_func_)[N], FILEN addr_file_, int line_,
+                       int level_)
+        : addr_func(addr_func_),
+          addr_file(addr_file_.chars),
+          len_func(N - 1),
+          len_file(addr_file_.len - 1),
+          line(line_),
+          level(level_) {}
 };
 
 LogBuffer& operator << (LogBuffer& log, const Prologue& pro);
@@ -441,39 +451,19 @@ struct LogBuilder {
     }
 };
 
-#if __GNUC__ >= 9
-#define DEFINE_PROLOGUE(level, prolog)                                         \
-    static constexpr const char* _prologue_func = __func__;                    \
+#define DEFINE_PROLOGUE(level)                                                 \
     auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
     auto _partial_file =                                                       \
         ConstString::TSpliter<'/', ' ',                                        \
                               decltype(_prologue_file_r)>::Current::reverse(); \
-    const static Prologue prolog{_prologue_func,                               \
-                                 _partial_file.chars,                          \
-                                 sizeof(__func__) - 1,                         \
-                                 (int)_partial_file.len,                       \
-                                 __LINE__,                                     \
-                                 level};
-#else
-#define DEFINE_PROLOGUE(level, prolog)                                         \
-    auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
-    auto _partial_file =                                                       \
-        ConstString::TSpliter<'/', ' ',                                        \
-                              decltype(_prologue_file_r)>::Current::reverse(); \
-    const static Prologue prolog{__func__,                                     \
-                                 _partial_file.chars,                          \
-                                 sizeof(__func__) - 1,                         \
-                                 (int)_partial_file.len,                       \
-                                 __LINE__,                                     \
-                                 level};
-#endif
+    constexpr static Prologue prolog(__func__, _partial_file, __LINE__, level);
 
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
 #define __LOG__(logger, level, first, ...)                             \
     ({                                                                 \
-        DEFINE_PROLOGUE(level, prolog);                                \
+        DEFINE_PROLOGUE(level);                                        \
         auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) { \
             if (_IS_LITERAL_STRING(first)) {                           \
                 return __log__(level, __output_##__LINE__, prolog,     \
