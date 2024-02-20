@@ -699,6 +699,21 @@ TEST(Semaphore, heavy) {
     wait_for_completion();
 }
 
+TEST(Semaphore, interrupt) {
+    semaphore sem;
+    auto start = photon::now;
+    auto th = thread_create11([&] {
+       sem.wait(1);
+    });
+    auto jh = thread_enable_join(th);
+    thread_sleep(1);
+    thread_interrupt(th);
+    thread_join(jh);
+    auto dt = photon::now - start;
+    EXPECT_GT(dt, 1000000);
+    EXPECT_LT(dt, 1500000);
+}
+
 TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
     // If current thread is only thread and sleeping
     // it should be able to avoid crash during long time sleep

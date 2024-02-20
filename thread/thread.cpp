@@ -1676,11 +1676,16 @@ R"(
         while (!try_substract(count)) {
             ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
             splock.lock();
-            if (ret < 0 && errno == ETIMEDOUT) {
-                CURRENT->semaphore_count = 0;
-                try_resume();       // when timeout, we need to try
-                splock.unlock();    // to resume next thread(s) in q
-                return ret;
+            if (ret < 0) {
+                if (errno == ETIMEDOUT) {
+                    CURRENT->semaphore_count = 0;
+                    try_resume();       // when timeout, we need to try
+                    splock.unlock();    // to resume next thread(s) in q
+                    return ret;
+                } else if (errno == EINTR) {
+                    splock.unlock();
+                    return ret;
+                }
             }
         }
         try_resume();
