@@ -530,7 +530,7 @@ inline NamedValue<T> make_named_value(const char (&name)[N], T&& value)
 template <ssize_t N, ssize_t M>
 inline NamedValue<ALogString> make_named_value(const char (&name)[N],
                                                char (&value)[M]) {
-    return {ALogStringL(name), ALogString(value, strlen(value))};
+    return {ALogStringL(name), alog_forwarding(value)};
 }
 
 #define VALUE(x) make_named_value(#x, x)
