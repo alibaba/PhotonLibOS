@@ -294,6 +294,8 @@ namespace fs
         ::DIR* dirp;
         ::dirent* direntp;
         long loc;
+        ::dirent m_dirent;
+
         LocalDIR(::DIR* dirp) : dirp(dirp)
         {
             next();
@@ -313,6 +315,10 @@ namespace fs
         }
         virtual dirent* get() override
         {
+            if (direntp) {
+                memcpy(&m_dirent, direntp, sizeof(m_dirent));
+                return &m_dirent;
+            }
             return direntp;
         }
         virtual int next() override
