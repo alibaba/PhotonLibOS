@@ -21,7 +21,6 @@ limitations under the License.
 #include <thread>
 #include <photon/common/metric-meter/metrics.h>
 #include <photon/common/alog.h>
-#include <memory>
 
 void* task_defer(void* arg) {
     auto th = photon::CURRENT;
