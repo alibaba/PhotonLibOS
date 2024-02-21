@@ -228,11 +228,6 @@ struct tm* alog_update_time(time_t now)
     return &alog_time;
 }
 
-static struct tm* alog_update_time()
-{
-    return alog_update_time(time(0) - timezone);
-}
-
 class LogOutputFile final : public BaseLogOutput {
 public:
     uint64_t log_file_size_limit = 0;
@@ -494,28 +489,34 @@ static inline ALogInteger DEC_W2P0(uint64_t x)
     return DEC(x).width(2).padding('0');
 }
 
+namespace photon {
+struct timeval alog_update_now();
+}
+
 LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
 {
 #ifdef LOG_BENCHMARK
     auto t = &alog_time;
 #else
-    auto t = alog_update_time();
+    auto ts = photon::alog_update_now();
+    auto t = alog_update_time(ts.tv_sec - timezone);
 #endif
     log.printf(t->tm_year, '/');
     log.printf(DEC_W2P0(t->tm_mon),  '/');
     log.printf(DEC_W2P0(t->tm_mday), ' ');
     log.printf(DEC_W2P0(t->tm_hour), ':');
     log.printf(DEC_W2P0(t->tm_min),  ':');
-    log.printf(DEC_W2P0(t->tm_sec));
+    log.printf(DEC_W2P0(t->tm_sec), '.');
+    log.printf(DEC(ts.tv_usec).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
     log.reserved = pro.level;
     log.printf(ALogString(&levels[pro.level * 10], 10));
     log.printf(photon::CURRENT, '|');
     if (pro.level != ALOG_AUDIT) {
-        log.printf(ALogString((char*)pro.addr_file, pro.len_file), ':');
+        log.printf(ALogString(pro.addr_file, pro.len_file), ':');
         log.printf(pro.line, '|');
-        log.printf(ALogString((char*)pro.addr_func, pro.len_func), ':');
+        log.printf(ALogString(pro.addr_func, pro.len_func), ':');
     }
     return log;
 }
