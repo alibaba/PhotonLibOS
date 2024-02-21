@@ -343,9 +343,19 @@ protected:
 
 struct Prologue
 {
-    uint64_t addr_func, addr_file;
+    const char *addr_func, *addr_file;
     int len_func, len_file;
     int line, level;
+
+    template <size_t N, typename FILEN>
+    constexpr Prologue(const char (&addr_func_)[N], FILEN addr_file_, int line_,
+                       int level_)
+        : addr_func(addr_func_),
+          addr_file(addr_file_.chars),
+          len_func(N - 1),
+          len_file(addr_file_.len - 1),
+          line(line_),
+          level(level_) {}
 };
 
 LogBuffer& operator << (LogBuffer& log, const Prologue& pro);
@@ -441,25 +451,19 @@ struct LogBuilder {
     }
 };
 
-#if __GNUC__ >= 9
-#define DEFINE_PROLOGUE(level, prolog)                                          \
-    static constexpr const char* _prologue_func = __func__;                     \
-    const static Prologue prolog{                                               \
-        (uint64_t) _prologue_func,  (uint64_t)__FILE__, sizeof(__func__) - 1,   \
-        sizeof(__FILE__) - 1, __LINE__, level};
-#else
-#define DEFINE_PROLOGUE(level, prolog)                                  \
-    const static Prologue prolog{                                       \
-        (uint64_t) __func__,  (uint64_t)__FILE__, sizeof(__func__) - 1, \
-        sizeof(__FILE__) - 1, __LINE__, level};
-#endif
+#define DEFINE_PROLOGUE(level)                                                 \
+    auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
+    auto _partial_file =                                                       \
+        ConstString::TSpliter<'/', ' ',                                        \
+                              decltype(_prologue_file_r)>::Current::reverse(); \
+    constexpr static Prologue prolog(__func__, _partial_file, __LINE__, level);
 
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
 #define __LOG__(logger, level, first, ...)                             \
     ({                                                                 \
-        DEFINE_PROLOGUE(level, prolog);                                \
+        DEFINE_PROLOGUE(level);                                        \
         auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) { \
             if (_IS_LITERAL_STRING(first)) {                           \
                 return __log__(level, __output_##__LINE__, prolog,     \
@@ -521,6 +525,12 @@ template<size_t N, typename T>
 inline NamedValue<T> make_named_value(const char (&name)[N], T&& value)
 {
     return NamedValue<T> {ALogStringL(name), std::forward<T>(value)};
+}
+
+template <ssize_t N, ssize_t M>
+inline NamedValue<ALogString> make_named_value(const char (&name)[N],
+                                               char (&value)[M]) {
+    return {ALogStringL(name), alog_forwarding(value)};
 }
 
 #define VALUE(x) make_named_value(#x, x)
