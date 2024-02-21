@@ -23,6 +23,7 @@ limitations under the License.
 #undef protected
 #include <gtest/gtest.h>
 #include <photon/thread/thread.h>
+#include <photon/common/alog.h>
 
 #include <thread>
 
