@@ -353,7 +353,7 @@ struct Prologue
         : addr_func(addr_func_),
           addr_file(addr_file_.chars),
           len_func(N - 1),
-          len_file(addr_file_.len),
+          len_file(addr_file_.len - 1),
           line(line_),
           level(level_) {}
 };
