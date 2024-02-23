@@ -528,22 +528,16 @@ inline NamedValue<T> make_named_value(const char (&name)[N], T&& value)
 }
 
 template <ssize_t N, ssize_t M>
-inline NamedValue<ALogString> make_named_value(const char (&name)[N],
-                                               char (&value)[M]) {
-    return {ALogStringL(name), alog_forwarding(value)};
+inline NamedValue<const char*> make_named_value(const char (&name)[N],
+                                                char (&value)[M]) {
+    return {ALogStringL(name), value};
 }
 
 #define VALUE(x) make_named_value(#x, x)
 
-template<typename T>
-inline LogBuffer& operator << (LogBuffer& log, const NamedValue<T>& v)
-{
+template <typename T>
+inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     return log.printf('[', v.name, '=', v.value, ']');
-}
-
-inline LogBuffer& operator << (LogBuffer& log, const NamedValue<ALogString>& v)
-{
-    return log.printf('[', v.name, '=', '"', v.value, '"', ']');
 }
 
 // output a log message, set errno, then return a value
