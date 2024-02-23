@@ -69,7 +69,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @return first resolved address.
  */
- inline IPAddr gethostbyname(const char* name) {
+inline IPAddr gethostbyname(const char* name) {
     IPAddr ret;
     auto cb = [&](IPAddr addr) {
         ret = addr;
@@ -88,7 +88,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @param buf IPAddr buffer pointer
  * @param bufsize size of `buf`, takes `sizeof(IPAddr)` as unit
- * @return sum of resolved address number. result will be filled into `buf`
+ * @return sum of resolved address number. -1 means error. result will be filled into `buf`
  */
 inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
     int i = 0;
@@ -107,7 +107,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  *
  * @param name Host name to resolve
  * @param ret `std::vector<IPAddr>` reference to get results
- * @return sum of resolved address number.
+ * @return sum of resolved address number. -1 means error.
  */
 inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
     ret.clear();
@@ -153,15 +153,16 @@ bool zerocopy_available();
  */
 class Resolver : public Object {
 public:
-    // When failed, IPAddr(0) should be returned.
+    // When failed, return an Undefined IPAddr
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(const char* host) = 0;
     virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
-    virtual void discard_cache(const char* host) = 0;  // discard current cache of host:ip
+    virtual void discard_cache(const char* host, IPAddr ip = IPAddr()) = 0;  // discard current cache of ip
 };
 
 /**
  * @brief A non-blocking Resolver based on gethostbyname.
+ * Currently, it's not thread safe.
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.

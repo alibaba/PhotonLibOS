@@ -29,8 +29,12 @@ namespace photon {
 namespace net {
 namespace http {
 
-void buf_append(char*& ptr, std::string_view sv);
 void buf_append(char*& ptr, uint64_t x);
+
+inline void buf_append(char*& ptr, std::string_view sv) {
+    memcpy(ptr, sv.data(), sv.size());
+    ptr += sv.size();
+}
 
 class HeadersBase {
 public:

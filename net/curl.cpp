@@ -28,6 +28,7 @@ limitations under the License.
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../io/reset_handle.h"
 
 namespace photon {
 namespace net {
@@ -159,6 +160,8 @@ public:
 
     void stop() { loop->stop(); }
 
+    photon::thread* loop_thread() { return loop->loop_thread(); }
+
 protected:
     EventLoop* loop;
     int cnt;
@@ -210,6 +213,17 @@ void __OpenSSLGlobalInit();
 //     curl_global_cleanup();
 // }
 
+class CurlResetHandle : public ResetHandle {
+     int reset() override {
+        LOG_INFO("reset libcurl by reset handle");
+        // interrupt g_loop by ETIMEDOUT to replace g_poller
+        if (cctx.g_loop)
+            thread_interrupt(cctx.g_loop->loop_thread(), ETIMEDOUT);
+        return 0;
+     }
+};
+static thread_local CurlResetHandle *reset_handler = nullptr;
+
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
@@ -240,6 +254,10 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
 
         libcurl_set_pipelining(pipelining);
         libcurl_set_maxconnects(maxconn);
+        if (reset_handler == nullptr) {
+            reset_handler = new CurlResetHandle();
+        }
+        LOG_INFO("libcurl initialized");
     }
 
     return 0;
@@ -256,6 +274,8 @@ void libcurl_fini() {
     if (ret != CURLM_OK)
         LOG_ERROR("libcurl-multi cleanup error: ", curl_multi_strerror(ret));
     cctx.g_libcurl_multi = nullptr;
+    safe_delete(reset_handler);
+    LOG_INFO("libcurl finished");
 }
 
 std::string url_escape(const char* str) {

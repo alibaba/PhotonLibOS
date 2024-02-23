@@ -19,7 +19,6 @@ limitations under the License.
 #include <cassert>
 #include <photon/thread/thread.h>
 #include <photon/common/callback.h>
-#include <photon/common/alog.h>
 
 namespace photon
 {

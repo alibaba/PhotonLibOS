@@ -29,7 +29,7 @@ namespace photon {
 namespace net {
 namespace http {
 static const uint64_t kDNSCacheLife = 3600UL * 1000 * 1000;
-static constexpr char USERAGENT[] = "EASE/0.21.6";
+static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 
 
 class PooledDialer {
@@ -44,9 +44,11 @@ public:
     PooledDialer(TLSContext *_tls_ctx) :
             tls_ctx(_tls_ctx ? _tls_ctx : new_tls_context(nullptr, nullptr, nullptr)),
             tls_ctx_ownership(_tls_ctx == nullptr),
-            tcpsock(new_tcp_socket_pool(new_tcp_socket_client(), -1, true)),
-            tlssock(new_tcp_socket_pool(new_tls_client(tls_ctx, new_tcp_socket_client(), true), -1, true)),
             resolver(new_default_resolver(kDNSCacheLife)) {
+        auto tcp_cli = new_tcp_socket_client();
+        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
+        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
+        tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
     }
 
     ~PooledDialer() {
@@ -67,6 +69,10 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     LOG_DEBUG("Dial to ` `", host, port);
     std::string strhost(host);
     auto ipaddr = resolver->resolve(strhost.c_str());
+    if (ipaddr.undefined()) {
+        LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
+    }
+
     EndPoint ep(ipaddr, port);
     LOG_DEBUG("Connecting ` ssl: `", ep, secure);
     ISocketStream *sock = nullptr;
@@ -82,10 +88,10 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
         return sock;
     }
     LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
-    if (ipaddr.addr == 0) LOG_DEBUG("No connectable resolve result");
+    if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
-    resolver->discard_cache(strhost.c_str());
+    resolver->discard_cache(strhost.c_str(), ipaddr);
     return nullptr;
 }
 
@@ -104,7 +110,8 @@ enum RoundtripStatus {
     ROUNDTRIP_FAILED,
     ROUNDTRIP_REDIRECT,
     ROUNDTRIP_NEED_RETRY,
-    ROUNDTRIP_FORCE_RETRY
+    ROUNDTRIP_FORCE_RETRY,
+    ROUNDTRIP_FAST_RETRY,
 };
 
 class ClientImpl : public Client {
@@ -113,9 +120,7 @@ public:
     CommonHeaders<> m_common_headers;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_cookie_jar(cookie_jar),
-        m_dialer(tls_ctx) {
-    }
+        m_dialer(tls_ctx), m_cookie_jar(cookie_jar) { }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
     int redirect(Operation* op) {
@@ -159,7 +164,12 @@ public:
         auto s = (m_proxy && !m_proxy_url.empty())
                      ? m_dialer.dial(m_proxy_url, tmo.timeout())
                      : m_dialer.dial(req, tmo.timeout());
-        if (!s) LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
+        if (!s) {
+            if (errno == ECONNREFUSED || errno == ENOENT) {
+                LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
+            }
+            LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
+        }
 
         SocketStream_ptr sock(s);
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
@@ -240,6 +250,9 @@ public:
                     sleep_interval = (sleep_interval + 500) * 2;
                     ++retry;
                     break;
+                case ROUNDTRIP_FAST_RETRY:
+                    ++retry;
+                    break;
                 case ROUNDTRIP_REDIRECT:
                     retry = 0;
                     ++followed;
@@ -250,7 +263,7 @@ public:
             if (tmo.timeout() == 0)
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "connection timedout");
             if (followed > op->follow || retry > op->retry)
-                LOG_ERROR_RETURN(ENOENT, -1,  "connection failed");
+                LOG_ERRNO_RETURN(0, -1,  "connection failed");
         }
         if (ret != ROUNDTRIP_SUCCESS) LOG_ERROR_RETURN(0, -1,"too many retry, roundtrip failed");
         return 0;

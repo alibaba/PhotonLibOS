@@ -28,6 +28,23 @@ CMAP = {
 enabling = False
 photon = []
 
+def get_arch():
+    frame = gdb.selected_frame()
+    arch = frame.architecture()
+    return arch.name()
+
+def get_regs(arch):
+    regs = {}
+    if arch == 'aarch64':
+        regs['sp'] = '$sp'
+        regs['bp'] = '$x29'
+        regs['ip'] = '$pc'
+    else:
+        regs['sp'] = '$rsp'
+        regs['bp'] = '$rbp'
+        regs['ip'] = '$rip'
+
+    return regs
 
 def cprint(stat, *args):
     print('{}{}{} {}'.format(CMAP[stat], stat, bcolors.ENDC,
@@ -55,11 +72,11 @@ def in_sleep(q):
     return [(q['_M_impl']['_M_start'][i]) for i in range(size)]
 
 
-def switch_to_ph(rsp, rbp, rip):
+def switch_to_ph(regs, rsp, rbp, rip):
     cprint('SWITCH', "to {} {} {}".format(hex(rsp), hex(rbp), hex(rip)))
-    gdb.parse_and_eval("$rsp={}".format(rsp))
-    gdb.parse_and_eval("$rbp={}".format(rbp))
-    gdb.parse_and_eval("$rip={}".format(rip))
+    gdb.parse_and_eval("{}={}".format(regs['sp'], rsp))
+    gdb.parse_and_eval("{}={}".format(regs['bp'], rbp))
+    gdb.parse_and_eval("{}={}".format(regs['ip'], rip))
 
 
 def get_u64_ptr(p):
@@ -143,14 +160,20 @@ class PhotonFr(gdb.Command):
         if i < 0 or i > len(photon):
             print("No such photon thread")
             return
-        switch_to_ph(photon[i][2], photon[i][3], photon[i][4])
+
+        arch = get_arch()
+        regs = get_regs(arch)
+        switch_to_ph(regs, photon[i][2], photon[i][3], photon[i][4])
 
 
 def photon_init():
     global photon
-    set_u64_reg('$saved_rsp', '$rsp')
-    set_u64_reg('$saved_rbp', '$rbp')
-    set_u64_reg('$saved_rip', '$rip')
+
+    arch = get_arch()
+    regs = get_regs(arch)
+    set_u64_reg('$saved_rsp', regs['sp'])
+    set_u64_reg('$saved_rbp', regs['bp'])
+    set_u64_reg('$saved_rip', regs['ip'])
     load_photon_threads()
     if len(photon) == 0:
         return
@@ -171,9 +194,11 @@ class PhotonInit(gdb.Command):
 def photon_restore():
     if not enabling:
         return
-    set_u64_reg('$rsp', '$saved_rsp')
-    set_u64_reg('$rbp', '$saved_rbp')
-    set_u64_reg('$rip', '$saved_rip')
+    arch = get_arch()
+    regs = get_regs(arch)
+    set_u64_reg(regs['sp'], '$saved_rsp')
+    set_u64_reg(regs['bp'], '$saved_rbp')
+    set_u64_reg(regs['ip'], '$saved_rip')
 
 
 class PhotonRestore(gdb.Command):

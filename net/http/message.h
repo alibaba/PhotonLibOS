@@ -57,7 +57,7 @@ public:
     void reset(void* buf, uint16_t buf_capacity, bool buf_ownership = false,
                 ISocketStream* s = nullptr, bool stream_ownership = false) {
         reset(s, stream_ownership);
-        if (m_buf_ownership && m_buf) {
+        if (m_buf_ownership) {
             free(m_buf);
         }
         m_buf = (char*)buf;

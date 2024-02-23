@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "signal.h"
+#include <cstdlib>
 #include <unistd.h>
 #include <pthread.h>
 #ifdef __APPLE__
@@ -26,6 +27,7 @@ limitations under the License.
 #include "fd-events.h"
 #include "../common/event-loop.h"
 #include "../common/alog.h"
+#include "reset_handle.h"
 
 namespace photon
 {
@@ -227,14 +229,35 @@ namespace photon
 #endif
     }
 
-    // should be invoked in child process after forked, to clear signal mask
-    static void fork_hook_child(void)
-    {
-        LOG_DEBUG("Fork hook");
-        sigset_t sigset0;       // can NOT use photon::clear_signal_mask(),
-        sigemptyset(&sigset0);  // as memory may be shared with parent, when vfork()ed
-        sigprocmask(SIG_SETMASK, &sigset0, nullptr);
-    }
+    class SignalResetHandle : public ResetHandle {
+        int reset() override {
+            if (sgfd < 0)
+                return 0;
+            LOG_INFO("reset signalfd by reset handle");
+            sigset_t sigset0;       // can NOT use photon::clear_signal_mask(),
+            sigemptyset(&sigset0);  // as memory may be shared with parent, when vfork()ed
+            sigprocmask(SIG_SETMASK, &sigset0, nullptr);
+            // reset sgfd
+            memset(sighandlers, 0, sizeof(sighandlers));
+#ifdef __APPLE__
+            sgfd = kqueue();        // kqueue fd is not inherited from the parent process
+#else
+            close(sgfd);
+            sigfillset(&sigset);
+            sgfd = signalfd(-1, &sigset, SFD_CLOEXEC | SFD_NONBLOCK);
+#endif
+            if (sgfd == -1) {
+                LOG_ERROR("failed to create signalfd() or kqueue()");
+                exit(1);
+            }
+            // interrupt event loop by ETIMEDOUT to replace sgfd
+            if (eloop)
+                thread_interrupt(eloop->loop_thread(), ETIMEDOUT);
+
+            return 0;
+        }
+    };
+    static SignalResetHandle *reset_handler = nullptr;
 
     int sync_signal_init()
     {
@@ -262,9 +285,11 @@ namespace photon
             LOG_ERROR_RETURN(EFAULT, -1, "failed to thread_create() for signal handling");
         }
         eloop->async_run();
-        LOG_INFO("signalfd initialized");
         thread_yield(); // give a chance let eloop to execute do_wait
-        pthread_atfork(nullptr, nullptr, &fork_hook_child);
+        if (reset_handler == nullptr) {
+            reset_handler = new SignalResetHandle();
+        }
+        LOG_INFO("signalfd initialized");
         return clear_signal_mask();
     }
 
@@ -298,6 +323,7 @@ namespace photon
             }
         }
 #endif
+        safe_delete(reset_handler);
         LOG_INFO("signalfd finished");
         return clear_signal_mask();
     }

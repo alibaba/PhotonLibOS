@@ -21,13 +21,14 @@ limitations under the License.
 #include <sys/event.h>
 #include <photon/common/alog.h>
 #include "events_map.h"
+#include "reset_handle.h"
 
 namespace photon {
 
 constexpr static EventsMap<EVUnderlay<EVFILT_READ, EVFILT_WRITE, EVFILT_EXCEPT>>
     evmap;
 
-class KQueue : public MasterEventEngine, public CascadingEventEngine {
+class KQueue : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     struct InFlightEvent {
         uint32_t interests = 0;
@@ -53,6 +54,15 @@ public:
             LOG_ERRNO_RETURN(0, -1, "failed to setup self-wakeup EVFILT_USER event by kevent()");
         }
         return 0;
+    }
+
+    int reset() override {
+        LOG_INFO("Reset event engine: kqueue");
+        _kq = -1;                   // kqueue fd is not inherited from the parent process
+        _inflight_events.clear();   // reset members
+        _n = 0;
+        _tm = {0, 0};
+        return init();              // re-init
     }
 
     ~KQueue() override {
