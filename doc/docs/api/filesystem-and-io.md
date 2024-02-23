@@ -7,13 +7,13 @@ toc_max_heading_level: 4
 
 Photon has POSIX-like encapsulations for file and filesystem. You can choose to use the encapsulations or not.
 
-### 1. Use the encapsulations
-
 #### Namespace
 
 `photon::fs::`
 
-#### Headers
+### 1. Use the encapsulations
+
+#### localfs
 
 `<photon/fs/localfs.h>`
 
@@ -32,6 +32,14 @@ DEFER(delete file);
 
 ssize_t n_written = file->write(buf, 4096);
 ```
+
+#### fusefs
+
+To be added...
+
+#### cachefs
+
+To be added...
 
 ### 2. Use the raw API
 

@@ -44,3 +44,16 @@ $ GIT_USER=photonlibos yarn deploy
 
 Will push to the `main` branch and use the GitHub pages for hosting
 
+## 翻译
+
+### 翻译HTML或者Javascript上的元素
+
+```
+$ yarn docusaurus write-translations -l cn
+
+$ vim i18n/cn/code.json
+```
+
+### 翻译文档或者博客等Markdown文件
+
+https://docusaurus.io/docs/i18n/tutorial#translate-markdown-files

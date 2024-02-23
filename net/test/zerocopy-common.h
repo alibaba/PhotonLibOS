@@ -24,7 +24,7 @@ using namespace photon;
 static const int checksum_padding_size = 4096;
 
 DEFINE_string(ip, "127.0.0.1", "ip");
-DEFINE_uint64(port, 9527, "port");
+DEFINE_uint64(port, 0, "port");
 DEFINE_uint64(buf_size, 4096, "RPC buffer size");
 DEFINE_uint64(num_threads, 32, "num of threads");
 DEFINE_bool(calculate_checksum, false, "calculate checksum for read test");

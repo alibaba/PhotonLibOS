@@ -51,7 +51,8 @@ int main(int argc, char** argv) {
         return 0;
     };
     server->set_handler(logHandle);
-    server->bind(31526, net::IPAddr());
+    server->bind_v4localhost();
+    LOG_INFO("bound to ", server->getsockname());
     server->listen(1024);
     server->start_loop(true);
 }

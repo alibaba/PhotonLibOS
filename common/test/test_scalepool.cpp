@@ -127,5 +127,5 @@ int main(int argc, char **argv)
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return ret;
 }

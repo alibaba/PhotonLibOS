@@ -39,6 +39,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
+#include "to_url.h"
 
 using namespace photon::net;
 using namespace photon::net::http;
@@ -65,8 +66,8 @@ TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1L);
-    tcpserver->bind(18731);
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+    tcpserver->bind_v4any();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -78,7 +79,7 @@ TEST(http_client, get) {
     server->add_handler(fs_handler);
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
-    static const char target[] = "http://localhost:18731/ease-httpclient-gettestfile";
+    auto target = to_url(tcpserver, "/ease-httpclient-gettestfile");
     auto client = new_http_client();
     DEFER(delete client);
     auto op2 = client->new_operation(Verb::GET, target);
@@ -156,8 +157,7 @@ TEST(http_client, post) {
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-    tcpserver->bind(18731, IPAddr("127.0.0.1"));
+    tcpserver->bind_v4localhost(0);
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -169,7 +169,7 @@ TEST(http_client, post) {
 
     auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
     DEFER(delete fs);
-    static const char target[] = "http://localhost:18731/ease-httpclient-posttestfile";
+    auto target = to_url(tcpserver, "/ease-httpclient-posttestfile");
     auto client = new_http_client();
     DEFER(delete client);
 
@@ -267,7 +267,6 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
     return 0;
 }
 
-EndPoint ep{IPAddr("127.0.0.1"), 19731};
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
 static int digtal_num(int n) {
@@ -317,9 +316,8 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
 TEST(http_client, chunked) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler});
-    auto ret = server->bind(ep.port, ep.addr);
+    auto ret = server->bind_v4localhost();
     if (ret < 0) LOG_ERROR(VALUE(errno));
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
@@ -329,7 +327,8 @@ TEST(http_client, chunked) {
     photon::thread_sleep(1);
     auto client = new_http_client();
     DEFER(delete client);
-    auto op = client->new_operation(Verb::GET, "http://localhost:19731/");
+    auto url = to_url(server, "/");
+    auto op = client->new_operation(Verb::GET, url);
     DEFER(delete op);
     std::string buf;
 
@@ -343,15 +342,17 @@ TEST(http_client, chunked) {
     LOG_DEBUG(VALUE(buf));
 
     server->set_handler({nullptr, &chunked_handler_complict});
-    auto opc = client->new_operation(Verb::GET, "http://localhost:19731/");
+    auto opc = client->new_operation(Verb::GET, url);
     DEFER(delete opc);
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
     ret = opc->resp.read((void*)buf.data(), 20000);
     EXPECT_EQ(10000 + 4090 + 4086 + 1024, ret);
-    for (int i = 0; i < 10000 + 4090 + 4086 + 1024; i++)
-        EXPECT_EQ(buf[i], 'a');
+    size_t i, cnt;
+    for (i = cnt = 0; i < 10000 + 4090 + 4086 + 1024; i++)
+        cnt += (buf[i] == 'a');
+    EXPECT_EQ(i, cnt);
 
     std_data.resize(std_data_size);
     int num = 0;
@@ -361,7 +362,7 @@ TEST(http_client, chunked) {
     srand(time(0));
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
-        auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
+        auto op_test = client->new_operation(Verb::GET, url);
         DEFER(delete op_test);
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);
@@ -417,9 +418,9 @@ int chunked_handler_debug(void*, ISocketStream* sock) {
 TEST(http_client, debug) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
-    auto ret = server->bind(ep.port, ep.addr);
+    auto ret = server->bind_v4localhost();
+    // auto ret = server->bind(ep.port, ep.addr);
     if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(ERRNO());
@@ -436,7 +437,7 @@ TEST(http_client, debug) {
 
     auto client = new_http_client();
     DEFER(delete client);
-    auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
+    auto op_test = client->new_operation(Verb::GET, to_url(server, "/"));
     DEFER(delete op_test);
     op_test->call();
     EXPECT_EQ(200, op_test->status_code);
@@ -463,13 +464,13 @@ TEST(http_client, server_no_resp) {
     auto server = new_tcp_socket_server();
     DEFER(delete server);
     server->set_handler({nullptr, &sleep_handler});
-    server->bind(38812, IPAddr());
+    server->bind_v4localhost();
     server->listen();
     server->start_loop();
 
     auto client = new_http_client();
     DEFER(delete client);
-    auto op = client->new_operation(Verb::GET, "http://127.0.0.1:38812/wtf");
+    auto op = client->new_operation(Verb::GET, to_url(server, "/wtf"));
     DEFER(delete op);
     op->req.headers.content_length(0);
     client->call(op);
@@ -483,7 +484,7 @@ TEST(http_client, partial_body) {
 
     auto tcpserver = new_tcp_socket_server();
     DEFER(delete tcpserver);
-    tcpserver->bind(18731);
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     auto server = new_http_server();
     DEFER(delete server);
@@ -495,7 +496,7 @@ TEST(http_client, partial_body) {
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
 
-    std::string target_get = "http://localhost:18731/file";
+    auto target_get = to_url(tcpserver, "/file");
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
@@ -580,7 +581,7 @@ int main(int argc, char** arg) {
     }
     DEFER(et_poller_fini());
 #endif
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return RUN_ALL_TESTS();
 }

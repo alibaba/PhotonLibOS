@@ -27,6 +27,7 @@ limitations under the License.
 #include <string>
 
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
 #include <photon/common/expirecontainer.h>
@@ -62,7 +63,7 @@ IPAddr gethostbypeer(IPAddr remote) {
     return s_local.to_endpoint().addr;
 }
 
-IPAddr gethostbypeer(const char *domain) {
+IPAddr gethostbypeer(std::string_view domain) {
     // get self ip by remote domain instead of ip
     IPAddr remote;
     auto ret = gethostbyname(domain, &remote);
@@ -71,37 +72,39 @@ IPAddr gethostbypeer(const char *domain) {
     return gethostbypeer(remote);
 }
 
-int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
-    assert(name);
-    int idx = 0;
+int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
+    if (name.empty()) return -1;
     addrinfo* result = nullptr;
     addrinfo hints = {};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_ALL | AI_V4MAPPED;
     hints.ai_family = AF_UNSPEC;
 
-    int ret = getaddrinfo(name, nullptr, &hints, &result);
+    std::string _name(name);
+    int ret = getaddrinfo(_name.c_str(), nullptr, &hints, &result);
     if (ret != 0) {
         LOG_ERROR_RETURN(0, -1, "Fail to getaddrinfo: `", gai_strerror(ret));
     }
     assert(result);
+    int cnt = 0;
     for (auto* cur = result; cur != nullptr; cur = cur->ai_next) {
+        IPAddr addr;
         if (cur->ai_family == AF_INET6) {
             auto sock_addr = (sockaddr_in6*) cur->ai_addr;
-            if (append_op(IPAddr(sock_addr->sin6_addr)) < 0) {
-                break;
-            }
-            idx++;
+            addr = IPAddr(sock_addr->sin6_addr);
         } else if (cur->ai_family == AF_INET) {
             auto sock_addr = (sockaddr_in*) cur->ai_addr;
-            if (append_op(IPAddr(sock_addr->sin_addr)) < 0) {
-                break;
-            }
-            idx++;
+            addr = IPAddr(sock_addr->sin_addr);
+        } else {
+            LOG_DEBUG("skip unsupported address family ", cur->ai_family);
+            continue;
         }
+        // LOG_DEBUG(VALUE(addr));
+        if (append_op(addr) < 0) break;
+        cnt++;
     }
     freeaddrinfo(result);
-    return idx;
+    return cnt;
 }
 
 struct xlator {
@@ -268,7 +271,7 @@ public:
         dnscache_.clear();
     }
 
-    IPAddr resolve(const char *host) override {
+    IPAddr resolve(std::string_view host) override {
         auto ctr = [&]() -> IPAddrList* {
             auto addrs = new IPAddrList();
             photon::semaphore sem;
@@ -285,21 +288,27 @@ public:
                 if ((uint64_t)time_elapsed <= resolve_timeout_) {
                     addrs->push_back(std::move(ret));
                     sem.signal(1);
+                } else {
+                    LOG_ERROR("resolve timeout");
+                    while(!ret.empty())
+                        delete ret.pop_front();
                 }
             }).detach();
             sem.wait(1, resolve_timeout_);
             return addrs;
         };
         auto ips = dnscache_.borrow(host, ctr);
-        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
+        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for '`' failed", host);
         auto ret = ips->front();
         ips->node = ret->next();  // access in round robin order
         return ret->addr;
     }
 
-    void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
+    void resolve(std::string_view host, Delegate<void, IPAddr> func) override {
+        func(resolve(host));
+    }
 
-    void discard_cache(const char *host, IPAddr ip) override {
+    void discard_cache(std::string_view host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
         if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
         else {
