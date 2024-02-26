@@ -77,16 +77,16 @@ public:
 static LogOutputNull _log_output_null;
 ILogOutput* const log_output_null = &_log_output_null;
 
-ALogLogger default_logger {ALOG_DEBUG, log_output_stdout};
-ALogLogger default_audit_logger {ALOG_AUDIT, log_output_null};
+ALogLogger default_logger {log_output_stdout, ALOG_DEBUG};
+ALogLogger default_audit_logger {log_output_null, ALOG_AUDIT};
 
-int &log_output_level = default_logger.log_level;
+uint32_t& log_output_level = default_logger.log_level;
 ILogOutput* &log_output = default_logger.log_output;
 
 void LogFormatter::put(ALogBuffer& buf, FP x)
 {
     char _fmt[64];
-    ALogBuffer fmt {0, _fmt, sizeof(_fmt)};
+    ALogBuffer fmt {_fmt, sizeof(_fmt), 0};
     put(fmt, '%');
     if (x.width() >= 0)
     {
@@ -510,7 +510,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     log.printf(DEC(ts.tv_usec).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
-    log.reserved = pro.level;
+    log.level = pro.level;
     log.printf(ALogString(&levels[pro.level * 10], 10));
     log.printf(photon::CURRENT, '|');
     if (pro.level != ALOG_AUDIT) {
@@ -519,4 +519,9 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
         log.printf(ALogString(pro.addr_func, pro.len_func), ':');
     }
     return log;
+}
+
+LogBuffer& operator << (LogBuffer& log, ERRNO e) {
+    auto no = e.no ? e.no : errno;
+    return log.printf("errno=", no, '(', strerror(no), ')');
 }
