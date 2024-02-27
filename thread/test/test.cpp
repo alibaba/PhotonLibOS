@@ -1890,6 +1890,95 @@ TEST(intrusive_list, split) {
 
 }
 
+TEST(interrupt, mutex) {
+    photon::mutex mtx(0);
+    // lock first
+    mtx.lock();
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    // this time will goto sleep
+    auto ret = mtx.lock();
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+    mtx.unlock();
+}
+
+TEST(interrupt, condition_variable) {
+    photon::condition_variable cond;
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    auto ret = cond.wait_no_lock();
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+}
+
+TEST(interrupt, semaphore) {
+    photon::semaphore sem(0);
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    auto ret = sem.wait(1); // nobody
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+}
+
+
+TEST(condition_variable, pred) {
+    photon::condition_variable cond;
+    int flag = 0;
+    photon::thread_create11([&cond, &flag]() {
+        // any errno except 0 is able to stop waiting
+        flag = 1;
+        cond.notify_one();
+        // first notify should not wake up condition variable
+        photon::thread_usleep(1000 * 1000);
+        flag = 2;
+        cond.notify_one();
+
+    });
+    auto ret = cond.wait_pred_no_lock([&flag](){ return flag == 2;});
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(2, flag);
+    flag = 0;
+    photon::mutex mtx;
+    SCOPED_LOCK(mtx);
+    photon::thread_create11([&cond, &flag, &mtx]() {
+        // any errno except 0 is able to stop waiting
+        {
+            SCOPED_LOCK(mtx);
+            flag = 1;
+            cond.notify_one();
+        }
+        // first notify should not wake up condition variable
+        photon::thread_usleep(1000 * 1000);
+        {
+            SCOPED_LOCK(mtx);
+            flag = 2;
+            cond.notify_one();
+        }
+    });
+    ret = cond.wait_pred(mtx, [&flag](){ return flag == 2;});
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(2, flag);
+}
+
 int main(int argc, char** arg)
 {
     ::testing::InitGoogleTest(&argc, arg);
