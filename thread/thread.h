@@ -362,13 +362,20 @@ namespace photon
         {
             return waitq::wait(timeout);
         }
-        template<typename LOCK, typename PRED>
-        int wait_pred(LOCK& lock, PRED&& pred, Timeout timeout = {}) {
-            return do_wait_pred([&]{ return wait(lock, timeout); }, std::forward<PRED>(pred), timeout);
+        template <typename LOCK, typename PRED,
+                  typename = typename std::enable_if<std::is_same<
+                      decltype(std::declval<PRED>()()), bool>::value>::type>
+        int wait(LOCK&& lock, PRED&& pred, Timeout timeout = {}) {
+            return do_wait_pred(
+                [&] { return wait(std::forward<LOCK>(lock), timeout); },
+                std::forward<PRED>(pred), timeout);
         }
-        template<typename PRED>
-        int wait_pred_no_lock(PRED&& pred, Timeout timeout = {}) {
-            return do_wait_pred([&]{ return wait_no_lock(timeout); }, std::forward<PRED>(pred), timeout);
+        template <typename PRED,
+                  typename = typename std::enable_if<std::is_same<
+                      decltype(std::declval<PRED>()()), bool>::value>::type>
+        int wait_no_lock(PRED&& pred, Timeout timeout = {}) {
+            return do_wait_pred([&] { return wait_no_lock(timeout); },
+                                std::forward<PRED>(pred), timeout);
         }
         thread* signal()     { return resume_one(); }
         thread* notify_one() { return resume_one(); }
@@ -378,8 +385,8 @@ namespace photon
         template<typename DO_WAIT, typename PRED>
         int do_wait_pred(DO_WAIT&& do_wait, PRED&& pred, Timeout timeout) {
             int ret = 0;
-            int err = 0;
-            while (!pred()) {
+            int err = ETIMEDOUT;
+            while (!pred() && !timeout.expired()) {
                 ret = do_wait();
                 err = errno;
             }
@@ -393,6 +400,14 @@ namespace photon
     public:
         explicit semaphore(uint64_t count = 0) : m_count(count) { }
         int wait(uint64_t count, Timeout timeout = {});
+        int wait_uninterruptible(uint64_t count, Timeout timeout = {}) {
+            int ret = 0;
+            do {
+                ret = wait(count, timeout);
+            } while (!timeout.expired() &&
+                     (ret == 0 || (ret < 0 && errno == ESHUTDOWN)));
+            return ret;
+        }
         int signal(uint64_t count)
         {
             if (count == 0) return 0;

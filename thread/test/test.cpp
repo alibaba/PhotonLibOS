@@ -1953,9 +1953,12 @@ TEST(condition_variable, pred) {
         cond.notify_one();
 
     });
-    auto ret = cond.wait_pred_no_lock([&flag](){ return flag == 2;});
+    auto ret = cond.wait_no_lock([&flag](){ return flag == 2;});
     EXPECT_EQ(0, ret);
     EXPECT_EQ(2, flag);
+    ret = cond.wait_no_lock([&flag](){ return flag == 3; }, 1000);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ETIMEDOUT, errno);
     flag = 0;
     photon::mutex mtx;
     SCOPED_LOCK(mtx);
@@ -1974,9 +1977,12 @@ TEST(condition_variable, pred) {
             cond.notify_one();
         }
     });
-    ret = cond.wait_pred(mtx, [&flag](){ return flag == 2;});
+    ret = cond.wait(mtx, [&flag](){ return flag == 2;});
     EXPECT_EQ(0, ret);
     EXPECT_EQ(2, flag);
+    ret = cond.wait(mtx, [&flag](){ return flag == 3; }, 1000);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ETIMEDOUT, errno);
 }
 
 int main(int argc, char** arg)
