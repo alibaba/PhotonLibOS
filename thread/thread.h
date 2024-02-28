@@ -363,19 +363,18 @@ namespace photon
             return waitq::wait(timeout);
         }
         template <typename LOCK, typename PRED,
-                  typename = typename std::enable_if<std::is_same<
-                      decltype(std::declval<PRED>()()), bool>::value>::type>
+                  typename = decltype(std::declval<PRED>()())>
         int wait(LOCK&& lock, PRED&& pred, Timeout timeout = {}) {
             return do_wait_pred(
                 [&] { return wait(std::forward<LOCK>(lock), timeout); },
                 std::forward<PRED>(pred), timeout);
         }
         template <typename PRED,
-                  typename = typename std::enable_if<std::is_same<
-                      decltype(std::declval<PRED>()()), bool>::value>::type>
+                  typename = decltype(std::declval<PRED>()())>
         int wait_no_lock(PRED&& pred, Timeout timeout = {}) {
-            return do_wait_pred([&] { return wait_no_lock(timeout); },
-                                std::forward<PRED>(pred), timeout);
+            return do_wait_pred(
+                [&] { return wait_no_lock(timeout); },
+                std::forward<PRED>(pred), timeout);
         }
         thread* signal()     { return resume_one(); }
         thread* notify_one() { return resume_one(); }
