@@ -398,15 +398,14 @@ namespace photon
     {
     public:
         explicit semaphore(uint64_t count = 0) : m_count(count) { }
-        int wait(uint64_t count, Timeout timeout = {});
-        int wait_uninterruptible(uint64_t count, Timeout timeout = {}) {
+        int wait(uint64_t count, Timeout timeout = {}) {
             int ret = 0;
             do {
-                ret = wait(count, timeout);
-            } while (!timeout.expired() &&
-                     (ret == 0 || (ret < 0 && errno == ESHUTDOWN)));
+                ret = wait_interruptible(count, timeout);
+            } while (ret < 0 && (errno != ESHUTDOWN && errno != ETIMEDOUT));
             return ret;
         }
+        int wait_interruptible(uint64_t count, Timeout timeout = {});
         int signal(uint64_t count)
         {
             if (count == 0) return 0;

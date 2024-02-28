@@ -1672,7 +1672,7 @@ R"(
     {
         return cvar_do_wait((thread_list*)&q, m, timeout, spinlock_lock, spinlock_unlock);
     }
-    int semaphore::wait(uint64_t count, Timeout timeout)
+    int semaphore::wait_interruptible(uint64_t count, Timeout timeout)
     {
         if (count == 0) return 0;
         splock.lock();

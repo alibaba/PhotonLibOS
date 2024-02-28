@@ -1933,7 +1933,7 @@ TEST(interrupt, semaphore) {
         // any errno except 0 is able to stop waiting
         photon::thread_interrupt(th, reason);
     });
-    auto ret = sem.wait(1); // nobody
+    auto ret = sem.wait_interruptible(1); // nobody
     ERRNO err;
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(reason, err.no);
