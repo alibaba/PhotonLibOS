@@ -44,7 +44,7 @@ jobs:
           cd build
           ctest --timeout 3600 -V
 
-  centos8-gcc9-epoll-debug:
+  centos8-gcc8-epoll-debug:
     runs-on: ubuntu-latest
 
     container:
@@ -71,7 +71,6 @@ jobs:
 
       - name: Build
         run: |
-          source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=Debug -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j -- VERBOSE=1
