@@ -347,13 +347,13 @@ struct Prologue
     int len_func, len_file;
     int line, level;
 
-    template <size_t N, typename FILEN>
-    constexpr Prologue(const char (&addr_func_)[N], FILEN addr_file_, int line_,
-                       int level_)
+    template <size_t N, size_t M>
+    constexpr Prologue(const char (&addr_func_)[N], const char (&addr_file_)[M],
+                       int line_, int level_)
         : addr_func(addr_func_),
-          addr_file(addr_file_.chars),
+          addr_file(addr_file_),
           len_func(N - 1),
-          len_file(addr_file_.len),
+          len_file(M - 1),
           line(line_),
           level(level_) {}
 };
@@ -456,7 +456,8 @@ struct LogBuilder {
     auto _partial_file =                                                       \
         ConstString::TSpliter<'/', ' ',                                        \
                               decltype(_prologue_file_r)>::Current::reverse(); \
-    constexpr static Prologue prolog(__func__, _partial_file, __LINE__, level);
+    constexpr static Prologue prolog(__func__, _partial_file.chars, __LINE__,  \
+                                     level);
 
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))

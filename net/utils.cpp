@@ -105,7 +105,10 @@ inline __attribute__((always_inline)) void base64_translate_3to4(const char *in,
     static const unsigned char tbl[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     auto v = htonl(*(uint32_t *)in);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
     auto x = *(xlator *)(&v);
+#pragma GCC diagnostic pop
     *(uint32_t *)out = ((tbl[x.a] << 24) + (tbl[x.b] << 16) +
                         (tbl[x.c] << 8) + (tbl[x.d] << 0));
 }

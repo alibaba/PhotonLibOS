@@ -151,7 +151,10 @@ HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
     if ((char*)(begin - 1) <= m_buf + m_buf_size)
         LOG_ERROR_RETURN(ENOBUFS, nullptr, "no buffer");
     auto it = std::lower_bound(begin, kv_end(), kv, HA(this));
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
     memmove(begin - 1, begin, sizeof(KV) * (it - begin));
+#pragma GCC diagnostic pop
     m_kv_size++;
     *(it - 1) = kv;
     return it - 1;
