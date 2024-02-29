@@ -212,9 +212,9 @@ namespace photon
     protected:
         int wait(Timeout timeout = {});
         int wait_defer(Timeout Timeout, void(*defer)(void*), void* arg);
-        void resume(thread* th, int error_number = ECANCELED);  // `th` must be waiting in this waitq!
-        int resume_all(int error_number = ECANCELED);
-        thread* resume_one(int error_number = ECANCELED);
+        void resume(thread* th, int error_number = -1);  // `th` must be waiting in this waitq!
+        int resume_all(int error_number = -1);
+        thread* resume_one(int error_number = -1);
         waitq() = default;
         waitq(const waitq& rhs) = delete;   // not allowed to copy construct
         waitq(waitq&& rhs) = delete;
@@ -362,17 +362,50 @@ namespace photon
         {
             return waitq::wait(timeout);
         }
+        template <typename LOCK, typename PRED,
+                  typename = decltype(std::declval<PRED>()())>
+        int wait(LOCK&& lock, PRED&& pred, Timeout timeout = {}) {
+            return do_wait_pred(
+                [&] { return wait(std::forward<LOCK>(lock), timeout); },
+                std::forward<PRED>(pred), timeout);
+        }
+        template <typename PRED,
+                  typename = decltype(std::declval<PRED>()())>
+        int wait_no_lock(PRED&& pred, Timeout timeout = {}) {
+            return do_wait_pred(
+                [&] { return wait_no_lock(timeout); },
+                std::forward<PRED>(pred), timeout);
+        }
         thread* signal()     { return resume_one(); }
         thread* notify_one() { return resume_one(); }
         int notify_all()     { return resume_all(); }
         int broadcast()      { return resume_all(); }
+    protected:
+        template<typename DO_WAIT, typename PRED>
+        int do_wait_pred(DO_WAIT&& do_wait, PRED&& pred, Timeout timeout) {
+            int ret = 0;
+            int err = ETIMEDOUT;
+            while (!pred() && !timeout.expired()) {
+                ret = do_wait();
+                err = errno;
+            }
+            errno = err;
+            return ret;
+        }
     };
 
     class semaphore : protected waitq
     {
     public:
         explicit semaphore(uint64_t count = 0) : m_count(count) { }
-        int wait(uint64_t count, Timeout timeout = {});
+        int wait(uint64_t count, Timeout timeout = {}) {
+            int ret = 0;
+            do {
+                ret = wait_interruptible(count, timeout);
+            } while (ret < 0 && (errno != ESHUTDOWN && errno != ETIMEDOUT));
+            return ret;
+        }
+        int wait_interruptible(uint64_t count, Timeout timeout = {});
         int signal(uint64_t count)
         {
             if (count == 0) return 0;

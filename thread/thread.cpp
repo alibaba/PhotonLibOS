@@ -1494,7 +1494,7 @@ R"(
             *perrno = ETIMEDOUT;
             return -1;
         }
-        return (*perrno == ECANCELED) ? 0 : -1;
+        return (*perrno == -1) ? 0 : -1;
     }
     int waitq::wait(Timeout timeout)
     {
@@ -1591,7 +1591,7 @@ R"(
         ScopedLockHead h(m);
         m->owner.store(h);
         if (h)
-            prelocked_thread_interrupt(h, ECANCELED);
+            prelocked_thread_interrupt(h, -1);
     }
     static void mutex_unlock(void* m_)
     {
@@ -1672,7 +1672,7 @@ R"(
     {
         return cvar_do_wait((thread_list*)&q, m, timeout, spinlock_lock, spinlock_unlock);
     }
-    int semaphore::wait(uint64_t count, Timeout timeout)
+    int semaphore::wait_interruptible(uint64_t count, Timeout timeout)
     {
         if (count == 0) return 0;
         splock.lock();
@@ -1680,11 +1680,14 @@ R"(
         int ret = 0;
         while (!try_substract(count)) {
             ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
+            ERRNO err;
             splock.lock();
-            if (ret < 0 && errno == ETIMEDOUT) {
+            if (ret < 0) {
                 CURRENT->semaphore_count = 0;
-                try_resume();       // when timeout, we need to try
-                splock.unlock();    // to resume next thread(s) in q
+                // when timeout, we need to try to resume next thread(s) in q
+                if (err.no == ETIMEDOUT) try_resume();
+                splock.unlock();
+                errno = err.no;
                 return ret;
             }
         }
@@ -1704,7 +1707,7 @@ R"(
             if (qfcount > cnt) break;
             cnt -= qfcount;
             qfcount = 0;
-            prelocked_thread_interrupt(th, ECANCELED);
+            prelocked_thread_interrupt(th, -1);
         }
     }
     bool semaphore::try_substract(uint64_t count)
