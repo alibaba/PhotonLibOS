@@ -416,19 +416,12 @@ public:
     }
 };
 
-template<class Hasher = std::hash<std::string_view>,
-         class KeyEqual = std::equal_to<std::string_view>,
-         class Alloc = std::allocator<std::pair<const skvm, size_t>>>
-using unordered_map_string_kv = basic_map_string_kv<
-    std::unordered_map<skvm, size_t, Hasher, KeyEqual, Alloc>>;
+using unordered_map_string_kv = basic_map_string_kv<std::unordered_map<
+    skvm, size_t, std::hash<std::string_view>>>;
 
-template<class Pred = std::less<skvm>,
-         class Alloc = std::allocator<std::pair<const skvm, size_t>>>
-class map_string_kv : public basic_map_string_kv<
-    std::map<skvm, size_t, Pred, Alloc>>
-{
+class map_string_kv : public basic_map_string_kv<std::map<skvm, size_t>> {
 public:
-    using base = basic_map_string_kv<std::map<skvm, size_t, Pred, Alloc>>;
+    using base = basic_map_string_kv<std::map<skvm, size_t>>;
     using typename base::key_type;
     using typename base::const_iterator;
     using typename base::iterator;
@@ -442,7 +435,8 @@ public:
     }
     const_iterator lower_bound (const key_type& k) const
     {
-        return base::lower_bound((const skvm&)k);
+        auto it = base::lower_bound((const skvm&)k);
+        return (typename base::iterator&)it;
     }
     iterator upper_bound (const key_type& k)
     {
@@ -450,6 +444,7 @@ public:
     }
     const_iterator upper_bound (const key_type& k) const
     {
-        return base::upper_bound((const skvm&)k);
+        auto it = base::upper_bound((const skvm&)k);
+        return (typename base::iterator&)it;
     }
 };

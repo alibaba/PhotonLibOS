@@ -103,7 +103,7 @@ public:
 class HttpFile_v2 : public fs::VirtualReadOnlyFile {
 public:
     std::string m_url;
-    unordered_map_string_key<std::string> m_common_header;
+    unordered_map_string_kv m_common_header;
     HttpFs_v2* m_fs;
     struct stat m_stat;
     uint64_t m_stat_gettime = 0;

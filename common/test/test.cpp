@@ -1078,7 +1078,7 @@ TEST(string_key, unordered_map_string_key) {
 }
 
 TEST(string_key, map_string_kv_perf) {
-    map_string_kv<> test_map;
+    map_string_kv test_map;
     basic_map_test(test_map);
 }
 
@@ -1119,7 +1119,7 @@ TEST(string_key, unordered_map_string_kv) {
     EXPECT_EQ(s.size(), sizeof(asdf) - 1);
     EXPECT_STREQ(s.get_value(), jkl);
 
-    unordered_map_string_kv<> test_map;
+    unordered_map_string_kv test_map;
     // LOG_DEBUG("asdf");
     auto emr = test_map.emplace(asdf, jkl);
     EXPECT_TRUE(emr.second);
@@ -1141,7 +1141,7 @@ TEST(string_key, unordered_map_string_kv) {
 }
 
 TEST(string_key, unordered_map_string_kv_perf) {
-    unordered_map_string_kv<> test_map;
+    unordered_map_string_kv test_map;
     basic_map_test(test_map);
 }
 
