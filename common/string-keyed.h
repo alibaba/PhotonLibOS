@@ -193,7 +193,7 @@ public:
 // in a consecutive area, so as to save one allocation
 class skvm : public string_key {
 public:
-    explicit skvm(std::string_view k, std::string_view v) {
+    skvm(std::string_view k, std::string_view v) {
         auto nk = k.size();
         auto nv = v.size();
         auto ptr = (char*) malloc(nk+1 + nv+1);
@@ -221,19 +221,37 @@ public:
     using key_type = std::string_view;
     using mapped_type = std::string_view;
     using typename base::size_type;
-    using base::erase;
 
     using value_type = std::pair<const key_type, mapped_type>;
 
-    struct MutableValue {
-        std::string_view _v;
-        skvm* _skvm;
-        operator std::string_view() const {
-            return _v;
+    struct MutableValue : public std::string_view {
+        basic_map_string_kv* _map = nullptr;
+        using pair = std::pair<const skvm, size_t>;
+        pair* _pair = nullptr;
+        std::string_view _key;
+        bool _modified = false;
+        MutableValue() = default;
+        MutableValue(pair& p) : std::string_view(
+            p.first.get_value(), p.second), _pair(&p) { }
+        MutableValue(basic_map_string_kv* map, std::string_view key) :
+            _map(map), _key(key) { }
+        ~MutableValue() {
+            if (!_modified) return;
+            if (_pair) {
+                assert(!_map);
+                auto s = (skvm*) &_pair->first;
+                s->replace_value(*this);
+                _pair->second = this->size();
+            } else {
+                assert(_map);
+                _map->emplace(_key, *this);
+            }
         }
+        MutableValue& operator = (const MutableValue& v) = default;
         MutableValue& operator = (std::string_view v) {
-            _skvm->replace_value(v);
-            _v = {_skvm->get_value(), v.size()};
+            std::string_view::operator=(v);
+            _modified = true;
+            return *this;
         }
     };
 
@@ -241,24 +259,29 @@ public:
         using base_it = typename base::iterator;
         base_it _b_it;
 
-        using mutable_value_type = std::pair<std::string, MutableValue>;
-        mutable_value_type _val;
+        using mutable_value_type = std::pair<std::string_view, MutableValue>;
+        mutable mutable_value_type _val;
+        mutable bool _has_val = false;
+
         iterator(base_it b_it) : _b_it(b_it) { }
-        void _init() {
-            _val.first = _b_it->first;
-            _val.second = {_b_it->first.end() + 1, _b_it->second};
+
+        mutable_value_type& _init_val() const {
+            if (_has_val) return _val;
+            _has_val = true;
+            _val = {_b_it->first, *_b_it};
+            return _val;
         }
         const mutable_value_type* operator->() const {
-            return &_val;
+            return &_init_val();
         }
         const mutable_value_type& operator*() const {
-            return _val;
+            return _init_val();
         }
         mutable_value_type* operator->() {
-            return &_val;
+            return &_init_val();
         }
         mutable_value_type& operator*() {
-            return _val;
+            return _init_val();
         }
         iterator operator++(int) {
             auto temp = *this;
@@ -267,7 +290,7 @@ public:
         }
         iterator& operator++() {
             ++_b_it;
-            _init();
+            _has_val = false;
             return *this;
         }
         iterator operator--(int) {
@@ -277,7 +300,7 @@ public:
         }
         iterator& operator--() {
             --_b_it;
-            _init();
+            _has_val = false;
             return *this;
         }
         bool operator==(const iterator& rhs) const {
@@ -290,17 +313,39 @@ public:
 
     using const_iterator = const iterator;
 
+    const_iterator begin() const
+    {
+        return base::begin();
+    }
+    iterator begin()
+    {
+        return base::begin();
+    }
+    using B_IT = typename base::iterator;
+    const_iterator end() const
+    {
+        auto it = base::end();
+        return (B_IT&)it;
+    }
+    iterator end()
+    {
+        return base::end();
+    }
     mapped_type operator[] ( const key_type& k ) const
     {
-        return find(k)->second;
+        auto it = base::find((const skvm&)k);
+        assert(it != base::end());
+        return iterator(it)->second;
     }
     MutableValue operator[] ( const key_type& k )
     {
-        return find(k)->second;
+        auto it = base::find((const skvm&)k);
+        return (it == base::end()) ? MutableValue(this, k) :
+                                     MutableValue(*it);
     }
     mapped_type at ( const key_type& k ) const
     {
-        return find(k)->second;
+        return mapped_type(find(k)->second);
     }
     MutableValue at ( const key_type& k )
     {
@@ -308,11 +353,13 @@ public:
     }
     const_iterator find ( const key_type& k ) const
     {
-        return base::find((const skvm&)k);
+        auto it = base::find((const skvm&)k);
+        return (B_IT&)it;
     }
     iterator find ( const key_type& k )
     {
-        return base::find((const skvm&)k);
+        auto it = base::find((const skvm&)k);
+        return (B_IT&)it;
     }
     size_type count ( const key_type& k ) const
     {
@@ -320,15 +367,16 @@ public:
     }
     std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
     {
-        return base::equal_range((const skvm&)k);
+        auto r = base::equal_range((const skvm&)k);
+        return {(B_IT&) r.first, (B_IT&) r.second};
     }
     std::pair<iterator, bool> emplace (const key_type& k, const mapped_type& v )
     {
-        return base::emplace({k, v}, v.size());
+        return base::emplace(skvm(k, v), v.size());
     }
     iterator emplace_hint ( const_iterator position, const key_type& k, const mapped_type& v )
     {
-        return base::emplace_hint(position, {k, v}, v.size());
+        return base::emplace_hint(position._b_it, skvm(k, v), v.size());
     }
     std::pair<iterator,bool> insert ( const value_type& k )
     {
@@ -336,7 +384,7 @@ public:
     }
     iterator insert ( const_iterator hint, const value_type& val )
     {
-        return emplace_hint(hint, val.first, val.second);
+        return emplace_hint(hint._b_it, val.first, val.second);
     }
     template <class InputIterator>
     void insert ( InputIterator first, InputIterator last )
@@ -347,6 +395,12 @@ public:
     void insert ( std::initializer_list<value_type> il )
     {
         insert(il.begin(), il.end());
+    }
+    iterator erase( iterator pos ) {
+        return base::erase(pos._b_it);
+    }
+    iterator erase( iterator first, iterator last ) {
+        return base::erase(first._b_it, last._b_it);
     }
     size_type erase ( const std::string_view& k )
     {
@@ -391,4 +445,3 @@ public:
         return base::upper_bound((const skvm&)k);
     }
 };
-
