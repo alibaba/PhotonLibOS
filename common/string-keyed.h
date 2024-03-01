@@ -382,9 +382,17 @@ public:
     {
         return emplace(k.first, k.second);
     }
+    std::pair<iterator,bool> insert ( const key_type& k, const mapped_type& v )
+    {
+        return emplace(k, v);
+    }
     iterator insert ( const_iterator hint, const value_type& val )
     {
         return emplace_hint(hint._b_it, val.first, val.second);
+    }
+    iterator insert ( const_iterator hint, const key_type& k, const mapped_type& v )
+    {
+        return emplace_hint(hint._b_it, k, v);
     }
     template <class InputIterator>
     void insert ( InputIterator first, InputIterator last )
