@@ -1017,7 +1017,7 @@ void basic_map_test(T &test_map) {
 }
 
 TEST(string_key, unordered_map_string_key_perf) {
-    unordered_map_string_key<std::string> test_map;
+    unordered_map_string_key<estring> test_map;
     test_map.reserve(6);
     basic_map_test(test_map);
     LOG_DEBUG("buckets `", test_map.bucket_count());
@@ -1083,7 +1083,7 @@ TEST(string_key, map_string_kv_perf) {
 }
 
 TEST(string_key, map_string_key_perf) {
-    map_string_key<string> test_map;
+    map_string_key<estring> test_map;
     basic_map_test(test_map);
 }
 
@@ -1092,7 +1092,7 @@ TEST(string_key, map_string_key) {
     std::unique_ptr<int> test_ptr(new int(10));
     test_uptr_map.emplace("sss", std::move(test_ptr));
 
-    map_string_key<string> test_map;
+    map_string_key<estring> test_map;
     basic_map_test(test_map);
 
     std::string prefix = "seggwrg90if908234j5rlkmx.c,bnmi7890wer1234rbdfb";
@@ -1103,7 +1103,7 @@ TEST(string_key, map_string_key) {
     EXPECT_EQ(test_map.lower_bound(prefix + "9000000"), test_map.end());
     EXPECT_EQ(test_map.upper_bound(prefix + "9000000"), test_map.end());
 
-    const map_string_key<string> &const_map = test_map;
+    const auto &const_map = test_map;
     EXPECT_EQ(const_map.lower_bound(prefix + "2"), test_map.find(prefix + "2"));
     EXPECT_EQ(const_map.lower_bound(prefix + "1"), test_map.find(prefix + "2"));
     EXPECT_EQ(const_map.upper_bound(prefix + "22"), test_map.find(prefix + "23"));
