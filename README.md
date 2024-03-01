@@ -7,6 +7,7 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Since 0.7, Photon will use release branches to enhance the reliability of software delivery. Bugfix will be merged into a stable release at first, then to higher release versions, and finally main.
 * Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.
 [En](https://developer.aliyun.com/article/1208512) / [中文](https://developer.aliyun.com/article/1208390).
 * How to transform `RocksDB` from multi-threads to coroutines by only 200 lines of code?
@@ -28,3 +29,9 @@
 * Made the first tag on 27 Jul 2022. Fix the compatibility for ARM CPU. Throughly compared the TCP echo server performance with other libs.
 
 </p></details>
+
+## Community
+
+<img src="/doc/static/img/slack.svg" width="20"> Join Slack: [link](https://join.slack.com/t/photonlibos/shared_invite/zt-25wauq8g1-iK_oHMrXetcvWNNhIt8Nkg)
+
+<img src="/doc/static/img/dingtalk.svg" width="20"> Join DingTalk group: 55690000272

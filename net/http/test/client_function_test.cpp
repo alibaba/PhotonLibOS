@@ -84,11 +84,12 @@ TEST(http_client, get) {
     auto op2 = client->new_operation(Verb::GET, target);
     DEFER(delete op2);
     op2->req.headers.content_length(0);
-    client->call(op2);
+    int ret = client->call(op2);
+    GTEST_ASSERT_EQ(0, ret);
 
     char resp_body_buf[1024];
     EXPECT_EQ(sizeof(socket_buf), op2->resp.resource_size());
-    auto ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
+    ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
     EXPECT_EQ(sizeof(socket_buf), ret);
     resp_body_buf[sizeof(socket_buf) - 1] = '\0';
     LOG_DEBUG(resp_body_buf);
@@ -419,9 +420,9 @@ TEST(http_client, debug) {
     server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
     auto ret = server->bind(ep.port, ep.addr);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     EXPECT_EQ(0, ret);
     LOG_INFO("Ready to accept");
     server->start_loop();
@@ -444,13 +445,13 @@ TEST(http_client, debug) {
     memset((void*)buf.data(), '0', std_data_size);
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
-    EXPECT_EQ(true, buf == std_data);
+    EXPECT_TRUE(buf == std_data);
     for (int i = 0; i < buf.size(); i++) {
         if (buf[i] != std_data[i]) {
-            std::cout << i << std::endl;
+            LOG_ERROR("first occurrence of difference at: ", i);
+            break;
         }
     }
-    std::cout << "new" << std::endl;
 }
 int sleep_handler(void*, ISocketStream* sock) {
     photon::thread_sleep(3);
@@ -512,6 +513,16 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
+    auto client = new_http_client();
+    DEFER(delete client);
+    // here is an ipv6-only website
+    auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
+    DEFER(delete op);
+    op->call();
+    EXPECT_EQ(200, op->resp.status_code());
+}
+
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),
@@ -569,7 +580,7 @@ int main(int argc, char** arg) {
     }
     DEFER(et_poller_fini());
 #endif
-    set_log_output_level(ALOG_DEBUG);
+    set_log_output_level(ALOG_INFO);
     ::testing::InitGoogleTest(&argc, arg);
     LOG_DEBUG("test result:`", RUN_ALL_TESTS());
 }

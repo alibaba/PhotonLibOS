@@ -231,56 +231,56 @@ namespace fs
             return underlayfs->mknod(path, mode, dev);
         }
 
-        virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size)
+        virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->getxattr(path, name, value, size);
         }
-        virtual ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size)
+        virtual ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->lgetxattr(path, name, value, size);
         }
-        virtual ssize_t listxattr(const char *path, char *list, size_t size)
+        virtual ssize_t listxattr(const char *path, char *list, size_t size) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->listxattr(path, list, size);
         }
-        virtual ssize_t llistxattr(const char *path, char *list, size_t size)
+        virtual ssize_t llistxattr(const char *path, char *list, size_t size) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->llistxattr(path, list, size);
         }
-        virtual int setxattr(const char *path, const char *name, const void *value, size_t size, int flags)
+        virtual int setxattr(const char *path, const char *name, const void *value, size_t size, int flags) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->setxattr(path, name, value, size, flags);
         }
-        virtual int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags)
+        virtual int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->lsetxattr(path, name, value, size, flags);
         }
-        virtual int removexattr(const char *path, const char *name)
+        virtual int removexattr(const char *path, const char *name) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");
             PathCat __(this, path);
             return underlay_xattrfs->removexattr(path, name);
         }
-        virtual int lremovexattr(const char *path, const char *name)
+        virtual int lremovexattr(const char *path, const char *name) override
         {
             if (!underlay_xattrfs)
                 LOG_ERROR_RETURN(ENOTSUP, -1, "xattr is not supported by underlay fs");

@@ -34,6 +34,7 @@ limitations under the License.
 #include "fd-events.h"
 #include "../common/utility.h"
 #include "../common/alog.h"
+#include "reset_handle.h"
 
 namespace photon
 {
@@ -186,7 +187,6 @@ retry:
 
     static void* libaio_polling(void*)
     {
-        libaio_ctx->running = 1;
         DEFER(libaio_ctx->running = 0);
         while (libaio_ctx->running == 1)
         {
@@ -342,6 +342,29 @@ retry:
         return rst;
     }
 
+    class AioResetHandle : public ResetHandle {
+        int reset() override {
+            if (!libaio_ctx)
+                return 0;
+            LOG_INFO("reset libaio by reset handle");
+            close(libaio_ctx->evfd);
+            libaio_ctx->evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (libaio_ctx->evfd < 0) {
+                LOG_ERROR("failed to create eventfd ", ERRNO());
+                exit(-1);
+            }
+            io_destroy(libaio_ctx->aio_ctx);
+            libaio_ctx->aio_ctx = {0};
+            int ret = io_setup(IODEPTH, &libaio_ctx->aio_ctx);
+            if (ret < 0) {
+                LOG_ERROR("failed to create aio context by io_setup() ", ERRNO(), VALUE(ret));
+                exit(-1);
+            }
+            thread_interrupt(libaio_ctx->polling_thread, ECANCELED);
+            return 0;
+        }
+    };
+    static thread_local AioResetHandle *reset_handler = nullptr;
 
     int libaio_wrapper_init()
     {
@@ -356,7 +379,7 @@ retry:
         int ret = io_setup(IODEPTH, &ctx->aio_ctx);
         if (ret < 0)
         {
-            LOG_ERROR("failed to create aio context by io_setup() ", ERRNO());
+            LOG_ERROR("failed to create aio context by io_setup() ", ERRNO(), VALUE(ret));
             close(ctx->evfd);
             return ret;
         }
@@ -364,7 +387,11 @@ retry:
         ctx->polling_thread = thread_create(&libaio_polling, nullptr);
         assert(ctx->polling_thread);
         libaio_ctx = ctx.release();
-        thread_yield_to(libaio_ctx->polling_thread);
+        libaio_ctx->running = 1;
+        if (reset_handler == nullptr) {
+            reset_handler = new AioResetHandle();
+        }
+        LOG_DEBUG("libaio initialized");
         return 0;
     }
 
@@ -384,10 +411,9 @@ retry:
         io_destroy(libaio_ctx->aio_ctx);
         close(libaio_ctx->evfd);
         libaio_ctx->evfd = -1;
-        delete libaio_ctx;
-        libaio_ctx = nullptr;
+        safe_delete(libaio_ctx);
+        safe_delete(reset_handler);
+        LOG_DEBUG("libaio finished");
         return 0;
     }
 }
-
-
