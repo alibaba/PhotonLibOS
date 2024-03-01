@@ -931,7 +931,10 @@ R"(
         stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
         auto p = ptr + stack_size - sizeof(thread) - randomizer;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
         (uint64_t&)p &= ~63;
+#pragma GCC diagnostic pop
         auto th = new (p) thread;
         th->buf = ptr;
         th->stackful_alloc_top = ptr;
