@@ -436,7 +436,7 @@ public:
     const_iterator lower_bound (const key_type& k) const
     {
         auto it = base::lower_bound((const skvm&)k);
-        return (typename base::iterator&)it;
+        return {(typename base::iterator&)it};
     }
     iterator upper_bound (const key_type& k)
     {
@@ -445,6 +445,6 @@ public:
     const_iterator upper_bound (const key_type& k) const
     {
         auto it = base::upper_bound((const skvm&)k);
-        return (typename base::iterator&)it;
+        return {(typename base::iterator&)it};
     }
 };
