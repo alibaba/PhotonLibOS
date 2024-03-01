@@ -1,6 +1,7 @@
 #pragma once
 
 #include <photon/thread/thread.h>
+#include <photon/common/utility.h>
 
 namespace photon {
 class throttle {

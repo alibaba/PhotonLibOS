@@ -7,9 +7,18 @@ toc_max_heading_level: 3
 
 ### Concept
 
-Photon thread == general coroutine/fiber
+- Photon thread is what we usually call coroutine/fiber. The reason why we use thread naming instead of the latter 
+two is because we hope that users will not notice the difference between the Photon program and traditional
+multi-threaded programs.
 
-A thread must reside in one [vCPU](vcpu-and-multicore).
+- A thread is essentially a function, and an execution unit.
+
+- A thread must reside in one [vCPU](vcpu-and-multicore). Threads can be migrated between vCPUs.
+
+<div><center>
+<img src="/img/api/thread-vcpu.png" alt="thread-vcpu.png" width="500" />
+</center>
+</div>
 
 ### Namespace
 
@@ -34,10 +43,9 @@ A thread must reside in one [vCPU](vcpu-and-multicore).
 ### thread_create
 
 ```cpp
-photon::thread*
-photon::thread_create(thread_entry start, void* arg, 
-					  uint64_t stack_size = DEFAULT_STACK_SIZE,
-					  uint16_t reserved_space = 0);
+photon::thread* photon::thread_create(thread_entry start, void* arg,
+                                      uint64_t stack_size = DEFAULT_STACK_SIZE,
+                                      uint16_t reserved_space = 0);
 ```
 
 #### Description
@@ -58,12 +66,49 @@ No thread yield in this call, which means the caller will continue its execution
 - `reserved_space` Can be used to passed large arguments to the new thread. Default is 0.
 
 :::caution
-Make sure your argument has the same lifecycle as the thread. So there won't be invalid memory access.
+Please make sure that the parameters you pass in have the same life cycle as the function and are
+not destroyed before the function starts executing. This may cause invalid memory access.
+
+If this cannot be guaranteed, you can use `thread_create11` below, 
+which can copy all parameters to the function stack of the new coroutine.
 :::
 
 :::caution
-Do not overflow your stack. Photon's stack is simulated in userspace. You won't get a notice when it's full.
+`stack_size` refers to the size of the coroutine stack, default is 8MB, same as Linux default function size.
+
+Be careful not to cause a stack overflow. Linux will report a stack overflow error at runtime. However, 
+since Photon simulates the stack in user mode, it will not detect a stack overflow error immediately.
+Continuous access might cause the memory to be trampled. Normally, you should avoid write recursive functions.
+
+Although we can use kernel's `mprotect` to guard this memory region, it will affect performance, so it is up to the user to control it.
 :::
+
+:::info
+
+Every time a new coroutine is created, malloc is called to apply for memory. Therefore, it is recommended to use 
+the `thread-pool` or `pooled_stack_allocator` for frequent creation.
+
+In terms of the actual memory used by the OS, it does not add 8MB immediately for every malloc, 
+but increases dynamically based on the mapping of the actual written page.
+
+```cpp
+int main() {
+    photon::init();
+    for (int i = 0; i < 2000; ++i) {
+        photon::thread_create11([]{
+            photon::thread_usleep(-1UL);
+        });
+    }
+    photon::thread_usleep(-1UL);
+}
+```
+
+In the above example, we created 2000 sleeping coroutines, the process shows that it has 16GB virtual memory, but only
+consumed 24MB physical memory.
+
+![malloc](/img/api/malloc.png)
+
+:::info
 
 #### Return
 
@@ -87,10 +132,6 @@ photon::thread* photon::thread_create11(F f, CLASS* obj, ARGUMENTS&& ...args);	/
 #### Description
 
 C++11 syntax wrapper for `thread_create`. Multiple arguments is allowed.
-
-:::note
-Arguments are forwarded to the new thread by value. If needed to pass by reference, it has to be wrapped by `std::ref` or `std::cref`.
-:::
 
 #### Headers
 
@@ -128,6 +169,10 @@ class A {
 };
 ```
 
+:::note
+Arguments are forwarded to the new thread by value. If needed to pass by reference, it has to be wrapped by `std::ref` or `std::cref`.
+:::
+
 #### Return
 
 Pointer to the new thread.
@@ -137,14 +182,17 @@ Pointer to the new thread.
 ### thread_enable_join
 
 ```cpp
-photon::join_handle* 
-photon::thread_enable_join(photon::thread* th, bool flag = true);
+photon::join_handle* photon::thread_enable_join(photon::thread* th, bool flag = true);
 ```
 
 #### Description
 
-Threads are join-able **only** through their `join_handle`. Once join is enabled, the thread will remain existing until being joined.
+- Join is disabled by default.
+
+- Once join is enabled, the thread will remain existing until being joined.
 Failing to do so will cause resource leak.
+
+- Threads are join-able **only** through their `join_handle`.
 
 #### Parameters
 
@@ -167,6 +215,10 @@ void photon::thread_join(photon::join_handle* jh);
 #### Description
 
 Join a thread.
+
+:::caution
+You can't join an exited or non-existent thread. It will cause core dump.
+:::
 
 #### Parameters
 
@@ -230,6 +282,10 @@ void photon::thread_interrupt(photon::thread* th, int error_number = EINTR);
 
 Interrupt the target thread. Awaken it from sleep.
 
+:::caution
+You can't interrupt an exited or non-existent thread. It will cause core dump.
+:::
+
 #### Parameters
 
 - `th` Target thread.
@@ -277,6 +333,10 @@ int photon::thread_migrate(photon::thread* th, photon::vcpu_base* vcpu);
 #### Description
 
 Migrate a `READY` state thread to another vCPU.
+
+- Although Photon is of M:1 model, we can still migrate the coroutine function to another thread.
+
+- Run-to-completion model is prefer. Once created, do not schedule the coroutine to other threads unless you encounter a CPU bottleneck in this thread.
 
 #### Parameters
 
@@ -342,6 +402,8 @@ Create a timer object with `default_timedout` in usec, callback function `on_tim
 and callback argument `arg`. The timer object is implemented as a special thread, so
 it has a `stack_size`, and the `on_timer` is invoked within the thread's context.
 The timer object is deleted automatically after it is finished.	
+
+A non-repeating is basically equal to creating a new thread and run thread_usleep.
 
 ```cpp
 Timer(uint64_t default_timeout, Entry on_timer, 

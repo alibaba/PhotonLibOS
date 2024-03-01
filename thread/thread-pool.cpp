@@ -20,8 +20,36 @@ limitations under the License.
 
 namespace photon
 {
+    static bool __bypass_threadpool = false;
+
+    bool __should_bypass_threadpool() {
+        return __bypass_threadpool;
+    }
+
+    void set_bypass_threadpool(bool flag) {
+        __bypass_threadpool = true;
+    }
+
     TPControl* ThreadPoolBase::thread_create_ex(thread_entry start, void* arg, bool joinable)
     {
+        if (m_capacity == 0 || __should_bypass_threadpool()) {
+            auto th = photon::thread_create(start, arg, (uint64_t)m_reserved,
+                                            sizeof(TPControl));
+            auto pCtrl = photon::thread_reserved_space<TPControl>(th);
+            pCtrl->th = th;
+            /* Actually unused in `bypass_threadpool` condition
+            because all threadcreate work are forwarding to
+            `photon::thread_create`
+
+            // pCtrl->joinable = joinable;
+            // pCtrl->start = start;
+            // pCtrl->arg = arg;
+            */
+            if (joinable) {
+                photon::thread_enable_join(th);
+            }
+            return pCtrl;
+        }
         auto pCtrl = B::get();
         {
             SCOPED_LOCK(pCtrl->m_mtx);
@@ -101,6 +129,10 @@ namespace photon
     }
     void ThreadPoolBase::join(TPControl* pCtrl)
     {
+        if (m_capacity == 0 || __should_bypass_threadpool()) {
+            photon::thread_join((photon::join_handle*)pCtrl->th);
+            return;
+        }
         auto should_put = do_thread_join(pCtrl);
         if (should_put)
             pCtrl->pool->put(pCtrl);

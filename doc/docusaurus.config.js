@@ -32,7 +32,19 @@ const config = {
   // to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: ['cn', 'en'],
+    path: 'i18n',
+    localeConfigs: {
+      cn: {
+        label: '中文',
+        path: 'cn',
+      },
+      en: {
+        label: 'English',
+        path: 'en',
+      },
+
+    },
   },
 
   presets: [
@@ -77,6 +89,10 @@ const config = {
             to: '/blog',
             label: 'Blog', 
             position: 'left',
+          },
+          {
+            type: 'localeDropdown',
+            position: 'right',
           },
           {
             href: 'https://github.com/alibaba/PhotonLibOS',

@@ -34,12 +34,12 @@ TEST(UDP, basic) {
     DEFER(delete s1);
     auto s2 = new_udp_socket();
     DEFER(delete s2);
-    s1->setsockopt(SOL_SOCKET, SO_SNDBUF, 256*1024);
-    s2->setsockopt(SOL_SOCKET, SO_SNDBUF, 256*1024);
-    s1->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
-    s2->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
+    s1->setsockopt<int>(SOL_SOCKET, SO_SNDBUF, 256*1024);
+    s2->setsockopt<int>(SOL_SOCKET, SO_SNDBUF, 256*1024);
+    s1->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
+    s2->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
 
-    EXPECT_EQ(0, s1->bind(EndPoint(IPAddr("127.0.0.1"), 0)));
+    EXPECT_EQ(0, s1->bind_v4localhost());
     auto ep = s1->getsockname();
     LOG_INFO("Bind at ", ep);
 
@@ -102,12 +102,12 @@ TEST(UDP, uds_huge_datag) {
     auto s3 = new_uds_datagram_socket();
     DEFER(delete s3);
 
-    s1->setsockopt(SOL_SOCKET, SO_SNDBUF, 256*1024);
-    s2->setsockopt(SOL_SOCKET, SO_SNDBUF, 256*1024);
-    s3->setsockopt(SOL_SOCKET, SO_SNDBUF, 256*1024);
-    s1->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
-    s2->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
-    s3->setsockopt(SOL_SOCKET, SO_RCVBUF, 256*1024);
+    s1->setsockopt<int>(SOL_SOCKET, SO_SNDBUF, 256*1024);
+    s2->setsockopt<int>(SOL_SOCKET, SO_SNDBUF, 256*1024);
+    s3->setsockopt<int>(SOL_SOCKET, SO_SNDBUF, 256*1024);
+    s1->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
+    s2->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
+    s3->setsockopt<int>(SOL_SOCKET, SO_RCVBUF, 256*1024);
 
     EXPECT_EQ(0, s1->bind(uds_path));
     char path[1024] = {};
@@ -134,5 +134,5 @@ int main(int argc, char** arg) {
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);
 
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return RUN_ALL_TESTS();
 }

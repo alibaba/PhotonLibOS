@@ -290,3 +290,23 @@ int version_compare(std::string_view a, std::string_view b, int& result);
 int kernel_version_compare(std::string_view dst, int& result);
 void print_stacktrace();
 
+namespace photon {
+
+// Saturating addition, no upward overflow
+__attribute__((always_inline)) inline
+uint64_t sat_add(uint64_t x, uint64_t y) {
+	uint64_t z, c = __builtin_uaddl_overflow(x, y, (unsigned long*)&z);
+	return -c | z;
+}
+
+// Saturating subtract, no downward overflow
+__attribute__((always_inline)) inline
+uint64_t sat_sub(uint64_t x, uint64_t y) {
+    uint64_t z, c = __builtin_usubl_overflow(x, y, (unsigned long*)&z);
+    return c ? 0 : z;
+}
+
+}
+
+
+

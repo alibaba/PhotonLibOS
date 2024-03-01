@@ -115,5 +115,5 @@ TEST(TString, JoinAndSplit) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return ret;
 }

@@ -5,6 +5,15 @@ toc_max_heading_level: 4
 
 # Lock and Synchronization
 
+- Multiple coroutines in the same OS thread have no visibility issues with each other. 
+For example, if multiple coroutines modify variables inside a thread at the same time, we don't need to use atomic 
+variables, and there is no need to pay attention to memory order.
+
+- But sync primitives are still needed, because locks are needed to protect variables from being modified by 
+other coroutines, if the lock owner might have a chance to yield its CPU.
+
+- All Photon's synchronization primitives are thead-safe, including the `thread_interrupt` API we introduced before.
+
 ### Namespace
 
 `photon::`
