@@ -46,7 +46,7 @@ endif ()
 ProcessorCount(NumCPU)
 
 # Global compiler options, only effective within this project
-add_compile_options(-Wall -Werror -Wno-error=pragmas)
+add_compile_options(-Wall -Wno-error=pragmas)
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
