@@ -1043,8 +1043,6 @@ EndPoint::EndPoint(const char* _ep) {
     // Detect IPv6 or IPv4
     estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
     auto ip = IPAddr(ip_str.c_str());
-    if (ip.undefined())
-        return;
     auto port_str = ep.substr(pos + 1);
     if (!port_str.all_digits())
         return;
