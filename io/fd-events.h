@@ -69,6 +69,27 @@ public:
     virtual ssize_t wait_and_fire_events(uint64_t timeout = -1) = 0;
 
     virtual int cancel_wait() = 0;
+
+    bool add_nested_epoll_fd(int fd) {
+        for (int i = 0; i < LEN(nested_epoll_fds); ++i) {
+            if (nested_epoll_fds[i] < 0) {
+                nested_epoll_fds[i] = fd;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int nested_epoll_index(int fd) {
+        for (int i = 0; i < LEN(nested_epoll_fds); ++i) {
+            if (nested_epoll_fds[i] == fd)
+                return i;
+        }
+        return -1;
+    }
+
+    int nested_epoll_fds[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    bool nested_poll_registered[8] = {false, false, false, false, false, false, false, false};
 };
 
 inline int wait_for_fd_readable(int fd, uint64_t timeout = -1) {

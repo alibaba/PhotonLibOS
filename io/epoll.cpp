@@ -53,9 +53,15 @@ class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, 
 public:
     int _evfd = -1;
     int _engine_fd = -1;
-    int init() {
+    int init(bool master = false) {
         int epfd = epoll_create(1);
         if (epfd < 0) LOG_ERRNO_RETURN(0, -1, "failed to epoll_create(1)");
+
+        if (!master) {
+            get_vcpu()->master_event_engine->add_nested_epoll_fd(epfd);
+            LOG_INFO("Add nested ep fd ", epfd);
+        }
+
 
         DEFER(if_close_fd(epfd));
         _engine_fd = epfd;
@@ -274,8 +280,24 @@ public:
     virtual int cancel_wait() override { return eventfd_write(_evfd, 1); }
 
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        // LOG_INFO("wait for fd ` `", VALUE(fd), VALUE(interests));
         Event event{fd, interests | ONE_SHOT, CURRENT};
-        int ret = add_interest(event);
+        int ret = 0;
+        int index = get_vcpu()->master_event_engine->nested_epoll_index(fd);
+        if (index >= 0) {
+            if (get_vcpu()->master_event_engine->nested_poll_registered[index]) {
+                // LOG_INFO("ep fd ` registeredt", fd);
+            } else {
+                get_vcpu()->master_event_engine->nested_poll_registered[index] = true;
+                // LOG_INFO("ep fd ` NOT registered, register and add interest", fd);
+                event.interests = interests;    // multi-shot
+                ret = add_interest(event);
+            }
+        } else {
+            // LOG_INFO("No such nested ep fd", fd);
+            ret = add_interest(event);
+        }
+
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         ret = thread_usleep(timeout);
         ERRNO err;
@@ -291,17 +313,17 @@ public:
             return -1;
         }
     }
+
 };
 
-__attribute__((noinline)) static EventEngineEPoll* new_epoll_engine() {
-    LOG_INFO("Init event engine: epoll");
-    return NewObj<EventEngineEPoll>()->init();
+MasterEventEngine* new_epoll_master_engine() {
+    LOG_INFO("Init master event engine: epoll");
+    return (MasterEventEngine*) NewObj<EventEngineEPoll>()->init(true);
 }
 
-MasterEventEngine* new_epoll_master_engine() { return new_epoll_engine(); }
-
 CascadingEventEngine* new_epoll_cascading_engine() {
-    return new_epoll_engine();
+    LOG_INFO("Init cascading event engine: epoll");
+    return (CascadingEventEngine*) NewObj<EventEngineEPoll>()->init(false);
 }
 
 }  // namespace photon

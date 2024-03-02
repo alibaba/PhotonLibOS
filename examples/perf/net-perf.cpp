@@ -37,10 +37,12 @@ static int client() {
             auto conn = cli->connect(ep);
             char buf[FLAGS_buf_size];
             while (!stop_test) {
+                // photon::thread_usleep(100);
                 ssize_t ret = conn->write(buf, FLAGS_buf_size);
                 if (ret != (ssize_t) FLAGS_buf_size) {
                     LOG_ERROR("fail to write");
                 }
+                photon::thread_yield();
             }
         });
     }
@@ -54,10 +56,15 @@ static int server(int index) {
     photon::net::EndPoint ep("0.0.0.0", FLAGS_port + index);
     photon::net::sockaddr_storage storage(ep);
     int sock_fd = photon::net::socket(AF_INET, SOCK_STREAM, 0);
+    int val = 1;
+    socklen_t len_opt = sizeof(val);
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &val, len_opt);
     bind(sock_fd, storage.get_sockaddr(), storage.get_socklen());
     listen(sock_fd, 1024);
     socklen_t len;
     int conn_fd = photon::net::accept(sock_fd, storage.get_sockaddr(), &len);
+
+    LOG_INFO("Server: Got new connection on fd `", conn_fd);
 
     auto engine = photon::new_epoll_cascading_engine();
     photon::CascadingEventEngine::Event ev{conn_fd, photon::EVENT_READ, (void*) (uintptr_t) conn_fd};
