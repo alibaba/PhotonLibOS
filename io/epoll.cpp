@@ -49,16 +49,16 @@ struct InFlightEvent {
     void* error_data;
 };
 
-class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
+class EventEngineEPoll : public EventEngine, public ResetHandle {
 public:
     int _evfd = -1;
-    int _engine_fd = -1;
+    int _epfd = -1;
     int init() {
         int epfd = epoll_create(1);
         if (epfd < 0) LOG_ERRNO_RETURN(0, -1, "failed to epoll_create(1)");
 
         DEFER(if_close_fd(epfd));
-        _engine_fd = epfd;
+        _epfd = epfd;
         int evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd < 0) LOG_ERRNO_RETURN(0, -1, "failed to create eventfd");
 
@@ -73,7 +73,7 @@ public:
         return 0;
     }
     int reset() override {
-        if_close_fd(_engine_fd);    // close original fd
+        if_close_fd(_epfd);    // close original fd
         if_close_fd(_evfd);
         _inflight_events.clear();   // reset members
         _events_remain = 0;
@@ -81,7 +81,7 @@ public:
     }
     virtual ~EventEngineEPoll() override {
         LOG_INFO("Finish event engine: epoll");
-        if_close_fd(_engine_fd);
+        if_close_fd(_epfd);
         if_close_fd(_evfd);
     }
     int if_close_fd(int& fd) {
@@ -94,7 +94,7 @@ public:
         struct epoll_event ev;
         ev.events = events;  // EPOLLERR | EPOLLHUP always included
         ev.data.u64 = fd;
-        int ret = epoll_ctl(_engine_fd, op, fd, &ev);
+        int ret = epoll_ctl(_epfd, op, fd, &ev);
         if (ret < 0) {
             ERRNO err;
             if (err.no != no_log_errno_1 &&
@@ -103,7 +103,7 @@ public:
                 auto events = HEX(ev.events);
                 auto data = ev.data.ptr;
                 LOG_WARN("failed to call epoll_ctl(`, `, `, {`, `})",
-                         VALUE(_engine_fd), VALUE(op), VALUE(fd), VALUE(events),
+                         VALUE(_epfd), VALUE(op), VALUE(fd), VALUE(events),
                          VALUE(data), err);
             }
             return -err.no;
@@ -135,8 +135,7 @@ public:
         auto op = eint ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
         if (op == EPOLL_CTL_MOD &&
             (e.interests & ONE_SHOT) != (entry.interests & ONE_SHOT)) {
-            LOG_ERROR_RETURN(
-                EINVAL, -1,
+            LOG_ERROR_RETURN(EINVAL, -1,
                 "do not support ONE_SHOT on no-oneshot interested fd");
         }
         auto x = entry.interests |= e.interests;
@@ -166,7 +165,7 @@ public:
         }
         return ctl(e.fd, op, events);
     }
-    epoll_event _events[16];
+    epoll_event _events[128];
     uint16_t _events_remain = 0;
     int do_epoll_wait(uint64_t timeout) {
         assert(_events_remain == 0);
@@ -178,6 +177,8 @@ public:
         timeout &= 0x7fffffff;  // make sure less than INT32_MAX
         while (_engine_fd > 0) {
             int ret = ::epoll_wait(_engine_fd, _events, LEN(_events), timeout);
+        while (_epfd > 0) {
+            int ret = epoll_wait(_epfd, _events, LEN(_events), timeout);
             if (ret < 0) {
                 ERRNO err;
                 if (err.no == EINTR) continue;
@@ -191,8 +192,9 @@ public:
         }
         return -1;
     }
+
     template <typename DataCB, typename FDCB>
-    void wait_for_events(uint64_t timeout, const DataCB& datacb,
+    void reap_events(uint64_t timeout, const DataCB& datacb,
                          const FDCB& fdcb) {
         if (!_events_remain) {
             int ret = do_epoll_wait(timeout);
@@ -210,31 +212,13 @@ public:
             if (e.data.u64 >= _inflight_events.size()) continue;
             auto& entry = _inflight_events[e.data.u64];
             if ((e.events & ERRBIT) && (entry.interests & EVENT_ERROR)) {
-                auto data = entry.error_data;
-                if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_ERROR | ONE_SHOT,
-                                 .data = nullptr});
-                }
-                datacb(data);
+                datacb(entry.error_data);
             }
             if ((e.events & READBITS) && (entry.interests & EVENT_READ)) {
-                auto data = entry.reader_data;
-                if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_READ | ONE_SHOT,
-                                 .data = nullptr});
-                }
-                datacb(data);
+                datacb(entry.reader_data);
             }
             if ((e.events & WRITEBITS) && (entry.interests & EVENT_WRITE)) {
-                auto data = entry.writer_data;
-                if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_WRITE | ONE_SHOT,
-                                 .data = nullptr});
-                }
-                datacb(data);
+                datacb(entry.writer_data);
             }
         }
     }
@@ -258,9 +242,13 @@ public:
         return ptr - data;
     }
     virtual ssize_t wait_and_fire_events(uint64_t timeout) override {
+};
+
+class MasterEpoll : public EventEngineEPoll {
+public:
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
         ssize_t n = 0;
-        wait_for_events(
-            timeout,
+        reap_events(timeout,
             [&](void* data) __INLINE__ {
                 assert(data);
                 thread_interrupt((thread*)data, EOK);
@@ -269,7 +257,14 @@ public:
             [&]() __INLINE__ { return true; });
         return n;
     }
-    virtual int cancel_wait() override { return eventfd_write(_evfd, 1); }
+    int cancel_wait() override {
+        return eventfd_write(_evfd, 1);
+    }
+    ssize_t wait_for_events(void**, size_t, uint64_t) override {
+        errno = ENOSYS;
+        return -1;
+    }
+};
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         Event event{fd, interests | ONE_SHOT, CURRENT};
@@ -287,19 +282,47 @@ public:
             rm_interest(event);  // Interrupted by other thread
             errno = err.no;
             return -1;
+class CascadingEpoll : public EventEngineEPoll {
+    thread* _waiting_th = nullptr;
+    virtual ssize_t wait_for_events(void** data, size_t count,
+                                    uint64_t timeout = -1) override {
+        if (!data || !count)
+            LOG_ERROR_RETURN(EINVAL, -1, "both data(`) and count(`) must not be 0", data, count);
+
+        _waiting_th = CURRENT;
+        int ret = get_vcpu()->master_event_engine->
+                  wait_for_fd_readable(_epfd, timeout);
+        _waiting_th = nullptr;
+        if (ret < 0) {
+            return errno == ETIMEDOUT ? 0 : -1;
         }
+
+        auto ptr = data;
+        auto end = data + count;
+        reap_events(0,
+            [&](void* data) __INLINE__ { *ptr++ = data; },
+            [&]() __INLINE__ { return (end - ptr) >= 3; });
+        return ptr - data;
+    }
+    int cancel_wait() override {
+        if (_waiting_th)
+            thread_interrupt(_waiting_th);
+        return 0;
+    }
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+        errno = ENOSYS;
+        return -1;
     }
 };
 
-__attribute__((noinline)) static EventEngineEPoll* new_epoll_engine() {
-    LOG_INFO("Init event engine: epoll");
-    return NewObj<EventEngineEPoll>()->init();
+MasterEventEngine* new_epoll_master_engine() {
+    LOG_INFO("Init event engine: master epoll");
+    return NewObj<MasterEpoll>()->init();
 }
 
-MasterEventEngine* new_epoll_master_engine() { return new_epoll_engine(); }
-
 CascadingEventEngine* new_epoll_cascading_engine() {
-    return new_epoll_engine();
+    LOG_INFO("Init event engine: cascading epoll");
+    return NewObj<CascadingEpoll>()->init();
 }
 
 }  // namespace photon

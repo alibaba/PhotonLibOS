@@ -91,7 +91,7 @@ static constexpr size_t PAGE_SIZE = 1 << 12;
 namespace photon
 {
     inline uint64_t min(uint64_t a, uint64_t b) { return (a<b) ? a : b; }
-    class NullEventEngine : public MasterEventEngine {
+    class NullEventEngine : public EventEngine {
     public:
         std::mutex _mutex;
         std::condition_variable _cvar;
@@ -99,6 +99,14 @@ namespace photon
 
         __attribute__((noinline))
         int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+            return -1;
+        }
+        __attribute__((noinline))
+        int add_interest(Event e) override {
+            return -1;
+        }
+        __attribute__((noinline))
+        int rm_interest(Event e) override {
             return -1;
         }
 
@@ -114,6 +122,12 @@ namespace photon
 
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {
+        ssize_t wait_for_events(void**, size_t, uint64_t timeout = -1) override {
+            return -1;
+        }
+
+        __attribute__((noinline))
+        ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
             DEFER(notify.store(false, std::memory_order_release));
             if (!timeout) return 0;
             timeout = min(timeout, 1000 * 100UL);

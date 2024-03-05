@@ -120,9 +120,9 @@ namespace photon
     // with EPERM)
     int thread_shutdown(thread* th, bool flag = true);
 
-    class MasterEventEngine;
+    class EventEngine;
     struct vcpu_base {
-        MasterEventEngine* master_event_engine;
+        EventEngine* master_event_engine;
         volatile uint64_t switch_count = 0;
     };
 

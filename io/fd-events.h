@@ -32,11 +32,19 @@ const static int EOK = ENXIO;   // the Event of NeXt I/O
 
 // Event engine is the abstraction of substrates like epoll,
 // io-uring, kqueue, etc.
+
 // There are two types of event engines, master and cascading.
 // Master event engine is the default one used by global functions
 // like wait_for_fd_readable/writable(), and it is also invoked by
 // the thread scheduler to wait for events when idle.
 // Every vCPU that processes events has a dedicated master engine.
+
+// Cascading event engine is used explicitly with a pointer, for complex
+// scenarios that the master engine cannot handle, e.g., waiting for multiple
+// events with a single invocation.
+// Cascading event engines do NOT block the vCPU. Instead, they only block
+// current thread, with the help of master event engine.
+
 class EventEngine {
 public:
     virtual ~EventEngine() = default;
@@ -80,33 +88,15 @@ public:
     virtual int rm_interest(Event e) = 0;
 
     /**
-     * @brief Wait for events, returns number of the arrived events, and their associated `data`
-     * @details For a master engine, it waits for events by invoking low-level event primitives
-     * like epoll, io_uring or kqueue.
-     * And it fires the events by resuming the involving thread(s). Parameters 'data' and 'count' are
-     * ignored by a master engine.
+     * @brief Wait for events and reap their associated `data`
+     * @details
      * For a cascading engine, it should wait for event(s)' comming with `wait_for_fd_readable()`,
      * then store at most `count` events into the array pointed to by `data`.
-     * @note This call will not return until timeout, if there had been no events.
      * @param[out] data
      * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
-     * @warning Master engines must **NOT** block photon thread (e.g. with photon::usleep()), and
-     * cascading engines must **NOT** block vCPU (e.g. with ::usleep()).
+     * @warning Only valid for cascading engines. Must **NOT** block vCPU (e.g. with ::usleep()).
      */
     virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;
-
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) {
-        assert(this == get_vcpu()->master_event_engine);
-        return wait_for_events(nullptr, 0, timeout);
-    }
-
-    virtual int cancel_wait() = 0;
-};
-
-
-class MasterEventEngine {
-public:
-    virtual ~MasterEventEngine() = default;
 
     /**
      * @param interests bitwisely OR-ed EVENT_READ, EVENT_WRITE
@@ -134,6 +124,11 @@ public:
      * @return 0 if slept well, or -1 if error occurred.
      * @warning Do NOT invoke photon::usleep() or photon::sleep() in this function, because their
      *          implementations also rely on this function.
+     * @brief Wait for events with low-level event primitives (e.g. epoll_wait) and notify the observing
+     * thread(s) with `thread_interrupt()`, returning the number of arrived events.
+     * @param timeout
+     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
+     * @warning Only valid for master engines. Must **NOT** block photon thread (e.g. with photon::usleep()).
      */
     virtual ssize_t wait_and_fire_events(uint64_t timeout) = 0;
 
@@ -152,41 +147,8 @@ inline int wait_for_fd_error(int fd, Timeout timeout = {}) {
     return get_vcpu()->master_event_engine->wait_for_fd_error(fd, timeout);
 }
 
-// Cascading event engine is used explicitly with a pointer, for complex
-// scenarios that the master engine cannot handle, e.g., waiting for multiple
-// events with a single invocation.
-// Cascading event engines do NOT block the vCPU. Instead, they only block
-// current thread, with the help of master event engine.
-class CascadingEventEngine {
-public:
-    virtual ~CascadingEventEngine() = default;
-
-    struct Event {
-        int fd;
-        uint32_t interests;    // bitwisely OR-ed EVENT_READ, EVENT_WRITE
-        void* data;
-    };
-
-    /**
-     * @brief `add_interests` should allow adding same fd on same event with same data
-     */
-    virtual int add_interest(Event e) = 0;
-
-    /**
-     * @brief The struct Event arg should be equal to that for `add_interest()`,
-     * as some engine may identify events by `data`, while some may operate each event independently.
-     */
-    virtual int rm_interest(Event e) = 0;
-
-    /**
-     * @brief Wait for events, returns number of the arrived events, and their associated `data`
-     * @note This call will not return until timeout, if there had been no events.
-     * @param[out] data
-     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
-     * @warning Do NOT block vcpu
-     */
-    virtual ssize_t wait_for_events(void** data, size_t count, Timeout timeout = {}) = 0;
-};
+using CascadingEventEngine = EventEngine;
+using MasterEventEngine = EventEngine;
 
 template<typename Ctor> inline
 int _fd_events_init(Ctor new_engine) {
@@ -197,9 +159,9 @@ int _fd_events_init(Ctor new_engine) {
     return 0;
 }
 
-#define DECLARE_MASTER_AND_CASCADING_ENGINE(name)           \
-MasterEventEngine* new_##name##_master_engine();            \
-CascadingEventEngine* new_##name##_cascading_engine();      \
+#define DECLARE_MASTER_AND_CASCADING_ENGINE(name)       \
+EventEngine* new_##name##_master_engine();              \
+EventEngine* new_##name##_cascading_engine();           \
 
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll);
 DECLARE_MASTER_AND_CASCADING_ENGINE(select);
@@ -235,7 +197,7 @@ inline int fd_events_fini() {
     return 0;
 }
 
-inline CascadingEventEngine* new_default_cascading_engine() {
+inline EventEngine* new_default_cascading_engine() {
 #ifdef __APPLE__
     return new_kqueue_cascading_engine();
 #else
@@ -246,7 +208,7 @@ inline CascadingEventEngine* new_default_cascading_engine() {
 #undef DECLARE_MASTER_AND_CASCADING_ENGINE
 
 // TODO: implement select engine in separate cpp files
-inline MasterEventEngine* new_select_master_engine() { return nullptr; }
-inline CascadingEventEngine* new_select_cascading_engine() { return nullptr; }
+inline EventEngine* new_select_master_engine() { return nullptr; }
+inline EventEngine* new_select_cascading_engine() { return nullptr; }
 
 } // namespace photon
