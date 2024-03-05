@@ -1049,7 +1049,7 @@ EndPoint::EndPoint(const char* _ep) {
         return;
     port = (uint16_t)_port;
     auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
-    if (ipsv.length() >= INET6_ADDRSTRLEN)
+    if (ipsv.length() >= INET6_ADDRSTRLEN - 1)
         return;
     char ip_str[INET6_ADDRSTRLEN];
     memcpy(ip_str, ipsv.data(), ipsv.length());

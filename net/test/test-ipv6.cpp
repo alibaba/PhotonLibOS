@@ -14,6 +14,13 @@ TEST(ipv6, endpoint) {
     EXPECT_FALSE(c.undefined());
     c = photon::net::EndPoint("[::1]:8888");
     EXPECT_FALSE(c.undefined());
+    c = photon::net::EndPoint("0.0.0.0:8888");
+    EXPECT_TRUE(c.undefined());
+    EXPECT_EQ(8888, c.port);
+    c = photon::net::EndPoint("::", 8888);
+    EXPECT_TRUE(!c.undefined());
+    EXPECT_TRUE(!c.is_ipv4());
+    EXPECT_EQ(8888, c.port);
 }
 
 TEST(ipv6, addr) {
