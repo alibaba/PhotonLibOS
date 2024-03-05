@@ -171,6 +171,7 @@ file(GLOB PHOTON_SRC
         fs/virtual-file.cpp
         fs/xfile.cpp
         fs/httpfs/*.cpp
+        io/fd-events.cpp
         io/signal.cpp
         io/reset_handle.cpp
         net/*.cpp

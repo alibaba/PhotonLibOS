@@ -26,16 +26,84 @@ const static uint32_t EVENT_READ = 1;
 const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
-const static uint32_t ONE_SHOT = 0x8000;
+const static uint32_t ONE_SHOT = 0x8000;    // multi-shot by default
 
 const static int EOK = ENXIO;   // the Event of NeXt I/O
 
 // Event engine is the abstraction of substrates like epoll,
 // io-uring, kqueue, etc.
+// There are two types of event engines, master and cascading.
 // Master event engine is the default one used by global functions
-// of wait_for_fd_readable/writable(), and it is also invoked by
+// like wait_for_fd_readable/writable(), and it is also invoked by
 // the thread scheduler to wait for events when idle.
 // Every vCPU that processes events has a dedicated master engine.
+class EventEngine {
+public:
+    virtual ~EventEngine() = default;
+
+    int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
+        return wait_for_fd(fd, EVENT_READ, timeout);
+    }
+
+    int wait_for_fd_writable(int fd, uint64_t timeout = -1) {
+        return wait_for_fd(fd, EVENT_WRITE, timeout);
+    }
+
+    int wait_for_fd_error(int fd, uint64_t timeout = -1) {
+        return wait_for_fd(fd, EVENT_ERROR, timeout);
+    }
+
+    /**
+     * @brief wait for event(s) happening on `fd`
+     * @param interests bitwisely OR-ed EVENT_READ, EVENT_WRITE, etc. It MUST be 0
+     * in the case that `interests` have already been registered by `add_interests()`.
+     * @return 0 for success, which means event arrived in time
+     *         -1 for failure, could be timeout or interrupted by another thread
+     */
+    virtual int wait_for_fd(int fd, uint32_t interests, uint64_t timeout);
+
+    struct Event {
+        int fd;
+        uint32_t interests;    // bitwisely OR-ed EVENT_READ, EVENT_WRITE
+        void* data;
+    };
+
+    /**
+     * @brief `add_interests` should allow adding same fd on same event with same data
+     */
+    virtual int add_interest(Event e) = 0;
+
+    /**
+     * @brief The struct Event arg should be equal to that for `add_interest()`,
+     * as some engine may identify events by `data`, while some may operate each event independently.
+     */
+    virtual int rm_interest(Event e) = 0;
+
+    /**
+     * @brief Wait for events, returns number of the arrived events, and their associated `data`
+     * @details For a master engine, it waits for events by invoking low-level event primitives
+     * like epoll, io_uring or kqueue.
+     * And it fires the events by resuming the involving thread(s). Parameters 'data' and 'count' are
+     * ignored by a master engine.
+     * For a cascading engine, it should wait for event(s)' comming with `wait_for_fd_readable()`,
+     * then store at most `count` events into the array pointed to by `data`.
+     * @note This call will not return until timeout, if there had been no events.
+     * @param[out] data
+     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
+     * @warning Master engines must **NOT** block photon thread (e.g. with photon::usleep()), and
+     * cascading engines must **NOT** block vCPU (e.g. with ::usleep()).
+     */
+    virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;
+
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) {
+        assert(this == get_vcpu()->master_event_engine);
+        return wait_for_events(nullptr, 0, timeout);
+    }
+
+    virtual int cancel_wait() = 0;
+};
+
+
 class MasterEventEngine {
 public:
     virtual ~MasterEventEngine() = default;
