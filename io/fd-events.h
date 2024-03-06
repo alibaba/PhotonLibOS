@@ -159,12 +159,12 @@ int _fd_events_init(Ctor new_engine) {
     return 0;
 }
 
-#define DECLARE_MASTER_AND_CASCADING_ENGINE(name)       \
-EventEngine* new_##name##_master_engine();              \
-EventEngine* new_##name##_cascading_engine();           \
+#define DECLARE_MASTER_AND_CASCADING_ENGINE(name)           \
+EventEngine* new_##name##_master_engine();                  \
+EventEngine* new_##name##_cascading_engine(int flags = 0);  \
 
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll);
-DECLARE_MASTER_AND_CASCADING_ENGINE(select);
+DECLARE_MASTER_AND_CASCADING_ENGINE(select);    // TODO
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
@@ -206,9 +206,5 @@ inline EventEngine* new_default_cascading_engine() {
 }
 
 #undef DECLARE_MASTER_AND_CASCADING_ENGINE
-
-// TODO: implement select engine in separate cpp files
-inline EventEngine* new_select_master_engine() { return nullptr; }
-inline EventEngine* new_select_cascading_engine() { return nullptr; }
 
 } // namespace photon
