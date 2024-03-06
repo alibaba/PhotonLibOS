@@ -97,22 +97,19 @@ namespace photon
         std::condition_variable _cvar;
         std::atomic_bool notify{false};
 
+#define UNIMPL(func) __attribute__((noinline)) func override { return -1; }
+        UNIMPL(int wait_for_fd(int fd, uint32_t interests, Timeout timeout));
+        // UNIMPL(int add_interest(Event e));
+
         __attribute__((noinline))
-        int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
-            return -1;
-        }
-        __attribute__((noinline))
-        int add_interest(Event e) override {
-            return -1;
-        }
-        __attribute__((noinline))
-        int rm_interest(Event e) override {
-            return -1;
-        }
+        int add_interest(Event e) override { return -1; }
+
+        UNIMPL(int rm_interest(Event e));
+#undef  UNIMPL
 
         __attribute__((noinline))
         int cancel_wait() override {
-            {
+            if (1) {
                 std::unique_lock<std::mutex> lock(_mutex);
                 notify.store(true, std::memory_order_release);
             }
@@ -122,12 +119,6 @@ namespace photon
 
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {
-        ssize_t wait_for_events(void**, size_t, uint64_t timeout = -1) override {
-            return -1;
-        }
-
-        __attribute__((noinline))
-        ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
             DEFER(notify.store(false, std::memory_order_release));
             if (!timeout) return 0;
             timeout = min(timeout, 1000 * 100UL);

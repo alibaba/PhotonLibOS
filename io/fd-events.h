@@ -26,7 +26,9 @@ const static uint32_t EVENT_READ = 1;
 const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
-const static uint32_t ONE_SHOT = 0x8000;    // multi-shot by default
+const static uint32_t ONE_SHOT = 0x8000;        // multi-shot by default
+const static uint32_t ONE_SHOT_SYNC = 0x10000;  // update event engine only, excluding
+                                                // low-level facilities (e.g. epoll)
 
 const static int EOK = ENXIO;   // the Event of NeXt I/O
 
@@ -49,15 +51,15 @@ class EventEngine {
 public:
     virtual ~EventEngine() = default;
 
-    int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
+    int wait_for_fd_readable(int fd, Timeout timeout = {}) {
         return wait_for_fd(fd, EVENT_READ, timeout);
     }
 
-    int wait_for_fd_writable(int fd, uint64_t timeout = -1) {
+    int wait_for_fd_writable(int fd, Timeout timeout = {}) {
         return wait_for_fd(fd, EVENT_WRITE, timeout);
     }
 
-    int wait_for_fd_error(int fd, uint64_t timeout = -1) {
+    int wait_for_fd_error(int fd, Timeout timeout = {}) {
         return wait_for_fd(fd, EVENT_ERROR, timeout);
     }
 
@@ -68,7 +70,7 @@ public:
      * @return 0 for success, which means event arrived in time
      *         -1 for failure, could be timeout or interrupted by another thread
      */
-    virtual int wait_for_fd(int fd, uint32_t interests, uint64_t timeout);
+    virtual int wait_for_fd(int fd, uint32_t interests, Timeout timeout = {});
 
     struct Event {
         int fd;
@@ -88,51 +90,36 @@ public:
     virtual int rm_interest(Event e) = 0;
 
     /**
-     * @brief Wait for events and reap their associated `data`
-     * @details
-     * For a cascading engine, it should wait for event(s)' comming with `wait_for_fd_readable()`,
-     * then store at most `count` events into the array pointed to by `data`.
-     * @param[out] data
-     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
-     * @warning Only valid for cascading engines. Must **NOT** block vCPU (e.g. with ::usleep()).
-     */
-    virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;
-
-    /**
-     * @param interests bitwisely OR-ed EVENT_READ, EVENT_WRITE
-     * @return 0 for success, which means event arrived in time
-     *         -1 for failure, could be timeout or interrupted by another thread
-     */
-    virtual int wait_for_fd(int fd, uint32_t interests, Timeout timeout) = 0;
-
-    int wait_for_fd_readable(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_READ, timeout);
-    }
-
-    int wait_for_fd_writable(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_WRITE, timeout);
-    }
-
-    int wait_for_fd_error(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_ERROR, timeout);
-    }
-
-    /**
-     * @brief Wait for events, and fire them by photon::thread_interrupt()
-     * @param timeout The *maximum* amount of time to sleep. May wake up
-     *        earlier in the case of some events happened.
-     * @return 0 if slept well, or -1 if error occurred.
-     * @warning Do NOT invoke photon::usleep() or photon::sleep() in this function, because their
-     *          implementations also rely on this function.
      * @brief Wait for events with low-level event primitives (e.g. epoll_wait) and notify the observing
      * thread(s) with `thread_interrupt()`, returning the number of arrived events.
-     * @param timeout
+     * @param timeout The *maximum* amount of time to wait. May wake up
+     *        earlier in the case of some events happened, or canceled.
      * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
      * @warning Only valid for master engines. Must **NOT** block photon thread (e.g. with photon::usleep()).
+     * @warning Must *NOT* invoke photon::usleep() or photon::sleep() in this function, because their
+     *          implementations also rely on this function.
      */
-    virtual ssize_t wait_and_fire_events(uint64_t timeout) = 0;
+    virtual ssize_t wait_and_fire_events(uint64_t timeout);
 
+    /**
+     * @brief Wait for events and reap their associated `data`. Only valid in cascading engines.
+     * @warning Only valid for cascading engines.
+     * @param[out] data
+     * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
+     * @warning Must **NOT** block vCPU (e.g. with ::usleep()).
+     */
+    virtual int wait_for_events(void** data, size_t count, Timeout timeout = {});
+
+    // cancel wait_and_fire_events() in the case of master engine,
+    //          or wait_for_events() in the case of cascading engine.
     virtual int cancel_wait() = 0;
+};
+
+class CascadingWaiter {
+    thread* _waiting_th = nullptr;
+public:
+    int wait(int fd, Timeout timeout);
+    void cancel();
 };
 
 inline int wait_for_fd_readable(int fd, Timeout timeout = {}) {
@@ -159,6 +146,9 @@ int _fd_events_init(Ctor new_engine) {
     return 0;
 }
 
+// support separate data for read, write, and error events respectively
+const int CASCADING_FLAG_PARALLEL_RWE = 1;
+
 #define DECLARE_MASTER_AND_CASCADING_ENGINE(name)           \
 EventEngine* new_##name##_master_engine();                  \
 EventEngine* new_##name##_cascading_engine(int flags = 0);  \
@@ -168,6 +158,8 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(select);    // TODO
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
+
+#undef DECLARE_MASTER_AND_CASCADING_ENGINE
 
 inline int fd_events_init(int master_engine) {
     switch (master_engine) {
@@ -205,6 +197,5 @@ inline EventEngine* new_default_cascading_engine() {
 #endif
 }
 
-#undef DECLARE_MASTER_AND_CASCADING_ENGINE
 
 } // namespace photon
