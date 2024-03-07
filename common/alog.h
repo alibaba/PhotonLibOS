@@ -503,7 +503,7 @@ struct ERRNO
     int *ptr, no;
     ERRNO() : ptr(&errno), no(*ptr) { }
     constexpr ERRNO(int no_) : ptr(0), no(no_) { }
-    void set(int x) { assert(ptr); *ptr = x; }
+    void set(int x) { assert(ptr); *ptr = no = x; }
 };
 
 LogBuffer& operator << (LogBuffer& log, ERRNO e);

@@ -27,8 +27,6 @@ const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
 const static uint32_t ONE_SHOT = 0x8000;        // multi-shot by default
-const static uint32_t ONE_SHOT_SYNC = 0x10000;  // update event engine only, excluding
-                                                // low-level facilities (e.g. epoll)
 
 const static int EOK = ENXIO;   // the Event of NeXt I/O
 
@@ -52,15 +50,15 @@ public:
     virtual ~EventEngine() = default;
 
     int wait_for_fd_readable(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_READ, timeout);
+        return wait_for_fd(fd, EVENT_READ | ONE_SHOT, timeout);
     }
 
     int wait_for_fd_writable(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_WRITE, timeout);
+        return wait_for_fd(fd, EVENT_WRITE | ONE_SHOT, timeout);
     }
 
     int wait_for_fd_error(int fd, Timeout timeout = {}) {
-        return wait_for_fd(fd, EVENT_ERROR, timeout);
+        return wait_for_fd(fd, EVENT_ERROR | ONE_SHOT, timeout);
     }
 
     /**
@@ -116,10 +114,13 @@ public:
 };
 
 class CascadingWaiter {
+    EventEngine* _master = nullptr;
     thread* _waiting_th = nullptr;
 public:
     int wait(int fd, Timeout timeout);
     void cancel();
+    void rm_interest(int fd);
+    ~CascadingWaiter() { assert(!_master); }
 };
 
 inline int wait_for_fd_readable(int fd, Timeout timeout = {}) {

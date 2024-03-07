@@ -121,16 +121,15 @@ public:
     }
 };
 
-// parallel events of read, write and error
+// parallel data field respecitvely for read, write and error
 class ParallelRWE : public EPoll {
 public:
     struct InFlightEvent {
-        uint32_t interests = 0, flags = 0;
+        uint32_t interests = 0, _;
         void* reader_data;
         void* writer_data;
         void* error_data;
     };
-    const static uint32_t REGISTERED = 0x10000;
     std::vector<InFlightEvent> _inflight_events;
     virtual int add_interest(Event e) override {
         if (e.fd < 0)
@@ -179,7 +178,6 @@ public:
         if (e.interests & EVENT_READ) entry.reader_data = nullptr;
         if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
         if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
-        if (e.interests & ONE_SHOT_SYNC) return 0;
         auto op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
         auto events = evmap.translate_bitwisely(x);
         if (op == EPOLL_CTL_DEL) {
@@ -192,7 +190,7 @@ public:
     int reap_events(uint64_t timeout, const FDCB& condcb, const DataCB& datacb) {
         if (_events_remain <= 0) {
             _events_remain = do_epoll_wait(timeout);
-            if (_events_remain < 0) return _events_remain;
+            if (_events_remain <= 0) return _events_remain;
         }
         while (_events_remain && condcb()) {
             auto& e = _events[--_events_remain];
@@ -204,20 +202,23 @@ public:
             assert(e.data.u64 < _inflight_events.size());
             if (e.data.u64 >= _inflight_events.size()) continue;
             auto& entry = _inflight_events[e.data.u64];
+            uint32_t event = 0;
             if ((e.events & ERRBIT) && (entry.interests & EVENT_ERROR)) {
+                event |= EVENT_ERROR;
                 datacb(entry.error_data);
-                entry.error_data = 0;
-                entry.interests ^= EVENT_ERROR;
             }
             if ((e.events & READBITS) && (entry.interests & EVENT_READ)) {
+                event |= EVENT_READ;
                 datacb(entry.reader_data);
-                entry.reader_data = 0;
-                entry.interests ^= EVENT_READ;
             }
             if ((e.events & WRITEBITS) && (entry.interests & EVENT_WRITE)) {
+                event |= EVENT_WRITE;
                 datacb(entry.writer_data);
-                entry.writer_data = 0;
-                entry.interests ^= EVENT_WRITE;
+            }
+            if (entry.interests & ONE_SHOT) {
+                rm_interest({.fd = (int)e.data.u64,
+                             .interests = event | ONE_SHOT,
+                             .data = nullptr});
             }
         }
         return 0;
@@ -251,51 +252,56 @@ class DyanmicBitset {
 public:
     const static size_t UNIT = 256;
     static_assert((UNIT & (UNIT-1)) == 0, "UNIT must be 2^n");
-    size_t _size;
     std::vector<std::bitset<UNIT> > _bitset;
     DyanmicBitset() {
-        _bitset.resize(1);
-        _size = UNIT;
+        clear();
     }
-    bool test(size_t i) {
-        return (i < _size) ? _bitset[i/UNIT].test(i%UNIT) : false;
+    bool test(size_t i) const {
+        size_t j = i % UNIT; i /= UNIT;
+        return (i < _bitset.size()) ? _bitset[i].test(j) : false;
     }
     void set(size_t i, bool flag) {
-        if (unlikely(i > _size)) {
-            size_t j = 1; // 00011010 ==> 00100000 (e.g. 1 << (8-3))
-            _size = j << (sizeof(i) * 8 - __builtin_clz(i));
-            _bitset.resize(_size / UNIT);
+        size_t j = i % UNIT; i /= UNIT;
+        if (unlikely(i > _bitset.size())) {
+            // 00011010 ==> 00100000 (e.g. 1 << (8-3))
+            auto s = 1UL << (sizeof(i) * 8 - __builtin_clz(i));
+            _bitset.resize(s);  // expand to the minimal 2^n that is > i
         }
-        _bitset[i/UNIT].set(i%UNIT, flag);
+        _bitset[i].set(j, flag);
     }
     void clear() {
         _bitset.clear();
+        _bitset.resize(1);
     }
 };
 
 class CascadingEpoll : public EPoll {
+public:
     DyanmicBitset _fd_in_epoll;
     virtual int add_interest(Event e) override {
         if (unlikely(e.fd < 0))
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
 
-        auto op = _fd_in_epoll.test(e.fd) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-        _fd_in_epoll.set(e.fd, true);
+        int op;
+        if (_fd_in_epoll.test(e.fd)) {
+            op = EPOLL_CTL_MOD;
+        } else {
+            op = EPOLL_CTL_ADD;
+            _fd_in_epoll.set(e.fd, true);
+        }
         auto x = e.interests & (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
         auto events = evmap.translate_bitwisely(x);
-        if (e.interests & ONE_SHOT)
-            x |= EPOLLONESHOT;
+        // if (e.interests & ONE_SHOT)
+        //     x |= EPOLLONESHOT;
         return ctl(e.fd, op, events);
     }
     virtual int rm_interest(Event e) override {
         if (unlikely(e.fd < 0 || _fd_in_epoll.test(e.fd) == false))
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
-
         return ctl(e.fd, EPOLL_CTL_DEL, 0);
     }
     CascadingWaiter _waiter;
-    virtual int wait_for_events(void** data, size_t count,
-                                    Timeout timeout) override {
+    virtual int wait_for_events(void** data, size_t count, Timeout timeout) override {
         if (!data || !count)
             LOG_ERROR_RETURN(EINVAL, -1, "both data(`) and count(`) must not be 0", data, count);
         _waiter.wait(_epfd, timeout);
@@ -310,6 +316,9 @@ class CascadingEpoll : public EPoll {
     int cancel_wait() override {
         _waiter.cancel();
         return 0;
+    }
+    ~CascadingEpoll() {
+        _waiter.rm_interest(_epfd);
     }
     int reset() override {
         _fd_in_epoll.clear();
@@ -337,6 +346,9 @@ public:
     int cancel_wait() override {
         _waiter.cancel();
         return 0;
+    }
+    ~CascadingEpol_PRWE() {
+        _waiter.rm_interest(_epfd);
     }
 };
 
