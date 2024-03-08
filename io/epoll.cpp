@@ -47,6 +47,8 @@ struct InFlightEvent {
     void* reader_data;
     void* writer_data;
     void* error_data;
+    bool registered = false;
+    bool in_epfd = false;
 };
 
 class EventEngineEPoll : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
@@ -128,23 +130,28 @@ public:
             }
         }
 
-        if (e.interests & EVENT_READ) entry.reader_data = e.data;
-        if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
-        if (e.interests & EVENT_ERROR) entry.error_data = e.data;
-        auto eint = entry.interests & (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
-        auto op = eint ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-        if (op == EPOLL_CTL_MOD &&
+        auto op = entry.in_epfd ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+        if ((entry.interests & (EVENT_READ | EVENT_WRITE | EVENT_ERROR)) &&
             (e.interests & ONE_SHOT) != (entry.interests & ONE_SHOT)) {
             LOG_ERROR_RETURN(
                 EINVAL, -1,
                 "do not support ONE_SHOT on no-oneshot interested fd");
         }
-        auto x = entry.interests |= e.interests;
-        x &= (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
-        // since epoll oneshot shows totally different meanning of ONESHOT in
-        // photon all epoll action keeps no oneshot
+        auto x = (entry.interests | e.interests) & 
+                 (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
         auto events = evmap.translate_bitwisely(x);
-        return ctl(e.fd, op, events);
+        if(e.interests & ONE_SHOT) {
+            events |= EPOLLONESHOT;
+        }
+        int ret = ctl(e.fd, op, events);
+        if (ret == 0) {
+            entry.in_epfd = true;
+            entry.interests |= e.interests;
+            if (e.interests & EVENT_READ) entry.reader_data = e.data;
+            if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
+            if (e.interests & EVENT_ERROR) entry.error_data = e.data;
+        }
+        return ret;
     }
     virtual int rm_interest(Event e) override {
         if (e.fd < 0 || (size_t)e.fd >= _inflight_events.size())
@@ -154,17 +161,53 @@ public:
                             (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
         if (intersection == 0) return 0;
 
-        auto x = (entry.interests ^= intersection) &
+        auto x = (entry.interests ^ intersection) &
                  (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
-        if (e.interests & EVENT_READ) entry.reader_data = nullptr;
-        if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
-        if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
         auto op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
         auto events = evmap.translate_bitwisely(x);
-        if (op == EPOLL_CTL_DEL) {
-            entry.interests = 0;
+        if (entry.interests & ONE_SHOT) {
+            events |= EPOLLONESHOT;
         }
-        return ctl(e.fd, op, events);
+        int ret = 0;
+        if (!(entry.registered && op == EPOLL_CTL_DEL)) {
+            ret = ctl(e.fd, op, events);
+        }
+        if (ret == 0 || errno == ENOENT) {
+            if (op == EPOLL_CTL_DEL) {
+                entry.interests = 0;
+                if (!entry.registered) {
+                    entry.in_epfd = false;
+                }
+            } else {
+                entry.interests ^= intersection;
+            }
+            if (e.interests & EVENT_READ) entry.reader_data = nullptr;
+            if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
+            if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
+        }
+        return ret;
+    }
+    int register_fd(int fd) {
+        if (fd < 0)
+            LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", fd);
+        if ((size_t)fd >= _inflight_events.size())
+            _inflight_events.resize(fd * 2);
+        auto& entry = _inflight_events[fd];
+        if (entry.registered)
+            LOG_ERROR_RETURN(EEXIST, -1, "file descriptor has already been registered", fd);
+        entry.registered = true;
+        return 0;
+    }
+    int unregister_fd(int fd) {
+        if (fd < 0 || (size_t)fd >= _inflight_events.size())
+            LOG_ERROR_RETURN(ENOENT, -1, "invalid file descriptor ", fd);
+        auto& entry = _inflight_events[fd];
+        if (!entry.registered)
+            LOG_ERROR_RETURN(ENOENT, -1, "file descriptor is not registered", fd);
+        entry.registered = false;
+        return rm_interest({.fd = fd,
+                    .interests = EVENT_READ | EVENT_WRITE | EVENT_ERROR,
+                    .data = nullptr});
     }
     epoll_event _events[16];
     uint16_t _events_remain = 0;
@@ -210,32 +253,32 @@ public:
             assert(e.data.u64 < _inflight_events.size());
             if (e.data.u64 >= _inflight_events.size()) continue;
             auto& entry = _inflight_events[e.data.u64];
+            uint32_t interests_to_rm = 0;
             if ((e.events & ERRBIT) && (entry.interests & EVENT_ERROR)) {
                 auto data = entry.error_data;
                 if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_ERROR | ONE_SHOT,
-                                 .data = nullptr});
+                    interests_to_rm |= (EVENT_ERROR | ONE_SHOT);
                 }
                 datacb(data);
             }
             if ((e.events & READBITS) && (entry.interests & EVENT_READ)) {
                 auto data = entry.reader_data;
                 if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_READ | ONE_SHOT,
-                                 .data = nullptr});
+                    interests_to_rm |= (EVENT_READ | ONE_SHOT);
                 }
                 datacb(data);
             }
             if ((e.events & WRITEBITS) && (entry.interests & EVENT_WRITE)) {
                 auto data = entry.writer_data;
                 if (entry.interests & ONE_SHOT) {
-                    rm_interest({.fd = (int)e.data.u64,
-                                 .interests = EVENT_WRITE | ONE_SHOT,
-                                 .data = nullptr});
+                    interests_to_rm |= (EVENT_WRITE | ONE_SHOT);
                 }
                 datacb(data);
+            }
+            if (interests_to_rm) {
+                rm_interest({.fd = (int)e.data.u64,
+                            .interests = interests_to_rm,
+                            .data = nullptr});
             }
         }
     }

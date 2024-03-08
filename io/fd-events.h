@@ -58,6 +58,15 @@ public:
         return wait_for_fd(fd, EVENT_ERROR, timeout);
     }
 
+    // only works in epoll
+    virtual int register_fd(int fd) {
+        return 0;
+    }
+
+    virtual int unregister_fd(int fd) {
+        return 0;
+    }
+
     /**
      * @brief Wait for events, and fire them by photon::thread_interrupt()
      * @param timeout The *maximum* amount of time to sleep. May wake up
