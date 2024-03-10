@@ -411,7 +411,8 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
 
 void tls_socket_set_hostname(ISocketStream *stream, const char *hostname) {
     if (auto s = dynamic_cast<TLSSocketStream*>(stream)) {
-        s->set_hostname(hostname);
+        if (!s->set_hostname(hostname))
+            LOG_ERROR("Failed to set hostname on tls stream: ", VALUE(stream), VALUE(hostname));
     } else if (auto s = dynamic_cast<ForwardSocketStream*>(stream)) {
         auto underlay = static_cast<ISocketStream*>(s->get_underlay_object(0));
         tls_socket_set_hostname(underlay, hostname);
