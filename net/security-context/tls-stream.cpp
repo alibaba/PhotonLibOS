@@ -28,6 +28,7 @@ limitations under the License.
 #include <vector>
 
 #include "../base_socket.h"
+#include "photon/common/alog.h"
 
 namespace photon {
 namespace net {
@@ -339,6 +340,11 @@ public:
         SSL_free(ssl);
     }
 
+    bool set_hostname(const char* hostname) {
+        int ret = SSL_set_tlsext_host_name(ssl, hostname);
+        return ret == 1;
+    }
+
     ssize_t recv(void* buf, size_t cnt, int flags = 0) override {
         return SSL_read(ssl, buf, cnt);
     }
@@ -402,6 +408,15 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
     LOG_DEBUG("New tls stream on ", VALUE(ctx), VALUE(base));
     return new TLSSocketStream(ctx, base, role, ownership);
 };
+
+void tls_socket_set_hostname(ISocketStream *stream, const char *hostname) {
+    if (auto s = dynamic_cast<TLSSocketStream*>(stream)) {
+        s->set_hostname(hostname);
+    } else if (auto s = dynamic_cast<ForwardSocketStream*>(stream)) {
+        auto underlay = static_cast<ISocketStream*>(s->get_underlay_object(0));
+        tls_socket_set_hostname(underlay, hostname);
+    }
+}
 
 class TLSSocketClient : public ForwardSocketClient {
 public:

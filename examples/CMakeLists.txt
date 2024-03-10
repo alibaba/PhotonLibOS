@@ -4,6 +4,9 @@ link_directories(${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 add_executable(simple-example simple/simple.cpp)
 target_link_libraries(simple-example PRIVATE photon_static)
 
+add_executable(sni sni/sni.cpp)
+target_link_libraries(sni PRIVATE photon_static)
+
 add_executable(net-perf perf/net-perf.cpp)
 target_link_libraries(net-perf PRIVATE photon_static ${testing_libs})
 

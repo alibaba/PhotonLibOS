@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <photon/net/socket.h>
 #include <photon/common/object.h>
 
 #include <cstdlib>
@@ -96,6 +97,8 @@ ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
  */
 ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
                               bool ownership = false);
+
+void tls_socket_set_hostname(ISocketStream* stream, const char* hostname);
 
 }  // namespace net
 }  // namespace photon
