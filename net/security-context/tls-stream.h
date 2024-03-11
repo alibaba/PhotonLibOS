@@ -16,7 +16,6 @@ limitations under the License.
 
 #pragma once
 
-#include <photon/net/socket.h>
 #include <photon/common/object.h>
 
 #include <cstdlib>
