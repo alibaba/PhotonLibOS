@@ -73,7 +73,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
-        tls_socket_set_hostname(sock, strhost.c_str());
+        tls_stream_set_hostname(sock, strhost.c_str());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);

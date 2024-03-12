@@ -21,6 +21,7 @@ limitations under the License.
 #include <openssl/ssl.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
+#include <photon/common/alog.h>
 #include <photon/net/basic_socket.h>
 #include <photon/net/socket.h>
 #include <photon/thread/thread.h>
@@ -28,7 +29,6 @@ limitations under the License.
 #include <vector>
 
 #include "../base_socket.h"
-#include "photon/common/alog.h"
 
 namespace photon {
 namespace net {
@@ -340,11 +340,6 @@ public:
         SSL_free(ssl);
     }
 
-    bool set_hostname(const char* hostname) {
-        int ret = SSL_set_tlsext_host_name(ssl, hostname);
-        return ret == 1;
-    }
-
     ssize_t recv(void* buf, size_t cnt, int flags = 0) override {
         return SSL_read(ssl, buf, cnt);
     }
@@ -409,14 +404,16 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
     return new TLSSocketStream(ctx, base, role, ownership);
 };
 
-void tls_socket_set_hostname(ISocketStream *stream, const char *hostname) {
-    if (auto s = dynamic_cast<TLSSocketStream*>(stream)) {
-        if (!s->set_hostname(hostname))
-            LOG_ERROR("Failed to set hostname on tls stream: ", VALUE(stream), VALUE(hostname));
-    } else if (auto s = dynamic_cast<ForwardSocketStream*>(stream)) {
-        auto underlay = static_cast<ISocketStream*>(s->get_underlay_object(0));
-        tls_socket_set_hostname(underlay, hostname);
+void tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+    if (auto s1 = dynamic_cast<TLSSocketStream*>(stream)) {
+        if (SSL_set_tlsext_host_name(s1->ssl, hostname) != 1)
+            LOG_ERROR("Failed to set hostname on tls stream: `", VALUE(hostname));
+    } else if (auto s2 = dynamic_cast<ForwardSocketStream*>(stream)) {
+        auto underlay = static_cast<ISocketStream*>(s2->get_underlay_object(0));
+        tls_stream_set_hostname(underlay, hostname);
     }
+#endif
 }
 
 class TLSSocketClient : public ForwardSocketClient {
