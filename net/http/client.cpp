@@ -78,7 +78,7 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, strhost.c_str());
+        tls_stream_set_hostname(sock, host.data());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
@@ -88,7 +88,6 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
         return sock;
     }
     LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
-    if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
     resolver->discard_cache(host, ipaddr);
