@@ -21,6 +21,7 @@ limitations under the License.
 #include <openssl/ssl.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
+#include <photon/common/alog.h>
 #include <photon/net/basic_socket.h>
 #include <photon/net/socket.h>
 #include <photon/thread/thread.h>
@@ -403,6 +404,18 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
     LOG_DEBUG("New tls stream on ", VALUE(ctx), VALUE(base));
     return new TLSSocketStream(ctx, base, role, ownership);
 };
+
+void tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+    if (auto s1 = dynamic_cast<TLSSocketStream*>(stream)) {
+        if (SSL_set_tlsext_host_name(s1->ssl, hostname) != 1)
+            LOG_ERROR("Failed to set hostname on tls stream: `", VALUE(hostname));
+    } else if (auto s2 = dynamic_cast<ForwardSocketStream*>(stream)) {
+        auto underlay = static_cast<ISocketStream*>(s2->get_underlay_object(0));
+        tls_stream_set_hostname(underlay, hostname);
+    }
+#endif
+}
 
 class TLSSocketClient : public ForwardSocketClient {
 public:
