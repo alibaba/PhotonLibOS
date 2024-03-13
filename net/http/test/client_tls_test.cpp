@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <openssl/ssl.h>
 #include <gtest/gtest.h>
 
 #include <photon/photon.h>
@@ -77,6 +78,21 @@ TEST(client_tls, basic) {
     EXPECT_EQ(exp_len, ret);
     EXPECT_EQ(true, "test" == op->resp.headers["Test_Handle"]);
 }
+
+// Server Name Indication (SNI) for SSL
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+TEST(http_client, SNI) {
+    auto tls = photon::net::new_tls_context();
+    DEFER(delete tls);
+    auto client = photon::net::http::new_http_client(nullptr, tls);
+    DEFER(delete client);
+    auto op = client->new_operation(photon::net::http::Verb::GET, "https://debug.fly.dev");
+    DEFER(delete op);
+    op->retry = 0;
+    int res = op->call();
+    ASSERT_EQ(0, res);
+}
+#endif
 
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))

@@ -35,4 +35,3 @@
 <img src="/doc/static/img/slack.svg" width="20"> Join Slack: [link](https://join.slack.com/t/photonlibos/shared_invite/zt-25wauq8g1-iK_oHMrXetcvWNNhIt8Nkg)
 
 <img src="/doc/static/img/dingtalk.svg" width="20"> Join DingTalk group: 55690000272
-
