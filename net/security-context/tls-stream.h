@@ -97,5 +97,7 @@ ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
 ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
                               bool ownership = false);
 
+void tls_stream_set_hostname(ISocketStream* stream, const char* hostname);
+
 }  // namespace net
 }  // namespace photon
