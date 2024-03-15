@@ -406,6 +406,8 @@ public:
         return Base::find(KeyedItem(key));
     }
 
+    // Borrow has defined a bool operator to indicate if ref_acquire is succeeded.
+    // Users should take care of the error handling if (!borrow_result)
     template <typename Constructor>
     Borrow borrow(const typename Item::InterfaceKey& key,
                   const Constructor& ctor, uint64_t failure_cooldown = 0) {

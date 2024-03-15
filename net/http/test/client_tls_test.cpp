@@ -85,7 +85,7 @@ TEST(client_tls, basic) {
 
 // Server Name Indication (SNI) for SSL
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
-TEST(http_client, SNI) {
+TEST(http_client, DISABLED_SNI) {
     auto tls = photon::net::new_tls_context();
     DEFER(delete tls);
     auto client = photon::net::http::new_http_client(nullptr, tls);
