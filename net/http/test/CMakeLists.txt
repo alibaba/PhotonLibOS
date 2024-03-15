@@ -26,5 +26,6 @@ target_link_libraries(headers_test PRIVATE photon_shared)
 add_test(NAME headers_test COMMAND $<TARGET_FILE:headers_test>)
 
 add_executable(client_tls_test client_tls_test.cpp)
+target_include_directories(client_tls_test PRIVATE ${OPENSSL_INCLUDE_DIRS})
 target_link_libraries(client_tls_test PRIVATE photon_shared ${testing_libs})
 add_test(NAME client_tls_test COMMAND $<TARGET_FILE:client_tls_test>)
