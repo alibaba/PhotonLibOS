@@ -47,12 +47,16 @@ TEST(Normal, ThreadPool) {
 }
 */
 TEST(PooledAllocator, PooledStack) {
-    do_test(0, {.use_pooled_stack_allocator = true});
+    PhotonOptions opt;
+    opt.use_pooled_stack_allocator = true;
+    do_test(0, opt);
 }
 
 TEST(PooledAllocator, BypassThreadPool) {
-    do_test(64, {.use_pooled_stack_allocator = true,
-                 .bypass_threadpool = true});
+    PhotonOptions opt;
+    opt.use_pooled_stack_allocator = true;
+    opt.bypass_threadpool = true;
+    do_test(64, opt);
 }
 
 int main(int argc, char** arg) {

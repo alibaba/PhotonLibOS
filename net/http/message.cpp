@@ -132,7 +132,7 @@ int Message::send_header(net::ISocketStream* stream) {
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
     if (ret < (ssize_t)sv.size())
-        LOG_ERRNO_RETURN(0, ret, "send header failed ");
+        LOG_ERRNO_RETURN(0, -1, "send header failed ");
     message_status = HEADER_SENT;
     return prepare_body_write_stream();
 }

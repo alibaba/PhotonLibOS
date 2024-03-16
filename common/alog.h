@@ -451,7 +451,7 @@ struct LogBuilder {
 
 #define DEFINE_PROLOGUE(level)                                                  \
     auto _prologue_file_r = TSTRING(__FILE__).reverse();                        \
-    auto _partial_file = ConstString::TSpliter<'/', ' ',                        \
+    constexpr auto _partial_file = ConstString::TSpliter<'/', ' ',              \
             decltype(_prologue_file_r)>::Current::reverse();                    \
     constexpr static Prologue prolog(__func__, _partial_file, __LINE__, level);
 

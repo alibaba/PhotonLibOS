@@ -45,8 +45,13 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 ProcessorCount(NumCPU)
 
-# Global compiler options, only effective within this project
-add_compile_options(-Wall -Werror -Wno-error=pragmas)
+# Global compile options, only effective within this project
+set(global_compile_options -Wall -Wno-error=pragmas)
+if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # Hint: -faligned-new is enabled by default after -std=c++17
+    list(APPEND global_compile_options -Werror -faligned-new)
+endif ()
+add_compile_options(${global_compile_options})
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -219,10 +224,6 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
-endif()
-if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # This option is enabled by default after -std=c++17
-    target_compile_options(photon_obj PRIVATE -faligned-new)
 endif()
 
 if (actually_built)
