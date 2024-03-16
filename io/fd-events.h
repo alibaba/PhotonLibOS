@@ -25,6 +25,7 @@ namespace photon {
 const static uint32_t EVENT_READ = 1;
 const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
+const static uint32_t NESTED_POLLER = 0x1000;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
 const static uint32_t ONE_SHOT = 0x8000;
 

@@ -139,6 +139,19 @@ public:
                 EINVAL, -1,
                 "do not support ONE_SHOT on no-oneshot interested fd");
         }
+
+        if (e.interests & NESTED_POLLER) {
+            if (e.interests != (EVENT_READ | ONE_SHOT | NESTED_POLLER)) {
+                LOG_ERROR_RETURN(0, -1, "Not supported");
+            }
+            int ret = ctl(e.fd, op, evmap.translate_bitwisely(EVENT_READ) | EPOLLONESHOT);
+            if (ret != 0) {
+                LOG_ERRNO_RETURN(0, -1, "epoll_ctr failed for NESTED_POLLER");
+            }
+            entry.interests |= e.interests;
+            return 0;
+        }
+
         auto x = entry.interests |= e.interests;
         x &= (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
         // since epoll oneshot shows totally different meanning of ONESHOT in
@@ -153,6 +166,14 @@ public:
         auto intersection = e.interests & entry.interests &
                             (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
         if (intersection == 0) return 0;
+
+        if (entry.interests & NESTED_POLLER && e.interests & NESTED_POLLER) {
+            entry.interests &= ~intersection;
+            if (e.interests & EVENT_READ) entry.reader_data = nullptr;
+            if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
+            if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
+            return 0;
+        }
 
         auto x = (entry.interests ^= intersection) &
                  (EVENT_READ | EVENT_WRITE | EVENT_ERROR);
@@ -240,7 +261,7 @@ public:
     }
     virtual ssize_t wait_for_events(void** data, size_t count,
                                     Timeout timeout) override {
-        int ret = ::photon::wait_for_fd_readable(_engine_fd, timeout);
+        int ret = get_vcpu()->master_event_engine->wait_for_fd(_engine_fd, EVENT_READ | NESTED_POLLER, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }
