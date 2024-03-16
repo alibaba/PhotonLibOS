@@ -117,30 +117,39 @@ public:
         if ((size_t)e.fd >= _inflight_events.size())
             _inflight_events.resize(e.fd * 2);
         auto& entry = _inflight_events[e.fd];
-        auto eint = e.interests & entry.interests;
-        if (((eint & EVENT_READ)  && (entry.reader_data != e.data)) ||
-            ((eint & EVENT_WRITE) && (entry.writer_data != e.data)) ||
-            ((eint & EVENT_ERROR) && (entry.error_data  != e.data))) {
+        auto intersection = e.interests & entry.interests;
+        if (((intersection & EVENT_READ)  && (entry.reader_data != e.data)) ||
+            ((intersection & EVENT_WRITE) && (entry.writer_data != e.data)) ||
+            ((intersection & EVENT_ERROR) && (entry.error_data  != e.data))) {
                 LOG_ERROR_RETURN(EALREADY, -1, "conflicted interest(s)");
         }
 
-        if (e.interests & EVENT_READ) entry.reader_data = e.data;
-        if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
-        if (e.interests & EVENT_ERROR) entry.error_data = e.data;
-        eint = entry.interests;
-        entry.interests |= e.interests;
-        auto x = entry.interests & EVENT_RWE;
+        int ret;
+        auto eint = entry.interests;
+        auto x = (eint | e.interests) & EVENT_RWE;
         auto events = evmap.translate_bitwisely(x);
         if (e.interests & ONE_SHOT) {
             events |= EPOLLONESHOT;
-            auto op = likely(eint & ONE_SHOT) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-            auto ret = ctl(e.fd, op, events);
-            return likely(ret >= 0) ? ret :
-                       ctl(e.fd, EPOLL_CTL_ADD, events);
+            if (likely(eint & ONE_SHOT)) {
+                ret = ctl(e.fd, EPOLL_CTL_MOD, events);
+                if (unlikely(ret < 0))
+                    ret = ctl(e.fd, EPOLL_CTL_ADD, events);
+            } else {
+                if (eint != 0) LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
+                ret = ctl(e.fd, EPOLL_CTL_ADD, events);
+            }
         } else {
             auto op = (eint & EVENT_RWE) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
-            return ctl(e.fd, op, events);
+            ret = ctl(e.fd, op, events);
         }
+        if (ret < 0)
+            LOG_ERROR_RETURN(0, ret, "failed to add_interest()");
+
+        entry.interests |= e.interests;
+        if (e.interests & EVENT_READ) entry.reader_data = e.data;
+        if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
+        if (e.interests & EVENT_ERROR) entry.error_data = e.data;
+        return 0;
     }
     virtual int rm_interest(Event e) override {
         if (e.fd < 0 || (size_t)e.fd >= _inflight_events.size())
@@ -150,24 +159,30 @@ public:
         auto intersection = e.interests & entry.interests & EVENT_RWE;
         if (intersection == 0) return 0;
 
-        entry.interests ^= intersection;
-        auto x = entry.interests & EVENT_RWE;
-        if (e.interests & EVENT_READ) entry.reader_data = nullptr;
-        if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
-        if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
-
+        int ret, op = 0;    // ^ is to flip intersected bits
+        auto x = (entry.interests ^ intersection) & EVENT_RWE;
         if (e.interests & ONE_SHOT) {
-            if (!x) return 0; // no need to epoll_ctl()
-            auto events = evmap.translate_bitwisely(x);
-            return ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
-        } else {
-            auto op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            if (op == EPOLL_CTL_DEL) {
-                entry.interests = 0;
+            if (!x) {
+                ret = 0; // no need to epoll_ctl()
+            } else {
+                auto events = evmap.translate_bitwisely(x);
+                ret = ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
             }
+        } else {
+            op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
             auto events = evmap.translate_bitwisely(x);
-            return ctl(e.fd, op, events);
+            ret = ctl(e.fd, op, events);
         }
+        if (ret < 0)
+            LOG_ERROR_RETURN(0, ret, "failed to rm_interest()");
+
+        // ^ is to flip intersected bits
+        entry.interests ^= intersection;
+        if (op == EPOLL_CTL_DEL) entry.interests = 0;
+        if (intersection & EVENT_READ) entry.reader_data = nullptr;
+        if (intersection & EVENT_WRITE) entry.writer_data = nullptr;
+        if (intersection & EVENT_ERROR) entry.error_data = nullptr;
+        return 0;
     }
     epoll_event _events[16];
     uint16_t _events_remain = 0;
