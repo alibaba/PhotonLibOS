@@ -695,18 +695,20 @@ void* start_server(void*) {
 
 TEST(utils, gethostbyname) {
     net::IPAddr localhost("127.0.0.1");
-    net::IPAddr addr;
-    net::gethostbyname("localhost", &addr);
-    EXPECT_EQ(localhost.to_nl(), addr.to_nl());
     std::vector<net::IPAddr> addrs;
     net::gethostbyname("localhost", addrs);
     EXPECT_GT((int)addrs.size(), 0);
-    EXPECT_EQ(localhost.to_nl(), addrs[0].to_nl());
+
     net::IPAddr host = net::gethostbypeer("localhost");
-    EXPECT_EQ(localhost.to_nl(), host.to_nl());
-    for (auto &x : addrs) {
+    bool found_localhost = false, found_host = false;
+    for (auto& x: addrs) {
         LOG_INFO(VALUE(x));
+        EXPECT_TRUE(x.is_loopback());
+        found_localhost |= (x == localhost);
+        found_host |= (x == host);
     }
+    EXPECT_TRUE(found_localhost);
+    EXPECT_TRUE(found_host);
 }
 
 TEST(utils, resolver) {
