@@ -132,6 +132,7 @@ public:
         auto x = entry.interests & EVENT_RWE;
         auto events = evmap.translate_bitwisely(x);
         if (e.interests & ONE_SHOT) {
+            events |= EPOLLONESHOT;
             auto op = likely(eint & ONE_SHOT) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
             auto ret = ctl(e.fd, op, events);
             return likely(ret >= 0) ? ret :
