@@ -133,7 +133,7 @@ public:
             events |= EPOLLONESHOT;
             if (likely(eint & ONE_SHOT)) {
                 ret = ctl(e.fd, EPOLL_CTL_MOD, events);
-                if (unlikely(ret < 0))
+                if (unlikely(ret < 0 && errno == ENOENT))
                     ret = ctl(e.fd, EPOLL_CTL_ADD, events);
             } else {
                 if (eint != 0) LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
