@@ -94,7 +94,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
     int i = 0;
     auto cb = [&](IPAddr addr) {
         if (i < bufsize) buf[i++] = addr;
-        return 0;
+        return (i < bufsize) ? 0 : -1;
     };
     return _gethostbyname(name, cb);
 }
