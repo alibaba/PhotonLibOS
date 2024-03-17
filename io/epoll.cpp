@@ -110,19 +110,20 @@ public:
         }
         return 0;
     }
+
     std::vector<InFlightEvent> _inflight_events;
     virtual int add_interest(Event e) override {
         if (e.fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
-        if ((size_t)e.fd >= _inflight_events.size())
+        if (unlikely((size_t)e.fd >= _inflight_events.size()))
             _inflight_events.resize(e.fd * 2);
         auto& entry = _inflight_events[e.fd];
-        auto intersection = e.interests & entry.interests;
-        if (((intersection & EVENT_READ)  && (entry.reader_data != e.data)) ||
-            ((intersection & EVENT_WRITE) && (entry.writer_data != e.data)) ||
-            ((intersection & EVENT_ERROR) && (entry.error_data  != e.data))) {
-                LOG_ERROR_RETURN(EALREADY, -1, "conflicted interest(s)");
-        }
+        auto intersection = e.interests & entry.interests & EVENT_RWE;
+        auto data = (entry.reader_data != e.data) * EVENT_READ  |
+                    (entry.writer_data != e.data) * EVENT_WRITE |
+                    (entry.error_data  != e.data) * EVENT_ERROR ;
+        if (intersection & data)
+            LOG_ERROR_RETURN(EALREADY, -1, "conflicted interest(s)");
 
         int ret;
         auto eint = entry.interests;
@@ -146,11 +147,12 @@ public:
             LOG_ERROR_RETURN(0, ret, "failed to add_interest()");
 
         entry.interests |= e.interests;
-        if (e.interests & EVENT_READ) entry.reader_data = e.data;
+        if (e.interests & EVENT_READ)  entry.reader_data = e.data;
         if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
-        if (e.interests & EVENT_ERROR) entry.error_data = e.data;
+        if (e.interests & EVENT_ERROR) entry.error_data  = e.data;
         return 0;
     }
+
     virtual int rm_interest(Event e) override {
         if (e.fd < 0 || (size_t)e.fd >= _inflight_events.size())
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
@@ -175,15 +177,14 @@ public:
         }
         if (ret < 0)
             LOG_ERROR_RETURN(0, ret, "failed to rm_interest()");
-
-        // ^ is to flip intersected bits
-        entry.interests ^= intersection;
-        if (op == EPOLL_CTL_DEL) entry.interests = 0;
-        if (intersection & EVENT_READ) entry.reader_data = nullptr;
+                                                    // ^ is to flip intersected bits
+        entry.interests = (op == EPOLL_CTL_DEL) ? 0 : (entry.interests ^ intersection);
+        if (intersection & EVENT_READ)  entry.reader_data = nullptr;
         if (intersection & EVENT_WRITE) entry.writer_data = nullptr;
-        if (intersection & EVENT_ERROR) entry.error_data = nullptr;
+        if (intersection & EVENT_ERROR) entry.error_data  = nullptr;
         return 0;
     }
+
     epoll_event _events[16];
     uint16_t _events_remain = 0;
     int do_epoll_wait(uint64_t timeout) {
