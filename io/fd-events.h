@@ -25,6 +25,7 @@ namespace photon {
 const static uint32_t EVENT_READ = 1;
 const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
+const static uint32_t EVENT_RWE = EVENT_READ | EVENT_WRITE | EVENT_ERROR;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
 const static uint32_t ONE_SHOT = 0x8000;
 
@@ -41,11 +42,11 @@ public:
     virtual ~MasterEventEngine() = default;
 
     /**
-     * @param interests bitwisely OR-ed EVENT_READ, EVENT_WRITE
+     * @param interest EVENT_READ, EVENT_WRITE, or EVENT_ERROR
      * @return 0 for success, which means event arrived in time
      *         -1 for failure, could be timeout or interrupted by another thread
      */
-    virtual int wait_for_fd(int fd, uint32_t interests, Timeout timeout) = 0;
+    virtual int wait_for_fd(int fd, uint32_t interest, Timeout timeout) = 0;
 
     int wait_for_fd_readable(int fd, Timeout timeout = {}) {
         return wait_for_fd(fd, EVENT_READ, timeout);

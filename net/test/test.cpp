@@ -712,13 +712,13 @@ TEST(utils, gethostbyname) {
     std::vector<net::IPAddr> addrs;
     net::gethostbyname("localhost", addrs);
     EXPECT_GT(addrs.size(), 0);
-    EXPECT_TRUE(addrs[0].is_localhost());
+    for (auto &x : addrs) {
+        LOG_INFO(VALUE(x));
+        EXPECT_TRUE(x.is_localhost());
+    }
 
     net::IPAddr host = net::gethostbypeer("localhost");
     EXPECT_TRUE(host.is_localhost());
-    for (auto &x : addrs) {
-        LOG_INFO(VALUE(x));
-    }
 }
 
 TEST(utils, resolver) {
