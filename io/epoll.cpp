@@ -129,7 +129,7 @@ public:
         auto eint = entry.interests;
         auto x = (eint | e.interests) & EVENT_RWE;
         auto events = evmap.translate_bitwisely(x);
-        if (e.interests & ONE_SHOT) {
+        if (likely(e.interests & ONE_SHOT)) {
             events |= EPOLLONESHOT;
             if (likely(eint & ONE_SHOT)) {
                 ret = ctl(e.fd, EPOLL_CTL_MOD, events);
@@ -163,7 +163,7 @@ public:
 
         int ret, op = 0;    // ^ is to flip intersected bits
         auto x = (entry.interests ^ intersection) & EVENT_RWE;
-        if (e.interests & ONE_SHOT) {
+        if (likely(e.interests & ONE_SHOT)) {
             if (!x) {
                 ret = 0; // no need to epoll_ctl()
             } else {
