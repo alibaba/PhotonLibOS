@@ -224,6 +224,8 @@ public:
     }
 
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        if (unlikely(interests == 0))
+            return 0;
         unsigned poll_mask = evmap.translate_bitwisely(interests);
         // The io_uring_prep_poll_add's return value is the same as poll(2)'s revents.
         int ret = async_io(&io_uring_prep_poll_add, timeout, 0, fd, poll_mask);
