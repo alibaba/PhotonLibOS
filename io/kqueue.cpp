@@ -88,6 +88,8 @@ public:
     }
 
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        if (unlikely(interests == 0))
+            return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
         int ret = thread_usleep(timeout);

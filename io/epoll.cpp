@@ -156,7 +156,7 @@ public:
     virtual int rm_interest(Event e) override {
         if (e.fd < 0 || (size_t)e.fd >= _inflight_events.size())
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
-        if (unlikely(!e.interests)) return 0;
+        if (unlikely(e.interests == 0)) return 0;
         auto& entry = _inflight_events[e.fd];
         auto intersection = e.interests & entry.interests & EVENT_RWE;
         if (intersection == 0) return 0;
@@ -164,10 +164,12 @@ public:
         int ret, op = 0;    // ^ is to flip intersected bits
         auto x = (entry.interests ^ intersection) & EVENT_RWE;
         if (likely(e.interests & ONE_SHOT)) {
+            // If e is ONE_SHOT, the entry must be ONE_SHOT as well
             if (!x) {
                 ret = 0; // no need to epoll_ctl()
             } else {
                 auto events = evmap.translate_bitwisely(x);
+                events |= EPOLLONESHOT;
                 ret = ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
             }
         } else {
@@ -286,7 +288,7 @@ public:
             LOG_ERROR_RETURN(EINVAL, -1, "invalid fd");
         if (interest & (interest-1))
             LOG_ERROR_RETURN(EINVAL, -1, "can not wait for multiple interests");
-        if (unlikely(!interest))
+        if (unlikely(interest == 0))
             return rm_interest({fd, EVENT_RWE, 0}); // remove fd from epoll
         int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
