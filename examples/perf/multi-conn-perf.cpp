@@ -88,7 +88,14 @@ static void server(int server_index) {
     pthread_setname_np(pthread_self(), name.c_str());
 
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
-    auto engine = photon::new_default_cascading_engine();
+
+    photon::CascadingEventEngine* engine = nullptr;
+    if (FLAGS_cascading_engine) {
+        LOG_INFO("Run server with cascading engine ...");
+        engine = photon::new_default_cascading_engine();
+    } else {
+        LOG_INFO("Run server with master engine ...");
+    }
 
     photon::net::EndPoint ep("0.0.0.0", FLAGS_port + server_index);
     photon::net::sockaddr_storage storage(ep);
