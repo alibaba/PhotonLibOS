@@ -158,29 +158,25 @@ public:
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
         if (unlikely(e.interests == 0)) return 0;
         auto& entry = _inflight_events[e.fd];
-        auto intersection = e.interests & entry.interests & EVENT_RWE;
+        auto eint = entry.interests & (EVENT_RWE | ONE_SHOT);
+        auto intersection = e.interests & eint;
         if (intersection == 0) return 0;
 
-        int ret, op = 0;    // ^ is to flip intersected bits
-        auto x = (entry.interests ^ intersection) & EVENT_RWE;
-        if (likely(e.interests & ONE_SHOT)) {
-            // If e is ONE_SHOT, the entry must be ONE_SHOT as well
-            if (!x) {
-                ret = 0; // no need to epoll_ctl()
+        auto remain = eint ^ intersection;  // ^ is to flip intersected bits
+        if (remain == ONE_SHOT) {/* no need to epoll_ctl() */} else {
+            uint32_t op, events = 0;
+            if (remain) {
+                events = evmap.translate_bitwisely(remain);
+                if (remain & ONE_SHOT) events |= EPOLLONESHOT;
+                op = EPOLL_CTL_MOD;
             } else {
-                auto events = evmap.translate_bitwisely(x);
-                events |= EPOLLONESHOT;
-                ret = ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
+                op = EPOLL_CTL_DEL;
             }
-        } else {
-            op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            auto events = evmap.translate_bitwisely(x);
-            ret = ctl(e.fd, op, events);
+           if (ctl(e.fd, op, events) < 0)
+               LOG_ERROR_RETURN(0, -1, "failed to rm_interest()");
         }
-        if (ret < 0)
-            LOG_ERROR_RETURN(0, ret, "failed to rm_interest()");
-                                                    // ^ is to flip intersected bits
-        entry.interests = (op == EPOLL_CTL_DEL) ? 0 : (entry.interests ^ intersection);
+
+        entry.interests ^= intersection;
         if (intersection & EVENT_READ)  entry.reader_data = nullptr;
         if (intersection & EVENT_WRITE) entry.writer_data = nullptr;
         if (intersection & EVENT_ERROR) entry.error_data  = nullptr;
@@ -246,7 +242,7 @@ public:
             }
             if (events && (entry.interests & ONE_SHOT)) {
                 rm_interest({.fd = (int)e.data.u64,
-                             .interests = events | ONE_SHOT,
+                             .interests = events,
                              .data = nullptr});
             }
         }
@@ -289,7 +285,7 @@ public:
         if (interest & (interest-1))
             LOG_ERROR_RETURN(EINVAL, -1, "can not wait for multiple interests");
         if (unlikely(interest == 0))
-            return rm_interest({fd, EVENT_RWE, 0}); // remove fd from epoll
+            return rm_interest({fd, EVENT_RWE| ONE_SHOT, 0}); // remove fd from epoll
         int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         ret = thread_usleep(timeout);
