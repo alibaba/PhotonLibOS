@@ -157,30 +157,35 @@ public:
         if (e.fd < 0 || (size_t)e.fd >= _inflight_events.size())
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
         if (unlikely(e.interests == 0)) return 0;
+
         auto& entry = _inflight_events[e.fd];
+        // intersection could only be part of RWE. ONE_SHOT is not included
         auto intersection = e.interests & entry.interests & EVENT_RWE;
         if (intersection == 0) return 0;
 
-        int ret, op = 0;    // ^ is to flip intersected bits
-        auto x = (entry.interests ^ intersection) & EVENT_RWE;
-        if (likely(e.interests & ONE_SHOT)) {
-            // If e is ONE_SHOT, the entry must be ONE_SHOT as well
-            if (!x) {
-                ret = 0; // no need to epoll_ctl()
-            } else {
-                auto events = evmap.translate_bitwisely(x);
+        int ret = 0;
+        uint32_t rest = entry.interests ^ intersection;   // ^ is to flip intersected bits
+        uint32_t rest_rwe = rest & EVENT_RWE;
+        if (likely(rest & ONE_SHOT)) {
+            if (rest_rwe != 0) {
+                uint32_t events = evmap.translate_bitwisely(rest_rwe);
                 events |= EPOLLONESHOT;
-                ret = ctl(e.fd, EPOLL_CTL_MOD, events); // re-arm other interests
+                ret = ctl(e.fd, EPOLL_CTL_MOD, events);     // re-arm other interests
             }
         } else {
-            op = x ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
-            auto events = evmap.translate_bitwisely(x);
+            int op = rest_rwe != 0 ? EPOLL_CTL_MOD : EPOLL_CTL_DEL;
+            uint32_t events = evmap.translate_bitwisely(rest_rwe);
             ret = ctl(e.fd, op, events);
         }
         if (ret < 0)
             LOG_ERROR_RETURN(0, ret, "failed to rm_interest()");
-                                                    // ^ is to flip intersected bits
-        entry.interests = (op == EPOLL_CTL_DEL) ? 0 : (entry.interests ^ intersection);
+
+        if (rest_rwe == 0) {
+            // Clear other ancillary flags if no RWE left in entry
+            rest &= ~ONE_SHOT;
+        }
+        entry.interests = rest;
+
         if (intersection & EVENT_READ)  entry.reader_data = nullptr;
         if (intersection & EVENT_WRITE) entry.writer_data = nullptr;
         if (intersection & EVENT_ERROR) entry.error_data  = nullptr;
