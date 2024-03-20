@@ -136,10 +136,13 @@ public:
                 if (unlikely(ret < 0 && errno == ENOENT))
                     ret = ctl(e.fd, EPOLL_CTL_ADD, events);
             } else {
-                if (eint != 0) LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
+                if (unlikely(eint != 0))
+                    LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
                 ret = ctl(e.fd, EPOLL_CTL_ADD, events);
             }
         } else {
+            if (unlikely(eint & ONE_SHOT))
+                LOG_ERROR_RETURN(EINVAL, -1, "conflicted interest(s) regarding ONE_SHOT");
             auto op = (eint & EVENT_RWE) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
             ret = ctl(e.fd, op, events);
         }
