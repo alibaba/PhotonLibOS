@@ -34,7 +34,11 @@ class streambuf : public std::streambuf {
 public:
     explicit streambuf(ISocketStream* sock, bool owner_ship) :
         _sock(sock), _owner(owner_ship) { }
-    ~streambuf() { if (_owner) delete _sock; }
+
+    ~streambuf() {
+        overflow(_EOF);
+        if (_owner) delete _sock;
+    }
 
     int underflow() override { // read
         assert(!gptr() || gptr() >= egptr());

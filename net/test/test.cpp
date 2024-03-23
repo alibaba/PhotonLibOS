@@ -803,6 +803,8 @@ void iostream_uds_server() {
     EXPECT_TRUE(ios);
     char line[4096];
     ios->getline(line, sizeof(line));
+    LOG_DEBUG("got line: '`'", line);
+    *ios << 123456;
     ASSERT_STREQ(line, LINE);
 }
 
@@ -818,6 +820,9 @@ TEST(iostream, UDS) {
     auto ios = new_iostream(sock, true);
     DEFER(delete ios);
     *ios << LINE << std::endl;
+    uint64_t x;
+    *ios >> x;
+    ASSERT_EQ(x, 123456);
     remove(uds_path);
 }
 
