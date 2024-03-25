@@ -31,6 +31,7 @@ limitations under the License.
 #include "../thread11.h"
 #include "../thread-pool.h"
 #include "../workerpool.h"
+#include "../promise.h"
 #include <photon/common/alog-audit.h>
 
 using namespace std;
@@ -1984,6 +1985,26 @@ TEST(condition_variable, pred) {
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ETIMEDOUT, errno);
 }
+
+const int promise_value = 1024;
+void* promise_worker(void* arg_) {
+    auto pro = (Promise<int>*)arg_;
+    thread_usleep(1000 * 10);
+    LOG_DEBUG("set value as ", promise_value);
+    pro->set_value(promise_value);
+}
+
+TEST(promise, future) {
+    Promise<int> pro;
+    thread_create(promise_worker, &pro);
+    thread_usleep(1000 * 4);
+    auto fut = pro.get_future();
+    fut.wait();
+    auto v = fut.get_value();
+    EXPECT_EQ(v, promise_value);
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+}
+
 
 int main(int argc, char** arg)
 {
