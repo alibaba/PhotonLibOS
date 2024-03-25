@@ -1988,17 +1988,18 @@ TEST(condition_variable, pred) {
 
 const int promise_value = 1024;
 void* promise_worker(void* arg_) {
-    auto pro = (Promise<int>*)arg_;
+    auto promise = (Promise<int>*)arg_;
     thread_usleep(1000 * 10);
     LOG_DEBUG("set value as ", promise_value);
-    pro->set_value(promise_value);
+    promise->set_value(promise_value);
 }
 
 TEST(promise, future) {
-    Promise<int> pro;
-    thread_create(promise_worker, &pro);
+    Promise<int> promise;
+    thread_create(promise_worker, &promise);
     thread_usleep(1000 * 4);
-    auto fut = pro.get_future();
+    LOG_DEBUG("before getting the value from future");
+    auto fut = promise.get_future();
     fut.wait();
     auto v = fut.get_value();
     EXPECT_EQ(v, promise_value);
