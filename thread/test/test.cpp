@@ -1987,24 +1987,50 @@ TEST(condition_variable, pred) {
 }
 
 const int promise_value = 1024;
-void* promise_worker(void* arg_) {
-    auto promise = (Promise<int>*)arg_;
+static void _promise_worker(Promise<int>* promise) {
     thread_usleep(1000 * 10);
     LOG_DEBUG("set value as ", promise_value);
     promise->set_value(promise_value);
+}
+
+static void* promise_worker(void* arg) {
+    _promise_worker((Promise<int>*)arg);
     return 0;
 }
 
 TEST(promise, future) {
     Promise<int> promise;
-    thread_create(promise_worker, &promise);
+    auto th = thread_create(promise_worker, &promise);
+    auto jh = thread_enable_join(th);
     thread_usleep(1000 * 4);
     LOG_DEBUG("before getting the value from future");
     auto fut = promise.get_future();
     fut.wait();
     auto v = fut.get_value();
-    EXPECT_EQ(v, promise_value);
     LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, promise_value);
+    thread_join(jh);
+}
+
+using SPI = std::shared_ptr<Promise<int>>;
+
+static void shared_promise_worker(SPI promise) {
+    _promise_worker(promise.get());
+}
+
+static SPI get_promise() {
+    auto promise = std::make_shared<Promise<int>>();
+    auto th = thread_create11(shared_promise_worker, promise);
+    thread_usleep(1000 * 4);
+    return promise;
+}
+
+TEST(promise, future2) {
+    auto promise = get_promise();
+    LOG_DEBUG("before getting the value from future");
+    auto v = promise->get_future().get_value();;
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, promise_value);
 }
 
 int main(int argc, char** arg)
