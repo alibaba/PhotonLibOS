@@ -1,5 +1,3 @@
-add_definitions(-w)
-
 add_executable(test-fs test.cpp)
 target_link_libraries(test-fs PRIVATE photon_shared)
 add_test(NAME test-fs COMMAND $<TARGET_FILE:test-fs>)
