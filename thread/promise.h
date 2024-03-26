@@ -46,10 +46,12 @@ public:
         Future(Promise* promise) : _promise(promise) { }
         Future(const Future&) = default;
         Future(Future&&) = default;
-        T& get() const {
+        T& get() {
+            wait();
             return _promise->_value;
         }
-        T& get_value() const {
+        T& get_value() {
+            wait();
             return _promise->_value;
         }
         int wait(Timeout timeout = {}) {

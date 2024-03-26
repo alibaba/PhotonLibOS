@@ -1992,6 +1992,7 @@ void* promise_worker(void* arg_) {
     thread_usleep(1000 * 10);
     LOG_DEBUG("set value as ", promise_value);
     promise->set_value(promise_value);
+    return 0;
 }
 
 TEST(promise, future) {
@@ -2005,7 +2006,6 @@ TEST(promise, future) {
     EXPECT_EQ(v, promise_value);
     LOG_DEBUG("got value ` from worker via promise/future", v);
 }
-
 
 int main(int argc, char** arg)
 {
