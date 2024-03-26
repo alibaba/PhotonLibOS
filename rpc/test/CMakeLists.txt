@@ -1,5 +1,3 @@
-add_definitions(-w)
-
 add_executable(test-rpc test.cpp)
 target_link_libraries(test-rpc PRIVATE photon_shared)
 add_test(NAME test-rpc COMMAND $<TARGET_FILE:test-rpc>)

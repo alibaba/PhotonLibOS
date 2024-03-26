@@ -1,5 +1,3 @@
-add_definitions(-w)
-
 add_executable(perf_usleepdefer_semaphore perf_usleepdefer_semaphore.cpp)
 target_link_libraries(perf_usleepdefer_semaphore PRIVATE photon_shared)
 add_test(NAME perf_usleepdefer_semaphore COMMAND $<TARGET_FILE:perf_usleepdefer_semaphore>)

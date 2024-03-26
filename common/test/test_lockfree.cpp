@@ -14,14 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#define _GNU_SOURCE
+#include <sched.h>
+
 #include <photon/common/lockfree_queue.h>
 #include <photon/thread/thread.h>
 #include <pthread.h>
 
 #include <array>
+#ifdef TESTING_ENABLE_BOOST
 #include <boost/lockfree/policies.hpp>
 #include <boost/lockfree/queue.hpp>
 #include <boost/lockfree/spsc_queue.hpp>
+#endif
 #include <mutex>
 #include <random>
 #include <thread>
@@ -46,8 +51,10 @@ LockfreeBatchMPMCRingQueue<int, capacity> lbqueue;
 LockfreeSPSCRingQueue<int, capacity> cqueue;
 std::mutex rlock, wlock;
 
+#ifdef TESTING_ENABLE_BOOST
 boost::lockfree::queue<int, boost::lockfree::capacity<capacity>> bqueue;
 boost::lockfree::spsc_queue<int, boost::lockfree::capacity<capacity>> squeue;
+#endif
 
 struct WithLock {
     template <typename T>
@@ -223,11 +230,15 @@ int test_queue_batch(const char *name, QType &queue) {
 }
 
 int main() {
+#ifdef TESTING_ENABLE_BOOST
     test_queue<NoLock, NoLock>("BoostQueue", bqueue);
+#endif
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
     test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch", lbqueue);
+#ifdef TESTING_ENABLE_BOOST
     test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
+#endif
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
 }

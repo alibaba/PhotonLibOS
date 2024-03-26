@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
         photon
-        VERSION 0.6
+        VERSION 0.7
         LANGUAGES C CXX ASM
 )
 
@@ -336,6 +336,8 @@ endif ()
 # Build test cases
 if (PHOTON_BUILD_TESTING)
     include(CTest)
+
+    add_compile_options(-Wno-error)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
 
