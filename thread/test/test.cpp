@@ -31,6 +31,7 @@ limitations under the License.
 #include "../thread11.h"
 #include "../thread-pool.h"
 #include "../workerpool.h"
+#include "../future.h"
 #include <photon/common/alog-audit.h>
 
 using namespace std;
@@ -1983,6 +1984,47 @@ TEST(condition_variable, pred) {
     ret = cond.wait(mtx, [&flag](){ return flag == 3; }, 1000);
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ETIMEDOUT, errno);
+}
+
+const int PROMISE_VALUE = 1024;
+static void _promise_worker(Promise<int> promise) {
+    thread_usleep(1000 * 10);
+    LOG_DEBUG("set value as ", PROMISE_VALUE);
+    promise.set_value(PROMISE_VALUE);
+}
+
+static void* promise_worker(void* arg) {
+    auto fut = (Future<int>*) arg;
+    _promise_worker(fut->get_promise());
+    return 0;
+}
+
+TEST(future, test1) {
+    Future<int> fut;
+    auto th = thread_create(promise_worker, &fut);
+    auto jh = thread_enable_join(th);
+    thread_usleep(1000 * 4);
+    LOG_DEBUG("before getting the value from future");
+    fut.wait();
+    auto v = fut.get_value();
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, PROMISE_VALUE);
+    thread_join(jh);
+}
+
+static std::shared_ptr<Future<int>> get_future() {
+    auto fut = std::make_shared<Future<int>>();
+    thread_create11(_promise_worker, fut->get_promise());
+    thread_usleep(1000 * 4);
+    return fut;
+}
+
+TEST(future, test2) {
+    auto fut = get_future();
+    LOG_DEBUG("before getting the value from future");
+    auto v = fut->get_value();;
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, PROMISE_VALUE);
 }
 
 int main(int argc, char** arg)

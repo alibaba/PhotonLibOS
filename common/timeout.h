@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <chrono>
 #include <cinttypes>
 #include <photon/common/utility.h>
 
@@ -50,6 +51,11 @@ public:
         if (x < m_expiration)
             m_expiration = x;
         return *this;
+    }
+    auto std_duration() const {
+        using us = std::chrono::microseconds;
+        uint64_t max = std::numeric_limits<us::rep>::max();
+        return (m_expiration > max) ? us::max() : us(timeout());
     }
 
 protected:
