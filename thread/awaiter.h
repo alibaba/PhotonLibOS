@@ -18,7 +18,7 @@ limitations under the License.
 
 #include <errno.h>
 #include <photon/thread/thread.h>
-
+#include <photon/common/timeout.h>
 #include <atomic>
 #include <future>
 
@@ -41,18 +41,25 @@ template <>
 struct Awaiter<PhotonContext> {
     photon::semaphore sem;
     Awaiter() {}
-    void suspend() { sem.wait(1); }
     void resume() { sem.signal(1); }
+    int suspend(Timeout timeout = {}) {
+        return sem.wait(1, timeout);
+    }
 };
 
 template <>
 struct Awaiter<StdContext> {
-    int err;
     std::promise<void> p;
-    std::future<void> f;
-    Awaiter() : f(p.get_future()) {}
-    void suspend() { f.get(); }
     void resume() { return p.set_value(); }
+    int suspend(Timeout timeout = {}) {
+        auto ret = p.get_future().wait_for(
+             std::chrono::microseconds(timeout.timeout()));
+        if (ret == std::future_status::timeout) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        return 0;
+    }
 };
 
 template <>
@@ -61,17 +68,13 @@ struct Awaiter<AutoContext> {
     Awaiter<StdContext> sctx;
     bool is_photon = false;
     Awaiter() : is_photon(photon::CURRENT) {}
-    void suspend() {
-        if (is_photon)
-            pctx.suspend();
-        else
-            sctx.suspend();
+    int suspend(Timeout timeout = {}) {
+        return is_photon ? pctx.suspend(timeout) :
+                           sctx.suspend(timeout) ;
     }
     void resume() {
-        if (is_photon)
-            pctx.resume();
-        else
-            sctx.resume();
+        return is_photon ? pctx.resume() :
+                           sctx.resume() ;
     }
 };
 }  // namespace photon

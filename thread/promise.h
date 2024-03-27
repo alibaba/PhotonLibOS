@@ -19,25 +19,33 @@ limitations under the License.
 
 namespace photon {
 #include <photon/thread/thread.h>
+#include <photon/thread/awaiter.h>
 
-template<typename T>
+template<typename T, typename Context = AutoContext>
 class Promise {
-    semaphore _sem;
+    static_assert(sizeof(T) > 0, "in the case that T is void, simply use Awaiter<Context> or semaphore instead!");
+
     T _value;
+    Awaiter<Context> _awaiter;
+    bool _got = false;
 
     int wait(Timeout timeout) {
-        if (_sem.count() > 0) return 0;  // already got
-        return _sem.wait(1, timeout);
+        if (_got) return 0; // already got
+        if (_awaiter.suspend() == 0) {
+            _got = true;
+            return 0;
+        }
+        return -1;
     }
 
 public:
     Promise() = default;    // not copy-able or movable, use pointer
-    void operator=(const Promise&) = delete;
+    void operator = (const Promise&) = delete;
 
     template<typename P>
     void set_value(P&& rhs) {
         _value = std::forward<P>(rhs);
-        _sem.signal(2);
+        _awaiter.resume();
     }
 
     class Future {
@@ -48,10 +56,12 @@ public:
         Future(Future&&) = default;
         T& get() {
             wait();
+            assert(_promise->_got);
             return _promise->_value;
         }
         T& get_value() {
             wait();
+            assert(_promise->_got);
             return _promise->_value;
         }
         int wait(Timeout timeout = {}) {
