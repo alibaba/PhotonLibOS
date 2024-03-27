@@ -183,6 +183,7 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
+        integration/*.cpp
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
