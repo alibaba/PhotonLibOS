@@ -22,14 +22,54 @@ namespace photon {
 #include <photon/thread/awaiter.h>
 
 template<typename T, typename Context = AutoContext>
-class Promise {
+class Future {
     static_assert(sizeof(T) > 0, "in the case that T is void, simply use Awaiter<Context> or semaphore instead!");
 
     T _value;
     Awaiter<Context> _awaiter;
     bool _got = false;
 
-    int wait(Timeout timeout) {
+    template<typename P>
+    void set_value(P&& rhs) {
+        assert(!_got);      // supposed to be assigned once
+        _value = std::forward<P>(rhs);
+        _awaiter.resume();
+    }
+
+public:
+    Future() = default;  // not copy-able or movable, use pointer or shared_ptr instead
+    void operator = (const Future&) = delete;
+
+    ~Future() { assert(_got); } // supposed to set_value() before destruction
+
+    class Promise {
+        Future* _fut;
+    public:
+        Promise(Future* future) : _fut(future) { }
+        Promise(const Promise&) = default;
+        Promise(Promise&&) = default;
+
+        template<typename P>
+        void set_value(P&& value) {
+            _fut->set_value(std::forward<P>(value));
+        }
+    };
+
+    friend Promise;
+
+    Promise get_promise() {
+        return Promise(this);
+    }
+
+    T& get() {
+        wait();
+        assert(_got);
+        return _value;
+    }
+    T& get_value() {
+        return get();
+    }
+    int wait(Timeout timeout = {}) {
         if (_got) return 0; // already got
         if (_awaiter.suspend() == 0) {
             _got = true;
@@ -37,45 +77,8 @@ class Promise {
         }
         return -1;
     }
-
-public:
-    Promise() = default;    // not copy-able or movable, use pointer
-    void operator = (const Promise&) = delete;
-
-    template<typename P>
-    void set_value(P&& rhs) {
-        _value = std::forward<P>(rhs);
-        _awaiter.resume();
-    }
-
-    class Future {
-        Promise* _promise;
-    public:
-        Future(Promise* promise) : _promise(promise) { }
-        Future(const Future&) = default;
-        Future(Future&&) = default;
-        T& get() {
-            wait();
-            assert(_promise->_got);
-            return _promise->_value;
-        }
-        T& get_value() {
-            wait();
-            assert(_promise->_got);
-            return _promise->_value;
-        }
-        int wait(Timeout timeout = {}) {
-            return _promise->wait(timeout);
-        }
-        int wait_for(Timeout timeout = {}) {
-            return _promise->wait(timeout);
-        }
-    };
-
-    friend Future;
-
-    Future get_future() {
-        return Future(this);
+    int wait_for(Timeout timeout = {}) {
+        return wait(timeout);
     }
 };
 
