@@ -16,10 +16,10 @@ limitations under the License.
 
 #pragma once
 #include <utility>
-
-namespace photon {
 #include <photon/thread/thread.h>
 #include <photon/thread/awaiter.h>
+
+namespace photon {
 
 template<typename T, typename Context = AutoContext>
 class Future {
@@ -31,7 +31,7 @@ class Future {
 
     template<typename P>
     void set_value(P&& rhs) {
-        assert(!_got);      // supposed to be assigned once
+        assert(!_got);      // supposed to be assigned only once
         _value = std::forward<P>(rhs);
         _awaiter.resume();
     }
@@ -43,11 +43,8 @@ public:
     ~Future() { assert(_got); } // supposed to set_value() before destruction
 
     class Promise {
-        Future* _fut;
     public:
-        Promise(Future* future) : _fut(future) { }
-        Promise(const Promise&) = default;
-        Promise(Promise&&) = default;
+        Future* _fut;
 
         template<typename P>
         void set_value(P&& value) {
@@ -58,15 +55,14 @@ public:
     friend Promise;
 
     Promise get_promise() {
-        return Promise(this);
+        return {this};
     }
-
-    T& get() {
+    T& get_value() {
         wait();
         assert(_got);
         return _value;
     }
-    T& get_value() {
+    T& get() {
         return get();
     }
     int wait(Timeout timeout = {}) {
@@ -81,5 +77,8 @@ public:
         return wait(timeout);
     }
 };
+
+template<typename T>
+using Promise = Future<T>::Promise;
 
 }

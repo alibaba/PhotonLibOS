@@ -1987,7 +1987,7 @@ TEST(condition_variable, pred) {
 }
 
 const int PROMISE_VALUE = 1024;
-static void _promise_worker(Future<int>::Promise promise) {
+static void _promise_worker(Promise<int> promise) {
     thread_usleep(1000 * 10);
     LOG_DEBUG("set value as ", PROMISE_VALUE);
     promise.set_value(PROMISE_VALUE);
@@ -1999,7 +1999,7 @@ static void* promise_worker(void* arg) {
     return 0;
 }
 
-TEST(promise, future) {
+TEST(future, test1) {
     Future<int> fut;
     auto th = thread_create(promise_worker, &fut);
     auto jh = thread_enable_join(th);
@@ -2019,7 +2019,7 @@ static std::shared_ptr<Future<int>> get_future() {
     return fut;
 }
 
-TEST(promise, future2) {
+TEST(future, test2) {
     auto fut = get_future();
     LOG_DEBUG("before getting the value from future");
     auto v = fut->get_value();;
