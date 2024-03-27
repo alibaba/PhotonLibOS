@@ -177,7 +177,7 @@ ctest
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
 
-#### Example
+#### Case 1. Staitcally build all third-party libs
 
 Build all the dependencies from source, so you can distribute Photon binary anywhere, as long as libc and libc++ versions suffice.
 
@@ -193,4 +193,14 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
 -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
 -D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+```
+
+#### Case 2. Dynamically link to libcurl.so and libssl.so
+
+```bash
+cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+-D PHOTON_BUILD_DEPENDENCIES=ON \
+-D PHOTON_AIO_SOURCE=https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz \
+-D PHOTON_CURL_SOURCE="" \
+-D PHOTON_OPENSSL_SOURCE=""
 ```

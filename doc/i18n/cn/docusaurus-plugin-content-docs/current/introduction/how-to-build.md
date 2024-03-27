@@ -177,7 +177,7 @@ ctest
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |           开启 F-Stack and DPDK，需要两者的库           |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             开启 extfs. 需要 `libe2fs`             |
 
-#### 例子
+#### 例子1
 
 用源码编译所有依赖，这样你就可以随意分发Photon二进制了，只要运行机器上的libc和libc++的版本满足条件。
 
@@ -193,4 +193,16 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
 -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
 -D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+```
+
+#### 例子2
+
+动态依赖 libcurl.so 和 libssl.so，libaio 源码编译
+
+```bash
+cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
+-D PHOTON_BUILD_DEPENDENCIES=ON \
+-D PHOTON_AIO_SOURCE=https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz \
+-D PHOTON_CURL_SOURCE="" \
+-D PHOTON_OPENSSL_SOURCE=""
 ```
