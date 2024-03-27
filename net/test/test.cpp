@@ -24,6 +24,7 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/net/curl.h>
 #include <photon/net/utils.h>
+#include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
 
 #define protected public
@@ -787,6 +788,43 @@ TEST(ZeroCopySocket, basic) {
     photon::thread_join((join_handle*) server_th);
 }
 #endif
+
+const static char LINE[] = "hello iostream over socket stream!";
+
+void iostream_uds_server() {
+    auto server = new_uds_server(true);
+    DEFER({ delete (server); });
+    ASSERT_EQ(0, server->bind(uds_path));
+    ASSERT_EQ(0, server->listen(100));
+    auto connection = server->accept();
+    EXPECT_TRUE(connection);
+    auto ios = new_iostream(connection, true);
+    DEFER(delete ios);
+    EXPECT_TRUE(ios);
+    char line[4096];
+    ios->getline(line, sizeof(line));
+    LOG_DEBUG("got line: '`'", line);
+    *ios << 123456;
+    ASSERT_STREQ(line, LINE);
+}
+
+TEST(iostream, UDS) {
+    remove(uds_path);
+    thread_create11(iostream_uds_server);
+    thread_yield();
+    // ASSERT_EQ(::access(uds_path, F_OK, AT_EACCESS), 0);
+    auto cli = new_uds_client();
+    DEFER({ delete cli; });
+    auto sock = cli->connect(uds_path);
+    EXPECT_TRUE(sock);
+    auto ios = new_iostream(sock, true);
+    DEFER(delete ios);
+    *ios << LINE << std::endl;
+    uint64_t x;
+    *ios >> x;
+    ASSERT_EQ(x, 123456);
+    remove(uds_path);
+}
 
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))

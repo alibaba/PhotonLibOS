@@ -33,7 +33,7 @@ DEFINE_string(ip, "127.0.0.1", "ip");
 DEFINE_uint64(port, 20000, "port");
 DEFINE_uint64(buf_size, 512, "buffer size");
 DEFINE_bool(cascading_engine, false, "Use cascading engine instead of master engine");
-DEFINE_uint32(mode, 0, "0: standalone, 1: client, 2: server");
+DEFINE_uint64(mode, 0, "0: standalone, 1: client, 2: server");
 
 enum class Mode {
     Standalone,
