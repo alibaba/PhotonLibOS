@@ -79,6 +79,6 @@ public:
 };
 
 template<typename T>
-using Promise = Future<T>::Promise;
+using Promise = typename Future<T>::Promise;
 
 }
