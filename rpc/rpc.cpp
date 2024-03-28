@@ -324,8 +324,12 @@ namespace rpc {
             if (unlikely(!m_running))
                 return -1;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
             ThreadLink node;
             m_list.push_back(&node);
+#pragma GCC diagnostic pop
             DEFER(m_list.erase(&node));
             // stream serve refcount
             int stream_serv_count = 0;
