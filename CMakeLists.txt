@@ -46,7 +46,7 @@ endif ()
 ProcessorCount(NumCPU)
 
 # Global compile options, only effective within this project
-set(global_compile_options -Wall -Wno-error=pragmas)
+set(global_compile_options -Wall -Wno-unknown-pragmas)
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     # Hint: -faligned-new is enabled by default after -std=c++17
     list(APPEND global_compile_options -Werror -faligned-new)
