@@ -139,6 +139,7 @@ public:
         return (Object*) (uint64_t) fd;
     }
     int close() final {
+        if (fd < 0) return 0;
         get_vcpu()->master_event_engine->wait_for_fd(fd, 0, -1UL);
         auto ret = ::close(fd);
         fd = -1;
