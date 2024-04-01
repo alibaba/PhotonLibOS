@@ -206,6 +206,9 @@ public:
         }
         m_authorized = true;
         ret = op.resp.readv(iovec, iovcnt);
+        if (ret < 0) {
+            LOG_ERROR("HttpFs: read body failed, ", ERRNO());
+        }
         return ret;
     }
 
