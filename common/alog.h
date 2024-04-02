@@ -23,6 +23,7 @@ limitations under the License.
 #include <ctime>
 #include <utility>
 #include <type_traits>
+#include <limits.h>
 
 #include <photon/common/utility.h>
 #include <photon/common/conststr.h>
