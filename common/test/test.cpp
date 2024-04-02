@@ -30,6 +30,7 @@ limitations under the License.
 #include "../string-keyed.h"
 #include "../range-lock.h"
 #include "../expirecontainer.h"
+#include "../retval.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -881,6 +882,41 @@ TEST(estring, test)
 TEST(generator, example)
 {
     ___example_of_generator____();
+}
+
+retval<double> bar() {
+    return {EALREADY, 0};   // return a failure
+}
+
+photon::retval<int> foo(int i) {
+    switch (i) {
+    default:
+        return 32;
+    case 1:
+        return retval_base{EINVAL};
+    case 2:
+        LOG_ERROR_RETVAL(EADDRINUSE, "trying to use LOG_ERROR_RETVAL() with an error number constant");
+    case 3:
+        retval<double> ret = bar();
+        EXPECT_TRUE(ret.failed());
+        // pass on ONLY the error number
+        LOG_ERROR_RETVAL(ret, "trying to pass on an existing (failed) retval<double> to retval<int>");
+    }
+}
+
+TEST(retval, basic) {
+    const static retval<int> rvs[] =
+        {{32}, {EINVAL, -2345}, {EADDRINUSE, -1234}, {EALREADY, -5234}};
+    EXPECT_EQ(rvs[0], 32);
+    EXPECT_EQ(rvs[1], -2345);
+    EXPECT_EQ(rvs[2], -1234);
+    EXPECT_EQ(rvs[3], -5234);
+
+    for (int i = 0; i < LEN(rvs); ++i) {
+        auto ret = foo(i);
+        LOG_DEBUG("got ", ret);
+        EXPECT_EQ(ret, rvs[i]);
+    }
 }
 
 template <class T>
