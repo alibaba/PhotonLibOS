@@ -16,40 +16,59 @@ limitations under the License.
 
 #pragma once
 #include <utility>
+#include <memory>
 #include <photon/thread/thread.h>
 #include <photon/thread/awaiter.h>
 
 namespace photon {
 
 template<typename T, typename Context = AutoContext>
-class Future {
+class Future   {
     static_assert(sizeof(T) > 0, "in the case that T is void, simply use Awaiter<Context> or semaphore instead!");
 
-    T _value;
-    Awaiter<Context> _awaiter;
-    bool _got = false;
+    struct FutureState{
+        T _value;
+        Awaiter<Context> _awaiter;
+        bool _got = false;
+        ~FutureState() {
+            assert(_got); // supposed to be assigned only once
+        }
+    }; 
+
+    using FutureStatePtr = std::shared_ptr<FutureState>;
+    FutureStatePtr _state;     
 
     template<typename P>
     void set_value(P&& rhs) {
-        assert(!_got);      // supposed to be assigned only once
-        _value = std::forward<P>(rhs);
-        _awaiter.resume();
+        assert(!_state->_got);      // supposed to be assigned only once
+        _state->_value = std::forward<P>(rhs);
+        _state->_awaiter.resume();
+    }
+public:
+
+    // Future() = default;  // not copy-able or movable, use pointer or shared_ptr instead
+    // void operator = (const Future&) = delete;
+    Future(){
+         _state = std::make_shared<FutureState>();
     }
 
-public:
-    Future() = default;  // not copy-able or movable, use pointer or shared_ptr instead
-    void operator = (const Future&) = delete;
-
-    ~Future() { assert(_got); } // supposed to set_value() before destruction
+    ~Future() { 
+        //assert(_state->_got); 
+    } // supposed to set_value() before destruction
 
     class Promise {
     public:
-        Future* _fut;
+        Future* _fut = nullptr ;
+
+        Future<T> get_future() {
+            return *_fut;
+        }
 
         template<typename P>
         void set_value(P&& value) {
             _fut->set_value(std::forward<P>(value));
         }
+        
     };
 
     friend Promise;
@@ -59,16 +78,16 @@ public:
     }
     T& get_value() {
         wait();
-        assert(_got);
-        return _value;
+        assert(_state->_got);
+        return _state->_value;
     }
     T& get() {
-        return get();
+        return get_value();
     }
     int wait(Timeout timeout = {}) {
-        if (_got) return 0; // already got
-        if (_awaiter.suspend() == 0) {
-            _got = true;
+        if (_state->_got) return 0; // already got
+        if (_state->_awaiter.suspend() == 0) {
+            _state->_got = true;
             return 0;
         }
         return -1;
