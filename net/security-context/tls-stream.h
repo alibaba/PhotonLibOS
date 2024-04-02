@@ -37,9 +37,15 @@ enum class SecurityRole {
  * These parameters is able to set after created
  */
 class TLSContext : public Object {
+public:
     virtual int set_pass_phrase(const char* pass) = 0;
     virtual int set_cert(const char* cert_str) = 0;
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
+    virtual unsigned long get_openssl_version() = 0;
+    unsigned long make_openssl_version(int major, int minor,
+                int patch = 0, int pre_release = 0) {
+        return (major << 28) | (minor << 20) | (patch << 4) | pre_release;
+    }
 };
 
 enum class TLSVersion{

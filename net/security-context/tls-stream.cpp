@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/net/basic_socket.h>
 #include <photon/net/socket.h>
 #include <photon/thread/thread.h>
+#include <dlfcn.h>
 
 #include <vector>
 
@@ -56,6 +57,33 @@ protected:
 class GlobalSSLContext : public Singleton<GlobalSSLContext> {
 public:
     std::vector<std::unique_ptr<photon::mutex>> mtx;
+
+    static unsigned long get_openssl_version() {
+        auto h = dlopen(nullptr, RTLD_NOW);
+        assert(h);
+        DEFER(dlclose(h));
+/*
+        # define OPENSSL_VERSION_NUMBER          \
+            ( (OPENSSL_VERSION_MAJOR<<28)        \
+              |(OPENSSL_VERSION_MINOR<<20)       \
+              |(OPENSSL_VERSION_PATCH<<4)        \
+              |_OPENSSL_VERSION_PRE_RELEASE )
+
+        #  define SSLEAY_VERSION_NUMBER   OPENSSL_VERSION_NUMBER
+
+        unsigned long OpenSSL_version_num() { return OPENSSL_VERSION_NUMBER; }
+        unsigned long SSLeay() { return SSLEAY_VERSION_NUMBER; }
+*/
+        auto f = dlsym(h, "OpenSSL_version_num");
+        if (!f)
+            f = dlsym(h, "SSLeay"); assert(f);
+        if (!f)
+            LOG_ERROR_RETURN(ENOSYS, 0, "failed to find symbols: not linked to openssl?");
+
+        typedef unsigned long (*OpenSSL_Version)();
+        auto get_ver = (OpenSSL_Version)f;
+        return get_ver();
+    }
 
     static unsigned long threadid_callback() {
         return (uint64_t)photon::get_vcpu();
@@ -169,6 +197,9 @@ public:
             LOG_ERROR_RETURN(0, -1, errbuf);
         }
         return 0;
+    }
+    unsigned long get_openssl_version() override {
+        return GlobalSSLContext::get_openssl_version();
     }
 };
 

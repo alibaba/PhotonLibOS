@@ -349,6 +349,19 @@ TEST(Socket, nested) {
     ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
 }
 
+TEST(openssl, version) {
+    auto ctx = photon::net::new_tls_context();
+    auto v = ctx->get_openssl_version();
+    EXPECT_GT(v, 0);
+    auto major =  v >> 28;
+    auto minor = (v >> 20) & 0xff;
+    auto patch = (v >>  4) & 0xffff;
+    auto pre   =  v & 0xf;
+    LOG_DEBUG("got OpenSSL version: `.`.`.", major, minor, patch, pre);
+    auto gt = v > ctx->make_openssl_version(1, 1);
+    LOG_DEBUG("is greater than 1.1? ", gt ? "true" : "false");
+}
+
 int main(int argc, char** arg) {
 #ifdef __linux__
     int ev_engine = photon::INIT_EVENT_EPOLL;
