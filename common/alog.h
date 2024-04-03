@@ -23,7 +23,6 @@ limitations under the License.
 #include <ctime>
 #include <utility>
 #include <type_traits>
-#include <limits.h>
 
 #include <photon/common/utility.h>
 #include <photon/common/conststr.h>
@@ -512,7 +511,6 @@ LogBuffer& operator << (LogBuffer& log, ERRNO e);
 
 inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
     auto x = rvb._errno;
-    assert(0<x && x<INT_MAX);
     return x ? (log << ERRNO((int)x)) : log;
 }
 

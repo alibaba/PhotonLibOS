@@ -909,7 +909,7 @@ retval<void> ret_failed() {
 }
 
 retval<void> ret_succeeded() {
-    return {0};
+    return {/* 0 */};
 }
 
 TEST(retval, basic) {
