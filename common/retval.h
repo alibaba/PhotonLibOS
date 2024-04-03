@@ -32,15 +32,6 @@ struct retval_base {
 template<typename T> inline
 T failure_value() { return 0; }
 
-#define DEFINE_FAILURE_VALUE(type, val) \
-    template<> inline type failure_value<type>() { return val; }
-
-DEFINE_FAILURE_VALUE(int8_t,  -1)
-DEFINE_FAILURE_VALUE(int16_t, -1)
-DEFINE_FAILURE_VALUE(int32_t, -1)
-DEFINE_FAILURE_VALUE(int64_t, -1)
-
-
 template<typename T>
 struct retval : public retval_base {
     T _val;
@@ -92,3 +83,12 @@ struct retval<void> : public retval_base {
 };
 
 }
+
+#define DEFINE_FAILURE_VALUE(type, val) namespace photon {  \
+    template<> inline type failure_value<type>() { return val; } }
+
+DEFINE_FAILURE_VALUE(int8_t,  -1)
+DEFINE_FAILURE_VALUE(int16_t, -1)
+DEFINE_FAILURE_VALUE(int32_t, -1)
+DEFINE_FAILURE_VALUE(int64_t, -1)
+
