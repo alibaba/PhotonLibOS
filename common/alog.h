@@ -569,12 +569,17 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     return retv;                                    \
 }
 
-#define LOG_ERROR_RETVAL(error, ...) {  \
-    retval_base e{error};               \
-    assert(e.failed());                 \
-    LOG_ERROR(__VA_ARGS__, ' ', e);     \
-    return e;                           \
-}
+#define LOG_ERROR_RETVAL(err, ...) do {             \
+    if (std::is_same<decltype(err), int>::value) {  \
+        retval_base e{err};                         \
+        assert(e.failed());                         \
+        LOG_ERROR(__VA_ARGS__, ' ', e);             \
+        return e;                                   \
+    } else {                                        \
+        LOG_ERROR(__VA_ARGS__);                     \
+        return err;                                 \
+    }                                               \
+} while(0)
 
 // Acts like a LogBuilder
 // but able to do operations when log builds
