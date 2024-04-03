@@ -260,7 +260,7 @@ namespace net {
     public:
         virtual int bind(const EndPoint& ep) = 0;
         virtual int bind(const char* path, size_t count) = 0;
-        int bind(uint16_t port = 0)       { return bind_v4any(0); }
+        int bind(uint16_t port = 0)       { return bind_v4any(port); }
         int bind(uint16_t port, IPAddr a) { return bind(EndPoint(a, port)); }
         int bind_v4any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
         int bind_v6any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
