@@ -513,13 +513,17 @@ LogBuffer& operator << (LogBuffer& log, ERRNO e);
 inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
     auto x = rvb._errno;
     assert(0<x && x<INT_MAX);
-    return x ? log << ERRNO((int)x) : log;
+    return x ? (log << ERRNO((int)x)) : log;
 }
 
 template<typename T> inline
 LogBuffer& operator << (LogBuffer& log, const photon::retval<T>& v) {
-    return v.succeeded() ? (log << v.get()) :
-        (log << (const photon::retval_base&)v);
+    return v.succeeded() ? (log << v.get()) : (log << v.base());
+}
+
+template<> inline
+LogBuffer& operator << <void> (LogBuffer& log, const photon::retval<void>& v) {
+    return log << v.base();
 }
 
 template<typename T>

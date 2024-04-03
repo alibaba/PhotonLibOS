@@ -35,6 +35,7 @@ T failure_value() { return 0; }
 #define DEFINE_FAILURE_VALUE(type, val) \
     template<> inline type failure_value<type>() { return val; }
 
+DEFINE_FAILURE_VALUE(int8_t,  -1)
 DEFINE_FAILURE_VALUE(int16_t, -1)
 DEFINE_FAILURE_VALUE(int32_t, -1)
 DEFINE_FAILURE_VALUE(int64_t, -1)
@@ -57,6 +58,9 @@ struct retval : public retval_base {
     T get() const {
         return _val;
     }
+    retval_base base() const {
+        return *this;
+    }
     bool operator==(const retval& rhs) const {
         return _errno ? (_errno == rhs._errno) : (_val == rhs._val);
     }
@@ -71,5 +75,20 @@ struct retval : public retval_base {
     }
 };
 
+template<>
+struct retval<void> : public retval_base {
+    retval(int _errno) : retval_base{(uint64_t)_errno} { }
+    retval(const retval_base& rvb) : retval_base(rvb) { }
+    void get() const { }
+    retval_base base() const {
+        return *this;
+    }
+    bool operator==(const retval& rhs) const {
+        return _errno == rhs._errno;
+    }
+    bool operator!=(const retval& rhs) const {
+        return !(*this == rhs);
+    }
+};
 
 }

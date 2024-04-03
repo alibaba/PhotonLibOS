@@ -904,6 +904,14 @@ photon::retval<int> foo(int i) {
     }
 }
 
+retval<void> ret_failed() {
+    return {EBADF};
+}
+
+retval<void> ret_succeeded() {
+    return {0};
+}
+
 TEST(retval, basic) {
     const static retval<int> rvs[] =
         {{32}, {EINVAL, -2345}, {EADDRINUSE, -1234}, {EALREADY, -5234}};
@@ -917,6 +925,12 @@ TEST(retval, basic) {
         LOG_DEBUG("got ", ret);
         EXPECT_EQ(ret, rvs[i]);
     }
+    auto A = ret_failed();
+    EXPECT_TRUE(A.failed());
+    LOG_DEBUG(A);
+    auto B = ret_succeeded();
+    EXPECT_TRUE(B.succeeded());
+    LOG_DEBUG(B);
 }
 
 template <class T>
