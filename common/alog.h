@@ -26,6 +26,7 @@ limitations under the License.
 
 #include <photon/common/utility.h>
 #include <photon/common/conststr.h>
+#include <photon/common/retval.h>
 
 class ILogOutput {
 protected:
@@ -508,6 +509,21 @@ struct ERRNO
 
 LogBuffer& operator << (LogBuffer& log, ERRNO e);
 
+inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
+    auto x = rvb._errno;
+    return x ? (log << ERRNO((int)x)) : log;
+}
+
+template<typename T> inline
+LogBuffer& operator << (LogBuffer& log, const photon::retval<T>& v) {
+    return v.succeeded() ? (log << v.get()) : (log << v.base());
+}
+
+template<> inline
+LogBuffer& operator << <void> (LogBuffer& log, const photon::retval<void>& v) {
+    return log << v.base();
+}
+
 template<typename T>
 struct NamedValue
 {
@@ -551,6 +567,13 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     LOG_ERROR(__VA_ARGS__, ' ', eno);               \
     if (new_errno) eno.set(new_errno);              \
     return retv;                                    \
+}
+
+#define LOG_ERROR_RETVAL(error, ...) {  \
+    retval_base e{error};               \
+    assert(e.failed());                 \
+    LOG_ERROR(__VA_ARGS__, ' ', e);     \
+    return e;                           \
 }
 
 // Acts like a LogBuilder
