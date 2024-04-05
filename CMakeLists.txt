@@ -183,7 +183,7 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
-        integration/*.cpp
+        ecosystem/*.cpp
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
@@ -355,6 +355,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
+    add_subdirectory(ecosystem/test)
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()

@@ -36,43 +36,134 @@ using str = estring_view;
 // the interface for internal implementations
 class NodeImpl : public Object {
 protected:
-    NodeImpl() = delete;
-    NodeImpl* _root;
-union {
-    NodeImpl* _next;
-    const char* _text_begin;     // the root node have text begin (base
-};                               // of _key and _value of rstring_view)
-union {
-    rstring_view32 _key;        // root node doesn't have a valid key, do not try to get it
-    std::atomic<uint32_t> _refcnt{0};
-};
-    rstring_view32 _value;
+    const static uint8_t FLAG_IS_ROOT       = 1;
+    const static uint8_t FLAG_IS_LAST       = 2;
+    const static size_t  MAX_NODE_SIZE      = 256;
+    const static size_t  MAX_NCHILDREN      = UINT16_MAX;
+    const static size_t  MAX_KEY_OFFSET     = UINT32_MAX;
+    const static size_t  MAX_KEY_LENGTH     = 4095;
+    const static size_t  MAX_VALUE_OFFSET   = 4095;
+    const static size_t  MAX_VALUE_LENGTH   = MAX_KEY_OFFSET;
+union { struct {// for non-root nodes
+    uint8_t _flags;
+    uint16_t _k_len : 12;           // key length (12 bits)
+    uint16_t _v_off : 12;           // value offset (12 bits) to key end
+    uint32_t _k_off;                // key offset to _text_begin
+    const NodeImpl* _root;          // root node
+    uint32_t _v_len;                // value length
+}__attribute__((packed));           // packed as 20 bytes
+struct {    // for the root node
+    uint8_t _flags_;                // the same as _flags
+    uint8_t _node_size;             // sizeof(the node implementation)
+    mutable uint16_t _refcnt;       // reference counter of the document
+    uint32_t _k_off_;
+    const char* _text_begin;
+    uint32_t _v_len_;
+}__attribute__((packed));};
+    uint16_t _nchildren;            // for all nodes
 
-    void add_doc_ref() {
-        assert(this == _root);
-        ++_refcnt;
+    using AT32 = std::atomic<uint32_t>;
+    static_assert(sizeof(AT32) == sizeof(uint32_t), "...");
+
+    void add_doc_ref() const {
+        assert(is_root());
+        ++*(AT32*)&_refcnt;
     }
 
-    void del_doc_ref() {
-        assert(this == _root);
-        if (--_refcnt == 0)
+    void del_doc_ref() const {
+        assert(is_root());
+        if (--*(AT32*)&_refcnt == 0)
             delete this;
     }
 
     friend class Node;
 
 public:
-    virtual size_t num_children() const __attribute__((pure)) = 0;
+    size_t num_children() const {
+        return _nchildren;
+    }
 
     // get the i-th child node
     // for an array object, it gets the i-th element (doc type determines the starting value)
-    // for an object, it gets the i-th element in implementation defined order
-    virtual NodeImpl* get(size_t i) const __attribute__((pure)) = 0;
+    // for an object, it gets the i-th element in implementation defined order (same-key
+    // nodes are garanteed adjacent)
+    virtual const NodeImpl* get(size_t i) const __attribute__((pure)) = 0;
 
     // get the first child node with a specified `key`
     // XML attributes are treated as a special child node with key "__attributes__"
-    virtual NodeImpl* get(str key) const __attribute__((pure)) = 0;
+    virtual const NodeImpl* get(str key) const __attribute__((pure)) = 0;
+
+    bool is_root() const {
+        return _flags & FLAG_IS_ROOT;
+    }
+    const NodeImpl* get_root() const {
+        return is_root() ? this : _root;
+    }
+    str get_key() const {
+        return {get_root()->_text_begin + _k_off, _k_len};
+    }
+    str get_value() const {
+        return {get_key().end() + _v_off, _v_len};
+    }
+    str get_key(const char* text_begin) const {
+        return {text_begin + _k_off, _k_len};
+    }
+    str get_value(const char* text_begin) const {
+        return {get_key(text_begin).end() + _v_off, _v_len};
+    }
+    bool has_next_sibling() const {
+        return !(_flags & FLAG_IS_LAST);
+    }
+    const NodeImpl* next_sibling() const {    // assuming consecutive placement
+        if (!has_next_sibling()) return nullptr;
+        assert(!is_root());
+        auto next = (char*)this + _root->_node_size;
+        return (NodeImpl*)next;
+    }
+    bool operator < (const NodeImpl& rhs) const {
+        assert(_root == rhs._root);
+        return get_key() < rhs.get_key();
+    }
+    bool operator < (str key) const {
+        return get_key() < key;
+    }
+
+    // init a root node
+    int init(const char* text_begin, uint32_t node_size) {
+        _flags = FLAG_IS_ROOT | FLAG_IS_LAST;
+        _text_begin = text_begin;
+        assert(node_size <= MAX_NODE_SIZE);
+        _node_size = node_size;
+        _refcnt = 1;
+        return 0;
+    }
+
+    // init a non-root node
+    int init(str key, str value, const NodeImpl* root, uint32_t flags) {
+        _root = root;
+        assert(root);
+        _flags = flags & ~FLAG_IS_ROOT;
+        auto text_begin = root->_text_begin;
+        if (!key.empty()) {
+            assert(key.data() > text_begin);
+            auto koff = key.data() - text_begin;
+            assert(koff <= MAX_KEY_OFFSET);
+            _k_off = koff;
+        }
+        assert(key.length() <= MAX_KEY_LENGTH);
+        _k_len = key.length();
+        if (!value.empty()) {
+            assert(value.data() > key.end());
+            auto voff = value.data() - key.end();
+            assert(voff <= MAX_VALUE_OFFSET);
+            _v_off = voff;
+        }
+        assert(value.length() <= MAX_VALUE_LENGTH);
+        _v_len = value.length();
+        return 0;
+    }
 };
+
 
 }
 }

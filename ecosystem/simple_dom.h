@@ -34,10 +34,10 @@ using str = estring_view;
 
 // the interface for users
 class Node {
-    NodeImpl* _impl = nullptr;
+    const NodeImpl* _impl = nullptr;
 public:
     Node() = default;
-    Node(NodeImpl* node) {
+    Node(const NodeImpl* node) {
         _impl = node;
         if (_impl)
             _impl->_root->add_doc_ref();
@@ -66,21 +66,20 @@ public:
         return *this;
     }
     ~Node() {
-        _impl->_root->del_doc_ref();
+        if (_impl)
+            _impl->_root->del_doc_ref();
     }
 
     #define IF_RET(e) if (_impl) return e; else return {};
-    Node next() const               { IF_RET(_impl->_next); }
+    Node next() const               { IF_RET(_impl->next_sibling()); }
     bool is_root() const            { IF_RET(_impl->_root == _impl); }
     Node root() const               { IF_RET(_impl->_root); }
-    NodeImpl* root_impl() const     { IF_RET(_impl->_root); }
-    rstring_view32 rkey() const     { assert(!is_root()); IF_RET(_impl->_key); }
-    rstring_view32 rvalue() const   { IF_RET(_impl->_value); }
-    str key(const char* b) const    { IF_RET(b | rkey()); }
-    str value(const char* b) const  { IF_RET(b | rvalue()); }
+    const NodeImpl* root_impl()const{ IF_RET(_impl->_root); }
+    str key() const                 { IF_RET(_impl->get_key()); }
+    str value() const               { IF_RET(_impl->get_value()); }
     const char* text_begin() const  { IF_RET(root()._impl->_text_begin); }
-    str key() const                 { IF_RET(text_begin() | rkey()); }
-    str value() const               { IF_RET(text_begin() | rvalue()); }
+    str key(const char* b) const    { IF_RET(_impl->get_key(b)); }
+    str value(const char* b) const  { IF_RET(_impl->get_value(b)); }
     bool valid() const              { return _impl; }
     operator bool() const           { return _impl; }
     size_t num_children() const     { IF_RET(_impl->num_children()); }
@@ -102,15 +101,37 @@ public:
         return value().to_double(def_val);
     }
 
+    bool operator==(str rhs) const { return value() == rhs; }
+    bool operator!=(str rhs) const { return value() != rhs; }
+    bool operator<=(str rhs) const { return value() <= rhs; }
+    bool operator< (str rhs) const { return value() <  rhs; }
+    bool operator>=(str rhs) const { return value() >= rhs; }
+    bool operator> (str rhs) const { return value() >  rhs; }
+
+    bool operator==(int64_t rhs) const { return to_integer() == rhs; }
+    bool operator!=(int64_t rhs) const { return to_integer() != rhs; }
+    bool operator<=(int64_t rhs) const { return to_integer() <= rhs; }
+    bool operator< (int64_t rhs) const { return to_integer() <  rhs; }
+    bool operator>=(int64_t rhs) const { return to_integer() >= rhs; }
+    bool operator> (int64_t rhs) const { return to_integer() >  rhs; }
+
+    bool operator==(double rhs) const { return to_number() == rhs; }
+    bool operator!=(double rhs) const { return to_number() != rhs; }
+    bool operator<=(double rhs) const { return to_number() <= rhs; }
+    bool operator< (double rhs) const { return to_number() <  rhs; }
+    bool operator>=(double rhs) const { return to_number() >= rhs; }
+    bool operator> (double rhs) const { return to_number() >  rhs; }
+
     struct SameKeyEnumerator;
-    Enumerable<SameKeyEnumerator> enumerable_same_key_siblings() const;
+    auto enumerable_same_key_siblings() const ->
+            Enumerable_Holder<SameKeyEnumerator>;
 
     struct ChildrenEnumerator;
-    Enumerable<ChildrenEnumerator> enumerable_children() const;
+    auto enumerable_children() const ->
+            Enumerable_Holder<ChildrenEnumerator>;
 
-    Enumerable<SameKeyEnumerator>  enumerable_children(str key) const {
-        return get(key).enumerable_same_key_siblings();
-    }
+    auto enumerable_children(str key) const ->
+            Enumerable_Holder<SameKeyEnumerator>;
 };
 
 // lower 8 bits are reserved for doc types
@@ -158,42 +179,59 @@ Node parse_file(const char* filename, int flags, fs::IFileSystem* fs = nullptr);
 Node make_overlay(Node* nodes, int n);
 
 struct Node::ChildrenEnumerator {
-    Node _impl;
+    const NodeImpl* _impl;
+    bool valid() const {
+        return _impl;
+    }
     Node get() const {
         return _impl;
     }
     int next() {
-        _impl = _impl.next();
-        return _impl.valid() ? 0 : -1;
+        _impl = _impl->next_sibling();
+        return _impl ? 0 : -1;
     }
 };
 
-inline Enumerable<Node::ChildrenEnumerator>
-Node::enumerable_children() const {
-    return enumerable(Node::ChildrenEnumerator{_impl->get(0)});
+inline auto Node::enumerable_children() const ->
+        Enumerable_Holder<Node::ChildrenEnumerator> {
+    return enumerable<Node::ChildrenEnumerator>({_impl->get(0)});
 }
 
-struct Node::SameKeyEnumerator {
-    Node _impl;
+struct Node::SameKeyEnumerator : public Node::ChildrenEnumerator {
     const char* _base;
     str _key;
-    SameKeyEnumerator(Node node) : _impl(node) {
-        _base = node.text_begin();
-        _key = node.key(_base);
-    }
-    Node get() const {
-        return _impl;
+    SameKeyEnumerator(const NodeImpl* node) {
+        _impl = node;
+        if (node) {
+            _base = node->get_root()->_text_begin;
+            _key = node->get_key(_base);
+        } else {
+            _base = nullptr;
+            assert(_key.empty());
+        }
     }
     int next() {
-        _impl = _impl.next();
-        return (_impl.valid() && _impl.key(_base) == _key) ? 0 : -1;
+        if (!valid()) return -1;
+        _impl = _impl->next_sibling();
+        if (!valid()) return -1;
+        if (_impl->get_key(_base) != _key) {
+            _impl = nullptr;
+            return -1;
+        }
+        return 0;
     }
 };
 
-inline Enumerable<Node::SameKeyEnumerator>
-Node::enumerable_same_key_siblings() const {
-    return enumerable(Node::SameKeyEnumerator{{_impl}});
+inline auto Node::enumerable_same_key_siblings() const ->
+        Enumerable_Holder<Node::SameKeyEnumerator> {
+    return enumerable<Node::SameKeyEnumerator>({_impl});
 }
+
+inline auto Node::enumerable_children(str key) const ->
+        Enumerable_Holder<Node::SameKeyEnumerator> {
+    return get(key).enumerable_same_key_siblings();
+}
+
 
 }
 }
