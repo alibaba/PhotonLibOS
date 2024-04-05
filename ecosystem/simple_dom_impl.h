@@ -149,7 +149,7 @@ public:
             auto koff = key.data() - text_begin;
             assert(koff <= MAX_KEY_OFFSET);
             _k_off = koff;
-        }
+        } else { _k_off = 0; }
         assert(key.length() <= MAX_KEY_LENGTH);
         _k_len = key.length();
         if (!value.empty()) {
@@ -157,7 +157,7 @@ public:
             auto voff = value.data() - key.end();
             assert(voff <= MAX_VALUE_OFFSET);
             _v_off = voff;
-        }
+        } else { _v_off = 0; }
         assert(value.length() <= MAX_VALUE_LENGTH);
         _v_len = value.length();
         return 0;

@@ -13,93 +13,108 @@
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
 #include "RapidXml/rapidxml.hpp"
+#include "rapidjson/reader.h"
 
 using namespace std;
 
 namespace photon {
 namespace SimpleDOM {
 
-static NodeImpl* parse_json(char* text, size_t size, int flags) {
-/*
-    using namespace rapidjson;
-    auto flags = kParseInsituFlag   | kParseNumbersAsStringsFlag |
-                 kParseCommentsFlag | kParseTrailingCommasFlag   |
-                 kParseNanAndInfFlag;
-    Reader reader;
-    reader.Parse<flags>(stream(text), handler);
-*/
-    return nullptr;
-}
-
-using namespace rapidxml;
-class XMLNode : public NodeImpl {
+template<typename Derived>
+class DocNode : public NodeImpl {
 public:
-    vector<XMLNode> _children;
-    XMLNode* _attributes = nullptr;
-    XMLNode() = default;
-    XMLNode(const char* text_begin) {
-        init(text_begin, sizeof(*this));
+    vector<Derived> _children;
+    DocNode() = default;
+    DocNode(const char* text_begin) {
+        init(text_begin, sizeof(Derived));
     }
-    XMLNode(str key, str value, const NodeImpl* root) {
+    DocNode(str key, str value, const NodeImpl* root) {
         init(key, value, root, 0);
     }
-    XMLNode(const NodeImpl* root) : XMLNode({0,0}, {0,0}, root) { }
-    void print_nodes(int depth, const vector<XMLNode>& nodes) {
-        for (auto& x: nodes) {
+    DocNode(const NodeImpl* root) : DocNode({0,0}, {0,0}, root) { }
+    void print_children(int depth) {
+        for (auto& x: _children) {
             auto k = x.get_key(), v = x.get_value();
             LOG_DEBUG(VALUE(depth), k, ':', v);
         }
     }
-    void set_children(vector<XMLNode>&& nodes) {
-        if (nodes.size()) {
-            assert(nodes.size() <= MAX_NCHILDREN);
-            if (nodes.size() > MAX_NCHILDREN)
-                nodes.resize(MAX_NCHILDREN);
-            sort(nodes.begin(), nodes.end());
-            nodes.back()._flags |= FLAG_IS_LAST;    // must be after sort!!!
-            _nchildren = nodes.size();
-            _children = std::move(nodes);
-        }
+    void set_children(vector<Derived>&& nodes) {
+        if (nodes.empty()) return;
+        assert(nodes.size() <= MAX_NCHILDREN);
+        if (nodes.size() > MAX_NCHILDREN)
+            nodes.resize(MAX_NCHILDREN);
+        sort(nodes.begin(), nodes.end());
+        nodes.back()._flags |= FLAG_IS_LAST;    // must be after sort!!!
+        _nchildren = nodes.size();
+        _children = std::move(nodes);
     }
-    void build(xml_node<char>* xml_node, int depth = 0) {
-        assert(xml_node);
-        vector<XMLNode> nodes;
-        auto root = get_root();
-        for (auto x = xml_node->first_attribute(); x;
-                  x = x->next_attribute()) {
-            str k{x->name(),  x->name_size()};
-            if (k.empty()) continue;
-            str v{x->value(), x->value_size()};
-            nodes.emplace_back(k, v, root);
-        }
-        if (nodes.size()) {
-            _attributes = new XMLNode(root);
-            _attributes->set_children(std::move(nodes));
-            print_nodes(depth, _attributes->_children);
-        }
-
-        assert(nodes.empty());
-        for (auto x = xml_node->first_node(); x;
-                  x = x->next_sibling()) {
-            str k{x->name(),  x->name_size()};
-            if (k.empty()) continue;
-            str v{x->value(), x->value_size()};
-            nodes.emplace_back(k, v, root);
-            nodes.back().build(x, depth + 1);
-        }
-        set_children(std::move(nodes));
-        print_nodes(depth, _children);
-    }
-    virtual const NodeImpl* get(size_t i) const override {
+    const NodeImpl* get(size_t i) const override {
         return (i < _children.size()) ? &_children[i] : nullptr;
     }
-    virtual const NodeImpl* get(str key) const override {
-        if ("__attributes__" == key)
-            return _attributes;
-
-        assert(_children.empty() || (_children.back()._flags & FLAG_IS_LAST));
+    const NodeImpl* get(str key) const override {
+        if (_children.empty()) return nullptr;
+        for (size_t i = 0; i < _children.size() - 1; ++i) {
+           assert((_children[i]._flags & FLAG_IS_LAST) == 0);
+        }
+        assert(_children.back()._flags & FLAG_IS_LAST);
         auto it = std::lower_bound(_children.begin(), _children.end(), key);
         return (it == _children.end() || it->get_key() != key) ? nullptr : &*it;
+    }
+};
+
+using namespace rapidjson;
+class JNode : public DocNode<JNode> {
+public:
+    using DocNode::DocNode;
+};
+
+static NodeImpl* parse_json(char* text, size_t size, int flags) {
+    const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
+             kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
+    using Encoding = UTF8<>;
+    BaseReaderHandler<Encoding> h;
+    GenericInsituStringStream<Encoding> s(text);
+    GenericReader<Encoding, Encoding> reader;
+    reader.Parse<kFlags>(s, h);
+    return nullptr;
+}
+
+using namespace rapidxml;
+class XMLNode : public DocNode<XMLNode> {
+public:
+    using DocNode::DocNode;
+    unique_ptr<XMLNode> __attributes__{nullptr};
+    retval<XMLNode*> emplace_back(vector<XMLNode>& nodes, xml_base<char>* x) {
+        if (x->name_size() == 0)
+            return {ECANCELED, 0};
+        str k{x->name(),  x->name_size()};
+        str v{x->value(), x->value_size()};
+        nodes.emplace_back(k, v, get_root());
+        // LOG_DEBUG(k, ':', v);
+        return &nodes.back();
+    }
+    void build(xml_node<char>* xml_node, int depth = 0) {
+        vector<XMLNode> nodes;
+        for (auto x = xml_node->first_node(); x;
+                  x = x->next_sibling()) {
+            auto ret = emplace_back(nodes, x);
+            if (ret.succeeded())
+                ret->build(x, depth + 1);
+        }
+        set_children(std::move(nodes));
+
+        assert(nodes.empty());
+        if (auto x = xml_node->first_attribute()) {
+            do { emplace_back(nodes, x); }
+            while((x = x->next_attribute()));
+            auto a = new XMLNode(get_root());
+            a->set_children(std::move(nodes));
+            __attributes__.reset(a);
+        }
+   }
+    const NodeImpl* get(str key) const override {
+        return (key != "__attributes__") ?
+            DocNode::get(key) : __attributes__.get();
     }
 };
 

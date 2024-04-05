@@ -93,6 +93,7 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     auto attr = list_bucket_result.get_attributes();
     EXPECT_EQ(attr.num_children(), 1);
     EXPECT_EQ(attr["category"], "flowers");
+/*
     print_all1(list_bucket_result);
     auto c = list_bucket_result.get("Contents");
     LOG_DEBUG(VALUE(c.key()));
@@ -100,7 +101,7 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     c = c.next();
     LOG_DEBUG(VALUE(c.key()));
     print_all2(c);
-
+*/
     for (auto child: list_bucket_result.enumerable_children("Contents")) {
         auto key = child["Key"];
         EXPECT_TRUE(key);
