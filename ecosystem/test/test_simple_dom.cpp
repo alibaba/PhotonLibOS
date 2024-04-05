@@ -21,7 +21,7 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
-// #include <gtest/gtest.h>
+#include <gtest/gtest.h>
 
 using namespace std;
 using namespace photon::SimpleDOM;
