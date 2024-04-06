@@ -158,7 +158,7 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     }
     bool RawNumber(const Ch* s, SizeType len, bool copy) {
         assert(!copy);
-        LOG_DEBUG(ALogString(s, len));
+        // LOG_DEBUG(ALogString(s, len));
         emplace_back(s, len);
         return true;
     }
