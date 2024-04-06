@@ -144,9 +144,11 @@ TEST(simple_dom, oss_list) {
         {0, DT_REG, "test10.txt",  1, false},
     };
     using T = decltype(truth[0]);
-    std::sort(truth.begin(), truth.end(), [](const T& a, const T& b){
+    auto cmp = [](T& a, T& b) {
         return std::get<2>(a) < std::get<2>(b);
-    });
+    };
+    std::sort(truth.begin(), truth.end(), cmp);
+    std::sort(list.begin(),  list.end(),  cmp);
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
 }
