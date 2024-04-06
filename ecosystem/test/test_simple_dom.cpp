@@ -29,7 +29,7 @@ using namespace std;
 using namespace photon::SimpleDOM;
 
 // OSS list response
-const char xml[] = R"(
+const static char xml[] = R"(
 <?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult category = "flowers">
   <Name>examplebucket</Name>
@@ -146,6 +146,39 @@ TEST(simple_dom, oss_list) {
     do_list_object("", list, &marker);
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
+}
+
+TEST(simple_dom, json) {
+    const static char json0[] = R"({
+        "hello": "world",
+        "t": true ,
+        "f": false,
+        "n": null,
+        "i": 123,
+        "pi": 3.1416,
+        "a": [1, 2, 3, 4],
+    })";
+    auto doc = parse_copy(json0, sizeof(json0), DOC_JSON);
+    EXPECT_TRUE(doc);
+
+    const static str truth[][2] = {
+        {"hello",   "world"},
+        {"t",       "true"},
+        {"f",       "false"},
+        {"i",       "123"},
+        {"pi",      "3.1416"},
+    };
+    for (auto& x: truth) {
+        auto q = doc[x[0]];
+        LOG_DEBUG("expect doc[`] => '`' (got '`')", x[0], x[1], q.to_string());
+        EXPECT_EQ(q, x[1]);
+    }
+
+    int val = 1;
+    for (auto x: doc["a"].enumerable_children()) {
+        EXPECT_EQ(x.to_integer(), val);
+        val++;
+    }
 }
 
 // TEST(simple_dom, example) {

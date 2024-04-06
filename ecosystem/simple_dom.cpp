@@ -20,16 +20,69 @@ using namespace std;
 namespace photon {
 namespace SimpleDOM {
 
+inline int NodeImpl::init_non_root(str key, str value,
+                const NodeImpl* root, uint32_t flags) {
+    _root = root;
+    assert(root);
+    _flags = flags & ~FLAG_IS_ROOT;
+
+    assert(key.length() <= MAX_KEY_LENGTH);
+    assert(value.length() <= MAX_VALUE_LENGTH);
+    _k_len = key.length();
+    _v_len = value.length();
+
+    auto text_begin = root->_text_begin;
+    assert(key.empty() || key.data() > text_begin);
+    assert(value.empty() || value.data() > key.end());
+    uint64_t koff, voff;
+    switch ((key.empty() << 1) | value.empty()) {
+        case 0:     // key && value
+            koff = key.data() - text_begin;
+            voff = value.data() - key.end();
+            break;
+        case 1:     // key && !value
+            koff = key.data() - text_begin;
+            voff = 0;
+            break;
+        case 2:     // !key && value
+            koff = value.data() - text_begin;
+            voff = 0;
+            break;
+        case 3:     // !key && !value
+            _k_off = 0; _k_len = 0;
+            _v_off = 0; _v_len = 0;
+            return 0;
+        default:
+            assert(false);
+            return -1;
+    }
+    assert(koff <= MAX_KEY_OFFSET);
+    assert(voff <= MAX_VALUE_OFFSET);
+    _k_off = koff;
+    _v_off = voff;
+    return 0;
+}
+
+inline int NodeImpl::init_root(const char* text_begin,
+                                uint32_t node_size) {
+    _flags = FLAG_IS_ROOT | FLAG_IS_LAST;
+    _text_begin = text_begin;
+    assert(node_size <= MAX_NODE_SIZE);
+    _node_size = node_size;
+    _refcnt = 1;
+    return 0;
+}
+
 template<typename Derived>
 class DocNode : public NodeImpl {
 public:
     vector<Derived> _children;
     DocNode() = default;
     DocNode(const char* text_begin) {
-        init(text_begin, sizeof(Derived));
+        init_root(text_begin, sizeof(Derived));
     }
     DocNode(str key, str value, const NodeImpl* root) {
-        init(key, value, root, 0);
+        init_non_root(key, value, root, 0);
     }
     DocNode(const NodeImpl* root) : DocNode({0,0}, {0,0}, root) { }
     void print_children(int depth) {
@@ -38,12 +91,13 @@ public:
             LOG_DEBUG(VALUE(depth), k, ':', v);
         }
     }
-    void set_children(vector<Derived>&& nodes) {
+    void set_children(vector<Derived>&& nodes, bool _sort = true) {
         if (nodes.empty()) return;
         assert(nodes.size() <= MAX_NCHILDREN);
         if (nodes.size() > MAX_NCHILDREN)
             nodes.resize(MAX_NCHILDREN);
-        sort(nodes.begin(), nodes.end());
+        if (_sort)
+            sort(nodes.begin(), nodes.end());
         nodes.back()._flags |= FLAG_IS_LAST;    // must be after sort!!!
         _nchildren = nodes.size();
         _children = std::move(nodes);
@@ -68,15 +122,88 @@ public:
     using DocNode::DocNode;
 };
 
+struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
+    vector<vector<JNode>> _nodes{1};
+    str _key;
+    JNode* _root;
+    JHandler(JNode* root) {
+        assert(_nodes.size() == 1);
+        _root = root;
+    }
+    ~JHandler() {
+        assert(_nodes.size() == 1);
+        assert(_nodes.front().size() == 1);
+        _root->set_children(std::move(_nodes.front().front()._children));
+    }
+    void emplace_back(const char* s, size_t length) {
+        str val{s, length};     // _key may be empty()
+        _nodes.back().emplace_back(_key, val, _root);
+        // LOG_DEBUG(_key, ": ", val);
+        _key = {0, 0};
+    }
+    bool Null() {
+        emplace_back(0, 0);
+        return true;
+    }
+    bool Key(const char* s, SizeType len, bool copy) {
+        assert(!copy);
+        _key = {s, len};
+        return true;
+    }
+    bool String(const char* s, SizeType len, bool copy) {
+        assert(!copy);
+        emplace_back(s, len);
+        return true;
+    }
+    bool RawNumber(const Ch* s, SizeType len, bool copy) {
+        assert(!copy);
+        LOG_DEBUG(ALogString(s, len));
+        emplace_back(s, len);
+        return true;
+    }
+    bool RawBool(const Ch* s, SizeType len, bool copy) {
+        assert(!copy);
+        emplace_back(s, len);
+        return true;
+    }
+    bool StartObject() {
+        emplace_back(0, 0);
+        _nodes.emplace_back();
+        return true;
+    }
+    bool EndObject(SizeType memberCount) {
+        commit(true);
+        return true;
+    }
+    void commit(bool sort) {
+        assert(_nodes.size() > 1);
+        auto temp = std::move(_nodes.back());
+        _nodes.pop_back();
+        assert(_nodes.back().size() > 0);
+        // LOG_DEBUG(temp.size(), " elements to ", _nodes.back().back().get_key(), " sort=", sort);
+        _nodes.back().back().set_children(std::move(temp), sort);
+    }
+    bool StartArray() {
+        emplace_back(0, 0);
+        _nodes.emplace_back();
+        return true;
+    }
+    bool EndArray(SizeType elementCount) {
+        commit(false);
+        return true;
+    }
+};
+
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
              kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
+    auto doc = new JNode(text);
+    JHandler h(doc);
     using Encoding = UTF8<>;
-    BaseReaderHandler<Encoding> h;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
     reader.Parse<kFlags>(s, h);
-    return nullptr;
+    return doc;
 }
 
 using namespace rapidxml;

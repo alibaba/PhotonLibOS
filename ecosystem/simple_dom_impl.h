@@ -44,6 +44,7 @@ protected:
     const static size_t  MAX_KEY_LENGTH     = 4095;
     const static size_t  MAX_VALUE_OFFSET   = 4095;
     const static size_t  MAX_VALUE_LENGTH   = MAX_KEY_OFFSET;
+
 union { struct {// for non-root nodes
     uint8_t _flags;
     uint16_t _k_len : 12;           // key length (12 bits)
@@ -121,6 +122,7 @@ public:
         return (NodeImpl*)next;
     }
     bool operator < (const NodeImpl& rhs) const {
+        assert(!is_root());
         assert(_root == rhs._root);
         return get_key() < rhs.get_key();
     }
@@ -128,40 +130,8 @@ public:
         return get_key() < key;
     }
 
-    // init a root node
-    int init(const char* text_begin, uint32_t node_size) {
-        _flags = FLAG_IS_ROOT | FLAG_IS_LAST;
-        _text_begin = text_begin;
-        assert(node_size <= MAX_NODE_SIZE);
-        _node_size = node_size;
-        _refcnt = 1;
-        return 0;
-    }
-
-    // init a non-root node
-    int init(str key, str value, const NodeImpl* root, uint32_t flags) {
-        _root = root;
-        assert(root);
-        _flags = flags & ~FLAG_IS_ROOT;
-        auto text_begin = root->_text_begin;
-        if (!key.empty()) {
-            assert(key.data() > text_begin);
-            auto koff = key.data() - text_begin;
-            assert(koff <= MAX_KEY_OFFSET);
-            _k_off = koff;
-        } else { _k_off = 0; }
-        assert(key.length() <= MAX_KEY_LENGTH);
-        _k_len = key.length();
-        if (!value.empty()) {
-            assert(value.data() > key.end());
-            auto voff = value.data() - key.end();
-            assert(voff <= MAX_VALUE_OFFSET);
-            _v_off = voff;
-        } else { _v_off = 0; }
-        assert(value.length() <= MAX_VALUE_LENGTH);
-        _v_len = value.length();
-        return 0;
-    }
+    int init_root(const char* text_begin, uint32_t node_size);
+    int init_non_root(str key, str value, const NodeImpl* root, uint32_t flags);
 };
 
 

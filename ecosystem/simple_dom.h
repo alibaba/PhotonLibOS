@@ -40,7 +40,7 @@ public:
     Node(const NodeImpl* node) {
         _impl = node;
         if (_impl)
-            _impl->_root->add_doc_ref();
+            _impl->get_root()->add_doc_ref();
     }
     Node(const Node& rhs) :
         Node(rhs._impl) { }
@@ -60,24 +60,24 @@ public:
     }
     Node& operator = (Node&& rhs) {
         if (_impl)
-            _impl->_root->del_doc_ref();
+            _impl->get_root()->del_doc_ref();
         _impl = rhs._impl;
         rhs._impl = nullptr;
         return *this;
     }
     ~Node() {
         if (_impl)
-            _impl->_root->del_doc_ref();
+            _impl->get_root()->del_doc_ref();
     }
 
     #define IF_RET(e) if (_impl) return e; else return {};
     Node next() const               { IF_RET(_impl->next_sibling()); }
-    bool is_root() const            { IF_RET(_impl->_root == _impl); }
-    Node root() const               { IF_RET(_impl->_root); }
-    const NodeImpl* root_impl()const{ IF_RET(_impl->_root); }
+    bool is_root() const            { IF_RET(_impl->is_root()); }
+    Node get_root() const           { IF_RET(_impl->get_root()); }
+    const NodeImpl* root_impl()const{ IF_RET(_impl->get_root()); }
     str key() const                 { IF_RET(_impl->get_key()); }
     str value() const               { IF_RET(_impl->get_value()); }
-    const char* text_begin() const  { IF_RET(root()._impl->_text_begin); }
+    const char* text_begin() const  { IF_RET(_impl->get_root()->_text_begin); }
     str key(const char* b) const    { IF_RET(_impl->get_key(b)); }
     str value(const char* b) const  { IF_RET(_impl->get_value(b)); }
     bool valid() const              { return _impl; }
