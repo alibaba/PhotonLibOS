@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <vector>
+#include <algorithm>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/utility.h>
@@ -84,7 +85,7 @@ public:
     DocNode(str key, str value, const NodeImpl* root) {
         init_non_root(key, value, root, 0);
     }
-    DocNode(const NodeImpl* root) : DocNode({0,0}, {0,0}, root) { }
+    DocNode(const NodeImpl* root) : DocNode({}, {}, root) { }
     void print_children(int depth) {
         for (auto& x: _children) {
             auto k = x.get_key(), v = x.get_value();
@@ -139,7 +140,7 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         str val{s, length};     // _key may be empty()
         _nodes.back().emplace_back(_key, val, _root);
         // LOG_DEBUG(_key, ": ", val);
-        _key = {0, 0};
+        _key = {};
     }
     bool Null() {
         emplace_back(0, 0);

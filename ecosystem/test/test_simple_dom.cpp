@@ -135,15 +135,18 @@ int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     return 0;
 }
 
-const static ObjectList truth = {
-    {0, DT_REG, "test100.txt", 1, false},
-    {0, DT_REG, "test10.txt", 1, false},
-};
-
 TEST(simple_dom, oss_list) {
     ObjectList list;
     string marker;
     do_list_object("", list, &marker);
+    static ObjectList truth = {
+        {0, DT_REG, "test100.txt", 1, false},
+        {0, DT_REG, "test10.txt",  1, false},
+    };
+    using T = decltype(truth[0]);
+    std::sort(truth.begin(), truth.end(), [](const T& a, const T& b){
+        return std::get<2>(a) < std::get<2>(b);
+    });
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
 }

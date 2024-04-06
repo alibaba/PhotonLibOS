@@ -68,12 +68,14 @@ struct {    // for the root node
 
     void add_doc_ref() const {
         assert(is_root());
-        ++*(AT32*)&_refcnt;
+        auto at32 = (AT32*)&_refcnt;
+        ++*at32;
     }
 
     void del_doc_ref() const {
         assert(is_root());
-        if (--*(AT32*)&_refcnt == 0)
+        auto at32 = (AT32*)&_refcnt;
+        if (--*at32 == 0)
             delete this;
     }
 
