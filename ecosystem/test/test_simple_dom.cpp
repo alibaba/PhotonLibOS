@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
