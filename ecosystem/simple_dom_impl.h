@@ -45,15 +45,17 @@ protected:
     const static size_t  MAX_VALUE_OFFSET   = 4095;
     const static size_t  MAX_VALUE_LENGTH   = MAX_KEY_OFFSET;
 
-union { struct alignas(1) { // for non-root nodes
-    uint8_t _flags;
-    uint16_t _k_len : 12;           // key length (12 bits)
-    uint16_t _v_off : 12;           // value offset (12 bits) to key end
+union { struct  { // fornon-root nodes
+    struct {
+        uint8_t _flags;
+        uint16_t _k_len : 12;       // key length (12 bits)
+        uint16_t _v_off : 12;       // value offset (12 bits) to key end
+    }__attribute__((packed));
     uint32_t _k_off;                // key offset to _text_begin
     const NodeImpl* _root;          // root node
     uint32_t _v_len;                // value length
 }                       ;           // packed as 20 bytes
-struct alignas(1) {         // for the root node
+struct {         // for the root node
     uint8_t _flags_;                // the same as _flags
     uint8_t _node_size;             // sizeof(the node implementation)
     mutable uint16_t _refcnt;       // reference counter of the document
