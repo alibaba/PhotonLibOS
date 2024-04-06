@@ -325,8 +325,10 @@ namespace rpc {
                 return -1;
 
 #pragma GCC diagnostic push
+#if __GNUC__ >= 13
 #pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
             ThreadLink node;
             m_list.push_back(&node);
 #pragma GCC diagnostic pop
