@@ -66,7 +66,7 @@ struct {         // for the root node
     uint16_t _nchildren;            // for all nodes
 
     using AT16 = std::atomic<uint16_t>;
-    static_assert(sizeof(AT16) == sizeof(uint16_t), "...");
+    static_assert(sizeof(AT16) == sizeof(_refcnt), "...");
 
     void add_doc_ref() const {
         assert(is_root());
