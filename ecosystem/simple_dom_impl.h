@@ -65,18 +65,18 @@ struct {         // for the root node
 }; };
     uint16_t _nchildren;            // for all nodes
 
-    using AT32 = std::atomic<uint32_t>;
-    static_assert(sizeof(AT32) == sizeof(uint32_t), "...");
+    using AT16 = std::atomic<uint16_t>;
+    static_assert(sizeof(AT16) == sizeof(uint16_t), "...");
 
     void add_doc_ref() const {
         assert(is_root());
-        auto at32 = (AT32*)&_refcnt;
+        auto at32 = (AT16*)&_refcnt;
         ++*at32;
     }
 
     void del_doc_ref() const {
         assert(is_root());
-        auto at32 = (AT32*)&_refcnt;
+        auto at32 = (AT16*)&_refcnt;
         if (--*at32 == 0)
             delete this;
     }
