@@ -240,7 +240,6 @@ public:
             return;
         }
         setopt(CURLOPT_ERRORBUFFER, m_errmsg);
-        setopt(CURLOPT_DNS_USE_GLOBAL_CACHE, 0L);
         setopt(CURLOPT_NOSIGNAL, 1L);
         setopt(CURLOPT_TCP_NODELAY, 1L);
         m_errmsg[0] = '\0';
@@ -413,7 +412,6 @@ public:
         set_read_stream(rstream);
         set_write_stream(wstream);
         setopt(CURLOPT_UPLOAD, 1L);
-        setopt(CURLOPT_PUT, 1L);
         setopt(CURLOPT_URL, url);
         setopt(CURLOPT_HTTPHEADER, headers.list);
 #if LIBCURL_VERSION_MAJOR > 7 || LIBCURL_VERSION_MAJOR == 7 && LIBCURL_VERSION_MINOR >= 37
