@@ -1,0 +1,61 @@
+diff --git a/include/rapidjson/reader.h b/include/rapidjson/reader.h
+index 19f8849b..618492a4 100644
+--- a/include/rapidjson/reader.h
++++ b/include/rapidjson/reader.h
+@@ -153,6 +153,7 @@ enum ParseFlag {
+     kParseNumbersAsStringsFlag = 64,    //!< Parse all numbers (ints/doubles) as strings.
+     kParseTrailingCommasFlag = 128, //!< Allow trailing commas at the end of objects and arrays.
+     kParseNanAndInfFlag = 256,      //!< Allow parsing NaN, Inf, Infinity, -Inf and -Infinity as doubles.
++    kParseBoolsAsStringFlag = 512,  //!< Parse all booleans (true/false) as strings.
+     kParseDefaultFlags = RAPIDJSON_PARSE_DEFAULT_FLAGS  //!< Default parse flags. Can be customized by defining RAPIDJSON_PARSE_DEFAULT_FLAGS
+ };
+ 
+@@ -201,6 +202,8 @@ struct BaseReaderHandler {
+     bool Default() { return true; }
+     bool Null() { return static_cast<Override&>(*this).Default(); }
+     bool Bool(bool) { return static_cast<Override&>(*this).Default(); }
++    // enabled via kParseBoolsAsStringsFlag, string is not null-terminated (use length)
++    bool RawBool(const Ch* str, SizeType len, bool copy) { return static_cast<Override&>(*this).Default(); }
+     bool Int(int) { return static_cast<Override&>(*this).Default(); }
+     bool Uint(unsigned) { return static_cast<Override&>(*this).Default(); }
+     bool Int64(int64_t) { return static_cast<Override&>(*this).Default(); }
+@@ -714,13 +717,22 @@ private:
+             RAPIDJSON_PARSE_ERROR(kParseErrorValueInvalid, is.Tell());
+     }
+ 
++    template<unsigned parseFlags, typename InputStream, typename Handler>
++    void ParseRawBools(InputStream& is, Handler& handler) {
++
++    }
++
+     template<unsigned parseFlags, typename InputStream, typename Handler>
+     void ParseTrue(InputStream& is, Handler& handler) {
+         RAPIDJSON_ASSERT(is.Peek() == 't');
++        auto begin = is.PutBegin();
+         is.Take();
+ 
+         if (RAPIDJSON_LIKELY(Consume(is, 'r') && Consume(is, 'u') && Consume(is, 'e'))) {
+-            if (RAPIDJSON_UNLIKELY(!handler.Bool(true)))
++            auto copy = !(parseFlags & kParseInsituFlag);
++            bool ret = (parseFlags & kParseBoolsAsStringFlag) ?
++                handler.RawBool(begin, 4, copy) : handler.Bool(true);
++            if (RAPIDJSON_UNLIKELY(!ret))
+                 RAPIDJSON_PARSE_ERROR(kParseErrorTermination, is.Tell());
+         }
+         else
+@@ -730,10 +742,14 @@ private:
+     template<unsigned parseFlags, typename InputStream, typename Handler>
+     void ParseFalse(InputStream& is, Handler& handler) {
+         RAPIDJSON_ASSERT(is.Peek() == 'f');
++        auto begin = is.PutBegin();
+         is.Take();
+ 
+         if (RAPIDJSON_LIKELY(Consume(is, 'a') && Consume(is, 'l') && Consume(is, 's') && Consume(is, 'e'))) {
+-            if (RAPIDJSON_UNLIKELY(!handler.Bool(false)))
++            auto copy = !(parseFlags & kParseInsituFlag);
++            bool ret = (parseFlags & kParseBoolsAsStringFlag) ?
++                handler.RawBool(begin, 5, copy) : handler.Bool(false);
++            if (RAPIDJSON_UNLIKELY(!ret))
+                 RAPIDJSON_PARSE_ERROR(kParseErrorTermination, is.Tell());
+         }
+         else
