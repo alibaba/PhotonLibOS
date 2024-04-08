@@ -103,6 +103,10 @@ public:
         _nchildren = nodes.size();
         _children = std::move(nodes);
     }
+    ~DocNode() override {
+        if (is_root())
+            free(_text_begin);
+    }
     const NodeImpl* get(size_t i) const override {
         return (i < _children.size()) ? &_children[i] : nullptr;
     }
@@ -127,14 +131,17 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     vector<vector<JNode>> _nodes{1};
     str _key;
     JNode* _root;
-    JHandler(JNode* root) {
+    JHandler(const char* text, size_t length) {
         assert(_nodes.size() == 1);
-        _root = root;
+        _root = new JNode(text);
     }
     ~JHandler() {
         assert(_nodes.size() == 1);
         assert(_nodes.front().size() == 1);
         _root->set_children(std::move(_nodes.front().front()._children));
+    }
+    JNode* get_root() {
+        return _root;
     }
     void emplace_back(const char* s, size_t length) {
         str val{s, length};     // _key may be empty()
@@ -198,13 +205,12 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
              kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
-    auto doc = new JNode(text);
-    JHandler h(doc);
+    JHandler h(text, size);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
     reader.Parse<kFlags>(s, h);
-    return doc;
+    return h.get_root();
 }
 
 using namespace rapidxml;
