@@ -14,8 +14,8 @@
 #include <photon/common/retval.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
-#include "RapidXml/rapidxml.hpp"
-#include "rapidjson/reader.h"
+#include <rapidxml.hpp>
+#include <rapidjson/reader.h>
 
 using namespace std;
 
