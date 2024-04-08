@@ -36,8 +36,10 @@ using str = estring_view;
 // the interface for internal implementations
 class NodeImpl : public Object {
 protected:
+    NodeImpl() = default;
     const static uint8_t FLAG_IS_ROOT       = 1;
     const static uint8_t FLAG_IS_LAST       = 2;
+    const static uint8_t FLAG_TEXT_OWNERSHIP= 4;
     const static size_t  MAX_NODE_SIZE      = 256;
     const static size_t  MAX_NCHILDREN      = UINT16_MAX;
     const static size_t  MAX_KEY_OFFSET     = UINT32_MAX;
@@ -45,7 +47,7 @@ protected:
     const static size_t  MAX_VALUE_OFFSET   = 4095;
     const static size_t  MAX_VALUE_LENGTH   = MAX_KEY_OFFSET;
 
-union { struct  { // fornon-root nodes
+union { struct  { // for non-root nodes
     struct {
         uint8_t _flags;
         uint16_t _k_len : 12;       // key length (12 bits)
@@ -134,7 +136,7 @@ public:
         return get_key() < key;
     }
 
-    int init_root(const char* text_begin, uint32_t node_size);
+    int init_root(const char* text_begin, uint32_t node_size, bool text_ownership);
     int init_non_root(str key, str value, const NodeImpl* root, uint32_t flags);
 };
 

@@ -4,6 +4,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <stdlib.h>
 #include <vector>
 #include <algorithm>
 #include <photon/common/alog.h>
@@ -65,12 +66,14 @@ inline int NodeImpl::init_non_root(str key, str value,
 }
 
 inline int NodeImpl::init_root(const char* text_begin,
-                                uint32_t node_size) {
+                uint32_t node_size, bool text_ownership) {
     _flags = FLAG_IS_ROOT | FLAG_IS_LAST;
+    if (text_ownership)
+        _flags |= FLAG_TEXT_OWNERSHIP;
     _text_begin = text_begin;
     assert(node_size <= MAX_NODE_SIZE);
     _node_size = node_size;
-    _refcnt = 1;
+    _refcnt = 0;
     return 0;
 }
 
@@ -79,8 +82,10 @@ class DocNode : public NodeImpl {
 public:
     vector<Derived> _children;
     DocNode() = default;
-    DocNode(const char* text_begin) {
-        init_root(text_begin, sizeof(Derived));
+    DocNode(DocNode&&) = default;
+    DocNode& operator=(DocNode&&) = default;
+    DocNode(const char* text_begin, bool text_ownership) {
+        init_root(text_begin, sizeof(Derived), text_ownership);
     }
     DocNode(str key, str value, const NodeImpl* root) {
         init_non_root(key, value, root, 0);
@@ -104,8 +109,11 @@ public:
         _children = std::move(nodes);
     }
     ~DocNode() override {
-        if (is_root())
-            free(_text_begin);
+        if (is_root()) {
+            assert(_refcnt == 0);
+            if (_flags & FLAG_TEXT_OWNERSHIP)
+                free((void*)_text_begin);
+        }
     }
     const NodeImpl* get(size_t i) const override {
         return (i < _children.size()) ? &_children[i] : nullptr;
@@ -131,9 +139,9 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     vector<vector<JNode>> _nodes{1};
     str _key;
     JNode* _root;
-    JHandler(const char* text, size_t length) {
+    JHandler(const char* text, bool text_ownership) {
         assert(_nodes.size() == 1);
-        _root = new JNode(text);
+        _root = new JNode(text, text_ownership);
     }
     ~JHandler() {
         assert(_nodes.size() == 1);
@@ -205,7 +213,7 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
              kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
-    JHandler h(text, size);
+    JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
@@ -255,7 +263,7 @@ public:
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
     xml_document<char> doc;
     doc.parse<0>(text);
-    auto root = new XMLNode(text);
+    auto root = new XMLNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     assert(root);
     root->build(&doc);
     return root;
@@ -277,14 +285,14 @@ Node parse(char* text, size_t size, int flags) {
                                          &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
     if ((size_t) i > LEN(parsers)) {
-        if (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED) free(text);
+        if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }
     return parsers[i](text, size, flags);
 }
 
 Node parse_file(fs::IFile* file, int flags) {
-    return parse(file->readall(), flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+    return parse(file->readall(), flags | DOC_OWN_TEXT);
 }
 
 Node parse_file(const char* filename, int flags, fs::IFileSystem* fs) {

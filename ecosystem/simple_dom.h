@@ -141,7 +141,9 @@ const int DOC_YAML = 0x02;
 const int DOC_INI  = 0x03;
 const int DOC_TYPE_MASK = 0xff;
 
-const int FLAG_FREE_TEXT_IF_PARSING_FAILED = 0x100;
+const int DOC_FREE_TEXT_IF_PARSING_FAILED   = 0x100;
+const int DOC_FREE_TEXT_ON_DESTRUCTION      = 0x200;
+const int DOC_OWN_TEXT                      = 0x300;
 
 using Document = Node;
 
@@ -154,7 +156,7 @@ Node parse(char* text, size_t size, int flags);
 inline Node parse(IStream::ReadAll&& buf, int flags) {
     if (!buf.ptr || buf.size <= 0) return nullptr;
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
-    if (node || (flags & FLAG_FREE_TEXT_IF_PARSING_FAILED)) {
+    if (node || (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) {
         buf.ptr.reset();
         buf.size = 0;
     }
@@ -162,13 +164,12 @@ inline Node parse(IStream::ReadAll&& buf, int flags) {
 }
 
 inline Node parse_copy(const char* text, size_t size, int flags) {
-    auto copy = strndup(text, size);
-    return parse(copy, size, flags | FLAG_FREE_TEXT_IF_PARSING_FAILED);
+    return parse(strndup(text, size), size, flags | DOC_OWN_TEXT);
 }
 
 inline Node parse_copy(const IStream::ReadAll& buf, int flags) {
     if (!buf.ptr || buf.size <= 0) return nullptr;
-    return parse_copy((char*)buf.ptr.get(), (size_t)buf.size, flags);
+    return parse_copy((const char*)buf.ptr.get(), (size_t)buf.size, flags);
 }
 
 Node parse_file(fs::IFile* file, int flags);
