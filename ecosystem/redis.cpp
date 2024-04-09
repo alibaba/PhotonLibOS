@@ -19,7 +19,7 @@ limitations under the License.
 #include <memory>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
-#include "cpp-redis/network/tcp_client_iface.hpp"
+#include <cpp_redis/network/tcp_client_iface.hpp>
 
 namespace photon {
 using namespace net;
