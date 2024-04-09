@@ -139,6 +139,7 @@ public:
         return (Object*) (uint64_t) fd;
     }
     int close() final {
+        if (fd < 0) return 0;
         get_vcpu()->master_event_engine->wait_for_fd(fd, 0, -1UL);
         auto ret = ::close(fd);
         fd = -1;
@@ -306,6 +307,9 @@ public:
             m_listen_fd = socket(s.get_sockaddr()->sa_family, 0, m_nonblocking, false);
             if (m_listen_fd < 0) return -1;
         }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
         int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)
             LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
@@ -321,6 +325,9 @@ public:
             m_listen_fd = socket(AF_UNIX, 0, true, false);
             if (m_listen_fd < 0)
                 LOG_ERRNO_RETURN(0, m_listen_fd, "failed to create UNIX domain socket at ", ALogString(path, count));
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
         }
         struct sockaddr_un addr_un;
         int ret = fill_uds_path(addr_un, path, count);
@@ -367,14 +374,14 @@ public:
     }
 
     int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
-        if (::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0) {
-            LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt");
-        }
+        if (m_listen_fd >= 0 && ::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to setsockopt for fd `", m_listen_fd);
         return m_opts.put_opt(level, option_name, option_value, option_len);
     }
 
     int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
-        if (::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0) return 0;
+        if (m_listen_fd >= 0 && ::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0)
+            return 0;
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
 
