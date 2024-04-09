@@ -63,7 +63,7 @@ public:
         return _value;
     }
     T& get() {
-        return get();
+        return get_value();
     }
     int wait(Timeout timeout = {}) {
         if (_got) return 0; // already got
