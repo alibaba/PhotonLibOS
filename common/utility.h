@@ -66,6 +66,8 @@ struct ptr_array_t
     T* pend;
     T* begin() { return pbegin; }
     T* end()   { return pend; }
+    T& front() { return pbegin[0]; }
+    T& back()  { return pend[-1]; }
 };
 
 template<typename T>

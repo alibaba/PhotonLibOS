@@ -288,9 +288,11 @@ void chunked_send(int offset, int size, ISocketStream* sock) {
 std::vector<int> rec;
 int chunked_handler_pt(void*, ISocketStream* sock) {
     EXPECT_NE(nullptr, sock);
-    LOG_DEBUG("Accepted");
     char recv[4096];
     auto len = sock->recv(recv, 4096);
+    if (len < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to read from socket ");
+    LOG_DEBUG("Accepted");
     EXPECT_GT(len, 0);
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
@@ -322,7 +324,7 @@ TEST(http_client, chunked) {
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
     EXPECT_EQ(0, ret);
-    LOG_INFO("Ready to accept");
+    LOG_INFO("Bind at `, Ready to accept", server->getsockname());
     server->start_loop();
     photon::thread_sleep(1);
     auto client = new_http_client();
@@ -386,6 +388,7 @@ TEST(http_client, chunked) {
         LOG_INFO("random chunked test ` passed", tmp);
     }
 }
+
 int wa_test[] = {5265,
 6392,
 4623,
@@ -398,6 +401,7 @@ int wa_test[] = {5265,
 4487,
 2195,
 292};
+
 int chunked_handler_debug(void*, ISocketStream* sock) {
     EXPECT_NE(nullptr, sock);
     LOG_DEBUG("Accepted");

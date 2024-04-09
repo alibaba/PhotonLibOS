@@ -21,16 +21,16 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
-// #include <gtest/gtest.h>
+#include <algorithm>
+#include <gtest/gtest.h>
+#include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 
 using namespace std;
 using namespace photon::SimpleDOM;
 
-#define EXPECT_EQ(a, b)
-#define EXPECT_TRUE(x)
-
 // OSS list response
-const char xml[] = R"(
+const static char xml[] = R"(
 <?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult category = "flowers">
   <Name>examplebucket</Name>
@@ -73,20 +73,36 @@ using ObjectList = vector<tuple<long, unsigned char, string_view, int64_t, bool>
 const long DT_DIR = 10;
 const long DT_REG = 20;
 
-const static ObjectList truth = {
-    {0, DT_REG, "test10.txt", 1, false},
-    {0, DT_REG, "test100.txt", 1, false},
-};
+void print_all1(Node node) {
+    for (size_t i = 0; i < node.num_children(); ++i) {
+        auto x = node.get(i);
+        LOG_DEBUG(x.key(), '=', x.value());
+    }
+}
+
+void print_all2(Node node) {
+    for (auto x = node.get(0); x; x = x.next()) {
+        LOG_DEBUG(x.key(), '=', x.value());
+    }
+}
 
 static __attribute__((noinline))
-int do_list_object(const string& prefix,
-                ObjectList& result, string* marker) {
+int do_list_object(string_view prefix, ObjectList& result, string* marker) {
     auto doc = parse_copy(xml, sizeof(xml), DOC_XML);
     EXPECT_TRUE(doc);
     auto list_bucket_result = doc["ListBucketResult"];
     auto attr = list_bucket_result.get_attributes();
     EXPECT_EQ(attr.num_children(), 1);
     EXPECT_EQ(attr["category"], "flowers");
+/*
+    print_all1(list_bucket_result);
+    auto c = list_bucket_result.get("Contents");
+    LOG_DEBUG(VALUE(c.key()));
+    print_all1(c);
+    c = c.next();
+    LOG_DEBUG(VALUE(c.key()));
+    print_all2(c);
+*/
     for (auto child: list_bucket_result.enumerable_children("Contents")) {
         auto key = child["Key"];
         EXPECT_TRUE(key);
@@ -94,6 +110,7 @@ int do_list_object(const string& prefix,
         EXPECT_TRUE(size);
         auto text = key.to_string();
         auto dsize = size.to_integer();
+        LOG_DEBUG(VALUE(text), VALUE(dsize));
         result.emplace_back(0, DT_REG, text.substr(prefix.size()),
                                 dsize, text.size() == prefix.size());
 /*      if (m_stat_pool) {
@@ -113,18 +130,61 @@ int do_list_object(const string& prefix,
     }
     if (marker) {
         auto next_marker = list_bucket_result["NextMarker"];
-        *marker = next_marker ? next_marker.to_string() : "";
+        if  (next_marker) *marker = next_marker.to_string();
+        else marker->clear();
     }
     return 0;
 }
 
-// TEST(simple_dom, oss_list) {
-void simple_dom_oss_list() {
+TEST(simple_dom, oss_list) {
     ObjectList list;
     string marker;
     do_list_object("", list, &marker);
+    static ObjectList truth = {
+        {0, DT_REG, "test100.txt", 1, false},
+        {0, DT_REG, "test10.txt",  1, false},
+    };
+    using T = decltype(truth[0]);
+    auto cmp = [](T& a, T& b) {
+        return std::get<2>(a) < std::get<2>(b);
+    };
+    std::sort(truth.begin(), truth.end(), cmp);
+    std::sort(list.begin(),  list.end(),  cmp);
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
+}
+
+TEST(simple_dom, json) {
+    const static char json0[] = R"({
+        "hello": "world",
+        "t": true ,
+        "f": false,
+        "n": null,
+        "i": 123,
+        "pi": 3.1416,
+        "a": [1, 2, 3, 4],
+    })";
+    auto doc = parse_copy(json0, sizeof(json0), DOC_JSON);
+    EXPECT_TRUE(doc);
+
+    const static str truth[][2] = {
+        {"hello",   "world"},
+        {"t",       "true"},
+        {"f",       "false"},
+        {"i",       "123"},
+        {"pi",      "3.1416"},
+    };
+    for (auto& x: truth) {
+        auto q = doc[x[0]];
+        LOG_DEBUG("expect doc[`] => '`' (got '`')", x[0], x[1], q.to_string());
+        EXPECT_EQ(q, x[1]);
+    }
+
+    int val = 1;
+    for (auto x: doc["a"].enumerable_children()) {
+        EXPECT_EQ(x.to_integer(), val);
+        val++;
+    }
 }
 
 // TEST(simple_dom, example) {
@@ -133,15 +193,12 @@ void simple_dom_examples() {
     auto a = doc["asdf"].to_string();
     auto j = doc["jkl"].to_integer();
     auto sb = doc["foo"]["bar"];
+    (void)a; (void)j; (void)sb;
     for (auto x: sb.enumerable_children()) {
-        // ...
+        (void)x;
     }
     for (auto x: sb.enumerable_same_key_siblings()) {
-        // ...
+        (void)x;
     }
 }
 
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

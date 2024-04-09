@@ -14,12 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <photon/integration/redis.h>
+#include <photon/ecosystem/redis.h>
 #include <inttypes.h>
 #include <memory>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
-#include "cpp-redis/network/tcp_client_iface.hpp"
+#include <cpp_redis/network/tcp_client_iface.hpp>
 
 namespace photon {
 using namespace net;

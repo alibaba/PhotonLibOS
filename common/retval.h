@@ -46,6 +46,9 @@ struct retval : public retval_base {
     operator T() const {
         return get();
     }
+    T operator->() {
+        return get();
+    }
     T get() const {
         return _val;
     }

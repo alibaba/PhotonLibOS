@@ -38,11 +38,11 @@ struct Enumerable
     {
         T* obj;
         explicit iterator(T* obj) : obj(obj) {
-          if (obj && obj->next() < 0)
+          if (obj && !obj->valid())
             this->obj = nullptr;
         }
         using R = typename std::result_of<decltype(&T::get)(T)>::type;
-        R operator*() { return obj->get(); }
+        R operator*() { return obj ? obj->get() : nullptr; }
         bool operator==(const iterator& rhs) const { return obj == rhs.obj; }
         bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
         iterator& operator++()
@@ -92,6 +92,7 @@ inline void __example_of_enumerable__()
 {
     struct exam
     {
+        bool valid() { return false; }
         int next() { return -1; }           // move to next, return 0 for success, -1 for failure
         double* get() { return nullptr; }   // get current result
     };

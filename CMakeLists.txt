@@ -37,6 +37,9 @@ set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
 set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
 set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
 set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
+set(PHOTON_RAPIDJSON_SOURCE "https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.zip" CACHE STRING "")
+set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapidxml/rapidxml%201.13/rapidxml-1.13.zip/download" CACHE STRING "")
+set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 
 # Get CPU arch and number
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -156,6 +159,7 @@ endforeach ()
 ################################################################################
 
 add_subdirectory(third_party)
+add_subdirectory(ecosystem)
 
 # Compile photon objects
 file(GLOB PHOTON_SRC
@@ -183,7 +187,7 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
-        integration/*.cpp
+        ecosystem/*.cpp
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
@@ -209,6 +213,7 @@ endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
+target_link_libraries(photon_obj PRIVATE ecosystem_deps)
 target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
 )
@@ -355,6 +360,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
+    add_subdirectory(ecosystem/test)
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()
