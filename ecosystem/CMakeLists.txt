@@ -29,6 +29,18 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(rapidxml)
 message(STATUS "Rapidxml source dir: ${rapidxml_SOURCE_DIR}")
 
+# RapidYAML
+# Single header file so should set DOWNLOAD_NO_EXTRACT
+FetchContent_Declare(
+    rapidyaml
+    URL ${PHOTON_RAPIDYAML_SOURCE}
+    URL_HASH
+        SHA256=09a5be64f7add04e24a675704a16b3aea7ed80e9ff73d865a3b92301971d0815
+    DOWNLOAD_NO_EXTRACT 1
+    UPDATE_DISCONNECTED 1)
+FetchContent_MakeAvailable(rapidyaml)
+message(STATUS "Rapidyaml source dir: ${rapidyaml_SOURCE_DIR}")
+
 # cpp-redis
 FetchContent_Declare(
     cpp-redis
@@ -48,7 +60,7 @@ message(STATUS "cpp-redis source dir: ${cpp-redis_SOURCE_DIR}")
 add_library(ecosystem_deps INTERFACE)
 target_include_directories(
     ecosystem_deps
-    INTERFACE ${rapidjson_SOURCE_DIR}/include ${rapidxml_SOURCE_DIR}
+    INTERFACE ${rapidjson_SOURCE_DIR}/include ${rapidxml_SOURCE_DIR} ${rapidyaml_SOURCE_DIR}
     ${cpp-redis_SOURCE_DIR}/includes)
 get_property(
     incs
