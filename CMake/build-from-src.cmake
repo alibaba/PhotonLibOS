@@ -27,7 +27,7 @@ function(build_from_src [dep])
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND CFLAGS=-fPIC ./configure --prefix=${BINARY_DIR} --static
+                CONFIGURE_COMMAND sh -c "CFLAGS=\"-fPIC -O3\" ./configure --prefix=${BINARY_DIR} --static"
                 BUILD_COMMAND $(MAKE)
                 INSTALL_COMMAND $(MAKE) install
         )
@@ -43,7 +43,7 @@ function(build_from_src [dep])
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
-                BUILD_COMMAND V=1 CFLAGS=-fPIC $(MAKE) -C src
+                BUILD_COMMAND sh -c "V=1 CFLAGS=\"-fPIC -g -O3 -Wall -Wextra -fno-stack-protector\" $(MAKE) -C src"
                 INSTALL_COMMAND $(MAKE) install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
