@@ -10,6 +10,9 @@ carefully crafted modules. Although behaves differently to std::thread,
 ```photon::thread``` is lightweight and lightning fast --- probably
 the fastest coroutine lib in the world.
 
+We believe that nothing is faster than photon, and nothing is more
+lightweight than photon.
+
 ### Coroutine runtime
 
 Photon's runtime is driven by a coroutine lib. Out tests show that it has the [**best 🔗**](../performance/network-performance#2-ping-pong) IO performance in the open source world by the year of 2022, even among different programing languages.
