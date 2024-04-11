@@ -20,7 +20,7 @@ Photon's runtime is driven by a coroutine lib. Out tests show that it has the [*
 
 ### Core Features
 
-* Stackful coroutine. Symmetric scheduler.
+* Stackful coroutine. Symmetric scheduler. Multi-core parallelism.
 * Non-blocking IO engine. Async event engine. Support epoll / kqueue / **io_uring**.
 * Support multiple platforms and architectures, x86 / ARM, Linux / macOS.
 * Well-designed assembly code on the critical path, to reduce overhead.
