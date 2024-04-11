@@ -42,7 +42,7 @@ We want to change the world of high-performance servers, to prevent the
 worsening situation of callback hell, and to protect the precious peace
 in production environments.
 
-We want to sleep early and well everyday, til the next morning without
+We want to sleep early and sleep well everyday, til the next morning without
 interruptions.
 
 And we also want to make friends with common interests, to fight together
