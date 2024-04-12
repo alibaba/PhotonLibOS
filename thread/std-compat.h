@@ -372,7 +372,7 @@ public:
 
     template< class Clock, class Duration >
     std::future_status wait_until( const std::chrono::time_point<Clock,Duration>& timeout_time ) const {
-        auto dt = timeout_time - std::chrono::system_clock::now();
+        auto dt = timeout_time - Clock::now();
         return (dt.count() < 0) ? wait(0) : wait_for(dt);
     }
 };
