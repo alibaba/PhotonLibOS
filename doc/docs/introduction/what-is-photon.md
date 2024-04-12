@@ -3,9 +3,15 @@ sidebar_position: 1
 toc_max_heading_level: 4
 ---
 
-# What is PhotonLibOS
+# What is Photon
 
-**PhotonLibOS** (hereby refered to as **Photon**) is a high-efficiency LibOS framework, based on a set of carefully selected C++ libs.
+**Photon** is a highly efficiencient LibOS framework with a set of
+carefully crafted modules. Although behaves differently to std::thread,
+```photon::thread``` is lightweight and lightning fast --- probably
+the fastest coroutine lib in the world.
+
+We believe that nothing is faster than photon, and nothing is more
+lightweight than photon.
 
 ### Coroutine runtime
 
@@ -14,7 +20,7 @@ Photon's runtime is driven by a coroutine lib. Out tests show that it has the [*
 
 ### Core Features
 
-* Stackful coroutine. Symmetric scheduler.
+* Stackful coroutine. Symmetric scheduler. Multi-core parallelism.
 * Non-blocking IO engine. Async event engine. Support epoll / kqueue / **io_uring**.
 * Support multiple platforms and architectures, x86 / ARM, Linux / macOS.
 * Well-designed assembly code on the critical path, to reduce overhead.
@@ -32,7 +38,18 @@ Any addition to this list is appreciated, if you have been using Photon, or just
 
 ### Vision
 
-We hope that Photon could help programs run as fast and agile as the _photon particle_, which exactly is the naming came from.
+We want to defend the ancient justice of sychronized programming paradigm,
+dispite challenged by modern highly concurrent demands.
+
+We want to change the world of high-performance servers, to prevent the
+worsening situation of callback hell, and to protect the precious peace
+in production environments.
+
+We want to sleep early and sleep well everyday, til the next morning without
+interruptions.
+
+And we also want to make friends with common interests, to fight together
+for the better future.
 
 ### History
 

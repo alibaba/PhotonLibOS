@@ -33,7 +33,7 @@ export default function Home() {
   return (
     <Layout
       title={`${siteConfig.title}`}
-      description="Probably the fastest coroutine lib of the world">
+      description="Probably the fastest coroutine lib in the world!">
       <HomepageHeader />
       <main>
         <HomepageFeatures />
