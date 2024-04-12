@@ -52,11 +52,8 @@ public:
             m_expiration = x;
         return *this;
     }
-    using us = std::chrono::microseconds;
-    template<class Rep, class Period = std::ratio<1>>
-    Timeout(const std::chrono::duration<Rep, Period>& x) :
-        Timeout(std::chrono::duration_cast<us>(x).count()) { }
     auto std_duration() const {
+        using us = std::chrono::microseconds;
         uint64_t max = std::numeric_limits<us::rep>::max();
         return (m_expiration > max) ? us::max() : us(timeout());
     }
