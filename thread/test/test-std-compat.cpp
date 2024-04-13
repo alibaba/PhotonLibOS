@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <gtest/gtest.h>
 
+#include <numeric>
 #include <photon/thread/workerpool.h>
 #include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>
@@ -167,6 +168,42 @@ TEST(std, exception) {
     } catch (std::system_error& err) {
         ASSERT_EQ(EPERM, err.code().value());
     }
+}
+
+void accumulate(std::vector<int>::iterator first,
+                std::vector<int>::iterator last,
+                photon_std::promise<int> accumulate_promise)
+{
+    int sum = std::accumulate(first, last, 0);
+    accumulate_promise.set_value(sum); // Notify future
+}
+
+void do_work(photon_std::promise<void> barrier)
+{
+    photon_std::this_thread::sleep_for(std::chrono::seconds(1));
+    barrier.set_value();
+}
+
+TEST(std, promise_future) {
+    std::vector<int> numbers = {1, 2, 3, 4, 5, 6};
+    photon_std::promise<int> accumulate_promise;
+    photon_std::future<int> accumulate_future = accumulate_promise.get_future();
+    photon_std::thread work_thread(accumulate, numbers.begin(), numbers.end(),
+                            std::move(accumulate_promise));
+
+    // future::get() will wait until the future has a valid result and retrieves it.
+    // Calling wait() before get() is not needed
+    // accumulate_future.wait(); // wait for result
+    auto result = accumulate_future.get();
+    LOG_DEBUG(VALUE(result));
+    work_thread.join(); // wait for thread completion
+
+    // Demonstrate using promise<void> to signal state between threads.
+    photon_std::promise<void> barrier;
+    photon_std::future<void> barrier_future = barrier.get_future();
+    photon_std::thread new_work_thread(do_work, std::move(barrier));
+    barrier_future.wait();
+    new_work_thread.join();
 }
 
 int main(int argc, char** arg) {

@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread-local.h>
+#include <photon/thread/future.h>
 
 namespace photon_std {
 
@@ -348,6 +349,67 @@ int work_pool_init(int vcpu_num = 1, int event_engine = photon::INIT_EVENT_DEFAU
  * @brief Destroy work pool
  */
 int work_pool_fini();
+
+template<typename T>
+class future {
+    using pf = photon::Future<T>;
+    std::shared_ptr<pf> _fut;
+public:
+    future(std::shared_ptr<pf>& fut) : _fut(fut) { }
+    bool valid() { return true; }
+    T get() { return _fut->get(); }
+
+    std::future_status wait(uint64_t timeout = -1) const {
+        int ret = _fut->wait(timeout);
+        return (ret == 0) ? std::future_status::ready  :
+                            std::future_status::timeout;
+    }
+
+    template< class Rep, class Period >
+    std::future_status wait_for( const std::chrono::duration<Rep,Period>& duration ) const {
+        return wait(__duration_to_microseconds(duration));
+    }
+
+    template< class Clock, class Duration >
+    std::future_status wait_until( const std::chrono::time_point<Clock,Duration>& timeout_time ) const {
+        auto dt = timeout_time - Clock::now();
+        return (dt.count() < 0) ? wait(0) : wait_for(dt);
+    }
+};
+
+template<typename T>
+class promise {
+    using pf = photon::Future<T>;
+    std::shared_ptr<pf> _fut { new pf };
+public:
+    future<T> get_future() {
+        return {_fut};
+    }
+    void swap( promise& other ) noexcept {
+        _fut.swap(other._fut);
+    }
+    template<typename P>
+    void set_value( P&& value ) {
+        _fut->get_promise().set_value(std::forward<P>(value));
+    }
+};
+
+template<>
+class future<void> : public future<bool> {
+public:
+    future(future<bool> fut) : future<bool>(fut) { }
+};
+
+template<>
+class promise<void> : public promise<bool> {
+public:
+    future<void> get_future() {
+        return {promise<bool>::get_future()};
+    }
+    void set_value() {
+        promise<bool>::set_value(true);
+    }
+};
 
 }   // namespace photon_std
 
