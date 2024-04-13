@@ -154,7 +154,7 @@ TEST(simple_dom, oss_list) {
     EXPECT_EQ(marker, "test100.txt");
 }
 
-void expect_eq_kvs(Node node, const str* truth, size_t n) {
+void expect_eq_kvs(Node node, const char * const *  truth, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         auto x = truth + i * 2;
         auto q = node[x[0]];
@@ -164,11 +164,11 @@ void expect_eq_kvs(Node node, const str* truth, size_t n) {
 }
 
 template<size_t N> inline
-void expect_eq_kvs(Node node, const str (&truth)[N][2]) {
+void expect_eq_kvs(Node node, const char* const (&truth)[N][2]) {
      expect_eq_kvs(node, &truth[0][0], N);
 }
 
-void expect_eq_vals(Node node, const str* truth, size_t n) {
+void expect_eq_vals(Node node, const char * const *  truth, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         auto x = truth[i];
         auto q = node[i];
@@ -178,7 +178,7 @@ void expect_eq_vals(Node node, const str* truth, size_t n) {
 }
 
 template<size_t N> inline
-void expect_eq_vals(Node node, const str (&truth)[N]) {
+void expect_eq_vals(Node node, const char * const (&truth)[N]) {
      expect_eq_vals(node, truth, N);
 }
 
