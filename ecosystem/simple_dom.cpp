@@ -287,7 +287,7 @@ public:
             str k, v;
             if (x.has_key()) k = _to_str(x.key());
             if (x.has_val()) v = _to_str(x.val());
-            LOG_DEBUG(k, ':', v);
+            // LOG_DEBUG(k, ':', v);
             nodes.emplace_back(k, v, get_root());
             nodes.back().build(x, depth + 1);
         }
