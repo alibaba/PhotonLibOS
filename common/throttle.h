@@ -129,10 +129,10 @@ protected:
             case Priority::Low:
                 return 20;
             case Priority::Medium:
-                return 40;
+                return 10;
             case Priority::High:
             default:
-                return 100;
+                return 0;
         }
     }
 
