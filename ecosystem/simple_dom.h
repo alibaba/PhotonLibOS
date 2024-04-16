@@ -86,6 +86,7 @@ public:
     Node get(size_t i) const        { IF_RET({_impl->get(i)}); }
     Node get(str key) const         { IF_RET({_impl->get(key)}); }
     Node operator[](str key) const  { return get(key); }
+    Node operator[](const char* key) const  { return get(key); }
     Node operator[](size_t i) const { return get(i); }
     Node get_attributes() const     { return get("__attributes__"); }
     str to_string() const           { return value(); }

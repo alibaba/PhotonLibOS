@@ -154,6 +154,34 @@ TEST(simple_dom, oss_list) {
     EXPECT_EQ(marker, "test100.txt");
 }
 
+void expect_eq_kvs(Node node, const char * const *  truth, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        auto x = truth + i * 2;
+        auto q = node[x[0]];
+        LOG_DEBUG("expect node['`'] => '`' (got '`')", x[0], x[1], q.to_string());
+        EXPECT_EQ(q, x[1]);
+    }
+}
+
+template<size_t N> inline
+void expect_eq_kvs(Node node, const char* const (&truth)[N][2]) {
+     expect_eq_kvs(node, &truth[0][0], N);
+}
+
+void expect_eq_vals(Node node, const char * const *  truth, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        auto x = truth[i];
+        auto q = node[i];
+        LOG_DEBUG("expect node[`] => '`' (got '`')", i, x, q.to_string());
+        EXPECT_EQ(q, x);
+    }
+}
+
+template<size_t N> inline
+void expect_eq_vals(Node node, const char * const (&truth)[N]) {
+     expect_eq_vals(node, truth, N);
+}
+
 TEST(simple_dom, json) {
     const static char json0[] = R"({
         "hello": "world",
@@ -166,39 +194,53 @@ TEST(simple_dom, json) {
     })";
     auto doc = parse_copy(json0, sizeof(json0), DOC_JSON);
     EXPECT_TRUE(doc);
-
-    const static str truth[][2] = {
+    expect_eq_kvs(doc, {
         {"hello",   "world"},
         {"t",       "true"},
         {"f",       "false"},
         {"i",       "123"},
         {"pi",      "3.1416"},
-    };
-    for (auto& x: truth) {
-        auto q = doc[x[0]];
-        LOG_DEBUG("expect doc[`] => '`' (got '`')", x[0], x[1], q.to_string());
-        EXPECT_EQ(q, x[1]);
-    }
-
-    int val = 1;
-    for (auto x: doc["a"].enumerable_children()) {
-        EXPECT_EQ(x.to_integer(), val);
-        val++;
-    }
+    });
+    expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
 }
 
-// TEST(simple_dom, example) {
-void simple_dom_examples() {
-    auto doc = parse(nullptr, 0, DOC_JSON);
-    auto a = doc["asdf"].to_string();
-    auto j = doc["jkl"].to_integer();
-    auto sb = doc["foo"]["bar"];
-    (void)a; (void)j; (void)sb;
-    for (auto x: sb.enumerable_children()) {
-        (void)x;
-    }
-    for (auto x: sb.enumerable_same_key_siblings()) {
-        (void)x;
-    }
+TEST(simple_dom, yaml0) {
+    static char yaml0[] = "{foo: 1, bar: [2, 3], john: doe}";
+    auto doc = parse(yaml0, sizeof(yaml0), DOC_YAML);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc, {{"foo", "1"}, {"john", "doe"}});
+    expect_eq_vals(doc["bar"], {"2", "3"});
 }
 
+TEST(simple_dom, yaml1) {
+    static char yaml1[] = R"(
+foo: says who
+bar:
+- 20
+- 30
+- oh so nice
+- oh so nice (serialized)
+john: in_scope
+float: 2.4
+digits: 2.400000
+newkeyval: shiny and new
+newkeyval (serialized): shiny and new (serialized)
+newseq: []
+newseq (serialized): []
+newmap: {}
+newmap (serialized): {}
+I am something: indeed
+)";
+    auto doc = parse(yaml1, sizeof(yaml1), DOC_YAML);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc, {
+        {"foo",         "says who"},
+        {"john",        "in_scope"},
+        {"float",       "2.4"},
+        {"digits",      "2.400000"},
+        {"newkeyval",   "shiny and new"},
+        {"I am something", "indeed"},
+    });
+    expect_eq_vals(doc["bar"], {"20", "30",
+        "oh so nice", "oh so nice (serialized)"});
+}

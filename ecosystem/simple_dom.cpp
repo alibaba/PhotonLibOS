@@ -16,6 +16,11 @@
 #include <photon/fs/filesystem.h>
 #include <rapidxml.hpp>
 #include <rapidjson/reader.h>
+#define RYML_SINGLE_HDR_DEFINE_NOW
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#include <rapidyaml-0.5.0.hpp>
+#pragma GCC diagnostic pop
 
 using namespace std;
 
@@ -269,8 +274,33 @@ static NodeImpl* parse_xml(char* text, size_t size, int flags) {
     return root;
 }
 
+class YAMLNode : public DocNode<YAMLNode> {
+public:
+    using DocNode::DocNode;
+    str _to_str(ryml::csubstr s) {
+        return {s.str, s.len};
+    }
+    void build(ryml::ConstNodeRef yaml_node, int depth = 0) {
+        vector<YAMLNode> nodes;
+        for (const auto& x: yaml_node.children()) {
+            assert(x.has_key() != yaml_node.is_seq());
+            str k, v;
+            if (x.has_key()) k = _to_str(x.key());
+            if (x.has_val()) v = _to_str(x.val());
+            // LOG_DEBUG(k, ':', v);
+            nodes.emplace_back(k, v, get_root());
+            nodes.back().build(x, depth + 1);
+        }
+        set_children(std::move(nodes), !yaml_node.is_seq());
+    }
+};
+
 static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
-    return nullptr;
+    auto yaml = ryml::parse_in_place({text, size});
+    auto root = new YAMLNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    assert(root);
+    root->build(yaml.rootref());
+    return root;
 }
 
 static NodeImpl* parse_ini(char* text, size_t size, int flags) {
