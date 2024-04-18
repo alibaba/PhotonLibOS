@@ -131,23 +131,22 @@ void test_case(Client* client, estring_view url, off_t st, size_t len, size_t ex
     auto ret = op->call();
     LOG_INFO("call finished");
     EXPECT_EQ(0, ret);
-    if (!invalid) {
-        if (exp_content_length != fs_handler_std_str.size())
-            EXPECT_EQ(206, op->resp.status_code());
-        else
-            EXPECT_EQ(200, op->resp.status_code());
-        char buf[4096];
-        ret = op->resp.read(buf, 4096);
-        EXPECT_EQ(exp_content_length, ret);
-        if ((size_t)st >= fs_handler_std_str.size())
-            st = fs_handler_std_str.size() - 1;
-        if ((size_t)st + len > fs_handler_std_str.size())
-            len = fs_handler_std_str.size() - st;
-        auto cont = fs_handler_std_str.data() + st;
-        std::string_view x(cont, exp_content_length);
-        std::string_view y(buf, exp_content_length);
-        EXPECT_EQ(x, y);
+    if (invalid) return;
+
+    if (exp_content_length != fs_handler_std_str.size()) {
+        EXPECT_EQ(206, op->resp.status_code());
+    } else {
+        EXPECT_EQ(200, op->resp.status_code());
     }
+    char buf[4096];
+    ret = op->resp.read(buf, 4096);
+    EXPECT_EQ(exp_content_length, ret);
+    if ((size_t)st >= fs_handler_std_str.size()) len = 0;
+    else if ((size_t)st + len > fs_handler_std_str.size())
+        len = fs_handler_std_str.size() - st;
+    std::string_view x(fs_handler_std_str.data() + st, len);
+    std::string_view y(buf, exp_content_length);
+    EXPECT_EQ(x, y);
 }
 
 void test_head_case(Client* client, estring_view url, off_t st, size_t len, size_t exp_content_length) {
