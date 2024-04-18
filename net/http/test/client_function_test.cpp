@@ -61,6 +61,21 @@ int timeout_writer(void *self, IStream* stream) {
     return 0;
 }
 
+class SimpleHandler : public http::HTTPHandler {
+public:
+    int handle_request(http::Request& req, http::Response& resp, std::string_view) {
+        std::string url_path(req.target());
+        resp.set_result(200);
+        resp.headers.content_length(url_path.size());
+        resp.headers.insert("Content-Type", "application/octet-stream");
+        auto n = resp.write(url_path.data(), url_path.size());
+        if (n != (ssize_t) url_path.size()) {
+            LOG_ERRNO_RETURN(0, -1, "send body failed");
+        }
+        return 0;
+    }
+};
+
 TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
@@ -523,6 +538,41 @@ TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environm
     EXPECT_EQ(200, op->resp.status_code());
 }
 
+TEST(http_client, unix_socket) {
+    const char* uds_path = "test-http-client.sock";
+
+    auto http_server = new_http_server();
+    DEFER(delete http_server);
+    http_server->add_handler(new SimpleHandler, true, "/simple-api");
+
+    auto socket_server = new_uds_server(true);
+    DEFER(delete socket_server);
+
+    socket_server->set_handler(http_server->get_connection_handler());
+    ASSERT_EQ(0, socket_server->bind(uds_path));
+    ASSERT_EQ(0, socket_server->listen());
+    ASSERT_EQ(0, socket_server->start_loop(false));
+
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    Client::OperationOnStack<> op(client, Verb::GET, "http://localhost/simple-api");
+    int ret = op.call(uds_path);
+    ASSERT_EQ(0, ret);
+    ASSERT_EQ(200, op.resp.status_code());
+
+    char buf[UINT16_MAX];
+    ssize_t n = op.resp.read(buf, op.resp.body_size());
+    ASSERT_EQ(n, (ssize_t) op.resp.body_size());
+    LOG_INFO(buf);
+
+    // A wrong hostname or HTTPS doesn't have effect on unix socket
+    Client::OperationOnStack<> op2(client, Verb::GET, "https://www.wrong.hostname/simple-api");
+    ret = op2.call(uds_path);
+    ASSERT_EQ(0, ret);
+    ASSERT_EQ(200, op2.resp.status_code());
+}
+
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),
@@ -582,5 +632,5 @@ int main(int argc, char** arg) {
 #endif
     set_log_output_level(ALOG_INFO);
     ::testing::InitGoogleTest(&argc, arg);
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return RUN_ALL_TESTS();
 }
