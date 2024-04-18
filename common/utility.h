@@ -18,6 +18,7 @@ limitations under the License.
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
+#include <assert.h>
 #include <utility>
 #include <random>
 #include <algorithm>
