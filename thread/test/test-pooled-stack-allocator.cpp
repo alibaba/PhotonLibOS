@@ -30,7 +30,7 @@ void do_test(int pool_mode, const PhotonOptions& options) {
     WorkPool pool(4, INIT_EVENT_DEFAULT, INIT_IO_NONE, pool_mode);
     semaphore sem(0);
     auto start = now;
-    for (int i = 0; i < N; i++) {
+    for (uint64_t i = 0; i < N; i++) {
         pool.async_call(new auto([&] { sem.signal(1); }));
     }
     sem.wait(N);

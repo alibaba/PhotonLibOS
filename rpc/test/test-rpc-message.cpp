@@ -110,17 +110,17 @@ public:
         assert(req->code == 999);
         for (size_t i = 0; i < req->buf.size(); ++i) {
             char* c = (char*) req->buf.addr() + i;
-            assert(*c == 'x');
+            EXPECT_EQ(*c, 'x');
         }
 
         auto iter = req->map.find("2");
-        assert(iter != req->map.end());
+        EXPECT_NE(iter, req->map.end());
         auto k = iter->first;
-        assert(k == "2");
+        EXPECT_EQ(k, "2");
         auto v = iter->second;
-        assert(v.a == 2);
-        assert(v.b == "val-2");
-        assert(v.c == '2');
+        EXPECT_EQ(v.a, 2);
+        EXPECT_EQ(v.b, "val-2");
+        EXPECT_EQ(v.c, '2');
 
         iter = req->map.find("4");
         if (iter != req->map.end()) {

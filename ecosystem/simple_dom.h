@@ -91,12 +91,8 @@ public:
     Node get_attributes() const     { return get("__attributes__"); }
     str to_string() const           { return value(); }
     #undef IF_RET
-    template<size_t N>
-    Node operator[](const char (&key)[N]) const {
-        return get(key);
-    }
     int64_t to_integer(int64_t def_val = 0) const {
-        return value().to_uint64(def_val);
+        return value().to_int64(def_val);
     }
     double to_number(double def_val = NAN) const {
         return value().to_double(def_val);

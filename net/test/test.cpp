@@ -19,6 +19,7 @@ limitations under the License.
 #include <sys/stat.h>
 
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
@@ -576,7 +577,7 @@ bool server_down = false;
 photon::thread* server_thread = nullptr;
 
 void* serve_connection(void* arg) {
-    auto fd = (int&)arg;
+    auto fd = __reinterpret_cast<int>(arg);
     while (true) {
         char buf[1024];
         auto ret = net::read(fd, buf, sizeof(buf));
@@ -727,9 +728,9 @@ TEST(utils, resolver) {
     DEFER(delete resolver);
     net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    if (addr.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr.to_nl());
+    if (addr.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr.to_nl()); }
     auto func = [&](net::IPAddr addr_){
-        if (addr_.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
+        if (addr_.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr_.to_nl()); }
     };
     resolver->resolve("localhost", func);
     resolver->discard_cache("non-exist-host.com");

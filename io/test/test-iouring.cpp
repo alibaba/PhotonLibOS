@@ -56,11 +56,11 @@ static void handle_signal(int sig) {
     LOG_INFO("try to stop test");
     stop_test = true;
 }
-
+/*
 static void ignore_signal(int sig) {
     LOG_INFO("ignore signal `", sig);
 }
-
+*/
 static void show_qps_loop() {
     while (!stop_test) {
         photon::thread_sleep(FLAGS_show_loop_interval);

@@ -199,6 +199,8 @@ xrange_t<uint64_t> xrange(T end)
     return xrange<T>(0, end);
 }
 
+#define FOR_LOOP(N) for (auto i = N; i; --i)
+
 inline uint64_t align_down(uint64_t x, uint64_t alignment)
 {
     return x & ~(alignment - 1);
@@ -291,6 +293,12 @@ constexpr bool unlikely(bool expr) { return __builtin_expect(expr, false); }
 int version_compare(std::string_view a, std::string_view b, int& result);
 int kernel_version_compare(std::string_view dst, int& result);
 void print_stacktrace();
+
+template<typename T, typename P> inline
+T& __reinterpret_cast(P& x) noexcept {
+    auto y = (T*)&x;
+    return *y;
+}
 
 namespace photon {
 

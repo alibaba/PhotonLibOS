@@ -710,6 +710,8 @@ void *(*old_malloc)(size_t size, const void *caller);
 void *my_malloc(size_t size, const void *caller);
 void my_free(void *ptr, const void *caller);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 void malloc_hook() {
     __malloc_hook = my_malloc;
     __free_hook = my_free;
@@ -724,6 +726,7 @@ void init_hook() {
     old_malloc = __malloc_hook;
     old_free = __free_hook;
 }
+#pragma GCC diagnostic pop
 
 void *my_malloc(size_t size, const void *caller) {
     return nullptr;
@@ -944,7 +947,7 @@ std::unique_ptr<char[]> random_block(uint64_t size) {
 void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, fs::IFile* file) {
     vector<std::unique_ptr<char[]>> rand_data;
     file->lseek(0, SEEK_SET);
-    for (auto i = 0; i< test_block_num; i++) {
+    for (uint64_t i = 0; i < test_block_num; i++) {
         rand_data.emplace_back(std::move(random_block(test_block_size)));
         char * buff = rand_data.back().get();
         file->write(buff, test_block_size);
@@ -961,14 +964,14 @@ void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, f
 void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num, const char* test_seq, fs::IFile* file) {
     char data[test_block_size];
     file->lseek(0, SEEK_SET);
-    for (auto i = 0; i< test_block_num; i++) {
+    for (auto i: xrange(test_block_num)) {
         memset(data, test_seq[i], test_block_size);
         file->write(data, test_block_size);
     }
     file->fdatasync();
     file->lseek(0, SEEK_SET);
     char buff[test_block_size];
-    for (auto i = 0; i< test_block_num; i++) {
+    for (uint64_t i = 0; i< test_block_num; i++) {
         file->read(buff, test_block_size);
         memset(data, *(test_seq++), test_block_size);
         EXPECT_EQ(0, memcmp(data, buff, test_block_size));
@@ -1002,7 +1005,7 @@ TEST(XFile, fixed_size_linear_file_basic) {
     const uint64_t test_block_size = 3986;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_fixed_size_linear_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
     }
     std::unique_ptr<IFile> xf(new_fixed_size_linear_file(test_block_size, lf, test_file_num, true));
@@ -1037,7 +1040,7 @@ TEST(XFile, linear_file_basic) {
     for (auto x : test_file_size) file_max_limit += x;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_linear_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
         lf[i]->ftruncate(test_file_size[i]);
     }
@@ -1073,7 +1076,7 @@ TEST(XFile, stripe_file_basic) {
     const uint64_t test_block_size = 128;
     std::unique_ptr<IFileSystem> fs(new_localfs_adaptor("/tmp/"));
     IFile* lf[test_file_num];
-    for (int i=0;i<test_file_num;i++) {
+    for (auto i: xrange(test_file_num)) {
         lf[i] = (fs->open(("test_stripe_file_" + std::to_string(i)).c_str(), O_RDWR | O_CREAT, 0666));
         lf[i]->ftruncate(test_file_size);
     }
@@ -1308,6 +1311,7 @@ TEST(range_split_vi, special_case) {
                 &kp[0],
                 kp.size()
         );
+        (void)iovsplit;
         cnt++;
         ASSERT_LT(1, cnt);
     }
@@ -1340,6 +1344,7 @@ TEST(Walker, basic) {
   DEFER(delete srcFs);
 
   for (auto file : enumerable(Walker(srcFs, ""))) {
+    (void)file;
     EXPECT_FALSE(true);
   }
 

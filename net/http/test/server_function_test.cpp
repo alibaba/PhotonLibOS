@@ -139,10 +139,14 @@ void test_case(Client* client, estring_view url, off_t st, size_t len, size_t ex
         char buf[4096];
         ret = op->resp.read(buf, 4096);
         EXPECT_EQ(exp_content_length, ret);
-        if (st >= fs_handler_std_str.size()) st = fs_handler_std_str.size() - 1;
-        if (st + len > fs_handler_std_str.size()) len = fs_handler_std_str.size() - st;
-        EXPECT_EQ(true, std::string(fs_handler_std_str.data() + st, exp_content_length) ==
-                        std::string(buf, exp_content_length));
+        if ((size_t)st >= fs_handler_std_str.size())
+            st = fs_handler_std_str.size() - 1;
+        if ((size_t)st + len > fs_handler_std_str.size())
+            len = fs_handler_std_str.size() - st;
+        auto cont = fs_handler_std_str.data() + st;
+        std::string_view x(cont, exp_content_length);
+        std::string_view y(buf, exp_content_length);
+        EXPECT_EQ(x, y);
     }
 }
 
@@ -218,7 +222,7 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
     LOG_INFO("req:", std::string_view(recv, len));
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
-    auto offset = 0;
+    size_t offset = 0;
     rec.clear();
     while (offset < std_data_size) {
         auto remain = std_data_size - offset;

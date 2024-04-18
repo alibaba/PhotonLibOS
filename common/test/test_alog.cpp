@@ -408,8 +408,8 @@ void test_defer()
 
 TEST(test, test)
 {
-    char asdf[20];
-//  int qwer[LEN(asdf)];
+//    char asdf[20];
+//    int qwer[LEN(asdf)];
 //    vector<int> uio;      // should not compile! to avoid misuse
 //    auto len = LEN(uio);
 

@@ -88,7 +88,7 @@ TEST(ipv6, dns_lookup) {
 class DualStackTest : public ::testing::Test {
 public:
     void run() {
-        auto server = photon::net::new_tcp_socket_server_ipv6();
+        auto server = photon::net::new_tcp_socket_server();
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
 

@@ -74,21 +74,21 @@ TEST(UDP, uds) {
 
     EXPECT_EQ(0, s1->bind(uds_path));
     char path[1024] = {};
-    socklen_t pathlen = s1->getsockname(path, 1024);
+    int ret = s1->getsockname(path, sizeof(path));
+    EXPECT_EQ(ret, 0);
     LOG_INFO("Bind at ", path);
 
     EXPECT_EQ(0, s2->connect(path));
     ASSERT_EQ(6, s2->send("Hello", 6));
     char buf[4096];
-    ASSERT_EQ(6, s1->recv(buf, 4096));
+    ASSERT_EQ(6, s1->recv(buf, sizeof(buf)));
     EXPECT_STREQ("Hello", buf);
 
     auto s3 = new_uds_datagram_socket();
     DEFER(delete s3);
     ASSERT_EQ(6, s3->sendto("Hello", 6, uds_path));
-    pathlen = 1024;
     memset(path, 0, sizeof(path));
-    ASSERT_EQ(6, s1->recvfrom(buf, 4096, path, sizeof(path)));
+    ASSERT_EQ(6, s1->recvfrom(buf, sizeof(buf), path, sizeof(path)));
     LOG_INFO(VALUE(path));
     EXPECT_STREQ("Hello", buf);
 }
@@ -111,7 +111,8 @@ TEST(UDP, uds_huge_datag) {
 
     EXPECT_EQ(0, s1->bind(uds_path));
     char path[1024] = {};
-    socklen_t pathlen = s1->getsockname(path, 1024);
+    int ret = s1->getsockname(path, 1024);
+    EXPECT_EQ(ret, 0);
     LOG_INFO("Bind at ", path);
 
     constexpr static size_t msgsize = 63 * 1024;  // more data returned failure

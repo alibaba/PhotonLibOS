@@ -269,6 +269,7 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
 
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
+/*
 static int digtal_num(int n) {
     int ret = 0;
     do {
@@ -277,6 +278,7 @@ static int digtal_num(int n) {
     } while (n);
     return ret;
 }
+*/
 void chunked_send(int offset, int size, ISocketStream* sock) {
     char s[10];
     auto len = snprintf(s, sizeof(s), "%x\r\n", size);
@@ -296,7 +298,7 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
     EXPECT_GT(len, 0);
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
-    auto offset = 0;
+    size_t offset = 0;
     rec.clear();
     while (offset < std_data_size) {
         auto remain = std_data_size - offset;
@@ -451,7 +453,7 @@ TEST(http_client, debug) {
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
     EXPECT_TRUE(buf == std_data);
-    for (int i = 0; i < buf.size(); i++) {
+    for (auto i: xrange(buf.size())) {
         if (buf[i] != std_data[i]) {
             LOG_ERROR("first occurrence of difference at: ", i);
             break;

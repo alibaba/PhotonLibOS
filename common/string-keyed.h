@@ -325,7 +325,7 @@ public:
     const_iterator end() const
     {
         auto it = base::end();
-        return (B_IT&)it;
+        return __reinterpret_cast<B_IT>(it);
     }
     iterator end()
     {
@@ -351,10 +351,16 @@ public:
     {
         return find(k)->second;
     }
+    template<typename T, typename P>
+    T& __reinterpret_cast(P& x) const {
+        static_assert(sizeof(P) == sizeof(T), "...");
+        auto y = (T*)&x;
+        return *y;
+    }
     const_iterator find ( const key_type& k ) const
     {
         auto it = base::find((const skvm&)k);
-        return (B_IT&)it;
+        return __reinterpret_cast<B_IT>(it);
     }
     iterator find ( const key_type& k )
     {
@@ -368,7 +374,8 @@ public:
     std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
     {
         auto r = base::equal_range((const skvm&)k);
-        return {(B_IT&) r.first, (B_IT&) r.second};
+        return {__reinterpret_cast<B_IT>(r.first),
+                __reinterpret_cast<B_IT>(r.second)};
     }
     std::pair<iterator, bool> emplace (const key_type& k, const mapped_type& v )
     {

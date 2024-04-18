@@ -69,7 +69,7 @@ public:
             it = m_index.emplace_hint(it, r);
             assert(it != m_index.end());
             static_assert(sizeof(it) == sizeof(LockHandle*), "...");
-            return (LockHandle*&)it;
+            return __reinterpret_cast<LockHandle*>(it);
         }
     }
 
@@ -87,7 +87,7 @@ public:
         if (!h) return -1;
         range_t r1(offset, length);
         SCOPED_LOCK(m_lock);
-        auto it = (iterator&)h;
+        auto it = __reinterpret_cast<iterator>(h);
         auto r0 = (range_t*) &*it;
         if ((r1.offset < r0->offset && r1.offset < prev_end(it)) ||
             (r1.end()  > it->end()  && r1.end()  > next_offset(it)))
@@ -100,7 +100,7 @@ public:
     void unlock(LockHandle* h)
     {
         SCOPED_LOCK(m_lock);
-        auto it = (iterator&)h;
+        auto it = __reinterpret_cast<iterator>(h);
         m_index.erase(it);
     }
 
@@ -146,6 +146,12 @@ protected:
     uint64_t prev_end(iterator it)
     {
         return (it == m_index.begin()) ? 0 : (--it)->end();
+    }
+    template<typename T, typename P>
+    T& __reinterpret_cast(P& x) {
+        static_assert(sizeof(P) == sizeof(T), "...");
+        auto y = (T*)&x;
+        return *y;
     }
 };
 

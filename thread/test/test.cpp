@@ -1116,7 +1116,7 @@ void* test_smp_cvar_recver(void* args_)
             thread_yield();
             SCOPED_LOCK(args->mutex);
             int ret = args->cvar.wait(args->mutex);
-            assert(ret == 0);
+            EXPECT_EQ(ret, 0);
             args->recvd++;
         }
         if (args->senders == 0) break;

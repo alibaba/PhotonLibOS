@@ -872,8 +872,8 @@ TEST(estring, test)
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
-    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
-    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+    EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
+    EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
@@ -920,7 +920,8 @@ TEST(retval, basic) {
     EXPECT_EQ(rvs[2], -1234);
     EXPECT_EQ(rvs[3], -5234);
 
-    for (int i = 0; i < LEN(rvs); ++i) {
+    for (auto i: xrange(LEN(rvs))) {
+        static_assert(std::is_same<decltype(i), size_t>::value, "...");
         auto ret = foo(i);
         LOG_DEBUG("got ", ret);
         EXPECT_EQ(ret, rvs[i]);

@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
 #include <photon/net/basic_socket.h>
+#include <photon/common/utility.h>
 
 DEFINE_uint64(client_thread_num, 8, "client thread number");
 DEFINE_uint64(server_thread_num, 8, "server thread number");
@@ -76,8 +77,8 @@ static int client(int client_index) {
 
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
 
-    for (int server_index = 0; server_index < FLAGS_server_thread_num; ++server_index) {
-        photon::thread_create11(do_write, server_index);
+    for (auto i: xrange(FLAGS_server_thread_num)) {
+        photon::thread_create11(do_write, i);
     }
     photon::thread_sleep(-1);
     return 0;
@@ -117,7 +118,7 @@ static void server(int server_index) {
                 for (int i = 0; i < num_events; ++i) {
                     int fd = (int) (uintptr_t) data[i];
                     ssize_t n = photon::net::read_n(fd, buf, sizeof(buf));
-                    if (n != sizeof(buf))
+                    if (n != (ssize_t)sizeof(buf))
                         exit(1);
                     qps++;
                 }
@@ -129,7 +130,7 @@ static void server(int server_index) {
         char buf[FLAGS_buf_size];
         while (true) {
             ssize_t n = photon::net::read_n(_conn_fd, buf, sizeof(buf));
-            if (n != sizeof(buf))
+            if (n != (ssize_t)sizeof(buf))
                 exit(1);
             qps++;
         }
@@ -161,14 +162,14 @@ int main(int argc, char** arg) {
 
     if (Mode(FLAGS_mode) == Mode::Standalone || Mode(FLAGS_mode) == Mode::Server) {
         photon::thread_create11(run_qps_loop);
-        for (int i = 0; i < FLAGS_server_thread_num; ++i) {
+        for (auto i: xrange(FLAGS_server_thread_num)) {
             std::thread(server, i).detach();
         }
     }
 
     if (Mode(FLAGS_mode) == Mode::Standalone || Mode(FLAGS_mode) == Mode::Client) {
         photon::thread_sleep(1);
-        for (int i = 0; i < FLAGS_client_thread_num; ++i) {
+        for (auto i: xrange(FLAGS_client_thread_num)) {
             std::thread(client, i).detach();
         }
     }
