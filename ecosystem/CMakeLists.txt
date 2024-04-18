@@ -3,13 +3,17 @@
 
 include(FetchContent)
 
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0") 
+    # set DOWNLOAD_EXTRACT_TIMESTAMP ON cmake 3.24 or above
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 # Rapidjson
 FetchContent_Declare(
     rapidjson
-    URL ${PHOTON_RAPIDJSON_SOURCE}
-    URL_HASH SHA256=8e00c38829d6785a2dfb951bb87c6974fa07dfe488aa5b25deec4b8bc0f6a3ab
-    PATCH_COMMAND patch -p1 < ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidjson.patch
-    DOWNLOAD_EXTRACT_TIMESTAMP ON
+    GIT_REPOSITORY ${PHOTON_RAPIDJSON_GIT}
+    GIT_TAG v1.1.0
+    PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidjson.patch
     UPDATE_DISCONNECTED 1)
 # Pre-set rapidjson build option, prevent building docs, examples and tests
 set(RAPIDJSON_BUILD_DOC OFF CACHE BOOL "Build rapidjson documentation.")
@@ -24,7 +28,6 @@ FetchContent_Declare(
     URL ${PHOTON_RAPIDXML_SOURCE}
     URL_HASH
         SHA256=c3f0b886374981bb20fabcf323d755db4be6dba42064599481da64a85f5b3571
-    DOWNLOAD_EXTRACT_TIMESTAMP ON
     UPDATE_DISCONNECTED 1)
 FetchContent_MakeAvailable(rapidxml)
 message(STATUS "Rapidxml source dir: ${rapidxml_SOURCE_DIR}")
@@ -39,6 +42,12 @@ FetchContent_Declare(
     DOWNLOAD_NO_EXTRACT 1
     UPDATE_DISCONNECTED 1)
 FetchContent_MakeAvailable(rapidyaml)
+if (CMAKE_VERSION VERSION_LESS "3.18.0")
+    # Before 3.18, CMake will not copy single header file to src directory
+    file(COPY
+        ${FETCHCONTENT_BASE_DIR}/rapidyaml-subbuild/rapidyaml-populate-prefix/src/rapidyaml-0.5.0.hpp
+        DESTINATION ${rapidyaml_SOURCE_DIR})
+endif()
 message(STATUS "Rapidyaml source dir: ${rapidyaml_SOURCE_DIR}")
 
 # cpp-redis
@@ -47,7 +56,6 @@ FetchContent_Declare(
     URL ${PHOTON_CPP_REDIS_SOURCE}
     URL_HASH
         SHA256=3859289d8254685fc775bda73de03dad27df923423b8ceb375b02d036c03b02f
-    DOWNLOAD_EXTRACT_TIMESTAMP ON
     UPDATE_DISCONNECTED 1)
 # uses only a simple header, so do not add sub directory to avoid unnecessary build
 # do not use FetchContent_MakeAvailable, just populate it.
