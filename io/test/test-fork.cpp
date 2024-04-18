@@ -16,7 +16,10 @@ limitations under the License.
 
 #include <unistd.h>
 #include <sys/wait.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 #include <thread>
 #include <fcntl.h>
 

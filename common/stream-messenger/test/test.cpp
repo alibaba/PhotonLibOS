@@ -18,7 +18,10 @@ limitations under the License.
 #include <memory>
 #include <algorithm>
 #include <string>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 #include <photon/thread/thread.h>
 #include <photon/common/memory-stream/memory-stream.h>
 #include <photon/common/utility.h>

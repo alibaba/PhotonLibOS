@@ -15,7 +15,10 @@ limitations under the License.
 */
 
 #include <fcntl.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 
 #include <photon/fs/async_filesystem.h>
 #include <photon/fs/exportfs.h>

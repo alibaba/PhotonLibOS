@@ -26,7 +26,10 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 using namespace photon;
 
 

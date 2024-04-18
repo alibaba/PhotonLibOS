@@ -30,8 +30,11 @@ limitations under the License.
 
 #include <thread>
 #include <gmock/gmock.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
 #include <gtest/gtest-spi.h>
+#pragma GCC diagnostic pop
 #ifdef __linux__
 #include <malloc.h>
 #endif

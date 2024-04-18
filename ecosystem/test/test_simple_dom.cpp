@@ -22,7 +22,10 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <algorithm>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 

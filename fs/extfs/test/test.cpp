@@ -27,7 +27,10 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 
 #define FILE_SIZE (2 * 1024 * 1024)
 
@@ -42,26 +45,15 @@ void print_stat(const char *path, struct stat *st) {
     printf("Modify: %s", asctime(localtime(&(st->st_mtim.tv_sec))));
     printf("Change: %s", asctime(localtime(&(st->st_ctim.tv_sec))));
 */
+#define KV(k, v) make_named_value(#k, v)
     LOG_INFO(VALUE(path));
-    auto Size = st->st_size;
-    auto Blocks = st->st_blocks;
-    auto BlkSize = st->st_blksize;
-    auto Type = IFTODT(st->st_mode);
-    LOG_INFO(VALUE(Size), VALUE(Blocks), VALUE(BlkSize), VALUE(Type));
-    auto Device = HEX(st->st_dev);
-    auto Inode = st->st_ino;
-    auto Links = st->st_nlink;
-    LOG_INFO(VALUE(Device), VALUE(Inode), VALUE(Links));
-    auto Uid = st->st_uid;
-    auto Gid = st->st_gid;
-    auto Access = OCT(st->st_mode & 0xFFF);
-    LOG_INFO(VALUE(Access), VALUE(Uid), VALUE(Gid));
-    auto AccessTime = asctime(localtime(&(st->st_atim.tv_sec)));
-    LOG_INFO(VALUE(AccessTime));
-    auto ModifyTime = asctime(localtime(&(st->st_mtim.tv_sec)));
-    LOG_INFO(VALUE(ModifyTime));
-    auto ChangeTime = asctime(localtime(&(st->st_ctim.tv_sec)));
-    LOG_INFO(VALUE(ChangeTime));
+    LOG_INFO(KV(Size, st->st_size), KV(Blocks, st->st_blocks), KV(BlkSize, st->st_blksize), KV(Type, IFTODT(st->st_mode)));
+    LOG_INFO(KV(Device, HEX(st->st_dev)), KV(Inode, st->st_ino), KV(nLinks, st->st_nlink));
+    LOG_INFO(KV(Access, OCT(st->st_mode & 0xFFF)), KV(Uid, st->st_uid), KV(Gid, st->st_gid));
+    LOG_INFO(KV(AccessTime, asctime(localtime(&(st->st_atim.tv_sec)))));
+    LOG_INFO(KV(ModifyTime, asctime(localtime(&(st->st_mtim.tv_sec)))));
+    LOG_INFO(KV(ChangeTime, asctime(localtime(&(st->st_ctim.tv_sec)))));
+#undef KV
 }
 
 photon::fs::IFile *new_file(photon::fs::IFileSystem *fs, const char *path) {

@@ -19,7 +19,10 @@ limitations under the License.
 #include <fcntl.h>
 #include <unordered_map>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Werror=sign-compare"
 #include <gtest/gtest.h>
+#pragma GCC diagnostic pop
 #include <gflags/gflags.h>
 
 #include <photon/io/fd-events.h>
