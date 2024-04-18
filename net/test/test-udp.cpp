@@ -27,7 +27,7 @@ using namespace photon;
 using namespace net;
 
 constexpr char uds_path[] = "udsudptest.sock";
-constexpr size_t uds_len = sizeof(uds_path) - 1;
+// constexpr size_t uds_len = sizeof(uds_path) - 1;
 
 TEST(UDP, basic) {
     auto s1 = new_udp_socket();

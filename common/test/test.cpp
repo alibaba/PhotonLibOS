@@ -955,7 +955,7 @@ void basic_map_test(T &test_map) {
     char xname[1000];
     auto p = test_map.begin();
     for (int i = 200000; i < 300000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(p, make_pair(xname, s));
         ASSERT_EQ(test_map.size(), i/2+1);
@@ -963,7 +963,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 300000; i < 400000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map[xname] = s;
         EXPECT_EQ(test_map[xname], s);
@@ -972,7 +972,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 400000; i < 500000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(pair<string_view, string_view>{xname, s});
         EXPECT_EQ(test_map.size(), i/2+1);
@@ -1088,7 +1088,7 @@ TEST(string_key, unordered_map_string_key) {
         std::string s = std::to_string(i);
         // string_view view(s);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // std::pair<const std::string_view, int> pr = make_pair(string_view(s), i);
         // unordered_map_string_key<int>::value_type x = make_pair(s, i);
         const std::pair<string, int> x = make_pair(s, i);//{s, i};
@@ -1101,7 +1101,7 @@ TEST(string_key, unordered_map_string_key) {
         //std::string
         std::string s = std::to_string(i);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // string_key k(s);
         // string_view view(s);
         string_view sv(chars);

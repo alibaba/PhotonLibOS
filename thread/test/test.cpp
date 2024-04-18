@@ -116,7 +116,7 @@ void print_heap(SleepQueue& sleepq)
     LOG_INFO("    ");
     int i = 0, k = 1;
     for (auto it : sleepq.q) {
-        printf("%lu(%d)", it->ts_wakeup, it->idx);
+        printf("%lu(%d)", (unsigned long)it->ts_wakeup, it->idx);
         i++;
         if (i == k) {
             printf("\n");
@@ -143,7 +143,7 @@ void sleepq_perf(SleepQueue& sleepq, const vector<photon::thread*>& items)
     check(sleepq);
 
     auto pops = items;
-    random_shuffle(pops.begin(), pops.end());
+    shuffle(pops.begin(), pops.end());
     pops.resize(pops.size()/2);
     {
         update_now();
@@ -1348,7 +1348,7 @@ TEST(workpool, async_work_lambda) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([i, r]() {
+            new auto ([r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1374,7 +1374,7 @@ TEST(workpool, async_work_lambda_threadcreate) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1403,7 +1403,7 @@ TEST(workpool, async_work_lambda_threadpool) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1441,7 +1441,7 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);

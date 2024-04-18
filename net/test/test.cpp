@@ -171,8 +171,8 @@ public:
     }
     int get_log_file_fd() override { return -1; }
 
-    uint64_t set_throttle(uint64_t) { return -1; }
-    uint64_t get_throttle() { return -1; }
+    uint64_t set_throttle(uint64_t) override { return -1; }
+    uint64_t get_throttle() override { return -1; }
 
     void destruct() override {}
 } log_output_test;

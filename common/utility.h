@@ -19,6 +19,8 @@ limitations under the License.
 #include <cstddef>
 #include <type_traits>
 #include <utility>
+#include <random>
+#include <algorithm>
 #include "string_view.h"
 // #include <string>
 
@@ -151,7 +153,7 @@ struct xrange_t
         }
         bool operator == (const iterator& rhs) const
         {
-            return _xrange == rhs._xrange && (i == rhs.i || (i >= _xrange->_end && rhs.i >= _xrange->_end));
+            return _xrange == rhs._xrange && i == rhs.i;
         }
         bool operator != (const iterator& rhs) const
         {
@@ -173,19 +175,16 @@ struct xrange_t
 // xrange() function of Python
 // usage: for (auto i: xrange(2, 8)) { ... }
 
-template<typename T, ENABLE_IF(std::is_signed<T>::value)>
-xrange_t<int64_t> xrange(T begin, T end, int64_t step = 1)
-{
+template<typename T> inline
+xrange_t<T> xrange(T begin, T end, int64_t step = 1) {
     static_assert(std::is_integral<T>::value, "...");
-    return xrange_t<int64_t>{begin, end, step};
+    assert(begin < end && (end - begin) % step == 0);
+    return xrange_t<T>{begin, end, step};
 }
 
-template<typename T, ENABLE_IF(std::is_signed<T>::value)>
-xrange_t<int64_t> xrange(T end)
-{
-    return xrange<T>(0, end);
-}
-
+template<typename T> inline
+xrange_t<T> xrange(T end) { return xrange<T>(0, end); }
+/*
 template<typename T, ENABLE_IF(!std::is_signed<T>::value)>
 xrange_t<uint64_t> xrange(T begin, T end, int64_t step = 1)
 {
@@ -198,8 +197,16 @@ xrange_t<uint64_t> xrange(T end)
 {
     return xrange<T>(0, end);
 }
+*/
 
 #define FOR_LOOP(N) for (auto i = N; i; --i)
+
+template< class RandomIt> inline
+void shuffle( RandomIt first, RandomIt last) {
+    std::random_device rd;
+    std::mt19937 g(rd());
+    return std::shuffle(first, last, g);
+}
 
 inline uint64_t align_down(uint64_t x, uint64_t alignment)
 {

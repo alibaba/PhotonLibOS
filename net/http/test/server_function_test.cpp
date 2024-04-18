@@ -163,8 +163,10 @@ void test_head_case(Client* client, estring_view url, off_t st, size_t len, size
     else
         EXPECT_EQ(200, op->resp.status_code());
     char range[64];
-    auto range_len = snprintf(range, 64, "bytes %lu-%lu/%lu", st, st + len - 1, fs_handler_std_str.size());
-    std::string rangestr(op->resp.headers["Content-Range"]);
+    auto range_len = snprintf(range, sizeof(range), "bytes %lu-%lu/%lu",
+        (unsigned long)st, (unsigned long)(st + len - 1),
+        (unsigned long)fs_handler_std_str.size());
+    auto rangestr = op->resp.headers["Content-Range"];
     EXPECT_EQ(0, memcmp(range, rangestr.data(), range_len));
 }
 

@@ -941,14 +941,14 @@ std::unique_ptr<char[]> random_block(uint64_t size) {
     while (size--) {
         *(p++) = rand() % UCHAR_MAX;
     }
-    return std::move(buff);
+    return buff;
 }
 
 void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, fs::IFile* file) {
     vector<std::unique_ptr<char[]>> rand_data;
     file->lseek(0, SEEK_SET);
     for (uint64_t i = 0; i < test_block_num; i++) {
-        rand_data.emplace_back(std::move(random_block(test_block_size)));
+        rand_data.emplace_back(random_block(test_block_size));
         char * buff = rand_data.back().get();
         file->write(buff, test_block_size);
     }
