@@ -32,12 +32,12 @@ static Value& get_v1() {
     static thread_local Value v1(1);
     return v1;
 }
-/*
+
 static Value& get_v4() {
     static thread_local Value v4(4);
     return v4;
 }
-*/
+
 struct GlobalEnv {
     GlobalEnv() {
         printf("Construct GlobalEnv\n");
@@ -46,8 +46,8 @@ struct GlobalEnv {
 
     ~GlobalEnv() {
         printf("Destruct GlobalEnv\n");
-        assert(get_v1().m_val == -1);
-        assert(get_v4().m_val == 4);
+        EXPECT_EQ(get_v1().m_val, -1);
+        EXPECT_EQ(get_v4().m_val, 4);
     }
     static thread_local Value v3;
 };
