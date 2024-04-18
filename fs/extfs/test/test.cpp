@@ -32,6 +32,7 @@ limitations under the License.
 #define FILE_SIZE (2 * 1024 * 1024)
 
 void print_stat(const char *path, struct stat *st) {
+/*
     printf("File: %s\n", path);
     printf("Size: %d, Blocks: %d, IO Blocks: %d, Type: %d\n", st->st_size, st->st_blocks, st->st_blksize, IFTODT(st->st_mode));
     printf("Device: %u/%u, Inode: %d, Links: %d, Device type: %u,%u\n",
@@ -40,6 +41,27 @@ void print_stat(const char *path, struct stat *st) {
     printf("Access: %s", asctime(localtime(&(st->st_atim.tv_sec))));
     printf("Modify: %s", asctime(localtime(&(st->st_mtim.tv_sec))));
     printf("Change: %s", asctime(localtime(&(st->st_ctim.tv_sec))));
+*/
+    LOG_INFO(VALUE(path));
+    auto Size = st->st_size;
+    auto Blocks = st->st_blocks;
+    auto BlkSize = st->st_blksize;
+    auto Type = IFTODT(st->st_mode);
+    LOG_INFO(VALUE(Size), VALUE(Blocks), VALUE(BlkSize), VALUE(Type));
+    auto Device = HEX(st->st_dev);
+    auto Inode = st->st_ino;
+    auto Links = st->st_nlink;
+    LOG_INFO(VALUE(Device), VALUE(Inode), VALUE(Links));
+    auto Uid = st->st_uid;
+    auto Gid = st->st_gid;
+    auto Access = OCT(st->st_mode & 0xFFF);
+    LOG_INFO(VALUE(Access), VALUE(Uid), VALUE(Gid));
+    auto AccessTime = asctime(localtime(&(st->st_atim.tv_sec)));
+    LOG_INFO(VALUE(AccessTime));
+    auto ModifyTime = asctime(localtime(&(st->st_mtim.tv_sec)));
+    LOG_INFO(VALUE(ModifyTime));
+    auto ChangeTime = asctime(localtime(&(st->st_ctim.tv_sec)));
+    LOG_INFO(VALUE(ChangeTime));
 }
 
 photon::fs::IFile *new_file(photon::fs::IFileSystem *fs, const char *path) {
