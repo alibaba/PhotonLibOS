@@ -27,7 +27,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 
 #define FILE_SIZE (2 * 1024 * 1024)
 

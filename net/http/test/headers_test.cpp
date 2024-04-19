@@ -22,7 +22,7 @@ limitations under the License.
 #undef private
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #include <chrono>
 #include <cstddef>

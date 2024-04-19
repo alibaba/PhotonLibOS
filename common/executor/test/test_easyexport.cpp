@@ -23,7 +23,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/executor/executor.h>
 #include <photon/common/executor/easyawaiter.h>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 
 using namespace photon;
 

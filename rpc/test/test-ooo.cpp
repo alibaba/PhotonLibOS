@@ -19,12 +19,14 @@ limitations under the License.
 #include <queue>
 #include <thread>
 #include <algorithm>
+#include "../../test/gtest.h"
+#include <gflags/gflags.h>
+#include <photon/common/alog.h>
 #define private public
 #define protected public
 #include "../out-of-order-execution.cpp"
 #include "../../thread/thread.cpp"
 #include <photon/thread/thread11.h>
-#include "../../tools/gtest.h"
 
 using namespace std;
 using namespace photon;

@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <openssl/ssl.h>
-#include <gtest/gtest.h>
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>
@@ -26,6 +25,7 @@ limitations under the License.
 #include <photon/net/http/message.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
+#include "../../../test/gtest.h"
 #include "to_url.h"
 
 #include "../../test/cert-key.cpp"

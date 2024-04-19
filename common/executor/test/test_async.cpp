@@ -26,7 +26,7 @@ limitations under the License.
 #include <immintrin.h>
 #include <chrono>
 #include <thread>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 
 using namespace photon;
 

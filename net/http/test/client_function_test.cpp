@@ -38,7 +38,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 #include "to_url.h"
 
 using namespace photon::net;

@@ -21,7 +21,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
-#include "../../tools/gtest.h"
+#include "../../test/gtest.h"
 
 
 struct map_value : photon::rpc::Message {

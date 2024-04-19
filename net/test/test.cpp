@@ -121,7 +121,7 @@ void tcp_client() {
     LOG_DEBUG(VALUE(sock), VALUE(errno));
     EndPoint epget = sock->getpeername();
     LOG_DEBUG("Connected `", epget);
-    EXPECT_TRUE(ep.port = epget.port);
+    EXPECT_EQ(ep.port, epget.port);
     char buff[] = "Hello";
     char recv[256];
     sock->send("Hello", 5);

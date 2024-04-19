@@ -4,7 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 
 #ifndef DATA_DIR
 #define DATA_DIR ""

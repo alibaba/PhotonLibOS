@@ -22,7 +22,7 @@ limitations under the License.
 #include <photon/common/memory-stream/memory-stream.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 using namespace std;
 using namespace photon;
 using namespace StreamMessenger;
