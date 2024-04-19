@@ -63,7 +63,7 @@ public:
             return new (ptr) Operation(c, buf_size);
         }
         void destroy() {
-            Operation::~Operation();
+            this->~Operation();
             free(this);
         }
         void set_enable_proxy(bool enable) { enable_proxy = enable; }
