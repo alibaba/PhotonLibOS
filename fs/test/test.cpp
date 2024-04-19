@@ -57,6 +57,8 @@ using namespace std;
 using namespace photon;
 using namespace photon::fs;
 
+#pragma GCC diagnostic ignored "-Wsign-compare"
+
 TEST(Path, split)
 {
     static const char* paths[]={
