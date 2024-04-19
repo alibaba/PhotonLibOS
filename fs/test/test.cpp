@@ -165,7 +165,7 @@ TEST(Tree, node)
     node.creat(k1234, (void*)1234);
     node.creat(k1234, (void*)2345);
     node.creat(k1234, v1234);
-    EXPECT_EQ(node.size(), 5);
+    EXPECT_EQ(node.size(), 5ul);
 
     for (auto x: subnodes)
         node.mkdir(x);
@@ -746,8 +746,8 @@ TEST(range_split, sub_range)
     EXPECT_FALSE(sr);
     sr.assign(0, 233, 1024);
     EXPECT_TRUE(sr);
-    EXPECT_EQ(233, sr.begin());
-    EXPECT_EQ(233+1024, sr.end());
+    EXPECT_EQ(233ul, sr.begin());
+    EXPECT_EQ(233ul+1024ul, sr.end());
     sr.clear();
     EXPECT_FALSE(sr);
     sr.assign(1, 233, 1024);
