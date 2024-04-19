@@ -27,6 +27,10 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include "../../test/gtest.h"
 
+#if __GNUC__ > 11
+#pragma GCC diagnostic ignored "-Wmismatched-dealloc"
+#endif
+
 bool exit_flag = false;
 bool exit_normal = false;
 
