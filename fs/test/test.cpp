@@ -812,7 +812,7 @@ TEST(range_split, range_split_aligned_case)
     EXPECT_EQ(12ul, p.end()->i);
     EXPECT_EQ(352ul, split.aligned_length());
     auto q = split.aligned_parts();
-    int cnt = 1;
+    uint64_t cnt = 1;
     for (auto &rs: q) {
         EXPECT_EQ(cnt++, rs.i);
         EXPECT_EQ(0ul, rs.begin());
@@ -981,7 +981,7 @@ void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num
 void xfile_fstat_test(uint64_t fsize, fs::IFile* file) {
     struct stat st;
     file->fstat(&st);
-    EXPECT_EQ(fsize, st.st_size);
+    EXPECT_EQ(fsize, (uint64_t)st.st_size);
 }
 
 void xfile_not_impl_test(fs::IFile* file) {
