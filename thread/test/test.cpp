@@ -23,7 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <sys/time.h>
 #include <gflags/gflags.h>
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 
 #define private public
 
