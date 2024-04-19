@@ -19,19 +19,12 @@ limitations under the License.
 #include <queue>
 #include <thread>
 #include <algorithm>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
-#include <gflags/gflags.h>
-#include <photon/common/alog.h>
-
 #define private public
 #define protected public
 #include "../out-of-order-execution.cpp"
 #include "../../thread/thread.cpp"
 #include <photon/thread/thread11.h>
+#include "../../tools/gtest.h"
 
 using namespace std;
 using namespace photon;

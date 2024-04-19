@@ -16,7 +16,6 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <time.h>
-#include <gtest/gtest.h>
 #include <netinet/tcp.h>
 
 #include <chrono>
@@ -39,6 +38,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
+#include "../../test/gtest.h"
 #include "to_url.h"
 
 using namespace photon::net;

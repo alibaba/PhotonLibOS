@@ -30,11 +30,6 @@ limitations under the License.
 
 #include <thread>
 #include <gmock/gmock.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
-#pragma GCC diagnostic pop
 #ifdef __linux__
 #include <malloc.h>
 #endif
@@ -55,7 +50,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
-
+#include "../../test/gtest.h"
 #include "mock.h"
 
 using namespace std;

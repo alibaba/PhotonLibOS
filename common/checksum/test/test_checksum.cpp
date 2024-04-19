@@ -1,14 +1,10 @@
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/common/checksum/crc32c.h>
-
 #include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include "../../test/gtest.h"
 
 #ifndef DATA_DIR
 #define DATA_DIR ""

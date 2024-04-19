@@ -14,10 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <memory>
 #include <string>
 #include <thread>
@@ -26,6 +22,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
 #include <photon/io/fd-events.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 

@@ -21,14 +21,10 @@ limitations under the License.
 
 #undef private
 #undef protected
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/thread/thread.h>
 #include <photon/common/alog.h>
-
 #include <thread>
+#include "../../test/gtest.h"
 
 static int thread_local release_cnt = 0;
 struct ShowOnDtor {

@@ -15,16 +15,13 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
 #include <photon/net/datagram_socket.h>
 #include <photon/thread/thread11.h>
 #include <sys/stat.h>
 #include "cert-key.cpp"
+#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace net;

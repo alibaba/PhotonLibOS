@@ -15,16 +15,13 @@ limitations under the License.
 */
 
 #include <cmath>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/photon.h>
 #include <photon/rpc/rpc.h>
 #include <photon/rpc/serialize.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
+#include "../../tools/gtest.h"
 
 
 struct map_value : photon::rpc::Message {

@@ -19,13 +19,9 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread.h>
-
 #include <csignal>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <gflags/gflags.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace std;

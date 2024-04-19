@@ -17,7 +17,6 @@ limitations under the License.
 #include <fcntl.h>
 #include <time.h>
 
-#include <gtest/gtest.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
 #include <photon/net/socket.h>
@@ -25,7 +24,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/fs/localfs.h>
-
+#include "../../test/gtest.h"
 #include "../server.h"
 #include "to_url.h"
 

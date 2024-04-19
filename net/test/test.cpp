@@ -15,12 +15,7 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <sys/stat.h>
-
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
@@ -30,6 +25,7 @@ limitations under the License.
 #include <photon/net/utils.h>
 #include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../../test/gtest.h"
 
 #define protected public
 #define private public

@@ -1,14 +1,10 @@
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/common/executor/executor.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
-
 #include <thread>
+#include "../../test/gtest.h"
 
 TEST(enter_as_executor, test) {
     // set global default logger output to null

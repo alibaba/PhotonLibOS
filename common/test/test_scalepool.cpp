@@ -22,12 +22,9 @@ limitations under the License.
 #undef protected
 
 #include "../alog.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/thread/thread.h>
 #include <vector>
+#include "../../test/gtest.h"
 
 TEST(IdentityPoolGC, basic) {
     auto pool = new_identity_pool<int>(128);

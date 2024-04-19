@@ -14,17 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
-
 #include <array>
 #include <tuple>
 
 #include "../alog-stdstring.h"
 #include "../alog.h"
 #include "../conststr.h"
+#include "../../test/gtest.h"
 
 DEFINE_ENUM_STR(VERBS, verbs, UNKNOW, DELETE, GET, HEAD, POST, PUT, CONNECT,
                 OPTIONS, TRACE, COPY, LOCK, MKCOL, MOV, PROPFIND, PROPPATCH,

@@ -18,13 +18,7 @@ limitations under the License.
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <gflags/gflags.h>
-
 #include <photon/io/fd-events.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
@@ -36,6 +30,7 @@ limitations under the License.
 #include <photon/io/iouring-wrapper.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
+#include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
 using namespace photon;

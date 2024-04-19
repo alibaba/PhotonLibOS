@@ -20,10 +20,6 @@ limitations under the License.
 #include "../exportfs.cpp"
 
 #include <errno.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <gmock/gmock.h>
 #include <type_traits>
 #include <photon/common/alog.h>
@@ -33,6 +29,7 @@ limitations under the License.
 #include <utime.h>
 #include <sys/time.h>
 #include <sys/sysmacros.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace photon::fs;

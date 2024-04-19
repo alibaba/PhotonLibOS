@@ -45,15 +45,11 @@ limitations under the License.
 #include <memory>
 #include <string>
 //#include <gmock/gmock.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
-#pragma GCC diagnostic pop
 //#include <malloc.h>
 #ifndef __clang__
 #include <gnu/libc-version.h>
 #endif
+#include "../../test/gtest.h"
 
 using namespace std;
 

@@ -27,10 +27,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
+#include "../../test/gtest.h"
 
 #define FILE_SIZE (2 * 1024 * 1024)
 

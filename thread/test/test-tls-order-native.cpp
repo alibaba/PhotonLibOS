@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 #include <thread>
-#include <gtest/gtest.h>
 #include <photon/common/utility.h>
+#include "../../test/gtest.h"
 
 struct Value {
     explicit Value(int val) : m_val(val) {

@@ -19,10 +19,6 @@ limitations under the License.
 #include "../alog-stdstring.h"
 #include "../alog-functionptr.h"
 #include "../alog-audit.h"
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <photon/thread/thread.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils-stdstring.h>
@@ -31,6 +27,7 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "../../test/gtest.h"
 
 class LogOutputTest : public ILogOutput {
 public:

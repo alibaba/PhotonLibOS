@@ -16,13 +16,8 @@ limitations under the License.
 
 #include <unistd.h>
 #include <sys/wait.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#pragma GCC diagnostic pop
 #include <thread>
 #include <fcntl.h>
-
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
@@ -30,6 +25,7 @@ limitations under the License.
 #include <photon/io/signal.h>
 #include <photon/net/curl.h>
 #include <photon/fs/localfs.h>
+#include "../../test/gtest.h"
 
 bool exit_flag = false;
 bool exit_normal = false;

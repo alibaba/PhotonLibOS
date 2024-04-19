@@ -26,19 +26,12 @@ limitations under the License.
 #include <thread>
 #include <chrono>
 #include <fcntl.h>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Werror=sign-compare"
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
-#pragma GCC diagnostic pop
-
-
 #include <photon/common/alog.h>
 #include <photon/fs/filesystem.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread.h>
 #include <photon/fs/localfs.h>
-
+#include "../../test/gtest.h"
 #include "mock.h"
 
 using namespace photon;
