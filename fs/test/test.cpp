@@ -170,14 +170,14 @@ TEST(Tree, node)
     for (auto x: subnodes)
         node.mkdir(x);
 
-    EXPECT_EQ(node.size(), 9);
+    EXPECT_EQ(node.size(), 9ul);
 
     f = F;
     void* v;
     for (auto x: items)
     {
         node.read(x, &v);
-        EXPECT_EQ(v, (void*)f++);
+        EXPECT_EQ(v, (void*)f); f++;
         node.unlink(x);
         EXPECT_FALSE(node.is_file(x));
     }
@@ -760,25 +760,25 @@ TEST(range_split, range_split_simple_case)
     // with abegin, aend as 0, 11
     // 11 parts in total
     EXPECT_FALSE(split.small_note);
-    EXPECT_EQ(42, split.begin);
-    EXPECT_EQ(363, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(2, split.apbegin);
-    EXPECT_EQ(split.apend,11);
-    EXPECT_EQ(32, split.aligned_begin_offset());
-    EXPECT_EQ(384, split.aligned_end_offset());
+    EXPECT_EQ(42ul, split.begin);
+    EXPECT_EQ(363ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(2ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
+    EXPECT_EQ(32ul, split.aligned_begin_offset());
+    EXPECT_EQ(384ul, split.aligned_end_offset());
     auto p = split.all_parts();
-    EXPECT_EQ(1, p.begin()->i);
-    EXPECT_EQ(10, p.begin()->begin());
-    EXPECT_EQ(32, p.begin()->end());
-    EXPECT_EQ(12, p.end()->i);
-    int cnt = 1;
+    EXPECT_EQ(1ul, p.begin()->i);
+    EXPECT_EQ(10ul, p.begin()->begin());
+    EXPECT_EQ(32ul, p.begin()->end());
+    EXPECT_EQ(12ul, p.end()->i);
+    uint64_t cnt = 1;
     for (auto &rs: p) {
         EXPECT_EQ(cnt++, rs.i);
         if (rs != p.begin() && rs != p.end()) {
-            EXPECT_EQ(0, rs.begin());
-            EXPECT_EQ(32, rs.end());
+            EXPECT_EQ(0ul, rs.begin());
+            EXPECT_EQ(32ul, rs.end());
         }
     }
     split = fs::range_split(2, 12, 24);
@@ -796,27 +796,27 @@ TEST(range_split, range_split_aligned_case)
     // it should be split into [begin, end) as [32, 64)+[64, 76) +... +[352,353)
     // with abegin, aend as 0, 11
     // 11 parts in total
-    EXPECT_EQ(32, split.begin);
-    EXPECT_EQ(353, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(1, split.apbegin);
-    EXPECT_EQ(11, split.apend);
+    EXPECT_EQ(32ul, split.begin);
+    EXPECT_EQ(353ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(1ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
     auto p = split.all_parts();
     EXPECT_FALSE(split.is_aligned());
     EXPECT_TRUE(split.is_aligned(128));
     EXPECT_TRUE(split.is_aligned_ptr((const void*)(uint64_t(65536))));
-    EXPECT_EQ(1, p.begin()->i);
-    EXPECT_EQ(0, p.begin()->begin());
-    EXPECT_EQ(32, p.begin()->end());
-    EXPECT_EQ(12, p.end()->i);
-    EXPECT_EQ(352, split.aligned_length());
+    EXPECT_EQ(1ul, p.begin()->i);
+    EXPECT_EQ(0ul, p.begin()->begin());
+    EXPECT_EQ(32ul, p.begin()->end());
+    EXPECT_EQ(12ul, p.end()->i);
+    EXPECT_EQ(352ul, split.aligned_length());
     auto q = split.aligned_parts();
     int cnt = 1;
     for (auto &rs: q) {
         EXPECT_EQ(cnt++, rs.i);
-        EXPECT_EQ(0, rs.begin());
-        EXPECT_EQ(32, rs.end());
+        EXPECT_EQ(0ul, rs.begin());
+        EXPECT_EQ(32ul, rs.end());
     }
     split = fs::range_split(0, 23, 24);
     EXPECT_TRUE(split.postface);
@@ -845,25 +845,25 @@ TEST(range_split_power2, basic) {
         LOG_DEBUG(rs.i, ' ', rs.begin(), ' ', rs.end());
     }
     EXPECT_FALSE(split.small_note);
-    EXPECT_EQ(42, split.begin);
-    EXPECT_EQ(363, split.end);
-    EXPECT_EQ(1, split.abegin);
-    EXPECT_EQ(12, split.aend);
-    EXPECT_EQ(2, split.apbegin);
-    EXPECT_EQ(11, split.apend);
-    EXPECT_EQ(32, split.aligned_begin_offset());
-    EXPECT_EQ(384, split.aligned_end_offset());
+    EXPECT_EQ(42ul, split.begin);
+    EXPECT_EQ(363ul, split.end);
+    EXPECT_EQ(1ul, split.abegin);
+    EXPECT_EQ(12ul, split.aend);
+    EXPECT_EQ(2ul, split.apbegin);
+    EXPECT_EQ(11ul, split.apend);
+    EXPECT_EQ(32ul, split.aligned_begin_offset());
+    EXPECT_EQ(384ul, split.aligned_end_offset());
     auto p = split.all_parts();
-    EXPECT_EQ(p.begin()->i, 1);
-    EXPECT_EQ(p.begin()->begin(), 10);
-    EXPECT_EQ(p.begin()->end(), 32);
-    EXPECT_EQ(p.end()->i, 12);
-    int cnt = 1;
+    EXPECT_EQ(p.begin()->i, 1ul);
+    EXPECT_EQ(p.begin()->begin(), 10ul);
+    EXPECT_EQ(p.begin()->end(), 32ul);
+    EXPECT_EQ(p.end()->i, 12ul);
+    uint64_t cnt = 1;
     for (auto &rs: p) {
         EXPECT_EQ(rs.i, cnt++);
         if (rs != p.begin() && rs != p.end()) {
-            EXPECT_EQ(rs.begin(), 0);
-            EXPECT_EQ(rs.end(), 32);
+            EXPECT_EQ(rs.begin(), 0ul);
+            EXPECT_EQ(rs.end(), 32ul);
         }
     }
 }
@@ -889,15 +889,15 @@ TEST(range_split_vi, basic) {
     uint64_t kp[] = {0, 32, 64, 128, 256, 512, UINT64_MAX};
     fs::range_split_vi split(12, 321, kp, 7);
     uint64_t *it = kp;
-    EXPECT_EQ(12, split.begin);
-    EXPECT_EQ(333, split.end);
-    EXPECT_TRUE(split.is_aligned((uint64_t)0));
-    EXPECT_FALSE(split.is_aligned(1));
-    EXPECT_TRUE(split.is_aligned(128));
+    EXPECT_EQ(12ul, split.begin);
+    EXPECT_EQ(333ul, split.end);
+    EXPECT_TRUE(split.is_aligned(0ul));
+    EXPECT_FALSE(split.is_aligned(1ul));
+    EXPECT_TRUE(split.is_aligned(128ul));
     for (auto p : split.all_parts()) {
         LOG_DEBUG(p.i, ' ', p.begin(), ' ', p.end());
-        EXPECT_EQ(*it == 0?12:0, p.begin());
-        EXPECT_EQ(*it == 256? 321-256+12 :(*(it+1) - *it), p.end());
+        EXPECT_EQ(*it == 0ul ? 12ul : 0ul, p.begin());
+        EXPECT_EQ(*it == 256ul ? 321ul-256ul+12ul : (*(it+1) - *it), p.end());
         it++;
     }
     uint64_t kpfail[] = {0, 32, 796, 128, 256, 512, UINT64_MAX};
@@ -914,14 +914,14 @@ TEST(range_split_vi, left_side_aligned) {
     uint64_t kp[] = {0, 32, 64, 128, 256, 512, UINT64_MAX};
     fs::range_split_vi split(0, 256, kp, 7);
     uint64_t *it = kp;
-    EXPECT_EQ(0, split.begin);
-    EXPECT_EQ(256, split.end);
-    EXPECT_TRUE(split.is_aligned((uint64_t)0));
-    EXPECT_FALSE(split.is_aligned(1));
-    EXPECT_TRUE(split.is_aligned(128));
+    EXPECT_EQ(0ul, split.begin);
+    EXPECT_EQ(256ul, split.end);
+    EXPECT_TRUE(split.is_aligned(0ul));
+    EXPECT_FALSE(split.is_aligned(1ul));
+    EXPECT_TRUE(split.is_aligned(128ul));
     for (auto p : split.all_parts()) {
         LOG_DEBUG(p.i, ' ', p.begin(), ' ', p.end());
-        EXPECT_EQ(0, p.begin());
+        EXPECT_EQ(0ul, p.begin());
         EXPECT_EQ((*(it+1) - *it), p.end());
         it++;
     }
