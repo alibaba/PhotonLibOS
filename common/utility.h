@@ -20,8 +20,6 @@ limitations under the License.
 #include <type_traits>
 #include <assert.h>
 #include <utility>
-#include <random>
-#include <algorithm>
 #include "string_view.h"
 // #include <string>
 
@@ -201,13 +199,6 @@ xrange_t<uint64_t> xrange(T end)
 */
 
 #define FOR_LOOP(N) for (auto i = N; i; --i)
-
-template< class RandomIt> inline
-void shuffle( RandomIt first, RandomIt last) {
-    std::random_device rd;
-    std::mt19937 g(rd());
-    return std::shuffle(first, last, g);
-}
 
 inline uint64_t align_down(uint64_t x, uint64_t alignment)
 {
