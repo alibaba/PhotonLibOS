@@ -46,19 +46,19 @@ int main() {
 // 全局函数
 int func(int a, char* b) {}
 
-// 用全局函数创建协程，thread对象析构时自动Join
+// 用全局函数创建协程，thread对象析构时自动Join，除非调用了detach
 photon_std::thread th(func, 1, '2');
+th.detach();
 
 // 或者使用匿名函数（lambda）
-new photon_std::thread([&] {
-		// 不用传参，可以直接访问局部变量
-	}
-);
+photon_std::thread th([&] {
+    // 直接访问上下文中的变量
+});
 
 // 用类的成员函数创建协程
 class A {
     void f() {
-    auto th = new photon_std::thread(&A::g, this, 1, '2');
+        new photon_std::thread(&A::g, this, 1, '2');
     }
     void g(int a, char* b) {}
 };
@@ -87,17 +87,21 @@ bool condition = false;
 photon_std::mutex mu;
 photon_std::condition_variable cv;
 
-// 生产者协程
-photon_std::lock_guard<photon_std::mutex> lock(mu);
-condition = true;
-cv.notify_one();
-
 // 消费者协程
-auto timeout = std::chrono::duration<std::chrono::seconds>(10);
-photon_std::unique_lock<photon_std::mutex> lock(mu);
-while (!condition) {
-    cv.wait(lock, timeout);
-}
+photon_std::thread([&]{
+    auto timeout = std::chrono::duration<std::chrono::seconds>(10);
+    photon_std::unique_lock<photon_std::mutex> lock(mu);
+    while (!condition) {
+        cv.wait(lock, timeout);
+    }
+}).detach();
+
+// 生产者协程
+photon_std::thread([&]{
+    photon_std::lock_guard<photon_std::mutex> lock(mu);
+    condition = true;
+    cv.notify_one();
+}).detach();
 ```
 
 ### 5. 文件 IO

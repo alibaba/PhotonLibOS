@@ -20,13 +20,13 @@ Currently, there are only two ways in Photon to utilize multiple cores:
 `thread_migrate` could be used to migrate thread to other vCPU.
 
 ```cpp
-new std::thread([&]{
+std::thread([]{
 	photon::init();
 	DEFER(photon::fini());
     
     auto th = photon::thread_create11(func);
     photon::thread_migrate(th, vcpu);
-});
+}).detach();
 ```
 
 ### 2. Use `WorkPool`

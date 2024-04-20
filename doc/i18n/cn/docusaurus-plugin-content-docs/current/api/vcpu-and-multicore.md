@@ -20,13 +20,13 @@ Photon 的 vCPU 的概念等价于 OS 线程。
 可以利用`thread_migrate`将协程迁移到其他vCPU上去
 
 ```cpp
-new std::thread([&]{
+std::thread([&]{
 	photon::init();
 	DEFER(photon::fini());
     
     auto th = photon::thread_create11(func);
     photon::thread_migrate(th, vcpu);
-});
+}).detach();
 ```
 
 ### 2. 使用 `WorkPool`

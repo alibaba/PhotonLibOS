@@ -50,19 +50,19 @@ There are many ways to create a thread. Just like the old ways you use `std::thr
 int func(int a, char* b) {}
 
 // Use global function to create a thread.
-// Will be automatically joined when thread object destructed.
+// Will be automatically joined when thread object destructed, unless been detached.
 photon_std::thread th(func, 1, '2');
+th.detach();
 
 // Create a thread with anonymous function (lambda)
 photon_std::thread th([&] {
-		// Access local variables directly without passing arguments 
-	}
-);
+    // Access variables directly in the context
+});
 
 // Create a thread with class member function
 class A {
     void f() {
-        auto th = new photon_std::thread(&A::g, this, 1, '2');  
+        new photon_std::thread(&A::g, this, 1, '2');
     }
     void g(int a, char* b) {}
 };
@@ -92,17 +92,21 @@ bool condition = false;
 photon_std::mutex mu;
 photon_std::condition_variable cv;
 
-// Producer thread
-photon_std::lock_guard<photon_std::mutex> lock(mu);
-condition = true;
-cv.notify_one();
-
 // Consumer thread
-auto timeout = std::chrono::duration<std::chrono::seconds>(10);
-photon_std::unique_lock<photon_std::mutex> lock(mu);
-while (!condition) {
-    cv.wait(lock, timeout);
-}
+photon_std::thread([&]{
+    auto timeout = std::chrono::duration<std::chrono::seconds>(10);
+    photon_std::unique_lock<photon_std::mutex> lock(mu);
+    while (!condition) {
+        cv.wait(lock, timeout);
+    }
+}).detach();
+
+// Producer thread
+photon_std::thread([&]{
+    photon_std::lock_guard<photon_std::mutex> lock(mu);
+    condition = true;
+    cv.notify_one();
+}).detach();
 ```
 
 ### 5. File IO
