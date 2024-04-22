@@ -576,7 +576,7 @@ bool server_down = false;
 photon::thread* server_thread = nullptr;
 
 void* serve_connection(void* arg) {
-    auto fd = __reinterpret_cast<int>(arg);
+    auto fd = (int)(uint64_t)arg;
     while (true) {
         char buf[1024];
         auto ret = net::read(fd, buf, sizeof(buf));
