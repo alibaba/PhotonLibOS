@@ -472,7 +472,7 @@ public:
         n = std::min(n, tail.load(std::memory_order_acquire) - h);
         if (n == 0) return 0;
         auto first_idx = idx(h);
-        auto last_idx = idx(h + n - 1);
+        auto last_idx = idx(h + n - 1); (void)last_idx;
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
             memcpy(x, &slots[first_idx], sizeof(T) * n);

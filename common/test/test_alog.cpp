@@ -19,7 +19,6 @@ limitations under the License.
 #include "../alog-stdstring.h"
 #include "../alog-functionptr.h"
 #include "../alog-audit.h"
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils-stdstring.h>
@@ -28,6 +27,7 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "../../test/gtest.h"
 
 class LogOutputTest : public ILogOutput {
 public:
@@ -408,8 +408,8 @@ void test_defer()
 
 TEST(test, test)
 {
-    char asdf[20];
-//  int qwer[LEN(asdf)];
+//    char asdf[20];
+//    int qwer[LEN(asdf)];
 //    vector<int> uio;      // should not compile! to avoid misuse
 //    auto len = LEN(uio);
 

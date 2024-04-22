@@ -264,6 +264,10 @@ public:
         mutable bool _has_val = false;
 
         iterator(base_it b_it) : _b_it(b_it) { }
+        iterator(typename base::const_iterator b_it) {
+            auto x = (base_it*) &b_it;
+            _b_it = *x;
+        }
 
         mutable_value_type& _init_val() const {
             if (_has_val) return _val;
@@ -321,11 +325,9 @@ public:
     {
         return base::begin();
     }
-    using B_IT = typename base::iterator;
     const_iterator end() const
     {
-        auto it = base::end();
-        return (B_IT&)it;
+        return {base::end()};
     }
     iterator end()
     {
@@ -353,13 +355,11 @@ public:
     }
     const_iterator find ( const key_type& k ) const
     {
-        auto it = base::find((const skvm&)k);
-        return (B_IT&)it;
+        return {base::find((const skvm&)k)};
     }
     iterator find ( const key_type& k )
     {
-        auto it = base::find((const skvm&)k);
-        return (B_IT&)it;
+        return {base::find((const skvm&)k)};
     }
     size_type count ( const key_type& k ) const
     {
@@ -367,8 +367,7 @@ public:
     }
     std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
     {
-        auto r = base::equal_range((const skvm&)k);
-        return {(B_IT&) r.first, (B_IT&) r.second};
+        return {base::equal_range((const skvm&)k)};
     }
     std::pair<iterator, bool> emplace (const key_type& k, const mapped_type& v )
     {
@@ -437,18 +436,12 @@ public:
     {
         return base::upper_bound((const skvm&)k);
     }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-    using typename base::B_IT;
     const_iterator lower_bound (const key_type& k) const
     {
-        auto it = base::lower_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::lower_bound((const skvm&)k)};
     }
     const_iterator upper_bound (const key_type& k) const
     {
-        auto it = base::upper_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::upper_bound((const skvm&)k)};
     }
-#pragma GCC diagnostic pop
 };

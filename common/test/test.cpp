@@ -45,12 +45,11 @@ limitations under the License.
 #include <memory>
 #include <string>
 //#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
 //#include <malloc.h>
 #ifndef __clang__
 #include <gnu/libc-version.h>
 #endif
+#include "../../test/gtest.h"
 
 using namespace std;
 
@@ -872,8 +871,8 @@ TEST(estring, test)
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
-    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
-    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+    EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
+    EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
@@ -920,7 +919,8 @@ TEST(retval, basic) {
     EXPECT_EQ(rvs[2], -1234);
     EXPECT_EQ(rvs[3], -5234);
 
-    for (int i = 0; i < LEN(rvs); ++i) {
+    for (auto i: xrange(LEN(rvs))) {
+        static_assert(std::is_same<decltype(i), size_t>::value, "...");
         auto ret = foo(i);
         LOG_DEBUG("got ", ret);
         EXPECT_EQ(ret, rvs[i]);
@@ -954,7 +954,7 @@ void basic_map_test(T &test_map) {
     char xname[1000];
     auto p = test_map.begin();
     for (int i = 200000; i < 300000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(p, make_pair(xname, s));
         ASSERT_EQ(test_map.size(), i/2+1);
@@ -962,7 +962,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 300000; i < 400000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map[xname] = s;
         EXPECT_EQ(test_map[xname], s);
@@ -971,7 +971,7 @@ void basic_map_test(T &test_map) {
 
     // LOG_DEBUG("asdf");
     for (int i = 400000; i < 500000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
         auto s = std::string_view(xname).substr(prefix.size());
         test_map.insert(pair<string_view, string_view>{xname, s});
         EXPECT_EQ(test_map.size(), i/2+1);
@@ -1087,7 +1087,7 @@ TEST(string_key, unordered_map_string_key) {
         std::string s = std::to_string(i);
         // string_view view(s);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // std::pair<const std::string_view, int> pr = make_pair(string_view(s), i);
         // unordered_map_string_key<int>::value_type x = make_pair(s, i);
         const std::pair<string, int> x = make_pair(s, i);//{s, i};
@@ -1100,7 +1100,7 @@ TEST(string_key, unordered_map_string_key) {
         //std::string
         std::string s = std::to_string(i);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // string_key k(s);
         // string_view view(s);
         string_view sv(chars);

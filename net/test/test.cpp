@@ -15,10 +15,9 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <sys/stat.h>
-
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
@@ -26,6 +25,7 @@ limitations under the License.
 #include <photon/net/utils.h>
 #include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../../test/gtest.h"
 
 #define protected public
 #define private public
@@ -121,7 +121,7 @@ void tcp_client() {
     LOG_DEBUG(VALUE(sock), VALUE(errno));
     EndPoint epget = sock->getpeername();
     LOG_DEBUG("Connected `", epget);
-    EXPECT_TRUE(ep.port = epget.port);
+    EXPECT_EQ(ep.port, epget.port);
     char buff[] = "Hello";
     char recv[256];
     sock->send("Hello", 5);
@@ -170,8 +170,8 @@ public:
     }
     int get_log_file_fd() override { return -1; }
 
-    uint64_t set_throttle(uint64_t) { return -1; }
-    uint64_t get_throttle() { return -1; }
+    uint64_t set_throttle(uint64_t) override { return -1; }
+    uint64_t get_throttle() override { return -1; }
 
     void destruct() override {}
 } log_output_test;
@@ -576,7 +576,7 @@ bool server_down = false;
 photon::thread* server_thread = nullptr;
 
 void* serve_connection(void* arg) {
-    auto fd = (int&)arg;
+    auto fd = (int)(uint64_t)arg;
     while (true) {
         char buf[1024];
         auto ret = net::read(fd, buf, sizeof(buf));
@@ -727,9 +727,9 @@ TEST(utils, resolver) {
     DEFER(delete resolver);
     net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    if (addr.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr.to_nl());
+    if (addr.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr.to_nl()); }
     auto func = [&](net::IPAddr addr_){
-        if (addr_.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
+        if (addr_.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr_.to_nl()); }
     };
     resolver->resolve("localhost", func);
     resolver->discard_cache("non-exist-host.com");

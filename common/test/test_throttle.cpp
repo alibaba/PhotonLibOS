@@ -1,13 +1,13 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/throttle.h>
 #include <photon/common/utility.h>
 #include <photon/net/socket.h>
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
+#include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
 TEST(Throttle, basic) {

@@ -17,7 +17,6 @@ limitations under the License.
 #include <fcntl.h>
 #include <time.h>
 
-#include <gtest/gtest.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
 #include <photon/net/socket.h>
@@ -25,7 +24,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/fs/localfs.h>
-
+#include "../../../test/gtest.h"
 #include "../server.h"
 #include "to_url.h"
 
@@ -64,7 +63,7 @@ TEST(http_server, headers) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, to_url(tcpserver, "/test"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     auto exp_len = 20;
     op->req.headers.range(0, exp_len - 1);
     op->call();
@@ -105,7 +104,7 @@ TEST(http_server, post) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::POST, to_url(tcpserver, "/test"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.content_length(10);
     std::string body = "1234567890";
     auto writer = [&](Request *req)-> ssize_t {
@@ -126,30 +125,33 @@ std::string fs_handler_std_str = "01234567890123456789";
 void test_case(Client* client, estring_view url, off_t st, size_t len, size_t exp_content_length, bool invalid = false) {
     LOG_INFO("test case start");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.range(st, st + len - 1);
     auto ret = op->call();
     LOG_INFO("call finished");
     EXPECT_EQ(0, ret);
-    if (!invalid) {
-        if (exp_content_length != fs_handler_std_str.size())
-            EXPECT_EQ(206, op->resp.status_code());
-        else
-            EXPECT_EQ(200, op->resp.status_code());
-        char buf[4096];
-        ret = op->resp.read(buf, 4096);
-        EXPECT_EQ(exp_content_length, ret);
-        if (st >= fs_handler_std_str.size()) st = fs_handler_std_str.size() - 1;
-        if (st + len > fs_handler_std_str.size()) len = fs_handler_std_str.size() - st;
-        EXPECT_EQ(true, std::string(fs_handler_std_str.data() + st, exp_content_length) ==
-                        std::string(buf, exp_content_length));
+    if (invalid) return;
+
+    if (exp_content_length != fs_handler_std_str.size()) {
+        EXPECT_EQ(206, op->resp.status_code());
+    } else {
+        EXPECT_EQ(200, op->resp.status_code());
     }
+    char buf[4096];
+    ret = op->resp.read(buf, 4096);
+    EXPECT_EQ(exp_content_length, ret);
+    if ((size_t)st >= fs_handler_std_str.size()) len = 0;
+    else if ((size_t)st + len > fs_handler_std_str.size())
+        len = fs_handler_std_str.size() - st;
+    std::string_view x(fs_handler_std_str.data() + st, len);
+    std::string_view y(buf, exp_content_length);
+    EXPECT_EQ(x, y);
 }
 
 void test_head_case(Client* client, estring_view url, off_t st, size_t len, size_t exp_content_length) {
     LOG_INFO("test HEAD case start");
     auto op = client->new_operation(Verb::HEAD, url);
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.range(st, st + len - 1);
     op->req.headers.content_length(fs_handler_std_str.size());
     auto ret = op->call();
@@ -160,8 +162,10 @@ void test_head_case(Client* client, estring_view url, off_t st, size_t len, size
     else
         EXPECT_EQ(200, op->resp.status_code());
     char range[64];
-    auto range_len = snprintf(range, 64, "bytes %lu-%lu/%lu", st, st + len - 1, fs_handler_std_str.size());
-    std::string rangestr(op->resp.headers["Content-Range"]);
+    auto range_len = snprintf(range, sizeof(range), "bytes %lu-%lu/%lu",
+        (unsigned long)st, (unsigned long)(st + len - 1),
+        (unsigned long)fs_handler_std_str.size());
+    auto rangestr = op->resp.headers["Content-Range"];
     EXPECT_EQ(0, memcmp(range, rangestr.data(), range_len));
 }
 
@@ -218,7 +222,7 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
     LOG_INFO("req:", std::string_view(recv, len));
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
-    auto offset = 0;
+    size_t offset = 0;
     rec.clear();
     while (offset < std_data_size) {
         auto remain = std_data_size - offset;
@@ -295,7 +299,7 @@ TEST(http_server, proxy_handler_get) {
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, to_url(tcpserver, "/filename"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     ret = op->call();
     EXPECT_EQ(0, ret);
     std::string data_buf;
@@ -337,7 +341,7 @@ TEST(http_server, proxy_handler_post) {
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::POST, to_url(tcpserver, "/filename"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     std::string body = "1234567890";
     op->req.headers.content_length(10);
     auto writer = [&](Request *req)-> ssize_t {
@@ -398,7 +402,7 @@ TEST(http_server, proxy_handler_post_forward) {
     DEFER(delete client1);
     client1->set_proxy(to_url(tcpserver, "/"));
     auto op = client1->new_operation(Verb::POST, to_url(source_server, "/filename"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     std::string body = "1234567890";
     op->req.headers.content_length(10);
     auto writer = [&](Request *req)-> ssize_t {
@@ -437,7 +441,7 @@ TEST(http_server, proxy_handler_failure) {
     //----------------------------------------------------
     auto url = to_url(tcpserver, "/filename");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(delete op);
+    DEFER(op->destroy());
     auto ret = op->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(502, op->resp.status_code());
@@ -488,7 +492,7 @@ TEST(http_server, mux_handler) {
     //----------------------------------------------------
     //--------------test static service--------------------
     auto op_static = client->new_operation(Verb::GET, to_url(tcpserver, "/static_service/fs_handler_test"));
-    DEFER(delete op_static);
+    DEFER(op_static->destroy());
     ret = op_static->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(200, op_static->resp.status_code());
@@ -499,7 +503,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == fs_handler_std_str);
     //--------------test proxy service---------------------
     auto op_proxy = client->new_operation(Verb::GET, to_url(tcpserver, "/proxy/filename_not_important"));
-    DEFER(delete op_proxy);
+    DEFER(op_proxy->destroy());
     ret = op_proxy->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(200, op_proxy->resp.status_code());
@@ -510,7 +514,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == std_data);
     //-------------test mux default handler---------------
     auto op_default = client->new_operation(Verb::GET, to_url(tcpserver, "/not_recorded/should_be_404"));
-    DEFER(delete op_default);
+    DEFER(op_default->destroy());
     ret = op_default->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(404, op_default->resp.status_code());

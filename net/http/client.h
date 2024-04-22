@@ -64,6 +64,10 @@ public:
             auto ptr = malloc(sizeof(Operation) + buf_size);
             return new (ptr) Operation(c, buf_size);
         }
+        void destroy() {
+            this->~Operation();
+            free(this);
+        }
         void set_enable_proxy(bool enable) { enable_proxy = enable; }
 
         int call() {
@@ -90,10 +94,12 @@ public:
         Operation(uint16_t buf_size) : req(_buf, buf_size) {}
     };
 
+    // use delete_operation() or destroy(), instead of delete
     Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, v, url, buf_size);
     }
 
+    // use delete_operation() or destroy(), instead of delete
     Operation* new_operation(uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, buf_size);
     }

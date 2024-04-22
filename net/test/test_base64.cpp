@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <photon/net/utils.h>
+#include "../../test/gtest.h"
 
 struct Base64TestData {
 		std::string  str;

@@ -21,11 +21,10 @@ limitations under the License.
 
 #undef private
 #undef protected
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/common/alog.h>
-
 #include <thread>
+#include "../../test/gtest.h"
 
 static int thread_local release_cnt = 0;
 struct ShowOnDtor {
@@ -100,7 +99,7 @@ TEST(ObjectCache, timeout_refresh) {
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
     // 1s
     auto ctor = [] { return new ShowOnDtor(0); };
-    auto ret = ocache.acquire(0, ctor);
+    auto ret = ocache.acquire(0, ctor); (void)ret;
     photon::thread_usleep(1100UL * 1000);
     ocache.expire();
     ocache.release(0);
@@ -249,7 +248,7 @@ struct OCArg2 {
 void* objcache_borrow_once(void* arg) {
     auto args = (OCArg2*)arg;
     auto oc = args->oc;
-    auto id = args->id;
+    // auto id = args->id;
     auto& count = *args->count;
     auto ctor = [&]() {
         // failed after 1s;

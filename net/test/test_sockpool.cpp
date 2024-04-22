@@ -1,10 +1,10 @@
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/net/socket.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/thread11.h>
+#include "../../test/gtest.h"
 
 void task(photon::net::ISocketClient* client, photon::net::EndPoint ep) {
     photon::net::ISocketStream* st = nullptr;

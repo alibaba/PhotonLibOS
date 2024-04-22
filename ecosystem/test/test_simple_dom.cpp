@@ -22,9 +22,9 @@ limitations under the License.
 #include <memory>
 #include <string>
 #include <algorithm>
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include "../../test/gtest.h"
 
 using namespace std;
 using namespace photon::SimpleDOM;
@@ -188,7 +188,7 @@ TEST(simple_dom, json) {
         "t": true ,
         "f": false,
         "n": null,
-        "i": 123,
+        "i": -123,
         "pi": 3.1416,
         "a": [1, 2, 3, 4],
     })";
@@ -198,9 +198,11 @@ TEST(simple_dom, json) {
         {"hello",   "world"},
         {"t",       "true"},
         {"f",       "false"},
-        {"i",       "123"},
+        {"i",       "-123"},
         {"pi",      "3.1416"},
     });
+    EXPECT_EQ(doc["i"].to_integer(), -123);
+    EXPECT_NEAR(doc["pi"].to_number(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
 }
 

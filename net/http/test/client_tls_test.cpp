@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <openssl/ssl.h>
-#include <gtest/gtest.h>
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>
@@ -26,6 +25,7 @@ limitations under the License.
 #include <photon/net/http/message.h>
 #include <photon/net/http/server.h>
 #include <photon/net/http/client.h>
+#include "../../../test/gtest.h"
 #include "to_url.h"
 
 #include "../../test/cert-key.cpp"
@@ -72,7 +72,7 @@ TEST(client_tls, basic) {
     auto client = net::http::new_http_client(nullptr, ctx);
     DEFER(delete client);
     auto op = client->new_operation(net::http::Verb::GET, to_surl(tcpserver, "/test"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     auto exp_len = 20;
     op->req.headers.range(0, exp_len - 1);
     op->call();
@@ -91,7 +91,7 @@ TEST(http_client, DISABLED_SNI) {
     auto client = photon::net::http::new_http_client(nullptr, tls);
     DEFER(delete client);
     auto op = client->new_operation(photon::net::http::Verb::GET, "https://debug.fly.dev");
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->retry = 0;
     int res = op->call();
     ASSERT_EQ(0, res);

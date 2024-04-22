@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <sched.h>
 
 #include <photon/common/lockfree_queue.h>
@@ -175,7 +177,7 @@ int test_queue_batch(const char *name, QType &queue) {
                 }
                 LRType::unlock(rlock);
                 if (x) rspent += (std::chrono::high_resolution_clock::now() - tm) / size;
-                for (auto y = 0; y < size; y++) {
+                for (auto y: xrange(size)) {
                     rc[buffer[y]]++;
                     rcnt[i]++;
                 }

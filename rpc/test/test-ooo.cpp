@@ -19,11 +19,9 @@ limitations under the License.
 #include <queue>
 #include <thread>
 #include <algorithm>
-
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 #include <gflags/gflags.h>
 #include <photon/common/alog.h>
-
 #define private public
 #define protected public
 #include "../out-of-order-execution.cpp"
@@ -58,7 +56,7 @@ int do_issue(void*, OutOfOrderContext* args)
     auto tag = args->tag;
     LOG_DEBUG(VALUE(tag));
     aop.push_back(args->tag);
-    random_shuffle(aop.begin(), aop.end());
+    shuffle(aop.begin(), aop.end());
     return 0;
 }
 
@@ -121,7 +119,7 @@ int heavy_complete(void*, OutOfOrderContext* args) {
 int process_thread() {
     while (issue_list.size()) {
         thread_yield();
-        random_shuffle(issue_list.begin(), issue_list.end());
+        shuffle(issue_list.begin(), issue_list.end());
         processing_queue.push(issue_list.back());
         issue_list.pop_back();
     }
@@ -207,7 +205,7 @@ inline int error_complete(void*, OutOfOrderContext* args) {
 inline int error_process() {
     while (issue_list.size()) {
         thread_yield_to(nullptr);
-        random_shuffle(issue_list.begin(), issue_list.end());
+        shuffle(issue_list.begin(), issue_list.end());
         auto val = issue_list.back();
         if (rand()%2)
             val = UINT64_MAX;

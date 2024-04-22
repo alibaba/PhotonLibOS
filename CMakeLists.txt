@@ -344,7 +344,7 @@ endif ()
 if (PHOTON_BUILD_TESTING)
     include(CTest)
 
-    add_compile_options(-Wno-error)
+    # add_compile_options(-Wno-error)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
 

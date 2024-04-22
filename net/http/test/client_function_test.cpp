@@ -16,7 +16,6 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <time.h>
-#include <gtest/gtest.h>
 #include <netinet/tcp.h>
 
 #include <chrono>
@@ -39,6 +38,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
+#include "../../../test/gtest.h"
 #include "to_url.h"
 
 using namespace photon::net;
@@ -98,7 +98,7 @@ TEST(http_client, get) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op2 = client->new_operation(Verb::GET, target);
-    DEFER(delete op2);
+    DEFER(op2->destroy());
     op2->req.headers.content_length(0);
     int ret = client->call(op2);
     GTEST_ASSERT_EQ(0, ret);
@@ -112,7 +112,7 @@ TEST(http_client, get) {
     EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
 
     auto op3 = client->new_operation(Verb::GET, target);
-    DEFER(delete op3);
+    DEFER(op3->destroy());
     op3->req.headers.content_length(0);
     op3->req.headers.range(10, 19);
     client->call(op3);
@@ -123,7 +123,7 @@ TEST(http_client, get) {
     LOG_DEBUG(resp_body_buf_range);
 
     auto op4 = client->new_operation(Verb::GET, target);
-    DEFER(delete op4);
+    DEFER(op4->destroy());
     op4->req.headers.content_length(0);
     op4->call();
     EXPECT_EQ(sizeof(socket_buf), op4->resp.resource_size());
@@ -140,7 +140,7 @@ TEST(http_client, get) {
 
     static const char target_tb[] = "http://www.taobao.com?x";
     auto op5 = client->new_operation(Verb::GET, target_tb);
-    DEFER(delete op5);
+    DEFER(op5->destroy());
     op5->req.headers.content_length(0);
     op5->call();
     EXPECT_EQ(op5->resp.status_code(), 200);
@@ -193,7 +193,7 @@ TEST(http_client, post) {
 
     // body stream test
     auto op1 = client->new_operation(Verb::POST, target);
-    DEFER(delete op1);
+    DEFER(op1->destroy());
     struct stat st;
     EXPECT_EQ(0, file->fstat(&st));
     op1->req.headers.content_length(st.st_size);
@@ -207,7 +207,7 @@ TEST(http_client, post) {
 
     // body writer test
     auto op2 = client->new_operation(Verb::POST, target);
-    DEFER(delete op2);
+    DEFER(op2->destroy());
     op2->req.headers.content_length(st.st_size);
     auto writer = [&](Request *req)-> ssize_t {
         file->lseek(0, SEEK_SET);
@@ -284,6 +284,7 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
 
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
+/*
 static int digtal_num(int n) {
     int ret = 0;
     do {
@@ -292,6 +293,7 @@ static int digtal_num(int n) {
     } while (n);
     return ret;
 }
+*/
 void chunked_send(int offset, int size, ISocketStream* sock) {
     char s[10];
     auto len = snprintf(s, sizeof(s), "%x\r\n", size);
@@ -311,7 +313,7 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
     EXPECT_GT(len, 0);
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
-    auto offset = 0;
+    size_t offset = 0;
     rec.clear();
     while (offset < std_data_size) {
         auto remain = std_data_size - offset;
@@ -346,7 +348,7 @@ TEST(http_client, chunked) {
     DEFER(delete client);
     auto url = to_url(server, "/");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(delete op);
+    DEFER(op->destroy());
     std::string buf;
 
     op->call();
@@ -360,7 +362,7 @@ TEST(http_client, chunked) {
 
     server->set_handler({nullptr, &chunked_handler_complict});
     auto opc = client->new_operation(Verb::GET, url);
-    DEFER(delete opc);
+    DEFER(opc->destroy());
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
@@ -380,7 +382,7 @@ TEST(http_client, chunked) {
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
         auto op_test = client->new_operation(Verb::GET, url);
-        DEFER(delete op_test);
+        DEFER(op_test->destroy());
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);
         buf.resize(std_data_size);
@@ -457,7 +459,7 @@ TEST(http_client, debug) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op_test = client->new_operation(Verb::GET, to_url(server, "/"));
-    DEFER(delete op_test);
+    DEFER(op_test->destroy());
     op_test->call();
     EXPECT_EQ(200, op_test->status_code);
     std::string buf;
@@ -466,7 +468,7 @@ TEST(http_client, debug) {
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
     EXPECT_TRUE(buf == std_data);
-    for (int i = 0; i < buf.size(); i++) {
+    for (auto i: xrange(buf.size())) {
         if (buf[i] != std_data[i]) {
             LOG_ERROR("first occurrence of difference at: ", i);
             break;
@@ -490,7 +492,7 @@ TEST(http_client, server_no_resp) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, to_url(server, "/wtf"));
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(-1, op->status_code);
@@ -519,7 +521,7 @@ TEST(http_client, partial_body) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
@@ -538,7 +540,7 @@ TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environm
     DEFER(delete client);
     // here is an ipv6-only website
     auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->call();
     EXPECT_EQ(200, op->resp.status_code());
 }
@@ -616,7 +618,7 @@ TEST(url, path_fix) {
 //     DEFER(delete client);
 //     client->set_proxy("http://localhost:8899/");
 //     auto op = client->new_operation(Verb::delete_, "https://domain:1234/targetName");
-//     DEFER(delete op);
+//     DEFER(op->destroy());
 //     LOG_DEBUG(VALUE(op->req.whole()));
 //     op->req.redirect(Verb::GET, "baidu.com", true);
 //     LOG_DEBUG(VALUE(op->req.whole()));

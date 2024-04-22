@@ -19,10 +19,9 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread.h>
-
 #include <csignal>
-#include <gtest/gtest.h>
 #include <gflags/gflags.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace std;

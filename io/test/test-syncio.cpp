@@ -26,7 +26,7 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 using namespace photon;
 
 

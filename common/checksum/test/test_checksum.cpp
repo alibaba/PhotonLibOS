@@ -1,11 +1,10 @@
-#include <gtest/gtest.h>
 #include <photon/common/checksum/crc32c.h>
-
 #include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include "../../../test/gtest.h"
 
 #ifndef DATA_DIR
 #define DATA_DIR ""

@@ -900,8 +900,8 @@ protected:
         }
         void copy(IOAlloc* rhs, uint16_t nbases)
         {
+            *(IOAlloc*)this = *rhs;
             auto rhs_ = (IOVAllocation_*)rhs;
-            *this = *rhs_;
             memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases);
         }
     };

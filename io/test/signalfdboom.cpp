@@ -21,8 +21,8 @@ limitations under the License.
 #undef protected
 
 #include <csignal>
-#include <gtest/gtest.h>
 #include <gflags/gflags.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace std;

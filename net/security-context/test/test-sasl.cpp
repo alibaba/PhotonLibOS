@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/socket.h>
