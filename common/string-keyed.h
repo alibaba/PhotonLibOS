@@ -265,7 +265,7 @@ public:
 
         iterator(base_it b_it) : _b_it(b_it) { }
         iterator(typename base::const_iterator b_it) {
-            auto x = (B_IT*) &b_it;
+            auto x = (base_it*) &b_it;
             _b_it = *x;
         }
 
@@ -325,7 +325,6 @@ public:
     {
         return base::begin();
     }
-    using B_IT = typename base::iterator;
     const_iterator end() const
     {
         return {base::end()};
@@ -437,10 +436,9 @@ public:
     {
         return base::upper_bound((const skvm&)k);
     }
-    using typename base::B_IT;
     const_iterator lower_bound (const key_type& k) const
     {
-        return {base::lower_bound((const skvm&)k)}
+        return {base::lower_bound((const skvm&)k)};
     }
     const_iterator upper_bound (const key_type& k) const
     {
