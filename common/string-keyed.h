@@ -437,18 +437,13 @@ public:
     {
         return base::upper_bound((const skvm&)k);
     }
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
     using typename base::B_IT;
     const_iterator lower_bound (const key_type& k) const
     {
-        auto it = base::lower_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::lower_bound((const skvm&)k)}
     }
     const_iterator upper_bound (const key_type& k) const
     {
-        auto it = base::upper_bound((const skvm&)k);
-        return (B_IT&)it;
+        return {base::upper_bound((const skvm&)k)};
     }
-#pragma GCC diagnostic pop
 };
