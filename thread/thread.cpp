@@ -305,6 +305,7 @@ namespace photon
             assert(state == states::DONE);
             // `buf` and `stack_size` will always store on register
             // when calling deallocating.
+            mprotect(buf, PAGE_SIZE, PROT_READ | PROT_WRITE);
             photon_thread_dealloc(buf, stack_size);
         }
     };
@@ -934,13 +935,14 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
-        stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
+        stack_size = align_up(randomizer + stack_size + sizeof(thread) + PAGE_SIZE, PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
+        mprotect(ptr, PAGE_SIZE, PROT_NONE);
         uint64_t p = (uint64_t) ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new((char*) p) thread;
         th->buf = ptr;
-        th->stackful_alloc_top = ptr;
+        th->stackful_alloc_top = ptr + PAGE_SIZE;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
