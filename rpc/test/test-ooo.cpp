@@ -92,7 +92,7 @@ void* test_ooo_execution(void* args_)
 TEST(OutOfOrder, Execution) {
     OooEngine engine;
     for (int i = 0; i < 5; ++i)
-        thread_create(test_ooo_execution, &engine, 64 * 1024);
+        thread_create(test_ooo_execution, &engine, DEFAULT_STACK_SIZE);
 
     thread_yield();
     wait_for_completion();
@@ -167,7 +167,7 @@ TEST(OutOfOrder, keep_same_tag) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo_same_tag, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo_same_tag, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
 }
@@ -181,7 +181,7 @@ TEST(OutOfOrder, heavy_test) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
 }
@@ -226,7 +226,7 @@ TEST(OutOfOrder, error_issue) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &error_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &error_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
     log_output = log_output_stdout;
@@ -247,7 +247,7 @@ TEST(OutOfOrder, error_complete) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &error_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &error_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
     thread_sleep(1);
@@ -267,7 +267,7 @@ TEST(OutOfOrder, error_process) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(error_process)));
     thread_sleep(1);
