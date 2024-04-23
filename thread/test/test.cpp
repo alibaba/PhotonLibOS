@@ -718,7 +718,7 @@ void *func1(void *)
 
 TEST(ThreadPool, test)
 {
-    ThreadPool<64> pool(64*1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i<FLAGS_ths_total; i++)
@@ -733,7 +733,7 @@ TEST(ThreadPool, test)
 
 TEST(ThreadPool, migrate) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -750,7 +750,7 @@ TEST(ThreadPool, migrate) {
 
 TEST(ThreadPool, multithread) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -798,7 +798,7 @@ TEST(RWLock, checklock) {
         uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
         handles.emplace_back(
             photon::thread_enable_join(
-                photon::thread_create(&rwlocktest, (void*)arg, 64*1024)
+                photon::thread_create(&rwlocktest, (void*)arg)
             )
         );
     }
@@ -1086,7 +1086,7 @@ TEST(smp, rwlock) {
             uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
             handles.emplace_back(
                 photon::thread_enable_join(
-                    photon::thread_create(&smprwlocktest, (void*)arg, 64*1024)
+                    photon::thread_create(&smprwlocktest, (void*)arg)
                 )
             );
         }
