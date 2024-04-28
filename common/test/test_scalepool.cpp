@@ -22,9 +22,9 @@ limitations under the License.
 #undef protected
 
 #include "../alog.h"
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <vector>
+#include "../../test/gtest.h"
 
 TEST(IdentityPoolGC, basic) {
     auto pool = new_identity_pool<int>(128);
@@ -127,5 +127,5 @@ int main(int argc, char **argv)
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return ret;
 }

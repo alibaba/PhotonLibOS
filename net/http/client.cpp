@@ -70,9 +70,8 @@ public:
 };
 
 ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
-    LOG_DEBUG("Dial to ` `", host, port);
-    std::string strhost(host);
-    auto ipaddr = resolver->resolve(strhost.c_str());
+    LOG_DEBUG("Dialing to `:`", host, port);
+    auto ipaddr = resolver->resolve(host);
     if (ipaddr.undefined()) {
         LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
     }
@@ -83,20 +82,19 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, strhost.c_str());
+        tls_stream_set_hostname(sock, host.data());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
     }
     if (sock) {
-        LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
+        LOG_DEBUG("Connected ` ", ep, VALUE(host), VALUE(secure));
         return sock;
     }
     LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
-    if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
-    resolver->discard_cache(strhost.c_str(), ipaddr);
+    resolver->discard_cache(host, ipaddr);
     return nullptr;
 }
 

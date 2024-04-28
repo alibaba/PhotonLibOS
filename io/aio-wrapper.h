@@ -24,7 +24,7 @@ namespace photon
 {
     extern "C"
     {
-        int libaio_wrapper_init();
+        int libaio_wrapper_init(int iodepth = 32);
         int libaio_wrapper_fini();
 
         // `fd` must be opened with O_DIRECT, and the buffers must be aligned

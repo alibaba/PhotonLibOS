@@ -103,7 +103,7 @@ public:
 class HttpFile_v2 : public fs::VirtualReadOnlyFile {
 public:
     std::string m_url;
-    unordered_map_string_key<std::string> m_common_header;
+    unordered_map_string_kv m_common_header;
     HttpFs_v2* m_fs;
     struct stat m_stat;
     uint64_t m_stat_gettime = 0;
@@ -147,20 +147,20 @@ public:
         m_stat.st_size = len;
         return 0;
     }
-    void send_read_request(net::http::Client::Operation &op, off_t offset, size_t length, const Timeout &tmo) {
-    again:
+    void send_read_request(net::http::Client::Operation &op, off_t offset, size_t length, Timeout tmo) {
         estring url;
         url.appends(m_url, "?", m_url_param);
         op.set_enable_proxy(m_fs->get_client()->has_proxy());
+    again:
         op.req.reset(net::http::Verb::GET, url, op.enable_proxy);
         for (auto &kv : m_common_header)
             op.req.headers.insert(kv.first, kv.second);
         op.req.headers.range(offset, offset + length - 1);
         op.req.headers.content_length(0);
-        op.timeout = tmo.timeout();
+        op.timeout = tmo;
         m_fs->get_client()->call(&op);
         if (op.status_code < 0) {
-            if (tmo.timeout() == 0) {
+            if (tmo.expired()) {
                 m_etimeout = true;
                 LOG_ERROR_RETURN(ENOENT, , "http timedout");
             }
@@ -257,7 +257,7 @@ public:
     }
 };
 
-IFile* HttpFs_v2::open(const char* pathname, int flags) {
+inline IFile* HttpFs_v2::open(const char* pathname, int flags) {
     if (!pathname) LOG_ERROR_RETURN(EINVAL, nullptr, "NULL is not allowed");
     if (flags != O_RDONLY) return nullptr;
 

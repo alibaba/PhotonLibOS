@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/executor/executor.h>
 #include <photon/common/utility.h>
@@ -25,9 +24,9 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <sched.h>
 #include <immintrin.h>
-
 #include <chrono>
 #include <thread>
+#include "../../../test/gtest.h"
 
 using namespace photon;
 

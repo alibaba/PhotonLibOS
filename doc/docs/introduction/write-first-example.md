@@ -11,10 +11,12 @@ in the background, created a Photon file for IO, and sent buffer through Photon 
 Photon locks and condition viariables are used as well.
 
 :::note
-The example code is written with [std-compatible API](../api/std-compatible-api).
+The example code is written in [std-compatible API](../api/std-compatible-api). 
+
+If you want to use the raw API, please refer to this [doc](../api/thread). It can provide more flexible functionalities.
 :::
 
-### 1. Initialize Photon environment
+### 1. Initialize environment
 
 ```cpp
 #include <photon/photon.h>
@@ -26,53 +28,62 @@ int main() {
         return -1;
     }
     DEFER(photon::fini());
-
     // ...
 }
 ```
 
-After `photon::init`, the [Env](../api/env) is initialized, which means the coroutine stack is successfully allocated on current [`vCPU`](../api/vcpu-and-multicore). You can now create multiple Photon [`threads`](../api/thread) to run in parallel, or migrate them to other vCPUs.
+After `photon::init`, the [**Env**](../api/env) is initialized, which means the coroutine stack is successfully allocated on current [**vCPU**](../api/vcpu-and-multicore). 
+
+Now you can create multiple Photon [**threads**](../api/thread) to run in parallel, or migrate them to other vCPUs.
 
 The `photon::fini` is responsible for deallocating the environment. 
 It's wrapped in a helper macro called `DEFER` from `common/utility.h`.
 Like Go's defer, it ensures the statement be executed before the function returns.
 Its implementation is based on the concept of `RAII`.
 
-### 2. Create a thread
+### 2. Create thread
 
-Just like the old way you create a `std::thread`, use `photon_std::thread` instead. The thread will start running immediately once you create it.
+There are many ways to create a thread. Just like the old ways you use `std::thread`, but try `photon_std::thread` instead.
 
 ```cpp
-int run_server(int a, MyType* b, MyType& c) {
-	// ...
+// Global function
+int func(int a, char* b) {}
+
+// Use global function to create a thread.
+// Will be automatically joined when thread object destructed, unless been detached.
+photon_std::thread th(func, 1, '2');
+th.detach();
+
+// Create a thread with anonymous function (lambda)
+photon_std::thread th([&] {
+    // Access variables directly in the context
+});
+
+// Create a thread with class member function
+class A {
+    void f() {
+        new photon_std::thread(&A::g, this, 1, '2');
+    }
+    void g(int a, char* b) {}
+};
+```
+
+### 3. Concurrency
+
+A thread is basically a function, and thus an execution unit. 
+You can create multiple threads at a time to achieve concurrency, and wait them finished by Join.
+
+```cpp
+std::vector<photon_std::thread> threads;
+for (int i = 0; i < 100; ++i) {
+    threads.emplace_back(func, 1, '2');
 }
-
-photon_std::thread th(run_server, a, b, std::ref(c));
-
-// Or new obj
-auto th = new photon_std::thread(run_server, a, b, std::ref(c));
-DEFER(delete th);
-
-// Or anonymous function by lambda
-new photon_std::thread([&] {
-		// Use a, b, c
-	}
-);
+for (auth& th : threads) {
+    th.join();
+}
 ```
 
-:::tip
-If you want to use the raw API, rather than the std-compatible one, please refer to this [doc](../api/thread#thread_create11)
-
-```cpp
-#include <photon/photon.h>
-#include <photon/thread/thread11.h>
-
-auto th = photon::thread_create11(run_server, a, b, std::ref(c));
-```
-
-:::
-
-### 3. Lock and synchronization
+### 4. Lock and synchronization
 
 This is a typical `condition_variable` usage. Again, we switch to Photon's exclusive namespace.
 
@@ -81,24 +92,32 @@ bool condition = false;
 photon_std::mutex mu;
 photon_std::condition_variable cv;
 
-// Producer thread
-photon_std::lock_guard<photon_std::mutex> lock(mu);
-condition = true;
-cv.notify_one();
-
 // Consumer thread
-auto timeout = std::chrono::duration<std::chrono::seconds>(10);
-photon_std::unique_lock<photon_std::mutex> lock(mu);
-while (!condition) {
-    cv.wait(lock, timeout);
-}
+photon_std::thread([&]{
+    auto timeout = std::chrono::duration<std::chrono::seconds>(10);
+    photon_std::unique_lock<photon_std::mutex> lock(mu);
+    while (!condition) {
+        cv.wait(lock, timeout);
+    }
+}).detach();
+
+// Producer thread
+photon_std::thread([&]{
+    photon_std::lock_guard<photon_std::mutex> lock(mu);
+    condition = true;
+    cv.notify_one();
+}).detach();
 ```
 
-### 4. File IO
+### 5. File IO
 
 Photon has POSIX-like encapsulations for file and filesystem. In this example we first create a `IFileSystem` under current working dir, and then open a `IFile` from it. 
 
-You can switch the io_engine from `photon::fs::ioengine_psync` to `photon::fs::ioengine_iouring`, if your event_engine satisfied.
+You can switch the io_engine from `photon::fs::ioengine_psync` to `photon::fs::ioengine_iouring`, 
+if your event_engine satisfied. io_uring IO is naturally asynchronous and non-blocking. 
+It can also use page cache compared with aio.
+
+In addition to local file systems, Photon also supports a variety of remote file systems, such as httpfs, extfs, fusefs, etc.
 
 ```cpp
 #include <photon/fs/localfs.h>
@@ -120,7 +139,7 @@ ssize_t n_written = file->write(buf, 4096);
 
 Both IFile and IFileSystem object will close itself at destruction. Again, RAII.
 
-### 5. Socket
+### 6. Socket
 
 The `tcp_socket_client` + `tcp_socket_server` is the most regular combination for client and server. Please refer to the API docs for more socket types.
 
@@ -135,7 +154,7 @@ if (client == nullptr) {
 }
 DEFER(delete client);
 
-photon::net::EndPoint ep{photon::net::IPAddr("127.0.0.1"), 9527};
+photon::net::EndPoint ep("127.0.0.1:9527");
 auto stream = client->connect(ep);
 if (!stream) {
     LOG_ERRNO_RETURN(0, -1, "failed to connect server");
@@ -170,7 +189,7 @@ auto handler = [&](photon::net::ISocketStream* stream) -> int {
 };
 
 server->set_handler(handler);
-server->bind(9527, photon::net::IPAddr());	// bind to 0.0.0.0
+server->bind_v4localhost(9527);
 server->listen();
 
 LOG_INFO("Server is listening for port ` ...", 9527);
@@ -178,9 +197,17 @@ server->start_loop(true);
 ```
 
 :::info
-The stream is a instance of `photon::net::ISocketStream`. It has extented write/read methods compared to triditional libc's send/recv.
+The stream is of type `photon::net::ISocketStream`. It has extended write/read methods compared to traditional libc's send/recv.
 
 Essentially, write = fully_send, and read = fully_recv.
+:::
+
+:::info
+LOG_INFO is Photon's unique logging system. It is based on template metaprogramming techniques 
+and optimizes results at compile time. So runtime overhead is reduced.
+Compared with other logging systems based on `sprintf`, Photon logging is 2~3 times faster than them.
+
+The \` symbol is a generic placeholder for multiple types of elements.
 :::
 
 ### Full source code

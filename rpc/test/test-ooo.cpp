@@ -19,11 +19,9 @@ limitations under the License.
 #include <queue>
 #include <thread>
 #include <algorithm>
-
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 #include <gflags/gflags.h>
 #include <photon/common/alog.h>
-
 #define private public
 #define protected public
 #include "../out-of-order-execution.cpp"
@@ -58,7 +56,7 @@ int do_issue(void*, OutOfOrderContext* args)
     auto tag = args->tag;
     LOG_DEBUG(VALUE(tag));
     aop.push_back(args->tag);
-    random_shuffle(aop.begin(), aop.end());
+    shuffle(aop.begin(), aop.end());
     return 0;
 }
 
@@ -94,7 +92,7 @@ void* test_ooo_execution(void* args_)
 TEST(OutOfOrder, Execution) {
     OooEngine engine;
     for (int i = 0; i < 5; ++i)
-        thread_create(test_ooo_execution, &engine, 64 * 1024);
+        thread_create(test_ooo_execution, &engine, DEFAULT_STACK_SIZE);
 
     thread_yield();
     wait_for_completion();
@@ -121,7 +119,7 @@ int heavy_complete(void*, OutOfOrderContext* args) {
 int process_thread() {
     while (issue_list.size()) {
         thread_yield();
-        random_shuffle(issue_list.begin(), issue_list.end());
+        shuffle(issue_list.begin(), issue_list.end());
         processing_queue.push(issue_list.back());
         issue_list.pop_back();
     }
@@ -169,7 +167,7 @@ TEST(OutOfOrder, keep_same_tag) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo_same_tag, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo_same_tag, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
 }
@@ -183,7 +181,7 @@ TEST(OutOfOrder, heavy_test) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
 }
@@ -207,7 +205,7 @@ inline int error_complete(void*, OutOfOrderContext* args) {
 inline int error_process() {
     while (issue_list.size()) {
         thread_yield_to(nullptr);
-        random_shuffle(issue_list.begin(), issue_list.end());
+        shuffle(issue_list.begin(), issue_list.end());
         auto val = issue_list.back();
         if (rand()%2)
             val = UINT64_MAX;
@@ -228,7 +226,7 @@ TEST(OutOfOrder, error_issue) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &error_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &error_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
     log_output = log_output_stdout;
@@ -249,7 +247,7 @@ TEST(OutOfOrder, error_complete) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &error_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &error_complete);
     }
     thread_join(thread_enable_join(thread_create11(process_thread)));
     thread_sleep(1);
@@ -269,7 +267,7 @@ TEST(OutOfOrder, error_process) {
               delete_ooo_execution_engine(engine);
           });
     for (int i=0;i<thread_num;i++) {
-        thread_create11(64*1024, test_ooo, engine, &heavy_issue, &heavy_complete);
+        thread_create11(DEFAULT_STACK_SIZE, test_ooo, engine, &heavy_issue, &heavy_complete);
     }
     thread_join(thread_enable_join(thread_create11(error_process)));
     thread_sleep(1);

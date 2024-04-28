@@ -18,11 +18,11 @@ limitations under the License.
 #include <memory>
 #include <algorithm>
 #include <string>
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include "../../../test/gtest.h"
 
 using namespace std;
 using namespace photon;

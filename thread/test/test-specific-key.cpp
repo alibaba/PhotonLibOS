@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread-key.h>
@@ -115,9 +115,9 @@ int main(int argc, char** arg) {
     static Value v;
     photon::thread_key_t key;
     int ret_key = photon::thread_key_create(&key, &Value::key_dtor);
-    assert(ret_key == 0);
+    EXPECT_EQ(ret_key, 0);
     ret_key = photon::thread_setspecific(key, &v);
-    assert(ret_key == 0);
+    EXPECT_EQ(ret_key, 0);
 
     return ret;
 }

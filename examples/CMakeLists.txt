@@ -1,10 +1,16 @@
-add_definitions(-w)
-
 add_executable(simple-example simple/simple.cpp)
 target_link_libraries(simple-example PRIVATE photon_static)
 
 add_executable(net-perf perf/net-perf.cpp)
 target_link_libraries(net-perf PRIVATE photon_static)
+
+if (NOT APPLE)
+    add_executable(io-perf perf/io-perf.cpp)
+    target_link_libraries(io-perf PRIVATE photon_static)
+
+    add_executable(multi-conn-perf perf/multi-conn-perf.cpp)
+    target_link_libraries(multi-conn-perf PRIVATE photon_static)
+endif ()
 
 add_executable(rpc-example-client rpc/client.cpp rpc/client_main.cpp)
 target_link_libraries(rpc-example-client PRIVATE photon_static)

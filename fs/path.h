@@ -170,6 +170,7 @@ namespace fs
         Walker(IFileSystem* fs, string_view path);
         string_view path() { return m_path; }
         string_view get() { return path(); }
+        bool valid() { return !m_path.empty(); }
         int next();
 
     protected:

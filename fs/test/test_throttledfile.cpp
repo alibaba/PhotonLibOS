@@ -26,16 +26,12 @@ limitations under the License.
 #include <thread>
 #include <chrono>
 #include <fcntl.h>
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
-
-
 #include <photon/common/alog.h>
 #include <photon/fs/filesystem.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread.h>
 #include <photon/fs/localfs.h>
-
+#include "../../test/gtest.h"
 #include "mock.h"
 
 using namespace photon;
@@ -434,6 +430,5 @@ TEST(ThrottledFs, concurrent){
 int main(int argc, char **argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

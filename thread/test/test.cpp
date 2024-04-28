@@ -23,7 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <sys/time.h>
 #include <gflags/gflags.h>
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 
 #define private public
 
@@ -31,6 +31,7 @@ limitations under the License.
 #include "../thread11.h"
 #include "../thread-pool.h"
 #include "../workerpool.h"
+#include "../future.h"
 #include <photon/common/alog-audit.h>
 
 using namespace std;
@@ -115,7 +116,7 @@ void print_heap(SleepQueue& sleepq)
     LOG_INFO("    ");
     int i = 0, k = 1;
     for (auto it : sleepq.q) {
-        printf("%lu(%d)", it->ts_wakeup, it->idx);
+        printf("%lu(%d)", (unsigned long)it->ts_wakeup, it->idx);
         i++;
         if (i == k) {
             printf("\n");
@@ -142,7 +143,7 @@ void sleepq_perf(SleepQueue& sleepq, const vector<photon::thread*>& items)
     check(sleepq);
 
     auto pops = items;
-    random_shuffle(pops.begin(), pops.end());
+    shuffle(pops.begin(), pops.end());
     pops.resize(pops.size()/2);
     {
         update_now();
@@ -717,7 +718,7 @@ void *func1(void *)
 
 TEST(ThreadPool, test)
 {
-    ThreadPool<64> pool(64*1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i<FLAGS_ths_total; i++)
@@ -732,7 +733,7 @@ TEST(ThreadPool, test)
 
 TEST(ThreadPool, migrate) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -749,7 +750,7 @@ TEST(ThreadPool, migrate) {
 
 TEST(ThreadPool, multithread) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
+    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -797,7 +798,7 @@ TEST(RWLock, checklock) {
         uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
         handles.emplace_back(
             photon::thread_enable_join(
-                photon::thread_create(&rwlocktest, (void*)arg, 64*1024)
+                photon::thread_create(&rwlocktest, (void*)arg)
             )
         );
     }
@@ -1085,7 +1086,7 @@ TEST(smp, rwlock) {
             uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
             handles.emplace_back(
                 photon::thread_enable_join(
-                    photon::thread_create(&smprwlocktest, (void*)arg, 64*1024)
+                    photon::thread_create(&smprwlocktest, (void*)arg)
                 )
             );
         }
@@ -1115,7 +1116,7 @@ void* test_smp_cvar_recver(void* args_)
             thread_yield();
             SCOPED_LOCK(args->mutex);
             int ret = args->cvar.wait(args->mutex);
-            assert(ret == 0);
+            EXPECT_EQ(ret, 0);
             args->recvd++;
         }
         if (args->senders == 0) break;
@@ -1347,7 +1348,7 @@ TEST(workpool, async_work_lambda) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([i, r]() {
+            new auto ([r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1373,7 +1374,7 @@ TEST(workpool, async_work_lambda_threadcreate) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1402,7 +1403,7 @@ TEST(workpool, async_work_lambda_threadpool) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1440,7 +1441,7 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, i, r]() {
+            new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -1888,6 +1889,142 @@ TEST(intrusive_list, split) {
     }
     EXPECT_EQ(3, cnt);
 
+}
+
+TEST(interrupt, mutex) {
+    photon::mutex mtx(0);
+    // lock first
+    mtx.lock();
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    // this time will goto sleep
+    auto ret = mtx.lock();
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+    mtx.unlock();
+}
+
+TEST(interrupt, condition_variable) {
+    photon::condition_variable cond;
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    auto ret = cond.wait_no_lock();
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+}
+
+TEST(interrupt, semaphore) {
+    photon::semaphore sem(0);
+    auto th = photon::CURRENT;
+    int reason = rand();
+    while (reason == 0) reason = rand();
+    photon::thread_create11([th, reason]() {
+        // any errno except 0 is able to stop waiting
+        photon::thread_interrupt(th, reason);
+    });
+    auto ret = sem.wait_interruptible(1); // nobody
+    ERRNO err;
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(reason, err.no);
+}
+
+
+TEST(condition_variable, pred) {
+    photon::condition_variable cond;
+    int flag = 0;
+    photon::thread_create11([&cond, &flag]() {
+        // any errno except 0 is able to stop waiting
+        flag = 1;
+        cond.notify_one();
+        // first notify should not wake up condition variable
+        photon::thread_usleep(1000 * 1000);
+        flag = 2;
+        cond.notify_one();
+
+    });
+    auto ret = cond.wait_no_lock([&flag](){ return flag == 2;});
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(2, flag);
+    ret = cond.wait_no_lock([&flag](){ return flag == 3; }, 1000);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ETIMEDOUT, errno);
+    flag = 0;
+    photon::mutex mtx;
+    SCOPED_LOCK(mtx);
+    photon::thread_create11([&cond, &flag, &mtx]() {
+        // any errno except 0 is able to stop waiting
+        {
+            SCOPED_LOCK(mtx);
+            flag = 1;
+            cond.notify_one();
+        }
+        // first notify should not wake up condition variable
+        photon::thread_usleep(1000 * 1000);
+        {
+            SCOPED_LOCK(mtx);
+            flag = 2;
+            cond.notify_one();
+        }
+    });
+    ret = cond.wait(mtx, [&flag](){ return flag == 2;});
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(2, flag);
+    ret = cond.wait(mtx, [&flag](){ return flag == 3; }, 1000);
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ETIMEDOUT, errno);
+}
+
+const int PROMISE_VALUE = 1024;
+static void _promise_worker(Promise<int> promise) {
+    thread_usleep(1000 * 10);
+    LOG_DEBUG("set value as ", PROMISE_VALUE);
+    promise.set_value(PROMISE_VALUE);
+}
+
+static void* promise_worker(void* arg) {
+    auto fut = (Future<int>*) arg;
+    _promise_worker(fut->get_promise());
+    return 0;
+}
+
+TEST(future, test1) {
+    Future<int> fut;
+    auto th = thread_create(promise_worker, &fut);
+    auto jh = thread_enable_join(th);
+    thread_usleep(1000 * 4);
+    LOG_DEBUG("before getting the value from future");
+    fut.wait();
+    auto v = fut.get_value();
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, PROMISE_VALUE);
+    thread_join(jh);
+}
+
+static std::shared_ptr<Future<int>> get_future() {
+    auto fut = std::make_shared<Future<int>>();
+    thread_create11(_promise_worker, fut->get_promise());
+    thread_usleep(1000 * 4);
+    return fut;
+}
+
+TEST(future, test2) {
+    auto fut = get_future();
+    LOG_DEBUG("before getting the value from future");
+    auto v = fut->get_value();;
+    LOG_DEBUG("got value ` from worker via promise/future", v);
+    EXPECT_EQ(v, PROMISE_VALUE);
 }
 
 int main(int argc, char** arg)

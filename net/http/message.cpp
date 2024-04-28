@@ -125,13 +125,14 @@ int Message::send_header(net::ISocketStream* stream) {
     headers.insert("Connection", m_keep_alive ? SV("keep-alive") :
                                                 SV("close"));
     if (headers.space_remain() < 2)
-        LOG_ERRNO_RETURN(ENOBUFS, -1, "no buffer");
+        LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
     memcpy(m_buf + m_buf_size + headers.size(), "\r\n", 2);
     std::string_view sv = {m_buf, m_buf_size + headers.size() + 2UL};
 
-    if (m_stream->write(sv.data(), sv.size()) != (ssize_t)sv.size())
-        LOG_ERROR_RETURN(0, -1, "send header failed");
+    ssize_t ret = m_stream->write(sv.data(), sv.size());
+    if (ret < (ssize_t)sv.size())
+        LOG_ERRNO_RETURN(0, -1, "send header failed ");
     message_status = HEADER_SENT;
     return prepare_body_write_stream();
 }

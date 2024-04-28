@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 #include "../alog.h"
+#include "../estring.h"
 #include "../alog-stdstring.h"
 #include "../alog-functionptr.h"
 #include "../alog-audit.h"
-#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils-stdstring.h>
@@ -27,6 +27,7 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "../../test/gtest.h"
 
 class LogOutputTest : public ILogOutput {
 public:
@@ -130,7 +131,7 @@ TEST(ALog, DEC) {
 
 TEST(ALog, DoubleLogger) {
     LogOutputTest lo2;
-    ALogLogger l2{0, &lo2};
+    ALogLogger l2{&lo2, 0};
     log_output = &log_output_test;
     DEFER(log_output = log_output_stdout);
     // LOG_DEBUG(' ');
@@ -170,7 +171,8 @@ TEST(ALog, log_to_file) {
     int length = ::read(fd, &buffer, sizeof(buffer));
     EXPECT_GT(length, 0);
     // compare, buffer will followed tailing enter in the end of line
-    EXPECT_EQ(0, strncmp(HELLO, &buffer[length - strlen(HELLO) - 1], strlen(HELLO)));
+    auto sv = estring_view(buffer, length - 1); // excluding the trailing '\n'
+    EXPECT_TRUE(sv.ends_with(HELLO));
     ::close(fd);
 }
 
@@ -406,8 +408,8 @@ void test_defer()
 
 TEST(test, test)
 {
-    char asdf[20];
-//  int qwer[LEN(asdf)];
+//    char asdf[20];
+//    int qwer[LEN(asdf)];
 //    vector<int> uio;      // should not compile! to avoid misuse
 //    auto len = LEN(uio);
 
@@ -578,6 +580,5 @@ int main(int argc, char **argv)
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

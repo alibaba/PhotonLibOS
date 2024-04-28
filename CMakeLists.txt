@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
         photon
-        VERSION 0.6
+        VERSION 0.7
         LANGUAGES C CXX ASM
 )
 
@@ -37,6 +37,10 @@ set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
 set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
 set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
 set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
+set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
+set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapidxml/rapidxml%201.13/rapidxml-1.13.zip/download" CACHE STRING "")
+set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
+set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 
 # Get CPU arch and number
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -45,8 +49,13 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 ProcessorCount(NumCPU)
 
-# Global compiler options, only effective within this project
-add_compile_options(-Wall -Werror -Wno-error=pragmas)
+# Global compile options, only effective within this project
+set(global_compile_options -Wall -Wno-error=pragmas)
+if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # Hint: -faligned-new is enabled by default after -std=c++17
+    list(APPEND global_compile_options -Werror -faligned-new)
+endif ()
+add_compile_options(${global_compile_options})
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,9 +80,11 @@ elseif (${ARCH} STREQUAL aarch64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char -fno-stack-protector -fomit-frame-pointer")
 endif ()
 
-check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
-if (COMPILER_HAS_MCRC32_FLAG)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
+if (${ARCH} STREQUAL x86_64)
+    check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
+    if (COMPILER_HAS_MCRC32_FLAG)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
+    endif ()
 endif ()
 
 set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
@@ -149,6 +160,7 @@ endforeach ()
 ################################################################################
 
 add_subdirectory(third_party)
+add_subdirectory(ecosystem)
 
 # Compile photon objects
 file(GLOB PHOTON_SRC
@@ -176,11 +188,12 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
+        ecosystem/*.cpp
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp)
+    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp io/epoll-ng.cpp)
     if (PHOTON_ENABLE_URING)
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()
@@ -201,6 +214,7 @@ endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
+target_link_libraries(photon_obj PRIVATE ecosystem_deps)
 target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
 )
@@ -217,10 +231,6 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
-endif()
-if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # This option is enabled by default after -std=c++17
-    target_compile_options(photon_obj PRIVATE -faligned-new)
 endif()
 
 if (actually_built)
@@ -334,6 +344,8 @@ endif ()
 if (PHOTON_BUILD_TESTING)
     include(CTest)
 
+    # add_compile_options(-Wno-error)
+
     add_library(ci-tools STATIC test/ci-tools.cpp)
 
     include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
@@ -349,6 +361,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
+    add_subdirectory(ecosystem/test)
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()

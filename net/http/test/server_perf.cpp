@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
 
     thread_create11(show_qps_loop);
     auto tcpserv = net::new_tcp_socket_server();
-    tcpserv->bind(FLAGS_port);
+    tcpserv->bind_v4any(FLAGS_port);
     tcpserv->listen();
     DEFER(delete tcpserv);
     auto http_srv = net::http::new_http_server();

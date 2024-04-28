@@ -27,11 +27,12 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #define FILE_SIZE (2 * 1024 * 1024)
 
 void print_stat(const char *path, struct stat *st) {
+/*
     printf("File: %s\n", path);
     printf("Size: %d, Blocks: %d, IO Blocks: %d, Type: %d\n", st->st_size, st->st_blocks, st->st_blksize, IFTODT(st->st_mode));
     printf("Device: %u/%u, Inode: %d, Links: %d, Device type: %u,%u\n",
@@ -40,6 +41,16 @@ void print_stat(const char *path, struct stat *st) {
     printf("Access: %s", asctime(localtime(&(st->st_atim.tv_sec))));
     printf("Modify: %s", asctime(localtime(&(st->st_mtim.tv_sec))));
     printf("Change: %s", asctime(localtime(&(st->st_ctim.tv_sec))));
+*/
+#define KV(k, v) make_named_value(#k, v)
+    LOG_INFO(VALUE(path));
+    LOG_INFO(KV(Size, st->st_size), KV(Blocks, st->st_blocks), KV(BlkSize, st->st_blksize), KV(Type, IFTODT(st->st_mode)));
+    LOG_INFO(KV(Device, HEX(st->st_dev)), KV(Inode, st->st_ino), KV(nLinks, st->st_nlink));
+    LOG_INFO(KV(Access, OCT(st->st_mode & 0xFFF)), KV(Uid, st->st_uid), KV(Gid, st->st_gid));
+    LOG_INFO(KV(AccessTime, asctime(localtime(&(st->st_atim.tv_sec)))));
+    LOG_INFO(KV(ModifyTime, asctime(localtime(&(st->st_mtim.tv_sec)))));
+    LOG_INFO(KV(ChangeTime, asctime(localtime(&(st->st_ctim.tv_sec)))));
+#undef KV
 }
 
 photon::fs::IFile *new_file(photon::fs::IFileSystem *fs, const char *path) {
@@ -987,6 +998,5 @@ int main(int argc, char **argv) {
     set_log_output_level(1);
 
     ::testing::InitGoogleTest(&argc, argv);
-    auto ret = RUN_ALL_TESTS();
-    if (ret) LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #include <photon/net/socket.h>
 #include <photon/io/fd-events.h>
@@ -72,7 +72,7 @@ TEST(basic, test) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -159,7 +159,7 @@ TEST(basic, socket_close_in_read) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -181,7 +181,7 @@ TEST(basic, socket_close_in_write) {
     DEFER(delete server);
     auto client = net::new_tcp_socket_client();
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -233,7 +233,9 @@ int s_handler(void*, net::ISocketStream* stream) {
 
 void s_client_test(net::ISocketStream* stream) {
     char buf[] = "Hello";
+    LOG_DEBUG("befor write");
     auto ret = stream->write(buf, 6);
+    LOG_DEBUG("after write ret=", ret);
     EXPECT_EQ(6, ret);
     char b[4096];
     size_t rx = 0;
@@ -254,7 +256,7 @@ TEST(cs, test) {
     auto client =
         net::new_tls_client(ctx, net::new_tcp_socket_client(), true);
     DEFER(delete client);
-    ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     auto ep = server->getsockname();
     LOG_INFO(VALUE(ep));
@@ -291,6 +293,9 @@ TEST(cs, uds) {
 }
 
 TEST(Socket, nested) {
+#ifdef __APPLE__
+    LOG_INFO("skip this case in MacOS");
+#endif
 #ifdef __linux___
     ASSERT_GE(net::et_poller_init(), 0);
     DEFER(net::et_poller_fini());
@@ -309,7 +314,7 @@ TEST(Socket, nested) {
     DEFER(delete server);
 
     server->set_handler({s_handler, server_ssl_ctx});
-    ASSERT_EQ(0, server->bind());
+    ASSERT_EQ(0, server->bind_v4localhost());
     ASSERT_EQ(0, server->listen());
     ASSERT_EQ(0, server->start_loop(false));
 
