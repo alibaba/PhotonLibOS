@@ -1051,7 +1051,7 @@ R"(
         gettimeofday(&tv, NULL);
         uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + tv.tv_usec;
         now = nnow;
-        assert(tv.tv_sec <= UINT32_MAX && tv.tv_usec < 1000000ul);
+        assert(tv.tv_sec <= UINT32_MAX && tv.tv_usec < 1000000);
         return {nnow, ((uint64_t)tv.tv_sec << 32) | (uint32_t)tv.tv_usec};
     }
     __attribute__((always_inline))
