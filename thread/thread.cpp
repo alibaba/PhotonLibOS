@@ -847,6 +847,11 @@ R"(
 )"
     );
 
+#ifdef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winline-asm"
+#endif
+
     inline void switch_context(thread* from, thread* to) {
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
@@ -881,6 +886,9 @@ R"(
                        "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
                        "x17", "x18");
     }
+#ifdef __clang__
+#pragma GCC diagnostic pop
+#endif
 
 #endif  // x86 or arm
 
@@ -1089,9 +1097,10 @@ R"(
             update_now();
         }
     }
-    struct timeval alog_update_now() {
+    NowTime udpate_now() {
         last_tsc = _rdtsc();
-        return update_now();
+        auto tv = update_now();
+        return {now, (uint32_t)tv.tv_sec, (uint32_t)tv.tv_usec};
     }
     int timestamp_updater_init() {
         if (!ts_updater) {
