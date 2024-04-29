@@ -483,7 +483,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
 #ifdef LOG_BENCHMARK
     auto t = &alog_time;
 #else
-    auto ts = photon::udpate_now();
+    auto ts = photon::__update_now();
     auto t = alog_update_time(ts.sec - timezone);
 #endif
 #define DEC_W2P0(x) DEC(x).width(2).padding('0')

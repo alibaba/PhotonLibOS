@@ -41,7 +41,7 @@ namespace photon
         uint64_t now;
         uint32_t sec, usec;
     };
-    NowTime udpate_now();    // update `now`
+    NowTime __update_now();    // update `now`
 
     enum states
     {
