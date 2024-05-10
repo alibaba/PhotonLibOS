@@ -1046,7 +1046,7 @@ R"(
 
     volatile uint64_t now;
     static std::atomic<pthread_t> ts_updater(0);
-    static inline struct timeval update_now()
+    static inline NowTime update_now()
     {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86))
@@ -1054,11 +1054,10 @@ R"(
 #endif
         struct timeval tv;
         gettimeofday(&tv, NULL);
-        uint64_t nnow = tv.tv_sec;
-        nnow *= 1000 * 1000;
-        nnow += tv.tv_usec;
+        uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + tv.tv_usec;
         now = nnow;
-        return tv;
+        assert(tv.tv_sec <= UINT32_MAX && tv.tv_usec < 1000000);
+        return {nnow, ((uint64_t)tv.tv_sec << 32) | (uint32_t)tv.tv_usec};
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
@@ -1102,7 +1101,7 @@ R"(
             update_now();
         }
     }
-    struct timeval alog_update_now() {
+    NowTime __update_now() {
         last_tsc = _rdtsc();
         return update_now();
     }
