@@ -18,6 +18,7 @@ find_package(PkgConfig REQUIRED)
 # Options
 set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
 option(PHOTON_BUILD_TESTING "enable build testing" OFF)
+option(PHOTON_BUILD_WITH_ASAN "build with asan" OFF)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
 option(PHOTON_ENABLE_SASL "enable sasl" OFF)
@@ -57,6 +58,13 @@ if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
 endif ()
 add_compile_options(${global_compile_options})
 
+if (PHOTON_BUILD_WITH_ASAN)
+    if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+        message(FATAL_ERROR "Wrong environment")
+    endif ()
+    add_link_options(-fsanitize=address -static-libasan)
+endif ()
+
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -95,12 +103,6 @@ set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
-
-# If ccache exists, use it to speed up compiling
-find_program(CCACHE_FOUND ccache)
-if(CCACHE_FOUND)
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
-endif(CCACHE_FOUND)
 
 # CMake dirs
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/CMake)

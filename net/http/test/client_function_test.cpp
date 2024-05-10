@@ -98,7 +98,7 @@ TEST(http_client, get) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op2 = client->new_operation(Verb::GET, target);
-    DEFER(op2->destroy());
+    DEFER(client->destroy_operation(op2));
     op2->req.headers.content_length(0);
     int ret = client->call(op2);
     GTEST_ASSERT_EQ(0, ret);
@@ -112,7 +112,7 @@ TEST(http_client, get) {
     EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
 
     auto op3 = client->new_operation(Verb::GET, target);
-    DEFER(op3->destroy());
+    DEFER(client->destroy_operation(op3));
     op3->req.headers.content_length(0);
     op3->req.headers.range(10, 19);
     client->call(op3);
@@ -123,7 +123,7 @@ TEST(http_client, get) {
     LOG_DEBUG(resp_body_buf_range);
 
     auto op4 = client->new_operation(Verb::GET, target);
-    DEFER(op4->destroy());
+    DEFER(client->destroy_operation(op4));
     op4->req.headers.content_length(0);
     op4->call();
     EXPECT_EQ(sizeof(socket_buf), op4->resp.resource_size());
@@ -140,7 +140,7 @@ TEST(http_client, get) {
 
     static const char target_tb[] = "http://www.taobao.com?x";
     auto op5 = client->new_operation(Verb::GET, target_tb);
-    DEFER(op5->destroy());
+    DEFER(client->destroy_operation(op5));
     op5->req.headers.content_length(0);
     op5->call();
     EXPECT_EQ(op5->resp.status_code(), 200);
@@ -193,7 +193,7 @@ TEST(http_client, post) {
 
     // body stream test
     auto op1 = client->new_operation(Verb::POST, target);
-    DEFER(op1->destroy());
+    DEFER(client->destroy_operation(op1));
     struct stat st;
     EXPECT_EQ(0, file->fstat(&st));
     op1->req.headers.content_length(st.st_size);
@@ -207,7 +207,7 @@ TEST(http_client, post) {
 
     // body writer test
     auto op2 = client->new_operation(Verb::POST, target);
-    DEFER(op2->destroy());
+    DEFER(client->destroy_operation(op2));
     op2->req.headers.content_length(st.st_size);
     auto writer = [&](Request *req)-> ssize_t {
         file->lseek(0, SEEK_SET);
@@ -348,7 +348,7 @@ TEST(http_client, chunked) {
     DEFER(delete client);
     auto url = to_url(server, "/");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     std::string buf;
 
     op->call();
@@ -362,7 +362,7 @@ TEST(http_client, chunked) {
 
     server->set_handler({nullptr, &chunked_handler_complict});
     auto opc = client->new_operation(Verb::GET, url);
-    DEFER(opc->destroy());
+    DEFER(client->destroy_operation(opc));
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
@@ -382,7 +382,7 @@ TEST(http_client, chunked) {
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
         auto op_test = client->new_operation(Verb::GET, url);
-        DEFER(op_test->destroy());
+        DEFER(client->destroy_operation(op_test));
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);
         buf.resize(std_data_size);
@@ -459,7 +459,7 @@ TEST(http_client, debug) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op_test = client->new_operation(Verb::GET, to_url(server, "/"));
-    DEFER(op_test->destroy());
+    DEFER(client->destroy_operation(op_test));
     op_test->call();
     EXPECT_EQ(200, op_test->status_code);
     std::string buf;
@@ -492,7 +492,7 @@ TEST(http_client, server_no_resp) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, to_url(server, "/wtf"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(-1, op->status_code);
@@ -521,7 +521,7 @@ TEST(http_client, partial_body) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
@@ -540,7 +540,7 @@ TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environm
     DEFER(delete client);
     // here is an ipv6-only website
     auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->call();
     EXPECT_EQ(200, op->resp.status_code());
 }

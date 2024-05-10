@@ -40,6 +40,17 @@ public:
 
 class Client : public Object {
 public:
+    class Operation;
+    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
+        return Operation::create(this, v, url, buf_size);
+    }
+    Operation* new_operation(uint16_t buf_size = UINT16_MAX) {
+        return Operation::create(this, buf_size);
+    }
+    void destroy_operation(Operation* op) {
+        op->destroy();
+    }
+
     class Operation {
     public:
         Request req;                              // request
@@ -68,8 +79,9 @@ public:
             this->~Operation();
             free(this);
         }
-        void set_enable_proxy(bool enable) { enable_proxy = enable; }
-
+        void set_enable_proxy(bool enable) {
+            enable_proxy = enable;
+        }
         int call() {
             if (!_client) return -1;
             return _client->call(this);
@@ -91,16 +103,10 @@ public:
             : req(_buf, buf_size),
               enable_proxy(c->has_proxy()),
               _client(c) {}
-        Operation(uint16_t buf_size) : req(_buf, buf_size) {}
+        explicit Operation(uint16_t buf_size) : req(_buf, buf_size), _client(nullptr) {}
+        Operation() = delete;
+        ~Operation() = default;
     };
-
-    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
-        return Operation::create(this, v, url, buf_size);
-    }
-
-    Operation* new_operation(uint16_t buf_size = UINT16_MAX) {
-        return Operation::create(this, buf_size);
-    }
 
     template<uint16_t BufferSize = UINT16_MAX>
     class OperationOnStack : public Operation {
@@ -108,7 +114,7 @@ public:
     public:
         OperationOnStack(Client* c, Verb v, std::string_view url):
             Operation(c, v, url, BufferSize) {}
-        OperationOnStack(Client* c): Operation(c, BufferSize) {};
+        explicit OperationOnStack(Client* c): Operation(c, BufferSize) {};
         OperationOnStack(): Operation(BufferSize) {}
     };
 
