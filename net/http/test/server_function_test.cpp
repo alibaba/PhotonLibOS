@@ -63,7 +63,7 @@ TEST(http_server, headers) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, to_url(tcpserver, "/test"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     auto exp_len = 20;
     op->req.headers.range(0, exp_len - 1);
     op->call();
@@ -104,7 +104,7 @@ TEST(http_server, post) {
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::POST, to_url(tcpserver, "/test"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(10);
     std::string body = "1234567890";
     auto writer = [&](Request *req)-> ssize_t {
@@ -125,7 +125,7 @@ std::string fs_handler_std_str = "01234567890123456789";
 void test_case(Client* client, estring_view url, off_t st, size_t len, size_t exp_content_length, bool invalid = false) {
     LOG_INFO("test case start");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.range(st, st + len - 1);
     auto ret = op->call();
     LOG_INFO("call finished");
@@ -151,7 +151,7 @@ void test_case(Client* client, estring_view url, off_t st, size_t len, size_t ex
 void test_head_case(Client* client, estring_view url, off_t st, size_t len, size_t exp_content_length) {
     LOG_INFO("test HEAD case start");
     auto op = client->new_operation(Verb::HEAD, url);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.range(st, st + len - 1);
     op->req.headers.content_length(fs_handler_std_str.size());
     auto ret = op->call();
@@ -299,7 +299,7 @@ TEST(http_server, proxy_handler_get) {
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::GET, to_url(tcpserver, "/filename"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     ret = op->call();
     EXPECT_EQ(0, ret);
     std::string data_buf;
@@ -341,7 +341,7 @@ TEST(http_server, proxy_handler_post) {
     tcpserver->start_loop();
     //----------------------------------------------------
     auto op = client->new_operation(Verb::POST, to_url(tcpserver, "/filename"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     std::string body = "1234567890";
     op->req.headers.content_length(10);
     auto writer = [&](Request *req)-> ssize_t {
@@ -402,7 +402,7 @@ TEST(http_server, proxy_handler_post_forward) {
     DEFER(delete client1);
     client1->set_proxy(to_url(tcpserver, "/"));
     auto op = client1->new_operation(Verb::POST, to_url(source_server, "/filename"));
-    DEFER(op->destroy());
+    DEFER(client1->destroy_operation(op));
     std::string body = "1234567890";
     op->req.headers.content_length(10);
     auto writer = [&](Request *req)-> ssize_t {
@@ -441,7 +441,7 @@ TEST(http_server, proxy_handler_failure) {
     //----------------------------------------------------
     auto url = to_url(tcpserver, "/filename");
     auto op = client->new_operation(Verb::GET, url);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     auto ret = op->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(502, op->resp.status_code());
@@ -492,7 +492,7 @@ TEST(http_server, mux_handler) {
     //----------------------------------------------------
     //--------------test static service--------------------
     auto op_static = client->new_operation(Verb::GET, to_url(tcpserver, "/static_service/fs_handler_test"));
-    DEFER(op_static->destroy());
+    DEFER(client->destroy_operation(op_static));
     ret = op_static->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(200, op_static->resp.status_code());
@@ -503,7 +503,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == fs_handler_std_str);
     //--------------test proxy service---------------------
     auto op_proxy = client->new_operation(Verb::GET, to_url(tcpserver, "/proxy/filename_not_important"));
-    DEFER(op_proxy->destroy());
+    DEFER(client->destroy_operation(op_proxy));
     ret = op_proxy->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(200, op_proxy->resp.status_code());
@@ -514,7 +514,7 @@ TEST(http_server, mux_handler) {
     EXPECT_EQ(true, data_buf == std_data);
     //-------------test mux default handler---------------
     auto op_default = client->new_operation(Verb::GET, to_url(tcpserver, "/not_recorded/should_be_404"));
-    DEFER(op_default->destroy());
+    DEFER(client->destroy_operation(op_default));
     ret = op_default->call();
     EXPECT_EQ(0, ret);
     EXPECT_EQ(404, op_default->resp.status_code());

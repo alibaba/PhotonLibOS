@@ -72,7 +72,7 @@ TEST(client_tls, basic) {
     auto client = net::http::new_http_client(nullptr, ctx);
     DEFER(delete client);
     auto op = client->new_operation(net::http::Verb::GET, to_surl(tcpserver, "/test"));
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     auto exp_len = 20;
     op->req.headers.range(0, exp_len - 1);
     op->call();
@@ -91,7 +91,7 @@ TEST(http_client, DISABLED_SNI) {
     auto client = photon::net::http::new_http_client(nullptr, tls);
     DEFER(delete client);
     auto op = client->new_operation(photon::net::http::Verb::GET, "https://debug.fly.dev");
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->retry = 0;
     int res = op->call();
     ASSERT_EQ(0, res);
