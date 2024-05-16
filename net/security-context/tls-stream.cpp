@@ -102,6 +102,8 @@ public:
             case TLSVersion::SSL23:
                 method = SSLv23_method();
                 break;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
             case TLSVersion::TLS11:
                 method = TLSv1_1_method();
                 break;
@@ -110,6 +112,7 @@ public:
                 break;
             default:
                 method = TLSv1_2_method();
+#pragma GCC diagnostic pop
         }
         ctx = SSL_CTX_new(method);
         if (ctx == nullptr) {

@@ -35,15 +35,12 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
-            -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j -- VERBOSE=1
 
       - name: Test
         run: |
-          ulimit -l unlimited
           cd build
           ctest --timeout 3600 -V
 
@@ -75,14 +72,11 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=Debug \
-            -D PHOTON_BUILD_DEPENDENCIES=OFF -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j -- VERBOSE=1
 
       - name: Test
         run: |
-          ulimit -l unlimited
           cd build
           ctest --timeout 3600 -V

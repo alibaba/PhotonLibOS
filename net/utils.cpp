@@ -21,15 +21,17 @@ limitations under the License.
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <list>
 #include <thread>
 #include <string>
 
 #include <photon/common/alog.h>
-#include <photon/io/signal.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/utility.h>
 #include <photon/common/expirecontainer.h>
 #include "socket.h"
+#include "base_socket.h"
 
 namespace photon {
 namespace net {
@@ -41,21 +43,23 @@ IPAddr gethostbypeer(IPAddr remote) {
     // but let os select the interface to connect,
     // then get its ip
     constexpr uint16_t UDP_IP_DETECTE_PORT = 8080;
+    int sock_family = remote.is_ipv4() ? AF_INET : AF_INET6;
 
-    int sockfd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    int sockfd = ::socket(sock_family, SOCK_DGRAM, 0);
     if (sockfd < 0) LOG_ERRNO_RETURN(0, IPAddr(), "Cannot create udp socket");
     DEFER(::close(sockfd));
-    struct sockaddr_in addr_in =
-        EndPoint{remote, UDP_IP_DETECTE_PORT}.to_sockaddr_in();
-    auto ret =
-        ::connect(sockfd, (sockaddr *)&addr_in, sizeof(struct sockaddr_in));
+
+    EndPoint ep_remote(remote, UDP_IP_DETECTE_PORT);
+    sockaddr_storage s_remote(ep_remote);
+
+    auto ret = ::connect(sockfd, s_remote.get_sockaddr(), s_remote.get_socklen());
     if (ret < 0) LOG_ERRNO_RETURN(0, IPAddr(), "Cannot connect remote");
-    struct sockaddr_in addr_local;
-    socklen_t len = sizeof(struct sockaddr_in);
-    ::getsockname(sockfd, (sockaddr *)&addr_local, &len);
-    IPAddr result;
-    result.from_nl(addr_local.sin_addr.s_addr);
-    return result;
+
+    sockaddr_storage s_local;
+    socklen_t len = s_local.get_max_socklen();
+    ::getsockname(sockfd, s_local.get_sockaddr(), &len);
+
+    return s_local.to_endpoint().addr;
 }
 
 IPAddr gethostbypeer(const char *domain) {
@@ -67,51 +71,61 @@ IPAddr gethostbypeer(const char *domain) {
     return gethostbypeer(remote);
 }
 
-int _gethostbyname(const char *name, Delegate<int, IPAddr> append_op) {
-    struct hostent *ent = nullptr;
-#ifdef __APPLE__
-    ent = ::gethostbyname(name);
-#else
-    int err;
-    struct hostent hbuf;
-    char buf[32 * 1024];
-
-    // only retval 0 means successful
-    if (::gethostbyname_r(name, &hbuf, buf, sizeof(buf), &ent, &err) != 0)
-        LOG_ERRNO_RETURN(0, -1, "Failed to gethostbyname", VALUE(err));
-#endif
+int _gethostbyname(const char* name, Delegate<int, IPAddr> append_op) {
+    assert(name);
     int idx = 0;
-    if (ent && ent->h_addrtype == AF_INET) {
-        // can only support IPv4
-        auto addrlist = (struct in_addr **)ent->h_addr_list;
-        while (*addrlist != nullptr) {
-            if (append_op(IPAddr((*addrlist)->s_addr)) < 0) break;
+    addrinfo* result = nullptr;
+    addrinfo hints = {};
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_ALL | AI_V4MAPPED;
+    hints.ai_family = AF_UNSPEC;
+
+    int ret = getaddrinfo(name, nullptr, &hints, &result);
+    if (ret != 0) {
+        LOG_ERROR_RETURN(0, -1, "Fail to getaddrinfo: `", gai_strerror(ret));
+    }
+    assert(result);
+    for (auto* cur = result; cur != nullptr; cur = cur->ai_next) {
+        if (cur->ai_family == AF_INET6) {
+            auto sock_addr = (sockaddr_in6*) cur->ai_addr;
+            if (append_op(IPAddr(sock_addr->sin6_addr)) < 0) {
+                break;
+            }
             idx++;
-            addrlist++;
+        } else if (cur->ai_family == AF_INET) {
+            auto sock_addr = (sockaddr_in*) cur->ai_addr;
+            if (append_op(IPAddr(sock_addr->sin_addr)) < 0) {
+                break;
+            }
+            idx++;
         }
     }
+    freeaddrinfo(result);
     return idx;
 }
 
-inline __attribute__((always_inline)) void base64_translate_3to4(const char *in, char *out)  {
-    struct xlator {
-        unsigned char _;
-        unsigned char a : 6;
-        unsigned char b : 6;
-        unsigned char c : 6;
-        unsigned char d : 6;
-    } __attribute__((packed));
-    static_assert(sizeof(xlator) == 4, "...");
+struct xlator {
+    unsigned char _;
+    unsigned char a : 6;
+    unsigned char b : 6;
+    unsigned char c : 6;
+    unsigned char d : 6;
+} __attribute__((packed));
+static_assert(sizeof(xlator) == 4, "...");
+
+inline __attribute__((always_inline))
+void base64_translate_3to4(const char *in, char *out)  {
     static const unsigned char tbl[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     auto v = htonl(*(uint32_t *)in);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
-    auto x = *(xlator *)(&v);
+    auto x = (xlator*) &v;
 #pragma GCC diagnostic pop
-    *(uint32_t *)out = ((tbl[x.a] << 24) + (tbl[x.b] << 16) +
-                        (tbl[x.c] << 8) + (tbl[x.d] << 0));
+    *(uint32_t *)out = ((tbl[x->a] << 24) + (tbl[x->b] << 16) +
+                        (tbl[x->c] << 8) + (tbl[x->d] << 0));
 }
+
 void Base64Encode(std::string_view in, std::string &out) {
     auto main = in.size() / 3;
     auto remain = in.size() % 3;
@@ -131,7 +145,6 @@ void Base64Encode(std::string_view in, std::string &out) {
         base64_translate_3to4(_in + 6, _out + 8);
         base64_translate_3to4(_in + 9, _out + 12);
     }
-
 
     for (; _in < end; _in += 3, _out += 4) {
         base64_translate_3to4(_in, _out);
@@ -186,16 +199,8 @@ static unsigned char get_index_of(char val, bool &ok) {
 }
  #undef EI
 
+inline
 bool base64_translate_4to3(const char *in, char *out)  {
-    struct xlator {
-        unsigned char _;
-        unsigned char a : 6;
-        unsigned char b : 6;
-        unsigned char c : 6;
-        unsigned char d : 6;
-    } __attribute__((packed));
-    static_assert(sizeof(xlator) == 4, "...");
-
     xlator v;
     bool f1, f2, f3, f4;
     v.a = get_index_of(*(in+3), f1);
@@ -203,10 +208,10 @@ bool base64_translate_4to3(const char *in, char *out)  {
     v.c = get_index_of(*(in+1), f3);
     v.d = get_index_of(*(in),   f4);
 
-
     *(uint32_t *)out = ntohl(*(uint32_t *)&v);
     return (f1 && f2 && f3 && f4);
 }
+
 bool Base64Decode(std::string_view in, std::string &out) {
 #define GSIZE 4 //Size of each group
     auto in_size = in.size();
@@ -250,37 +255,69 @@ bool Base64Decode(std::string_view in, std::string &out) {
 }
 
 class DefaultResolver : public Resolver {
+protected:
+    struct IPAddrNode : public intrusive_list_node<IPAddrNode> {
+        IPAddr addr;
+        IPAddrNode(IPAddr addr) : addr(addr) {}
+    };
+    using IPAddrList = intrusive_list<IPAddrNode>;
 public:
     DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
         : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
-    ~DefaultResolver() { dnscache_.clear(); }
+    ~DefaultResolver() {
+        for (auto it : dnscache_) {
+            ((IPAddrList*)it->_obj)->delete_all();
+        }
+        dnscache_.clear();
+    }
 
     IPAddr resolve(const char *host) override {
-        auto ctr = [&]() -> IPAddr * {
-            auto *ip = new IPAddr();
+        auto ctr = [&]() -> IPAddrList* {
+            auto addrs = new IPAddrList();
             photon::semaphore sem;
             std::thread([&]() {
-                *ip = gethostbyname(host);
-                sem.signal(1);
+                auto now = std::chrono::steady_clock::now();
+                IPAddrList ret;
+                auto cb = [&](IPAddr addr) {
+                    ret.push_back(new IPAddrNode(addr));
+                    return 0;
+                };
+                _gethostbyname(host, cb);
+                auto time_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - now).count();
+                if ((uint64_t)time_elapsed <= resolve_timeout_) {
+                    addrs->push_back(std::move(ret));
+                    sem.signal(1);
+                }
             }).detach();
-            auto ret = sem.wait(1, resolve_timeout_);
-            if (ret < 0 && errno == ETIMEDOUT) {
-                LOG_WARN("Domain resolution for ` timeout!", host);
-            }
-            return ip;
+            sem.wait(1, resolve_timeout_);
+            return addrs;
         };
-        return *(dnscache_.borrow(host, ctr));
+        auto ips = dnscache_.borrow(host, ctr);
+        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
+        auto ret = ips->front();
+        ips->node = ret->next();  // access in round robin order
+        return ret->addr;
     }
 
     void resolve(const char *host, Delegate<void, IPAddr> func) override { func(resolve(host)); }
 
-    void discard_cache(const char *host) override {
+    void discard_cache(const char *host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
-        ipaddr.recycle(true);
+        if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
+        else {
+            for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
+                if ((*itr)->addr == ip) {
+                    ipaddr->erase(*itr);
+                    break;
+                }
+            }
+            ipaddr.recycle(ipaddr->empty());
+        }
     }
 
 private:
-    ObjectCache<std::string, IPAddr *> dnscache_;
+    ObjectCache<std::string, IPAddrList*> dnscache_;
     uint64_t resolve_timeout_;
 };
 

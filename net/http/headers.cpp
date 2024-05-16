@@ -64,11 +64,6 @@ HeadersBase::iterator HeadersBase::find(std::string_view key) const {
     return {this, (uint16_t)(it - kv_begin())};
 }
 
-void buf_append(char*& ptr, std::string_view sv) {
-    memcpy(ptr, sv.data(), sv.size());
-    ptr += sv.size();
-}
-
 void buf_append(char*& ptr, uint64_t x) {
     auto begin = ptr;
     do {
@@ -151,10 +146,14 @@ HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
     if ((char*)(begin - 1) <= m_buf + m_buf_size)
         LOG_ERROR_RETURN(ENOBUFS, nullptr, "no buffer");
     auto it = std::lower_bound(begin, kv_end(), kv, HA(this));
+#ifndef __clang__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
     memmove(begin - 1, begin, sizeof(KV) * (it - begin));
+#ifndef __clang__
 #pragma GCC diagnostic pop
+#endif
     m_kv_size++;
     *(it - 1) = kv;
     return it - 1;

@@ -39,6 +39,10 @@ limitations under the License.
 #include <photon/common/callback.h>
 #include <photon/common/io-alloc.h>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#pragma GCC diagnostic ignored "-Wzero-length-bounds"
+
 inline bool operator == (const iovec& a, const iovec& b)
 {
     return a.iov_base == b.iov_base && a.iov_len == b.iov_len;
@@ -236,6 +240,10 @@ inline void delete_iovector(iovector* ptr);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Warray-bounds"
+#if __GNUC_MINOR__ >= 13
+#pragma GCC diagnostic ignored "-Wzero-length-bounds"
+#pragma GCC diagnostic ignored "-Wstrict-flex-arrays"
+#endif
 
 class iovector
 {
@@ -861,7 +869,7 @@ protected:
 
     struct IOVAllocation_ : public IOAlloc
     {
-        void* bases[0];
+        void* bases[];
         void* do_allocate(int size, uint16_t& nbases, uint16_t capacity)
         {
             return do_allocate(size, size, nbases, capacity);
@@ -1070,3 +1078,4 @@ public:
 
 #undef IF_ASSERT_RETURN
 
+#pragma GCC diagnostic pop

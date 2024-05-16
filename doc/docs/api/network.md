@@ -23,6 +23,9 @@ Network lib provides non-blocking socket implementations for clients and servers
 ISocketClient* new_tcp_socket_client();
 ISocketServer* new_tcp_socket_server();
 
+ISocketClient* new_tcp_socket_client_ipv6();
+ISocketServer* new_tcp_socket_server_ipv6();
+
 ISocketClient* new_uds_client();
 ISocketServer* new_uds_server(bool autoremove = false);
 
@@ -41,6 +44,11 @@ ISocketServer* new_smc_socket_server();
 ISocketClient* new_fstack_dpdk_socket_client();
 ISocketServer* new_fstack_dpdk_socket_server();
 ```
+
+:::note
+An IPv6 socket server listening on `::0` can handle both v4 and v6 socket client.
+:::
+
 
 #### Class Method
 
@@ -95,36 +103,55 @@ namespace net {
 }
 ```
 
-#### IPv4 Address
+#### Address and Endpoint
 ```cpp
 namespace photon {
 namespace net {
-    union IPAddr {
-        // Save IP address as a 32 bits integer, or 4 bytes.
-        uint32_t addr = 0;
-        struct { uint8_t a, b, c, d; };
-
-        // Create from the Internet host address, in network byte order, or from string
+    struct IPAddr {
+        in6_addr addr;
+        // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
+        IPAddr();
+        // V6 constructor (Internet Address)
+        explicit IPAddr(in6_addr internet_addr);
+        // V6 constructor (Network byte order)
+        IPAddr(uint32_t nl1, uint32_t nl2, uint32_t nl3, uint32_t nl4);
+        // V4 constructor (Internet Address)
+        explicit IPAddr(in_addr internet_addr);
+        // V4 constructor (Network byte order)
         explicit IPAddr(uint32_t nl);
-        explicit IPAddr(const char* s)
-        
+        // String constructor
+        explicit IPAddr(const char* s);
+        // Check if it's actually an IPv4 address mapped in IPV6
+        bool is_ipv4();
+        // We regard the default IPv4 0.0.0.0 as undefined
+        bool undefined();
+        // Should ONLY be used for IPv4 address
         uint32_t to_nl() const;
-        void from_nl(uint32_t nl);
+        bool is_loopback() const;
+        bool is_broadcast() const;
+        bool is_link_local() const;
+        bool operator==(const IPAddr& rhs) const;
+        bool operator!=(const IPAddr& rhs) const;
+        static IPAddr V6None();
+        static IPAddr V6Any();
+        static IPAddr V6Loopback();
+        static IPAddr V4Broadcast();
+        static IPAddr V4Any();
+        static IPAddr V4Loopback();
     };
 
     // EndPoint represents IP address and port
+    // A default endpoint is undefined (0.0.0.0:0)
     struct EndPoint {
         IPAddr addr;
-        uint16_t port;
-
-        // convert from the typical struct sockaddr_in
-        sockaddr_in to_sockaddr_in() const;
-        void from_sockaddr_in(const struct sockaddr_in& addr_in);
+        uint16_t port = 0;
+        EndPoint() = default;
+        EndPoint(IPAddr ip, uint16_t port);
+        bool is_ipv4() const;
+        bool operator==(const EndPoint& rhs) const;
+        bool operator!=(const EndPoint& rhs) const;
+        bool undefined() const;
     };
-
-    // operators to help logging IP addresses with alog
-    LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
-    LogBuffer& operator << (LogBuffer& log, const EndPoint ep);
 }
 }
 ```

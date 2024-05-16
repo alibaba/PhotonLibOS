@@ -72,8 +72,6 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
    by target vcpu in resume_thread(), when its runq becomes empty;
 */
 
-#define SCOPED_MEMBER_LOCK(x) SCOPED_LOCK(&(x)->lock, ((bool)x) * 2)
-
 // Define assembly section header for clang and gcc
 #if defined(__APPLE__)
 #define DEF_ASM_FUNC(name) ".text\n" \
@@ -849,6 +847,11 @@ R"(
 )"
     );
 
+#ifdef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winline-asm"
+#endif
+
     inline void switch_context(thread* from, thread* to) {
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
@@ -883,6 +886,9 @@ R"(
                        "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
                        "x17", "x18");
     }
+#ifdef __clang__
+#pragma GCC diagnostic pop
+#endif
 
 #endif  // x86 or arm
 
@@ -930,18 +936,15 @@ R"(
         size_t randomizer = (rand() % 32) * (1024 + 8);
         stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
-        auto p = ptr + stack_size - sizeof(thread) - randomizer;
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-        (uint64_t&)p &= ~63;
-#pragma GCC diagnostic pop
-        auto th = new (p) thread;
+        uint64_t p = (uint64_t) ptr + stack_size - sizeof(thread) - randomizer;
+        p = align_down(p, 64);
+        auto th = new((char*) p) thread;
         th->buf = ptr;
         th->stackful_alloc_top = ptr;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
-        auto sp = align_down((uint64_t)p - reserved_space, 64);
+        auto sp = align_down(p - reserved_space, 64);
         th->stack.init((void*)sp, &_photon_thread_stub, th);
         AtomicRunQ arq(rq);
         th->vcpu = arq.vcpu;
@@ -1038,7 +1041,7 @@ R"(
 
     volatile uint64_t now;
     static std::atomic<pthread_t> ts_updater(0);
-    static inline struct timeval update_now()
+    static inline NowTime update_now()
     {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86))
@@ -1046,11 +1049,10 @@ R"(
 #endif
         struct timeval tv;
         gettimeofday(&tv, NULL);
-        uint64_t nnow = tv.tv_sec;
-        nnow *= 1000 * 1000;
-        nnow += tv.tv_usec;
+        uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + tv.tv_usec;
         now = nnow;
-        return tv;
+        assert(tv.tv_sec <= UINT32_MAX && tv.tv_usec < 1000000);
+        return {nnow, ((uint64_t)tv.tv_sec << 32) | (uint32_t)tv.tv_usec};
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
@@ -1094,7 +1096,7 @@ R"(
             update_now();
         }
     }
-    struct timeval alog_update_now() {
+    NowTime __update_now() {
         last_tsc = _rdtsc();
         return update_now();
     }
@@ -1207,7 +1209,8 @@ R"(
     __attribute__((always_inline)) inline
     Switch prepare_usleep(uint64_t useconds, thread_list* waitq, RunQ rq = {})
     {
-        SCOPED_MEMBER_LOCK(waitq);
+        spinlock* waitq_lock = waitq ? &waitq->lock : nullptr;
+        SCOPED_LOCK(waitq_lock, ((bool) waitq) * 2);
         SCOPED_LOCK(rq.current->lock);
         assert(!AtomicRunQ(rq).single());
         auto sw = AtomicRunQ(rq).remove_current(states::SLEEPING);
@@ -1553,12 +1556,12 @@ R"(
         auto splock = (spinlock*)s_;
         splock->unlock();
     }
-    int mutex::lock(uint64_t timeout)
-    {
-        for (int tries = 0; tries < MaxTries; ++tries) {
+    int mutex::lock(uint64_t timeout) {
+        if (try_lock() == 0) return 0;
+        for (auto re = retries; re; --re) {
+            thread_yield();
             if (try_lock() == 0)
                 return 0;
-            thread_yield();
         }
         splock.lock();
         if (try_lock() == 0) {
@@ -1580,7 +1583,7 @@ R"(
     {
         thread* ptr = nullptr;
         bool ret = owner.compare_exchange_strong(ptr, CURRENT,
-            std::memory_order_release, std::memory_order_relaxed);
+            std::memory_order_acq_rel, std::memory_order_relaxed);
         return (int)ret - 1;
     }
     inline void do_mutex_unlock(mutex* m)

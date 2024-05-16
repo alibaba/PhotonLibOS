@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/iovector.h>
 #include <photon/common/utility.h>
+#include "base_socket.h"
 
 #ifndef MSG_ZEROCOPY
 #define MSG_ZEROCOPY    0x4000000
@@ -96,7 +97,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
                 if (ret < 0) return -1;
                 socklen_t n = sizeof(err);
                 ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &n);
-                if (ret < 0) return -1;
+                if (unlikely(ret < 0)) return -1;
                 if (err) {
                     errno = err;
                     return -1;
@@ -261,12 +262,39 @@ bool ISocketStream::skip_read(size_t count) {
     return true;
 }
 
+ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
+    size_t n = 0;
+    do {
+        ssize_t ret = this->recv(buf, count, flags);
+        if (ret < 0) return ret;
+        if (ret == 0) break;    // EOF
+        if ((n += ret) >= least) break;
+        count -= ret;
+    } while (count);
+    return n;
+}
+
+ssize_t ISocketStream::recv_at_least_mutable(struct iovec *iov, int iovcnt,
+                                             size_t least, int flags /*=0*/) {
+    size_t n = 0;
+    iovector_view v(iov, iovcnt);
+    do {
+        ssize_t ret = this->recv(v.iov, v.iovcnt, flags);
+        if (ret < 0) return ret;
+        if (ret == 0) break;    // EOF
+        if ((n += ret) >= least) break;
+        auto r = v.extract_front(ret);
+        assert((ssize_t) r == ret); (void)r;
+    } while (v.iovcnt && v.iov->iov_len);
+    return n;
+}
+
 int do_get_name(int fd, Getter getter, EndPoint& addr) {
-    struct sockaddr_in addr_in;
-    socklen_t len = sizeof(addr_in);
-    int ret = getter(fd, (struct sockaddr*) &addr_in, &len);
-    if (ret < 0 || len != sizeof(addr_in)) return -1;
-    addr.from_sockaddr_in(addr_in);
+    sockaddr_storage storage;
+    socklen_t len = storage.get_max_socklen();
+    int ret = getter(fd, storage.get_sockaddr(), &len);
+    if (ret < 0 || len > storage.get_max_socklen()) return -1;
+    addr = storage.to_endpoint();
     return 0;
 }
 

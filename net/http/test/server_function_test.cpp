@@ -531,7 +531,7 @@ int main(int argc, char** arg) {
     }
     DEFER(net::et_poller_fini());
 #endif
-    set_log_output_level(ALOG_DEBUG);
+    set_log_output_level(ALOG_INFO);
     ::testing::InitGoogleTest(&argc, arg);
     LOG_DEBUG("test result:`", RUN_ALL_TESTS());
 }
