@@ -573,6 +573,44 @@ TEST(http_client, unix_socket) {
     ASSERT_EQ(200, op2.resp.status_code());
 }
 
+int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
+    auto ua = req.headers["User-Agent"];
+    LOG_DEBUG(VALUE(ua));
+    EXPECT_EQ(ua, "TEST_UA");
+    resp.set_result(200);
+    std::string str = "success";
+    resp.headers.content_length(7);
+    resp.write((void*)str.data(), str.size());
+    return 0;
+}
+
+TEST(http_client, user_agent) {
+    auto tcpserver = new_tcp_socket_server();
+    DEFER(delete tcpserver);
+    tcpserver->bind(18731);
+    tcpserver->listen();
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &ua_check_handler});
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+
+    std::string target_get = "http://localhost:18731/file";
+    auto client = new_http_client();
+    client->set_user_agent("TEST_UA");
+    DEFER(delete client);
+    auto op = client->new_operation(Verb::GET, target_get);
+    DEFER(delete op);
+    op->req.headers.content_length(0);
+    client->call(op);
+    EXPECT_EQ(op->status_code, 200);
+    std::string buf;
+    buf.resize(op->resp.headers.content_length());
+    op->resp.read((void*)buf.data(), op->resp.headers.content_length());
+    LOG_DEBUG(VALUE(buf));
+    EXPECT_EQ(true, buf == "success");
+}
+
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),

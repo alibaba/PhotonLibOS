@@ -252,9 +252,10 @@ public:
             LOG_ERROR_RETURN(EINVAL, ROUNDTRIP_FAILED,
                             "Content-Length and Transfer-Encoding conflicted");
         }
-        op->req.headers.insert("User-Agent", USERAGENT);
-        op->req.headers.insert("Connection", "keep-alive");
         op->req.headers.merge(m_common_headers);
+        op->req.headers.insert("User-Agent", m_user_agent.empty() ? std::string_view(USERAGENT)
+                                                                  : std::string_view(m_user_agent));
+        op->req.headers.insert("Connection", "keep-alive");
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
