@@ -243,7 +243,12 @@ TEST(Callback, virtual_function)
     Callback<int> dd(lambda);
 //    Callback<int> ee([&](int x){ return RET + x/2; });
 
+#pragma GCC diagnostic push
+#if __GNUC__ >= 13
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
     THIS = (BB*)&c;
+#pragma GCC diagnostic pop
     LOG_DEBUG(VALUE(THIS), VALUE(&c));
 
     for (int i=0; i<100; ++i)

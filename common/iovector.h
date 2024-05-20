@@ -40,7 +40,8 @@ limitations under the License.
 #include <photon/common/io-alloc.h>
 
 #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#if __GNUC__ >= 13
+// #pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
 
 inline bool operator == (const iovec& a, const iovec& b)
