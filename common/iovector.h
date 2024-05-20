@@ -43,6 +43,7 @@ limitations under the License.
 #if __GNUC__ >= 13
 // #pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
+#endif
 
 inline bool operator == (const iovec& a, const iovec& b)
 {
