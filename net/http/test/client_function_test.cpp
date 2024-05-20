@@ -27,13 +27,8 @@ limitations under the License.
 #include <photon/net/curl.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
-#define protected public
-#define private public
 #include "../client.cpp"
-#undef protected
-#undef private
 #include "../server.h"
-// #include "client.h"
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
@@ -607,7 +602,7 @@ TEST(http_client, user_agent) {
     client->set_user_agent("TEST_UA");
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(delete op);
+    DEFER(op->destroy());
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(op->status_code, 200);
