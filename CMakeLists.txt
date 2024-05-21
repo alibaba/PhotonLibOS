@@ -348,9 +348,8 @@ if (PHOTON_BUILD_TESTING)
 
     # add_compile_options(-Wno-error)
 
+    include_directories(include ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     add_library(ci-tools STATIC test/ci-tools.cpp)
-
-    include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
 
     add_subdirectory(examples)

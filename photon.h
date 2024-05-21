@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <inttypes.h>
+#include <photon/common/callback.h>
 
 namespace photon {
 
@@ -68,5 +69,9 @@ int init(uint64_t event_engine = INIT_EVENT_DEFAULT,
  */
 int fini();
 
+/**
+ * @brief add callbacks on fini()
+ */
+void fini_hook(Delegate<void> handler);
 
 }

@@ -29,6 +29,8 @@ limitations under the License.
 #include "net/curl.h"
 #include "net/socket.h"
 #include "fs/exportfs.h"
+#include "common/callback.h"
+#include <vector>
 
 namespace photon {
 
@@ -94,7 +96,19 @@ int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options
     return 0;
 }
 
+static std::vector<Delegate<void>>& get_hook_vector() {
+    thread_local std::vector<Delegate<void>> hooks;
+    return hooks;
+}
+
+void fini_hook(Delegate<void> handler) {
+    get_hook_vector().emplace_back(handler);
+}
+
 int fini() {
+    for (auto h : get_hook_vector()) {
+        h.fire();
+    }
 #ifdef __linux__
     FINI_IO(LIBAIO, libaio_wrapper)
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
