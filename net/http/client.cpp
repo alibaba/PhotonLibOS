@@ -24,6 +24,7 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/net/security-context/tls-stream.h>
 #include <photon/net/utils.h>
+#include <photon/photon.h>
 
 namespace photon {
 namespace net {
@@ -51,9 +52,17 @@ public:
         tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
         tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
         udssock.reset(new_uds_client());
+        photon::fini_hook({this, &PooledDialer::at_photon_fini});
     }
 
     ~PooledDialer() {
+    }
+
+    void at_photon_fini() {
+        resolver.reset();
+        udssock.reset();
+        tlssock.reset();
+        tcpsock.reset();
         if (tls_ctx_ownership)
             delete tls_ctx;
     }
@@ -127,12 +136,17 @@ enum RoundtripStatus {
 
 class ClientImpl : public Client {
 public:
-    PooledDialer m_dialer;
     CommonHeaders<> m_common_headers;
+    TLSContext *m_tls_ctx;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_dialer(tls_ctx),
+        m_tls_ctx(tls_ctx),
         m_cookie_jar(cookie_jar) {
+    }
+
+    PooledDialer& get_dialer() {
+        thread_local PooledDialer dialer(m_tls_ctx);
+        return dialer;
     }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
@@ -165,22 +179,18 @@ public:
         return ROUNDTRIP_REDIRECT;
     }
 
-    int concurreny = 0;
     int do_roundtrip(Operation* op, Timeout tmo) {
-        concurreny++;
-        LOG_DEBUG(VALUE(concurreny));
-        DEFER(concurreny--);
         op->status_code = -1;
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
         ISocketStream* s;
         if (m_proxy && !m_proxy_url.empty())
-            s = m_dialer.dial(m_proxy_url, tmo.timeout());
+            s = get_dialer().dial(m_proxy_url, tmo.timeout());
         else if (!op->uds_path.empty())
-            s = m_dialer.dial(op->uds_path, tmo.timeout());
+            s = get_dialer().dial(op->uds_path, tmo.timeout());
         else
-            s = m_dialer.dial(req, tmo.timeout());
+            s = get_dialer().dial(req, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -288,7 +298,7 @@ public:
     }
 
     ISocketStream* native_connect(std::string_view host, uint16_t port, bool secure, uint64_t timeout) override {
-        return m_dialer.dial(host, port, secure, timeout);
+        return get_dialer().dial(host, port, secure, timeout);
     }
 
     CommonHeaders<>* common_headers() override {

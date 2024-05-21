@@ -530,6 +530,62 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+
+TEST(http_client, vcpu) {
+    system("mkdir -p /tmp/ease_ut/http_test/");
+    system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
+    DEFER(delete fs);
+    auto fs_handler = new_fs_handler(fs);
+    DEFER(delete fs_handler);
+    server->add_handler(fs_handler);
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/ease-httpclient-gettestfile");
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    int vcpu_num = 16;
+    photon::semaphore sem(0);
+    std::thread th[vcpu_num];
+    for (int i = 0; i < vcpu_num; i++) {
+        th[i] = std::thread([&] {
+            photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+            DEFER({
+                photon::fini();
+                sem.signal(1);
+            });
+
+            for (int round = 0; round < 10; round++) {
+                auto op = client->new_operation(Verb::GET, target);
+                DEFER(client->destroy_operation(op));
+                op->req.headers.content_length(0);
+                int ret = client->call(op);
+                GTEST_ASSERT_EQ(0, ret);
+
+                char resp_body_buf[1024];
+                EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
+                ret = op->resp.read(resp_body_buf, sizeof(socket_buf));
+                EXPECT_EQ(sizeof(socket_buf), ret);
+                resp_body_buf[sizeof(socket_buf) - 1] = '\0';
+                LOG_DEBUG(resp_body_buf);
+                EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
+            }
+        });
+    }
+
+    sem.wait(vcpu_num);
+    for (int i = 0; i < vcpu_num; i++)
+        th[i].join();
+}
+
 TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
     auto client = new_http_client();
     DEFER(delete client);
