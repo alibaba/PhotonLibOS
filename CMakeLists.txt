@@ -25,6 +25,7 @@ option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
+option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" ON)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -162,7 +163,10 @@ endforeach ()
 ################################################################################
 
 add_subdirectory(third_party)
-add_subdirectory(ecosystem)
+
+if (PHOTON_ENABLE_ECOSYSTEM)
+    add_subdirectory(ecosystem)
+endif ()
 
 # Compile photon objects
 file(GLOB PHOTON_SRC
@@ -190,7 +194,6 @@ file(GLOB PHOTON_SRC
         net/security-context/tls-stream.cpp
         rpc/*.cpp
         thread/*.cpp
-        ecosystem/*.cpp
         )
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
@@ -213,10 +216,16 @@ if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif ()
+if (PHOTON_ENABLE_ECOSYSTEM)
+    file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
+    list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
+endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_link_libraries(photon_obj PRIVATE ecosystem_deps)
+if (PHOTON_ENABLE_ECOSYSTEM)
+    target_link_libraries(photon_obj PRIVATE ecosystem_deps)
+endif ()
 target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
 )
@@ -362,7 +371,9 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
-    add_subdirectory(ecosystem/test)
+    if (PHOTON_ENABLE_ECOSYSTEM)
+        add_subdirectory(ecosystem/test)
+    endif ()
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()
