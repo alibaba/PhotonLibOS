@@ -35,7 +35,7 @@ namespace photon
         // it has a `stack_size`, and the `on_timer` is invoked within the thread's context.
         // The timer object is deleted automatically after it is finished.
         Timer(uint64_t default_timeout, Entry on_timer, bool repeating = true,
-              uint64_t stack_size = 1024 * 64)
+              uint64_t stack_size = DEFAULT_STACK_SIZE)
         {
             _on_timer = on_timer;
             _default_timeout = default_timeout;
