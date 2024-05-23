@@ -658,7 +658,7 @@ TEST(http_client, user_agent) {
     client->set_user_agent("TEST_UA");
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(op->destroy());
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(op->status_code, 200);
