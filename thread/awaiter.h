@@ -52,10 +52,15 @@ struct Awaiter<StdContext> {
     std::promise<void> p;
     void resume() { return p.set_value(); }
     int suspend(Timeout timeout = {}) {
-        auto ret = p.get_future().wait_for(timeout.std_duration());
-        if (ret == std::future_status::timeout) {
-            errno = ETIMEDOUT;
-            return -1;
+        auto duration = timeout.std_duration();
+        if (duration == std::chrono::microseconds().max()) {
+            p.get_future().wait();
+        } else {
+            auto ret = p.get_future().wait_for(duration);
+            if (ret == std::future_status::timeout) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
         }
         return 0;
     }
