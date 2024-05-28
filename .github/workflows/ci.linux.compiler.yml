@@ -30,6 +30,8 @@ jobs:
         with:
           name: output850
           path: build/output850
+          retention-days: 5
+          compression-level: 0
 
   gcc921:
     needs: gcc850
@@ -52,6 +54,8 @@ jobs:
         with:
           name: output921
           path: build/output921
+          retention-days: 5
+          compression-level: 0
 
   gcc1031:
     needs: gcc921
@@ -74,6 +78,8 @@ jobs:
         with:
           name: output1031
           path: build/output1031
+          retention-days: 5
+          compression-level: 0
 
   gcc1121:
     needs: gcc1031
@@ -96,6 +102,8 @@ jobs:
         with:
           name: output1121
           path: build/output1121
+          retention-days: 5
+          compression-level: 0
 
   gcc1211:
     needs: gcc1121
@@ -118,5 +126,7 @@ jobs:
         with:
           name: output1211
           path: build/output1211
+          retention-days: 5
+          compression-level: 0
 
 
