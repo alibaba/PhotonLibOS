@@ -157,8 +157,11 @@ public:
     // When failed, return an Undefined IPAddr
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(std::string_view host) = 0;
-    virtual void resolve(std::string_view host, Delegate<void, IPAddr> func) = 0;
-    virtual void discard_cache(std::string_view host, IPAddr ip = IPAddr()) = 0;  // discard current cache of ip
+    void resolve(std::string_view host, Delegate<void, IPAddr> func) { func(resolve(host)); }
+    // If filter callback returns false, the IP will be abandoned.
+    virtual IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr> filter) = 0;
+    // Discard cache of a hostname, ip can be specified
+    virtual void discard_cache(std::string_view host, IPAddr ip = IPAddr()) = 0;
 };
 
 /**

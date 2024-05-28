@@ -427,7 +427,7 @@ namespace photon
     protected:
         std::atomic<uint64_t> m_count;
         spinlock splock;
-        bool try_substract(uint64_t count);
+        bool try_subtract(uint64_t count);
         void try_resume();
     };
 
