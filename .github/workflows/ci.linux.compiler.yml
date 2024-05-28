@@ -19,6 +19,7 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output850
+          mkdir build/output
 
   upload850:
     needs: gcc850
@@ -40,6 +41,7 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output921
+          mkdir build/output
 
   upload921:
     needs: gcc921
@@ -61,6 +63,7 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output1031
+          mkdir build/output
 
   upload1031:
     needs: gcc1031
@@ -82,6 +85,7 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output1121
+          mkdir build/output
 
   upload1121:
     needs: gcc1121
@@ -103,6 +107,7 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output1211
+          mkdir build/output
 
   upload1211:
     needs: gcc1211
