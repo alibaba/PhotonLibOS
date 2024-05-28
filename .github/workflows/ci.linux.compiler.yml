@@ -30,13 +30,14 @@ jobs:
                          -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          tar -c --use-compress-program=pigz -f output850.tgz build/output/
+          rm -f build/output/*.a build/uring-*
+          find build/ -name "*.o" -type f -delete
+          # tar -c --use-compress-program=pigz -f output850.tgz build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
-          name: output850
-          path: build/output
+          name: build850
+          path: build
           retention-days: 5
           compression-level: 0
 
@@ -47,13 +48,14 @@ jobs:
       - name: download850
         uses: actions/download-artifact@v4
         with:
-          name: output850
+          name: build850
           # path: output850.tgz
       - name: test
         run: |
           # tar -xzf output850.tgz
           ls -R
-          cd output850/build
+          zstdmt || echo "no zstdmt"
+          # cd build
           ctest --timeout 3600 -V
 
   gcc921:
