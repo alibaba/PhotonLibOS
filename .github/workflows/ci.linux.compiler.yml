@@ -20,10 +20,10 @@ jobs:
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output850.tar.zstd build/output/
 
-  upload850:
-    needs: gcc850
-    runs-on: [self-hosted, compiler]
-    steps:
+  # upload850:
+  #   needs: gcc850
+  #   runs-on: [self-hosted, compiler]
+  #   steps:
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
@@ -43,10 +43,10 @@ jobs:
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
 
-  upload921:
-    needs: gcc921
-    runs-on: [self-hosted, compiler]
-    steps:
+  # upload921:
+  #   needs: gcc921
+  #   runs-on: [self-hosted, compiler]
+  #   steps:
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
@@ -66,10 +66,10 @@ jobs:
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
 
-  upload1031:
-    needs: gcc1031
-    runs-on: [self-hosted, compiler]
-    steps:
+  # upload1031:
+  #   needs: gcc1031
+  #   runs-on: [self-hosted, compiler]
+  #   steps:
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
@@ -89,10 +89,10 @@ jobs:
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
 
-  upload1121:
-    needs: gcc1121
-    runs-on: [self-hosted, compiler]
-    steps:
+  # upload1121:
+  #   needs: gcc1121
+  #   runs-on: [self-hosted, compiler]
+  #   steps:
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
@@ -112,10 +112,10 @@ jobs:
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
 
-  upload1211:
-    needs: gcc1211
-    runs-on: [self-hosted, compiler]
-    steps:
+  # upload1211:
+  #   needs: gcc1211
+  #   runs-on: [self-hosted, compiler]
+  #   steps:
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
