@@ -14,16 +14,15 @@ jobs:
       - name: Build850
         run: |
           rm -fr build
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
+                         -D PHOTON_BUILD_TESTING=ON     \
+                         -D PHOTON_ENABLE_SASL=ON       \
+                         -D PHOTON_ENABLE_FUSE=ON       \
+                         -D PHOTON_ENABLE_URING=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output850.tar.zstd build/output/
-
-  # upload850:
-  #   needs: gcc850
-  #   runs-on: [self-hosted, compiler]
-  #   steps:
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
@@ -42,11 +41,6 @@ jobs:
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
-
-  # upload921:
-  #   needs: gcc921
-  #   runs-on: [self-hosted, compiler]
-  #   steps:
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
@@ -65,11 +59,6 @@ jobs:
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
-
-  # upload1031:
-  #   needs: gcc1031
-  #   runs-on: [self-hosted, compiler]
-  #   steps:
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
@@ -88,11 +77,6 @@ jobs:
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
-
-  # upload1121:
-  #   needs: gcc1121
-  #   runs-on: [self-hosted, compiler]
-  #   steps:
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
@@ -111,11 +95,6 @@ jobs:
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
-
-  # upload1211:
-  #   needs: gcc1211
-  #   runs-on: [self-hosted, compiler]
-  #   steps:
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
