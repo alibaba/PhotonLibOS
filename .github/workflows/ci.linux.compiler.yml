@@ -32,7 +32,7 @@ jobs:
         run: |
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -clean-first -- VERBOSE=1
+          cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
 
       - name: Upload850
@@ -46,7 +46,7 @@ jobs:
           source /opt/rh/gcc-toolset-9/enable
           # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
           #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -clean-first -- VERBOSE=1
+          cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
 
       - name: Upload921
@@ -60,7 +60,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
           #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -clean-first -- VERBOSE=1
+          cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
 
       - name: Upload1031
@@ -74,13 +74,13 @@ jobs:
           source /opt/rh/gcc-toolset-11/enable
           # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
           #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -clean-first -- VERBOSE=1
+          cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
 
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
-          name: output921
+          name: output1121
           path: build/output
 
       - name: Build1211
@@ -88,7 +88,7 @@ jobs:
           source /opt/rh/gcc-toolset-12/enable
           # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
           #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j -clean-first -- VERBOSE=1
+          cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
 
       - name: Upload1211
