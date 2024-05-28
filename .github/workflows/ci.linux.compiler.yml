@@ -9,93 +9,109 @@ on:
 jobs:
   gcc850:
     runs-on: [self-hosted, compiler]
-
     steps:
-      # - uses: szenius/set-timezone@v1.2
-      #   with:
-      #     timezoneLinux: "Asia/Shanghai"
-      #     timezoneMacos: "Asia/Shanghai"
-      #     timezoneWindows: "China Standard Time"
-
       - uses: actions/checkout@v3
-
-      # - name: Install Dependencies
-      #   run: |
-      #     dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
-      #     dnf install -y gcc-toolset-9-gcc-c++
-      #     dnf install -y openssl-devel libcurl-devel libaio-devel
-      #     dnf install -y epel-release
-      #     dnf config-manager --set-enabled powertools
-      #     dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
-
       - name: Build850
         run: |
+          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
+          mv build/output build/output850
 
+  upload850:
+    needs: gcc850
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
           name: output850
-          path: build/output
+          path: build/output850
 
+  gcc921:
+    needs: gcc850
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Build921
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-          #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
+          mv build/output build/output921
 
+  upload921:
+    needs: gcc921
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
           name: output921
-          path: build/output
+          path: build/output921
 
+  gcc1031:
+    needs: gcc921
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Build1031
         run: |
           source /opt/rh/gcc-toolset-10/enable
-          # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-          #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
+          mv build/output build/output1031
 
+  upload1031:
+    needs: gcc1031
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
           name: output1031
-          path: build/output
+          path: build/output1031
 
+  gcc1121:
+    needs: gcc1031
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Build1121
         run: |
-          source /opt/rh/gcc-toolset-11/enable
-          # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-          #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
+          mv build/output build/output1121
 
+  upload1121:
+    needs: gcc1121
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
           name: output1121
-          path: build/output
+          path: build/output1121
 
+  gcc1211:
+    needs: gcc1121
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Build1211
         run: |
-          source /opt/rh/gcc-toolset-12/enable
-          # cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-          #   -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
+          mv build/output build/output1211
 
+  upload1211:
+    needs: gcc1211
+    runs-on: [self-hosted, compiler]
+    steps:
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
           name: output1211
-          path: build/output
-
+          path: build/output1211
 
 
