@@ -30,7 +30,7 @@ jobs:
                          -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a build/uring-*
+          rm -fr build/output/*.a build/uring-*
           find build/ -name "*.o" -type f -delete
           # tar -c --use-compress-program=pigz -f output850.tgz build/output/
       - name: Upload850
