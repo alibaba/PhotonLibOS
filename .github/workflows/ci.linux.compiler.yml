@@ -67,7 +67,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
+          tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
@@ -85,7 +85,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
+          tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
@@ -103,7 +103,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
+          tar -c --use-compress-program=zstdmt -f output1211.tar.zstd build/output/
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
