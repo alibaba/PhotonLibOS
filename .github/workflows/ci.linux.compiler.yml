@@ -18,8 +18,7 @@ jobs:
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          mv build/output build/output850
-          mkdir build/output
+          tar -c --use-compress-program=zstdmt -f output850.tar.zstd build/output/
 
   upload850:
     needs: gcc850
@@ -28,8 +27,8 @@ jobs:
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
-          name: output850
-          path: build/output850
+          name: output850.tar.zstd
+          path: output850.tar.zstd
           retention-days: 5
           compression-level: 0
 
@@ -42,8 +41,7 @@ jobs:
           source /opt/rh/gcc-toolset-9/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          mv build/output build/output921
-          mkdir build/output
+          tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
 
   upload921:
     needs: gcc921
@@ -52,8 +50,8 @@ jobs:
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
-          name: output921
-          path: build/output921
+          name: output921.tar.zstd
+          path: output921.tar.zstd
           retention-days: 5
           compression-level: 0
 
@@ -66,8 +64,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          mv build/output build/output1031
-          mkdir build/output
+          tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
 
   upload1031:
     needs: gcc1031
@@ -76,8 +73,8 @@ jobs:
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
-          name: output1031
-          path: build/output1031
+          name: output1031.tar.zstd
+          path: output1031.tar.zstd
           retention-days: 5
           compression-level: 0
 
@@ -90,8 +87,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          mv build/output build/output1121
-          mkdir build/output
+          tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
 
   upload1121:
     needs: gcc1121
@@ -100,8 +96,8 @@ jobs:
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
-          name: output1121
-          path: build/output1121
+          name: output1121.tar.zstd
+          path: output1121.tar.zstd
           retention-days: 5
           compression-level: 0
 
@@ -114,8 +110,7 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          mv build/output build/output1211
-          mkdir build/output
+          tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
 
   upload1211:
     needs: gcc1211
@@ -124,8 +119,8 @@ jobs:
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
-          name: output1211
-          path: build/output1211
+          name: output1211.tar.zstd
+          path: output1211.tar.zstd
           retention-days: 5
           compression-level: 0
 
