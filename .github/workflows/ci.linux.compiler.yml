@@ -27,11 +27,11 @@ jobs:
                          -D PHOTON_OPENSSL_SOURCE=""      \
                          -D PHOTON_GFLAGS_SOURCE=""       \
                          -D PHOTON_GOOGLETEST_SOURCE=""   \
-                         -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz \
+                         -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output850.tgz build/output/
+          tar -c --use-compress-program=pigz -f output850.tgz build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
@@ -39,6 +39,21 @@ jobs:
           path: output850.tgz
           retention-days: 5
           compression-level: 0
+
+  test850:
+    needs: gcc850
+    runs-on: ubuntu-latest
+    steps:
+      - name: download850
+        uses: actions/download-artifact@v4
+        with:
+          name: output850.tgz
+          path: output850.tgz
+      - name: test
+        run: |
+          tar -xzf output850.tgz
+          cd build
+          ctest --timeout 3600 -V
 
   gcc921:
     needs: gcc850
