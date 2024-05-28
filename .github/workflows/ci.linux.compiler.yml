@@ -16,7 +16,7 @@ jobs:
           rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j --clean-first -- VERBOSE=1
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output850
           mkdir build/output
@@ -38,7 +38,7 @@ jobs:
       - name: Build921
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake --build build -j --clean-first -- VERBOSE=1
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output921
           mkdir build/output
@@ -60,7 +60,7 @@ jobs:
       - name: Build1031
         run: |
           source /opt/rh/gcc-toolset-10/enable
-          cmake --build build -j --clean-first -- VERBOSE=1
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output1031
           mkdir build/output
@@ -104,7 +104,7 @@ jobs:
       - name: Build1211
         run: |
           source /opt/rh/gcc-toolset-10/enable
-          cmake --build build -j --clean-first -- VERBOSE=1
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           mv build/output build/output1211
           mkdir build/output
