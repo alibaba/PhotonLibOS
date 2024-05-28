@@ -31,12 +31,12 @@ jobs:
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output850.tar.zstd build/output/
+          tar -c --use-compress-program=zstdmt -f output850.tgz build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
-          name: output850.tar.zstd
-          path: output850.tar.zstd
+          name: output850.tgz
+          path: output850.tgz
           retention-days: 5
           compression-level: 0
 
@@ -49,12 +49,12 @@ jobs:
           source /opt/rh/gcc-toolset-9/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output921.tar.zstd build/output/
+          tar -c --use-compress-program=pigz -f output921.tgz build/output/
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
-          name: output921.tar.zstd
-          path: output921.tar.zstd
+          name: output921.tgz
+          path: output921.tgz
           retention-days: 5
           compression-level: 0
 
@@ -67,12 +67,12 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output1031.tar.zstd build/output/
+          tar -c --use-compress-program=pigz -f output1031.tgz build/output/
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
-          name: output1031.tar.zstd
-          path: output1031.tar.zstd
+          name: output1031.tgz
+          path: output1031.tgz
           retention-days: 5
           compression-level: 0
 
@@ -85,12 +85,12 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output1121.tar.zstd build/output/
+          tar -c --use-compress-program=pigz -f output1121.tgz build/output/
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
-          name: output1121.tar.zstd
-          path: output1121.tar.zstd
+          name: output1121.tgz
+          path: output1121.tgz
           retention-days: 5
           compression-level: 0
 
@@ -103,12 +103,12 @@ jobs:
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
-          tar -c --use-compress-program=zstdmt -f output1211.tar.zstd build/output/
+          tar -c --use-compress-program=pigz -f output1211.tgz build/output/
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
-          name: output1211.tar.zstd
-          path: output1211.tar.zstd
+          name: output1211.tgz
+          path: output1211.tgz
           retention-days: 5
           compression-level: 0
 
