@@ -14,12 +14,21 @@ jobs:
       - name: Build850
         run: |
           rm -fr build
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
-                         -D PHOTON_BUILD_TESTING=ON     \
-                         -D PHOTON_ENABLE_SASL=ON       \
-                         -D PHOTON_ENABLE_FUSE=ON       \
-                         -D PHOTON_ENABLE_URING=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON        \
+                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                         -D PHOTON_AIO_SOURCE=""          \
+                         -D PHOTON_ZLIB_SOURCE=""         \
+                         -D PHOTON_CURL_SOURCE=""         \
+                         -D PHOTON_OPENSSL_SOURCE=""      \
+                         -D PHOTON_GFLAGS_SOURCE=""       \
+                         -D PHOTON_GOOGLETEST_SOURCE=""   \
+                         -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz \
+
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           tar -c --use-compress-program=zstdmt -f output850.tar.zstd build/output/
