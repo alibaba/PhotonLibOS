@@ -36,26 +36,41 @@ static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
-    bool tls_ctx_ownership;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
     std::unique_ptr<ISocketClient> udssock;
     std::unique_ptr<Resolver> resolver;
+    photon::mutex init_mtx;
+    bool initialized = false;
+    bool tls_ctx_ownership = false;
 
-    //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
-    PooledDialer(TLSContext *_tls_ctx) :
-            tls_ctx(_tls_ctx ? _tls_ctx : new_tls_context(nullptr, nullptr, nullptr)),
-            tls_ctx_ownership(_tls_ctx == nullptr),
-            resolver(new_default_resolver(kDNSCacheLife)) {
+    // If there is a photon thread switch during construction, the constructor might be called
+    // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
+    // thread switch inside the constructor. Place the initialization work in init() and ensure it
+    // is initialized only once.
+    PooledDialer() {
+        photon::fini_hook({this, &PooledDialer::at_photon_fini});
+    }
+
+    int init(TLSContext *_tls_ctx) {
+        if (initialized)
+            return 0;
+        SCOPED_LOCK(init_mtx);
+        if (initialized)
+            return 0;
+        tls_ctx = _tls_ctx;
+        if (!tls_ctx) {
+            tls_ctx_ownership = true;
+            tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
+        }
         auto tcp_cli = new_tcp_socket_client();
         auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
         tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
         tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
         udssock.reset(new_uds_client());
-        photon::fini_hook({this, &PooledDialer::at_photon_fini});
-    }
-
-    ~PooledDialer() {
+        resolver.reset(new_default_resolver(kDNSCacheLife));
+        initialized = true;
+        return 0;
     }
 
     void at_photon_fini() {
@@ -145,7 +160,8 @@ public:
     }
 
     PooledDialer& get_dialer() {
-        thread_local PooledDialer dialer(m_tls_ctx);
+        thread_local PooledDialer dialer;
+        dialer.init(m_tls_ctx);
         return dialer;
     }
 
