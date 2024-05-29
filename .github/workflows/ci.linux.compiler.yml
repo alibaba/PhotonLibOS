@@ -32,12 +32,12 @@ jobs:
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           rm -f build/output/*.a
           # find build/ -name "*.o" -type f -delete
-          # tar -c --use-compress-program=pigz -f output850.tgz build/output/
+          tar -c --use-compress-program=zstdmt -f output850.tzs build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
           name: output850
-          path: build/output
+          path: output850.tzs
           retention-days: 5
           compression-level: 0
 
@@ -48,14 +48,11 @@ jobs:
       - name: download850
         uses: actions/download-artifact@v4
         with:
-          name: output850
-          # path: output850.tgz
+          name: output850.tzs
       - name: test
         run: |
-          # tar -xzf output850.tgz
+          # tar -x --use-compress-program=zstdmt -f output850.tzs
           ls -R
-          zstdmt || echo "no zstdmt"
-          # cd build
           ctest --timeout 3600 -V
 
   gcc921:
