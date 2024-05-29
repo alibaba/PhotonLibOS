@@ -57,7 +57,7 @@ jobs:
           tar -x --use-compress-program=zstdmt -f output850.tzs
           ls -R
           sudo apt-get update
-          sudo apt-get install libgsasl
+          sudo apt-get install gsasl
           ctest --timeout 3600 -V
 
   gcc921:
