@@ -335,6 +335,8 @@ endif ()
 # Build test cases
 if (PHOTON_BUILD_TESTING)
     include(CTest)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/testset)
+    include(generate-ctest-packed-script)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
 
@@ -354,4 +356,5 @@ if (PHOTON_BUILD_TESTING)
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()
+    GenerateStandaloneCTestScript(${CMAKE_SOURCE_DIR} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/CTestTestfile.cmake)
 endif ()
