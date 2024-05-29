@@ -17,6 +17,7 @@
 class TestChecksum : public ::testing::Test {
     virtual void SetUp() {
         in.open(xstr(DATA_DIR) "checksum.in");
+        if (!in) in.open("checksum.in");
         ASSERT_TRUE(!!in);
         uint32_t value;
         std::string str;

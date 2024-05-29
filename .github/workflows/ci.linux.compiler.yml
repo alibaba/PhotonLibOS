@@ -30,9 +30,8 @@ jobs:
                          -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          cd build/output
-          rm -f *.a
-          tar -c -h --use-compress-program=zstdmt -f ../../output850.tzs .
+          ln common/checksum/test/checksum.in build/output/
+          tar -c -h --use-compress-program=zstdmt -f output850.tzs build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
@@ -59,6 +58,7 @@ jobs:
       - name: test
         run: |
           tar -x --use-compress-program=zstdmt -f output850.tzs
+          cd build/output/
           ctest --timeout 3600 -V
 
   gcc921:
@@ -69,15 +69,36 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-9/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          tar -c --use-compress-program=pigz -f output921.tgz build/output/
+          ln common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output921.tzs build/output/
       - name: Upload921
         uses: actions/upload-artifact@v4
         with:
-          name: output921.tgz
-          path: output921.tgz
+          name: output921
+          path: output921.tzs
           retention-days: 5
           compression-level: 0
+
+  test921:
+    needs: gcc921
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output921
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output921.tzs
+          cd build/output/
+          ctest --timeout 3600 -V
 
   gcc1031:
     needs: gcc921
@@ -87,15 +108,36 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          tar -c --use-compress-program=pigz -f output1031.tgz build/output/
+          ln common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1031.tzs build/output/
       - name: Upload1031
         uses: actions/upload-artifact@v4
         with:
-          name: output1031.tgz
-          path: output1031.tgz
+          name: output1031
+          path: output1031.tzs
           retention-days: 5
           compression-level: 0
+
+  test1031:
+    needs: gcc1031
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1031
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1031.tzs
+          cd build/output/
+          ctest --timeout 3600 -V
 
   gcc1121:
     needs: gcc1031
@@ -105,15 +147,36 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          tar -c --use-compress-program=pigz -f output1121.tgz build/output/
+          ln common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1121.tzs build/output/
       - name: Upload1121
         uses: actions/upload-artifact@v4
         with:
-          name: output1121.tgz
-          path: output1121.tgz
+          name: output1121
+          path: output1121.tzs
           retention-days: 5
           compression-level: 0
+
+  test1121:
+    needs: gcc1121
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1121
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1121.tzs
+          cd build/output/
+          ctest --timeout 3600 -V
 
   gcc1211:
     needs: gcc1121
@@ -123,14 +186,35 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          tar -c --use-compress-program=pigz -f output1211.tgz build/output/
+          ln common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1211.tzs build/output/
       - name: Upload1211
         uses: actions/upload-artifact@v4
         with:
-          name: output1211.tgz
-          path: output1211.tgz
+          name: output1211
+          path: output1211.tzs
           retention-days: 5
           compression-level: 0
+
+  test1211:
+    needs: gcc1211
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1211
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1211.tzs
+          cd build/output/
+          ctest --timeout 3600 -V
 
 
