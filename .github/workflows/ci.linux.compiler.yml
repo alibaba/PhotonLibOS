@@ -30,9 +30,12 @@ jobs:
                          -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          rm -f build/output/*.a
-          # find build/ -name "*.o" -type f -delete
-          tar -c --use-compress-program=zstdmt -f output850.tzs build/output/
+          cd build/output
+          rm -f *.a
+          for f in gtest gmock gflags; do
+            ln -s `ldd test-curl | grep $f | awk '{print $3}'` .
+          done
+          tar -c -h --use-compress-program=zstdmt -f ../../output850.tzs .
       - name: Upload850
         uses: actions/upload-artifact@v4
         with:
