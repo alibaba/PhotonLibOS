@@ -30,7 +30,7 @@ jobs:
                          -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          ln common/checksum/test/checksum.in build/output/
+          ln -f common/checksum/test/checksum.in build/output/
           tar -c -h --use-compress-program=zstdmt -f output850.tzs build/output/
       - name: Upload850
         uses: actions/upload-artifact@v4
@@ -69,7 +69,7 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-9/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          ln common/checksum/test/checksum.in build/output/
+          ln -f common/checksum/test/checksum.in build/output/
           tar -c --use-compress-program=zstdmt -f output921.tzs build/output/
       - name: Upload921
         uses: actions/upload-artifact@v4
@@ -108,7 +108,7 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          ln common/checksum/test/checksum.in build/output/
+          ln -f common/checksum/test/checksum.in build/output/
           tar -c --use-compress-program=zstdmt -f output1031.tzs build/output/
       - name: Upload1031
         uses: actions/upload-artifact@v4
@@ -147,7 +147,7 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j --clean-first -- VERBOSE=1
-          ln common/checksum/test/checksum.in build/output/
+          ln -f common/checksum/test/checksum.in build/output/
           tar -c --use-compress-program=zstdmt -f output1121.tzs build/output/
       - name: Upload1121
         uses: actions/upload-artifact@v4
@@ -186,7 +186,7 @@ jobs:
         run: |
           source /opt/rh/gcc-toolset-10/enable
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-          ln common/checksum/test/checksum.in build/output/
+          ln -f common/checksum/test/checksum.in build/output/
           tar -c --use-compress-program=zstdmt -f output1211.tzs build/output/
       - name: Upload1211
         uses: actions/upload-artifact@v4
