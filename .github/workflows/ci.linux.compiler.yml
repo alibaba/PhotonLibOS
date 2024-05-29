@@ -32,7 +32,7 @@ jobs:
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           cd build/output
           rm -f *.a
-          for f in gtest gmock gflags; do
+          for f in gtest gmock gflags libfuse; do
             ln -s `ldd test-curl | grep $f | awk '{print $3}'` .
           done
           tar -c -h --use-compress-program=zstdmt -f ../../output850.tzs .
@@ -57,6 +57,7 @@ jobs:
           tar -x --use-compress-program=zstdmt -f output850.tzs
           ls -R
           # cd build/output
+          ldd libphoton.so
           ctest --timeout 3600 -V
 
   gcc921:
