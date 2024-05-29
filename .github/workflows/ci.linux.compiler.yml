@@ -56,7 +56,7 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output850.tzs
           ls -R
-          cd build/output
+          # cd build/output
           ctest --timeout 3600 -V
 
   gcc921:
