@@ -56,8 +56,8 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output850.tzs
           ls -R
-          # cd build/output
-          ldd libphoton.so
+          sudo apt-get update
+          sudo apt-get install libgsasl
           ctest --timeout 3600 -V
 
   gcc921:
