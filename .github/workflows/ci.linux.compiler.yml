@@ -48,7 +48,7 @@ jobs:
       - name: download850
         uses: actions/download-artifact@v4
         with:
-          name: output850.tzs
+          name: output850
       - name: test
         run: |
           # tar -x --use-compress-program=zstdmt -f output850.tzs
