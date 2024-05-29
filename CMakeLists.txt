@@ -335,7 +335,7 @@ endif ()
 # Build test cases
 if (PHOTON_BUILD_TESTING)
     include(CTest)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/testset)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
     include(generate-ctest-packed-script)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
