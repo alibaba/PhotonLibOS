@@ -86,7 +86,7 @@ bool is_using_default_engine() {
     return _engine == 0 || _engine == default_eng;
 }
 
-void set_cpu_affinity() {
+void set_cpu_affinity(int i) {
 #ifdef __linux__
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);

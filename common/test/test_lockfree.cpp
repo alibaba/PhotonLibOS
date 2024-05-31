@@ -76,7 +76,7 @@ int test_queue(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            photon::set_cpu_affinity();
+            photon::set_cpu_affinity(i);
             std::chrono::nanoseconds rspent(std::chrono::nanoseconds(0));
             for (size_t x = 0; x < items_num / receiver_num; x++) {
                 int t;
@@ -99,7 +99,7 @@ int test_queue(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            photon::set_cpu_affinity();
+            photon::set_cpu_affinity(i);
             std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
             for (size_t x = 0; x < items_num / sender_num; x++) {
                 auto tm = std::chrono::high_resolution_clock::now();
@@ -145,7 +145,7 @@ int test_queue_batch(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            photon::set_cpu_affinity();
+            photon::set_cpu_affinity(i);
             int buffer[32];
             size_t size;
             int amount = items_num / receiver_num;
@@ -173,7 +173,7 @@ int test_queue_batch(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            photon::set_cpu_affinity();
+            photon::set_cpu_affinity(i);
             std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
             for (size_t x = 0; x < items_num / sender_num; x++) {
                 auto tm = std::chrono::high_resolution_clock::now();

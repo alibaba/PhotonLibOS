@@ -77,7 +77,7 @@ TEST(std_executor, perf) {
     for (int i = 0; i < th_num; i++) {
         ths.emplace_back([&] {
             for (int j = 0; j < app_num; j++) {
-                photon::set_cpu_affinity();
+                photon::set_cpu_affinity(j);
                 auto start = std::chrono::high_resolution_clock::now();
                 eth.async_perform(new auto ([&] { cnt++; if (cnt % 10000 == 0) printf("%d\n", cnt);}));
                 auto end = std::chrono::high_resolution_clock::now();
