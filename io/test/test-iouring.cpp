@@ -622,6 +622,5 @@ int main(int argc, char** arg) {
     testing::InitGoogleTest(&argc, arg);
     testing::FLAGS_gtest_break_on_failure = true;
     gflags::ParseCommandLineFlags(&argc, &arg, true);
-    ci_parse_env();
     return RUN_ALL_TESTS();
 }
