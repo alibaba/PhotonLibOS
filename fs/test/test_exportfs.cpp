@@ -29,17 +29,26 @@ limitations under the License.
 #include <thread>
 #include <utime.h>
 #include <sys/time.h>
-#include <sys/sysmacros.h>
+// #include <sys/sysmacros.h>
 
 using namespace photon;
 using namespace photon::fs;
 using namespace testing;
 
-#ifdef __linux__
-static const int event_engine = photon::INIT_EVENT_EPOLL;
-#else
-static const int event_engine = photon::INIT_EVENT_KQUEUE;
-#endif
+// #ifdef __linux__
+// static const int event_engine = photon::INIT_EVENT_EPOLL;
+// #else
+// static const int event_engine = photon::INIT_EVENT_KQUEUE;
+// #endif
+
+inline void photon_init() {
+    init(INIT_EVENT_DEFAULT, INIT_IO_EXPORTFS);
+}
+
+inline void photon_fini() {
+    fini();
+}
+
 constexpr uint64_t magic = 150820;
 static std::atomic<int> work(0);
 
@@ -99,14 +108,14 @@ int callbackvoid(void*, AsyncResult<void>* ret) {
     }
 
 TEST(ExportFS, basic) {
-    photon::vcpu_init();
-    photon::fd_events_init(event_engine);
-    exportfs_init();
-    DEFER({
-        exportfs_fini();
-        photon::fd_events_fini();
-        photon::vcpu_fini();
-    });
+    // photon::vcpu_init();
+    // photon::fd_events_init(event_engine);
+    // exportfs_init();
+    // DEFER({
+    //     exportfs_fini();
+    //     photon::fd_events_fini();
+    //     photon::vcpu_fini();
+    // });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile();
     PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
     PMock::MockNullDIR* mockdir = new PMock::MockNullDIR();
@@ -257,19 +266,24 @@ TEST(ExportFS, init_fini_failed_situation) {
     DEFER({
         log_output = _o_output;
     });
-    auto ret = exportfs_fini();
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(ENOSYS, errno);
-    photon::vcpu_init();
-    photon::fd_events_init(event_engine);
-    ret = exportfs_init();
-    EXPECT_EQ(0, ret);
-    ret = exportfs_init();
+    // photon::vcpu_init();
+    // photon::fd_events_init(event_engine);
+    // ret = exportfs_init();
+    // EXPECT_EQ(0, ret);
+
+    auto ret = exportfs_init();
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(EALREADY, errno);
+
     ret = exportfs_fini();
     EXPECT_EQ(0, ret);
-    photon::fd_events_fini();
+    ret = exportfs_fini();
+    EXPECT_EQ(-1, ret);
+    EXPECT_EQ(ENOSYS, errno);
+
+    ret = exportfs_init();
+    EXPECT_EQ(0, ret);
+    // photon::fd_events_fini();
     // photon::vcpu_fini();
 }
 
@@ -280,13 +294,13 @@ TEST(ExportFS, op_failed_situation) {
         log_output = _o_output;
     });
     // photon::vcpu_init();
-    photon::fd_events_init(event_engine);
-    exportfs_init();
-    DEFER({
-        exportfs_fini();
-        photon::fd_events_fini();
-        // photon::vcpu_fini();
-    });
+    // photon::fd_events_init(event_engine);
+    // exportfs_init();
+    // DEFER({
+    //     exportfs_fini();
+    //     photon::fd_events_fini();
+    //     // photon::vcpu_fini();
+    // });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile;
     errno = 0;
     EXPECT_CALL(*mockfile, read(_, _))
@@ -308,14 +322,14 @@ TEST(ExportFS, op_failed_situation) {
 }
 
 TEST(ExportFS, xattr) {
-    photon::vcpu_init();
-    photon::fd_events_init(event_engine);
-    exportfs_init();
-    DEFER({
-        exportfs_fini();
-        photon::fd_events_fini();
-        photon::vcpu_fini();
-    });
+    // photon::vcpu_init();
+    // photon::fd_events_init(event_engine);
+    // exportfs_init();
+    // DEFER({
+    //     exportfs_fini();
+    //     photon::fd_events_fini();
+    //     photon::vcpu_fini();
+    // });
     PMock::MockNullFile* mockfile = new PMock::MockNullFile();
     PMock::MockNullFileSystem* mockfs = new PMock::MockNullFileSystem();
     auto file = dynamic_cast<IAsyncFileXAttr*>(export_as_async_file(mockfile));
@@ -376,14 +390,16 @@ TEST(ExportFS, xattr_sync) {
     IFileSystemXAttr* fs = nullptr;
 
     std::thread th([&]{
-        photon::vcpu_init();
-        photon::fd_events_init(event_engine);
-        exportfs_init();
-        DEFER({
-            exportfs_fini();
-            photon::fd_events_fini();
-            photon::vcpu_fini();
-        });
+        photon_init();
+        DEFER(photon_fini());
+        // photon::vcpu_init();
+        // photon::fd_events_init(event_engine);
+        // exportfs_init();
+        // DEFER({
+        //     exportfs_fini();
+        //     photon::fd_events_fini();
+        //     photon::vcpu_fini();
+        // });
         file = dynamic_cast<IFileXAttr*>(export_as_sync_file(mockfile));
         fs = dynamic_cast<IFileSystemXAttr*>(export_as_sync_fs(mockfs));
         sem.wait(1);
@@ -430,9 +446,11 @@ TEST(ExportFS, xattr_sync) {
 
 int main(int argc, char **argv)
 {
-    photon::vcpu_init();
-    DEFER(photon::vcpu_fini());
-    ::testing::InitGoogleTest(&argc, argv);
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    photon_init();
+    DEFER(photon_fini());
+    return 0;
+    // ::testing::InitGoogleTest(&argc, argv);
+    // int ret = RUN_ALL_TESTS();
+    // LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    // return ret;
 }

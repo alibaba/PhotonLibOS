@@ -45,7 +45,7 @@ static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, IN
 static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
 
-int init(uint64_t event_engine, uint64_t io_engine) {
+int __photon_init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
@@ -82,6 +82,10 @@ int init(uint64_t event_engine, uint64_t io_engine) {
         reset_handle_registed = true;
     }
     return 0;
+}
+
+int init(uint64_t event_engine, uint64_t io_engine) {
+    return __photon_init(event_engine, io_engine);
 }
 
 int fini() {

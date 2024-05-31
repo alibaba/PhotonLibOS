@@ -1,10 +1,10 @@
+#include <chrono>
 #include <gtest/gtest.h>
 #include <photon/common/alog.h>
 #include <photon/common/throttle.h>
 #include <photon/common/utility.h>
 #include <photon/photon.h>
-
-#include <chrono>
+#include "../../test/ci-tools.h"
 
 TEST(Throttle, basic) {
     // baseline
@@ -162,6 +162,7 @@ TEST(Throttle, try_consume) {
 }
 
 int main(int argc, char** argv) {
+    if (!photon::is_using_default_engine()) return 0;
     photon::init(0, 0);
     DEFER(photon::fini());
     testing::InitGoogleTest(&argc, argv);

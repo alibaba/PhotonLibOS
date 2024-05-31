@@ -4,6 +4,7 @@
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
+#include "../../../test/ci-tools.h"
 
 #include <thread>
 

@@ -159,7 +159,6 @@ file(GLOB PHOTON_SRC
         common/checksum/*.cpp
         common/executor/*.cpp
         common/memory-stream/*.cpp
-        common/stream-messenger/*.cpp
         fs/aligned-file.cpp
         fs/async_filesystem.cpp
         fs/exportfs.cpp
@@ -203,9 +202,8 @@ endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
-        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
-)
+target_include_directories(photon_obj PRIVATE include)
+
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 if (PHOTON_ENABLE_URING)
     target_include_directories(photon_obj PRIVATE ${URING_INCLUDE_DIRS})
@@ -339,6 +337,7 @@ if (PHOTON_BUILD_TESTING)
     include(generate-ctest-packed-script)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
+    target_include_directories(ci-tools PRIVATE include)
 
     include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
@@ -346,6 +345,8 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(examples)
     add_subdirectory(common/checksum/test)
     add_subdirectory(common/test)
+    add_subdirectory(common/memory-stream/test)
+    add_subdirectory(common/executor/test)
     add_subdirectory(fs/test)
     add_subdirectory(io/test)
     add_subdirectory(net/test)

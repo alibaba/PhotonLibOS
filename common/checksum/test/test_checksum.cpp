@@ -6,6 +6,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include "../../../test/ci-tools.h"
 
 #ifndef DATA_DIR
 #define DATA_DIR ""
@@ -71,6 +72,7 @@ TEST_F(TestChecksum, crc32c_sw) {
 
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

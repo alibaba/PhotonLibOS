@@ -29,8 +29,9 @@ limitations under the License.
 
 #include "../thread.cpp"
 #include "../thread11.h"
-#include "../thread-pool.h"
-#include "../workerpool.h"
+#include "../thread-pool.cpp"
+#include "../workerpool.cpp"
+#include "../../photon.cpp"
 #include <photon/common/alog-audit.h>
 
 using namespace std;

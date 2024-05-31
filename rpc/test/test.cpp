@@ -33,7 +33,7 @@ using namespace rpc;
 class RpcTest : public testing::Test {
 public:
     void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(ci_ev_engine, photon::INIT_IO_NONE));
+        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
     }
     void TearDown() override {
         photon::fini();
@@ -481,7 +481,6 @@ TEST_F(RpcTest, passive_shutdown) {
 
 int main(int argc, char** arg)
 {
-    ci_parse_env();
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

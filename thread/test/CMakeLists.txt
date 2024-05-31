@@ -5,7 +5,7 @@ target_link_libraries(perf_usleepdefer_semaphore PRIVATE photon_shared)
 add_test(NAME perf_usleepdefer_semaphore COMMAND $<TARGET_FILE:perf_usleepdefer_semaphore>)
 
 add_executable(test-thread test.cpp x.cpp)
-target_link_libraries(test-thread PRIVATE photon_static)
+target_link_libraries(test-thread PRIVATE photon_shared)
 add_test(NAME test-thread COMMAND $<TARGET_FILE:test-thread>)
 
 add_executable(test-std-compat test-std-compat.cpp)
@@ -33,5 +33,5 @@ target_link_libraries(test-lib-data PRIVATE photon_shared)
 add_test(NAME test-lib-data COMMAND $<TARGET_FILE:test-lib-data>)
 
 add_executable(test-multi-vcpu-locking test-multi-vcpu-locking.cpp)
-target_link_libraries(test-multi-vcpu-locking PRIVATE photon_static)
+target_link_libraries(test-multi-vcpu-locking PRIVATE photon_shared)
 add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-locking>)

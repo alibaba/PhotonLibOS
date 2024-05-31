@@ -19,13 +19,14 @@ limitations under the License.
 #include <pthread.h>
 
 #include <array>
-#include <boost/lockfree/policies.hpp>
-#include <boost/lockfree/queue.hpp>
-#include <boost/lockfree/spsc_queue.hpp>
+// #include <boost/lockfree/policies.hpp>
+// #include <boost/lockfree/queue.hpp>
+// #include <boost/lockfree/spsc_queue.hpp>
 #include <mutex>
 #include <random>
 #include <thread>
 #include <vector>
+#include "../../test/ci-tools.h"
 
 static constexpr size_t sender_num = 4;
 static constexpr size_t receiver_num = 4;
@@ -46,8 +47,8 @@ LockfreeBatchMPMCRingQueue<int, capacity> lbqueue;
 LockfreeSPSCRingQueue<int, capacity> cqueue;
 std::mutex rlock, wlock;
 
-boost::lockfree::queue<int, boost::lockfree::capacity<capacity>> bqueue;
-boost::lockfree::spsc_queue<int, boost::lockfree::capacity<capacity>> squeue;
+// boost::lockfree::queue<int, boost::lockfree::capacity<capacity>> bqueue;
+// boost::lockfree::spsc_queue<int, boost::lockfree::capacity<capacity>> squeue;
 
 struct WithLock {
     template <typename T>
@@ -75,10 +76,7 @@ int test_queue(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(i, &cpuset);
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            photon::set_cpu_affinity();
             std::chrono::nanoseconds rspent(std::chrono::nanoseconds(0));
             for (size_t x = 0; x < items_num / receiver_num; x++) {
                 int t;
@@ -101,10 +99,7 @@ int test_queue(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(i + receiver_num, &cpuset);
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            photon::set_cpu_affinity();
             std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
             for (size_t x = 0; x < items_num / sender_num; x++) {
                 auto tm = std::chrono::high_resolution_clock::now();
@@ -150,10 +145,7 @@ int test_queue_batch(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(i, &cpuset);
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            photon::set_cpu_affinity();
             int buffer[32];
             size_t size;
             int amount = items_num / receiver_num;
@@ -181,10 +173,7 @@ int test_queue_batch(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            cpu_set_t cpuset;
-            CPU_ZERO(&cpuset);
-            CPU_SET(i + receiver_num, &cpuset);
-            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+            photon::set_cpu_affinity();
             std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
             for (size_t x = 0; x < items_num / sender_num; x++) {
                 auto tm = std::chrono::high_resolution_clock::now();
@@ -223,11 +212,12 @@ int test_queue_batch(const char *name, QType &queue) {
 }
 
 int main() {
-    test_queue<NoLock, NoLock>("BoostQueue", bqueue);
+    if (!photon::is_using_default_engine()) return 0;
+    // test_queue<NoLock, NoLock>("BoostQueue", bqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
     test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch", lbqueue);
-    test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
+    // test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
 }
