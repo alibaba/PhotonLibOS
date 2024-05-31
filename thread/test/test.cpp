@@ -34,6 +34,8 @@ limitations under the License.
 #include "../../photon.cpp"
 #include "../common/identity-pool.cpp"
 #include <photon/common/alog-audit.h>
+#include "../../test/ci-tools.h"
+
 
 using namespace std;
 using namespace photon;
@@ -1894,6 +1896,7 @@ TEST(intrusive_list, split) {
 
 int main(int argc, char** arg)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;

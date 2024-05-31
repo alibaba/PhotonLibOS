@@ -25,10 +25,11 @@ static void parse_env_eng() {
         _engine = photon::INIT_EVENT_IOURING;
     } else if (strcmp(_engine_name, "kqueue") == 0) {
         _engine = photon::INIT_EVENT_KQUEUE;
+    } else {
+        printf("invalid event engine: %s\n", _engine_name);
+        _engine_name = nullptr;
+        exit(-1);
     }
-    printf("invalid event engine: %s\n", _engine_name);
-    _engine_name = nullptr;
-    exit(-1);
 }
 
 static const char* get_engine_name(uint64_t eng) {
