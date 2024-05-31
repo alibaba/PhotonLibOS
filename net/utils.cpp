@@ -313,8 +313,10 @@ public:
 
     void discard_cache(std::string_view host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
-        if (ip.undefined() || ipaddr->empty()) ipaddr.recycle(true);
-        else {
+        if (ip.undefined() || ipaddr->empty()) {
+            ipaddr->delete_all();
+            ipaddr.recycle(true);
+        } else {
             for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
                 if ((*itr)->addr == ip) {
                     ipaddr->erase(*itr);
