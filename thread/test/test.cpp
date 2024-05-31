@@ -32,6 +32,7 @@ limitations under the License.
 #include "../thread-pool.cpp"
 #include "../workerpool.cpp"
 #include "../../photon.cpp"
+#include "../common/identity-pool.cpp"
 #include <photon/common/alog-audit.h>
 
 using namespace std;
