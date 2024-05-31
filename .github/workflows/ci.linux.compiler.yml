@@ -20,14 +20,14 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON        \
-                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
-                         -D PHOTON_AIO_SOURCE=""          \
-                         -D PHOTON_ZLIB_SOURCE=""         \
-                         -D PHOTON_CURL_SOURCE=""         \
-                         -D PHOTON_OPENSSL_SOURCE=""      \
-                         -D PHOTON_GFLAGS_SOURCE=""       \
-                         -D PHOTON_GOOGLETEST_SOURCE=""   \
-                         -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
+                        #  -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                        #  -D PHOTON_AIO_SOURCE=""          \
+                        #  -D PHOTON_ZLIB_SOURCE=""         \
+                        #  -D PHOTON_CURL_SOURCE=""         \
+                        #  -D PHOTON_OPENSSL_SOURCE=""      \
+                        #  -D PHOTON_GFLAGS_SOURCE=""       \
+                        #  -D PHOTON_GOOGLETEST_SOURCE=""   \
+                        #  -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
 
           cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           ln -f common/checksum/test/checksum.in build/output/

@@ -342,7 +342,8 @@ TEST(perf, DISABLED_read) {
 class event_engine : public testing::Test {
 protected:
     void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(ci_ev_engine, photon::INIT_IO_NONE));
+        auto eng = photon::INIT_EVENT_DEFAULT - photon::INIT_EVENT_EPOLL;
+        GTEST_ASSERT_EQ(0, photon::init(eng, photon::INIT_IO_NONE));
 #ifdef PHOTON_URING
         engine = (ci_ev_engine == photon::INIT_EVENT_EPOLL) ? photon::new_epoll_cascading_engine()
                                                           : photon::new_iouring_cascading_engine();
