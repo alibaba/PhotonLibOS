@@ -725,14 +725,30 @@ TEST(utils, gethostbyname) {
 TEST(utils, resolver) {
     auto *resolver = new_default_resolver();
     DEFER(delete resolver);
-    net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    if (addr.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr.to_nl()); }
-    auto func = [&](net::IPAddr addr_){
-        if (addr_.is_ipv4()) { EXPECT_EQ(localhost.to_nl(), addr_.to_nl()); }
+    if (addr.is_ipv4()) {
+        EXPECT_EQ(net::IPAddr::V4Loopback(), addr);
+    } else {
+        EXPECT_EQ(net::IPAddr::V6Loopback(), addr);
+    }
+}
+
+TEST(utils, resolver_filter) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    auto filter = [&](net::IPAddr addr_) -> bool {
+        return !addr_.is_ipv4();
     };
-    resolver->resolve("localhost", func);
+    auto addr = resolver->resolve_filter("localhost", filter);
+    ASSERT_TRUE(!addr.is_ipv4());
+}
+
+TEST(utils, resolver_discard) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    (void) resolver->resolve("localhost");
     resolver->discard_cache("non-exist-host.com");
+    resolver->discard_cache("localhost");
 }
 
 #ifdef __linux__

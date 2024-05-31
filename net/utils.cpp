@@ -264,24 +264,17 @@ protected:
         IPAddrNode(IPAddr addr) : addr(addr) {}
     };
     using IPAddrList = intrusive_list<IPAddrNode>;
-public:
-    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
-        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
-    ~DefaultResolver() {
-        for (auto it : dnscache_) {
-            ((IPAddrList*)it->_obj)->delete_all();
-        }
-        dnscache_.clear();
-    }
 
-    IPAddr resolve(std::string_view host) override {
+    IPAddr do_resolve(std::string_view host, Delegate<bool, IPAddr> filter) {
         auto ctr = [&]() -> IPAddrList* {
             auto addrs = new IPAddrList();
             photon::semaphore sem;
             std::thread([&]() {
                 auto now = std::chrono::steady_clock::now();
                 IPAddrList ret;
-                auto cb = [&](IPAddr addr) {
+                auto cb = [&](IPAddr addr) -> int {
+                    if (filter && !filter.fire(addr))
+                        return 0;
                     ret.push_back(new IPAddrNode(addr));
                     return 0;
                 };
@@ -307,8 +300,22 @@ public:
         return ret->addr;
     }
 
-    void resolve(std::string_view host, Delegate<void, IPAddr> func) override {
-        func(resolve(host));
+public:
+    DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
+        : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
+    ~DefaultResolver() {
+        for (auto it : dnscache_) {
+            ((IPAddrList*)it->_obj)->delete_all();
+        }
+        dnscache_.clear();
+    }
+
+    IPAddr resolve(std::string_view host) override {
+        return do_resolve(host, nullptr);
+    }
+
+    IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr> filter) override {
+        return do_resolve(host, filter);
     }
 
     void discard_cache(std::string_view host, IPAddr ip) override {

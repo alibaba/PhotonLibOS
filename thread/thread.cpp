@@ -1682,7 +1682,7 @@ R"(
         splock.lock();
         CURRENT->semaphore_count = count;
         int ret = 0;
-        while (!try_substract(count)) {
+        while (!try_subtract(count)) {
             ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
             ERRNO err;
             splock.lock();
@@ -1714,7 +1714,7 @@ R"(
             prelocked_thread_interrupt(th, -1);
         }
     }
-    bool semaphore::try_substract(uint64_t count)
+    bool semaphore::try_subtract(uint64_t count)
     {
         while(true)
         {

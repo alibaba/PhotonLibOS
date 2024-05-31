@@ -488,7 +488,11 @@ struct LogBuilder {
                                 ALOG_TEMP, __VA_ARGS__); \
         errno = _err_bak;                                \
     }
+#ifndef DISABLE_AUDIT
 #define LOG_AUDIT(...) (__LOG__((), default_audit_logger, ALOG_AUDIT, __VA_ARGS__))
+#else
+#define LOG_AUDIT(...)
+#endif
 
 inline void set_log_output(ILogOutput* output) {
     default_logger.log_output = output;

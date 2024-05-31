@@ -10,7 +10,7 @@ protected:
     photon::semaphore sem;
     uint64_t last_retrieve = 0;
     uint64_t m_limit = -1UL;
-    uint64_t m_limit_per_slice;
+    uint64_t m_limit_per_slice = -1UL;
     uint64_t m_time_window;
     uint64_t m_time_window_per_slice;
     uint64_t m_slice_num;
@@ -62,10 +62,8 @@ public:
         uint64_t fulfil_percent = get_fulfill_percent(prio);
         uint64_t starving_percent = m_starving_slice_percent[int(prio)];
 
-        // TODO:
-        // if (unlikely(amount > m_limit && m_limit > 0)) {
-        //     return 0;
-        // }
+        // TODO: Handle the situation when throttle limit is extremely low
+        assert(amount < m_limit);
 
         int ret = -1;
         int err = ETIMEDOUT;
@@ -81,12 +79,16 @@ public:
             if (sem.count() * 100 < m_limit * fulfil_percent) {
                 // Request are fulfilled only if they saw enough percent of tokens,
                 // otherwise wait a `time_window_per_slice`.
-                photon::thread_usleep(m_time_window_per_slice);
+                ret = photon::thread_usleep(m_time_window_per_slice);
+                if (ret != 0) {
+                    // Interrupted, just return
+                    return -1;
+                }
                 starving_slice_num++;
                 continue;
             }
 break_starving:
-            ret = sem.wait(amount, m_time_window_per_slice);
+            ret = sem.wait_interruptible(amount, m_time_window_per_slice);
             err = errno;
         } while (ret < 0 && err == ETIMEDOUT);
         if (ret < 0) {
@@ -136,7 +138,7 @@ protected:
         }
     }
 
-    uint64_t m_starving_slice_num[int(Priority::NumPriorities)];
-    uint64_t m_starving_slice_percent[int(Priority::NumPriorities)];
+    uint64_t m_starving_slice_num[int(Priority::NumPriorities)] = {};
+    uint64_t m_starving_slice_percent[int(Priority::NumPriorities)] = {};
 };
 }  // namespace photon
