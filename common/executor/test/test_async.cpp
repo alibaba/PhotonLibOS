@@ -23,8 +23,8 @@ limitations under the License.
 #include <photon/fs/filesystem.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
-#include <pthread.h>
-#include <sched.h>
+// #include <pthread.h>
+// #include <sched.h>
 #include "../../../test/ci-tools.h"
 // #include <immintrin.h>
 
