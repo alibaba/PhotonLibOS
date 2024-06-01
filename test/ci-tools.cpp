@@ -32,7 +32,7 @@ static void parse_env_eng() {
     }
 }
 
-static const char* get_engine_name(uint64_t eng) {
+static estring_view get_engine_name(uint64_t eng) {
     switch(eng) {
         case INIT_EVENT_EPOLL:      return "epoll";
         case INIT_EVENT_IOURING:    return "io_uring";
@@ -40,7 +40,7 @@ static const char* get_engine_name(uint64_t eng) {
         case INIT_EVENT_SELECT:     return "select";
         case INIT_EVENT_IOCP:       return "iocp";
     }
-    return nullptr;
+    return {};
 }
 
 static estring get_engine_names(uint64_t engs) {
@@ -50,12 +50,10 @@ static estring get_engine_names(uint64_t engs) {
     } else {
         for (uint64_t i = 0; i < 64; ++i) {
             auto name = get_engine_name(engs & (1UL << i));
-            if (name) names.appends(name, ", ");
+            if (name.size()) names.appends(name, ", ");
         }
-        if (names.size() > 2) {
+        if (names.size() > 2)
             names.resize(names.size() - 2);
-            // LOG_INFO("`: ` (`)", str, names, engs);
-        }
     }
     return names;
 }
@@ -86,7 +84,7 @@ bool is_using_default_engine() {
 #else
     const uint64_t default_eng = INIT_EVENT_KQUEUE;
 #endif
-    return _engine == 0 || _engine == default_eng;
+    return !_engine || _engine == default_eng;
 }
 
 void set_cpu_affinity(int i) {
