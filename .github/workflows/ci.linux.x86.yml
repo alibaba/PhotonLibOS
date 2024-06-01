@@ -1,4 +1,4 @@
-name: Linux Compiler
+name: Linux X86
 
 on:
   push:
