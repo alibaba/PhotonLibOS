@@ -73,8 +73,9 @@ int init(uint64_t event_engine, uint64_t io_engine) {
     LOG_INFO("argument specified: ` (`)", get_engine_names(arg_specified), arg_specified);
     LOG_INFO("environment specified: '`'", _engine_name);
     if (_engine && arg_specified) {
-        event_engine &= ~all_engines | _engine;
-        LOG_INFO("environment overridden: ", get_engine_names(event_engine & all_engines));
+        event_engine &= ~all_engines;
+        event_engine |= _engine;
+        LOG_INFO("event engine overridden to: ", get_engine_names(event_engine & all_engines));
     }
     return __photon_init(event_engine, io_engine);
 }

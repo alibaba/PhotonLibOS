@@ -39,20 +39,25 @@ static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 #define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
 
 // Try to init master engine with the recommended order
+static const uint8_t recommended_order[] = {
 #if defined(__linux__)
-static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_SELECT};
+    __builtin_ctz(INIT_EVENT_EPOLL), __builtin_ctz(INIT_EVENT_IOURING), __builtin_ctz(INIT_EVENT_SELECT)};
 #else   // macOS, FreeBSD ...
-static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
+    __builtin_ctz(INIT_EVENT_KQUEUE), __builtin_ctz(INIT_EVENT_SELECT)};
 #endif
 
 int __photon_init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
-    if (event_engine != INIT_EVENT_NONE) {
+    const uint64_t ALL_ENGINES = INIT_EVENT_EPOLL  |
+            INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
+            INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
+    if (event_engine & ALL_ENGINES) {
         bool ok = false;
         for (auto each : recommended_order) {
-            if ((each & event_engine) && fd_events_init(each) == 0) {
+            auto x = 1ul << each;
+            if ((x & event_engine) && fd_events_init(x) == 0) {
                 ok = true;
                 break;
             }

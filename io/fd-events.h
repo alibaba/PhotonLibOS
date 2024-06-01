@@ -138,7 +138,7 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(select);
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 
-inline int fd_events_init(int master_engine) {
+inline int fd_events_init(uint64_t master_engine) {
     switch (master_engine) {
 #ifdef __linux__
         case INIT_EVENT_EPOLL:
