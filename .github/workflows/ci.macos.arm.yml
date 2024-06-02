@@ -7,15 +7,15 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS-clang-release:
-    runs-on: [self-hosted, macOS, ARM64]
+  macOS14-arm:
+    runs-on: macos-14
 
     steps:
-#      - uses: szenius/set-timezone@v1.2
-#        with:
-#          timezoneLinux: "Asia/Shanghai"
-#          timezoneMacos: "Asia/Shanghai"
-#          timezoneWindows: "China Standard Time"
+     - uses: szenius/set-timezone@v1.2
+       with:
+         timezoneLinux: "Asia/Shanghai"
+         timezoneMacos: "Asia/Shanghai"
+         timezoneWindows: "China Standard Time"
 
       - uses: actions/checkout@v3
 
