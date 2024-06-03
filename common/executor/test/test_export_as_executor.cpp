@@ -4,7 +4,7 @@
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 #include <thread>
-#include "../../test/gtest.h"
+#include "../../../test/gtest.h"
 
 TEST(enter_as_executor, test) {
     // set global default logger output to null

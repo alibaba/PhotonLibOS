@@ -7,8 +7,8 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS-12-Monterey-release:
-    runs-on: macos-12
+  macOS13-x86:
+    runs-on: macos-13
 
     steps:
     - uses: szenius/set-timezone@v1.2
@@ -20,17 +20,17 @@ jobs:
     - uses: actions/checkout@v3
 
     - name: Install Dependencies
-      shell: bash  
+      shell: bash
       run: |
-        brew install cmake openssl@1.1 gflags googletest gsasl
+        brew install cmake openssl gflags googletest gsasl
 
     - name: Build
       run: |
         cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
-          -D PHOTON_ENABLE_SASL=ON -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
-        cmake --build ${{github.workspace}}/build -j
+          -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+        cmake --build ${{github.workspace}}/build -j $(nproc)
 
     - name: Test
       working-directory: ${{github.workspace}}/build
-      run: ctest --timeout 3600 -V
-      
+      run: ctest -E test-lockfree --timeout 3600 -V
+

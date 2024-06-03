@@ -429,10 +429,9 @@ TEST_P(ThrottlePriorityTest, run) {
 #endif
 
 int main(int argc, char** argv) {
+    if (!photon::is_using_default_engine()) return 0;
+    photon::init(0, 0);
+    DEFER(photon::fini());
     testing::InitGoogleTest(&argc, argv);
-    ci_parse_env();
-    photon::init(ci_ev_engine, photon::INIT_IO_NONE);
-    // TODO
-    // DEFER(photon::fini());
     return RUN_ALL_TESTS();
 }

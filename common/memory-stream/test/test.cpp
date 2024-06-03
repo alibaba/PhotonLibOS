@@ -22,6 +22,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include "../../../test/ci-tools.h"
 #include "../../../test/gtest.h"
 
 using namespace std;
@@ -82,6 +83,7 @@ TEST(MemoryStream, normalTest)
 
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     log_output_level = ALOG_DEBUG;
     ::testing::InitGoogleTest(&argc, argv);
     photon::vcpu_init();

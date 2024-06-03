@@ -27,6 +27,7 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "../../test/ci-tools.h"
 #include "../../test/gtest.h"
 
 class LogOutputTest : public ILogOutput {
@@ -577,6 +578,7 @@ TEST(ALOG, IPAddr) {
 
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);

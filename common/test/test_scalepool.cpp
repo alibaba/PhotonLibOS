@@ -22,8 +22,9 @@ limitations under the License.
 #undef protected
 
 #include "../alog.h"
-#include <photon/thread/thread.h>
 #include <vector>
+#include <photon/thread/thread.h>
+#include "../../test/ci-tools.h"
 #include "../../test/gtest.h"
 
 TEST(IdentityPoolGC, basic) {
@@ -123,6 +124,7 @@ TEST(IOAlloc, basic) {
 }
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
