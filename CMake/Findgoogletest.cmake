@@ -1,6 +1,7 @@
 find_path(GOOGLETEST_INCLUDE_DIRS gtest/gtest.h gmock/gmock.h)
 
 find_library(GOOGLETEST_GTEST_LIBRARIES gtest)
+find_library(GOOGLETEST_GTEST_MAIN_LIBRARIES gtest_main)
 find_library(GOOGLETEST_GMOCK_LIBRARIES gmock)
 
 set(GOOGLETEST_LIBRARIES

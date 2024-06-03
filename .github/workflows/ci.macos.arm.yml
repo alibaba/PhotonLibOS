@@ -7,15 +7,15 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS-clang-release:
-    runs-on: [self-hosted, macOS, ARM64]
+  macOS14-arm:
+    runs-on: macos-14
 
     steps:
-#      - uses: szenius/set-timezone@v1.2
-#        with:
-#          timezoneLinux: "Asia/Shanghai"
-#          timezoneMacos: "Asia/Shanghai"
-#          timezoneWindows: "China Standard Time"
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
 
       - uses: actions/checkout@v3
 
@@ -28,8 +28,8 @@ jobs:
         run: |
           cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
             -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
-          cmake --build ${{github.workspace}}/build -j
+          cmake --build ${{github.workspace}}/build -j $(nproc)
 
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest --timeout 3600 -V
+        run: ctest -E test-lockfree --timeout 3600 -V

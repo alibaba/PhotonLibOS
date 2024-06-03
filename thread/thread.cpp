@@ -268,8 +268,9 @@ namespace photon
 
         void init_main_thread_stack() {
 #ifdef __APPLE__
-            stack_size = pthread_get_stacksize_np(pthread_self());
-            stackful_alloc_top = (char*) pthread_get_stackaddr_np(pthread_self());
+            auto self = pthread_self();
+            stack_size = pthread_get_stacksize_np(self);
+            stackful_alloc_top = (char*) pthread_get_stackaddr_np(self);
 #elif defined(_WIN64)
             ULONG_PTR stack_low, stack_high;
             GetCurrentThreadStackLimits(&stack_low, &stack_high);

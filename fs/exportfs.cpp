@@ -561,6 +561,7 @@ namespace fs
         ExportBase::ref = 1;
         if (thread_pool_capacity != 0) ExportBase::pool = new_thread_pool(thread_pool_capacity);
         evloop->async_run();
+        LOG_INFO(" OK");
         return 0;
     }
     int exportfs_fini()

@@ -13,7 +13,7 @@ target_link_libraries(test-sockpool PRIVATE photon_shared)
 add_test(NAME test-sockpool COMMAND $<TARGET_FILE:test-sockpool>)
 
 add_executable(test-curl test_curl.cpp)
-target_link_libraries(test-curl PRIVATE photon_static)
+target_link_libraries(test-curl PRIVATE photon_shared)
 add_test(NAME test-curl COMMAND $<TARGET_FILE:test-curl>)
 
 add_executable(test-server test-server.cpp)

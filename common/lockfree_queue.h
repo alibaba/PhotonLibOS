@@ -31,6 +31,8 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 
+#define size_t uint64_t
+
 template <size_t x>
 struct Capacity_2expN {
     constexpr static size_t capacity = Capacity_2expN<(x >> 1)>::capacity << 1;
@@ -600,3 +602,6 @@ public:
 
 }  // namespace common
 }  // namespace photon
+
+#undef size_t
+
