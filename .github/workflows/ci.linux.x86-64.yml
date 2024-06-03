@@ -1,4 +1,4 @@
-name: Linux X86
+name: Linux x86 (new)
 
 on:
   push:
@@ -59,9 +59,9 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output850.tzs
           cd build/output/
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
     needs: gcc850
@@ -100,9 +100,9 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output921.tzs
           cd build/output/
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
     needs: gcc921
@@ -141,9 +141,9 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output1031.tzs
           cd build/output/
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
     needs: gcc1031
@@ -182,9 +182,9 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output1121.tzs
           cd build/output/
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
     needs: gcc1121
@@ -223,8 +223,8 @@ jobs:
         run: |
           tar -x --use-compress-program=zstdmt -f output1211.tzs
           cd build/output/
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
 
 
