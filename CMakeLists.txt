@@ -332,17 +332,20 @@ endif ()
 
 # Build test cases
 if (PHOTON_BUILD_TESTING)
+    include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/examples-output)
+    link_libraries(${GFLAGS_LIBRARIES})
+    add_subdirectory(examples)
+
     include(CTest)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/output)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
     include(generate-ctest-packed-script)
 
     add_library(ci-tools STATIC test/ci-tools.cpp)
     target_include_directories(ci-tools PRIVATE include)
 
-    include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
 
-    add_subdirectory(examples)
     add_subdirectory(common/checksum/test)
     add_subdirectory(common/test)
     add_subdirectory(common/memory-stream/test)

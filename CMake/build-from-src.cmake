@@ -44,7 +44,7 @@ function(build_from_src [dep])
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}
                 BUILD_COMMAND sh -c "V=1 CFLAGS=\"-fPIC -O3 -Wall -Wextra -fno-stack-protector\" $(MAKE) -C src"
-                # INSTALL_COMMAND $(MAKE) install
+                INSTALL_COMMAND $(MAKE) install
         )
         set(URING_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(URING_LIBRARIES ${BINARY_DIR}/lib/liburing.a PARENT_SCOPE)
