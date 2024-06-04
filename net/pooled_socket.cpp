@@ -230,9 +230,11 @@ public:
 
     bool release(const EndPoint& ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
+        ERRNO err;
         if (!stream_alive(fd)) return false;
         auto node = new StreamListNode(ep, stream, fd, TTL_us);
         push_into_pool(node);
+        errno = err.no;
         return true;
     }
 
