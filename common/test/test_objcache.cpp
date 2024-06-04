@@ -21,10 +21,11 @@ limitations under the License.
 
 #undef private
 #undef protected
+#include <thread>
+#include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/common/alog.h>
-#include <thread>
-#include "../../test/gtest.h"
+#include "../../test/ci-tools.h"
 
 static int thread_local release_cnt = 0;
 struct ShowOnDtor {
@@ -67,8 +68,6 @@ void* objcache(void* arg) {
 }
 
 TEST(ObjectCache, release_cycle) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -92,8 +91,6 @@ TEST(ObjectCache, release_cycle) {
 
 TEST(ObjectCache, timeout_refresh) {
     release_cnt = 0;
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
@@ -128,8 +125,6 @@ void *ph_act(void *arg) {
 
 TEST(ObjectCache, ctor_may_yield_and_null) {
     release_cnt = 0;
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
@@ -148,8 +143,6 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
 }
 
 TEST(ObjectCache, multithread) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
     ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
@@ -291,8 +284,6 @@ TEST(ObjectCache, borrow_with_once) {
 }
 
 TEST(ExpireContainer, expire_container) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     char key2[10] = "hello";
     ExpireContainer<std::string, int, bool> expire(1000 *
@@ -333,8 +324,6 @@ TEST(ExpireContainer, refresh) {
 }
 
 TEST(ExpireList, expire_container) {
-    // photon::vcpu_init();
-    // DEFER(photon::vcpu_fini());
     char key[10] = "hello";
     ExpireList<std::string> expire(1000 * 1000);  // expire in 100ms
     expire.keep_alive(key, true);
@@ -393,6 +382,7 @@ TEST(ObjCache, with_list) {
 }
 
 int main(int argc, char** argv) {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     ::testing::InitGoogleTest(&argc, argv);

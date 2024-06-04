@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "photon.h"
+#include <inttypes.h>
 
 #include "io/fd-events.h"
 #include "io/signal.h"
@@ -43,14 +44,22 @@ static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 #define INIT_IO(name, prefix, ...)    if (INIT_IO_##name & io_engine) { if (prefix##_init(__VA_ARGS__) < 0) return -1; }
 #define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
 
+class Shift {
+    uint8_t _n;
+public:
+    constexpr Shift(uint64_t x) : _n(__builtin_ctz(x)) { }
+    operator uint64_t() { return 1UL << _n; }
+};
+
 // Try to init master engine with the recommended order
+static const Shift recommended_order[] = {
 #if defined(__linux__)
-static const int recommended_order[] = {INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_EPOLL_NG, INIT_EVENT_SELECT};
+    INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_EPOLL_NG, INIT_EVENT_SELECT};
 #else   // macOS, FreeBSD ...
-static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
+    INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
 
-int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
+int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
     if (options.use_pooled_stack_allocator) {
         use_pooled_stack_allocator();
     }
@@ -61,10 +70,14 @@ int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options
     if (vcpu_init() < 0)
         return -1;
 
-    if (event_engine != INIT_EVENT_NONE) {
+    const uint64_t ALL_ENGINES =
+            INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
+            INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
+            INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
+    if (event_engine & ALL_ENGINES) {
         bool ok = false;
-        for (auto each : recommended_order) {
-            if ((each & event_engine) && fd_events_init(each) == 0) {
+        for (auto x : recommended_order) {
+            if ((x & event_engine) && fd_events_init(x) == 0) {
                 ok = true;
                 break;
             }
@@ -94,6 +107,10 @@ int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options
         reset_handle_registed = true;
     }
     return 0;
+}
+
+int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
+    return __photon_init(event_engine, io_engine, options);
 }
 
 static std::vector<Delegate<void>>& get_hook_vector() {

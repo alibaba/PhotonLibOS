@@ -51,6 +51,9 @@ limitations under the License.
 #endif
 #include "../../test/gtest.h"
 
+#include "../../test/ci-tools.h"
+
+
 using namespace std;
 
 char str[] = "2018/01/05 21:53:28|DEBUG| 2423423|test.cpp:254|virtual void LOGPerf_1M_memcpy_Test::TestBody():aksdjfj 234:^%$#@341234  hahah `:jksld88423CACE::::::::::::::::::::::::::::::::::::::::::::::::::::";
@@ -1257,6 +1260,7 @@ TEST(update_now, after_idle_sleep) {
 // #endif
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     char a[100]{}, b[100]{};

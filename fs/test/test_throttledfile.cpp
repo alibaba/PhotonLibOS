@@ -31,6 +31,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>
 #include <photon/thread/thread.h>
 #include <photon/fs/localfs.h>
+#include "../../test/ci-tools.h"
 #include "../../test/gtest.h"
 #include "mock.h"
 
@@ -429,6 +430,7 @@ TEST(ThrottledFs, concurrent){
 
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

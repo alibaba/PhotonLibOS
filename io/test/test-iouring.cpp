@@ -340,7 +340,8 @@ TEST(perf, DISABLED_read) {
 class event_engine : public testing::Test {
 protected:
     void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(ci_ev_engine, photon::INIT_IO_NONE));
+        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
+                                        photon::INIT_IO_NONE));
 #ifdef PHOTON_URING
         engine = (ci_ev_engine == photon::INIT_EVENT_EPOLL) ? photon::new_epoll_cascading_engine()
                                                           : photon::new_iouring_cascading_engine();
@@ -619,6 +620,5 @@ int main(int argc, char** arg) {
     testing::InitGoogleTest(&argc, arg);
     testing::FLAGS_gtest_break_on_failure = true;
     gflags::ParseCommandLineFlags(&argc, &arg, true);
-    ci_parse_env();
     return RUN_ALL_TESTS();
 }

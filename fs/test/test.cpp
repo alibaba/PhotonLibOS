@@ -1374,12 +1374,7 @@ TEST(Walker, basic) {
 
 int main(int argc, char **argv){
     ::testing::InitGoogleTest(&argc, argv);
-#ifdef __linux__
-    int ev_engine = photon::INIT_EVENT_EPOLL;
-#else
-    int ev_engine = photon::INIT_EVENT_KQUEUE;
-#endif
-    if (photon::init(ev_engine, photon::INIT_IO_NONE))
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());
     return RUN_ALL_TESTS();

@@ -1,7 +1,9 @@
 #pragma once
-#include <cstdint>
 
-extern uint64_t ci_ev_engine;
-extern uint64_t ci_ev_engine_with_signal;
+namespace photon {
 
-void ci_parse_env();
+bool is_using_default_engine();
+
+void set_cpu_affinity(int i);
+
+}

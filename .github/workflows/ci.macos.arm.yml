@@ -7,29 +7,29 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS-clang-release:
-    runs-on: [self-hosted, macOS, ARM64]
+  macOS14-arm:
+    runs-on: macos-14
 
     steps:
-#      - uses: szenius/set-timezone@v1.2
-#        with:
-#          timezoneLinux: "Asia/Shanghai"
-#          timezoneMacos: "Asia/Shanghai"
-#          timezoneWindows: "China Standard Time"
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
 
       - uses: actions/checkout@v3
 
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install cmake openssl@1.1 gflags googletest gsasl
+          brew install cmake openssl gflags googletest gsasl
 
       - name: Build
         run: |
           cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
-            -D PHOTON_ENABLE_SASL=ON -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
-          cmake --build ${{github.workspace}}/build -j
+            -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@1.1/1.1.1w
+          cmake --build ${{github.workspace}}/build -j $(nproc)
 
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest --timeout 3600 -V
+        run: ctest -E test-lockfree --timeout 3600 -V

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include "../../../test/ci-tools.h"
 #include "../../../test/gtest.h"
 
 #ifndef DATA_DIR
@@ -16,6 +17,7 @@
 class TestChecksum : public ::testing::Test {
     virtual void SetUp() {
         in.open(xstr(DATA_DIR) "checksum.in");
+        if (!in) in.open("checksum.in");
         ASSERT_TRUE(!!in);
         uint32_t value;
         std::string str;
@@ -69,6 +71,7 @@ TEST_F(TestChecksum, crc32c_sw) {
 
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

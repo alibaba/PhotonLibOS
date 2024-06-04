@@ -83,7 +83,7 @@ TEST(easy_performer, test) {
     easy_atomic_set(count, 10000);
 
     std::thread([]() {
-        if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        if (ci_init_photon(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
             return -1;
         DEFER(photon::fini());
         fs::exportfs_init();

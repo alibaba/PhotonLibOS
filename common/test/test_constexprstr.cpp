@@ -20,6 +20,7 @@ limitations under the License.
 #include "../alog-stdstring.h"
 #include "../alog.h"
 #include "../conststr.h"
+#include "../../test/ci-tools.h"
 #include "../../test/gtest.h"
 
 DEFINE_ENUM_STR(VERBS, verbs, UNKNOW, DELETE, GET, HEAD, POST, PUT, CONNECT,
@@ -112,6 +113,7 @@ TEST(TString, JoinAndSplit) {
 }
 
 int main(int argc, char** argv) {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     int ret = RUN_ALL_TESTS();
     return ret;

@@ -1,11 +1,11 @@
 add_executable(client_perf client_perf.cpp)
-target_link_libraries(client_perf PRIVATE photon_static)
+target_link_libraries(client_perf PRIVATE photon_shared)
 
 add_executable(server_perf server_perf.cpp)
 target_link_libraries(server_perf PRIVATE photon_shared)
 
 add_executable(pure_libcurl pure_libcurl.cpp)
-target_link_libraries(pure_libcurl PRIVATE photon_static)
+target_link_libraries(pure_libcurl PRIVATE photon_shared)
 
 add_executable(client_function_test client_function_test.cpp)
 target_link_libraries(client_function_test PRIVATE photon_shared)
