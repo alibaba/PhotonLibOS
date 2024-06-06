@@ -288,6 +288,7 @@ public:
     virtual int cancel_wait() override { return eventfd_write(evfd, 1); }
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+        if (interests == 0) return 0;
         Event waiter{fd, interests | ONE_SHOT, CURRENT};
         Event event{fd, interests | ONE_SHOT, &waiter};
         int ret = add_interest(event);
