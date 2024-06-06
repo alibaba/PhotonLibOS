@@ -62,6 +62,8 @@ jobs:
           ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
           ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
     needs: gcc850
@@ -102,6 +104,8 @@ jobs:
           cd build/output/
           ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
@@ -144,6 +148,8 @@ jobs:
           ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
           ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
     needs: gcc1031
@@ -185,6 +191,8 @@ jobs:
           ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
           ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
     needs: gcc1121
@@ -225,6 +233,8 @@ jobs:
           cd build/output/
           ctest -E test-lockfree --timeout 3600 -V
           export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
 
