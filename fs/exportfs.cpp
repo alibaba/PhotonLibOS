@@ -241,6 +241,10 @@ namespace fs
         {
             PERFORM(OPID_APPENDV, m_file->do_appendv(iov, iovcnt, offset, position));
         }
+        OVERRIDE_ASYNC(int, fallocate, int mode, off_t offset, off_t len)
+        {
+            PERFORM(OPID_FALLOCATE, m_file->fallocate(mode, offset, len));
+        }
         OVERRIDE_ASYNC(ssize_t, fgetxattr, const char *name, void *value, size_t size)
         {
             if (!m_xattr) {
