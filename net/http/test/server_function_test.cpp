@@ -243,7 +243,10 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
 
 int test_director(void* src_, Request& src, Request& dst) {
     auto source_server = (ISocketServer*)src_;
-    dst.reset(src.verb(), to_url(source_server, "/filename_not_important"));
+    if (source_server)
+        dst.reset(src.verb(), to_url(source_server, "/filename_not_important"));
+    else
+        dst.reset(src.verb(), "http://localhost:0/filename_not_important");
     dst.headers.insert("proxy_server_test", "just4test");
     for (auto kv = src.headers.begin(); kv != src.headers.end(); kv++) {
         if (kv.first() != "Host") dst.headers.insert(kv.first(), kv.second(), 1);
@@ -433,7 +436,7 @@ TEST(http_server, proxy_handler_failure) {
     DEFER(delete tcpserver);
     auto proxy_server = new_http_server();
     DEFER(delete proxy_server);
-    auto proxy_handler = new_proxy_handler({tcpserver, &test_director},
+    auto proxy_handler = new_proxy_handler({nullptr, &test_director},
                                            {nullptr, &test_modifier}, client_proxy);
     proxy_server->add_handler(proxy_handler);
     tcpserver->set_handler(proxy_server->get_connection_handler());
