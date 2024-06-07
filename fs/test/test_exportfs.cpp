@@ -294,15 +294,16 @@ TEST(ExportFS, op_failed_situation) {
         delete file;
     });
 
-    auto action = [=](AsyncResult<ssize_t>* ret){
+    std::atomic<int> error {0};
+    auto action = [&](AsyncResult<ssize_t>* ret){
         EXPECT_EQ(ENOSYS, ret->error_number);
-        errno = EDOM;
+        error = EDOM;
         return -1;
     };
     Callback<AsyncResult<ssize_t>*> fail_cb(action);
     file->read(nullptr, 0, fail_cb);
-    while (EDOM != errno) photon::thread_yield();
-    EXPECT_EQ(EDOM, errno);
+    while (EDOM != error) photon::thread_yield();
+    EXPECT_EQ(EDOM, error);
 }
 
 TEST(ExportFS, xattr) {
