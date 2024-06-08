@@ -26,9 +26,13 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B ${{github.workspace}}/build -D PHOTON_BUILD_TESTING=ON -D CMAKE_BUILD_TYPE=Release \
-            -D PHOTON_ENABLE_SASL=ON -DOPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@1.1/1.1.1w
-          cmake --build ${{github.workspace}}/build -j $(nproc)
+          cmake -B ${{github.workspace}}/build \
+            -D PHOTON_ENABLE_ECOSYSTEM=ON \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D CMAKE_BUILD_TYPE=MinSizeRel \
+            -D PHOTON_ENABLE_SASL=ON \
+            -D OPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@1.1/1.1.1w
+          cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 
       - name: Test
         working-directory: ${{github.workspace}}/build

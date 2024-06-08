@@ -25,7 +25,7 @@ option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
-option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" ON)
+option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -44,12 +44,11 @@ set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapi
 set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
 set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 
-# Get CPU arch and number
+# Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${ARCH} STREQUAL arm64))
     message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
 endif ()
-ProcessorCount(NumCPU)
 
 # Global compile options, only effective within this project
 set(global_compile_options -Wall -Wno-error=pragmas)
@@ -77,7 +76,6 @@ set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2")    # Only for CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_BUILD_PARALLEL_LEVEL ${NumCPU})
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
