@@ -11,7 +11,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
-      image: dokken/centos-stream-8:sha-40294ce
+      image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4
 
     steps:
@@ -23,14 +23,14 @@ jobs:
 
       - uses: actions/checkout@v3
 
-      - name: Install Dependencies
-        run: |
-          dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
-          dnf install -y gcc-toolset-9-gcc-c++
-          dnf install -y openssl-devel libcurl-devel libaio-devel
-          dnf install -y epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
+      # - name: Install Dependencies
+      #   run: |
+      #     dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
+      #     dnf install -y gcc-toolset-9-gcc-c++
+      #     dnf install -y openssl-devel libcurl-devel libaio-devel
+      #     dnf install -y epel-release
+      #     dnf config-manager --set-enabled powertools
+      #     dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
 
       - name: Build
         run: |
@@ -51,7 +51,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
-      image: dokken/centos-stream-8:sha-40294ce
+      image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4
 
     steps:
@@ -63,14 +63,14 @@ jobs:
 
       - uses: actions/checkout@v3
 
-      - name: Install Dependencies
-        run: |
-          dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
-          dnf install -y gcc-toolset-9-gcc-c++
-          dnf install -y openssl-devel libcurl-devel libaio-devel
-          dnf install -y epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
+      # - name: Install Dependencies
+      #   run: |
+      #     dnf install -y git gcc-c++ cmake 'dnf-command(config-manager)'
+      #     dnf install -y gcc-toolset-9-gcc-c++
+      #     dnf install -y openssl-devel libcurl-devel libaio-devel
+      #     dnf install -y epel-release
+      #     dnf config-manager --set-enabled powertools
+      #     dnf install -y gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel e2fsprogs-devel
 
       - name: Build
         run: |

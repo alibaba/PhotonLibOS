@@ -179,7 +179,7 @@ public:
     using Base::empty;
     using Base::full;
 
-    bool push_weak(const T& x) {
+    bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
         for (;;) {
             auto& slot = slots[idx(t)];
@@ -192,15 +192,16 @@ public:
                 }
             } else {
                 auto const prevTail = t;
+                auto h = head.load(std::memory_order_acquire);
                 t = tail.load(std::memory_order_acquire);
-                if (t == prevTail) {
+                if (t == prevTail && Base::check_full(h, t)) {
                     return false;
                 }
             }
         }
     }
 
-    bool pop_weak(T& x) {
+    bool pop(T& x) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
             auto& slot = slots[idx(h)];
@@ -213,26 +214,13 @@ public:
                 }
             } else {
                 auto const prevHead = h;
+                auto t = tail.load(std::memory_order_acquire);
                 h = head.load(std::memory_order_acquire);
-                if (h == prevHead) {
+                if (h == prevHead && Base::check_empty(h, t)) {
                     return false;
                 }
             }
         }
-    }
-
-    bool push(const T& x) {
-        do {
-            if (push_weak(x)) return true;
-        } while (!full());
-        return false;
-    }
-
-    bool pop(T& x) {
-        do {
-            if (pop_weak(x)) return true;
-        } while (!empty());
-        return false;
     }
 
     template <typename Pause = ThreadPause>
@@ -536,8 +524,8 @@ namespace common {
  * and load balancing.
  * Watch out that `recv` should run in photon environment (because it has to)
  * use photon semaphore to be notified that new item has sended. `send` could
- * running in photon or std::thread environment (needs to set template `Pause` as
- * `ThreadPause`).
+ * running in photon or std::thread environment (needs to set template `Pause`
+ * as `ThreadPause`).
  *
  * @tparam QueueType shoulde be one of LockfreeMPMCRingQueue,
  * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
