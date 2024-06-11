@@ -24,7 +24,7 @@ namespace PMock {
     using photon::fs::DIR;
     using photon::fs::fiemap;
 
-    class MockNullFile : public IFile, public IFileXAttr {
+    class MockNoAttrNullFile : public IFile {
     public:
         MOCK_METHOD0(filesystem, IFileSystem*());
         MOCK_METHOD3(pread, ssize_t(void*, size_t, off_t));
@@ -49,13 +49,9 @@ namespace PMock {
         MOCK_METHOD2(trim, int(off_t, off_t));
         MOCK_METHOD1(fiemap, int(struct fiemap *p));
         MOCK_METHOD2(vioctl, int(int, va_list));
-        MOCK_METHOD3(fgetxattr, ssize_t(const char*, void*, size_t));
-        MOCK_METHOD2(flistxattr, ssize_t(char*, size_t));
-        MOCK_METHOD4(fsetxattr, int(const char*, const void*, size_t, int));
-        MOCK_METHOD1(fremovexattr, int(const char*));
     };
 
-    class MockNullFileSystem : public IFileSystem, public IFileSystemXAttr{
+    class MockNoAttrNullFileSystem : public IFileSystem {
     public:
         MOCK_METHOD2(open, IFile*(const char *pathname, int flags));
         MOCK_METHOD3(open, IFile*(const char *pathname, int flags, mode_t mode));
@@ -82,6 +78,18 @@ namespace PMock {
         MOCK_METHOD3(mknod, int(const char *path, mode_t mode, dev_t dev));
         MOCK_METHOD0(syncfs, int());
         MOCK_METHOD1(opendir, DIR*(const char *name));
+    };
+
+    class MockNullFile : public MockNoAttrNullFile, public IFileXAttr {
+    public:
+        MOCK_METHOD3(fgetxattr, ssize_t(const char*, void*, size_t));
+        MOCK_METHOD2(flistxattr, ssize_t(char*, size_t));
+        MOCK_METHOD4(fsetxattr, int(const char*, const void*, size_t, int));
+        MOCK_METHOD1(fremovexattr, int(const char*));
+    };
+
+    class MockNullFileSystem : public MockNoAttrNullFileSystem, public IFileSystemXAttr{
+    public:
         MOCK_METHOD4(getxattr, ssize_t(const char*, const char*, void*, size_t));
         MOCK_METHOD4(lgetxattr, ssize_t(const char*, const char*, void*, size_t));
         MOCK_METHOD3(listxattr, ssize_t(const char*, char*, size_t));
