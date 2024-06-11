@@ -360,6 +360,7 @@ TEST(ExportFS, xattr) {
 #undef CALL_TEST
 #undef CALL_TEST0
 
+// FIXME: failed on macos when compiled as release.
 TEST(ExportFS, DISABLED_xattr_sync) {
     photon::semaphore sem;
     PMock::MockNullFile* mockfile = new PMock::MockNullFile();

@@ -139,7 +139,6 @@ namespace fs
             typename AsyncResult<R>::result_type ret;
             int err = 0;
 
-            AsyncWaiter() { }
             int on_done(AsyncResult<R>* r)
             {
                 std::lock_guard<std::mutex> lock(_mtx);
