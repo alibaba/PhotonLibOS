@@ -528,8 +528,6 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
-<<<<<<< HEAD
-=======
 TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
     auto client = new_http_client();
     DEFER(delete client);
@@ -575,7 +573,6 @@ TEST(http_client, unix_socket) {
     ASSERT_EQ(200, op2.resp.status_code());
 }
 
->>>>>>> release/0.7
 int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     auto ua = req.headers["User-Agent"];
     LOG_DEBUG(VALUE(ua));
@@ -587,10 +584,6 @@ int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     return 0;
 }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> release/0.7
 TEST(http_client, user_agent) {
     auto tcpserver = new_tcp_socket_server();
     DEFER(delete tcpserver);
@@ -618,10 +611,6 @@ TEST(http_client, user_agent) {
     EXPECT_EQ(true, buf == "success");
 }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> release/0.7
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),
