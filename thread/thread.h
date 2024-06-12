@@ -36,7 +36,13 @@ namespace photon
 
     struct thread;
     extern __thread thread* CURRENT;
-    extern volatile uint64_t now;
+    extern volatile uint64_t now;   // a coarse-grained timestamp in unit of us
+    struct NowTime {
+        uint64_t now, _sec_usec;
+        uint32_t  sec() { return _sec_usec >> 32; }
+        uint32_t usec() { auto p = (uint32_t*)&_sec_usec; return *p; }
+    };
+    NowTime __update_now();    // update `now`
 
     enum states
     {
@@ -226,8 +232,9 @@ namespace photon
     class mutex : protected waitq
     {
     public:
-        int lock(uint64_t timeout = -1);        // threads are guaranteed to get the lock
-        int try_lock();                         // in FIFO order, when there's contention
+        mutex(uint16_t max_retries = 100) : retries(max_retries) { }
+        int lock(uint64_t timeout = -1);
+        int try_lock();
         void unlock();
         ~mutex()
         {
@@ -235,13 +242,20 @@ namespace photon
         }
 
     protected:
-        static constexpr const int MaxTries = 100;
         std::atomic<thread*> owner{nullptr};
+        uint16_t retries;
         spinlock splock;
+    };
+
+    class seq_mutex : protected mutex {
+    public:
+        // threads are guaranteed to get the lock in sequental order (FIFO)
+        seq_mutex() : mutex(0) { }
     };
 
     class recursive_mutex : protected mutex {
     public:
+        using mutex::mutex;
         int lock(uint64_t timeout = -1);
         int try_lock();
         void unlock();

@@ -51,6 +51,9 @@ limitations under the License.
 #include <gnu/libc-version.h>
 #endif
 
+#include "../../test/ci-tools.h"
+
+
 using namespace std;
 
 char str[] = "2018/01/05 21:53:28|DEBUG| 2423423|test.cpp:254|virtual void LOGPerf_1M_memcpy_Test::TestBody():aksdjfj 234:^%$#@341234  hahah `:jksld88423CACE::::::::::::::::::::::::::::::::::::::::::::::::::::";
@@ -243,7 +246,12 @@ TEST(Callback, virtual_function)
     Callback<int> dd(lambda);
 //    Callback<int> ee([&](int x){ return RET + x/2; });
 
+#pragma GCC diagnostic push
+#if __GNUC__ >= 13
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
     THIS = (BB*)&c;
+#pragma GCC diagnostic pop
     LOG_DEBUG(VALUE(THIS), VALUE(&c));
 
     for (int i=0; i<100; ++i)
@@ -867,6 +875,15 @@ TEST(estring, test)
     estring as = "   \tasdf  \t\r\n";
     auto trimmed = as.trim();
     EXPECT_EQ(trimmed, "asdf");
+
+    EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
+    EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
+    EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
+    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
+    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+
+    EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
+    EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
 }
 
 TEST(generator, example)
@@ -1156,6 +1173,7 @@ TEST(update_now, after_idle_sleep) {
 // #endif
 int main(int argc, char **argv)
 {
+    if (!photon::is_using_default_engine()) return 0;
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     char a[100]{}, b[100]{};

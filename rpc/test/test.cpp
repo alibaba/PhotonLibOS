@@ -16,15 +16,29 @@ limitations under the License.
 
 #include "../../rpc/rpc.cpp"
 #include <memory>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <photon/thread/thread.h>
 #include <photon/common/memory-stream/memory-stream.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/socket.h>
+#include <photon/photon.h>
+#include "../../test/ci-tools.h"
+
 using namespace std;
 using namespace photon;
 using namespace rpc;
+
+class RpcTest : public testing::Test {
+public:
+    void SetUp() override {
+        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    }
+    void TearDown() override {
+        photon::fini();
+    }
+};
 
 std::string S = "1234567890";
 struct Args
@@ -38,15 +52,10 @@ struct Args
     }
     void verify()
     {
-        LOG_DEBUG(VALUE(a));
         EXPECT_EQ(a, 123);
-        LOG_DEBUG(VALUE(b));
         EXPECT_EQ(b, 123);
-        LOG_DEBUG(VALUE(c));
         EXPECT_EQ(c, 123);
-        LOG_DEBUG(VALUE(d));
         EXPECT_EQ(d, 123);
-        LOG_DEBUG(VALUE(s));
         EXPECT_EQ(s, S);
     }
     uint64_t serialize(iovector& iov)
@@ -142,13 +151,13 @@ int server_exit_function(void* instance, iovector* request, rpc::Skeleton::Respo
 
 bool skeleton_exited;
 photon::condition_variable skeleton_exit;
-rpc::Skeleton* g_sk;
+
 void* rpc_skeleton(void* args)
 {
-    skeleton_exited = false;
     auto s = (IStream*)args;
     auto sk = new_skeleton();
-    g_sk = sk;
+    DEFER(delete sk);
+
     sk->add_function(FID, rpc::Skeleton::Function((void*)123, &server_function));
     sk->add_function(-1,  rpc::Skeleton::Function(sk, &server_exit_function));
     sk->serve(s);
@@ -171,7 +180,7 @@ void do_call(StubImpl& stub, uint64_t function)
     EXPECT_EQ(memcmp(STR, resp_iov.iov.back().iov_base, LEN(STR)), 0);
 }
 
-TEST(rpc, call)
+TEST_F(RpcTest, call)
 {
     unique_ptr<DuplexMemoryStream> ds( new_duplex_memory_stream(16) );
     thread_create(&rpc_skeleton, ds->endpoint_a);
@@ -207,13 +216,14 @@ void* do_concurrent_call_shut(void* arg)
     return nullptr;
 }
 
-TEST(rpc, concurrent)
+TEST_F(RpcTest, concurrent)
 {
 //    log_output_level = 1;
     LOG_INFO("Creating 1,000 threads, each doing 1,000 RPC calls");
     // ds will be destruct just after function returned
     // but server will not
     // therefore, it will cause assert when destruction
+    skeleton_exited = false;
     unique_ptr<DuplexMemoryStream> ds( new_duplex_memory_stream(16) );
     thread_create(&rpc_skeleton, ds->endpoint_a);
 
@@ -232,7 +242,6 @@ TEST(rpc, concurrent)
     ds->close();
     if (!skeleton_exited)
         skeleton_exit.wait_no_lock();
-    log_output_level = 0;
 }
 
 void do_call_timeout(StubImpl& stub, uint64_t function)
@@ -280,10 +289,9 @@ int server_function_timeout(void* instance, iovector* request, rpc::Skeleton::Re
 
 void* rpc_skeleton_timeout(void* args)
 {
-    skeleton_exited = false;
     auto s = (IStream*)args;
     auto sk = new_skeleton();
-    g_sk = sk;
+    DEFER(delete sk);
     sk->add_function(FID, rpc::Skeleton::Function((void*)123, &server_function_timeout));
     sk->add_function(-1,  rpc::Skeleton::Function(sk, &server_exit_function));
     sk->serve(s);
@@ -293,13 +301,14 @@ void* rpc_skeleton_timeout(void* args)
     return nullptr;
 }
 
-TEST(rpc, timeout) {
+TEST_F(RpcTest, timeout) {
     LOG_INFO("Creating 1,000 threads, each doing 1,000 RPC calls");
     // ds will be destruct just after function returned
     // but server will not
     // therefore, it will cause assert when destruction
     unique_ptr<DuplexMemoryStream> ds( new_duplex_memory_stream(655360) );
 
+    skeleton_exited = false;
     thread_create(&rpc_skeleton_timeout, ds->endpoint_a);
 
     LOG_DEBUG("asdf1");
@@ -320,9 +329,158 @@ TEST(rpc, timeout) {
     log_output_level = 0;
 }
 
+class RpcServer {
+public:
+    RpcServer(Skeleton* skeleton, net::ISocketServer* socket) : m_socket(socket), m_skeleton(skeleton) {
+        m_skeleton->register_service<Operation>(this);
+        m_socket->set_handler({this, &RpcServer::serve});
+    }
+    struct Operation {
+        const static uint32_t IID = 0x1;
+        const static uint32_t FID = 0x2;
+        struct Request : public photon::rpc::Message {
+            int code = 0;
+            PROCESS_FIELDS(code);
+        };
+        struct Response : public photon::rpc::Message {
+            int code = 0;
+            PROCESS_FIELDS(code);
+        };
+    };
+    int do_rpc_service(Operation::Request* req, Operation::Response* resp, IOVector* iov, IStream* stream) {
+        resp->code = req->code;
+        return 0;
+    }
+    int serve(photon::net::ISocketStream* stream) {
+        return m_skeleton->serve(stream);
+    }
+    int run() {
+        m_socket->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
+        if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
+            LOG_ERRNO_RETURN(0, -1, "bind failed");
+        if (m_socket->listen() != 0)
+            LOG_ERRNO_RETURN(0, -1, "listen failed");
+        return m_socket->start_loop(false);
+    }
+    net::ISocketServer* m_socket;
+    Skeleton* m_skeleton;
+};
+
+static int do_call_2(Stub* stub) {
+    RpcServer::Operation::Request req;
+    RpcServer::Operation::Response resp;
+    return stub->call<RpcServer::Operation>(req, resp);
+}
+
+TEST_F(RpcTest, shutdown) {
+    auto socket_server = photon::net::new_tcp_socket_server_ipv6();
+    GTEST_ASSERT_NE(nullptr, socket_server);
+    DEFER(delete socket_server);
+    auto sk = photon::rpc::new_skeleton();
+    GTEST_ASSERT_NE(nullptr, sk);
+    DEFER(delete sk);
+
+    RpcServer rpc_server(sk, socket_server);
+    GTEST_ASSERT_EQ(0, rpc_server.run());
+
+    auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+    DEFER(delete pool);
+
+    photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
+    auto stub = pool->get_stub(ep, false);
+    ASSERT_NE(nullptr, stub);
+    DEFER(pool->put_stub(ep, true));
+
+    photon::thread_create11([&]{
+        photon::thread_sleep(1);
+        sk->shutdown();
+        delete sk;
+        sk = nullptr;
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    while (true) {
+        int ret = do_call_2(stub);
+        if (ret < 0) {
+            GTEST_ASSERT_EQ(ECONNRESET, errno);
+            break;
+        }
+    }
+    auto end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    GTEST_ASSERT_GT(duration, 900);
+    GTEST_ASSERT_LT(duration, 1100);
+}
+
+TEST_F(RpcTest, passive_shutdown) {
+    auto socket_server = photon::net::new_tcp_socket_server_ipv6();
+    GTEST_ASSERT_NE(nullptr, socket_server);
+    DEFER(delete socket_server);
+    auto sk = photon::rpc::new_skeleton();
+    GTEST_ASSERT_NE(nullptr, sk);
+    DEFER(delete sk);
+
+    RpcServer rpc_server(sk, socket_server);
+    GTEST_ASSERT_EQ(0, rpc_server.run());
+
+    photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
+
+    photon::thread_create11([&]{
+        // Should always succeed in 3 seconds
+        auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+        DEFER(delete pool);
+        auto stub = pool->get_stub(ep, false);
+        if (!stub) abort();
+        DEFER(pool->put_stub(ep, true));
+        for (int i = 0 ; i < 30; ++i) {
+            int ret = do_call_2(stub);
+            if (ret < 0) {
+                LOG_ERROR(VALUE(ret));
+                abort();
+            }
+            photon::thread_usleep(100'000);
+        }
+    });
+
+    photon::thread_create11([&]{
+        photon::thread_sleep(2);
+        // Should get connection refused after 2 seconds. Because socket closed listen fd at 1 second.
+        auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+        DEFER(delete pool);
+        auto stub = pool->get_stub(ep, false);
+        if (stub) {
+            LOG_ERROR("should not get stub");
+            abort();
+        }
+        if (errno != ECONNREFUSED) {
+            LOG_ERROR(ERRNO());
+            abort();
+        }
+    });
+
+    auto start = std::chrono::steady_clock::now();
+
+    photon::thread_sleep(1);
+    socket_server->terminate();
+    delete socket_server;
+    socket_server = nullptr;
+
+    LOG_INFO("begin passive shutdown");
+    sk->shutdown(false);
+    LOG_INFO("end passive shutdown");
+    delete sk;
+    sk = nullptr;
+
+    auto end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    // The passive shutdown took 3 seconds, until client closed the connection
+    GTEST_ASSERT_GT(duration, 2900);
+    GTEST_ASSERT_LT(duration, 3200);
+}
+
 int main(int argc, char** arg)
 {
-    ::photon::vcpu_init();
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

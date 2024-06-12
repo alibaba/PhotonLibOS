@@ -50,6 +50,8 @@ protected:
     ssize_t recv(B* buf, S count, int flags = 0) {
         return cast()->recv(buf, count, nullptr, nullptr, flags);
     }
+    using IMessage::recv;
+    using IMessage::send;
 };
 
 class UDPSocket : public IDatagramSocket {

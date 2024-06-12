@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "photon.h"
+#include <inttypes.h>
 
 #include "io/fd-events.h"
 #include "io/signal.h"
@@ -22,6 +23,7 @@ limitations under the License.
 #ifdef ENABLE_FSTACK_DPDK
 #include "io/fstack-dpdk.h"
 #endif
+#include "io/reset_handle.h"
 #include "net/curl.h"
 #include "net/socket.h"
 #include "fs/exportfs.h"
@@ -31,26 +33,38 @@ namespace photon {
 using namespace fs;
 using namespace net;
 
+static bool reset_handle_registed = false;
 static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
 #define INIT_IO(name, prefix)    if (INIT_IO_##name & io_engine) { if (prefix##_init() < 0) return -1; }
 #define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
 
+class Shift {
+    uint8_t _n;
+public:
+    constexpr Shift(uint64_t x) : _n(__builtin_ctz(x)) { }
+    operator uint64_t() { return 1UL << _n; }
+};
+
 // Try to init master engine with the recommended order
+static const Shift recommended_order[] = {
 #if defined(__linux__)
-static const int recommended_order[] = {INIT_EVENT_IOURING, INIT_EVENT_EPOLL, INIT_EVENT_SELECT};
+    INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_SELECT};
 #else   // macOS, FreeBSD ...
-static const int recommended_order[] = {INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
+    INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
 
-int init(uint64_t event_engine, uint64_t io_engine) {
+int __photon_init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
-    if (event_engine != INIT_EVENT_NONE) {
+    const uint64_t ALL_ENGINES = INIT_EVENT_EPOLL  |
+            INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
+            INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
+    if (event_engine & ALL_ENGINES) {
         bool ok = false;
-        for (auto each : recommended_order) {
-            if ((each & event_engine) && fd_events_init(each) == 0) {
+        for (auto x : recommended_order) {
+            if ((x & event_engine) && fd_events_init(x) == 0) {
                 ok = true;
                 break;
             }
@@ -74,7 +88,16 @@ int init(uint64_t event_engine, uint64_t io_engine) {
 #endif
     g_event_engine = event_engine;
     g_io_engine = io_engine;
+    if (!reset_handle_registed) {
+        pthread_atfork(nullptr, nullptr, &reset_all_handle);
+        LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
+        reset_handle_registed = true;
+    }
     return 0;
+}
+
+int init(uint64_t event_engine, uint64_t io_engine) {
+    return __photon_init(event_engine, io_engine);
 }
 
 int fini() {

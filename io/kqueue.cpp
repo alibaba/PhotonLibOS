@@ -21,13 +21,14 @@ limitations under the License.
 #include <sys/event.h>
 #include <photon/common/alog.h>
 #include "events_map.h"
+#include "reset_handle.h"
 
 namespace photon {
 
 constexpr static EventsMap<EVUnderlay<EVFILT_READ, EVFILT_WRITE, EVFILT_EXCEPT>>
     evmap;
 
-class KQueue : public MasterEventEngine, public CascadingEventEngine {
+class KQueue : public MasterEventEngine, public CascadingEventEngine, public ResetHandle {
 public:
     struct InFlightEvent {
         uint32_t interests = 0;
@@ -55,6 +56,15 @@ public:
         return 0;
     }
 
+    int reset() override {
+        LOG_INFO("Reset event engine: kqueue");
+        _kq = -1;                   // kqueue fd is not inherited from the parent process
+        _inflight_events.clear();   // reset members
+        _n = 0;
+        _tm = {0, 0};
+        return init();              // re-init
+    }
+
     ~KQueue() override {
         LOG_INFO("Finish event engine: kqueue");
         // if (_n > 0) LOG_INFO(VALUE(_events[0].ident), VALUE(_events[0].filter), VALUE(_events[0].flags));
@@ -78,6 +88,8 @@ public:
     }
 
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        if (unlikely(interests == 0))
+            return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
         int ret = thread_usleep(timeout);

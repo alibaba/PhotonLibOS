@@ -16,7 +16,7 @@ limitations under the License.
 
 #include "identity-pool.h"
 #include "../thread/timer.h"
-// #include "alog.h"
+#include "alog.h"
 
 void* IdentityPoolBase::get()
 {

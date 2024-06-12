@@ -55,30 +55,39 @@ size_t estring_view::find_last_not_of(const charset& set) const
 
 bool estring_view::to_uint64_check(uint64_t* v) const
 {
-    v ? (*v = 0) : 0;
-    for (unsigned char c : *this) {
-        if (c > '9' || c < '0')
-            return false;
-        v ? (*v = *v * 10 + (c - '0')) : 0;
+    if (this->empty()) return false;
+    uint64_t val = (*this)[0] - '0';
+    if (val > 9) return false;
+    for (unsigned char c : this->substr(1)) {
+        c -= '0';
+        if (c > 9) break;
+        val = val * 10 + c;
     }
+    if (v) *v = val;
     return true;
 }
 
-uint64_t estring_view::hex_to_uint64() const
-{
-    uint64_t ret = 0;
-    for (unsigned char c : *this) {
-        if (c >= '0' && c <= '9') {
-            ret = ret * 16 + (c - '0');
-        } else if (c >= 'A' && c <= 'F') {
-            ret = ret * 16 + (c - 'A' + 10);
-        } else if (c >= 'a' && c <= 'f') {
-            ret = ret * 16 + (c - 'a' + 10);
-        } else {
-            return ret;
-        }
+inline char hex_char_to_digit(char c) {
+    unsigned char cc = c - '0';
+    if (cc < 10) return cc;
+    const unsigned char mask = 'a' - 'A';
+    static_assert(mask == 32, "..."); // single digit
+    c |= mask; // unified to 'a'..'f'
+    cc = c - 'a';
+    return (cc < 6) ? (cc + 10) : -1;
+}
+
+bool estring_view::hex_to_uint64_check(uint64_t* v) const {
+    if (this->empty()) return false;
+    uint64_t val = hex_char_to_digit((*this)[0]);
+    if (val == -1ul) return false;
+    for (unsigned char c : this->substr(1)) {
+        auto d = hex_char_to_digit(c);
+        if (d == -1) break;
+        val = val * 16 + d;
     }
-    return ret;
+    if (v) *v = val;
+    return true;
 }
 
 estring& estring::append(uint64_t x)

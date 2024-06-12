@@ -16,14 +16,15 @@ limitations under the License.
 
 #include "datagram_socket.h"
 
+#include <sys/fcntl.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/net/basic_socket.h>
 #include <photon/net/socket.h>
-#include <sys/fcntl.h>
-#include <sys/un.h>
-#include <unistd.h>
+#include "base_socket.h"
 
 namespace photon {
 namespace net {
@@ -139,14 +140,14 @@ public:
     virtual int connect(const Addr* addr, size_t addr_len) override {
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
-        auto in = ep->to_sockaddr_in();
-        return do_connect((sockaddr*)&in, sizeof(in));
+        sockaddr_storage s(*ep);
+        return do_connect(s.get_sockaddr(), s.get_socklen());
     }
     virtual int bind(const Addr* addr, size_t addr_len) override {
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
-        auto in = ep->to_sockaddr_in();
-        return do_bind((sockaddr*)&in, sizeof(in));
+        sockaddr_storage s(*ep);
+        return do_bind(s.get_sockaddr(), s.get_socklen());
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt, const Addr* addr,
                          size_t addr_len, int flags = 0) override {
@@ -154,8 +155,8 @@ public:
         if (likely(!ep) || unlikely(addr_len != sizeof(*ep)))
             return do_send(iov, iovcnt, nullptr, 0, flags);
         assert(addr_len == sizeof(*ep));
-        auto in = ep->to_sockaddr_in();
-        return do_send(iov, iovcnt, (sockaddr*)&in, sizeof(in), flags);
+        sockaddr_storage s(*ep);
+        return do_send(iov, iovcnt, s.get_sockaddr(), s.get_socklen(), flags);
     }
     virtual ssize_t recv(const struct iovec* iov, int iovcnt, Addr* addr,
                          size_t* addr_len, int flags) override {
@@ -164,12 +165,12 @@ public:
             return do_recv(iov, iovcnt, nullptr, 0, flags);
         }
 
-        sockaddr_in in;
-        size_t alen = sizeof(in);
-        auto ret = do_recv(iov, iovcnt, (sockaddr*)&in, &alen, flags);
+        sockaddr_storage s(*ep);
+        size_t alen = s.get_socklen();
+        auto ret = do_recv(iov, iovcnt, s.get_sockaddr(), &alen, flags);
         if (ret >= 0) {
-            ep->from(in);
-            *addr_len = sizeof(*ep);
+            *ep = s.to_endpoint();
+            *addr_len = alen;
         }
         return ret;
     }

@@ -24,6 +24,7 @@ namespace photon {
 const static uint32_t EVENT_READ = 1;
 const static uint32_t EVENT_WRITE = 2;
 const static uint32_t EVENT_ERROR = 4;
+const static uint32_t EVENT_RWE = EVENT_READ | EVENT_WRITE | EVENT_ERROR;
 const static uint32_t EDGE_TRIGGERED = 0x4000;
 const static uint32_t ONE_SHOT = 0x8000;
 
@@ -44,7 +45,7 @@ public:
      * @return 0 for success, which means event arrived in time
      *         -1 for failure, could be timeout or interrupted by another thread
      */
-    virtual int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) = 0;
+    virtual int wait_for_fd(int fd, uint32_t interest, uint64_t timeout) = 0;
 
     int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
         return wait_for_fd(fd, EVENT_READ, timeout);
@@ -111,6 +112,7 @@ public:
 
     /**
      * @brief Wait for events, returns number of the arrived events, and their associated `data`
+     * @note This call will not return until timeout, if there had been no events.
      * @param[out] data
      * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
      * @warning Do NOT block vcpu
@@ -136,7 +138,7 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(select);
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 
-inline int fd_events_init(int master_engine) {
+inline int fd_events_init(uint64_t master_engine) {
     switch (master_engine) {
 #ifdef __linux__
         case INIT_EVENT_EPOLL:

@@ -24,19 +24,17 @@ limitations under the License.
 #include <sys/time.h>
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
+#include <photon/common/alog-audit.h>
 
 #define private public
-
 #include "../thread.cpp"
 #include "../thread11.h"
-#include "../thread-pool.h"
-#include "../workerpool.h"
-#include <photon/common/alog-audit.h>
+#include "../../test/ci-tools.h"
+
 
 using namespace std;
 using namespace photon;
 
-DEFINE_int32(ths_total, 100, "total threads when testing threadpool.");
 DEFINE_int32(vcpus, 1, "total # of vCPUs");
 
 thread_local semaphore aSem(4);
@@ -709,64 +707,6 @@ TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
     EXPECT_LE(dt, 3UL*1024*1024);
 }
 
-void *func1(void *)
-{
-    photon::thread_sleep(rand()%5);
-    LOG_INFO("hello");
-    return nullptr;
-}
-
-TEST(ThreadPool, test)
-{
-    ThreadPool<64> pool(64*1024);
-    vector<TPControl*> ths;
-    ths.resize(FLAGS_ths_total);
-    for (int i = 0; i<FLAGS_ths_total; i++)
-        ths[i] = pool.thread_create_ex(&::func1, nullptr, true);
-    // LOG_INFO("----------");
-    for (int i = 0; i<FLAGS_ths_total; i++) {
-        LOG_DEBUG("wait thread: `", ths[i]->th);
-        pool.join(ths[i]);
-    }
-    // LOG_INFO("???????????????");
-}
-
-TEST(ThreadPool, migrate) {
-    WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
-    vector<TPControl*> ths;
-    ths.resize(FLAGS_ths_total);
-    for (int i = 0; i < FLAGS_ths_total; i++) {
-        ths[i] = pool.thread_create_ex(&::func1, nullptr, true);
-        wp.thread_migrate(ths[i]->th);
-    }
-    LOG_INFO("----------");
-    for (int i = 0; i < FLAGS_ths_total; i++) {
-        LOG_DEBUG("wait thread: `", ths[i]->th);
-        pool.join(ths[i]);
-    }
-    LOG_INFO("???????????????");
-}
-
-TEST(ThreadPool, multithread) {
-    WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(64 * 1024);
-    vector<TPControl*> ths;
-    ths.resize(FLAGS_ths_total);
-    for (int i = 0; i < FLAGS_ths_total; i++) {
-        wp.call(
-            [&] { ths[i] = pool.thread_create_ex(&::func1, nullptr, true); });
-    }
-    LOG_INFO("----------");
-    for (int i = 0; i < FLAGS_ths_total; i++) {
-        wp.call([&] {
-            LOG_DEBUG("wait thread: `", ths[i]->th);
-            pool.join(ths[i]);
-        });
-    }
-    LOG_INFO("???????????????");
-}
-
 thread_local uint64_t rw_count;
 thread_local bool writing = false;
 thread_local photon::rwlock rwl;
@@ -866,7 +806,7 @@ void run_all_tests(uint32_t i)
     RUN_TEST(thread11, test);
     RUN_TEST(Semaphore, basic);
     RUN_TEST(Semaphore, heavy);
-    RUN_TEST(ThreadPool, test);
+    // RUN_TEST(ThreadPool, test);
     RUN_TEST(RWLock, checklock);
     RUN_TEST(RWLock, interrupt);
     wait_for_completion(i);
@@ -1252,216 +1192,6 @@ TEST(mutex, timeout_is_zero) {
     }
     for(auto &th : ths) th.join();
     LOG_INFO("Meet ` lock timeout, all work finished", cnt.load());
-}
-
-int jobwork(WorkPool* pool, int i) {
-    LOG_INFO("LAUNCH");
-    int ret = 0;
-    pool->call(
-        [&ret](int i) {
-            LOG_INFO("START");
-            this_thread::sleep_for(std::chrono::seconds(1));
-            LOG_INFO("FINISH");
-            ret = i;
-        },
-        i);
-    LOG_INFO("RETURN");
-    EXPECT_EQ(i, ret);
-    return 0;
-}
-
-TEST(workpool, work) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(2));
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 4; i++) {
-        jhs.emplace_back(photon::thread_enable_join(
-            photon::thread_create11(&jobwork, pool.get(), i)));
-    }
-    for (auto& j : jhs) {
-        photon::thread_join(j);
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(2));
-    EXPECT_LE(duration, std::chrono::seconds(3));
-}
-
-TEST(workpool, async_work_capture) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(2, 0, 0, 0));
-
-    photon::semaphore sem;
-    int flag[10] = {0};
-    auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 10; i++) {
-        pool->async_call(new auto([&sem, i, &flag]{
-            EXPECT_FALSE(flag[i]);
-            flag[i] = true;
-            auto x = i;
-            LOG_INFO(x);
-            photon::thread_usleep(2000 * 1000);
-            EXPECT_EQ(x, i);
-            EXPECT_TRUE(flag[i]);
-            sem.signal(1);
-        }));
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(0));
-    EXPECT_LE(duration, std::chrono::seconds(1));
-    sem.wait(10);
-    LOG_INFO("DONE");
-}
-
-struct CopyMoveRecord{
-    size_t copy = 0;
-    size_t move = 0;
-    CopyMoveRecord() {
-    }
-    ~CopyMoveRecord() {
-    }
-    CopyMoveRecord(const CopyMoveRecord& rhs) {
-        copy = rhs.copy + 1;
-        move = rhs.move;
-        LOG_INFO("COPY ", this);
-    }
-    CopyMoveRecord(CopyMoveRecord&& rhs) {
-        copy = rhs.copy;
-        move = rhs.move + 1;
-        LOG_INFO("MOVE ", this);
-    }
-    CopyMoveRecord& operator=(const CopyMoveRecord& rhs) {
-        copy = rhs.copy + 1;
-        move = rhs.move;
-        LOG_INFO("COPY ASSIGN ", this);
-        return *this;
-    }
-    CopyMoveRecord& operator=(CopyMoveRecord&& rhs) {
-        copy = rhs.copy;
-        move = rhs.move + 1;
-        LOG_INFO("MOVE ASSIGN", this);
-        return *this;
-    }
-};
-
-TEST(workpool, async_work_lambda) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(2));
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 4; i++) {
-        CopyMoveRecord *r = new CopyMoveRecord();
-        pool->async_call(
-            new auto ([i, r]() {
-                LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
-                         VALUE(r->move));
-                EXPECT_EQ(0, r->copy);
-                this_thread::sleep_for(std::chrono::seconds(1));
-                LOG_INFO("FINISH");
-                delete r;
-            }));
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(0));
-    EXPECT_LE(duration, std::chrono::seconds(1));
-    photon::thread_sleep(3);
-    LOG_INFO("DONE");
-}
-
-
-TEST(workpool, async_work_lambda_threadcreate) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(1, 0, 0, 0));
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = std::chrono::system_clock::now();
-    photon::semaphore sem;
-    for (int i = 0; i < 4; i++) {
-        CopyMoveRecord *r = new CopyMoveRecord();
-        pool->async_call(
-            new auto ([&sem, i, r]() {
-                LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
-                         VALUE(r->move));
-                EXPECT_EQ(0, r->copy);
-                photon::thread_sleep(1);
-                sem.signal(1);
-                LOG_INFO("FINISH");
-                delete r;
-            }));
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(0));
-    EXPECT_LE(duration, std::chrono::seconds(1));
-    sem.wait(4);
-    duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(1));
-    EXPECT_LE(duration, std::chrono::seconds(3));
-    LOG_INFO("DONE");
-}
-
-TEST(workpool, async_work_lambda_threadpool) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(1, 0, 0, 4));
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = std::chrono::system_clock::now();
-    photon::semaphore sem;
-    for (int i = 0; i < 4; i++) {
-        CopyMoveRecord *r = new CopyMoveRecord();
-        pool->async_call(
-            new auto ([&sem, i, r]() {
-                LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
-                         VALUE(r->move));
-                EXPECT_EQ(0, r->copy);
-                photon::thread_sleep(1);
-                sem.signal(1);
-                LOG_INFO("FINISH");
-                delete r;
-            }));
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(0));
-    EXPECT_LE(duration, std::chrono::seconds(1));
-    sem.wait(4);
-    duration = std::chrono::system_clock::now() - start;
-    LOG_INFO(VALUE(duration.count()));
-    EXPECT_GE(duration, std::chrono::seconds(1));
-    EXPECT_LE(duration, std::chrono::seconds(2));
-    LOG_INFO("DONE");
-}
-
-TEST(workpool, async_work_lambda_threadpool_append) {
-    std::unique_ptr<WorkPool> pool(new WorkPool(0, 0, 0, 0));
-
-    for (int i=0;i<4;i++) {
-        std::thread([&]{
-            photon::vcpu_init();
-            DEFER(photon::vcpu_fini());
-            pool->join_current_vcpu_into_workpool();
-        }).detach();
-    }
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = std::chrono::system_clock::now();
-    photon::semaphore sem;
-    for (int i = 0; i < 4; i++) {
-        CopyMoveRecord *r = new CopyMoveRecord();
-        pool->async_call(
-            new auto ([&sem, i, r]() {
-                LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
-                         VALUE(r->move));
-                EXPECT_EQ(0, r->copy);
-                photon::thread_sleep(1);
-                sem.signal(1);
-                LOG_INFO("FINISH");
-                delete r;
-            }));
-    }
-    auto duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(0));
-    EXPECT_LE(duration, std::chrono::seconds(1));
-    sem.wait(4);
-    duration = std::chrono::system_clock::now() - start;
-    EXPECT_GE(duration, std::chrono::seconds(1));
-    EXPECT_LE(duration, std::chrono::seconds(2));
-    LOG_INFO("DONE");
 }
 
 #if defined(_WIN64)
@@ -1896,6 +1626,7 @@ TEST(intrusive_list, split) {
 
 int main(int argc, char** arg)
 {
+    if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;

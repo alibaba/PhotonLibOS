@@ -137,7 +137,9 @@ struct Delegate : public Delegate_Base
 template<typename...Ts>
 using Callback = Delegate<int, Ts...>;
 
-// a Closure encapslates a Delegate together
+namespace photon {
+
+// a Closure encapsulates a Delegate together
 // with a ptr to a functor (or lambda object),
 // and delete it if DELETE_CLOSURE is returned.
 
@@ -171,6 +173,8 @@ struct Closure : public Delegate<int64_t, ARGS...> {
 };
 
 using Closure0 = struct Closure<>;
+
+} // namespace photon
 
 /*
 inline int __Examples_of_Callback(void*, int, double, long)

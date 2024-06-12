@@ -48,7 +48,9 @@ public:
         uint16_t retry = 5;                       // default retry: 5 at most
         Response resp;                            // response
         int status_code = -1;                     // status code in response
-        bool enable_proxy;
+        bool enable_proxy = false;
+        std::string_view uds_path;                // If set, Unix Domain Socket will be used instead of TCP.
+                                                  // URL should still be the format of http://localhost/xxx
         IStream* body_stream = nullptr;                 // use body_stream as body
         using BodyWriter = Delegate<ssize_t, Request*>; // or call body_writer if body_stream
         BodyWriter body_writer = {};                    // is not set
@@ -68,6 +70,11 @@ public:
             if (!_client) return -1;
             return _client->call(this);
         }
+        int call(std::string_view unix_socket_path) {
+            if (!_client) return -1;
+            uds_path = unix_socket_path;
+            return _client->call(this);
+        }
 
     protected:
         Client* _client;
@@ -83,15 +90,15 @@ public:
         Operation(uint16_t buf_size) : req(_buf, buf_size) {}
     };
 
-    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = 64 * 1024 - 1) {
+    Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, v, url, buf_size);
     }
 
-    Operation* new_operation(uint16_t buf_size = 64 * 1024 - 1) {
+    Operation* new_operation(uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, buf_size);
     }
 
-    template<uint16_t BufferSize>
+    template<uint16_t BufferSize = UINT16_MAX>
     class OperationOnStack : public Operation {
         char _buf[BufferSize];
     public:

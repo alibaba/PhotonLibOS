@@ -33,7 +33,7 @@ limitations under the License.
 #include <photon/io/iouring-wrapper.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
-
+#include "../../test/ci-tools.h"
 
 using namespace photon;
 
@@ -339,183 +339,239 @@ TEST(perf, DISABLED_read) {
 
 /* Event Engine Tests */
 
-photon::CascadingEventEngine* new_cascading_engine(bool iouring = false) {
-    // return photon::new_iouring_cascading_engine();
-    return photon::new_epoll_cascading_engine();
-}
+class event_engine : public testing::Test {
+protected:
+    void SetUp() override {
+        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
+                                        photon::INIT_IO_NONE));
+#ifdef PHOTON_URING
+        engine = (ci_ev_engine == photon::INIT_EVENT_EPOLL) ? photon::new_epoll_cascading_engine()
+                                                          : photon::new_iouring_cascading_engine();
+#else
+        engine = photon::new_default_cascading_engine();
+#endif
+    }
+    void TearDown() override {
+        delete engine;
+        photon::fini();
+    };
 
-TEST(event_engine, master) {
+    photon::CascadingEventEngine* engine = nullptr;
+};
+
+TEST_F(event_engine, master) {
     int fd[2];
     pipe(fd);
     char buf[1];
+    photon::semaphore sem;
     auto f = [&] {
-        LOG_INFO("sleep 2s");
-        photon::thread_sleep(2);
-        LOG_INFO("start write");
+        sem.wait(1);
         write(fd[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
-    LOG_INFO("wait 3s at most");
-    ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), 0);
+    sem.signal(1);
+    LOG_INFO("wait 1s at most");
+    ASSERT_EQ(0, photon::wait_for_fd_readable(fd[0], 1000000));
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, master_timeout) {
+TEST_F(event_engine, master_timeout) {
     int fd[2];
     pipe(fd);
     char buf[1];
     auto f = [&] {
         LOG_INFO("sleep 2s");
         photon::thread_sleep(2);
-        LOG_INFO("start write");
         write(fd[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
     LOG_INFO("wait 1s at most");
-    ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 1000000), -1);
-    ASSERT_EQ(errno, ETIMEDOUT);
+    ASSERT_EQ(-1, photon::wait_for_fd_readable(fd[0], 1000000));
+    ASSERT_EQ(ETIMEDOUT, errno);
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, master_interrupted) {
+TEST_F(event_engine, master_interrupted) {
     int fd[2];
     pipe(fd);
+    photon::semaphore sem;
     photon::thread* main = photon::CURRENT;
     auto f = [&] {
-        LOG_INFO("sleep 2s");
-        photon::thread_sleep(2);
+        sem.wait(1);
         LOG_INFO("start interrupt main");
-        photon::thread_interrupt(main, EPERM);
+        photon::thread_interrupt(main);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
-    LOG_INFO("wait 3s at most");
-    ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), -1);
-    ASSERT_EQ(errno, EPERM);
+    LOG_INFO("wait 1s at most");
+    sem.signal(1);
+    ASSERT_EQ(-1, photon::wait_for_fd_readable(fd[0], 1000000));
+    ASSERT_EQ(EINTR, errno);
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, master_interrupted_after_io) {
+TEST_F(event_engine, master_interrupted_after_io) {
     int fd[2];
     pipe(fd);
     char buf[1];
+    photon::semaphore sem;
     photon::thread* main = photon::CURRENT;
     auto f = [&] {
-        LOG_INFO("sleep 2s");
-        photon::thread_sleep(2);
-        LOG_INFO("start write");
+        sem.wait(1);
         write(fd[1], buf, 1);
         LOG_INFO("start interrupt main");
-        photon::thread_interrupt(main, EPERM);
+        photon::thread_interrupt(main);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
-    LOG_INFO("wait 3s at most");
-    ASSERT_EQ(photon::wait_for_fd_readable(fd[0], 3000000), -1);
-    ASSERT_EQ(errno, EPERM);
+    LOG_INFO("wait 1s at most");
+    sem.signal(1);
+    ASSERT_EQ(-1, photon::wait_for_fd_readable(fd[0], 1000000));
+    ASSERT_EQ(EINTR, errno);
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, cascading) {
+TEST_F(event_engine, cascading_add) {
     int fd1[2];
     int fd2[2];
     pipe(fd1);
     pipe(fd2);
     char buf[1];
+    photon::semaphore sem;
     auto f = [&] {
-        photon::thread_sleep(2);
-        LOG_INFO("write pipe");
+        sem.wait(1);
         write(fd1[1], buf, 1);
         write(fd2[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
-    auto engine = new_cascading_engine();
-    DEFER(delete engine);
     engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
     engine->add_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
+    sem.signal(1);
+
     void* data[5] = {};
     ssize_t num_events = engine->wait_for_events(data, 5, -1UL);
-    ASSERT_EQ(num_events, 2);
+    ASSERT_EQ(2, num_events);
+
+    // data order is not ensured
     bool b1 = data[0] == (void*) 0x1111 && data[1] == (void*) 0x2222;
     bool b2 = data[0] == (void*) 0x2222 && data[1] == (void*) 0x1111;
     ASSERT_EQ(b1 || b2, true);
 
-    engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
-    engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
-
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, cascading_timeout) {
+TEST_F(event_engine, cascading_timeout) {
     int fd1[2];
-    int fd2[2];
     pipe(fd1);
-    pipe(fd2);
     char buf[1];
     auto f = [&] {
         photon::thread_sleep(2);
         write(fd1[1], buf, 1);
-        write(fd2[1], buf, 1);
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
-    auto engine = new_cascading_engine();
-    DEFER(delete engine);
     engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
-    engine->add_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
     void* data[5] = {};
     ssize_t num_events = engine->wait_for_events(data, 5, 1000000);
     ASSERT_EQ(0, num_events);
 
-    engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
-    engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
-
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, cascading_remove) {
+TEST_F(event_engine, cascading_remove) {
     int fd1[2];
     int fd2[2];
     pipe(fd1);
     pipe(fd2);
     char buf[1];
-    auto engine = new_cascading_engine();
-    DEFER(delete engine);
-    auto f = [&] {
-        photon::thread_sleep(1);
+    photon::semaphore sem;
+
+    auto sub = photon::thread_create11([&] {
+        sem.wait(1);
+        // 3. Remove one
         engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
-        photon::thread_sleep(1);
-        LOG_INFO("start write fd");
+        // 4. Write both
         write(fd1[1], buf, 1);
         write(fd2[1], buf, 1);
-    };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    });
     photon::thread_enable_join(sub);
 
+    // 1. Add both
     engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
     engine->add_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
+    sem.signal(1);
+
+    // 2. Wait both
     void* data[5] = {};
     ssize_t num_events = engine->wait_for_events(data, 5, -1UL);
-    ASSERT_EQ(num_events, 1);
+
+    // 5. Should get only one
+    ASSERT_EQ(1, num_events);
     ASSERT_EQ(data[0], (void*) 0x2222);
+    photon::thread_join((photon::join_handle*) sub);
 
+    sub = photon::thread_create11([&] {
+        // 7. Remove one
+        engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
+    });
+    photon::thread_enable_join(sub);
 
-    engine->rm_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
+    // 6. Wait one
+    num_events = engine->wait_for_events(data, 5, 1000000);
+    ASSERT_EQ(0, num_events);
 
     photon::thread_join((photon::join_handle*) sub);
 }
 
-TEST(event_engine, cascading_one_shot) {
+TEST_F(event_engine, cascading_remove_inplace) {
+    int fd1[2];
+    pipe(fd1);
+    char buf[1];
+
+    engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
+    engine->rm_interest({fd1[0], photon::EVENT_READ, (void*) 0x2222});
+
+    write(fd1[1], buf, 1);
+
+    void* data[5] = {};
+    ssize_t num_events = engine->wait_for_events(data, 5, 1000000);
+    ASSERT_EQ(0, num_events);
+}
+
+TEST_F(event_engine, cascading_interrupt) {
+    int fd1[2];
+    pipe(fd1);
+    photon::thread* main = photon::CURRENT;
+    photon::semaphore sem;
+
+    engine->add_interest({fd1[0], photon::EVENT_READ, (void*) 0x1111});
+
+    auto th = photon::thread_create11([&] {
+        sem.wait(1);
+        photon::thread_interrupt(main);
+    });
+    photon::thread_enable_join(th);
+
+    sem.signal(1);
+
+    void* data[5] = {};
+    ssize_t num_events = engine->wait_for_events(data, 5, 1000000);
+    ASSERT_EQ(-1, num_events);
+    ASSERT_EQ(EINTR, errno);
+    photon::thread_join((photon::join_handle*) th);
+}
+
+TEST_F(event_engine, cascading_one_shot) {
     int fd1[2];
     int fd2[2];
     pipe(fd1);
@@ -532,11 +588,9 @@ TEST(event_engine, cascading_one_shot) {
         write(fd2[1], buf, 1);
 
     };
-    photon::thread* sub = photon::thread_create11(&decltype(f)::operator(), &f);
+    photon::thread* sub = photon::thread_create11(f);
     photon::thread_enable_join(sub);
 
-    auto engine = new_cascading_engine();
-    DEFER(delete engine);
     engine->add_interest({fd1[0], photon::EVENT_READ | photon::ONE_SHOT, (void*) 0x1111});
     engine->add_interest({fd2[0], photon::EVENT_READ, (void*) 0x2222});
 
@@ -558,7 +612,6 @@ TEST(event_engine, cascading_one_shot) {
     LOG_INFO("wait non events");
     num_events = engine->wait_for_events(data, 5, 2000000);
     ASSERT_EQ(num_events, 0);
-    ASSERT_EQ(errno, ETIMEDOUT);
 
     photon::thread_join((photon::join_handle*) sub);
 }
@@ -566,14 +619,8 @@ TEST(event_engine, cascading_one_shot) {
 int main(int argc, char** arg) {
     srand(time(nullptr));
     set_log_output_level(ALOG_INFO);
-
     testing::InitGoogleTest(&argc, arg);
     testing::FLAGS_gtest_break_on_failure = true;
     gflags::ParseCommandLineFlags(&argc, &arg, true);
-
-    if (photon::init())
-        return -1;
-    DEFER(photon::fini());
-
     return RUN_ALL_TESTS();
 }

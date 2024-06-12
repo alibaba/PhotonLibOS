@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include "../../test/ci-tools.h"
 
 #include "../expirecontainer.h"
 

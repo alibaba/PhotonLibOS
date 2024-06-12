@@ -59,7 +59,7 @@ struct ExampleServer {
 
     // Serve provides handler for socket server
     int serve(photon::net::ISocketStream* stream) {
-        return skeleton->serve(stream, false);
+        return skeleton->serve(stream);
     }
 
     void term() {

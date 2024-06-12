@@ -61,6 +61,21 @@ int timeout_writer(void *self, IStream* stream) {
     return 0;
 }
 
+class SimpleHandler : public http::HTTPHandler {
+public:
+    int handle_request(http::Request& req, http::Response& resp, std::string_view) {
+        std::string url_path(req.target());
+        resp.set_result(200);
+        resp.headers.content_length(url_path.size());
+        resp.headers.insert("Content-Type", "application/octet-stream");
+        auto n = resp.write(url_path.data(), url_path.size());
+        if (n != (ssize_t) url_path.size()) {
+            LOG_ERRNO_RETURN(0, -1, "send body failed");
+        }
+        return 0;
+    }
+};
+
 TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
@@ -84,11 +99,12 @@ TEST(http_client, get) {
     auto op2 = client->new_operation(Verb::GET, target);
     DEFER(delete op2);
     op2->req.headers.content_length(0);
-    client->call(op2);
+    int ret = client->call(op2);
+    GTEST_ASSERT_EQ(0, ret);
 
     char resp_body_buf[1024];
     EXPECT_EQ(sizeof(socket_buf), op2->resp.resource_size());
-    auto ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
+    ret = op2->resp.read(resp_body_buf, sizeof(socket_buf));
     EXPECT_EQ(sizeof(socket_buf), ret);
     resp_body_buf[sizeof(socket_buf) - 1] = '\0';
     LOG_DEBUG(resp_body_buf);
@@ -419,9 +435,9 @@ TEST(http_client, debug) {
     server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
     auto ret = server->bind(ep.port, ep.addr);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
-    if (ret < 0) LOG_ERROR(VALUE(errno));
+    if (ret < 0) LOG_ERROR(ERRNO());
     EXPECT_EQ(0, ret);
     LOG_INFO("Ready to accept");
     server->start_loop();
@@ -444,13 +460,13 @@ TEST(http_client, debug) {
     memset((void*)buf.data(), '0', std_data_size);
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
-    EXPECT_EQ(true, buf == std_data);
+    EXPECT_TRUE(buf == std_data);
     for (int i = 0; i < buf.size(); i++) {
         if (buf[i] != std_data[i]) {
-            std::cout << i << std::endl;
+            LOG_ERROR("first occurrence of difference at: ", i);
+            break;
         }
     }
-    std::cout << "new" << std::endl;
 }
 int sleep_handler(void*, ISocketStream* sock) {
     photon::thread_sleep(3);
@@ -512,6 +528,54 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+<<<<<<< HEAD
+=======
+TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
+    auto client = new_http_client();
+    DEFER(delete client);
+    // here is an ipv6-only website
+    auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
+    DEFER(delete op);
+    op->call();
+    EXPECT_EQ(200, op->resp.status_code());
+}
+
+TEST(http_client, unix_socket) {
+    const char* uds_path = "test-http-client.sock";
+
+    auto http_server = new_http_server();
+    DEFER(delete http_server);
+    http_server->add_handler(new SimpleHandler, true, "/simple-api");
+
+    auto socket_server = new_uds_server(true);
+    DEFER(delete socket_server);
+
+    socket_server->set_handler(http_server->get_connection_handler());
+    ASSERT_EQ(0, socket_server->bind(uds_path));
+    ASSERT_EQ(0, socket_server->listen());
+    ASSERT_EQ(0, socket_server->start_loop(false));
+
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    Client::OperationOnStack<> op(client, Verb::GET, "http://localhost/simple-api");
+    int ret = op.call(uds_path);
+    ASSERT_EQ(0, ret);
+    ASSERT_EQ(200, op.resp.status_code());
+
+    char buf[UINT16_MAX];
+    ssize_t n = op.resp.read(buf, op.resp.body_size());
+    ASSERT_EQ(n, (ssize_t) op.resp.body_size());
+    LOG_INFO(buf);
+
+    // A wrong hostname or HTTPS doesn't have effect on unix socket
+    Client::OperationOnStack<> op2(client, Verb::GET, "https://www.wrong.hostname/simple-api");
+    ret = op2.call(uds_path);
+    ASSERT_EQ(0, ret);
+    ASSERT_EQ(200, op2.resp.status_code());
+}
+
+>>>>>>> release/0.7
 int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     auto ua = req.headers["User-Agent"];
     LOG_DEBUG(VALUE(ua));
@@ -523,7 +587,10 @@ int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     return 0;
 }
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> release/0.7
 TEST(http_client, user_agent) {
     auto tcpserver = new_tcp_socket_server();
     DEFER(delete tcpserver);
@@ -551,7 +618,10 @@ TEST(http_client, user_agent) {
     EXPECT_EQ(true, buf == "success");
 }
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> release/0.7
 TEST(url, url_escape_unescape) {
     EXPECT_EQ(
         url_escape("?a=x:b&b=cd&c= feg&d=2/1[+]@alibaba.com&e='!bad';"),
@@ -609,7 +679,7 @@ int main(int argc, char** arg) {
     }
     DEFER(et_poller_fini());
 #endif
-    set_log_output_level(ALOG_DEBUG);
+    set_log_output_level(ALOG_INFO);
     ::testing::InitGoogleTest(&argc, arg);
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return RUN_ALL_TESTS();
 }

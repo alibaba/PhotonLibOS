@@ -135,7 +135,7 @@ namespace photon {
 
         void asdf()
         {
-            int a; char b;
+            int a = 0; char b = 0;
             auto func = &__Example_of_Thread11__::member_function;
             auto cfunc = &__Example_of_Thread11__::const_member_function;
 

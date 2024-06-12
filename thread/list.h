@@ -221,6 +221,48 @@ public:
     {
         return {nullptr, nullptr};
     }
+
+    struct reverse_iterator
+    {
+        __intrusive_list_node* ptr;
+        __intrusive_list_node* end;
+        T* operator*()
+        {
+            return static_cast<T*>(ptr);
+        }
+        reverse_iterator& operator++()
+        {
+            ptr = ptr->__prev_ptr;
+            if (ptr == end)
+                ptr = nullptr;
+            return *this;
+        }
+        reverse_iterator operator++(int)
+        {
+            auto rst = *this;
+            ptr = ptr->__prev_ptr;
+            if (ptr == end)
+                ptr = nullptr;
+            return rst;
+        }
+        bool operator == (const reverse_iterator& rhs) const
+        {
+            return ptr == rhs.ptr;
+        }
+        bool operator != (const reverse_iterator& rhs) const
+        {
+            return !(*this == rhs);
+        }
+    };
+
+    reverse_iterator rbegin()
+    {
+        return {this->__prev_ptr, this->__prev_ptr};
+    }
+    reverse_iterator rend()
+    {
+        return {nullptr, nullptr};
+    }
 };
 
 
@@ -321,11 +363,20 @@ public:
         return node == nullptr;
     }
     typedef typename NodeType::iterator iterator;
+    typedef typename NodeType::reverse_iterator reverse_iterator;
     iterator begin()
     {
         return node ? node->begin() : end();
     }
     iterator end()
+    {
+        return {nullptr, nullptr};
+    }
+    reverse_iterator rbegin()
+    {
+        return node ? node->rbegin() : rend();
+    }
+    reverse_iterator rend()
     {
         return {nullptr, nullptr};
     }
