@@ -18,7 +18,7 @@ https://github.com/alibaba/PhotonLibOS/blob/main/examples/perf/net-perf.cpp
 
 ```cmake
 cmake -B build -D PHOTON_BUILD_TESTING=1 -D PHOTON_ENABLE_URING=1 -D CMAKE_BUILD_TYPE=Release
-cmake --build build -j -t net-perf
+cmake --build build -j 8 -t net-perf
 ```
 
 ### Run

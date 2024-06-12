@@ -873,7 +873,7 @@ TEST(range_split_power2, random_test) {
     offset = rand();
     length = rand();
     auto interval_shift = rand()%32 + 1;
-    interval = 1<<interval_shift;
+    interval = uint64_t(1) << interval_shift;
     fs::range_split_power2 split(offset, length, interval);
     EXPECT_EQ(offset, split.begin);
     EXPECT_EQ(offset + length, split.end);
@@ -1373,6 +1373,7 @@ TEST(Walker, basic) {
 }
 
 int main(int argc, char **argv){
+    srand(time(nullptr));
     ::testing::InitGoogleTest(&argc, argv);
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;

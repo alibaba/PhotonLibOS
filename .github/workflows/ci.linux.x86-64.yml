@@ -15,6 +15,7 @@ jobs:
         run: |
           rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
                          -D PHOTON_ENABLE_SASL=ON         \
                          -D PHOTON_ENABLE_FUSE=ON         \
@@ -158,7 +159,7 @@ jobs:
       - name: Build1121
         run: |
           source /opt/rh/gcc-toolset-10/enable
-          cmake --build build -j --clean-first -- VERBOSE=1
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
           ln -f common/checksum/test/checksum.in build/output/
           tar -c --use-compress-program=zstdmt -f output1121.tzs build/output/
       - name: Upload1121
