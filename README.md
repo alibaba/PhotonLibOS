@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml)
 [![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml)
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.x86.yml)
+[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.arm.yml)
 
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
