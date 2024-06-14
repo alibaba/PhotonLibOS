@@ -109,7 +109,7 @@ int main() {
             while (true) {
                 func_1us();
                 Message* m;
-                bool ok = ring.pop_weak(m);
+                bool ok = ring.pop(m);
                 if (!ok)
                     continue;
                 m->start = std::chrono::steady_clock::now();
