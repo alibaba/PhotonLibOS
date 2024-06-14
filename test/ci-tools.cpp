@@ -25,6 +25,8 @@ static void parse_env_eng() {
         _engine = photon::INIT_EVENT_IOURING;
     } else if (strcmp(_engine_name, "kqueue") == 0) {
         _engine = photon::INIT_EVENT_KQUEUE;
+    } else if (strcmp(_engine_name, "epoll_ng") == 0) {
+        _engine = photon::INIT_EVENT_EPOLL_NG;
     } else {
         printf("invalid event engine: %s\n", _engine_name);
         _engine_name = nullptr;
@@ -39,6 +41,7 @@ static estring_view get_engine_name(uint64_t eng) {
         case INIT_EVENT_KQUEUE:     return "kqueue";
         case INIT_EVENT_SELECT:     return "select";
         case INIT_EVENT_IOCP:       return "iocp";
+        case INIT_EVENT_EPOLL_NG:   return "epoll_ng";
     }
     return {};
 }
@@ -58,15 +61,16 @@ static estring get_engine_names(uint64_t engs) {
     return names;
 }
 
-int __photon_init(uint64_t event_engine, uint64_t io_engine);
+int __photon_init(uint64_t, uint64_t, const PhotonOptions&);
 
 // this function is supposed to be linked statically to test
 // cases, so as to override the real one in libphoton.so/dylib
-int init(uint64_t event_engine, uint64_t io_engine) {
+int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
     LOG_INFO("enter CI overriden photon::init()");
     const uint64_t all_engines = INIT_EVENT_EPOLL  |
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
-            INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
+            INIT_EVENT_SELECT  | INIT_EVENT_IOCP   |
+            INIT_EVENT_EPOLL_NG;
     auto arg_specified = event_engine & all_engines;
     LOG_INFO("argument specified: ` (`)", get_engine_names(arg_specified), arg_specified);
     LOG_INFO("environment specified: '`'", _engine_name);
@@ -75,7 +79,7 @@ int init(uint64_t event_engine, uint64_t io_engine) {
         event_engine |= _engine;
         LOG_INFO("event engine overridden to: ", get_engine_names(event_engine & all_engines));
     }
-    return __photon_init(event_engine, io_engine);
+    return __photon_init(event_engine, io_engine, options);
 }
 
 bool is_using_default_engine() {

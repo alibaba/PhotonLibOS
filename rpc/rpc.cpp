@@ -65,7 +65,7 @@ namespace rpc {
         int do_send(OutOfOrderContext* args_)
         {
             auto args = (OooArgs*)args_;
-            if (args->timeout.expire() < photon::now) {
+            if (args->timeout.expiration() < photon::now) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Request timedout before send");
             }
             auto size = args->request->sum();
@@ -92,7 +92,7 @@ namespace rpc {
         {
             auto args = (OooArgs*)args_;
             m_header.magic = 0;
-            if (args->timeout.expire() < photon::now) {
+            if (args->timeout.expiration() < photon::now) {
                 // m_stream->shutdown(ShutdownHow::ReadWrite);
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timeout before read header ");
             }
@@ -154,7 +154,7 @@ namespace rpc {
         int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) override {
             scoped_rwlock rl(m_rwlock, photon::RLOCK);
             Timeout tmo(timeout);
-            if (tmo.expire() < photon::now) {
+            if (tmo.expiration() < photon::now) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(timeout), VALUE(tmo.timeout()));
             }
             int ret = 0;
@@ -326,7 +326,7 @@ namespace rpc {
 
 #pragma GCC diagnostic push
 #if __GNUC__ >= 13
-// #pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wdangling-pointer"
 #endif
             ThreadLink node;
@@ -422,14 +422,12 @@ namespace rpc {
         explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
-            tcpclientv6 = net::new_tcp_socket_client_ipv6();
             tcpclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
             m_rpc_timeout = rpc_timeout;
         }
 
         ~StubPoolImpl() {
-            delete tcpclientv6;
             delete tcpclient;
             delete m_pool;
             delete tls_ctx;
@@ -461,9 +459,10 @@ namespace rpc {
 
     protected:
         net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
-            LOG_INFO("Connect to ", ep);
-            auto sock = ep.is_ipv4() ? tcpclient->connect(ep) : tcpclientv6->connect(ep);
-            if (!sock) return nullptr;
+            auto sock = tcpclient->connect(ep);
+            if (!sock)
+                LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
+            LOG_DEBUG("connected to ", ep);
             sock->timeout(m_rpc_timeout);
             if (tls) {
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
@@ -473,7 +472,6 @@ namespace rpc {
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
         net::ISocketClient *tcpclient;
-        net::ISocketClient *tcpclientv6;
         net::TLSContext* tls_ctx = nullptr;
         uint64_t m_rpc_timeout;
     };

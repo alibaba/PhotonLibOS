@@ -24,6 +24,8 @@ struct pmf_map
     T* obj; // may be adjusted for virtual function call
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
 template<typename PF, typename T, typename MF>
 inline auto __get_mfa__(T* obj, MF f)
     -> pmf_map<PF, T>
@@ -65,6 +67,7 @@ inline auto __get_mfa__(T* obj, MF f)
     auto addr = pmf.get_function_address((void*&)obj);
     return pmf_map<PF, T>{(PF)addr, obj};
 }
+#pragma GCC diagnostic pop
 
 template<typename T, typename R, typename...ARGS>
 inline auto get_member_function_address(T* obj, R (T::*f)(ARGS...))

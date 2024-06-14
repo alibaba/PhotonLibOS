@@ -30,6 +30,7 @@ limitations under the License.
 #include "../string-keyed.h"
 #include "../range-lock.h"
 #include "../expirecontainer.h"
+#include "../retval.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -44,12 +45,11 @@ limitations under the License.
 #include <memory>
 #include <string>
 //#include <gmock/gmock.h>
-#include <gtest/gtest.h>
-#include <gtest/gtest-spi.h>
 //#include <malloc.h>
 #ifndef __clang__
 #include <gnu/libc-version.h>
 #endif
+#include "../../test/gtest.h"
 
 #include "../../test/ci-tools.h"
 
@@ -879,8 +879,8 @@ TEST(estring, test)
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
-    EXPECT_EQ(estring_view("-3.14").to_double(), -3.14);
-    EXPECT_EQ(estring_view("1e10").to_double(), 1e10);
+    EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
+    EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
@@ -891,6 +891,56 @@ TEST(generator, example)
     ___example_of_generator____();
 }
 
+retval<double> bar() {
+    return {EALREADY, 0};   // return a failure
+}
+
+photon::retval<int> foo(int i) {
+    switch (i) {
+    default:
+        return 32;
+    case 1:
+        return retval_base{EINVAL};
+    case 2:
+        LOG_ERROR_RETVAL(EADDRINUSE, "trying to use LOG_ERROR_RETVAL() with an error number constant");
+    case 3:
+        retval<double> ret = bar();
+        EXPECT_TRUE(ret.failed());
+        // pass on ONLY the error number
+        LOG_ERROR_RETVAL(ret, "trying to pass on an existing (failed) retval<double> to retval<int>");
+    }
+}
+
+retval<void> ret_failed() {
+    return {EBADF};
+}
+
+retval<void> ret_succeeded() {
+    return {/* 0 */};
+}
+
+TEST(retval, basic) {
+    const static retval<int> rvs[] =
+        {{32}, {EINVAL, -2345}, {EADDRINUSE, -1234}, {EALREADY, -5234}};
+    EXPECT_EQ(rvs[0], 32);
+    EXPECT_EQ(rvs[1], -2345);
+    EXPECT_EQ(rvs[2], -1234);
+    EXPECT_EQ(rvs[3], -5234);
+
+    for (auto i: xrange(LEN(rvs))) {
+        static_assert(std::is_same<decltype(i), size_t>::value, "...");
+        auto ret = foo(i);
+        LOG_DEBUG("got ", ret);
+        EXPECT_EQ(ret, rvs[i]);
+    }
+    auto A = ret_failed();
+    EXPECT_TRUE(A.failed());
+    LOG_DEBUG(A);
+    auto B = ret_succeeded();
+    EXPECT_TRUE(B.succeeded());
+    LOG_DEBUG(B);
+}
+
 template <class T>
 void basic_map_test(T &test_map) {
 
@@ -898,89 +948,92 @@ void basic_map_test(T &test_map) {
 
     std::string prefix = "seggwrg90if908234j5rlkmx.c,bnmi7890wer1234rbdfb";
     for (int i = 0; i < 100000; i++) if (i % 2 == 0) {
-        //std::string
-        test_map.insert({prefix + std::to_string(i), i});
+        auto s = std::to_string(i);
+        test_map.insert({prefix + s, s});
         ASSERT_EQ(test_map.size(), i/2+1);
     }
     for (int i = 100000; i < 200000; i++) if (i % 2 == 0){
-        //string_view
-        std::string x = prefix + std::to_string(i);
-        // sprintf(xx, "%s%d", prefix.c_str(), i);
-        // std::string_view k((prefix + std::to_string(i)).c_str());
-        // std::string_view k(x);
-        test_map.emplace(x, i);
+        auto s = std::to_string(i);
+        std::string x = prefix + s;
+        test_map.emplace(x, s);
         ASSERT_EQ(test_map.size(), i/2+1);
     }
-
-    char *xname = new char [1000];
-
+    // LOG_DEBUG("asdf");
+    char xname[1000];
     auto p = test_map.begin();
     for (int i = 200000; i < 300000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
-        // string_key k(prefix + to_string(i));
-        test_map.insert(p, pair<string_view, int>(xname, i));
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
+        auto s = std::string_view(xname).substr(prefix.size());
+        test_map.insert(p, make_pair(xname, s));
         ASSERT_EQ(test_map.size(), i/2+1);
     }
 
+    // LOG_DEBUG("asdf");
     for (int i = 300000; i < 400000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
-        test_map[xname] = i;
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
+        auto s = std::string_view(xname).substr(prefix.size());
+        test_map[xname] = s;
+        EXPECT_EQ(test_map[xname], s);
         EXPECT_EQ(test_map.size(), i/2+1);
     }
 
+    // LOG_DEBUG("asdf");
     for (int i = 400000; i < 500000; i++) if (i % 2 == 0) {
-        sprintf(xname, "%s%d", prefix.c_str(), i);
-        // test_map.insert(pair<string_key, int>(string_key(std::move(string_key(xname))), i));
-        test_map.insert(pair<string_view, int>(string_view(xname), i));
+        snprintf(xname, sizeof(xname), "%s%d", prefix.c_str(), i);
+        auto s = std::string_view(xname).substr(prefix.size());
+        test_map.insert(pair<string_view, string_view>{xname, s});
         EXPECT_EQ(test_map.size(), i/2+1);
     }
 
     for (int i = 500000; i < 600000; i++) if (i % 2 == 0) {
-        // sprintf(xname, "%s%d", prefix.c_str(), i);
-        // unordered_map_string_key<int>::value_type x = {string_key(prefix + std::to_string(i)), i};
-        std::string s = prefix + std::to_string(i);
-        const std::pair<const string_view, int> x = {s, i};
+        std::string k = prefix + std::to_string(i);
+        auto s = std::string_view(k).substr(prefix.size());
+        const std::pair<string_view, string_view> x = {k, s};
         test_map.insert(test_map.begin(), x);
         EXPECT_EQ(test_map.size(), i/2+1);
     }
 
-    vector<pair<string, int> > vec;
-
+    // LOG_DEBUG("asdf");
+    vector<pair<string, string> > vec;
     for (int i = 600000; i < 700000; i++) if (i % 2 == 0) {
-        std::string s = prefix + std::to_string(i);
-        std::pair<string, int> x = make_pair(s, i);//{s, i};
-        vec.emplace_back(x);
+        std::string k = prefix + std::to_string(i);
+        auto s = std::string_view(k).substr(prefix.size());
+        vec.emplace_back(k, s);
     }
+
     test_map.insert(vec.begin(), vec.end());
 
     for (int i = 700000; i < 800000; i++) if (i % 2 == 0) {
-        std::string x = prefix + std::to_string(i);
-        std::string_view k(x);
-        // string_key kk(k);
-        auto v = pair<string_view, int>(k, i);
+        std::string k = prefix + std::to_string(i);
+        auto s = std::string_view(k).substr(prefix.size());
+        auto v = pair<string_view, string_view>(k, s);
         test_map.insert(p, v);
         ASSERT_EQ(test_map.size(), i/2+1);
     }
 
-
-    test_map.insert({ {"ppp7000002", 7000002}, {"ppp7000004", 7000004}, {"ppp7000006", 7000006} });
-    test_map.emplace("ppp7000004", 7000004);
-    EXPECT_EQ(test_map.find("ppp7000002")->second, 7000002);
+    // LOG_DEBUG("asdf");
+    test_map.insert({ {"ppp7000002", "7000002"}, {"ppp7000004", "7000004"}, {"ppp7000006", "7000006"} });
+    test_map.emplace("ppp7000004", "7000004");
+    EXPECT_EQ(test_map.find("ppp7000002")->second, "7000002");
+    EXPECT_EQ(test_map["ppp7000002"], "7000002");
 
     const T &const_map = test_map;
 
     memcpy(xname, prefix.c_str(), prefix.size());
     for (int i = 0; i < 800000; i++) {
+        auto s = std::to_string(i);
+        memcpy(xname + prefix.size(), s.c_str(), s.size());
+        xname[prefix.size() + s.size()] = 0;
         if (i % 2 == 0) {
-            EXPECT_EQ(test_map.find(prefix + std::to_string(i))->second, i);
-            memcpy(xname + prefix.size(), std::to_string(i).c_str(), std::to_string(i).size());
-            xname[prefix.size() + std::to_string(i).size()] = 0;
-            EXPECT_EQ(test_map.find(xname)->second, i);
-            EXPECT_EQ(test_map[xname], i);
-            EXPECT_EQ(test_map.at(xname), i);
+            // LOG_DEBUG((string_view&)test_map.find(prefix + s)->second, ' ', s);
+            // EXPECT_TRUE(test_map.find(prefix + s)->second == s);
+            EXPECT_EQ(test_map.find(prefix + s)->second, s);
+            EXPECT_EQ(test_map.find(xname)->second, s);
+            EXPECT_EQ(test_map[xname], s);
+            EXPECT_EQ(test_map.at(xname), s);
 
-            EXPECT_EQ(const_map.find(xname)->second, i);
-            EXPECT_EQ(const_map.at(xname), i);
+            EXPECT_EQ(const_map.find(xname)->second, s);
+            EXPECT_EQ(const_map.at(xname), s);
 
             // string_key sk(xname);
             // string_key &sk1 = sk;
@@ -995,14 +1048,9 @@ void basic_map_test(T &test_map) {
             EXPECT_EQ(const_map.at(sv), rg1.first->second);
 
         } else {
-            EXPECT_EQ(test_map.find(prefix + std::to_string(i)), test_map.end());
-
-            memcpy(xname + prefix.size(), std::to_string(i).c_str(), std::to_string(i).size());
-            xname[prefix.size() + std::to_string(i).size()] = 0;
-
+            EXPECT_EQ(test_map.find(prefix + s), test_map.end());
             EXPECT_EQ(test_map.find(xname), test_map.end());
             EXPECT_EQ(test_map.count(xname), 0);
-
             EXPECT_EQ(const_map.find(xname), const_map.end());
             EXPECT_EQ(const_map.count(xname), 0);
 
@@ -1015,23 +1063,19 @@ void basic_map_test(T &test_map) {
         }
     }
 
+    // LOG_DEBUG("asdf");
     test_map.clear();
     // string_key y("asdf");
     // string_key x = &y;
 
-    // test_map.insert({y, -1});
-    test_map["1"] = 1;
+    // test_map.insert({y, "-1"});
+    test_map["1"] = "1";
     EXPECT_EQ(test_map.count("asdf"), 0);
     EXPECT_EQ(test_map.count("1"), 1);
-    // std::map<string, string> xmap;
-    // xmap.emplace_hint(xmap.begin(), "a", "b");
-
-    delete []xname;
 }
 
-
-TEST(unordered_map_string_key, test) {
-    unordered_map_string_key<int> test_map;
+TEST(string_key, unordered_map_string_key_perf) {
+    unordered_map_string_key<estring> test_map;
     test_map.reserve(6);
     basic_map_test(test_map);
     LOG_DEBUG("buckets `", test_map.bucket_count());
@@ -1040,7 +1084,7 @@ TEST(unordered_map_string_key, test) {
     LOG_DEBUG("buckets `", test_map.bucket_count());
 }
 
-TEST(simple_unordered_map_string_key, test) {
+TEST(string_key, unordered_map_string_key) {
     unordered_map_string_key<int> test_map;
     test_map.reserve(6);
 
@@ -1051,7 +1095,7 @@ TEST(simple_unordered_map_string_key, test) {
         std::string s = std::to_string(i);
         // string_view view(s);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // std::pair<const std::string_view, int> pr = make_pair(string_view(s), i);
         // unordered_map_string_key<int>::value_type x = make_pair(s, i);
         const std::pair<string, int> x = make_pair(s, i);//{s, i};
@@ -1064,7 +1108,7 @@ TEST(simple_unordered_map_string_key, test) {
         //std::string
         std::string s = std::to_string(i);
         char chars[1000];
-        sprintf(chars, "%d", i);
+        snprintf(chars, sizeof(chars), "%d", i);
         // string_key k(s);
         // string_view view(s);
         string_view sv(chars);
@@ -1091,12 +1135,22 @@ TEST(simple_unordered_map_string_key, test) {
     // string_key key("1000");
 }
 
-TEST(map_string_key, test) {
+TEST(string_key, map_string_kv_perf) {
+    map_string_kv test_map;
+    basic_map_test(test_map);
+}
+
+TEST(string_key, map_string_key_perf) {
+    map_string_key<estring> test_map;
+    basic_map_test(test_map);
+}
+
+TEST(string_key, map_string_key) {
     map_string_key<std::unique_ptr<int> > test_uptr_map;
     std::unique_ptr<int> test_ptr(new int(10));
     test_uptr_map.emplace("sss", std::move(test_ptr));
 
-    map_string_key<int> test_map;
+    map_string_key<estring> test_map;
     basic_map_test(test_map);
 
     std::string prefix = "seggwrg90if908234j5rlkmx.c,bnmi7890wer1234rbdfb";
@@ -1107,13 +1161,46 @@ TEST(map_string_key, test) {
     EXPECT_EQ(test_map.lower_bound(prefix + "9000000"), test_map.end());
     EXPECT_EQ(test_map.upper_bound(prefix + "9000000"), test_map.end());
 
-    const map_string_key<int> &const_map = test_map;
+    const auto &const_map = test_map;
     EXPECT_EQ(const_map.lower_bound(prefix + "2"), test_map.find(prefix + "2"));
     EXPECT_EQ(const_map.lower_bound(prefix + "1"), test_map.find(prefix + "2"));
     EXPECT_EQ(const_map.upper_bound(prefix + "22"), test_map.find(prefix + "23"));
 
     EXPECT_EQ(const_map.lower_bound(prefix + "9000000"), test_map.end());
     EXPECT_EQ(const_map.upper_bound(prefix + "9000000"), test_map.end());
+}
+
+TEST(string_key, unordered_map_string_kv) {
+    const static char asdf[] = "asdf", jkl[] = "jkl";
+    skvm s{asdf, jkl};
+    EXPECT_STREQ(s.data(), asdf);
+    EXPECT_EQ(s.size(), sizeof(asdf) - 1);
+    EXPECT_STREQ(s.get_value(), jkl);
+
+    unordered_map_string_kv test_map;
+    // LOG_DEBUG("asdf");
+    auto emr = test_map.emplace(asdf, jkl);
+    EXPECT_TRUE(emr.second);
+    EXPECT_TRUE(emr.first != test_map.end());
+    test_map.insert({{"zxcv", "nm,./"}, {"qwer", "tongyi"}, {"1234", "7890"}});
+    EXPECT_EQ(test_map.size(), 4);
+    auto it = test_map.find("asdf");
+    EXPECT_EQ(it, emr.first);
+    LOG_DEBUG(it->first, " => ", (std::string_view)it->second);
+    test_map.erase(it);
+    for (auto& x: test_map) {
+        // LOG_DEBUG("asdf");
+        EXPECT_EQ(x.first.end() + 1, x.second.begin());
+        LOG_DEBUG(x.first, " => ", (std::string_view)x.second);
+    }
+
+    test_map["qwer"] = "1111";
+    EXPECT_EQ(test_map["qwer"], "1111");
+}
+
+TEST(string_key, unordered_map_string_kv_perf) {
+    unordered_map_string_kv test_map;
+    basic_map_test(test_map);
 }
 
 TEST(RangeLock, Basic) {
@@ -1188,6 +1275,5 @@ int main(int argc, char **argv)
 #endif
     // #endif
     ::testing::InitGoogleTest(&argc, argv);
-    int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return RUN_ALL_TESTS();
 }

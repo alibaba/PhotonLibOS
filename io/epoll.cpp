@@ -207,18 +207,17 @@ ok:     entry.interests |= eint;
         // in such condition, timeout_ms should be at least 1
         // or it may call epoll_wait without any idle
         timeout = (timeout && timeout < 1024) ? 1 : timeout / 1024;
+        timeout &= 0x7fffffff;  // make sure less than INT32_MAX
         while (_engine_fd > 0) {
-            int ret = epoll_wait(_engine_fd, _events, LEN(_events), timeout);
+            int ret = ::epoll_wait(_engine_fd, _events, LEN(_events), timeout);
             if (ret < 0) {
                 ERRNO err;
                 if (err.no == EINTR) continue;
-                usleep(1024L * cool_down_ms);
+                ::usleep(1024L * cool_down_ms);
+                if (cool_down_ms > 16)
+                    LOG_ERROR_RETURN(err.no, -1, "epoll_wait() failed ", err);
                 timeout = sat_sub(timeout, cool_down_ms);
-                if (cool_down_ms < 16) {
-                    cool_down_ms *= 2;
-                    continue;
-                }
-                LOG_ERROR_RETURN(err.no, -1, "epoll_wait() failed ", err);
+                cool_down_ms *= 2;
             }
             return _events_remain = ret;
         }
@@ -263,9 +262,8 @@ ok:     entry.interests |= eint;
         }
     }
     virtual ssize_t wait_for_events(void** data, size_t count,
-                                    uint64_t timeout = -1) override {
-        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(
-            _engine_fd, timeout);
+                                    Timeout timeout) override {
+        int ret = ::photon::wait_for_fd_readable(_engine_fd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }
@@ -281,7 +279,7 @@ ok:     entry.interests |= eint;
         }
         return ptr - data;
     }
-    virtual ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+    virtual ssize_t wait_and_fire_events(uint64_t timeout) override {
         ssize_t n = 0;
         wait_for_events(timeout,
             [&](void* data) __INLINE__ {
@@ -294,7 +292,7 @@ ok:     entry.interests |= eint;
     }
     virtual int cancel_wait() override { return eventfd_write(_evfd, 1); }
 
-    int wait_for_fd(int fd, uint32_t interest, uint64_t timeout) override {
+    int wait_for_fd(int fd, uint32_t interest, Timeout timeout) override {
         if (fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid fd");
         if (interest & (interest-1))

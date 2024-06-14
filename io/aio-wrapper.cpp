@@ -38,10 +38,10 @@ limitations under the License.
 
 namespace photon
 {
-    const uint64_t IODEPTH = 2048;
+    constexpr static int IODEPTH_MAX = 2048;
     struct libaio_ctx_t
     {
-        int evfd = -1, running = 0;
+        int evfd = -1, running = 0, iodepth = 32;
         io_context_t aio_ctx = {0};
         thread* polling_thread = nullptr;
         condition_variable cond;
@@ -152,8 +152,8 @@ namespace photon
     static void resume_libaio_requesters()
     {
 retry:
-        struct io_event events[IODEPTH];
-        int n = HAVE_N_TRY(my_io_getevents, (0, IODEPTH, events));
+        struct io_event events[IODEPTH_MAX];
+        int n = HAVE_N_TRY(my_io_getevents, (0, libaio_ctx->iodepth, events));
         for (int i=0; i<n; ++i)
         {
             auto piocb = (libaiocb*)events[i].obj;
@@ -166,7 +166,7 @@ retry:
                          VALUE(piocb->u.c.buf), VALUE(piocb->u.c.resfd));
             thread_interrupt((thread *)events[i].data, EOK);
         }
-        if (n == IODEPTH)
+        if (n == libaio_ctx->iodepth)
         {
             thread_yield();
             goto retry;
@@ -355,7 +355,7 @@ retry:
             }
             io_destroy(libaio_ctx->aio_ctx);
             libaio_ctx->aio_ctx = {0};
-            int ret = io_setup(IODEPTH, &libaio_ctx->aio_ctx);
+            int ret = io_setup(libaio_ctx->iodepth, &libaio_ctx->aio_ctx);
             if (ret < 0) {
                 LOG_ERROR("failed to create aio context by io_setup() ", ERRNO(), VALUE(ret));
                 exit(-1);
@@ -366,17 +366,21 @@ retry:
     };
     static thread_local AioResetHandle *reset_handler = nullptr;
 
-    int libaio_wrapper_init()
+    int libaio_wrapper_init(int iodepth)
     {
         if (libaio_ctx)
             return 0;
 
+        if (iodepth <= 0)
+            LOG_ERROR_RETURN(EINVAL, -1, "iodepth should be greater than 0");
+
         std::unique_ptr<libaio_ctx_t> ctx(new libaio_ctx_t);
         ctx->evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        ctx->iodepth = iodepth > IODEPTH_MAX ? IODEPTH_MAX : iodepth;
         if (ctx->evfd < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to create eventfd");
 
-        int ret = io_setup(IODEPTH, &ctx->aio_ctx);
+        int ret = io_setup(ctx->iodepth, &ctx->aio_ctx);
         if (ret < 0)
         {
             LOG_ERROR("failed to create aio context by io_setup() ", ERRNO(), VALUE(ret));

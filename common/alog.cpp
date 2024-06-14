@@ -44,7 +44,7 @@ public:
     constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
 
     void write(int, const char* begin, const char* end) override {
-        ::write(log_file_fd, begin, end - begin);
+        std::ignore = ::write(log_file_fd, begin, end - begin);
         throttle_block();
     }
     void throttle_block() {
@@ -77,16 +77,16 @@ public:
 static LogOutputNull _log_output_null;
 ILogOutput* const log_output_null = &_log_output_null;
 
-ALogLogger default_logger {ALOG_DEBUG, log_output_stdout};
-ALogLogger default_audit_logger {ALOG_AUDIT, log_output_null};
+ALogLogger default_logger {log_output_stdout, ALOG_DEBUG};
+ALogLogger default_audit_logger {log_output_null, ALOG_AUDIT};
 
-int &log_output_level = default_logger.log_level;
+uint32_t& log_output_level = default_logger.log_level;
 ILogOutput* &log_output = default_logger.log_output;
 
 void LogFormatter::put(ALogBuffer& buf, FP x)
 {
     char _fmt[64];
-    ALogBuffer fmt {0, _fmt, sizeof(_fmt)};
+    ALogBuffer fmt {_fmt, sizeof(_fmt), 0};
     put(fmt, '%');
     if (x.width() >= 0)
     {
@@ -250,9 +250,9 @@ public:
         uint64_t length = end - begin;
         iovec iov{(void*)begin, length};
 #ifndef _WIN64
-        ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
+        std::ignore = ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
 #else
-        ::write(log_file_fd, iov.iov_base, iov.iov_len);
+        std::ignore = ::write(log_file_fd, iov.iov_base, iov.iov_len);
 #endif
         throttle_block();
         if (log_file_name && log_file_size_limit) {
@@ -307,10 +307,10 @@ public:
         int fd = fopen(log_file_name);
         if (fd < 0) {
             static char msg[] = "failed to open log output file: ";
-            ::write(log_file_fd, msg, sizeof(msg) - 1);
+            std::ignore = ::write(log_file_fd, msg, sizeof(msg) - 1);
             if (log_file_name)
-                ::write(log_file_fd, log_file_name, strlen(log_file_name));
-            ::write(log_file_fd, "\n", 1);
+                std::ignore = ::write(log_file_fd, log_file_name, strlen(log_file_name));
+            std::ignore = ::write(log_file_fd, "\n", 1);
             return;
         }
 
@@ -496,7 +496,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     log.printf(DEC(ts.usec()).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
-    log.reserved = pro.level;
+    log.level = pro.level;
     log.printf(ALogString(&levels[pro.level * 10], 10));
     log.printf(photon::CURRENT, '|');
     if (pro.level != ALOG_AUDIT) {
@@ -505,4 +505,9 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
         log.printf(ALogString(pro.addr_func, pro.len_func), ':');
     }
     return log;
+}
+
+LogBuffer& operator << (LogBuffer& log, ERRNO e) {
+    auto no = e.no ? e.no : errno;
+    return log.printf("errno=", no, '(', strerror(no), ')');
 }

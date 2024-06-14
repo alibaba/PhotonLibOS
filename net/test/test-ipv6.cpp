@@ -1,15 +1,14 @@
 #include <vector>
-#include <gtest/gtest.h>
-
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
 #include <photon/net/utils.h>
 #include <photon/common/alog.h>
+#include "../../test/gtest.h"
 
 TEST(ipv6, endpoint) {
     auto c = photon::net::EndPoint("127.0.0.1");
-    EXPECT_TRUE(c.undefined());
+    EXPECT_TRUE(c.undefined()); // must have ':port' included
     c = photon::net::EndPoint("127.0.0.1:8888");
     EXPECT_FALSE(c.undefined());
     c = photon::net::EndPoint("[::1]:8888");
@@ -88,23 +87,24 @@ TEST(ipv6, dns_lookup) {
 class DualStackTest : public ::testing::Test {
 public:
     void run() {
-        auto server = photon::net::new_tcp_socket_server_ipv6();
+        auto server = photon::net::new_tcp_socket_server();
         ASSERT_NE(nullptr, server);
         DEFER(delete server);
-        int ret = server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-        ASSERT_EQ(0, ret);
 
-        ret = server->bind(9527, photon::net::IPAddr::V6Any());
+        int ret = server->bind_v6any();
         ASSERT_EQ(0, ret);
         ret = server->listen();
         ASSERT_EQ(0, ret);
+
+        auto port = server->getsockname().port;
+        LOG_INFO(VALUE(port));
 
         photon::thread_create11([&] {
             auto client = get_client();
             if (!client) abort();
             DEFER(delete client);
 
-            photon::net::EndPoint ep(get_server_ip(), 9527);
+            photon::net::EndPoint ep(get_server_ip(), port);
             auto stream = client->connect(ep);
             if (!stream) abort();
             DEFER(delete stream);
@@ -138,7 +138,7 @@ public:
         } else {
             ASSERT_TRUE(ep4.is_ipv4());
         }
-        ASSERT_EQ(9527, ep4.port);
+        ASSERT_EQ(port, ep4.port);
 
         // Wait client close
         photon::thread_sleep(2);
@@ -153,7 +153,7 @@ protected:
 class V6ToV6Test : public DualStackTest {
 protected:
     photon::net::ISocketClient* get_client() override {
-        return photon::net::new_tcp_socket_client_ipv6();
+        return photon::net::new_tcp_socket_client();
     }
     photon::net::IPAddr get_server_ip() override {
         return photon::net::IPAddr::V6Loopback();

@@ -215,7 +215,7 @@ static int echo_server() {
     photon::thread_enable_join(stop_th);
 
     server->set_handler(handler);
-    server->bind(FLAGS_port, photon::net::IPAddr());
+    server->bind_v4localhost(FLAGS_port);
     server->listen();
     server->start_loop(true);
 

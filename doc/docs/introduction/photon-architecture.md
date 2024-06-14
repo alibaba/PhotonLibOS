@@ -11,7 +11,7 @@ The major goal of Photon is to handle concurrency and I/O (including file I/O an
 
 Its components are:
 
-* [Thread](../api/thread.md), [vCPU](../api/vcpu-and-multicore.md), timer, sync primitives, gdb extension, emulation of std::thread, task dispatching ...
+* [Thread](../api/thread.md), [vCPU](../api/vcpu-and-multicore.md), locks and sync primitives, event engines, task dispatching ...
 * Multiple IO wrappers: psync, posix_aio, libaio, io_uring
 * Multiple socket implementations: tcp (level-trigger/edge-trigger), unix-domain, zero-copy, libcurl, TLS support, etc.
 * High performance RPC client/server, HTTP client/server.

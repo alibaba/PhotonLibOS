@@ -308,9 +308,9 @@ public:
     bool to_double_check(double* v = nullptr)
     {
         char buf[32];
-        auto len = std::max(this->size(), sizeof(buf) - 1 );
+        auto len = std::min(this->size(), sizeof(buf) - 1 );
         memcpy(buf, data(), len);
-        buf[len] = '0';
+        buf[len] = '\0';
         return sscanf(buf, "%lf", v) == 1;
     }
     double to_double(double default_val = NAN)

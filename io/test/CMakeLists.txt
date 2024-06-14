@@ -1,5 +1,3 @@
-add_definitions(-w)
-
 add_executable(signalfdtest signalfdtest.cpp)
 target_link_libraries(signalfdtest PRIVATE photon_shared)
 add_test(NAME signalfdtest COMMAND $<TARGET_FILE:signalfdtest>)

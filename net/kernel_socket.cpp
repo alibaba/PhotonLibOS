@@ -63,53 +63,57 @@ limitations under the License.
 namespace photon {
 namespace net {
 
+static int socket(int family, int protocol = 0,
+            bool nonblocking = true, bool nodelay = true) {
+    int fd = ::socket(family, SOCK_STREAM, protocol);
+    if (fd < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to create socket fd");
+    if (nonblocking)
+        set_fd_nonblocking(fd);
+    if (nodelay) {
+        int v = 1;
+        if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v)) < 0)
+            LOG_WARN("failed to set TCP_NODELAY ", ERRNO());
+    }
+    return fd;
+}
+
+template<typename Stream> inline
+Stream* new_stream(int family, int protocol = 0, bool nonblocking = true) {
+    int fd = socket(family, protocol, nonblocking, family != AF_UNIX);
+    return (fd < 0) ? nullptr : new Stream(fd);
+}
+
 class KernelSocketStream : public SocketStreamBase {
 public:
     using ISocketStream::setsockopt;
     using ISocketStream::getsockopt;
     int fd = -1;
     explicit KernelSocketStream(int fd) : fd(fd) {}
-    KernelSocketStream(int socket_family, bool nonblocking) {
-        if (fd >= 0)
-            return;
-        if (nonblocking) {
-            fd = net::socket(socket_family, SOCK_STREAM, 0);
-        } else {
-            fd = ::socket(socket_family, SOCK_STREAM, 0);
-        }
-        if (fd >= 0 && (socket_family == AF_INET || socket_family == AF_INET6)) {
-            int val = 1;
-            ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
-        }
-    }
     ~KernelSocketStream() override {
         if (fd < 0) return;
         shutdown(ShutdownHow::ReadWrite);
         close();
     }
     ssize_t read(void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_recv(fd, buf, count, 0, timeout));
-        return net::doio_n(buf, count, cb);
+        Timeout timeout(m_timeout);
+        return DOIO_LOOP(do_recv(fd, buf, count, 0, timeout), BufStep(buf, count));
     }
     ssize_t readv(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout));
-        return net::doiov_n(view, cb);
+        Timeout timeout(m_timeout);
+        return DOIO_LOOP(do_recvmsg(fd, tmp_msg_hdr(view), 0, timeout), BufStepV(view));
     }
     ssize_t write(const void* buf, size_t count) override {
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_send(fd, buf, count, MSG_NOSIGNAL, timeout));
-        return net::doio_n((void*&) buf, count, cb);
+        Timeout timeout(m_timeout);
+        return DOIO_LOOP(do_send(fd, buf, count, MSG_NOSIGNAL, timeout), BufStep((void*&)buf, count));
     }
     ssize_t writev(const iovec* iov, int iovcnt) override {
         SmartCloneIOV<8> clone(iov, iovcnt);
         iovector_view view(clone.ptr, iovcnt);
-        uint64_t timeout = m_timeout;
-        auto cb = LAMBDA_TIMEOUT(do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout));
-        return net::doiov_n(view, cb);
+        Timeout timeout(m_timeout);
+        return DOIO_LOOP(do_sendmsg(fd, tmp_msg_hdr(view), MSG_NOSIGNAL, timeout), BufStepV(view));
     }
     ssize_t recv(void* buf, size_t count, int flags = 0) override {
         return do_recv(fd, buf, count, flags, m_timeout);
@@ -135,6 +139,7 @@ public:
         return (Object*) (uint64_t) fd;
     }
     int close() final {
+        if (fd < 0) return 0;
         get_vcpu()->master_event_engine->wait_for_fd(fd, 0, -1UL);
         auto ret = ::close(fd);
         fd = -1;
@@ -163,16 +168,16 @@ public:
 protected:
     uint64_t m_timeout = -1;
 
-    virtual ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) {
+    virtual ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) {
         return photon::net::send(sockfd, buf, count, flags, timeout);
     }
-    virtual ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) {
+    virtual ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) {
         return photon::net::sendmsg(sockfd, message, flags, timeout);
     }
-    virtual ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
+    virtual ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
         return photon::net::recv(sockfd, buf, count, flags, timeout);
     }
-    virtual ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
+    virtual ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
         return photon::net::recvmsg(sockfd, message, flags, timeout);
     }
 
@@ -182,47 +187,42 @@ protected:
             this->msg_iovlen = iovcnt;
         }
 
-        explicit tmp_msg_hdr(iovector_view& view) : tmp_msg_hdr(view.iov, view.iovcnt) {}
+        explicit tmp_msg_hdr(iovector_view& view) :
+            tmp_msg_hdr(view.iov, view.iovcnt) { }
 
-        operator ::msghdr*() {
-            return this;
-        }
+        operator ::msghdr*() { return this; }
     };
 };
 
 class KernelSocketClient : public SocketClientBase {
 public:
-    KernelSocketClient(bool nonblocking) : m_nonblocking(nonblocking) {}
-
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
         if (fill_uds_path(addr_un, path, count) != 0) return nullptr;
-        return do_connect((const sockaddr*) &addr_un, sizeof(addr_un));
+        sockaddr_storage r(addr_un);
+        return do_connect(&r);
     }
 
-    ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) override {
+    ISocketStream* connect(const EndPoint& remote, const EndPoint* local) override {
         sockaddr_storage r(remote);
-        if (local.undefined()) {
-            return do_connect(r.get_sockaddr(), r.get_socklen());
+        if (likely(!local || local->is_ipv4() != remote.is_ipv4())) {
+            return do_connect(&r);
         }
-        sockaddr_storage l(local);
-        return do_connect(r.get_sockaddr(), r.get_socklen(), l.get_sockaddr(), l.get_socklen());
+        sockaddr_storage l(*local);
+        return do_connect(&r, &l);
     }
-
-protected:
-    bool m_nonblocking;
 
     virtual KernelSocketStream* create_stream(int socket_family) {
-        return new KernelSocketStream(socket_family, m_nonblocking);
+        return new_stream<KernelSocketStream>(socket_family);
     }
 
     virtual int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) {
         return net::connect(fd, remote, addrlen, m_timeout);
     }
 
-    ISocketStream* do_connect(const sockaddr* remote, socklen_t len_remote,
-                              const sockaddr* local = nullptr, socklen_t len_local = 0) {
-        auto stream = create_stream(remote->sa_family);
+    ISocketStream* do_connect(const sockaddr_storage* remote,
+                              const sockaddr_storage* local = nullptr) {
+        auto stream = create_stream(remote->store.ss_family);
         auto deleter = [&](KernelSocketStream*) {
             auto errno_backup = errno;
             delete stream;
@@ -237,13 +237,13 @@ protected:
         }
         ptr->timeout(m_timeout);
         if (local != nullptr) {
-            if (::bind(ptr->fd, local, len_local) != 0) {
+            if (::bind(ptr->fd, local->get_sockaddr(), local->get_socklen()) != 0) {
                 LOG_ERRNO_RETURN(0, nullptr, "fail to bind socket");
             }
         }
-        auto ret = fd_connect(ptr->fd, remote, len_remote);
+        auto ret = fd_connect(ptr->fd, remote->get_sockaddr(), remote->get_socklen());
         if (ret < 0) {
-            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect socket");
+            LOG_ERRNO_RETURN(0, nullptr, "Failed to connect to ", remote->to_endpoint());
         }
         return ptr.release();
     }
@@ -254,11 +254,9 @@ public:
     using ISocketServer::setsockopt;
     using ISocketServer::getsockopt;
 
-    KernelSocketServer(int socket_family, bool autoremove, bool nonblocking) :
-            m_socket_family(socket_family),
-            m_autoremove(autoremove),
-            m_nonblocking(nonblocking) {
-    }
+    explicit KernelSocketServer(bool autoremove = false) : m_autoremove(autoremove) { }
+
+    int init() { return 0; }
 
     ~KernelSocketServer() {
         terminate();
@@ -276,27 +274,9 @@ public:
         m_listen_fd = -1;
     }
 
-    // Comply with the NewObj interface.
-    virtual int init() {
-        if (m_nonblocking) {
-            m_listen_fd = net::socket(m_socket_family, SOCK_STREAM, 0);
-        } else {
-            m_listen_fd = ::socket(m_socket_family, SOCK_STREAM, 0);
-        }
-        if (m_listen_fd < 0) {
-            LOG_ERRNO_RETURN(0, -1, "fail to setup listen fd");
-        }
-        if (m_socket_family == AF_INET || m_socket_family == AF_INET6) {
-            if (setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1) != 0) {
-                LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt of TCP_NODELAY");
-            }
-        }
-        return 0;
-    }
-
     int start_loop(bool block) override {
         if (workth) LOG_ERROR_RETURN(EALREADY, -1, "Already listening");
-        m_block = block;
+        m_block_serv = block;
         if (block) return accept_loop();
         auto loop = &KernelSocketServer::accept_loop;
         auto th = thread_create((thread_entry&)loop, this);
@@ -311,7 +291,7 @@ public:
         workth = nullptr;
         if (waiting) {
             thread_interrupt(th);
-            if (!m_block)
+            if (!m_block_serv)
                 thread_join((join_handle*)th);
         }
     }
@@ -321,22 +301,41 @@ public:
         return this;
     }
 
-    int bind(uint16_t port, IPAddr addr) override {
-        if (m_socket_family == AF_INET6 && addr.undefined()) {
-            addr = IPAddr::V6Any();
+    int bind(const EndPoint& ep) override {
+        auto s = sockaddr_storage(ep);
+        if (m_listen_fd < 0) {
+            m_listen_fd = socket(s.get_sockaddr()->sa_family, 0, m_nonblocking, false);
+            if (m_listen_fd < 0) return -1;
         }
-        sockaddr_storage s(EndPoint(addr, port));
-        return ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
+        int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
     }
 
     int bind(const char* path, size_t count) override {
         if (m_autoremove && is_socket(path)) {
-            unlink(path);
+            if (unlink(path) < 0)
+                LOG_ERRNO_RETURN(0, -1, VALUE(path));
+        }
+        if (m_listen_fd < 0) {
+            m_listen_fd = socket(AF_UNIX, 0, true, false);
+            if (m_listen_fd < 0)
+                LOG_ERRNO_RETURN(0, m_listen_fd, "failed to create UNIX domain socket at ", ALogString(path, count));
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
         }
         struct sockaddr_un addr_un;
         int ret = fill_uds_path(addr_un, path, count);
         if (ret < 0) return -1;
-        return ::bind(m_listen_fd, (struct sockaddr*) &addr_un, sizeof(addr_un));
+        ret = ::bind(m_listen_fd, (struct sockaddr*) &addr_un, sizeof(addr_un));
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to '`' ", ALogString(path, count))
+        return 0;
     }
 
     int listen(int backlog) override {
@@ -375,42 +374,40 @@ public:
     }
 
     int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
-        if (::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0) {
-            LOG_ERRNO_RETURN(EINVAL, -1, "failed to setsockopt");
-        }
+        if (m_listen_fd >= 0 && ::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to setsockopt for fd `", m_listen_fd);
         return m_opts.put_opt(level, option_name, option_value, option_len);
     }
 
     int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
-        if (::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0) return 0;
+        if (m_listen_fd >= 0 && ::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0)
+            return 0;
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
 
 protected:
-    int m_socket_family;
     bool m_autoremove;
-    bool m_nonblocking;
-
+    bool m_nonblocking = true;
+    bool m_block_serv = false;
+    bool waiting = false;
     Handler m_handler;
     photon::thread* workth = nullptr;
-    bool m_block = false;
-    bool waiting = false;
     int m_listen_fd = -1;
 
     virtual KernelSocketStream* create_stream(int fd) {
         return new KernelSocketStream(fd);
     }
 
-    virtual int fd_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
-        return net::accept(fd, addr, addrlen);
+    virtual int do_accept(struct sockaddr *addr, socklen_t *addrlen) {
+        return net::accept(m_listen_fd, addr, addrlen);
     }
 
-    int do_accept() { return fd_accept(m_listen_fd, nullptr, nullptr); }
+    int do_accept() { return do_accept(nullptr, nullptr); }
 
     int do_accept(EndPoint& remote_endpoint) {
         sockaddr_storage s;
         socklen_t len = s.get_max_socklen();
-        int cfd = fd_accept(m_listen_fd, s.get_sockaddr(), &len);
+        int cfd = do_accept(s.get_sockaddr(), &len);
         if (cfd < 0 || len > s.get_max_socklen())
             return -1;
         remote_endpoint = s.to_endpoint();
@@ -428,12 +425,12 @@ protected:
         DEFER(workth = nullptr);
         while (workth) {
             waiting = true;
-            auto sess = accept();
+            auto connection = accept();
             waiting = false;
             if (!workth) return 0;
-            if (sess) {
-                sess->timeout(m_timeout);
-                photon::thread_create11(&KernelSocketServer::handler, m_handler, sess);
+            if (connection) {
+                connection->timeout(m_timeout);
+                photon::thread_create11(&KernelSocketServer::handler, m_handler, connection);
             } else {
                 LOG_WARN("KernelSocketServer: failed to accept new connections: `", ERRNO());
                 photon::thread_usleep(1000);
@@ -448,6 +445,32 @@ protected:
     }
 };
 
+class SMCSocketClient : public KernelSocketClient {
+public:
+    virtual KernelSocketStream* create_stream(int socket_family) {
+        int ver = (socket_family == AF_INET6);
+        return new_stream<KernelSocketStream>(AF_SMC, ver);
+    }
+};
+
+class SMCSocketServer : public KernelSocketServer {
+public:
+    int bind(const EndPoint& ep) override {
+        auto s = sockaddr_storage(ep);
+        if (m_listen_fd < 0) {
+            int ver = (s.get_sockaddr()->sa_family == AF_INET6);
+            m_listen_fd = socket(AF_SMC, ver);
+            if (m_listen_fd < 0) return -1;
+        }
+        int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
+    }
+
+    UNIMPLEMENTED(int bind(const char* path, size_t count));
+};
+
 #ifdef __linux__
 class ZeroCopySocketStream : public KernelSocketStream {
 public:
@@ -455,20 +478,15 @@ public:
         setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
     }
 
-    ZeroCopySocketStream(int socket_family, bool nonblocking) :
-            KernelSocketStream(socket_family, nonblocking) {
-        setsockopt<int>(SOL_SOCKET, SO_ZEROCOPY, 1);
-    }
-
 protected:
     uint32_t m_num_calls = 0;
 
-    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) override {
         struct iovec iov{const_cast<void*>(buf), count};
         return do_sendmsg(sockfd, tmp_msg_hdr(&iov, 1), flags, timeout);
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
         m_num_calls++;
         auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, timeout);
@@ -482,13 +500,13 @@ class ZeroCopySocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
-    int init() override {
+    int init() {
         if (!net::zerocopy_available()) {
             LOG_ERROR_RETURN(0, -1, "zerocopy not available");
         }
-        if (KernelSocketServer::init() != 0) {
-            return -1;
-        }
+        // if (KernelSocketServer::init() != 0) {
+        //     return -1;
+        // }
         return 0;
     }
 
@@ -501,9 +519,10 @@ protected:
 class ZeroCopySocketClient : public KernelSocketClient {
 public:
     using KernelSocketClient::KernelSocketClient;
+
 protected:
     KernelSocketStream* create_stream(int socket_family) override {
-        return new ZeroCopySocketStream(socket_family, m_nonblocking);
+        return new_stream<ZeroCopySocketStream>(socket_family);
     }
 };
 
@@ -513,26 +532,25 @@ class IouringSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
 
-protected:
-    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) override {
         if (flags & ZEROCOPY_FLAG)
             return photon::iouring_send_zc(sockfd, buf, count, flags | MSG_WAITALL, timeout);
         else
             return photon::iouring_send(sockfd, buf, count, flags, timeout);
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         if (flags & ZEROCOPY_FLAG)
             return photon::iouring_sendmsg_zc(sockfd, message, flags | MSG_WAITALL, timeout);
         else
             return photon::iouring_sendmsg(sockfd, message, flags, timeout);
     }
 
-    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) override {
         return photon::iouring_recv(sockfd, buf, count, flags, timeout);
     }
 
-    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) override {
         return photon::iouring_recvmsg(sockfd, message, flags, timeout);
     }
 };
@@ -541,9 +559,8 @@ class IouringSocketClient : public KernelSocketClient {
 public:
     using KernelSocketClient::KernelSocketClient;
 
-protected:
     KernelSocketStream* create_stream(int socket_family) override {
-        return new IouringSocketStream(socket_family, m_nonblocking);
+        return new_stream<IouringSocketStream>(socket_family, 0, false);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
@@ -555,13 +572,17 @@ class IouringSocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
-protected:
+    int init() {
+        m_nonblocking = false;
+        return 0;
+    }
+
     KernelSocketStream* create_stream(int fd) override {
         return new IouringSocketStream(fd);
     }
 
-    int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
-        return photon::iouring_accept(fd, addr, addrlen, -1);
+    int do_accept(struct sockaddr* addr, socklen_t* addrlen) override {
+        return photon::iouring_accept(m_listen_fd, addr, addrlen, -1);
     }
 };
 
@@ -573,37 +594,31 @@ public:
             photon::iouring_register_files(fd);
     }
 
-    IouringFixedFileSocketStream(int socket_family, bool nonblocking) :
-            IouringSocketStream(socket_family, nonblocking) {
-        if (fd >= 0)
-            photon::iouring_register_files(fd);
-    }
-
     ~IouringFixedFileSocketStream() override {
         if (fd >= 0)
             photon::iouring_unregister_files(fd);
     }
 
 private:
-    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) override {
         if (flags & ZEROCOPY_FLAG)
             return photon::iouring_send_zc(sockfd, buf, count, IouringFixedFileFlag | flags | MSG_WAITALL, timeout);
         else
             return photon::iouring_send(sockfd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         if (flags & ZEROCOPY_FLAG)
             return photon::iouring_sendmsg_zc(sockfd, message, IouringFixedFileFlag | flags | MSG_WAITALL, timeout);
         else
             return photon::iouring_sendmsg(sockfd, message, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) override {
         return photon::iouring_recv(sockfd, buf, count, IouringFixedFileFlag | flags, timeout);
     }
 
-    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) override {
         return photon::iouring_recvmsg(sockfd, message, IouringFixedFileFlag | flags, timeout);
     }
 };
@@ -613,7 +628,7 @@ protected:
     using IouringSocketClient::IouringSocketClient;
 
     KernelSocketStream* create_stream(int socket_family) override {
-        return new IouringFixedFileSocketStream(socket_family, m_nonblocking);
+        return new_stream<IouringFixedFileSocketStream>(socket_family, 0, false);
     }
 };
 
@@ -634,14 +649,10 @@ class FstackDpdkSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
 
-    FstackDpdkSocketStream(int socket_family, bool nonblocking) : KernelSocketStream(socket_family, nonblocking) {
+    FstackDpdkSocketStream(int socket_family, bool nonblocking) {
         fd = fstack_socket(socket_family, SOCK_STREAM, 0);
-        if (fd < 0)
-            return;
-        if (socket_family == AF_INET) {
-            int val = 1;
-            fstack_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
-        }
+        if (fd < 0) return;
+        setsockopt<int>(fd, IPPROTO_TCP, TCP_NODELAY, 1);
     }
 
     ~FstackDpdkSocketStream() override {
@@ -652,19 +663,19 @@ public:
     }
 
 protected:
-    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) override {
         return fstack_send(sockfd, buf, count, flags, timeout);
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         return fstack_sendmsg(sockfd, message, flags, timeout);
     }
 
-    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) override {
         return fstack_recv(sockfd, buf, count, flags, timeout);
     }
 
-    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) override {
         return fstack_recvmsg(sockfd, message, flags, timeout);
     }
 
@@ -682,7 +693,7 @@ protected:
     using KernelSocketClient::KernelSocketClient;
 
     KernelSocketStream* create_stream(int socket_family) override {
-        return new FstackDpdkSocketStream(socket_family, m_nonblocking);
+        return new FstackDpdkSocketStream(socket_family, true);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
@@ -694,20 +705,18 @@ class FstackDpdkSocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
-    int init() override {
-        m_listen_fd = fstack_socket(m_socket_family, SOCK_STREAM, 0);
-        if (m_listen_fd < 0)
-            return -1;
-        if (m_socket_family == AF_INET) {
-            int val = 1;
-            fstack_setsockopt(m_listen_fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+    int bind(const EndPoint& ep) override {
+        if (m_listen_fd >= 0)
+            LOG_ERROR_RETURN(EALREADY, -1, "already bound");
+        auto s = sockaddr_storage(ep);
+        m_listen_fd = fstack_socket(s.get_sockaddr()->sa_family, SOCK_STREAM, 0);   // already non-blocking and no-delay
+        if (m_listen_fd < 0) {
+            LOG_ERRNO_RETURN(0, -1, "fail to setup DPDK listen fd");
         }
+        int ret = fstack_bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
         return 0;
-    }
-
-    int bind(uint16_t port, IPAddr addr) override {
-        auto addr_in = EndPoint(addr, port).to_sockaddr_in();
-        return fstack_bind(m_listen_fd, (sockaddr*) &addr_in, sizeof(addr_in));
     }
 
     int bind(const char* path, size_t count) override {
@@ -736,8 +745,8 @@ protected:
         return new FstackDpdkSocketStream(fd);
     }
 
-    int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
-        return fstack_accept(fd, addr, addrlen, m_timeout);
+    int do_accept(struct sockaddr* addr, socklen_t* addrlen) override {
+        return fstack_accept(m_listen_fd, addr, addrlen, m_timeout);
     }
 
 private:
@@ -890,37 +899,31 @@ public:
         if (fd >= 0) etpoller.register_notifier(fd, this);
     }
 
-    ETKernelSocketStream(int socket_family, bool nonblocking) :
-            KernelSocketStream(socket_family, nonblocking) {
-        if (fd >= 0) etpoller.register_notifier(fd, this);
-    }
-
     ~ETKernelSocketStream() {
         if (fd >= 0) etpoller.unregister_notifier(fd);
     }
 
     ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
-        void* buf_unused = nullptr;
-        return doio_n(buf_unused, count, LAMBDA(do_sendfile(in_fd, offset, count)));
+        return DOIO_LOOP(do_sendfile(in_fd, offset, count), BufStep(count));
     }
 
 private:
-    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_send(int sockfd, const void* buf, size_t count, int flags, Timeout timeout) override {
         return etdoio(LAMBDA(::send(sockfd, buf, count, flags)),
                       LAMBDA_TIMEOUT(wait_for_writable(timeout)));
     }
 
-    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         return etdoio(LAMBDA(::sendmsg(sockfd, message, flags)),
                       LAMBDA_TIMEOUT(wait_for_writable(timeout)));
     }
 
-    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) override {
+    ssize_t do_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) override {
         return etdoio(LAMBDA(::read(sockfd, buf, count)),
                       LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 
-    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) override {
+    ssize_t do_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) override {
         return etdoio(LAMBDA(::recvmsg(sockfd, message, flags)),
                       LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
@@ -938,7 +941,7 @@ public:
 
 protected:
     KernelSocketStream* create_stream(int socket_family) override {
-        return new ETKernelSocketStream(socket_family, m_nonblocking);
+        return new_stream<ETKernelSocketStream>(socket_family);
     }
 };
 
@@ -950,9 +953,20 @@ public:
         if (m_listen_fd >= 0) etpoller.unregister_notifier(m_listen_fd);
     }
 
-    int init() override {
-        if (KernelSocketServer::init() != 0) return -1;
-        return etpoller.register_notifier(m_listen_fd, this);
+    int bind(const EndPoint& ep) override {
+        int fd = m_listen_fd;
+        int ret = KernelSocketServer::bind(ep);
+        if (fd < 0 && m_listen_fd >= 0)
+            etpoller.register_notifier(m_listen_fd, this);
+        return ret;
+    }
+
+    int bind(const char* path, size_t count) override {
+        int fd = m_listen_fd;
+        int ret = KernelSocketServer::bind(path, count);
+        if (fd < 0 && m_listen_fd >= 0)
+            etpoller.register_notifier(m_listen_fd, this);
+        return ret;
     }
 
 protected:
@@ -960,9 +974,9 @@ protected:
         return new ETKernelSocketStream(fd);
     }
 
-    int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
+    int do_accept(struct sockaddr* addr, socklen_t* addrlen) override {
         uint64_t timeout = -1;
-        return (int) etdoio(LAMBDA(::accept4(fd, addr, addrlen, SOCK_NONBLOCK)),
+        return (int) etdoio(LAMBDA(::accept4(m_listen_fd, addr, addrlen, SOCK_NONBLOCK)),
                             LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 };
@@ -972,62 +986,56 @@ protected:
 /* ET Socket - End */
 
 extern "C" ISocketClient* new_tcp_socket_client() {
-    return new KernelSocketClient(true);
-}
-extern "C" ISocketClient* new_tcp_socket_client_ipv6() {
-    return new KernelSocketClient(true);
+    return new KernelSocketClient();
 }
 extern "C" ISocketServer* new_tcp_socket_server() {
-    return NewObj<KernelSocketServer>(AF_INET, false, true)->init();
-}
-extern "C" ISocketServer* new_tcp_socket_server_ipv6() {
-    return NewObj<KernelSocketServer>(AF_INET6, false, true)->init();
+    return NewObj<KernelSocketServer>()->init();
 }
 extern "C" ISocketClient* new_uds_client() {
-    return new KernelSocketClient(true);
+    return new KernelSocketClient();
 }
 extern "C" ISocketServer* new_uds_server(bool autoremove) {
-    return NewObj<KernelSocketServer>(AF_UNIX, autoremove, true)->init();
+    return NewObj<KernelSocketServer>(autoremove)->init();
 }
 #ifdef __linux__
 extern "C" ISocketServer* new_zerocopy_tcp_server() {
-    return NewObj<ZeroCopySocketServer>(AF_INET, false, true)->init();
+    return NewObj<ZeroCopySocketServer>()->init();
 }
 extern "C" ISocketClient* new_zerocopy_tcp_client() {
-    return new ZeroCopySocketClient(true);
+    return new ZeroCopySocketClient();
 }
 #ifdef PHOTON_URING
 extern "C" ISocketClient* new_iouring_tcp_client() {
     if (photon::iouring_register_files_enabled())
-        return new IouringFixedFileSocketClient(false);
+        return new IouringFixedFileSocketClient();
     else
-        return new IouringSocketClient(false);
+        return new IouringSocketClient();
 }
 extern "C" ISocketServer* new_iouring_tcp_server() {
     if (photon::iouring_register_files_enabled())
-        return NewObj<IouringFixedFileSocketServer>(AF_INET, false, false)->init();
+        return NewObj<IouringFixedFileSocketServer>()->init();
     else
-        return NewObj<IouringSocketServer>(AF_INET, false, false)->init();
+        return NewObj<IouringSocketServer>()->init();
 }
 #endif // PHOTON_URING
 extern "C" ISocketClient* new_et_tcp_socket_client() {
-    return new ETKernelSocketClient(true);
+    return new ETKernelSocketClient();
 }
 extern "C" ISocketServer* new_et_tcp_socket_server() {
-    return NewObj<ETKernelSocketServer>(AF_INET, false, true)->init();
+    return NewObj<ETKernelSocketServer>()->init();
 }
 extern "C" ISocketClient* new_smc_socket_client() {
-    return new KernelSocketClient(true);
+    return new SMCSocketClient();
 }
 extern "C" ISocketServer* new_smc_socket_server() {
-    return NewObj<KernelSocketServer>(AF_SMC, false, true)->init();
+    return NewObj<SMCSocketServer>()->init();
 }
 #ifdef ENABLE_FSTACK_DPDK
 extern "C" ISocketClient* new_fstack_dpdk_socket_client() {
-    return new FstackDpdkSocketClient(true);
+    return new FstackDpdkSocketClient();
 }
 extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
-    return NewObj<FstackDpdkSocketServer>(false, true)->init();
+    return NewObj<FstackDpdkSocketServer>()->init();
 }
 #endif // ENABLE_FSTACK_DPDK
 #endif // __linux__
@@ -1039,19 +1047,25 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 EndPoint::EndPoint(const char* _ep) {
     estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
-    if (pos == estring::npos)
+    if (pos == 0 || pos == estring::npos)
         return;
-    // Detect IPv6 or IPv4
-    estring ip_str = ep[pos - 1] == ']' ? ep.substr(1, pos - 2) : ep.substr(0, pos);
-    auto ip = IPAddr(ip_str.c_str());
     auto port_str = ep.substr(pos + 1);
     if (!port_str.all_digits())
         return;
-    addr = ip;
-    port = std::stoul(port_str);
+    auto _port = port_str.to_uint64();
+    if (_port > UINT16_MAX)
+        return;
+    port = (uint16_t)_port;
+    auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    if (ipsv.length() >= INET6_ADDRSTRLEN - 1)
+        return;
+    char ip_str[INET6_ADDRSTRLEN];
+    memcpy(ip_str, ipsv.data(), ipsv.length());
+    ip_str[ipsv.length()] = '\0';
+    addr = IPAddr(ip_str);
 }
 
-LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
+LogBuffer& operator<<(LogBuffer& log, const IPAddr& addr) {
     if (addr.is_ipv4())
         return log.printf(addr.a, '.', addr.b, '.', addr.c, '.', addr.d);
     else {
@@ -1063,7 +1077,7 @@ LogBuffer& operator<<(LogBuffer& log, const IPAddr addr) {
     }
 }
 
-LogBuffer& operator<<(LogBuffer& log, const EndPoint ep) {
+LogBuffer& operator<<(LogBuffer& log, const EndPoint& ep) {
     if (ep.is_ipv4())
         return log << ep.addr << ':' << ep.port;
     else
@@ -1083,8 +1097,5 @@ LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
     return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
 LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
-    return log << photon::net::sockaddr_storage(addr).to_endpoint();
-}
-LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
     return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }

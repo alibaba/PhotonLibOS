@@ -33,10 +33,10 @@ ssize_t filecopy(IFile* infile, IFile* outfile, size_t bs, int retry_limit) {
     void* buff = nullptr;
     ;
     // buffer allocate, with 4K alignment
-    ::posix_memalign(&buff, ALIGNMENT, bs);
-    if (buff == nullptr)
+    int err = ::posix_memalign(&buff, ALIGNMENT, bs);
+    if (err)
         LOG_ERROR_RETURN(ENOMEM, -1, "Fail to allocate buffer with ",
-                         VALUE(bs));
+                         VALUE(bs), VALUE(err));
     DEFER(free(buff));
     off_t offset = 0;
     ssize_t count = bs;

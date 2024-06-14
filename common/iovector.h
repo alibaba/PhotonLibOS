@@ -41,7 +41,7 @@ limitations under the License.
 
 #pragma GCC diagnostic push
 #if __GNUC__ >= 13
-// #pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
 #endif
 
@@ -900,8 +900,8 @@ protected:
         }
         void copy(IOAlloc* rhs, uint16_t nbases)
         {
+            *(IOAlloc*)this = *rhs;
             auto rhs_ = (IOVAllocation_*)rhs;
-            *this = *rhs_;
             memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases);
         }
     };
@@ -1057,15 +1057,15 @@ inline void delete_iovector(iovector* ptr)
 
 // Allocate io-vectors on heap if CAPACITY is not enough,
 // otherwise just copy them into array.
-template<size_t CAPACITY>
+template<size_t INLINE_CAPACITY>
 class SmartCloneIOV
 {
 public:
-    iovec iov[CAPACITY];
+    iovec iov[INLINE_CAPACITY];
     iovec* ptr;
     SmartCloneIOV(const iovec* iov, int iovcnt)
     {
-        ptr = (iovcnt <= (int)CAPACITY) ?
+        ptr = (iovcnt <= (int)INLINE_CAPACITY) ?
             this->iov :
             new iovec[iovcnt];
         memcpy(ptr, iov, iovcnt * sizeof(*iov));
@@ -1076,6 +1076,7 @@ public:
             delete [] ptr;
     }
 };
+
 
 
 #undef IF_ASSERT_RETURN

@@ -1,5 +1,3 @@
-add_definitions(-w)
-
 add_executable(client_perf client_perf.cpp)
 target_link_libraries(client_perf PRIVATE photon_shared)
 

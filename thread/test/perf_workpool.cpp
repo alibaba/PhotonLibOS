@@ -35,7 +35,7 @@ std::atomic<uint64_t> sum;
 
 void* task(void* arg) {
     photon::semaphore sem(0);
-    for (auto i = 0; i < fires; i++) {
+    FOR_LOOP(fires) {
         auto start = std::chrono::steady_clock::now();
         pool->async_call(new auto ([&, start]{
             auto end = std::chrono::steady_clock::now();
@@ -49,7 +49,7 @@ void* task(void* arg) {
 }
 
 void* task_sync(void* arg) {
-    for (auto i = 0; i < fires; i++) {
+    FOR_LOOP(fires) {
         auto start = std::chrono::steady_clock::now();
         pool->call([&, start]{
             auto end = std::chrono::steady_clock::now();
@@ -66,7 +66,7 @@ int main() {
     DEFER(delete pool);
     std::vector<photon::join_handle*> jhs;
     auto start = photon::now;
-    for (uint64_t i = 0; i < concurrent; i++) {
+    for (auto i: xrange(concurrent)) {
         jhs.emplace_back(
             photon::thread_enable_join(photon::thread_create(task, (void*)i)));
     }

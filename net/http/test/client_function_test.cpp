@@ -16,7 +16,6 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <time.h>
-#include <gtest/gtest.h>
 #include <netinet/tcp.h>
 
 #include <chrono>
@@ -28,17 +27,14 @@ limitations under the License.
 #include <photon/net/curl.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
-#define protected public
-#define private public
 #include "../client.cpp"
-#undef protected
-#undef private
 #include "../server.h"
-// #include "client.h"
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
+#include "../../../test/gtest.h"
+#include "to_url.h"
 
 using namespace photon::net;
 using namespace photon::net::http;
@@ -80,8 +76,8 @@ TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1L);
-    tcpserver->bind(18731);
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+    tcpserver->bind_v4any();
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -93,11 +89,11 @@ TEST(http_client, get) {
     server->add_handler(fs_handler);
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
-    static const char target[] = "http://localhost:18731/ease-httpclient-gettestfile";
+    auto target = to_url(tcpserver, "/ease-httpclient-gettestfile");
     auto client = new_http_client();
     DEFER(delete client);
     auto op2 = client->new_operation(Verb::GET, target);
-    DEFER(delete op2);
+    DEFER(client->destroy_operation(op2));
     op2->req.headers.content_length(0);
     int ret = client->call(op2);
     GTEST_ASSERT_EQ(0, ret);
@@ -111,7 +107,7 @@ TEST(http_client, get) {
     EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
 
     auto op3 = client->new_operation(Verb::GET, target);
-    DEFER(delete op3);
+    DEFER(client->destroy_operation(op3));
     op3->req.headers.content_length(0);
     op3->req.headers.range(10, 19);
     client->call(op3);
@@ -122,7 +118,7 @@ TEST(http_client, get) {
     LOG_DEBUG(resp_body_buf_range);
 
     auto op4 = client->new_operation(Verb::GET, target);
-    DEFER(delete op4);
+    DEFER(client->destroy_operation(op4));
     op4->req.headers.content_length(0);
     op4->call();
     EXPECT_EQ(sizeof(socket_buf), op4->resp.resource_size());
@@ -139,7 +135,7 @@ TEST(http_client, get) {
 
     static const char target_tb[] = "http://www.taobao.com?x";
     auto op5 = client->new_operation(Verb::GET, target_tb);
-    DEFER(delete op5);
+    DEFER(client->destroy_operation(op5));
     op5->req.headers.content_length(0);
     op5->call();
     EXPECT_EQ(op5->resp.status_code(), 200);
@@ -171,8 +167,7 @@ TEST(http_client, post) {
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
     auto tcpserver = new_tcp_socket_server();
     tcpserver->timeout(1000UL*1000);
-    tcpserver->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
-    tcpserver->bind(18731, IPAddr("127.0.0.1"));
+    tcpserver->bind_v4localhost(0);
     tcpserver->listen();
     DEFER(delete tcpserver);
     auto server = new_http_server();
@@ -184,7 +179,7 @@ TEST(http_client, post) {
 
     auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
     DEFER(delete fs);
-    static const char target[] = "http://localhost:18731/ease-httpclient-posttestfile";
+    auto target = to_url(tcpserver, "/ease-httpclient-posttestfile");
     auto client = new_http_client();
     DEFER(delete client);
 
@@ -193,7 +188,7 @@ TEST(http_client, post) {
 
     // body stream test
     auto op1 = client->new_operation(Verb::POST, target);
-    DEFER(delete op1);
+    DEFER(client->destroy_operation(op1));
     struct stat st;
     EXPECT_EQ(0, file->fstat(&st));
     op1->req.headers.content_length(st.st_size);
@@ -207,7 +202,7 @@ TEST(http_client, post) {
 
     // body writer test
     auto op2 = client->new_operation(Verb::POST, target);
-    DEFER(delete op2);
+    DEFER(client->destroy_operation(op2));
     op2->req.headers.content_length(st.st_size);
     auto writer = [&](Request *req)-> ssize_t {
         file->lseek(0, SEEK_SET);
@@ -282,9 +277,9 @@ int chunked_handler_complict(void*, ISocketStream* sock) {
     return 0;
 }
 
-EndPoint ep{IPAddr("127.0.0.1"), 19731};
 std::string std_data;
 const size_t std_data_size = 64 * 1024;
+/*
 static int digtal_num(int n) {
     int ret = 0;
     do {
@@ -293,6 +288,7 @@ static int digtal_num(int n) {
     } while (n);
     return ret;
 }
+*/
 void chunked_send(int offset, int size, ISocketStream* sock) {
     char s[10];
     auto len = snprintf(s, sizeof(s), "%x\r\n", size);
@@ -304,13 +300,15 @@ void chunked_send(int offset, int size, ISocketStream* sock) {
 std::vector<int> rec;
 int chunked_handler_pt(void*, ISocketStream* sock) {
     EXPECT_NE(nullptr, sock);
-    LOG_DEBUG("Accepted");
     char recv[4096];
     auto len = sock->recv(recv, 4096);
+    if (len < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to read from socket ");
+    LOG_DEBUG("Accepted");
     EXPECT_GT(len, 0);
     auto ret = sock->write(header_data, sizeof(header_data) - 1);
     EXPECT_EQ(sizeof(header_data) - 1, ret);
-    auto offset = 0;
+    size_t offset = 0;
     rec.clear();
     while (offset < std_data_size) {
         auto remain = std_data_size - offset;
@@ -332,20 +330,20 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
 TEST(http_client, chunked) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler});
-    auto ret = server->bind(ep.port, ep.addr);
+    auto ret = server->bind_v4localhost();
     if (ret < 0) LOG_ERROR(VALUE(errno));
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(VALUE(errno));
     EXPECT_EQ(0, ret);
-    LOG_INFO("Ready to accept");
+    LOG_INFO("Bind at `, Ready to accept", server->getsockname());
     server->start_loop();
     photon::thread_sleep(1);
     auto client = new_http_client();
     DEFER(delete client);
-    auto op = client->new_operation(Verb::GET, "http://localhost:19731/");
-    DEFER(delete op);
+    auto url = to_url(server, "/");
+    auto op = client->new_operation(Verb::GET, url);
+    DEFER(client->destroy_operation(op));
     std::string buf;
 
     op->call();
@@ -358,15 +356,17 @@ TEST(http_client, chunked) {
     LOG_DEBUG(VALUE(buf));
 
     server->set_handler({nullptr, &chunked_handler_complict});
-    auto opc = client->new_operation(Verb::GET, "http://localhost:19731/");
-    DEFER(delete opc);
+    auto opc = client->new_operation(Verb::GET, url);
+    DEFER(client->destroy_operation(opc));
     opc->call();
     EXPECT_EQ(200, opc->status_code);
     buf.resize(20000);
     ret = opc->resp.read((void*)buf.data(), 20000);
     EXPECT_EQ(10000 + 4090 + 4086 + 1024, ret);
-    for (int i = 0; i < 10000 + 4090 + 4086 + 1024; i++)
-        EXPECT_EQ(buf[i], 'a');
+    size_t i, cnt;
+    for (i = cnt = 0; i < 10000 + 4090 + 4086 + 1024; i++)
+        cnt += (buf[i] == 'a');
+    EXPECT_EQ(i, cnt);
 
     std_data.resize(std_data_size);
     int num = 0;
@@ -376,8 +376,8 @@ TEST(http_client, chunked) {
     srand(time(0));
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
-        auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
-        DEFER(delete op_test);
+        auto op_test = client->new_operation(Verb::GET, url);
+        DEFER(client->destroy_operation(op_test));
         op_test->call();
         EXPECT_EQ(200, op_test->status_code);
         buf.resize(std_data_size);
@@ -400,6 +400,7 @@ TEST(http_client, chunked) {
         LOG_INFO("random chunked test ` passed", tmp);
     }
 }
+
 int wa_test[] = {5265,
 6392,
 4623,
@@ -412,6 +413,7 @@ int wa_test[] = {5265,
 4487,
 2195,
 292};
+
 int chunked_handler_debug(void*, ISocketStream* sock) {
     EXPECT_NE(nullptr, sock);
     LOG_DEBUG("Accepted");
@@ -432,9 +434,9 @@ int chunked_handler_debug(void*, ISocketStream* sock) {
 TEST(http_client, debug) {
     auto server = new_tcp_socket_server();
     DEFER({ delete server; });
-    server->setsockopt(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler({nullptr, &chunked_handler_debug});
-    auto ret = server->bind(ep.port, ep.addr);
+    auto ret = server->bind_v4localhost();
+    // auto ret = server->bind(ep.port, ep.addr);
     if (ret < 0) LOG_ERROR(ERRNO());
     ret |= server->listen(100);
     if (ret < 0) LOG_ERROR(ERRNO());
@@ -451,8 +453,8 @@ TEST(http_client, debug) {
 
     auto client = new_http_client();
     DEFER(delete client);
-    auto op_test = client->new_operation(Verb::GET, "http://localhost:19731/");
-    DEFER(delete op_test);
+    auto op_test = client->new_operation(Verb::GET, to_url(server, "/"));
+    DEFER(client->destroy_operation(op_test));
     op_test->call();
     EXPECT_EQ(200, op_test->status_code);
     std::string buf;
@@ -461,7 +463,7 @@ TEST(http_client, debug) {
     ret = op_test->resp.read((void*)buf.data(), std_data_size);
     EXPECT_EQ(std_data_size, ret);
     EXPECT_TRUE(buf == std_data);
-    for (int i = 0; i < buf.size(); i++) {
+    for (auto i: xrange(buf.size())) {
         if (buf[i] != std_data[i]) {
             LOG_ERROR("first occurrence of difference at: ", i);
             break;
@@ -478,14 +480,14 @@ TEST(http_client, server_no_resp) {
     auto server = new_tcp_socket_server();
     DEFER(delete server);
     server->set_handler({nullptr, &sleep_handler});
-    server->bind(38812, IPAddr());
+    server->bind_v4localhost();
     server->listen();
     server->start_loop();
 
     auto client = new_http_client();
     DEFER(delete client);
-    auto op = client->new_operation(Verb::GET, "http://127.0.0.1:38812/wtf");
-    DEFER(delete op);
+    auto op = client->new_operation(Verb::GET, to_url(server, "/wtf"));
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(-1, op->status_code);
@@ -498,7 +500,7 @@ TEST(http_client, partial_body) {
 
     auto tcpserver = new_tcp_socket_server();
     DEFER(delete tcpserver);
-    tcpserver->bind(18731);
+    tcpserver->bind_v4localhost();
     tcpserver->listen();
     auto server = new_http_server();
     DEFER(delete server);
@@ -510,11 +512,11 @@ TEST(http_client, partial_body) {
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
 
-    std::string target_get = "http://localhost:18731/file";
+    auto target_get = to_url(tcpserver, "/file");
     auto client = new_http_client();
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(delete op);
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
@@ -528,12 +530,68 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+
+TEST(http_client, vcpu) {
+    system("mkdir -p /tmp/ease_ut/http_test/");
+    system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-gettestfile");
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    auto fs = photon::fs::new_localfs_adaptor("/tmp/ease_ut/http_test/");
+    DEFER(delete fs);
+    auto fs_handler = new_fs_handler(fs);
+    DEFER(delete fs_handler);
+    server->add_handler(fs_handler);
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/ease-httpclient-gettestfile");
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    int vcpu_num = 16;
+    photon::semaphore sem(0);
+    std::thread th[vcpu_num];
+    for (int i = 0; i < vcpu_num; i++) {
+        th[i] = std::thread([&] {
+            photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+            DEFER({
+                photon::fini();
+                sem.signal(1);
+            });
+
+            for (int round = 0; round < 10; round++) {
+                auto op = client->new_operation(Verb::GET, target);
+                DEFER(client->destroy_operation(op));
+                op->req.headers.content_length(0);
+                int ret = client->call(op);
+                GTEST_ASSERT_EQ(0, ret);
+
+                char resp_body_buf[1024];
+                EXPECT_EQ(sizeof(socket_buf), op->resp.resource_size());
+                ret = op->resp.read(resp_body_buf, sizeof(socket_buf));
+                EXPECT_EQ(sizeof(socket_buf), ret);
+                resp_body_buf[sizeof(socket_buf) - 1] = '\0';
+                LOG_DEBUG(resp_body_buf);
+                EXPECT_EQ(0, strcmp(resp_body_buf, socket_buf));
+            }
+        });
+    }
+
+    sem.wait(vcpu_num);
+    for (int i = 0; i < vcpu_num; i++)
+        th[i].join();
+}
+
 TEST(DISABLED_http_client, ipv6) {  // make sure runing in a ipv6-ready environment
     auto client = new_http_client();
     DEFER(delete client);
     // here is an ipv6-only website
     auto op = client->new_operation(Verb::GET, "http://test6.ustc.edu.cn");
-    DEFER(delete op);
+    DEFER(client->destroy_operation(op));
     op->call();
     EXPECT_EQ(200, op->resp.status_code());
 }
@@ -600,7 +658,7 @@ TEST(http_client, user_agent) {
     client->set_user_agent("TEST_UA");
     DEFER(delete client);
     auto op = client->new_operation(Verb::GET, target_get);
-    DEFER(delete op);
+    DEFER(client->destroy_operation(op));
     op->req.headers.content_length(0);
     client->call(op);
     EXPECT_EQ(op->status_code, 200);
@@ -649,7 +707,7 @@ TEST(url, path_fix) {
 //     DEFER(delete client);
 //     client->set_proxy("http://localhost:8899/");
 //     auto op = client->new_operation(Verb::delete_, "https://domain:1234/targetName");
-//     DEFER(delete op);
+//     DEFER(op->destroy());
 //     LOG_DEBUG(VALUE(op->req.whole()));
 //     op->req.redirect(Verb::GET, "baidu.com", true);
 //     LOG_DEBUG(VALUE(op->req.whole()));
@@ -668,7 +726,7 @@ int main(int argc, char** arg) {
     }
     DEFER(et_poller_fini());
 #endif
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }

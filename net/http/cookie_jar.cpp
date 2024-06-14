@@ -84,7 +84,7 @@ public:
         bool first_kv = true;
         vector<string_view> eliminate;
         if (request->headers.insert("Cookie", "") != 0) return -1;
-        for (auto it : m_kv) {
+        for (auto& it : m_kv) {
             if (it.second.m_expire <= photon::now) {
                 eliminate.emplace_back(it.first);
                 continue;

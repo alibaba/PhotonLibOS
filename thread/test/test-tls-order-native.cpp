@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 #include <thread>
-#include <gtest/gtest.h>
 #include <photon/common/utility.h>
+#include "../../test/gtest.h"
 
 struct Value {
     explicit Value(int val) : m_val(val) {
@@ -46,8 +46,8 @@ struct GlobalEnv {
 
     ~GlobalEnv() {
         printf("Destruct GlobalEnv\n");
-        assert(get_v1().m_val == -1);
-        assert(get_v4().m_val == 4);
+        EXPECT_EQ(get_v1().m_val, -1);
+        EXPECT_EQ(get_v4().m_val, 4);
     }
     static thread_local Value v3;
 };

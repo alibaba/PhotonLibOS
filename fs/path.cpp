@@ -252,6 +252,9 @@ namespace fs
         if (path.empty() || path.back() != '/') {
           path_push_back("/");
         }
+        int ret = next();
+        if (ret < 0)
+            m_path = {0, 0};
     }
     int Walker::enter_dir()
     {

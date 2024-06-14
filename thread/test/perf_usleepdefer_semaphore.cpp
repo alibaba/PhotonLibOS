@@ -17,7 +17,7 @@ limitations under the License.
 #include "../thread.h"
 #include "../thread11.h"
 #include <photon/io/fd-events.h>
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 #include <thread>
 #include <photon/common/metric-meter/metrics.h>
 #include <photon/common/alog.h>

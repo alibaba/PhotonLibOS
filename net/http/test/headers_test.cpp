@@ -22,7 +22,7 @@ limitations under the License.
 #undef private
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #include <chrono>
 #include <cstddef>
@@ -54,9 +54,9 @@ protected:
     char _buffer[BUF_CAPACITY];
 };
 TEST(headers, req_header) {
-    char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
-                             "Host: HostName\r\n"
-                             "Content-Length: 0\r\n\r\n";
+    // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
+    //                          "Host: HostName\r\n"
+    //                          "Content-Length: 0\r\n\r\n";
     RequestHeadersStored<> req(Verb::GET, "http://HostName:80/targetName");
     req.headers.content_length(0);
     EXPECT_EQ(false, req.headers.empty());
@@ -134,7 +134,7 @@ public:
 };
 
 TEST(headers, resp_header) {
-    char of_buf[128 * 1024 - 1];
+    char of_buf[64 * 1024 - 1];
     Response of_header(of_buf, sizeof(of_buf));
     string of_stream = "HTTP/1.1 123 status_message\r\n";
     for (auto i = 0; i < 10; i++) of_stream += "key" + to_string(i) + ": value" + to_string(i) + "\r\n";
@@ -247,6 +247,5 @@ int main(int argc, char** arg) {
 #endif
     set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
-    return 0;
+    return RUN_ALL_TESTS();
 }
