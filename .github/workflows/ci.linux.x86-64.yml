@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v1.2
         with:
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v1.2
         with:
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v1.2
         with:
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v1.2
         with:
@@ -218,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v1.2
         with:
