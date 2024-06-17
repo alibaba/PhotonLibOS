@@ -182,20 +182,28 @@ int test_queue_batch(const char *name, QType &queue) {
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
             photon::set_cpu_affinity(i);
-            std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
+            std::vector<int> vec;
+            vec.resize(items_num / sender_num);
             for (size_t x = 0; x < items_num / sender_num; x++) {
+                vec[x] = x;
+            }
+            size_t size;
+            std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
+            for (size_t x = 0; x < items_num / sender_num;) {
                 auto tm = std::chrono::high_resolution_clock::now();
                 LSType::lock(wlock);
-                while (!queue.push(x)) {
+                while (!(size = queue.push_batch(&vec[x], std::min(32UL, vec.size() - x)))) {
                     LSType::unlock(wlock);
                     CPUPause::pause();
                     LSType::lock(wlock);
                 }
                 LSType::unlock(wlock);
-                wspent += std::chrono::high_resolution_clock::now() - tm;
-                sc[x]++;
-                scnt[i]++;
-                // ThreadPause::pause();
+                wspent += (std::chrono::high_resolution_clock::now() - tm) / size;
+                for (auto y = x; y < x + size; y++) {
+                    sc[y] ++;
+                    scnt[i] ++;
+                }
+                x += size;
             }
             LOG_DEBUG("` sender done, ` ns per action", i,
                    wspent.count() / (items_num / sender_num));
@@ -204,7 +212,7 @@ int test_queue_batch(const char *name, QType &queue) {
     for (auto &x : senders) x.join();
     for (auto &x : receivers) x.join();
     auto end = std::chrono::steady_clock::now();
-    LOG_DEBUG("` ` p ` c, ` items, Spent ` us\n", name, sender_num, receiver_num, items_num,
+    LOG_DEBUG("` ` p ` c, ` items, Spent ` us", name, sender_num, receiver_num, items_num,
            std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     for (size_t i = 0; i < items_num / sender_num; i++) {
         if (sc[i] != rc[i] || sc[i] != sender_num) {
