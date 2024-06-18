@@ -7,7 +7,7 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  test850:
+  gcc850:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -39,7 +39,7 @@ jobs:
           export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
-  test921:
+  gcc921:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -51,7 +51,7 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v3
-      - name: Build850
+      - name: Build921
         run: |
           source /opt/rh/gcc-toolset-9/enable
           rm -fr build
@@ -72,7 +72,7 @@ jobs:
           export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
-  test1031:
+  gcc1031:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -84,7 +84,7 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v3
-      - name: Build850
+      - name: Build1031
         run: |
           source /opt/rh/gcc-toolset-10/enable
           rm -fr build
@@ -105,7 +105,7 @@ jobs:
           export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
-  test1121:
+  gcc1121:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -117,7 +117,7 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v3
-      - name: Build850
+      - name: Build1121
         run: |
           source /opt/rh/gcc-toolset-11/enable
           rm -fr build
@@ -138,7 +138,7 @@ jobs:
           export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
-  test1211:
+  gcc1211:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -150,7 +150,7 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v3
-      - name: Build850
+      - name: Build1211
         run: |
           source /opt/rh/gcc-toolset-12/enable
           rm -fr build
