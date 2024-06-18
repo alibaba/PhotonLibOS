@@ -13,12 +13,12 @@ jobs:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Build850
         run: |
           rm -fr build
@@ -45,12 +45,12 @@ jobs:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Build921
         run: |
           source /opt/rh/gcc-toolset-9/enable
@@ -78,12 +78,12 @@ jobs:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Build1031
         run: |
           source /opt/rh/gcc-toolset-10/enable
@@ -111,12 +111,12 @@ jobs:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Build1121
         run: |
           source /opt/rh/gcc-toolset-11/enable
@@ -144,12 +144,12 @@ jobs:
       image: ghcr.io/coldwings/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Build1211
         run: |
           source /opt/rh/gcc-toolset-12/enable
