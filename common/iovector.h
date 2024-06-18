@@ -40,8 +40,10 @@ limitations under the License.
 #include <photon/common/io-alloc.h>
 
 #pragma GCC diagnostic push
-#if __GNUC__ >= 13
+#if defined(__clang__)
 #pragma GCC diagnostic ignored "-Wunknown-warning-option"
+#endif
+#if __GNUC__ >= 12
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
 #endif
 
