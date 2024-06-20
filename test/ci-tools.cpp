@@ -7,6 +7,7 @@
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/photon.h>
+#include <pthread.h>
 
 
 namespace photon {

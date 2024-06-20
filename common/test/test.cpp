@@ -247,7 +247,7 @@ TEST(Callback, virtual_function)
 //    Callback<int> ee([&](int x){ return RET + x/2; });
 
 #pragma GCC diagnostic push
-#if __GNUC__ >= 13
+#if __GNUC__ >= 12
 #pragma GCC diagnostic ignored "-Wdangling-pointer"
 #endif
     THIS = (BB*)&c;

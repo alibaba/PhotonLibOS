@@ -13,6 +13,7 @@
 #include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 #include "../../test/ci-tools.h"
+#include <thread>
 
 DEFINE_int32(ths_total, 100, "total threads when testing threadpool.");
 
