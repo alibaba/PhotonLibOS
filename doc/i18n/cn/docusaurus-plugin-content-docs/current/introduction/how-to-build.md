@@ -64,7 +64,7 @@ brew install cmake openssl pkg-config
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -75,7 +75,7 @@ cmake --build build -j
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -85,8 +85,8 @@ cmake --build build -j
 
 ```bash
 cd PhotonLibOS
-cmake -B build
-cmake --build build -j
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -115,7 +115,7 @@ dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -133,7 +133,7 @@ apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -150,8 +150,8 @@ ctest
 brew install gflags googletest gsasl
 
 # Build examples and test code
-cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1 -D PHOTON_BUILD_TESTING=ON
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -163,7 +163,7 @@ ctest
 </Tabs>
 ```
 
-### 编译选项
+### 高级编译选项
 
 |          Option           | Default |                  Description                   |
 |:-------------------------:|:-------:|:----------------------------------------------:|
@@ -176,6 +176,7 @@ ctest
 |    PHOTON_ENABLE_SASL     |   OFF   |             开启 SASL. 需要 `libgsasl`             |
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |           开启 F-Stack and DPDK，需要两者的库           |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             开启 extfs. 需要 `libe2fs`             |
+|  PHOTON_ENABLE_ECOSYSTEM  |   OFF   |            编译Photon生态库，包含一些三方工具和封装             |
 
 #### 例子1
 
