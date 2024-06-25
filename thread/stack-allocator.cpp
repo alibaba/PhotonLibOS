@@ -98,7 +98,8 @@ public:
         auto ptr = slots[idx].get();
         if (unlikely(!ptr.first)) {
             // slots[idx] empty
-            return __alloc(size);
+            auto aligned_size = MIN_ALLOCATION_SIZE << idx;
+            return __alloc(aligned_size);
         }
         // got from pool
         in_pool_size -= ptr.second;
