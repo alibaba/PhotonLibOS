@@ -97,7 +97,7 @@ public:
             // reset m_ring so that the destructor won't do duplicate munmap cleanup (io_uring_queue_exit)
             delete m_ring;
             m_ring = nullptr;
-            LOG_ERRNO_RETURN(0, -1, "iouring: failed to init queue");
+            LOG_ERROR_RETURN(0, -1, "iouring: failed to init queue: ", ERRNO(-ret));
         }
 
         // Check feature supported

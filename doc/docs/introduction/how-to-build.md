@@ -105,8 +105,8 @@ The examples and test code are built together.
 
 ```bash
 # Install additional dependencies
-dnf install epel-releaase
-dnf config-manager --set-enabled PowerTools
+dnf install epel-release
+dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
