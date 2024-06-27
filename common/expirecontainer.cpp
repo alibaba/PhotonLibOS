@@ -18,10 +18,12 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 ExpireContainerBase::ExpireContainerBase(uint64_t lifespan,
-                                         uint64_t timer_cycle)
+                                         uint64_t timer_cycle,
+                                         bool expire_if_possible)
     : _lifespan(lifespan),
       _timer(std::max(static_cast<uint64_t>(1000), timer_cycle),
-             {this, &ExpireContainerBase::expire}, true, 8UL * 1024 * 1024) {}
+             {this, &ExpireContainerBase::expire}, true),
+      _expire_if_possible(expire_if_possible) {}
 
 auto ExpireContainerBase::insert(Item* item) -> std::pair<iterator, bool> {
     return _set.emplace(item);
@@ -48,6 +50,8 @@ void ExpireContainerBase::clear() {
 }
 
 uint64_t ExpireContainerBase::expire() {
+    if (_lifespan > UINT64_MAX / 2)
+        return 0;
     ({
         SCOPED_LOCK(_lock);
         _list.split_by_predicate([&](Item* x) {
@@ -60,7 +64,7 @@ uint64_t ExpireContainerBase::expire() {
 }
 
 bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
-    DEFER(expire());
+    DEFER( if (_expire_if_possible) expire(); );
     SCOPED_LOCK(_lock);
     auto it = __find_prelock(x);
     if (it == _set.end() && insert_if_not_exists) {
@@ -79,7 +83,7 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
                                   uint64_t failure_cooldown) -> Item* {
     Base::iterator holder;
     Item* item = nullptr;
-    expire();
+    if (_expire_if_possible) expire();
     do {
         SCOPED_LOCK(_lock);
         holder = Base::__find_prelock(key_item);
@@ -115,7 +119,7 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
 }
 
 int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
-    DEFER(expire());
+    DEFER( if (_expire_if_possible) expire(); );
     photon::semaphore sem;
     {
         SCOPED_LOCK(_lock);

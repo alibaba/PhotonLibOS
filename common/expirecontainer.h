@@ -79,6 +79,7 @@ protected:
     intrusive_list<Item> _list;
     uint64_t _lifespan;
     photon::Timer _timer;
+    bool _expire_if_possible;
     photon::spinlock _lock; // protect _list/_set operations
 
     using ItemPtr = Item*;
@@ -93,9 +94,6 @@ protected:
 
     using Set = std::unordered_set<ItemPtr, ItemHash, ItemEqual>;
     Set _set;
-
-    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle);
-    ~ExpireContainerBase() { clear(); }
 
     using iterator = decltype(_set)::iterator;
     std::pair<iterator, bool> insert(Item* item);
@@ -121,6 +119,11 @@ protected:
     }
 
 public:
+    explicit ExpireContainerBase(uint64_t lifespan) : ExpireContainerBase(lifespan, lifespan / 16, true) {}
+    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle) : ExpireContainerBase(lifespan, timer_cycle, true) {}
+    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle, bool expire_if_possible);
+    ~ExpireContainerBase() override { clear(); }
+
     void clear();
     uint64_t expire();
     size_t size() { return _set.size(); }
@@ -134,9 +137,7 @@ template <typename KeyType, typename... Ts>
 class ExpireContainer : public ExpireContainerBase {
 public:
     using Base = ExpireContainerBase;
-    ExpireContainer(uint64_t expiration) : Base(expiration, expiration / 16) {}
-    ExpireContainer(uint64_t expiration, uint64_t timer_cycle)
-        : Base(expiration, timer_cycle) {}
+    using Base::Base;
 
 protected:
     using KeyedItem = typename Base::KeyedItem<Base::Item, KeyType>;
@@ -198,7 +199,6 @@ public:
 
 // a set / list like structure
 // able to query whether an item not expired in it.
-
 template <typename T>
 class ExpireList : public ExpireContainer<T> {
 public:
@@ -367,16 +367,13 @@ template <typename KeyType, typename ValType, typename ItemType>
 class __ObjectCache : public ObjectCacheBase {
 public:
     using Base = ObjectCacheBase;
+    using Base::Base;
     using Item = ItemType;
     using KeyedItem = Base::KeyedItem<Base::Item, KeyType>;
     using InterfaceKey = typename Item::InterfaceKey;
     using ItemPtr = Item*;
     using ValEntity = typename Item::ValEntity;
     using Borrow = typename Base::Borrow<__ObjectCache>;
-
-    __ObjectCache(uint64_t expiration) : Base(expiration, expiration / 16) {}
-    __ObjectCache(uint64_t expiration, uint64_t timer_cycle)
-        : Base(expiration, timer_cycle) {}
 
     template <typename Constructor>
     ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
