@@ -293,8 +293,8 @@ public:
             return cv_status::no_timeout;
         // We got a timeout when measured against photon's internal clock,
         // but we need to check against the caller-supplied clock to tell whether we should return a timeout.
-        if (Clock::now() < t)
-            return cv_status::no_timeout;
+        // if (Clock::now() < t)
+        //     return cv_status::no_timeout;
         return cv_status::timeout;
     }
 
