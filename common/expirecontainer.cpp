@@ -18,10 +18,12 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 ExpireContainerBase::ExpireContainerBase(uint64_t lifespan,
-                                         uint64_t timer_cycle)
+                                         uint64_t timer_cycle,
+                                         bool expire_if_possible)
     : _lifespan(lifespan),
       _timer(std::max(static_cast<uint64_t>(1000), timer_cycle),
-             {this, &ExpireContainerBase::expire}, true, 8UL * 1024 * 1024) {}
+             {this, &ExpireContainerBase::expire}, true),
+      _expire_if_possible(expire_if_possible) {}
 
 auto ExpireContainerBase::insert(Item* item) -> std::pair<iterator, bool> {
     return _set.emplace(item);
@@ -38,24 +40,31 @@ auto ExpireContainerBase::find(const Item& key_item) -> iterator {
 }
 
 void ExpireContainerBase::clear() {
-    for (auto x : ({
-             SCOPED_LOCK(_lock);
-             _list.node = nullptr;
-             Set(std::move(_set));
-         })) {
-        delete x;
+    Set tmp;
+    {
+        SCOPED_LOCK(_lock);
+        _list.node = nullptr;
+        tmp = std::move(_set);
     }
+    for (auto x : tmp)
+        delete x;
 }
 
 uint64_t ExpireContainerBase::expire() {
-    ({
+    if (_lifespan > UINT64_MAX / 2)
+        return 0;
+    intrusive_list<Item> expired;
+    {
         SCOPED_LOCK(_lock);
-        _list.split_by_predicate([&](Item* x) {
+        auto tmp = _list.split_by_predicate([&](Item* x) {
             bool ret = x->_timeout.expiration() < photon::now;
             if (ret) _set.erase(x);
             return ret;
         });
-    }).delete_all();
+        expired = tmp;
+        tmp.node = nullptr;
+    }
+    expired.delete_all();
     return 0;
 }
 
@@ -79,7 +88,7 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
                                   uint64_t failure_cooldown) -> Item* {
     Base::iterator holder;
     Item* item = nullptr;
-    expire();
+    if (_expire_if_possible) expire();
     do {
         SCOPED_LOCK(_lock);
         holder = Base::__find_prelock(key_item);
@@ -115,7 +124,9 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
 }
 
 int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
-    DEFER(expire());
+    DEFER({
+        if (_expire_if_possible) expire();
+    });
     photon::semaphore sem;
     {
         SCOPED_LOCK(_lock);
