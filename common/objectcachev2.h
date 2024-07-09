@@ -110,14 +110,14 @@ protected:
     }
 
     template <typename KeyType>
-    Box* __find_or_create_item(const KeyType& key) {
+    Box* __find_or_create_item(KeyType&& key) {
         Box keyitem(key);
         auto pkey = &keyitem;
         Box* item = nullptr;
         SCOPED_LOCK(maplock);
         auto it = map.find(pkey);
         if (it == map.end()) {
-            item = new Box(key);
+            item = new Box(std::forward<KeyType>(key));
             map.emplace(item);
         } else
             item = *it;
@@ -217,7 +217,7 @@ public:
 
     template <typename KeyType>
     Borrow borrow(KeyType&& key) {
-        return borrow(&key, [&]() { return new V(); });
+        return borrow(std::forward<KeyType>(key), [&]() { return new V(); });
     }
 
     template <typename KeyType, typename Ctor>
