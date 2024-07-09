@@ -9,6 +9,10 @@
 #include <csignal>
 #include <bits/socket.h>
 #include <sys/types.h>
+#include "CommDef.h"
+#include "photon/thread/std-compat.h"
+#include "photon/photon.h"
+#include <liburing.h>
 
 typedef int (*sleep_fun_ptr_t)(unsigned int seconds);
 
@@ -27,20 +31,76 @@ typedef ssize_t (*write_fun_ptr_t)(int fd, const void *buf, size_t count);
 
 namespace ZyIo{
 
+    namespace Socket{
+
+        /**
+        * data flag
+        */
+        enum DataFlag
+        {
+            ACCEPT, CONNETC, READ, WRITE
+        };
+        class DataCarrier final {
+        CLASS_FAST_PROPERTY_GETTER(DataFlag, flag, Flag)
+        CLASS_FAST_PROPERTY_GETTER(photon::thread* , tid, Tid)
+        CLASS_FAST_PROPERTY_GETTER(__s32*, res, Res)
+
+        public:
+            DataCarrier() = delete;
+            DataCarrier(DataFlag flag,photon::thread* tid,__s32* res);
+            ~DataCarrier();
+
+        };
+
+
+
+        class ZySokect final {
+            CLASS_FAST_PROPERTY_GETTER(io_uring*, ring, Ring)
+
+        public:
+            static unsigned int DEFAULT_ENTITY_SIZE_S;
+            ZySokect();
+            ~ZySokect();
+
+            void start();
+
+            void startWithFb();
+
+            void submitAccept( photon::thread* th,__s32* res,int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+
+            void submitConnect( photon::thread* th,__s32* res,int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+
+            void submitRead( photon::thread* th,__s32* res,int fd, void *buf, size_t count);
+
+            void submitWrite( photon::thread* th,__s32* res,int fd, const void *buf, size_t count);
+
+
+
+
+
+        protected:
+            io_uring_sqe* doTake();
+
+            void doSubmit(io_uring_sqe* sqe, DataCarrier* carrier);
+        };
+    }
+
+
     namespace Hook
     {
         void initHook();
 
-        unsigned int sleep_hook(unsigned int seconds);
+        unsigned int sleep_hook( photon::thread* th,unsigned int seconds);
 
-        int accept_hook(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+        int accept_hook( photon::thread* th,int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 
-        int connect_hook(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+        int connect_hook( photon::thread* th,int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 
-        ssize_t read_hook(int fd, void *buf, size_t count);
+        ssize_t read_hook( photon::thread* th,int fd, void *buf, size_t count);
 
-        ssize_t write_hook(int fd, const void *buf, size_t count);
+        ssize_t write_hook( photon::thread* th,int fd, const void *buf, size_t count);
     }
+
 
 
 
