@@ -3,7 +3,6 @@
 //
 
 #include "photon/hook/hook.h"
-#include "photon/hook/ZySokect.h"
 #include <iostream>
 #include <dlfcn.h>
 #include <cstring>
@@ -58,7 +57,7 @@ namespace ZyIo{
                 {
                     continue;
                 }
-                for (int i = 0; i < cqeCount; i++)
+                for (unsigned int i = 0; i < cqeCount; i++)
                 {
                     auto cqe = cqes[i];
                     auto dataCarrier = (DataCarrier*)cqe->user_data;
@@ -104,7 +103,7 @@ namespace ZyIo{
         }
 
         void ZySokect::submitWrite(photon::thread *th, __s32 *res, int fd, const void *buf, size_t count) {
-            auto carrier = new DataCarrier(READ, th,res);
+            auto carrier = new DataCarrier(WRITE, th,res);
             auto sqe = doTake();
             io_uring_prep_write(sqe, fd, buf, count, 0);
             doSubmit(sqe, carrier);

@@ -7,7 +7,7 @@
 
 
 #include <csignal>
-#include <bits/socket.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include "CommDef.h"
 #include "photon/thread/std-compat.h"
