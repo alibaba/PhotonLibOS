@@ -48,13 +48,12 @@ protected:
 
             // Returned RefPtr is the old one
             // other reader will get new one after updated
-            std::shared_ptr<V> update(V* val, uint64_t ts = 0) {
-                while (box->reflock.try_lock() != 0) {
-                    photon::thread_yield();
-                }
-                DEFER(box->reflock.unlock());
+            std::shared_ptr<V> update(V* val, uint64_t ts = 0,
+                                      std::shared_ptr<V>* newptr = nullptr) {
+                SCOPED_LOCK(box->reflock);
                 auto r = std::shared_ptr<V>(val);
-                if (ts) box->lastcreate = ts;
+                if (newptr) *newptr = r;
+                box->lastcreate = ts;
                 std::swap(r, box->ref);
                 return r;
             }
@@ -103,9 +102,11 @@ protected:
     uint64_t lifespan;
     photon::Timer _timer;
 
-    void __update(Box* item, V* val) {
-        reclaim_queue.template send<PhotonPause>(
-            new std::shared_ptr<V>(item->writer().update(val, photon::now)));
+    std::shared_ptr<V> __update(Box* item, V* val) {
+        std::shared_ptr<V> ret;
+        reclaim_queue.template send<PhotonPause>(new std::shared_ptr<V>(
+            item->writer().update(val, photon::now, &ret)));
+        return ret;
     }
 
     template <typename KeyType>
@@ -199,19 +200,19 @@ public:
         while (!r) {
             if (item->boxlock.try_lock() == 0) {
                 DEFER(item->boxlock.unlock());
-                auto lr = item->reader();
-                if (!lr) {
+                r = item->reader();
+                if (!r) {
                     if (photon::sat_add(item->lastcreate, cooldown) <=
                         photon::now) {
-                        __update(item, ctor());
+                        r = __update(item, ctor());
                     }
-                    return Borrow(this, item, item->reader());
+                    return Borrow(this, item, std::move(r));
                 }
             }
             photon::thread_yield();
             r = item->reader();
         }
-        return Borrow(this, item, item->reader());
+        return Borrow(this, item, std::move(r));
     }
 
     template <typename KeyType>
@@ -222,8 +223,8 @@ public:
     template <typename KeyType, typename Ctor>
     Borrow update(KeyType&& key, Ctor&& ctor) {
         auto item = __find_or_create_item(std::forward<KeyType>(key));
-        __update(item, ctor());
-        return Borrow(this, item, item->reader());
+        auto r = __update(item, ctor());
+        return Borrow(this, item, std::move(r));
     }
 
     ObjectCacheV2(uint64_t lifespan)
