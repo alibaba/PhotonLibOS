@@ -40,7 +40,7 @@ void *task(void *arg) {
     for (const auto &x : k) {
         auto strx = std::to_string(x);
         auto b = oc->borrow(strx, [&strx] {
-            photon::thread_usleep(1 * 1000);
+            // photon::thread_usleep(1 * 1000);
             // LOG_INFO("CTOR `", photon::now);
             return new std::string(strx);
         });
@@ -64,7 +64,7 @@ void test_objcache(OC<std::string, std::string *> &oc, const char *name) {
 
 template <template <class, class> class OC>
 void test(const char *name) {
-    OC<std::string, std::string *> oc(-1UL);
+    OC<std::string, std::string *> oc(0);
     std::vector<std::thread> ths;
     photon::semaphore sem(0);
     for (int i = 0; i < 10; i++) {

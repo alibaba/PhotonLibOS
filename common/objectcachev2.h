@@ -37,7 +37,6 @@ protected:
         const K key;
         std::shared_ptr<V> ref;
         photon::spinlock boxlock;
-        photon::spinlock reflock;
         uint64_t lastcreate = 0;
         uint64_t timestamp = 0;
 
@@ -50,11 +49,12 @@ protected:
             // other reader will get new one after updated
             std::shared_ptr<V> update(V* val, uint64_t ts = 0,
                                       std::shared_ptr<V>* newptr = nullptr) {
-                SCOPED_LOCK(box->reflock);
                 auto r = std::shared_ptr<V>(val);
-                if (newptr) *newptr = r;
+                if (newptr)
+                    std::atomic_store(newptr, r);
+                *newptr = r;
                 box->lastcreate = ts;
-                std::swap(r, box->ref);
+                r = std::atomic_exchange(&box->ref, r);
                 return r;
             }
 
@@ -79,8 +79,7 @@ protected:
 
         Updater writer() { return Updater(this); }
         std::shared_ptr<V> reader() {
-            SCOPED_LOCK(reflock);
-            return ref;
+            return std::atomic_load(&ref);
         }
     };
     struct ItemHash {
@@ -173,6 +172,7 @@ public:
         Borrow& operator=(Borrow&& rhs) {
             std::swap(_oc, rhs._oc);
             std::swap(_item, rhs._item);
+            _reader = std::atomic_exchange(&rhs._reader, _reader);
             std::swap(_reader, rhs._reader);
             std::swap(_recycle, rhs._recycle);
             return *this;
