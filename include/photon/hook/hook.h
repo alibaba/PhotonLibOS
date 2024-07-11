@@ -88,7 +88,7 @@ namespace ZyIo{
 
     namespace Hook
     {
-        void initHook();
+        void initHook(bool isDebug);
 
         unsigned int sleep_hook( photon::thread* th,unsigned int seconds);
 
