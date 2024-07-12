@@ -40,7 +40,7 @@ namespace ZyIo{
         }
 
         void ZySokect::startWithFb() {
-            new photon_std::thread(&ZyIo::Socket::ZySokect::start, this);
+            std::thread(&ZyIo::Socket::ZySokect::start, this);
         }
 
         void ZySokect::start() {
@@ -64,7 +64,6 @@ namespace ZyIo{
                     delete dataCarrier;
                     io_uring_cqe_seen(ring, cqe);
                 }
-                photon::thread_usleep(100);
             }
         }
 
@@ -120,11 +119,10 @@ namespace ZyIo{
                 fprintf(stderr, "please init hook in fiber\n");
                 return;
             }
-            SocketHook::G_HOOK = true;
-            SocketHook::G_HOOK_IS_DEBUG = isDebug;
-            SocketHook::G_HOOK_SOCKET_INS = new ZyIo::Socket::ZySokect();
             G_HOOK_SOCKET_INS = new ZyIo::Socket::ZySokect();
             G_HOOK_SOCKET_INS->startWithFb();
+            G_HOOK_IS_DEBUG = isDebug;
+            G_HOOK = true;
             printf("enable block socket api hook\n");
             #else
             fprintf(stderr, "not support hook for this system\n");
