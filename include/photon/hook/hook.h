@@ -75,10 +75,7 @@ namespace ZyIo{
             void submitWrite( photon::thread* th,__s32* res,int fd, const void *buf, size_t count);
 
 
-
-
-
-        protected:
+        private:
             io_uring_sqe* doTake();
 
             void doSubmit(io_uring_sqe* sqe, DataCarrier* carrier);
@@ -88,7 +85,15 @@ namespace ZyIo{
 
     namespace Hook
     {
-        void initHook(bool isDebug);
+
+        class SocketHook{
+
+        public:
+            static bool G_HOOK;
+            static bool G_HOOK_IS_DEBUG;
+            static ZyIo::Socket::ZySokect* G_HOOK_SOCKET_INS;
+            static void init(bool isDebug);
+        };
 
         unsigned int sleep_hook( photon::thread* th,unsigned int seconds);
 

@@ -3,7 +3,6 @@
 //
 
 #include "photon/hook/hook.h"
-#include "photon/common/alog.h"
 #include <dlfcn.h>
 
 
@@ -13,8 +12,6 @@ HOOK_SYS_FUNC(connect);
 HOOK_SYS_FUNC(accept);
 HOOK_SYS_FUNC(read);
 HOOK_SYS_FUNC(write);
-
-
 
 
 namespace ZyIo{
@@ -33,7 +30,7 @@ namespace ZyIo{
             auto const ret = io_uring_queue_init(DEFAULT_ENTITY_SIZE_S, pUring, 0); // 初始化
             if (ret < 0)
             {
-                LOG_ERROR("io_uring_queue_init error: %d",ret);
+                fprintf(stderr, "io_uring_queue_init error: %d\n",ret);
                 exit(EXIT_FAILURE);
             }
             this->ring = pUring;
@@ -67,6 +64,7 @@ namespace ZyIo{
                     delete dataCarrier;
                     io_uring_cqe_seen(ring, cqe);
                 }
+                photon::thread_usleep(100);
             }
         }
 
@@ -112,37 +110,38 @@ namespace ZyIo{
 
     }
     namespace Hook{
-        static bool G_HOOK = false;
-        static bool G_HOOK_IS_DEBUG = false;
-        static ZyIo::Socket::ZySokect* G_HOOK_SOCKET_INS = nullptr;
-        void initHook(bool isDebug) {
-        #ifdef __linux__
+        bool SocketHook::G_HOOK = false;
+        bool SocketHook::G_HOOK_IS_DEBUG = false;
+        ZyIo::Socket::ZySokect* SocketHook::G_HOOK_SOCKET_INS = nullptr;
+        void SocketHook::init(bool isDebug) {
+            #ifdef __linux__
             auto th = photon_std::this_thread::get_id();
             if(th == nullptr){
-                LOG_WARN("please init hook in fiber");
+                fprintf(stderr, "please init hook in fiber\n");
                 return;
             }
-            G_HOOK = true;
-            G_HOOK_IS_DEBUG = isDebug;
+            SocketHook::G_HOOK = true;
+            SocketHook::G_HOOK_IS_DEBUG = isDebug;
+            SocketHook::G_HOOK_SOCKET_INS = new ZyIo::Socket::ZySokect();
             G_HOOK_SOCKET_INS = new ZyIo::Socket::ZySokect();
-            G_HOOK_SOCKET_INS->start();
-            LOG_INFO("enable block socket api hook");
-        #else
-            LOG_WARN("not support hook for this system");
-        #endif
+            G_HOOK_SOCKET_INS->startWithFb();
+            printf("enable block socket api hook\n");
+            #else
+            fprintf(stderr, "not support hook for this system\n");
+            #endif
         }
 
         unsigned int sleep_hook(photon::thread* th,unsigned int seconds){
-            return photon::thread_usleep(seconds);
+            return photon::thread_sleep(seconds);
         }
 
         int accept_hook(photon::thread* th,int sockfd, struct sockaddr *addr, socklen_t *addrlen){
             //submit accept
             __s32 r=-100;
             __s32* res =&r;
-            G_HOOK_SOCKET_INS->submitAccept(th,res,sockfd,addr,addrlen);
+            SocketHook::G_HOOK_SOCKET_INS->submitAccept(th,res,sockfd,addr,addrlen);
             //yield()
-            photon::thread_usleep(-1UL);
+            photon::thread_sleep(-1U);
             //wait notify
             return *res;
         }
@@ -151,9 +150,9 @@ namespace ZyIo{
             //submit connect
             __s32 r=-100;
             __s32* res =&r;
-            G_HOOK_SOCKET_INS->submitConnect(th,res,sockfd,addr,addrlen);
+            SocketHook::G_HOOK_SOCKET_INS->submitConnect(th,res,sockfd,addr,addrlen);
             //yield()
-            photon::thread_usleep(-1UL);
+            photon::thread_sleep(-1U);
             //wait notify
             return *res;
         }
@@ -162,9 +161,9 @@ namespace ZyIo{
             //submit read
             __s32 r=-100;
             __s32* res =&r;
-            G_HOOK_SOCKET_INS->submitRead(th,res,fd,buf,count);
+            SocketHook::G_HOOK_SOCKET_INS->submitRead(th,res,fd,buf,count);
             //yield()
-            photon::thread_usleep(-1UL);
+            photon::thread_sleep(-1U);
             //wait notify
             return *res;
         }
@@ -173,9 +172,9 @@ namespace ZyIo{
             //submit write
             __s32 r=-100;
             __s32* res =&r;
-            G_HOOK_SOCKET_INS->submitWrite(th,res,fd,buf,count);
+            SocketHook::G_HOOK_SOCKET_INS->submitWrite(th,res,fd,buf,count);
             //yield()
-            photon::thread_usleep(-1UL);
+            photon::thread_sleep(-1U);
             //wait notify
             return *res;
         }
@@ -190,14 +189,14 @@ extern "C" {
 
 unsigned int sleep(unsigned int seconds){
     auto th = photon_std::this_thread::get_id();
-    if(ZyIo::Hook::G_HOOK && th != nullptr){
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call hook sleep api");
+    if(ZyIo::Hook::SocketHook::G_HOOK && th != nullptr){
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call hook sleep api,sleep:%d s\n",seconds);
         }
         return ZyIo::Hook::sleep_hook(th,seconds);
     }else{
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call lib c sleep api");
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call lib c sleep api,sleep:%d s\n",seconds);
         }
         return g_sys_sleep_fun(seconds);
     }
@@ -206,14 +205,14 @@ unsigned int sleep(unsigned int seconds){
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
     auto th = photon_std::this_thread::get_id();
-    if (ZyIo::Hook::G_HOOK && th != nullptr) {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call hook accept api");
+    if (ZyIo::Hook::SocketHook::G_HOOK && th != nullptr) {
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call hook accept api\n");
         }
         return ZyIo::Hook::accept_hook(th,sockfd, addr, addrlen);
     } else {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call lib c accept api");
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call lib c accept api\n");
         }
         return g_sys_accept_fun(sockfd, addr, addrlen);
     }
@@ -222,14 +221,14 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     auto th = photon_std::this_thread::get_id();
-    if (ZyIo::Hook::G_HOOK && th != nullptr) {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call hook connect api");
+    if (ZyIo::Hook::SocketHook::G_HOOK && th != nullptr) {
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call hook connect api\n");
         }
         return ZyIo::Hook::connect_hook(th,sockfd, addr, addrlen);
     } else {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call lib c connect api");
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call lib c connect api\n");
         }
         return g_sys_connect_fun(sockfd, addr, addrlen);
     }
@@ -237,14 +236,20 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
 ssize_t read(int fd, void *buf, size_t count) {
     auto th = photon_std::this_thread::get_id();
-    if (ZyIo::Hook::G_HOOK && th != nullptr) {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call hook read api");
+    if (ZyIo::Hook::SocketHook::G_HOOK && th != nullptr) {
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call hook hook read api\n");
+            size_t len = ZyIo::Hook::read_hook(th,fd, buf, count);
+            printf("expect data len:%zu,success read data len:%zu\n",count,len);
+            return len;
         }
         return ZyIo::Hook::read_hook(th,fd, buf, count);
     } else {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call lib c read api");
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call lib c read api\n");
+            size_t len = g_sys_read_fun(fd, buf, count);
+            printf("expect data len:%zu,success read data len:%zu\n",count,len);
+            return len;
         }
         return g_sys_read_fun(fd, buf, count);
     }
@@ -252,14 +257,14 @@ ssize_t read(int fd, void *buf, size_t count) {
 
 ssize_t write(int fd, const void *buf, size_t count) {
     auto th = photon_std::this_thread::get_id();
-    if (ZyIo::Hook::G_HOOK && th != nullptr) {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call write read api");
+    if (ZyIo::Hook::SocketHook::G_HOOK && th != nullptr) {
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call hook write read api,write data len:%zu\n",count);
         }
         return ZyIo::Hook::write_hook(th,fd, buf, count);
     } else {
-        if(ZyIo::Hook::G_HOOK_IS_DEBUG){
-            LOG_INFO("call lib c write api");
+        if(ZyIo::Hook::SocketHook::G_HOOK_IS_DEBUG){
+            printf("call lib c write api,write data len:%zu\n",count);
         }
         return g_sys_write_fun(fd, buf, count);
     }
