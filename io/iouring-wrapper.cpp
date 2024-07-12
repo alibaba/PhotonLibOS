@@ -112,7 +112,7 @@ public:
         if (probe == nullptr) {
             LOG_ERROR_RETURN(0, -1, "iouring: failed to get probe");
         }
-        DEFER(free(probe));
+        DEFER(io_uring_free_probe(probe));
         if (!io_uring_opcode_supported(probe, IORING_OP_PROVIDE_BUFFERS) ||
             !io_uring_opcode_supported(probe, IORING_OP_ASYNC_CANCEL)) {
             LOG_ERROR_RETURN(0, -1, "iouring: some opcodes are not supported");
