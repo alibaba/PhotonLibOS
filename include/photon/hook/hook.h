@@ -31,7 +31,7 @@ typedef ssize_t (*write_fun_ptr_t)(int fd, const void *buf, size_t count);
 
 namespace ZyIo{
 
-    namespace Socket{
+    namespace IoUring{
 
         /**
         * data flag
@@ -54,13 +54,13 @@ namespace ZyIo{
 
 
 
-        class ZySokect final {
+        class IoUringImp final {
             CLASS_FAST_PROPERTY_GETTER(io_uring*, ring, Ring)
 
         public:
             static unsigned int DEFAULT_ENTITY_SIZE_S;
-            ZySokect();
-            ~ZySokect();
+            IoUringImp();
+            ~IoUringImp();
 
             void start();
 
@@ -86,14 +86,24 @@ namespace ZyIo{
     namespace Hook
     {
 
-        class SocketHook{
+
+        class HookFlag{
 
         public:
             static bool G_HOOK;
             static bool G_HOOK_IS_DEBUG;
-            static ZyIo::Socket::ZySokect* G_HOOK_SOCKET_INS;
+            static IoUring::IoUringImp* G_HOOK_IOURING_INS;
             static void init(bool isDebug);
+
+
+        public:
+            HookFlag() = delete;
+            ~HookFlag() = default;
         };
+
+
+
+
 
         unsigned int sleep_hook( photon::thread* th,unsigned int seconds);
 
@@ -104,6 +114,7 @@ namespace ZyIo{
         ssize_t read_hook( photon::thread* th,int fd, void *buf, size_t count);
 
         ssize_t write_hook( photon::thread* th,int fd, const void *buf, size_t count);
+
     }
 
 
