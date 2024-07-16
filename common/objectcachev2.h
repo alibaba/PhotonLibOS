@@ -47,15 +47,17 @@ protected:
 
             // Returned RefPtr is the old one
             // other reader will get new one after updated
-            std::shared_ptr<V> update(V* val, uint64_t ts = 0,
-                                      std::shared_ptr<V>* newptr = nullptr) {
-                auto r = std::shared_ptr<V>(val);
-                if (newptr)
-                    std::atomic_store(newptr, r);
-                *newptr = r;
+
+            std::shared_ptr<V> update(std::shared_ptr<V>& r, uint64_t ts = 0) {
                 box->lastcreate = ts;
                 r = std::atomic_exchange(&box->ref, r);
                 return r;
+            }
+            std::shared_ptr<V> update(V* val, uint64_t ts = 0,
+                                      std::shared_ptr<V>* newptr = nullptr) {
+                auto r = std::shared_ptr<V>(val);
+                if (newptr) *newptr = r;
+                return update(r, ts);
             }
 
             explicit Updater(Box* b) : box(b) {}
@@ -78,53 +80,56 @@ protected:
         ~Box() {}
 
         Updater writer() { return Updater(this); }
-        std::shared_ptr<V> reader() {
-            return std::atomic_load(&ref);
-        }
+        std::shared_ptr<V> reader() { return std::atomic_load(&ref); }
     };
     struct ItemHash {
-        size_t operator()(const Box* x) const { return std::hash<K>()(x->key); }
+        size_t operator()(const Box& x) const { return std::hash<K>()(x.key); }
     };
     struct ItemEqual {
-        bool operator()(const Box* a, const Box* b) const {
-            return a->key == b->key;
+        bool operator()(const Box& a, const Box& b) const {
+            return a.key == b.key;
         }
     };
 
     photon::thread* reclaimer = nullptr;
-    photon::common::RingChannel<
-        LockfreeMPMCRingQueue<std::shared_ptr<V>*, 4096>>
+    photon::common::RingChannel<LockfreeMPMCRingQueue<std::shared_ptr<V>, 4096>>
         reclaim_queue;
     photon::spinlock maplock;
-    std::unordered_set<Box*, ItemHash, ItemEqual> map;
+    std::unordered_set<Box, ItemHash, ItemEqual> map;
     intrusive_list<Box> cycle_list;
     uint64_t lifespan;
     photon::Timer _timer;
+    bool _exit = false;
 
-    std::shared_ptr<V> __update(Box* item, V* val) {
-        std::shared_ptr<V> ret;
-        reclaim_queue.template send<PhotonPause>(new std::shared_ptr<V>(
-            item->writer().update(val, photon::now, &ret)));
-        return ret;
+    std::shared_ptr<V> __update(Box& item, std::shared_ptr<V> val) {
+        auto ret_val = val;
+        auto old_val = item.writer().update(val, photon::now);
+        reclaim_queue.template send<PhotonPause>(old_val);
+        return ret_val;
+    }
+
+    std::shared_ptr<V> __update(Box& item, V* val) {
+        std::shared_ptr<V> ptr(val);
+        return __update(item, ptr);
     }
 
     template <typename KeyType>
-    Box* __find_or_create_item(KeyType&& key) {
+    Box& __find_or_create_item(KeyType&& key) {
         Box keyitem(key);
-        auto pkey = &keyitem;
         Box* item = nullptr;
         SCOPED_LOCK(maplock);
-        auto it = map.find(pkey);
+        auto it = map.find(keyitem);
         if (it == map.end()) {
-            item = new Box(std::forward<KeyType>(key));
-            map.emplace(item);
+            // item = new Box(std::forward<KeyType>(key));
+            auto rt = map.emplace(key);
+            if (rt.second) item = (Box*)&*rt.first;
         } else
-            item = *it;
+            item = (Box*)&*it;
         assert(item);
         item->timestamp = photon::now;
         cycle_list.pop(item);
         cycle_list.push_back(item);
-        return item;
+        return *item;
     }
 
     uint64_t __expire() {
@@ -142,13 +147,11 @@ protected:
             auto x = cycle_list.front();
             while (x && (photon::sat_add(x->timestamp, lifespan) < now)) {
                 cycle_list.pop(x);
-                __update(x, nullptr);
-                map.erase(x);
-                delete_list.push_back(x);
+                __update(*x, nullptr);
+                map.erase(*x);
                 x = cycle_list.front();
             }
         }
-        delete_list.delete_all();
         return 0;
     }
 
@@ -180,7 +183,7 @@ public:
 
         ~Borrow() {
             if (_recycle) {
-                _oc->__update(_item, nullptr);
+                _oc->__update(*_item, nullptr);
             }
         }
 
@@ -195,29 +198,30 @@ public:
 
     template <typename KeyType, typename Ctor>
     Borrow borrow(KeyType&& key, Ctor&& ctor, uint64_t cooldown = 0UL) {
-        auto item = __find_or_create_item(std::forward<KeyType>(key));
-        auto r = item->reader();
+        auto& item = __find_or_create_item(std::forward<KeyType>(key));
+        auto r = item.reader();
         while (!r) {
-            if (item->boxlock.try_lock() == 0) {
-                DEFER(item->boxlock.unlock());
-                r = item->reader();
+            if (item.boxlock.try_lock() == 0) {
+                DEFER(item.boxlock.unlock());
+                r = item.reader();
                 if (!r) {
-                    if (photon::sat_add(item->lastcreate, cooldown) <=
+                    if (photon::sat_add(item.lastcreate, cooldown) <=
                         photon::now) {
                         r = __update(item, ctor());
                     }
-                    return Borrow(this, item, std::move(r));
+                    return Borrow(this, &item, std::move(r));
                 }
             }
             photon::thread_yield();
-            r = item->reader();
+            r = item.reader();
         }
-        return Borrow(this, item, std::move(r));
+        return Borrow(this, &item, std::move(r));
     }
 
     template <typename KeyType>
     Borrow borrow(KeyType&& key) {
-        return borrow(std::forward<KeyType>(key), [&]() { return new V(); });
+        return borrow(std::forward<KeyType>(key),
+                      [&]() { return std::make_shared<V>(); });
     }
 
     template <typename KeyType, typename Ctor>
@@ -230,15 +234,11 @@ public:
     ObjectCacheV2(uint64_t lifespan)
         : lifespan(lifespan),
           _timer(1UL * 1000 * 1000, {this, &ObjectCacheV2::__expire}, true,
-                 photon::DEFAULT_STACK_SIZE) {
+                 photon::DEFAULT_STACK_SIZE),
+          _exit(false) {
         reclaimer = photon::thread_create11([this] {
-            while (true) {
-                auto r = reclaim_queue.recv();
-                if (!r) {
-                    break;
-                } else {
-                    delete r;
-                }
+            while (!_exit) {
+                reclaim_queue.recv();
             }
         });
         photon::thread_enable_join(reclaimer);
@@ -247,11 +247,12 @@ public:
     ~ObjectCacheV2() {
         _timer.stop();
         if (reclaimer) {
+            _exit = true;
             reclaim_queue.template send<PhotonPause>(nullptr);
             photon::thread_join((photon::join_handle*)reclaimer);
             reclaimer = nullptr;
         }
         SCOPED_LOCK(maplock);
-        cycle_list.delete_all();
+        cycle_list.node = nullptr;
     }
 };
