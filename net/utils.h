@@ -53,11 +53,11 @@ IPAddr gethostbypeer(IPAddr remote);
  * @param name target hostname when detecting
  * @return `IPAddr` of this host
  */
-IPAddr gethostbypeer(const char* domain);
+IPAddr gethostbypeer(std::string_view name);
 
 // Callback returns -1 means break
 
-int _gethostbyname(const char* name, Callback<IPAddr> append_op);
+int _gethostbyname(std::string_view name, Callback<IPAddr> append_op);
 
 // inline implemention for compatible
 
@@ -69,7 +69,7 @@ int _gethostbyname(const char* name, Callback<IPAddr> append_op);
  * @param name Host name to resolve
  * @return first resolved address.
  */
-inline IPAddr gethostbyname(const char* name) {
+inline IPAddr gethostbyname(std::string_view name) {
     IPAddr ret;
     auto cb = [&](IPAddr addr) {
         ret = addr;
@@ -90,11 +90,12 @@ inline IPAddr gethostbyname(const char* name) {
  * @param bufsize size of `buf`, takes `sizeof(IPAddr)` as unit
  * @return sum of resolved address number. -1 means error. result will be filled into `buf`
  */
-inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
-    int i = 0;
+inline int gethostbyname(std::string_view name, IPAddr* buf, size_t bufsize = 1) {
+    size_t i = 0;
     auto cb = [&](IPAddr addr) {
-        if (i < bufsize) buf[i++] = addr;
-        return (i < bufsize) ? 0 : -1;
+        if (i >= bufsize) return -1;
+        buf[i++] = addr;
+        return 0;
     };
     return _gethostbyname(name, cb);
 }
@@ -109,7 +110,7 @@ inline int gethostbyname(const char* name, IPAddr* buf, int bufsize = 1) {
  * @param ret `std::vector<IPAddr>` reference to get results
  * @return sum of resolved address number. -1 means error.
  */
-inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
+inline int gethostbyname(std::string_view name, std::vector<IPAddr>& ret) {
     ret.clear();
     auto cb = [&](IPAddr addr) {
         ret.push_back(addr);
@@ -129,7 +130,7 @@ inline int gethostbyname(const char* name, std::vector<IPAddr>& ret) {
  * @param ret `std::vector<IPAddr>` reference to get results
  * @return sum of resolved address number.
  */
-inline int gethostbyname_nb(const char* name, std::vector<IPAddr>& ret) {
+inline int gethostbyname_nb(std::string_view name, std::vector<IPAddr>& ret) {
     photon::semaphore sem(0);
     int r = 0;
     ret.clear();
@@ -155,9 +156,12 @@ class Resolver : public Object {
 public:
     // When failed, return an Undefined IPAddr
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
-    virtual IPAddr resolve(const char* host) = 0;
-    virtual void resolve(const char* host, Delegate<void, IPAddr> func) = 0;
-    virtual void discard_cache(const char* host, IPAddr ip = IPAddr()) = 0;  // discard current cache of ip
+    virtual IPAddr resolve(std::string_view host) = 0;
+    void resolve(std::string_view host, Delegate<void, IPAddr> func) { func(resolve(host)); }
+    // If filter callback returns false, the IP will be abandoned.
+    virtual IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr> filter) = 0;
+    // Discard cache of a hostname, ip can be specified
+    virtual void discard_cache(std::string_view host, IPAddr ip = IPAddr()) = 0;
 };
 
 /**

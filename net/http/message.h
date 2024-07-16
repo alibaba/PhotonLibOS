@@ -96,6 +96,7 @@ public:
     ssize_t write(const void *buf, size_t count) override;
     ssize_t writev(const struct iovec *iov, int iovcnt) override;
     ssize_t write_stream(IStream *stream, size_t size_limit = -1);
+    int close() override { return 0; }
 
     // size of body
     size_t body_size() const;
@@ -130,7 +131,6 @@ protected:
     int append_bytes(uint16_t size);
 
     int skip_remain();
-    int close() override { return 0; }
 
     std::string_view partial_body() const {
         return std::string_view{m_buf, m_buf_size} | m_body;

@@ -71,25 +71,27 @@ public:
 
     virtual uint64_t max_message_size() override { return m_max_msg_size; }
 
-    int do_connect(struct sockaddr* addr, size_t addr_len) {
-        return doio([&] { return ::connect(fd, addr, addr_len); },
-                    [&] { return photon::wait_for_fd_writable(fd); });
+    int do_connect(const sockaddr_storage* s) {
+        return DOIO_ONCE(::connect(fd, s->get_sockaddr(), s->get_socklen()), wait_for_fd_writable(fd));
     }
 
-    int do_bind(struct sockaddr* addr, size_t addr_len) {
-        return ::bind(fd, addr, addr_len);
+    int do_bind(const sockaddr_storage* s) {
+        return ::bind(fd, s->get_sockaddr(), s->get_socklen());
     }
     ssize_t do_send(const iovec* iov, int iovcnt, sockaddr* addr,
                     size_t addrlen, int flags = 0) {
         flags |= MSG_NOSIGNAL;
         struct msghdr hdr {
-            .msg_name = (void*)addr, .msg_namelen = (socklen_t)addrlen,
+            .msg_name = (void*)addr,
+            .msg_namelen = (socklen_t)addrlen,
             .msg_iov = (iovec*)iov,
             .msg_iovlen = (decltype(msghdr::msg_iovlen))iovcnt,
-            .msg_control = nullptr, .msg_controllen = 0, .msg_flags = flags,
+            .msg_control = nullptr,
+            .msg_controllen = 0,
+            .msg_flags = 0,
         };
-        return doio([&] { return ::sendmsg(fd, &hdr, MSG_DONTWAIT | flags); },
-                    [&] { return photon::wait_for_fd_writable(fd); });
+        return DOIO_ONCE(::sendmsg(fd, &hdr, MSG_DONTWAIT | flags),
+                     wait_for_fd_writable(fd));
     }
     ssize_t do_recv(const iovec* iov, int iovcnt, sockaddr* addr,
                     size_t* addrlen, int flags) {
@@ -98,11 +100,12 @@ public:
             .msg_namelen = addrlen ? (socklen_t)*addrlen : 0,
             .msg_iov = (iovec*)iov,
             .msg_iovlen = (decltype(msghdr::msg_iovlen))iovcnt,
-            .msg_control = nullptr, .msg_controllen = 0, .msg_flags = flags,
+            .msg_control = nullptr,
+            .msg_controllen = 0,
+            .msg_flags = 0,
         };
-        auto ret =
-            doio([&] { return ::recvmsg(fd, &hdr, MSG_DONTWAIT | flags); },
-                 [&] { return photon::wait_for_fd_readable(fd); });
+        auto ret = DOIO_ONCE(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
+                         wait_for_fd_writable(fd));
         if (addrlen) *addrlen = hdr.msg_namelen;
         return ret;
     }
@@ -141,13 +144,13 @@ public:
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
         sockaddr_storage s(*ep);
-        return do_connect(s.get_sockaddr(), s.get_socklen());
+        return do_connect(&s);
     }
     virtual int bind(const Addr* addr, size_t addr_len) override {
         auto ep = (EndPoint*)addr;
         assert(ep && addr_len == sizeof(*ep));
         sockaddr_storage s(*ep);
-        return do_bind(s.get_sockaddr(), s.get_socklen());
+        return do_bind(&s);
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt, const Addr* addr,
                          size_t addr_len, int flags = 0) override {
@@ -187,11 +190,13 @@ public:
     }
     virtual int connect(const Addr* addr, size_t addr_len) override {
         auto un = to_addr_un(addr, addr_len);
-        return do_connect((sockaddr*)&un, sizeof(un));
+        sockaddr_storage s(un);
+        return do_connect(&s);
     }
     virtual int bind(const Addr* addr, size_t addr_len) override {
         auto un = to_addr_un(addr, addr_len);
-        return do_bind((sockaddr*)&un, sizeof(un));
+        sockaddr_storage s(un);
+        return do_bind(&s);
     }
     virtual ssize_t send(const struct iovec* iov, int iovcnt, const Addr* addr,
                          size_t addr_len, int flags = 0) override {

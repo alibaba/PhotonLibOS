@@ -22,13 +22,21 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 namespace photon {
+
+struct ExecutorQueueOption {
+    uint64_t max_yield_turn;
+    uint64_t max_yield_usec;
+};
+
 class Executor {
 public:
     class ExecutorImpl;
 
     ExecutorImpl *e;
     Executor(int init_ev = photon::INIT_EVENT_DEFAULT,
-             int init_io = photon::INIT_IO_DEFAULT);
+             int init_io = photon::INIT_IO_DEFAULT,
+             const PhotonOptions& options = {},
+             const ExecutorQueueOption& queue_options = {-1UL, 1024});
     ~Executor();
 
     template <

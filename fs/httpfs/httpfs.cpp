@@ -145,7 +145,7 @@ public:
         net::DummyReaderWriter dummy;
         ret = curl->GET(get_url().c_str(), &dummy, tmo.timeout());
         if (ret < 200) {
-            if (photon::now >= tmo.expire()) {
+            if (photon::now >= tmo.expiration()) {
                 // set errno to ENOENT since stat should not ETIMEDOUT
                 LOG_ERROR_RETURN(ENOENT, -1, "Failed to update file stat");
             }
@@ -214,7 +214,7 @@ public:
         curl->set_header_container(&headers);
         ret = curl->GET(get_url().c_str(), &writer, tmo.timeout());
         if (ret < 200) {
-            if (photon::now > tmo.expire()) {
+            if (photon::now > tmo.expiration()) {
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Failed to perform GET ", VALUE(url),
                                  VALUE(offset));
             }

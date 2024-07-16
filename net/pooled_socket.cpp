@@ -105,10 +105,10 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
     EndPoint key;
     std::unique_ptr<ISocketStream> stream;
     int fd;
-    Timeout expire;
+    Timeout timeout;
 
-    StreamListNode(EndPoint key, ISocketStream* stream, int fd, uint64_t expire)
-        : key(key), stream(stream), fd(fd), expire(expire) {
+    StreamListNode(const EndPoint& key, ISocketStream* stream, int fd, uint64_t TTL_us)
+        : key(key), stream(stream), fd(fd), timeout(TTL_us) {
     }
 };
 
@@ -117,7 +117,7 @@ protected:
     CascadingEventEngine* ev;
     photon::thread* collector;
     std::unordered_map<EndPoint, intrusive_list<StreamListNode>> fdmap;
-    uint64_t expiration;
+    uint64_t TTL_us;
     photon::Timer timer;
 
     // all fd < 0 treated as socket not based on fd
@@ -135,7 +135,7 @@ protected:
         if (node->fd >= 0) ev->rm_interest({node->fd, EVENT_READ, node});
     }
 
-    ISocketStream* get_from_pool(EndPoint ep) {
+    ISocketStream* get_from_pool(const EndPoint& ep) {
         auto it = fdmap.find(ep);
         if (it == fdmap.end()) return nullptr;
         assert(it != fdmap.end());
@@ -162,12 +162,12 @@ protected:
     }
 
 public:
-    TCPSocketPool(ISocketClient* client, uint64_t expiration,
+    TCPSocketPool(ISocketClient* client, uint64_t TTL_us,
                   bool client_ownership = false)
         : ForwardSocketClient(client, client_ownership),
           ev(photon::new_default_cascading_engine()),
-          expiration(expiration),
-          timer(expiration, {this, &TCPSocketPool::evict}) {
+          TTL_us(TTL_us),
+          timer(TTL_us, {this, &TCPSocketPool::evict}) {
         collector = (photon::thread*)photon::thread_enable_join(
             photon::thread_create11(&TCPSocketPool::collect, this));
     }
@@ -189,8 +189,8 @@ public:
                          "Socket pool supports TCP-like socket only");
     }
 
-    ISocketStream* connect(EndPoint remote,
-                           EndPoint local = EndPoint()) override {
+    ISocketStream* connect(const EndPoint& remote,
+                           const EndPoint* local) override {
     again:
         auto stream = get_from_pool(remote);
         if (!stream) {
@@ -205,18 +205,18 @@ public:
     uint64_t evict() {
         // remove empty entry in fdmap
         intrusive_list<StreamListNode> freelist;
-        uint64_t near_expire = expiration;
+        uint64_t near_expire = TTL_us + now;
         for (auto it = fdmap.begin(); it != fdmap.end();) {
             auto& list = it->second;
-            while (!list.empty() &&
-                   list.front()->expire.expire() < photon::now) {
+            uint64_t exp;
+            while (!list.empty() && now >=
+                   (exp = list.front()->timeout.expiration())) {
                 freelist.push_back(list.pop_front());
             }
-            if (it->second.empty()) {
+            if (list.empty()) {
                 it = fdmap.erase(it);
             } else {
-                near_expire =
-                    std::min(near_expire, it->second.front()->expire.timeout());
+                near_expire = std::min(near_expire, exp);
                 it++;
             }
         }
@@ -224,14 +224,17 @@ public:
             rm_watch(node);
         }
         freelist.delete_all();
-        return near_expire;
+        assert(near_expire > now);
+        return sat_sub(near_expire, now);
     }
 
-    bool release(EndPoint ep, ISocketStream* stream) {
+    bool release(const EndPoint& ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
+        ERRNO err;
         if (!stream_alive(fd)) return false;
-        auto node = new StreamListNode(ep, stream, fd, expiration);
+        auto node = new StreamListNode(ep, stream, fd, TTL_us);
         push_into_pool(node);
+        errno = err.no;
         return true;
     }
 
@@ -256,8 +259,8 @@ PooledTCPSocketStream::~PooledTCPSocketStream() {
     }
 }
 
-extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expire, bool client_ownership) {
-    return new TCPSocketPool(client, expire, client_ownership);
+extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t TTL_us, bool client_ownership) {
+    return new TCPSocketPool(client, TTL_us, client_ownership);
 }
 
 }

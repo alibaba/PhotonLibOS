@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <gtest/gtest.h>
-
 #include <array>
 #include <tuple>
 
@@ -23,6 +21,7 @@ limitations under the License.
 #include "../alog.h"
 #include "../conststr.h"
 #include "../../test/ci-tools.h"
+#include "../../test/gtest.h"
 
 DEFINE_ENUM_STR(VERBS, verbs, UNKNOW, DELETE, GET, HEAD, POST, PUT, CONNECT,
                 OPTIONS, TRACE, COPY, LOCK, MKCOL, MOV, PROPFIND, PROPPATCH,
@@ -117,5 +116,5 @@ int main(int argc, char** argv) {
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
     int ret = RUN_ALL_TESTS();
-    LOG_ERROR_RETURN(0, ret, VALUE(ret));
+    return ret;
 }

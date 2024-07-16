@@ -15,8 +15,6 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
-
 #include <photon/common/alog.h>
 #include <photon/fs/filesystem.h>
 #include <photon/fs/localfs.h>
@@ -24,6 +22,7 @@ limitations under the License.
 #include <photon/common/executor/executor.h>
 #include <photon/common/executor/easyawaiter.h>
 #include <photon/thread/thread.h>
+#include "../../test/gtest.h"
 
 using namespace photon;
 

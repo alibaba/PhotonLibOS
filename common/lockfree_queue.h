@@ -286,65 +286,59 @@ public:
     using Base::empty;
     using Base::full;
 
-    size_t push_batch(const T* x, size_t n) {
+    size_t push_batch(const T *x, size_t n) {
         size_t rh, wt;
         wt = tail.load(std::memory_order_relaxed);
         for (;;) {
-            rh = head.load(std::memory_order_relaxed);
-            auto rn = std::min(n, Base::capacity - (wt - rh));
-            if (rn == 0) return 0;
-            if (tail.compare_exchange_strong(wt, wt + rn,
-                                             std::memory_order_acq_rel)) {
-                auto first_idx = idx(wt);
-                auto part_length = Base::capacity - first_idx;
-                if (likely(part_length >= rn)) {
-                    memcpy(&slots[first_idx], x, sizeof(T) * rn);
-                } else {
-                    if (likely(part_length))
-                        memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
-                    memcpy(&slots[0], x + part_length,
-                           sizeof(T) * (rn - part_length));
-                }
-                auto wh = wt;
-                while (!write_head.compare_exchange_weak(
-                    wh, wt + rn, std::memory_order_acq_rel)) {
-                    ThreadPause::pause();
-                    wh = wt;
-                }
-                return rn;
+            rh = head.load(std::memory_order_acquire);
+            auto wn = std::min(n, Base::capacity - (wt - rh));
+            if (wn == 0)
+                return 0;
+            if (!tail.compare_exchange_strong(wt, wt + wn, std::memory_order_acq_rel))
+                continue;
+            auto first_idx = idx(wt);
+            auto part_length = Base::capacity - first_idx;
+            if (likely(part_length >= wn)) {
+                memcpy(&slots[first_idx], x, sizeof(T) * wn);
+            } else {
+                if (likely(part_length))
+                    memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
+                memcpy(&slots[0], x + part_length, sizeof(T) * (wn - part_length));
             }
+            auto wh = wt;
+            while (!write_head.compare_exchange_strong(wh, wt + wn, std::memory_order_acq_rel))
+                wh = wt;
+            return wn;
         }
     }
 
-    bool push(const T& x) { return push_batch(&x, 1) == 1; }
+    bool push(const T &x) {
+        return push_batch(&x, 1) == 1;
+    }
 
-    size_t pop_batch(T* x, size_t n) {
+    size_t pop_batch(T *x, size_t n) {
         size_t rt, wh;
         rt = read_tail.load(std::memory_order_relaxed);
         for (;;) {
-            wh = write_head.load(std::memory_order_relaxed);
+            wh = write_head.load(std::memory_order_acquire);
             auto rn = std::min(n, wh - rt);
-            if (rn == 0) return 0;
-            if (read_tail.compare_exchange_strong(rt, rt + rn,
-                                                  std::memory_order_acq_rel)) {
-                auto first_idx = idx(rt);
-                auto part_length = Base::capacity - first_idx;
-                if (likely(part_length >= rn)) {
-                    memcpy(x, &slots[first_idx], sizeof(T) * rn);
-                } else {
-                    if (likely(part_length))
-                        memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
-                    memcpy(x + part_length, &slots[0],
-                           sizeof(T) * (rn - part_length));
-                }
-                auto rh = rt;
-                while (!head.compare_exchange_weak(rh, rt + rn,
-                                                   std::memory_order_acq_rel)) {
-                    ThreadPause::pause();
-                    rh = rt;
-                }
-                return rn;
+            if (rn == 0)
+                return 0;
+            if (!read_tail.compare_exchange_strong(rt, rt + rn, std::memory_order_acq_rel))
+                continue;
+            auto first_idx = idx(rt);
+            auto part_length = Base::capacity - first_idx;
+            if (likely(part_length >= rn)) {
+                memcpy(x, &slots[first_idx], sizeof(T) * rn);
+            } else {
+                if (likely(part_length))
+                    memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
+                memcpy(x + part_length, &slots[0], sizeof(T) * (rn - part_length));
             }
+            auto rh = rt;
+            while (!head.compare_exchange_strong(rh, rt + rn, std::memory_order_acq_rel))
+                rh = rt;
+            return rn;
         }
     }
 
@@ -444,7 +438,6 @@ public:
             n, Base::capacity - (t - head.load(std::memory_order_acquire)));
         if (n == 0) return 0;
         auto first_idx = idx(t);
-        auto last_idx = idx(t + n - 1);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
             memcpy(&slots[first_idx], x, sizeof(T) * n);
@@ -462,7 +455,6 @@ public:
         n = std::min(n, tail.load(std::memory_order_acquire) - h);
         if (n == 0) return 0;
         auto first_idx = idx(h);
-        auto last_idx = idx(h + n - 1);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
             memcpy(x, &slots[first_idx], sizeof(T) * n);
@@ -538,8 +530,8 @@ class RingChannel : public QueueType {
 protected:
     photon::semaphore queue_sem;
     std::atomic<uint64_t> idler{0};
-    uint64_t m_busy_yield_turn;
-    uint64_t m_busy_yield_timeout;
+    uint64_t default_yield_turn = -1UL;
+    uint64_t default_yield_usec = 1024;
 
     using T = decltype(std::declval<QueueType>().recv());
 
@@ -551,41 +543,42 @@ public:
     using QueueType::read_available;
     using QueueType::write_available;
 
-    /**
-     * @brief Construct a new Ring Channel object
-     *
-     * @param busy_yield_timeout setting yield timeout, default is template
-     * parameter DEFAULT_BUSY_YIELD_TIMEOUT. Ring Channel will try busy yield
-     * in `busy_yield_timeout` usecs.
-     */
-    RingChannel(uint64_t busy_yield_turn = 64,
-                uint64_t busy_yield_timeout = 1024)
-        : m_busy_yield_turn(busy_yield_turn),
-          m_busy_yield_timeout(busy_yield_timeout) {}
+    RingChannel() = default;
+    explicit RingChannel(uint64_t max_yield_turn, uint64_t max_yield_usec)
+        : default_yield_turn(max_yield_turn),
+          default_yield_usec(max_yield_usec) {}
 
     template <typename Pause = ThreadPause>
     void send(const T& x) {
         while (!push(x)) {
-            if (!full()) Pause::pause();
+            Pause::pause();
         }
-        queue_sem.signal(idler.load(std::memory_order_acquire));
+        if (idler.load(std::memory_order_acquire)) queue_sem.signal(1);
     }
-    T recv() {
+    T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        Timeout yield_timeout(m_busy_yield_timeout);
-        int yield_turn = m_busy_yield_turn;
+        if (pop(x)) return x;
+        // yield once if failed, so photon::now will be update
+        photon::thread_yield();
         idler.fetch_add(1, std::memory_order_acq_rel);
         DEFER(idler.fetch_sub(1, std::memory_order_acq_rel));
+        Timeout yield_timeout(max_yield_usec);
+        uint64_t yield_turn = max_yield_turn;
         while (!pop(x)) {
-            if (yield_turn > 0 && photon::now < yield_timeout.expire()) {
+            if (yield_turn > 0 && !yield_timeout.expired()) {
                 yield_turn--;
                 photon::thread_yield();
             } else {
-                queue_sem.wait(1);
+                // wait for 100ms
+                queue_sem.wait(1, 100UL * 1000);
+                // reset yield mark and set into busy wait
+                yield_turn = max_yield_turn;
+                yield_timeout.timeout(max_yield_usec);
             }
         }
         return x;
     }
+    T recv() { return recv(default_yield_turn, default_yield_usec); }
 };
 
 }  // namespace common

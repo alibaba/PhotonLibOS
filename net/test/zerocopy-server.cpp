@@ -235,6 +235,7 @@ int main(int argc, char** argv) {
 
     socket_srv->set_handler({rpc_server, &TestRPCServer::serve});
     socket_srv->bind((uint16_t) FLAGS_port, net::IPAddr("0.0.0.0"));
+    FLAGS_port = socket_srv->getsockname().port;
     socket_srv->listen(1024);
 
     auto stop_watcher = [&] {

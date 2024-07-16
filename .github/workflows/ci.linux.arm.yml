@@ -15,19 +15,24 @@ jobs:
       options: --cpus 4
 
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build \
+            -D CMAKE_BUILD_TYPE=MinSizeRel \
+            -D PHOTON_ENABLE_ECOSYSTEM=ON \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON \
+            -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test
@@ -43,19 +48,24 @@ jobs:
       options: --cpus 4
 
     steps:
-      - uses: szenius/set-timezone@v1.2
+      - uses: szenius/set-timezone@v2.0
         with:
           timezoneLinux: "Asia/Shanghai"
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=Debug -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON -D PHOTON_ENABLE_FUSE=ON -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build \
+            -D CMAKE_BUILD_TYPE=Debug \
+            -D PHOTON_ENABLE_ECOSYSTEM=ON \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON \
+            -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test

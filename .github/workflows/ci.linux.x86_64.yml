@@ -1,0 +1,173 @@
+name: Linux x86_64
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+  pull_request:
+    branches: [ "main", "release/*" ]
+
+jobs:
+  gcc850:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/checkout@v4
+      - name: Build850
+        run: |
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+      - name: test
+        run: |
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc921:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/checkout@v4
+      - name: Build921
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+      - name: test
+        run: |
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1031:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/checkout@v4
+      - name: Build1031
+        run: |
+          source /opt/rh/gcc-toolset-10/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+      - name: test
+        run: |
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1121:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/checkout@v4
+      - name: Build1121
+        run: |
+          source /opt/rh/gcc-toolset-11/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+      - name: test
+        run: |
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1211:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/checkout@v4
+      - name: Build1211
+        run: |
+          source /opt/rh/gcc-toolset-12/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+      - name: test
+        run: |
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=epoll_ng
+          ctest -E test-lockfree --timeout 3600 -V
+

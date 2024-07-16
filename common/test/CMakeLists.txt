@@ -1,5 +1,5 @@
-SET(TEST_WORKING_DIR ${CMAKE_CURRENT_SOURCE_DIR}/)
-ADD_DEFINITIONS(-w -DDATA_DIR=${TEST_WORKING_DIR})
+set(TEST_WORKING_DIR ${CMAKE_CURRENT_SOURCE_DIR}/)
+add_definitions(-DDATA_DIR=${TEST_WORKING_DIR})
 
 add_executable(test-objcache test_objcache.cpp)
 target_link_libraries(test-objcache PRIVATE photon_shared)

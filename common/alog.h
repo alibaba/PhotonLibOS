@@ -26,6 +26,7 @@ limitations under the License.
 
 #include <photon/common/utility.h>
 #include <photon/common/conststr.h>
+#include <photon/common/retval.h>
 
 class ILogOutput {
 protected:
@@ -186,10 +187,9 @@ ALogStringPChar alog_forwarding(const T * const & s) { return ALogStringPChar(s,
 
 struct ALogBuffer
 {
-    int level;
     char* ptr;
     uint32_t size;
-    uint32_t reserved;
+    uint32_t level;
     void consume(size_t n) { ptr += n; size -= n; }
 };
 
@@ -280,10 +280,9 @@ protected:
     }
 };
 
-struct LogBuffer;
 struct ALogLogger {
-    int log_level;
     ILogOutput* log_output;
+    uint32_t log_level;
 
     template <typename T>
     ALogLogger& operator<<(T&& rhs) {
@@ -297,7 +296,7 @@ extern ALogLogger default_audit_logger;
 
 inline int get_log_file_fd() { return default_logger.log_output->get_log_file_fd(); }
 
-extern int& log_output_level;
+extern uint32_t& log_output_level;
 extern ILogOutput*& log_output;
 
 static LogFormatter log_formatter;
@@ -305,15 +304,13 @@ static LogFormatter log_formatter;
 struct LogBuffer : public ALogBuffer
 {
 public:
-    LogBuffer(ILogOutput *output): log_output(output)
+    LogBuffer(ILogOutput *output) : log_output(output)
     {
         ptr = buf;
         size = sizeof(buf) - 2;
     }
-    ~LogBuffer()
+    ~LogBuffer() __INLINE__
     {
-        printf('\n');
-        *ptr = '\0';
         log_output->write(level, buf, ptr);
     }
     template<typename T>
@@ -335,10 +332,10 @@ public:
     }
 
 protected:
-    char buf[LOG_BUFFER_SIZE];
     ILogOutput *log_output;
+    char buf[LOG_BUFFER_SIZE];
     void operator = (const LogBuffer& rhs);
-    LogBuffer(const LogBuffer& rhs);
+    LogBuffer(const LogBuffer& rhs) = default;
 };
 
 struct Prologue
@@ -347,13 +344,13 @@ struct Prologue
     int len_func, len_file;
     int line, level;
 
-    template <size_t N, size_t M>
-    constexpr Prologue(const char (&addr_func_)[N], const char (&addr_file_)[M],
-                       int line_, int level_)
+    template <size_t N, typename FILEN>
+    constexpr Prologue(const char (&addr_func_)[N], FILEN addr_file_, int line_,
+                       int level_)
         : addr_func(addr_func_),
-          addr_file(addr_file_),
+          addr_file(addr_file_.chars),
           len_func(N - 1),
-          len_file(M - 1),
+          len_file(addr_file_.len),
           line(line_),
           level(level_) {}
 };
@@ -369,6 +366,8 @@ using CopyOrRef = std::conditional<
 struct STFMTLogBuffer : public LogBuffer
 {
     using LogBuffer::LogBuffer;
+
+    __INLINE__ ~STFMTLogBuffer() = default;
 
     template <typename ST, typename T, typename... Ts>
     auto print_fmt(ST st, T&& t, Ts&&... ts) ->
@@ -412,19 +411,19 @@ struct STFMTLogBuffer : public LogBuffer
     }
 };
 
-template<typename FMT, typename...Ts> __attribute__((noinline, cold))
-static STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog, FMT fmt, Ts&&...xs)
+template<typename FMT, typename...Ts> inline
+STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog, FMT fmt, Ts&&...xs)
 {
     STFMTLogBuffer log(output);
     log << prolog;
-    log.print_fmt(fmt, std::forward<Ts>(xs)...);
+    log.print_fmt(fmt, std::forward<Ts>(xs)..., '\n');
     log.level = level;
     return log;
 }
 
 template<typename BuilderType>
 struct LogBuilder {
-    int level;
+    uint32_t level;
     BuilderType builder;
     ALogLogger* logger;
     bool done;
@@ -443,7 +442,7 @@ struct LogBuilder {
         // so just make sure the other one will not output
         rhs.done = true;
     }
-    ~LogBuilder() {
+    ~LogBuilder() __INLINE__ {
         if (!done && level >= logger->log_level) {
             builder(logger->log_output);
             done = true;
@@ -451,47 +450,49 @@ struct LogBuilder {
     }
 };
 
-#define DEFINE_PROLOGUE(level)                                                 \
-    auto _prologue_file_r = TSTRING(__FILE__).reverse();                       \
-    auto _partial_file =                                                       \
-        ConstString::TSpliter<'/', ' ',                                        \
-                              decltype(_prologue_file_r)>::Current::reverse(); \
-    constexpr static Prologue prolog(__func__, _partial_file.chars, __LINE__,  \
-                                     level);
+#define DEFINE_PROLOGUE(level)                                                  \
+    auto _prologue_file_r = TSTRING(__FILE__).reverse();                        \
+    constexpr auto _partial_file = ConstString::TSpliter<'/', ' ',              \
+            decltype(_prologue_file_r)>::Current::reverse();                    \
+    constexpr static Prologue prolog(__func__, _partial_file, __LINE__, level);
 
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
-#define __LOG__(logger, level, first, ...)                             \
-    ({                                                                 \
+#define __LOG__(attr, logger, level, first, ...)    ({                 \
         DEFINE_PROLOGUE(level);                                        \
-        auto __build_lambda__ = [&](ILogOutput* __output_##__LINE__) { \
+        auto L = [&](ILogOutput* out) __attribute__(attr) {            \
             if (_IS_LITERAL_STRING(first)) {                           \
-                return __log__(level, __output_##__LINE__, prolog,     \
+                return __log__(level, out, prolog,                     \
                                TSTRING(#first).template strip<'\"'>(), \
                                ##__VA_ARGS__);                         \
             } else {                                                   \
-                return __log__(level, __output_##__LINE__, prolog,     \
+                return __log__(level, out, prolog,                     \
                                ConstString::TString<>(), first,        \
                                ##__VA_ARGS__);                         \
             }                                                          \
         };                                                             \
-        LogBuilder<decltype(__build_lambda__)>(                        \
-            level, ::std::move(__build_lambda__), &logger);            \
+        LogBuilder<decltype(L)>(level, ::std::move(L), &logger);       \
     })
 
-#define LOG_DEBUG(...) (__LOG__(default_logger, ALOG_DEBUG, __VA_ARGS__))
-#define LOG_INFO(...) (__LOG__(default_logger, ALOG_INFO, __VA_ARGS__))
-#define LOG_WARN(...) (__LOG__(default_logger, ALOG_WARN, __VA_ARGS__))
-#define LOG_ERROR(...) (__LOG__(default_logger, ALOG_ERROR, __VA_ARGS__))
-#define LOG_FATAL(...) (__LOG__(default_logger, ALOG_FATAL, __VA_ARGS__))
+
+#define LOG_DEBUG(...)  (__LOG__((noinline, cold), default_logger, ALOG_DEBUG, __VA_ARGS__))
+#define LOG_INFO(...)   (__LOG__((noinline, cold), default_logger, ALOG_INFO, __VA_ARGS__))
+#define LOG_WARN(...)   (__LOG__((noinline, cold), default_logger, ALOG_WARN, __VA_ARGS__))
+#define LOG_ERROR(...)  (__LOG__((noinline, cold), default_logger, ALOG_ERROR, __VA_ARGS__))
+#define LOG_FATAL(...)  (__LOG__((noinline, cold), default_logger, ALOG_FATAL, __VA_ARGS__))
 #define LOG_TEMP(...)                                    \
     {                                                    \
         auto _err_bak = errno;                           \
-        __LOG__(default_logger, ALOG_TEMP, __VA_ARGS__); \
+        __LOG__((noinline, cold), default_logger,        \
+                                ALOG_TEMP, __VA_ARGS__); \
         errno = _err_bak;                                \
     }
-#define LOG_AUDIT(...) (__LOG__(default_audit_logger, ALOG_AUDIT, __VA_ARGS__))
+#ifndef DISABLE_AUDIT
+#define LOG_AUDIT(...) (__LOG__((), default_audit_logger, ALOG_AUDIT, __VA_ARGS__))
+#else
+#define LOG_AUDIT(...)
+#endif
 
 inline void set_log_output(ILogOutput* output) {
     default_logger.log_output = output;
@@ -504,15 +505,27 @@ inline void set_log_output_level(int l)
 
 struct ERRNO
 {
-    const int no;
-    ERRNO() : no(errno) { }
-    constexpr ERRNO(int no_) : no(no_) { }
+    int *ptr, no;
+    ERRNO() : ptr(&errno), no(*ptr) { }
+    constexpr ERRNO(int no_) : ptr(0), no(no_) { }
+    void set(int x) { assert(ptr); *ptr = x; }
 };
 
-inline LogBuffer& operator << (LogBuffer& log, ERRNO e)
-{
-    auto no = e.no ? e.no : errno;
-    return log.printf("errno=", no, '(', strerror(no), ')');
+LogBuffer& operator << (LogBuffer& log, ERRNO e);
+
+inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
+    auto x = rvb._errno;
+    return x ? (log << ERRNO((int)x)) : log;
+}
+
+template<typename T> inline
+LogBuffer& operator << (LogBuffer& log, const photon::retval<T>& v) {
+    return v.succeeded() ? (log << v.get()) : (log << v.base());
+}
+
+template<> inline
+LogBuffer& operator << <void> (LogBuffer& log, const photon::retval<void>& v) {
+    return log << v.base();
 }
 
 template<typename T>
@@ -556,12 +569,24 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
 #define LOG_ERRNO_RETURN(new_errno, retv, ...) {    \
     ERRNO eno;                                      \
     LOG_ERROR(__VA_ARGS__, ' ', eno);               \
-    errno = (new_errno) ? (new_errno) : eno.no;     \
+    if (new_errno) eno.set(new_errno);              \
     return retv;                                    \
 }
 
+#define LOG_ERROR_RETVAL(err, ...) do {             \
+    if (std::is_same<decltype(err), int>::value) {  \
+        retval_base e{err};                         \
+        assert(e.failed());                         \
+        LOG_ERROR(__VA_ARGS__, ' ', e);             \
+        return e;                                   \
+    } else {                                        \
+        LOG_ERROR(__VA_ARGS__);                     \
+        return err;                                 \
+    }                                               \
+} while(0)
+
 // Acts like a LogBuilder
-// but able to do operations when log builds 
+// but able to do operations when log builds
 template <typename Builder, typename Append>
 struct __LogAppender : public Builder {
     // using Builder members

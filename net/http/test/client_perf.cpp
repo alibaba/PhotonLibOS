@@ -32,10 +32,10 @@ limitations under the License.
 using namespace photon;
 
 DEFINE_string(ip, "127.0.0.1", "server ip");
-DEFINE_int32(port, 19876, "port");
+DEFINE_uint64(port, 19876, "port");
 DEFINE_uint64(count, -1UL, "request count per thread, -1 for endless loop");
-DEFINE_int32(threads, 4, "num threads");
-DEFINE_int32(body_size, 4096, "http body size");
+DEFINE_uint64(threads, 4, "num threads");
+DEFINE_uint64(body_size, 4096, "http body size");
 DEFINE_bool(curl, false, "use curl client rather than http client");
 
 class StringStream {
@@ -91,7 +91,7 @@ void curl_thread_entry(result* res) {
         buffer.clean();
         client.GET(target.c_str(), &buffer);
         auto t_end = GetSteadyTimeUs();
-        if (buffer.ptr != FLAGS_body_size) {
+        if (buffer.ptr != (int)FLAGS_body_size) {
             LOG_ERROR(VALUE(buffer.ptr), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
             res->failed = true;
         }
@@ -103,7 +103,7 @@ void curl_thread_entry(result* res) {
 void test_curl(result &res) {
     res.t_begin = GetSteadyTimeUs();
     std::vector<photon::join_handle*> jhs;
-    for (auto i = 0; i < FLAGS_threads; ++i) {
+    FOR_LOOP(FLAGS_threads) {
         jhs.emplace_back(photon::thread_enable_join(
             photon::thread_create11(&curl_thread_entry, &res)));
     }
@@ -126,7 +126,7 @@ void client_thread_entry(result *res, net::http::Client *client, int idx) {
             res->failed = true;
         }
         auto ret = op->resp.read((void*)body_buf.data(), FLAGS_body_size);
-        if (ret != FLAGS_body_size) {
+        if (ret != (ssize_t)FLAGS_body_size) {
             LOG_ERROR(VALUE(ret), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
             res->failed = true;
         }
@@ -141,7 +141,7 @@ void test_client(result &res) {
     auto client = net::http::new_http_client();
     DEFER(delete client);
     std::vector<photon::join_handle*> jhs;
-    for (auto i = 0; i < FLAGS_threads; ++i) {
+    for (auto i: xrange(FLAGS_threads)) {
         jhs.emplace_back(photon::thread_enable_join(
             photon::thread_create11(&client_thread_entry, &res, client, i)));
     }

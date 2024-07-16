@@ -1,12 +1,14 @@
 # PhotonLibOS
 
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86.yml)
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml)
-[![CI](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.yml)
+[![Linux x86_64](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86_64.yml/badge.svg?branch=main)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.x86_64.yml)
+[![Linux ARM](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.linux.arm.yml)
+[![macOS x86_64](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.x86_64.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.x86_64.yml)
+[![macOS ARM](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.arm.yml/badge.svg)](https://github.com/alibaba/PhotonLibOS/actions/workflows/ci.macos.arm.yml)
 
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Feb 2024，[中文文档](https://photonlibos.github.io/cn/docs/category/introduction)在官网上线了
 * Since 0.7, Photon will use release branches to enhance the reliability of software delivery. Bugfix will be merged into a stable release at first, then to higher release versions, and finally main.
 * Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.
 [En](https://developer.aliyun.com/article/1208512) / [中文](https://developer.aliyun.com/article/1208390).

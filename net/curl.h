@@ -304,6 +304,9 @@ public:
         return setopt(CURLOPT_HEADERDATA, (void*)stream),
                setopt(CURLOPT_HEADERFUNCTION, &writer<T>);
     }
+    cURL& set_unix_socket(const char* path) {
+        return _setopt(CURLOPT_UNIX_SOCKET_PATH, path);
+    }
     // Turn on/off verbose, log to ALOG
     // ATTENTION: during verbose mode on, make sure ALOG configured.
     // modify ALOG configurations during verbose on may cause

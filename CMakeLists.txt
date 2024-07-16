@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
         photon
-        VERSION 0.6
+        VERSION 0.7
         LANGUAGES C CXX ASM
 )
 
@@ -18,12 +18,14 @@ find_package(PkgConfig REQUIRED)
 # Options
 set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
 option(PHOTON_BUILD_TESTING "enable build testing" OFF)
+option(PHOTON_BUILD_WITH_ASAN "build with asan" OFF)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
 option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
+option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -37,16 +39,31 @@ set(PHOTON_FSTACK_SOURCE "" CACHE STRING "")
 set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
 set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
 set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
+set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
+set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapidxml/rapidxml%201.13/rapidxml-1.13.zip/download" CACHE STRING "")
+set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
+set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 
-# Get CPU arch and number
+# Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${ARCH} STREQUAL arm64))
     message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
 endif ()
-ProcessorCount(NumCPU)
 
-# Global compiler options, only effective within this project
-add_compile_options(-Wall -Werror -Wno-error=pragmas)
+# Global compile options, only effective within this project
+set(global_compile_options -Wall -Wno-error=pragmas)
+if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # Hint: -faligned-new is enabled by default after -std=c++17
+    list(APPEND global_compile_options -Werror -faligned-new)
+endif ()
+add_compile_options(${global_compile_options})
+
+if (PHOTON_BUILD_WITH_ASAN)
+    if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+        message(FATAL_ERROR "Wrong environment")
+    endif ()
+    add_link_options(-fsanitize=address -static-libasan)
+endif ()
 
 set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,7 +76,6 @@ set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2")    # Only for CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_BUILD_PARALLEL_LEVEL ${NumCPU})
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
@@ -86,12 +102,6 @@ set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif ()
-
-# If ccache exists, use it to speed up compiling
-find_program(CCACHE_FOUND ccache)
-if(CCACHE_FOUND)
-    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
-endif(CCACHE_FOUND)
 
 # CMake dirs
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/CMake)
@@ -152,6 +162,10 @@ endforeach ()
 
 add_subdirectory(third_party)
 
+if (PHOTON_ENABLE_ECOSYSTEM)
+    add_subdirectory(ecosystem)
+endif ()
+
 # Compile photon objects
 file(GLOB PHOTON_SRC
         photon.cpp
@@ -181,7 +195,7 @@ file(GLOB PHOTON_SRC
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp)
+    list(APPEND PHOTON_SRC io/aio-wrapper.cpp io/epoll.cpp io/epoll-ng.cpp)
     if (PHOTON_ENABLE_URING)
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()
@@ -199,10 +213,19 @@ if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif ()
+if (PHOTON_ENABLE_ECOSYSTEM)
+    file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
+    list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
+endif ()
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_include_directories(photon_obj PRIVATE include)
+if (PHOTON_ENABLE_ECOSYSTEM)
+    target_link_libraries(photon_obj PRIVATE ecosystem_deps)
+endif ()
+target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
+        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
+)
 
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 if (PHOTON_ENABLE_URING)
@@ -217,10 +240,6 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
-endif()
-if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # This option is enabled by default after -std=c++17
-    target_compile_options(photon_obj PRIVATE -faligned-new)
 endif()
 
 if (actually_built)
@@ -357,6 +376,9 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
+    if (PHOTON_ENABLE_ECOSYSTEM)
+        add_subdirectory(ecosystem/test)
+    endif ()
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()

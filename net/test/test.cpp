@@ -15,16 +15,17 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <gtest/gtest.h>
 #include <sys/stat.h>
-
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
 #include <photon/net/curl.h>
 #include <photon/net/utils.h>
+#include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
+#include "../../test/gtest.h"
 
 #define protected public
 #define private public
@@ -94,17 +95,18 @@ TEST(Socket, UDM_basic) {
     EXPECT_EQ(-1, remove(uds_path));
 }
 
-EndPoint ep{IPAddr("127.0.0.1"), 7654};
+EndPoint ep;
 
 void tcp_server() {
     auto sock = new_tcp_socket_server();
     DEFER({ delete sock; });
-    auto ret = sock->bind(ep.port, ep.addr);
+    auto ret = sock->bind_v4localhost();
+    // auto ret = sock->bind(ep.port, ep.addr);
     ret |= sock->listen(100);
     LOG_DEBUG(VALUE(ret), VALUE(errno));
-    EndPoint epget = sock->getsockname();
-    EXPECT_TRUE(ep == epget);
-    LOG_DEBUG("Listening `", epget);
+    ep = sock->getsockname();
+    // EXPECT_TRUE(ep == epget);
+    LOG_DEBUG("Listening `", ep);
     handler(sock->accept());
     photon::thread_yield_to(nullptr);
 }
@@ -113,14 +115,13 @@ void tcp_client() {
     photon::thread_yield_to(nullptr);
     auto cli = new_tcp_socket_client();
     DEFER({ delete cli; });
-    LOG_DEBUG("Connecting");
     auto sock = cli->connect(ep);
     ASSERT_NE(sock, nullptr);
     DEFER(delete sock);
     LOG_DEBUG(VALUE(sock), VALUE(errno));
     EndPoint epget = sock->getpeername();
     LOG_DEBUG("Connected `", epget);
-    EXPECT_TRUE(ep == epget);
+    EXPECT_EQ(ep.port, epget.port);
     char buff[] = "Hello";
     char recv[256];
     sock->send("Hello", 5);
@@ -129,8 +130,6 @@ void tcp_client() {
     LOG_DEBUG("RECV `", recv);
     EXPECT_EQ(0, memcmp(recv, buff, 5));
 }
-
-EndPoint epet{IPAddr("127.0.0.1"), 7619};
 
 TEST(Socket, TCP_basic) {
     remove(uds_path);
@@ -171,8 +170,8 @@ public:
     }
     int get_log_file_fd() override { return -1; }
 
-    uint64_t set_throttle(uint64_t) { return -1; }
-    uint64_t get_throttle() { return -1; }
+    uint64_t set_throttle(uint64_t) override { return -1; }
+    uint64_t get_throttle() override { return -1; }
 
     void destruct() override {}
 } log_output_test;
@@ -211,11 +210,11 @@ TEST(Socket, timeout) {
         delete cli;
         delete serv;
     });
-    serv->bind(19876, IPAddr("127.0.0.1"));
+    serv->bind_v4localhost();
     serv->listen(100);
     cli->timeout(1024UL * 1024);  // 1-sec;
     EXPECT_EQ(1024UL * 1024, cli->timeout());
-    auto sock = cli->connect(EndPoint{IPAddr("127.0.0.1"), 19876});
+    auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
     EXPECT_NE(nullptr, sock);
     char buff[128];
@@ -242,9 +241,9 @@ TEST(Socket, iov) {
         delete cli;
         delete serv;
     });
-    serv->bind(12876, IPAddr("127.0.0.1"));
+    serv->bind_v4localhost();
     serv->listen(100);
-    auto sock = cli->connect(EndPoint{IPAddr("127.0.0.1"), 12876});
+    auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
     char buff[128] = {0};
     char recv[128] = {0};
@@ -284,7 +283,7 @@ TEST(Socket, iov) {
 TEST(ETServer, listen_twice) {
     auto server = net::new_et_tcp_socket_server();
     DEFER(delete server);
-    server->bind(5432, net::IPAddr());
+    server->bind_v4localhost();
     server->listen();
     int ret, err;
     ret = server->start_loop();
@@ -298,16 +297,17 @@ TEST(ETServer, listen_twice) {
     EXPECT_EQ(0, ret);
 }
 
+EndPoint epet;
+
 void et_tcp_server() {
     auto sock = new_et_tcp_socket_server();
     DEFER({ delete sock; });
-    auto ret = sock->bind(epet.port, epet.addr);
+    auto ret = sock->bind_v4localhost();
     LOG_DEBUG("before Listening");
     ret |= sock->listen(100);
     LOG_DEBUG(VALUE(ret), VALUE(errno));
-    EndPoint epget = sock->getsockname();
-    EXPECT_TRUE(epet == epget);
-    LOG_DEBUG("Listening `", epget);
+    epet = sock->getsockname();
+    LOG_DEBUG("Listening `", epet);
     handler(sock->accept());
     photon::thread_yield_to(nullptr);
 }
@@ -320,9 +320,6 @@ void et_tcp_client() {
     auto sock = cli->connect(epet);
     DEFER(delete sock);
     LOG_DEBUG(VALUE(sock), VALUE(errno));
-    EndPoint epget = sock->getpeername();
-    LOG_DEBUG("Connected `", epget);
-    EXPECT_TRUE(epet == epget);
     char buff[] = "Hello";
     char recv[256];
     sock->send("Hello", 5);
@@ -349,11 +346,11 @@ TEST(ETSocket, timeout) {
         delete cli;
         delete serv;
     });
-    serv->bind(19876, IPAddr("127.0.0.1"));
+    serv->bind_v4localhost();
     serv->listen(100);
     cli->timeout(1024UL * 1024);  // 1-sec;
     EXPECT_EQ(1024UL * 1024, cli->timeout());
-    auto sock = cli->connect(EndPoint{IPAddr("127.0.0.1"), 19876});
+    auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
     EXPECT_NE(nullptr, sock);
     char buff[128];
@@ -364,9 +361,9 @@ TEST(ETSocket, timeout) {
     EXPECT_GE(photon::now - now, 1000 * 1000UL);
 }
 
-void ETSocket_iov_test_cli_connect(ISocketStream** sock, ISocketClient* cli) {
+void ETSocket_iov_test_cli_connect(ISocketStream** sock, ISocketClient* cli, ISocketServer* serv) {
     LOG_DEBUG("enter tmp_thread");
-    *sock = cli->connect(EndPoint{IPAddr("127.0.0.1"), 32876});
+    *sock = cli->connect(serv->getsockname());
     LOG_DEBUG("leave tmp_thread");
 }
 
@@ -378,11 +375,11 @@ TEST(ETSocket, iov) {
         delete cli;
         delete serv;
     });
-    serv->bind(32876, IPAddr("127.0.0.1"));
+    serv->bind_v4localhost();
     serv->listen(100);
     // serv->start_loop();
     ISocketStream* sock;
-    auto th = photon::thread_create11(ETSocket_iov_test_cli_connect, &sock, cli);
+    auto th = photon::thread_create11(ETSocket_iov_test_cli_connect, &sock, cli, serv);
     auto jh1 = photon::thread_enable_join(th);
     photon::thread_yield_to(th);
     // LOG_DEBUG("connected");
@@ -426,14 +423,16 @@ TEST(ETSocket, iov) {
 #endif
 
 TEST(Socket, autoremove) {
-    char path[] = "/tmp/testnosock";
+    static const char path[] = "/tmp/testnosock";
     // 1. do not remove file if the file is not socket
+    remove(path);
     auto fd = open(path, O_RDWR | O_CREAT, 0777);
     if (fd != -1) close(fd);
     auto sock = new_uds_server(true);
     auto ret = sock->bind(path);
     EXPECT_EQ(-1, ret);
     remove(path);
+
     // 2. do not remove if autoremove is false
     auto sock_noar = new_uds_server();
     ret = sock_noar->bind(path);
@@ -443,9 +442,11 @@ TEST(Socket, autoremove) {
     ret = stat(path, &statbuf);
     EXPECT_EQ(0, ret);
     EXPECT_NE(0, S_ISSOCK(statbuf.st_mode));
+
     // 3. do remove when binding
     ret = sock->bind(path);
     EXPECT_EQ(0, ret);
+
     // 4. do remove when closing
     delete sock;
     ret = stat(path, &statbuf);
@@ -479,7 +480,7 @@ void test_server_start_and_terminate(bool blocking) {
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
     auto th = photon::thread_create11([&]{
-        server->bind();
+        server->bind_v4localhost();
         server->listen();
         server->start_loop(blocking);
     });
@@ -500,7 +501,7 @@ TEST(TCPServer, start_and_terminate_nonblocking) {
 TEST(TCPServer, listen_twice) {
     auto server = net::new_tcp_socket_server();
     DEFER(delete server);
-    server->bind(5432, net::IPAddr("127.0.0.1"));
+    server->bind_v4localhost();
     server->listen();
     int ret, err;
     ret = server->start_loop();
@@ -524,7 +525,7 @@ TEST(TLSSocket, basic) {
     auto server = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete server);
 
-    server->bind(31524, net::IPAddr("127.0.0.1"));
+    server->bind_v4localhost();
     server->timeout(10UL * 1024 * 1024);
 
     auto logHandle = [&](ISocketStream* sock) {
@@ -543,7 +544,7 @@ TEST(TLSSocket, basic) {
     auto cli = net::new_tls_client(ctx, net::new_tcp_socket_client(), true);
     DEFER(delete cli);
     cli->timeout(10 * 1024 * 1024);
-    auto sock = cli->connect(net::EndPoint{net::IPAddr("127.0.0.1"), 31524});
+    auto sock = cli->connect(server->getsockname());
     DEFER(delete sock);
     EXPECT_EQ(0, ret);
     LOG_DEBUG(ERRNO());
@@ -563,7 +564,6 @@ void test_log_sockaddr_in() {
 void test_log_sockaddr() {
     struct sockaddr myaddr0;
     myaddr0.sa_family = 0;
-    LOG_DEBUG(myaddr0);
 
     auto myaddr = (struct sockaddr_in&)myaddr0;
     myaddr.sin_family = AF_INET;
@@ -576,7 +576,7 @@ bool server_down = false;
 photon::thread* server_thread = nullptr;
 
 void* serve_connection(void* arg) {
-    auto fd = (int&)arg;
+    auto fd = (int)(uint64_t)arg;
     while (true) {
         char buf[1024];
         auto ret = net::read(fd, buf, sizeof(buf));
@@ -597,6 +597,8 @@ void* serve_connection(void* arg) {
     return nullptr;
 }
 
+uint16_t _srvport = 0;
+
 int test_socket_server() {
     server_thread = photon::CURRENT;
     int fd = net::socket(AF_INET, SOCK_STREAM, 0);
@@ -607,10 +609,17 @@ int test_socket_server() {
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(12888);
+    addr.sin_port = htons(0);
+    // addr.sin_port = htons(12888);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     int ret = bind(fd, (sockaddr*)&addr, sizeof(addr));
     if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to bind() to ", addr);
+
+    socklen_t len = sizeof(addr);
+    ret = ::getsockname(fd, (sockaddr*)&addr, &len);
+    if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to getsockname()");
+    assert(len == sizeof(addr));
+    _srvport = ntohs(addr.sin_port);
 
     ret = listen(fd, 50);
     if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to listen()");
@@ -640,7 +649,7 @@ TEST(ConnectTest, HandleNoneZeroInput) {
     struct sockaddr_in addr;
     bzero(&addr, sizeof(struct sockaddr_in));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(12888);
+    addr.sin_port = htons(_srvport);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     int fd = net::socket(AF_INET, SOCK_STREAM, 0);
@@ -675,7 +684,7 @@ void test_writer(Writer& writer) {
     EXPECT_EQ(3, ret);
     ret = writer.write("456", 3);
     EXPECT_EQ(3, ret);
-    EXPECT_EQ(0, strcmp("123456", writer.alog_string().s));
+    EXPECT_EQ(0, strncmp("123456", writer.alog_string().s, 6));
 }
 
 TEST(writers, multiple_segment) {
@@ -695,33 +704,51 @@ void* start_server(void*) {
 
 TEST(utils, gethostbyname) {
     net::IPAddr localhost("127.0.0.1");
+    net::IPAddr addr;
+    int ret = net::gethostbyname("localhost", &addr);
+    ASSERT_GE(ret, 1);
+    LOG_DEBUG(VALUE(localhost), VALUE(addr));
+    EXPECT_TRUE(localhost.is_localhost() && addr.is_localhost());
+
     std::vector<net::IPAddr> addrs;
     net::gethostbyname("localhost", addrs);
-    EXPECT_GT((int)addrs.size(), 0);
+    EXPECT_GT(addrs.size(), 0);
+    for (auto &x : addrs) {
+        LOG_INFO(VALUE(x));
+        EXPECT_TRUE(x.is_localhost());
+    }
 
     net::IPAddr host = net::gethostbypeer("localhost");
-    bool found_localhost = false, found_host = false;
-    for (auto& x: addrs) {
-        LOG_INFO(VALUE(x));
-        EXPECT_TRUE(x.is_loopback());
-        found_localhost |= (x == localhost);
-        found_host |= (x == host);
-    }
-    EXPECT_TRUE(found_localhost);
-    EXPECT_TRUE(found_host);
+    EXPECT_TRUE(host.is_localhost());
 }
 
 TEST(utils, resolver) {
     auto *resolver = new_default_resolver();
     DEFER(delete resolver);
-    net::IPAddr localhost("127.0.0.1");
     net::IPAddr addr = resolver->resolve("localhost");
-    if (addr.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr.to_nl());
-    auto func = [&](net::IPAddr addr_){
-        if (addr_.is_ipv4()) EXPECT_EQ(localhost.to_nl(), addr_.to_nl());
+    if (addr.is_ipv4()) {
+        EXPECT_EQ(net::IPAddr::V4Loopback(), addr);
+    } else {
+        EXPECT_EQ(net::IPAddr::V6Loopback(), addr);
+    }
+}
+
+TEST(utils, resolver_filter) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    auto filter = [&](net::IPAddr addr_) -> bool {
+        return !addr_.is_ipv4();
     };
-    resolver->resolve("localhost", func);
+    auto addr = resolver->resolve_filter("localhost", filter);
+    ASSERT_TRUE(!addr.is_ipv4());
+}
+
+TEST(utils, resolver_discard) {
+    auto *resolver = new_default_resolver();
+    DEFER(delete resolver);
+    (void) resolver->resolve("localhost");
     resolver->discard_cache("non-exist-host.com");
+    resolver->discard_cache("localhost");
 }
 
 #ifdef __linux__
@@ -749,7 +776,7 @@ TEST(ZeroCopySocket, basic) {
     auto run_server = [&] {
         server = new_zerocopy_tcp_server();
         DEFER(delete server);
-        ASSERT_EQ(server->bind(), 0);
+        ASSERT_EQ(server->bind_v4localhost(), 0);
         ep_dst = server->getsockname();
         server->set_handler(handler);
         ASSERT_EQ(server->listen(), 0);
@@ -762,7 +789,7 @@ TEST(ZeroCopySocket, basic) {
 
     auto client = new_tcp_socket_client();
     DEFER(delete client);
-    auto conn = client->connect(ep_dst, ep_src);
+    auto conn = client->connect(ep_dst, &ep_src);
     ASSERT_NE(conn, nullptr);
     DEFER(delete conn);
 
@@ -777,6 +804,43 @@ TEST(ZeroCopySocket, basic) {
     photon::thread_join((join_handle*) server_th);
 }
 #endif
+
+const static char LINE[] = "hello iostream over socket stream!";
+
+void iostream_uds_server() {
+    auto server = new_uds_server(true);
+    DEFER({ delete (server); });
+    ASSERT_EQ(0, server->bind(uds_path));
+    ASSERT_EQ(0, server->listen(100));
+    auto connection = server->accept();
+    EXPECT_TRUE(connection);
+    auto ios = new_iostream(connection, true);
+    DEFER(delete ios);
+    EXPECT_TRUE(ios);
+    char line[4096];
+    ios->getline(line, sizeof(line));
+    LOG_DEBUG("got line: '`'", line);
+    *ios << 123456;
+    ASSERT_STREQ(line, LINE);
+}
+
+TEST(iostream, UDS) {
+    remove(uds_path);
+    thread_create11(iostream_uds_server);
+    thread_yield();
+    // ASSERT_EQ(::access(uds_path, F_OK, AT_EACCESS), 0);
+    auto cli = new_uds_client();
+    DEFER({ delete cli; });
+    auto sock = cli->connect(uds_path);
+    EXPECT_TRUE(sock);
+    auto ios = new_iostream(sock, true);
+    DEFER(delete ios);
+    *ios << LINE << std::endl;
+    uint64_t x;
+    *ios >> x;
+    ASSERT_EQ(x, 123456);
+    remove(uds_path);
+}
 
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
@@ -795,9 +859,9 @@ int main(int argc, char** arg) {
     test_log_sockaddr();
     photon::thread_create(&start_server, nullptr);
 
-    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    int ret = RUN_ALL_TESTS();
+    LOG_DEBUG("test result: ", ret);
     server_down = true;
     photon::thread_interrupt(server_thread);
-
-    // photon::fd_events_fini();
+    return ret;
 }

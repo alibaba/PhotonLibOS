@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <gtest/gtest.h>
+#include "../../../test/gtest.h"
 
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/socket.h>
@@ -416,7 +416,7 @@ TEST(basic, test) {
         DEFER(delete server);
         auto client = net::new_tcp_socket_client();
         DEFER(delete client);
-        ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+        ASSERT_EQ(0, server->bind_v4localhost());
         ASSERT_EQ(0, server->listen());
         auto ep = server->getsockname();
         LOG_INFO(VALUE(ep));
@@ -503,7 +503,7 @@ TEST(cs, test) {
         DEFER(delete server);
         auto client = net::new_sasl_client(c_session, net::new_tcp_socket_client(), true);
         DEFER(delete client);
-        ASSERT_EQ(0, server->bind(0, net::IPAddr("127.0.0.1")));
+        ASSERT_EQ(0, server->bind_v4localhost());
         ASSERT_EQ(0, server->listen());
         auto ep = server->getsockname();
         LOG_INFO(VALUE(ep));

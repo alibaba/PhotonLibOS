@@ -14,18 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <sched.h>
+
 #include <photon/common/lockfree_queue.h>
 #include <photon/thread/thread.h>
 #include <pthread.h>
 
 #include <array>
-// #include <boost/lockfree/policies.hpp>
-// #include <boost/lockfree/queue.hpp>
-// #include <boost/lockfree/spsc_queue.hpp>
+#ifdef TESTING_ENABLE_BOOST
+#include <boost/lockfree/policies.hpp>
+#include <boost/lockfree/queue.hpp>
+#include <boost/lockfree/spsc_queue.hpp>
+#endif
 #include <mutex>
 #include <random>
 #include <thread>
 #include <vector>
+#include <photon/common/alog.h>
 #include "../../test/ci-tools.h"
 
 static constexpr size_t sender_num = 4;
@@ -47,8 +55,10 @@ LockfreeBatchMPMCRingQueue<int, capacity> lbqueue;
 LockfreeSPSCRingQueue<int, capacity> cqueue;
 std::mutex rlock, wlock;
 
-// boost::lockfree::queue<int, boost::lockfree::capacity<capacity>> bqueue;
-// boost::lockfree::spsc_queue<int, boost::lockfree::capacity<capacity>> squeue;
+#ifdef TESTING_ENABLE_BOOST
+boost::lockfree::queue<int, boost::lockfree::capacity<capacity>> bqueue;
+boost::lockfree::spsc_queue<int, boost::lockfree::capacity<capacity>> squeue;
+#endif
 
 struct WithLock {
     template <typename T>
@@ -93,7 +103,7 @@ int test_queue(const char *name, QType &queue) {
                 rc[t]++;
                 rcnt[i]++;
             }
-            printf("%lu receiver done, %lu ns per action\n", i,
+            LOG_DEBUG("` receiver done, ` ns per action", i,
                    rspent.count() / (items_num / receiver_num - 1));
         });
     }
@@ -115,20 +125,18 @@ int test_queue(const char *name, QType &queue) {
                 scnt[i]++;
                 // ThreadPause::pause();
             }
-            printf("%lu sender done, %lu ns per action\n", i,
+            LOG_DEBUG("` sender done, ` ns per action", i,
                    wspent.count() / (items_num / sender_num));
         });
     }
     for (auto &x : senders) x.join();
     for (auto &x : receivers) x.join();
     auto end = std::chrono::steady_clock::now();
-    printf("%s %lu p %lu c, %lu items, Spent %ld us\n", name, sender_num,
-           receiver_num, items_num,
-           std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
-               .count());
+    LOG_DEBUG("` ` p ` c, ` items, Spent ` us", name, sender_num, receiver_num, items_num,
+           std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     for (size_t i = 0; i < items_num / sender_num; i++) {
         if (sc[i] != rc[i] || sc[i] != sender_num) {
-            printf("MISMATCH %lu %d %d\n", i, sc[i].load(), rc[i].load());
+            LOG_DEBUG("MISMATCH ` ` `", i, sc[i].load(), rc[i].load());
         }
         sc[i] = 0;
         rc[i] = 0;
@@ -160,49 +168,55 @@ int test_queue_batch(const char *name, QType &queue) {
                 }
                 LRType::unlock(rlock);
                 if (x) rspent += (std::chrono::high_resolution_clock::now() - tm) / size;
-                for (auto y = 0; y < size; y++) {
+                for (auto y: xrange(size)) {
                     rc[buffer[y]]++;
                     rcnt[i]++;
                 }
                 x += size;
                 amount -= size;
             }
-            printf("%lu receiver done, %lu ns per action\n", i,
+            LOG_DEBUG("` receiver done, ` ns per action", i,
                    rspent.count() / (items_num / receiver_num - 1));
         });
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
             photon::set_cpu_affinity(i);
-            std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
+            std::vector<int> vec;
+            vec.resize(items_num / sender_num);
             for (size_t x = 0; x < items_num / sender_num; x++) {
+                vec[x] = x;
+            }
+            size_t size;
+            std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
+            for (size_t x = 0; x < items_num / sender_num;) {
                 auto tm = std::chrono::high_resolution_clock::now();
                 LSType::lock(wlock);
-                while (!queue.push(x)) {
+                while (!(size = queue.push_batch(&vec[x], std::min(32UL, vec.size() - x)))) {
                     LSType::unlock(wlock);
                     CPUPause::pause();
                     LSType::lock(wlock);
                 }
                 LSType::unlock(wlock);
-                wspent += std::chrono::high_resolution_clock::now() - tm;
-                sc[x]++;
-                scnt[i]++;
-                // ThreadPause::pause();
+                wspent += (std::chrono::high_resolution_clock::now() - tm) / size;
+                for (auto y = x; y < x + size; y++) {
+                    sc[y] ++;
+                    scnt[i] ++;
+                }
+                x += size;
             }
-            printf("%lu sender done, %lu ns per action\n", i,
+            LOG_DEBUG("` sender done, ` ns per action", i,
                    wspent.count() / (items_num / sender_num));
         });
     }
     for (auto &x : senders) x.join();
     for (auto &x : receivers) x.join();
     auto end = std::chrono::steady_clock::now();
-    printf("%s %lu p %lu c, %lu items, Spent %ld us\n", name, sender_num,
-           receiver_num, items_num,
-           std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
-               .count());
+    LOG_DEBUG("` ` p ` c, ` items, Spent ` us", name, sender_num, receiver_num, items_num,
+           std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     for (size_t i = 0; i < items_num / sender_num; i++) {
         if (sc[i] != rc[i] || sc[i] != sender_num) {
-            printf("MISMATCH %lu %d %d\n", i, sc[i].load(), rc[i].load());
+            LOG_DEBUG("MISMATCH ` ` `", i, sc[i].load(), rc[i].load());
         }
         sc[i] = 0;
         rc[i] = 0;
@@ -212,12 +226,15 @@ int test_queue_batch(const char *name, QType &queue) {
 }
 
 int main() {
-    if (!photon::is_using_default_engine()) return 0;
-    // test_queue<NoLock, NoLock>("BoostQueue", bqueue);
+#ifdef TESTING_ENABLE_BOOST
+    test_queue<NoLock, NoLock>("BoostQueue", bqueue);
+#endif
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
     test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch", lbqueue);
-    // test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
+#ifdef TESTING_ENABLE_BOOST
+    test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
+#endif
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
 }
