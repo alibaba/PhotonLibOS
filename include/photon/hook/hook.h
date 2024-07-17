@@ -43,11 +43,15 @@ namespace ZyIo{
         class DataCarrier final {
         CLASS_FAST_PROPERTY_GETTER(DataFlag, flag, Flag)
         CLASS_FAST_PROPERTY_GETTER(photon::thread* , tid, Tid)
+        CLASS_FAST_PROPERTY_GETTER(int , fd, Fd)
         CLASS_FAST_PROPERTY_GETTER(__s32*, res, Res)
+        CLASS_FAST_PROPERTY_COMM2(size_t, currentDataLen, CurrentDataLen,0)
+        CLASS_FAST_PROPERTY_GETTER2(void*, buf, Buf, nullptr)
+        CLASS_FAST_PROPERTY_GETTER(size_t, bufLen, BufLen)
 
         public:
             DataCarrier() = delete;
-            DataCarrier(DataFlag flag,photon::thread* tid,__s32* res);
+            DataCarrier(DataFlag flag,photon::thread* tid,int fd,__s32* res,void *buf,size_t len);
             ~DataCarrier();
 
         };
@@ -66,19 +70,24 @@ namespace ZyIo{
 
             void startWithFb();
 
-            void submitAccept( photon::thread* th,__s32* res,int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+            void submitAccept(photon::thread* th,int sockfd,__s32* res, struct sockaddr *addr, socklen_t *addrlen);
 
-            void submitConnect( photon::thread* th,__s32* res,int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+            void submitConnect(photon::thread* th,int sockfd,__s32* res, const struct sockaddr *addr, socklen_t addrlen);
 
-            void submitRead( photon::thread* th,__s32* res,int fd, void *buf, size_t count);
+            void submitRead( photon::thread* th,int fd,__s32* res,void *buf, size_t count);
 
-            void submitWrite( photon::thread* th,__s32* res,int fd, const void *buf, size_t count);
+            void submitWrite( photon::thread* th,int fd,__s32* res, void *buf, size_t count);
 
+            void submitRead(DataCarrier *dataCarrier);
+
+            void submitWrite(DataCarrier *dataCarrier);
 
         private:
             io_uring_sqe* doTake();
 
             void doSubmit(io_uring_sqe* sqe, DataCarrier* carrier);
+
+
         };
     }
 
@@ -113,7 +122,7 @@ namespace ZyIo{
 
         ssize_t read_hook( photon::thread* th,int fd, void *buf, size_t count);
 
-        ssize_t write_hook( photon::thread* th,int fd, const void *buf, size_t count);
+        ssize_t write_hook( photon::thread* th,int fd, void *buf, size_t count);
 
     }
 

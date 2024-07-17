@@ -4,6 +4,7 @@
 
 #include "photon/hook/hook.h"
 #include <dlfcn.h>
+#include <cstring>
 
 
 #define HOOK_SYS_FUNC(name) name##_fun_ptr_t g_sys_##name##_fun = (name##_fun_ptr_t)dlsym(RTLD_NEXT, #name);
@@ -17,14 +18,15 @@ HOOK_SYS_FUNC(write);
 namespace ZyIo{
     namespace IoUring{
 
-        DataCarrier::DataCarrier(DataFlag flag, photon::thread* tid, __s32 *res)
-        :flag(flag),tid(tid),res(res) {
+
+        DataCarrier::DataCarrier(DataFlag flag, photon::thread* tid,int fd, __s32 *res,void *buf,size_t len)
+                :flag(flag),tid(tid),fd(fd),res(res),buf(buf),bufLen(len) {
 
         }
         DataCarrier::~DataCarrier()= default;
 
 
-        unsigned int IoUringImp::DEFAULT_ENTITY_SIZE_S = 16;
+        unsigned int IoUringImp::DEFAULT_ENTITY_SIZE_S = 128;
         IoUringImp::IoUringImp() {
             auto pUring = new io_uring;
             auto const ret = io_uring_queue_init(DEFAULT_ENTITY_SIZE_S, pUring, 0); // 初始化
@@ -44,10 +46,51 @@ namespace ZyIo{
             thread.detach();
         }
 
+        void processCqe(io_uring* ring,io_uring_cqe* cqe){
+            auto dataCarrier = (DataCarrier*)cqe->user_data;
+            //1.check read or write
+            if(dataCarrier->getFlag() == DataFlag::READ || dataCarrier->getFlag() == DataFlag::WRITE){
+                size_t res = cqe->res;
+                dataCarrier->setCurrentDataLen(dataCarrier->getCurrentDataLen() + res);
+                if(dataCarrier->getCurrentDataLen() == dataCarrier->getBufLen()){
+                    //return res
+                    *(dataCarrier->getRes()) = dataCarrier->getBufLen();
+                    //resume thead
+                    photon::thread_interrupt(dataCarrier->getTid());
+                    delete dataCarrier;
+                    io_uring_cqe_seen(ring, cqe);
+                    return;
+                }
+                //keep read
+                io_uring_cqe_seen(ring, cqe);
+                if(dataCarrier->getFlag() == DataFlag::READ){
+                    Hook::HookFlag::G_HOOK_IOURING_INS->submitRead(dataCarrier);
+                }else{
+                    Hook::HookFlag::G_HOOK_IOURING_INS->submitWrite(dataCarrier);
+                }
+                return;
+            }
+            //2.connect accept ...
+            //return res
+            *(dataCarrier->getRes()) = cqe->res;
+            //resume thead
+            photon::thread_interrupt(dataCarrier->getTid());
+            delete dataCarrier;
+            io_uring_cqe_seen(ring, cqe);
+        }
+
         void IoUringImp::start() {
             while (true)
             {
-                //批量获取
+
+//                struct io_uring_cqe *cqe;
+//                int ret =io_uring_wait_cqe(ring,&cqe);
+//                if(ret <0){
+//                    continue;
+//                }
+//                processCqe(ring,cqe);
+//                批量获取
+                usleep(500);
                 io_uring_cqe* cqes[64] = {};
                 auto cqeCount = io_uring_peek_batch_cqe(ring, cqes, 64);
                 if (cqeCount <= 0)
@@ -56,17 +99,12 @@ namespace ZyIo{
                 }
                 for (unsigned int i = 0; i < cqeCount; i++)
                 {
-                    auto cqe = cqes[i];
-                    auto dataCarrier = (DataCarrier*)cqe->user_data;
-                    //return res
-                    *(dataCarrier->getRes()) = cqe->res;
-                    //resume thead
-                    photon::thread_interrupt(dataCarrier->getTid());
-                    delete dataCarrier;
-                    io_uring_cqe_seen(ring, cqe);
+                    processCqe(ring,cqes[i]);
                 }
             }
         }
+
+
 
         io_uring_sqe *IoUringImp::doTake() {
             return io_uring_get_sqe(ring);
@@ -77,33 +115,45 @@ namespace ZyIo{
             io_uring_submit(ring);
         }
 
-        void IoUringImp::submitConnect(photon::thread *th, __s32 *res, int sockfd, const struct sockaddr *addr,
+        void IoUringImp::submitConnect(photon::thread *th, int sockfd, __s32 *res,  const struct sockaddr *addr,
                                      socklen_t addrlen) {
-            auto carrier = new DataCarrier(CONNETC, th,res);
+            auto carrier = new DataCarrier(CONNETC, th,sockfd,res, nullptr,0);
             auto sqe = doTake();
             io_uring_prep_connect(sqe, sockfd, addr, addrlen);
             doSubmit(sqe, carrier);
         }
 
-        void IoUringImp::submitAccept(photon::thread *th, __s32 *res, int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-            auto carrier = new DataCarrier(ACCEPT, th,res);
+        void IoUringImp::submitAccept(photon::thread *th, int sockfd,__s32 *res,  struct sockaddr *addr, socklen_t *addrlen) {
+            auto carrier = new DataCarrier(ACCEPT, th,sockfd,res, nullptr,0);
             auto sqe = doTake();
             io_uring_prep_accept(sqe, sockfd, addr, addrlen, 0);
             doSubmit(sqe, carrier);
         }
 
-        void IoUringImp::submitRead(photon::thread *th, __s32 *res, int fd, void *buf, size_t count) {
-            auto carrier = new DataCarrier(READ, th,res);
+        void IoUringImp::submitRead(photon::thread *th, int fd,__s32 *res,  void *buf, size_t count) {
+            auto carrier = new DataCarrier(READ, th,fd,res,buf,count);
             auto sqe = doTake();
-            io_uring_prep_read(sqe, fd, buf, count, 0);
+            io_uring_prep_read(sqe, fd, carrier->getBuf(), carrier->getBufLen(), 0);
             doSubmit(sqe, carrier);
         }
 
-        void IoUringImp::submitWrite(photon::thread *th, __s32 *res, int fd, const void *buf, size_t count) {
-            auto carrier = new DataCarrier(WRITE, th,res);
+        void IoUringImp::submitWrite(photon::thread *th, int fd,__s32 *res,void *buf, size_t count) {
+            auto carrier = new DataCarrier(WRITE, th,fd,res,buf,count);
             auto sqe = doTake();
-            io_uring_prep_write(sqe, fd, buf, count, 0);
+            io_uring_prep_write(sqe, fd, carrier->getBuf(), carrier->getBufLen(), 0);
             doSubmit(sqe, carrier);
+        }
+
+        void IoUringImp::submitRead(ZyIo::IoUring::DataCarrier *dataCarrier) {
+            auto sqe = doTake();
+            io_uring_prep_read(sqe, dataCarrier->getFd(),dataCarrier->getBuf() , dataCarrier->getBufLen() - dataCarrier->getCurrentDataLen(), dataCarrier->getCurrentDataLen());
+            doSubmit(sqe, dataCarrier);
+        }
+
+        void IoUringImp::submitWrite(ZyIo::IoUring::DataCarrier *dataCarrier) {
+            auto sqe = doTake();
+            io_uring_prep_write(sqe, dataCarrier->getFd(),dataCarrier->getBuf() , dataCarrier->getBufLen() - dataCarrier->getCurrentDataLen(), dataCarrier->getCurrentDataLen());
+            doSubmit(sqe, dataCarrier);
         }
 
 
@@ -142,7 +192,7 @@ namespace ZyIo{
             //submit accept
             __s32 r=-100;
             __s32* res =&r;
-            HookFlag::G_HOOK_IOURING_INS->submitAccept(th,res,sockfd,addr,addrlen);
+            HookFlag::G_HOOK_IOURING_INS->submitAccept(th,sockfd,res,addr,addrlen);
             //yield()
             photon::thread_sleep(-1U);
             //wait notify
@@ -154,7 +204,7 @@ namespace ZyIo{
             //submit connect
             __s32 r=-100;
             __s32* res =&r;
-            HookFlag::G_HOOK_IOURING_INS->submitConnect(th,res,sockfd,addr,addrlen);
+            HookFlag::G_HOOK_IOURING_INS->submitConnect(th,sockfd,res,addr,addrlen);
             //yield()
             photon::thread_sleep(-1U);
             //wait notify
@@ -165,18 +215,18 @@ namespace ZyIo{
             //submit read
             __s32 r=-100;
             __s32* res =&r;
-            HookFlag::G_HOOK_IOURING_INS->submitRead(th,res,fd,buf,count);
+            HookFlag::G_HOOK_IOURING_INS->submitRead(th,fd,res,buf,count);
             //yield()
             photon::thread_sleep(-1U);
             //wait notify
             return *res;
         }
 
-        ssize_t write_hook(photon::thread* th,int fd, const void *buf, size_t count){
+        ssize_t write_hook(photon::thread* th,int fd, void *buf, size_t count){
             //submit write
             __s32 r=-100;
             __s32* res =&r;
-            HookFlag::G_HOOK_IOURING_INS->submitWrite(th,res,fd,buf,count);
+            HookFlag::G_HOOK_IOURING_INS->submitWrite(th,fd,res,buf,count);
             //yield()
             photon::thread_sleep(-1U);
             //wait notify
@@ -242,7 +292,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     auto th = photon_std::this_thread::get_id();
     if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
         if(ZyIo::Hook::HookFlag::G_HOOK_IS_DEBUG){
-            printf("call hook hook read api\n");
+            printf("call hook read api\n");
             size_t len = ZyIo::Hook::read_hook(th,fd, buf, count);
             printf("expect data len:%zu,success read data len:%zu\n",count,len);
             return len;
@@ -263,9 +313,11 @@ ssize_t write(int fd, const void *buf, size_t count) {
     auto th = photon_std::this_thread::get_id();
     if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
         if(ZyIo::Hook::HookFlag::G_HOOK_IS_DEBUG){
-            printf("call hook write read api,write data len:%zu\n",count);
+            size_t res = ZyIo::Hook::write_hook(th, fd, const_cast<void *>(buf), count);
+            printf("call hook write read api,write data len:%zu,write res:%zu\n",count,res);
+            return res;
         }
-        return ZyIo::Hook::write_hook(th,fd, buf, count);
+        return ZyIo::Hook::write_hook(th, fd, const_cast<void *>(buf), count);
     } else {
         if(ZyIo::Hook::HookFlag::G_HOOK_IS_DEBUG){
             printf("call lib c write api,write data len:%zu\n",count);
