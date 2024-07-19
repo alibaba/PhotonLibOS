@@ -89,6 +89,21 @@ namespace ZyIo{
 
 
         };
+
+        class Evimp{
+        public:
+            void start();
+
+            void startWithFb();
+
+            void submitRead( photon::thread* th,int fd,__s32* res,void *buf, size_t count);
+
+            void submitWrite( photon::thread* th,int fd,__s32* res, void *buf, size_t count);
+
+            void submitRead(DataCarrier *dataCarrier);
+
+            void submitWrite(DataCarrier *dataCarrier);
+        };
     }
 
 
