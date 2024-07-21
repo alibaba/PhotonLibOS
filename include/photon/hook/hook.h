@@ -90,7 +90,7 @@ namespace ZyIo{
 
         };
 
-        class Evimp{
+        class EvImp{
         public:
             void start();
 
