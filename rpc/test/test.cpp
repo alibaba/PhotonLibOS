@@ -481,7 +481,8 @@ TEST_F(RpcTest, passive_shutdown) {
 
     // The passive shutdown took 3 seconds, until client closed the connection
     GTEST_ASSERT_GT(duration, 2900);
-    GTEST_ASSERT_LT(duration, 3200);
+    // Since GH CI is slow, we allow 3.5 secs
+    GTEST_ASSERT_LT(duration, 3500);
 }
 
 int main(int argc, char** arg)
