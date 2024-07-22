@@ -621,7 +621,7 @@ struct __limit_first_n {
     uint64_t count = 0;
     bool operator()() { return (++count) > N; }
     void reset() { count = 0; }
-    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>\n"; }
 };
 
 template <uint64_t N>
@@ -629,7 +629,7 @@ struct __limit_every_n {
     uint64_t count = 0;
     bool operator()() { return ((++count) % N) != 1; }
     void reset() { count = 0; }
-    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>"; }
+    void append_tail(LogBuffer& buffer) { buffer << " <" << count << " log(s)>\n"; }
 };
 
 template <time_t T>
@@ -649,7 +649,7 @@ struct __limit_every_t {
     void reset() { last = 0; }
     void append_tail(LogBuffer& buffer) {
         if (duration)
-            buffer << " <last log " << duration << " sec>";
+            buffer << " <last log " << duration << " sec>\n";
         duration = 0;
     }
 };
@@ -672,7 +672,7 @@ struct __limit_first_n_every_t {
     }
     void append_tail(STFMTLogBuffer& buffer) {
         if (cnt) {
-            buffer << " <" << cnt << " log(s) in " << T << " sec>";
+            buffer << " <" << cnt << " log(s) in " << T << " sec>\n";
             cnt = 0;
         }
     }
