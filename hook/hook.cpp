@@ -11,11 +11,17 @@
 
 #define HOOK_SYS_FUNC(name) name##_fun_ptr_t g_sys_##name##_fun = (name##_fun_ptr_t)dlsym(RTLD_NEXT, #name);
 HOOK_SYS_FUNC(sleep);
+HOOK_SYS_FUNC(usleep);
 HOOK_SYS_FUNC(connect);
 HOOK_SYS_FUNC(accept);
 HOOK_SYS_FUNC(read);
 HOOK_SYS_FUNC(write);
-
+HOOK_SYS_FUNC(readv);
+HOOK_SYS_FUNC(writev);
+HOOK_SYS_FUNC(recv);
+HOOK_SYS_FUNC(send);
+HOOK_SYS_FUNC(recvmsg);
+HOOK_SYS_FUNC(sendmsg);
 
 namespace ZyIo {
     namespace IoUring {
@@ -297,6 +303,15 @@ unsigned int sleep(unsigned int seconds) {
     }
 }
 
+int usleep(__useconds_t useconds){
+     auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::thread_usleep(useconds);
+    } else {
+        return g_sys_usleep_fun(useconds);
+    }
+}
+
 
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
     auto th = photon_std::this_thread::get_id();
@@ -377,5 +392,59 @@ ssize_t write(int fd, const void *buf, size_t count) {
     }
 }
 
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt){
+    auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_preadv(fd, iov, iovcnt,0);
+    } else {
+        return g_sys_readv_fun(fd, iov, iovcnt);
+    }
+}
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt){
+    auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_pwritev(fd, iov, iovcnt,0);
+    } else {
+        return g_sys_writev_fun(fd, iov, iovcnt);
+    }
+}
+
+ssize_t recv (int fd, void *buf, size_t n, int flags){
+    auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_recv(fd, buf, n,flags);
+    } else {
+        return g_sys_recv_fun(fd, buf, n,flags);
+    }
+}
+
+ssize_t send (int fd, const void *buf, size_t n, int flags){
+    auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_send(fd, buf, n,flags);
+    } else {
+        return g_sys_send_fun(fd, buf, n,flags);
+    }
+}
+
+ssize_t recvmsg(int fd, struct msghdr * msg, int flag){
+     auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_recvmsg(fd, msg, flag);
+    } else {
+        return g_sys_recvmsg_fun(fd, msg, flag);
+    }
+}
+
+ssize_t sendmsg (int fd, const struct msghdr *msg,int flag){
+     auto th = photon_std::this_thread::get_id();
+    if (ZyIo::Hook::HookFlag::G_HOOK && th != nullptr) {
+        return photon::iouring_sendmsg(fd, msg, flag);
+    } else {
+        return g_sys_sendmsg_fun(fd, msg, flag);
+    }
+}
 
 }
