@@ -5,6 +5,10 @@ add_executable(test-objcache test_objcache.cpp)
 target_link_libraries(test-objcache PRIVATE photon_shared)
 add_test(NAME test-objcache COMMAND $<TARGET_FILE:test-objcache>)
 
+add_executable(perf-objcache perf_objcache.cpp)
+target_link_libraries(perf-objcache PRIVATE photon_shared)
+add_test(NAME perf-objcache COMMAND $<TARGET_FILE:test-objcache>)
+
 add_executable(test-common test.cpp)
 target_link_libraries(test-common PRIVATE photon_shared)
 add_test(NAME test-common COMMAND $<TARGET_FILE:test-common>)

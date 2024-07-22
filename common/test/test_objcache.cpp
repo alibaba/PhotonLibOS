@@ -18,6 +18,7 @@ limitations under the License.
 #define private public
 
 #include "../expirecontainer.h"
+#include "../objectcachev2.h"
 
 #undef private
 #undef protected
@@ -270,6 +271,115 @@ TEST(ObjectCache, borrow_with_once) {
     for (auto& arg : args) {
         handles.emplace_back(photon::thread_enable_join(
             photon::thread_create(&objcache_borrow_once, &arg)));
+    }
+    for (const auto& handle : handles) {
+        photon::thread_join(handle);
+    }
+    EXPECT_EQ(1, count.load());
+    ocache.borrow(0, [&] {
+        photon::thread_usleep(1000 * 1000UL);
+        count++;
+        return new ShowOnDtor(1);
+    });
+    EXPECT_EQ(2, count.load());
+}
+
+struct OCArgV2 {
+    ObjectCacheV2<int, ShowOnDtor*>* oc;
+    int id;
+    std::atomic<int>* count;
+};
+void* objcache_borrow_v2(void* arg) {
+    auto args = (OCArgV2*)arg;
+    auto oc = args->oc;
+    auto id = args->id;
+    auto ctor = [&]() { return new ShowOnDtor(id); };
+    // acquire every 10ms
+    photon::thread_usleep(10 * 1000UL * id);
+    {
+        auto ret = oc->borrow(0, ctor);
+        LOG_DEBUG("Acquired ", VALUE(id));
+        EXPECT_TRUE(ret);
+        // object holds for 50ms
+        photon::thread_usleep(50 * 1000UL);
+        if (id % 10 == 0) {
+            LOG_INFO("Cycle ", VALUE(id));
+            ret.recycle(true);
+        }
+    }
+    // every 10 objs will recycle
+    if (id % 10 == 0) cycle_cnt++;
+    LOG_DEBUG("Released ", VALUE(id));
+    return 0;
+}
+
+
+TEST(ObjectCacheV2, borrow) {
+    set_log_output_level(ALOG_INFO);
+    DEFER(set_log_output_level(ALOG_DEBUG));
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    cycle_cnt = 0;
+    release_cnt = 0;
+    // 10s, during the test, nothing will be free if not set recycle
+    std::vector<std::thread> ths;
+    for (int i = 0; i < 10; i++) {
+        ths.emplace_back([&] {
+            photon::vcpu_init();
+            DEFER(photon::vcpu_fini());
+            std::vector<photon::join_handle*> handles;
+            std::vector<OCArgV2> args;
+            for (int i = 0; i < 100; i++) {
+                args.emplace_back(OCArgV2({&ocache, i + 1}));
+            }
+            for (auto& arg : args) {
+                handles.emplace_back(photon::thread_enable_join(
+                    photon::thread_create(&objcache_borrow_v2, &arg)));
+            }
+            for (const auto& handle : handles) {
+                photon::thread_join(handle);
+            }
+        });
+    }
+    for (auto& x : ths) {
+        x.join();
+    }
+
+    EXPECT_EQ(cycle_cnt, release_cnt);
+}
+
+void* objcache_borrow_once_v2(void* arg) {
+    auto args = (OCArgV2*)arg;
+    auto oc = args->oc;
+    // auto id = args->id;
+    auto& count = *args->count;
+    auto ctor = [&]()->ShowOnDtor* {
+        // failed after 1s;
+        photon::thread_usleep(1000 * 1000UL);
+        count++;
+        return nullptr;
+    };
+    auto ret = oc->borrow(0, ctor, 1000UL * 1000);
+    (void)ret;
+    // every 10 objs will recycle
+    return 0;
+}
+
+TEST(ObjectCacheV2, borrow_with_once) {
+    set_log_output_level(ALOG_INFO);
+    DEFER(set_log_output_level(ALOG_DEBUG));
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    cycle_cnt = 0;
+    release_cnt = 0;
+    std::atomic<int> count(0);
+    // 10s, during the test, nothing will be free if not set recycle
+    std::vector<photon::join_handle*> handles;
+    std::vector<OCArgV2> args;
+    for (int i = 0; i < 100; i++) {
+        args.emplace_back(OCArgV2{&ocache, i + 1, &count});
+    }
+    for (auto& arg : args) {
+        handles.emplace_back(photon::thread_enable_join(
+            photon::thread_create(&objcache_borrow_once_v2, &arg)));
     }
     for (const auto& handle : handles) {
         photon::thread_join(handle);
