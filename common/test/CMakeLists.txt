@@ -28,3 +28,6 @@ add_test(NAME test-lockfree COMMAND $<TARGET_FILE:test-lockfree>)
 add_executable(test-alog test_alog.cpp x.cpp)
 target_link_libraries(test-alog PRIVATE photon_shared)
 add_test(NAME test-alog COMMAND $<TARGET_FILE:test-alog>)
+
+add_executable(perf-rcuptr perf_rcuptr.cpp)
+target_link_libraries(perf-rcuptr PRIVATE photon_shared)
