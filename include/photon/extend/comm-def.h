@@ -1,9 +1,10 @@
 //
-// Created by jun on 24-6-23.
+// Created by jun on 2024/7/25.
 //
 
-#ifndef COMMDEF_H
-#define COMMDEF_H
+#ifndef PHOTON_EXTEND_COMMDEF_H
+#define PHOTON_EXTEND_COMMDEF_H
+
 
 #ifndef CLASS_FAST_PROPERTY_GETTER_DEF
 #define CLASS_FAST_PROPERTY_GETTER_DEF(type, name, funName)\
@@ -38,8 +39,4 @@ public: virtual inline type get##funName() const {return this->name;}\
 public: virtual inline void set##funName(type arg){this->name=arg;}
 #endif //CLASS_FAST_PROPERTY_COMM2
 
-
-
-
-
-#endif //COMMDEF_H
+#endif //PHOTON_EXTEND_COMMDEF_H

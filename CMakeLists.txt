@@ -218,13 +218,13 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
 endif ()
 
-#################### hook begin#############################
-file(GLOB HOOK_SRC hook/*.cpp)
-list(APPEND PHOTON_SRC ${HOOK_SRC})
+#################### extend begin #############################
+file(GLOB Extend_SRC extend/*.cpp extend/urlmatch/*.c)
+list(APPEND PHOTON_SRC ${Extend_SRC})
 
 #target_include_directories(photon_obj PRIVATE include/photon)
 
-#################### hook end#############################
+#################### extend end #############################
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
