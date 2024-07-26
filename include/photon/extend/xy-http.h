@@ -7,18 +7,19 @@
 
 #include "photon/extend/comm-def.h"
 #include "photon/net/http/server.h"
+#include "photon/thread/list.h"
 
 namespace zyio{
     namespace http{
 
-        typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> bizLogic;
+        typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> httpPHandler;
 
         class BizLogicProxy {
         private:
-            bizLogic logic;
+            httpPHandler logic;
             bool hasExecute = false;
         public:
-            explicit BizLogicProxy(bizLogic logic);
+            explicit BizLogicProxy(httpPHandler logic);
 
             void executeOnce(photon::net::http::Request &request, photon::net::http::Response &response);
         };
@@ -29,6 +30,8 @@ namespace zyio{
             HttpFilter() = delete;
         public:
             HttpFilter(int order);
+
+            virtual ~HttpFilter() = default;
 
             /**
              * if return true,the filter keep run
@@ -44,36 +47,60 @@ namespace zyio{
             virtual void afterHandle(photon::net::http::Request& req, photon::net::http::Response& resp) = 0;
         };
 
-        class HttpFilterChain : public HttpFilter{
+        class HttpFilterChain {
         private:
-            CLASS_FAST_PROPERTY_GETTER(std::string_view,pattern,Pattern)
+            CLASS_FAST_PROPERTY_GETTER(std::string,pattern,Pattern)
             CLASS_FAST_PROPERTY_GETTER(photon::net::http::Verb,method,Method)
             std::vector<HttpFilter*>* chain;
         public:
             HttpFilterChain() = delete;
-            HttpFilterChain(std::string_view pattern,photon::net::http::Verb method);
-            ~HttpFilterChain();
+            HttpFilterChain(std::string pattern,photon::net::http::Verb method);
+            virtual ~HttpFilterChain();
             void addFilter(HttpFilter* filter);
+
+            bool preHandle(photon::net::http::Request& req, photon::net::http::Response& resp);
+
+            void postHandle(BizLogicProxy &logicProxy,photon::net::http::Request& req, photon::net::http::Response& resp);
+
+            void afterHandle(photon::net::http::Request& req, photon::net::http::Response& resp);
 
         };
 
-        class HttpServerEnhance{
+        enum class ServerStatus {
+            running = 1,
+            stopping = 2,
+        };
+
+        struct SockItem: public intrusive_list_node<SockItem> {
+            SockItem(photon::net::ISocketStream* sock): sock(sock) {}
+            photon::net::ISocketStream* sock = nullptr;
+        };
+
+        class XyHttpServer : public Object {
         private:
             std::unordered_map<std::string,HttpFilterChain*> chainContainer = {};
+            std::unordered_map<std::string,httpPHandler> handlerContainer ={};
+            intrusive_list<SockItem> connections = {};
+            ServerStatus status = ServerStatus::running;
+            uint64_t workers = 0;
         public:
-            HttpServerEnhance() = delete;
-            ~HttpServerEnhance() = default;
+            XyHttpServer() = default;
+            virtual ~XyHttpServer();
 
+            photon::net::ISocketServer::Handler getConnectionHandler();
+            int handleConnection(photon::net::ISocketStream* stream);
+
+
+            void addHandler(httpPHandler handler,std::string pattern,photon::net::http::Verb method);
             void bindFilterChain(HttpFilterChain* filterChain);
 
+
+
+
+
         protected:
-            void findMatchChain(std::vector<HttpFilterChain*> &vector,photon::net::http::Request& req);
-
-            bool preHandle(std::vector<HttpFilterChain*> &vector,photon::net::http::Request& req, photon::net::http::Response& resp);
-
-            void postHandle(std::vector<HttpFilterChain*> &vector,photon::net::http::Request& req, photon::net::http::Response& resp);
-
-            void afterHandle(std::vector<HttpFilterChain*> &vector,photon::net::http::Request& req, photon::net::http::Response& resp);
+            HttpFilterChain* matchFilterChain(photon::net::http::Request& req);
+            httpPHandler findHttpPHandler(photon::net::http::Request& req);
 
         };
 

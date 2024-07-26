@@ -107,6 +107,12 @@ public:
     // in some cases, users can call it manually
     int send();
 
+    // return 0 if header recvd
+    // return 1 if end of stream
+    // return negative if an error occured
+    int receive_header(uint64_t timeout = -1UL);
+    int skip_remain();
+
     int message_status = 0;
     Headers headers;
 
@@ -115,10 +121,7 @@ protected:
     virtual int prepare_body_write_stream();
     virtual int parse_start_line(Parser &p) = 0;
 
-    // return 0 if header recvd
-    // return 1 if end of stream
-    // return negative if an error occured
-    int receive_header(uint64_t timeout = -1UL);
+
     int send_header(net::ISocketStream* stream = nullptr);
     // return 0 if whole header recvd
     // return 1 if end of stream
@@ -130,7 +133,7 @@ protected:
     // return a negative number if an error occured
     int append_bytes(uint16_t size);
 
-    int skip_remain();
+
 
     std::string_view partial_body() const {
         return std::string_view{m_buf, m_buf_size} | m_body;

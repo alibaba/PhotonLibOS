@@ -13,7 +13,6 @@
 #include "comm-def.h"
 #include "photon/thread/std-compat.h"
 #include "photon/photon.h"
-#include <liburing.h>
 
 
 typedef int (*sleep_fun_ptr_t)(unsigned int seconds);

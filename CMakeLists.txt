@@ -44,6 +44,7 @@ set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapi
 set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
 set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w")
+
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
 if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${ARCH} STREQUAL arm64))
@@ -219,15 +220,16 @@ if (PHOTON_ENABLE_ECOSYSTEM)
 endif ()
 
 #################### extend begin #############################
-file(GLOB Extend_SRC extend/*.cpp extend/urlmatch/*.c)
+file(GLOB Extend_SRC extend/*.cpp)
 list(APPEND PHOTON_SRC ${Extend_SRC})
-
 #target_include_directories(photon_obj PRIVATE include/photon)
 
 #################### extend end #############################
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
+target_link_libraries(photon_obj PRIVATE urlmatch)
+
 if (PHOTON_ENABLE_ECOSYSTEM)
     target_link_libraries(photon_obj PRIVATE ecosystem_deps)
 endif ()
