@@ -9,9 +9,111 @@
 #include "photon/thread/thread.h"
 #include <photon/common/alog-stdstring.h>
 #include <urlmatch.h>
+#include <regex>
 
 namespace zyio{
     namespace http{
+
+        std::string genHttpMapKey(std::string url,photon::net::http::Verb method){
+            auto verb =  magic_enum::enum_name(method);
+            std::stringstream key;
+            key<<verb.length();
+            key << verb;
+            key << url;
+            return key.str();
+        }
+
+        //    wildcard
+//      *          zero or more occurrence of any characters
+//      +          1 or more occurrence of any characters
+//      ?          any character
+//
+//	  pattern         url         result
+//	  */cmd          test/cmd      true
+//	  d/*/cmd        d/test/cmd    true
+//	  d/*/cmd        d/e/cmd/g     false
+//
+
+        bool urlMatch(const char * url, const char * pattern) {
+            for ( ; *url == *pattern || *pattern == '?' ; url++, pattern++)
+                if (*url == '\0')
+                    return true;
+
+            // a difference was found
+            switch(*pattern){
+                case '+':
+                    if(*url == '\0')
+                        break; // end reached before comparing ("foo+" vs "foo")
+                    url++;// skip the first character !
+                    // treat it as *
+                case '*':
+                    ++pattern;// pattern point now to the target (next char after *)
+                    while(1){
+                        // skip char until the target was found or end of url reached
+                        for ( ; *url != *pattern && *url != '\0'; url++);
+
+                        if(*url != *pattern) // end reached before the target could be found
+                            break;
+                        // does the url match the pattern ?
+                        if(urlMatch(url,pattern))
+                            return true;
+
+                        // else no match, try to find the target furthermore
+                        url++;
+                    }
+                    break;
+            }
+            return false;
+        }
+
+        template<typename T>
+        Router<T>::Router(std::string pattern,photon::net::http::Verb method,T holder){
+
+        }
+
+        template <typename T>
+        T Router<T>::getHolder(){
+            return holder;
+        }
+
+        template<typename T>
+        void WebRouter<T>::addRouter(Router<T> router) {
+            auto key = genHttpMapKey(router.getPattern(),router.getMethod());
+            if (isAguePath(router.getPattern())) {
+                vagueContainer.insert({key,router});
+            } else{
+                explicitContainer.insert({key,router});
+            }
+        }
+
+        template<typename T>
+        Router<T> WebRouter<T>::doMatch(photon::net::http::Verb method, std::string url) {
+            auto key = genHttpMapKey(url,method);
+            auto it = explicitContainer.find(url);
+            if(it != explicitContainer.end()){
+                return it->second;
+            }
+            //foreach
+            auto methodStr =  magic_enum::enum_name(method);
+            for(auto it2 : vagueContainer){
+                auto k = it2.first;
+                auto method2 = k.substr(1,k[0]);
+                if(methodStr == method2){
+                     auto pattern = k.substr(k[0]+1);
+                     if(urlMatch(url,pattern)){
+                         return it2.second;
+                     }
+                }
+            }
+            return nullptr;
+        }
+
+        template<typename T>
+        bool WebRouter<T>::isAguePath(std::string path) {
+            std::regex pattern(R"([*?+]+)");
+            return std::regex_search(path, pattern);
+        }
+
 
         BizLogicProxy::BizLogicProxy(httpPHandler logic):logic(std::move(logic)){
 
@@ -165,14 +267,7 @@ namespace zyio{
             return 0;
         }
 
-        std::string genHttpMapKey(std::string url,photon::net::http::Verb method){
-            auto verb =  magic_enum::enum_name(method);
-            std::stringstream key;
-            key << url;
-            key << "@";
-            key << verb;
-            return key.str();
-        }
+
 
         void XyHttpServer::bindFilterChain(zyio::http::HttpFilterChain *filterChain) {
             std::string key = genHttpMapKey(filterChain->getPattern(),filterChain->getMethod());

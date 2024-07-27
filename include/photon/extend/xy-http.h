@@ -5,6 +5,7 @@
 #ifndef PHOTON_EXTEND_XY_HTTP_H
 #define PHOTON_EXTEND_XY_HTTP_H
 
+#include <regex>
 #include "photon/extend/comm-def.h"
 #include "photon/net/http/server.h"
 #include "photon/thread/list.h"
@@ -13,6 +14,34 @@ namespace zyio{
     namespace http{
 
         typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> httpPHandler;
+
+        template<typename T>
+        class Router{
+        private:
+            CLASS_FAST_PROPERTY_GETTER(std::string ,pattern,Pattern)
+            CLASS_FAST_PROPERTY_GETTER(photon::net::http::Verb ,method,Method)
+            T holder;
+        public:
+            Router()=delete;
+            Router(std::string pattern,photon::net::http::Verb method,T holder);
+            T getHolder();
+        };
+
+        template<class T>
+        class WebRouter{
+        private:
+            std::unordered_map<std::string,Router<T>> explicitContainer ={};
+            std::unordered_map<std::string,Router<T>> vagueContainer ={};
+
+
+        public:
+            void addRouter(Router<T> router);
+            Router<T> doMatch(photon::net::http::Verb method,std::string url);
+
+            bool isAguePath(std::string path);
+        };
+
+
 
         class BizLogicProxy {
         private:
@@ -78,8 +107,9 @@ namespace zyio{
 
         class XyHttpServer : public Object {
         private:
-            std::unordered_map<std::string,HttpFilterChain*> chainContainer = {};
-            std::unordered_map<std::string,httpPHandler> handlerContainer ={};
+            WebRouter<HttpFilterChain*> chainContainer = {};
+            WebRouter<httpPHandler> handlerContainer = {};
+
             intrusive_list<SockItem> connections = {};
             ServerStatus status = ServerStatus::running;
             uint64_t workers = 0;
