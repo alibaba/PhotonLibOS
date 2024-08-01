@@ -30,7 +30,7 @@ namespace photon
         // 0 for default_timeout (given in the ctor)
         using Entry = Delegate<uint64_t>;
 
-        // Create a timer object with `default_timedout` in usec, callback function `on_timer`,
+        // Create a timer object with `default_timeout` in usec, callback function `on_timer`,
         // and callback argument `arg`. The timer object is implemented as a special thread, so
         // it has a `stack_size`, and the `on_timer` is invoked within the thread's context.
         // The timer object is deleted automatically after it is finished.
@@ -39,6 +39,7 @@ namespace photon
         {
             _on_timer = on_timer;
             _default_timeout = default_timeout;
+            _reset_timeout = -1UL;
             _repeating = repeating;
             _th = thread_create(&_stub, this, stack_size);
             thread_enable_join(_th);
