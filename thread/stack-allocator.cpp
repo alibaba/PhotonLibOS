@@ -37,7 +37,11 @@ class PooledStackAllocator {
         __builtin_ffsl(MAX_ALLOCATION_SIZE / MIN_ALLOCATION_SIZE);
 
 public:
-    PooledStackAllocator() {}
+    PooledStackAllocator() {
+        for (size_t i = 0; i < N_SLOTS; i++) {
+            slots[i].slotsize = MIN_ALLOCATION_SIZE << i;
+        }
+    }
 
 protected:
     size_t in_pool_size = 0;
@@ -62,24 +66,26 @@ protected:
     }
 
     struct Slot {
-        std::vector<std::pair<void*, size_t>> pool;
+        std::vector<void*> pool;
+        uint32_t slotsize;
 
         ~Slot() {
             for (auto pt : pool) {
-                __dealloc(pt.first, pt.second);
+                __dealloc(pt, slotsize);
             }
         }
-        std::pair<void*, size_t> get() {
+        void* get() {
             if (!pool.empty()) {
                 auto ret = pool.back();
                 pool.pop_back();
                 return ret;
             }
-            return {nullptr, 0};
+            return __alloc(slotsize);
         }
-        void put(void* ptr, size_t size) { pool.emplace_back(ptr, size); }
+        void put(void* ptr) { pool.emplace_back(ptr); }
     };
 
+    // get_slot(length) returns first slot that larger or equal to length
     static inline uint32_t get_slot(uint32_t length) {
         static auto base = __builtin_clz(MIN_ALLOCATION_SIZE - 1);
         auto index = __builtin_clz(length - 1);
@@ -91,31 +97,26 @@ protected:
 public:
     void* alloc(size_t size) {
         auto idx = get_slot(size);
-        if (unlikely(idx > N_SLOTS)) {
+        if (unlikely(idx >= N_SLOTS)) {
             // larger than biggest slot
             return __alloc(size);
         }
         auto ptr = slots[idx].get();
-        if (unlikely(!ptr.first)) {
-            // slots[idx] empty
-            auto aligned_size = MIN_ALLOCATION_SIZE << idx;
-            return __alloc(aligned_size);
-        }
         // got from pool
-        in_pool_size -= ptr.second;
-        return ptr.first;
+        in_pool_size -= slots[idx].slotsize;
+        return ptr;
     }
     int dealloc(void* ptr, size_t size) {
         auto idx = get_slot(size);
-        if (unlikely(idx > N_SLOTS ||
-                     (in_pool_size + size >= trim_threshold))) {
+        if (unlikely(idx >= N_SLOTS ||
+                     (in_pool_size + slots[idx].slotsize >= trim_threshold))) {
             // big block or in-pool buffers reaches to threshold
-            __dealloc(ptr, size);
+            __dealloc(ptr, idx >= N_SLOTS ? size : slots[idx].slotsize);
             return 0;
         }
         // Collect into pool
-        in_pool_size += size;
-        slots[idx].put(ptr, size);
+        in_pool_size += slots[idx].slotsize;
+        slots[idx].put(ptr);
         return 0;
     }
     size_t trim(size_t keep_size) {
@@ -124,9 +125,9 @@ public:
             if (!slots[i].pool.empty()) {
                 auto ptr = slots[i].pool.back();
                 slots[i].pool.pop_back();
-                in_pool_size -= ptr.second;
-                count += ptr.second;
-                __dealloc(ptr.first, ptr.second);
+                in_pool_size -= slots[i].slotsize;
+                count += slots[i].slotsize;
+                __dealloc(ptr, slots[i].slotsize);
             }
         }
         return count;
