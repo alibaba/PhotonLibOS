@@ -21,6 +21,8 @@ option(PHOTON_BUILD_TESTING "enable build testing" OFF)
 option(PHOTON_BUILD_WITH_ASAN "build with asan" OFF)
 option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
 option(PHOTON_ENABLE_FUSE "enable fuse function" OFF)
+option(PHOTON_GLOBAL_INIT_OPENSSL "Turn this off if any of your third-party libs inits old-version OpenSSL as well,
+because Photon will register coroutine locks for crypto. But don't bother if you have latest OpenSSL >= 1.1.0" ON)
 option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
@@ -228,6 +230,9 @@ target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${
 )
 
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
+if (PHOTON_GLOBAL_INIT_OPENSSL)
+    target_compile_definitions(photon_obj PRIVATE PHOTON_GLOBAL_INIT_OPENSSL)
+endif ()
 if (PHOTON_ENABLE_URING)
     target_include_directories(photon_obj PRIVATE ${URING_INCLUDE_DIRS})
     target_compile_definitions(photon_obj PRIVATE PHOTON_URING=on)
