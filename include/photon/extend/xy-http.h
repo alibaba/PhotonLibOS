@@ -46,9 +46,9 @@ namespace zyio{
             virtual ~UrlPatternMatch();
 
             void addPatternMatch(UrlPattern pattern,T t);
-            void addPatternMatch(photon::net::http::Verb methodIn,std::string urlIn,T t);
+            void addPatternMatch(std::string urlIn,photon::net::http::Verb methodIn,T t);
             T doMatch(UrlPattern urlPatternIn);
-            T doMatch(photon::net::http::Verb methodIn,std::string urlIn);
+            T doMatch(std::string urlIn,photon::net::http::Verb methodIn);
         };
 
 
@@ -95,7 +95,7 @@ namespace zyio{
 
         public:
             HttpFilterChain(UrlPattern urlPattern);
-            HttpFilterChain(photon::net::http::Verb method,std::string url);
+            HttpFilterChain(std::string url,photon::net::http::Verb method);
             virtual ~HttpFilterChain();
 
             void addFilter(HttpFilter* filter);
@@ -135,7 +135,7 @@ namespace zyio{
             int handleConnection(photon::net::ISocketStream* stream);
 
             void bindFilterChain(HttpFilterChain* filterChain);
-            void addHandler(httpHandler* handler,std::string pattern,photon::net::http::Verb method);
+            void addHandler(std::string pattern,photon::net::http::Verb method,httpHandler* handler);
 
 
 

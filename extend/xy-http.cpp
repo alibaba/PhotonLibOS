@@ -102,7 +102,7 @@ namespace zyio{
         }
 
         template<typename T>
-        void UrlPatternMatch<T>::addPatternMatch(photon::net::http::Verb methodIn,std::string urlIn,T t) {
+        void UrlPatternMatch<T>::addPatternMatch(std::string urlIn,photon::net::http::Verb methodIn,T t) {
             zyio::http::UrlPattern urlPatternIn(urlIn,methodIn);
             addPatternMatch(urlPatternIn,t);
         }
@@ -131,7 +131,7 @@ namespace zyio{
         }
 
         template<typename T>
-        T UrlPatternMatch<T>::doMatch(photon::net::http::Verb methodIn, std::string urlIn) {
+        T UrlPatternMatch<T>::doMatch(std::string urlIn,photon::net::http::Verb methodIn) {
             zyio::http::UrlPattern urlPatternIn(urlIn,methodIn);
             return doMatch(urlPatternIn);
         }
@@ -160,7 +160,7 @@ namespace zyio{
             vector = new std::vector<HttpFilter*>();
         }
 
-        HttpFilterChain::HttpFilterChain(photon::net::http::Verb method,std::string url){
+        HttpFilterChain::HttpFilterChain(std::string url,photon::net::http::Verb method){
              vector = new std::vector<HttpFilter*>();
              pattern = UrlPattern(url,method);
         }
@@ -275,7 +275,7 @@ namespace zyio{
                 auto verb = req.verb();
                 auto url = std::string(req.target());
 
-                auto logic = webRouter->doMatch(verb,url);
+                auto logic = webRouter->doMatch(url,verb);
                 //404
                 if (logic == nullptr) {
                     //write 404
@@ -285,7 +285,7 @@ namespace zyio{
                 }
                 //wrap logic
                 BizLogicProxy logicProxy(logic);
-                HttpFilterChain* httpFilterChain = webFilterChain->doMatch(verb,url);
+                HttpFilterChain* httpFilterChain = webFilterChain->doMatch(url,verb);
                 //no filter chain
                 if (httpFilterChain == nullptr) {
                     LOG_DEBUG("no filter found");
@@ -322,8 +322,8 @@ namespace zyio{
             webFilterChain->addPatternMatch(filterChain->getPattern(),filterChain);
         }
 
-        void XyHttpServer::addHandler(httpHandler* handler,std::string pattern,photon::net::http::Verb method){
-            webRouter->addPatternMatch(method,pattern,handler);
+        void XyHttpServer::addHandler(std::string pattern,photon::net::http::Verb method,httpHandler* handler){
+            webRouter->addPatternMatch(pattern,method,handler);
         }
 
 
