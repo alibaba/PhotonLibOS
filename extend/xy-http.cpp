@@ -14,14 +14,7 @@
 namespace zyio{
     namespace http{
 
-        std::string genHttpMapKey(std::string url,photon::net::http::Verb method){
-            auto verb =  magic_enum::enum_name(method);
-            std::stringstream key;
-            key<<verb.length();
-            key << verb;
-            key << url;
-            return key.str();
-        }
+
 
         //    wildcard
 //      *          zero or more occurrence of any characters
@@ -66,56 +59,87 @@ namespace zyio{
             return false;
         }
 
-        template<typename T>
-        Router<T>::Router(std::string pattern,photon::net::http::Verb method,T holder){
+
+        UrlPattern::UrlPattern(std::string pattern,photon::net::http::Verb method) : pattern(pattern),method(method){
 
         }
 
-        template <typename T>
-        T Router<T>::getHolder(){
-            return holder;
+        std::string UrlPattern::genHttpMapKey(){
+            auto verb =  magic_enum::enum_name(method);
+            std::stringstream key;
+            key<<verb.length();
+            key << verb;
+            key << pattern;
+            return key.str();
         }
 
         template<typename T>
-        void WebRouter<T>::addRouter(Router<T> router) {
-            auto key = genHttpMapKey(router.getPattern(),router.getMethod());
-            if (isAguePath(router.getPattern())) {
-                vagueContainer.insert({key,router});
+        UrlPatternMatch<T>::UrlPatternMatch(){
+            explicitContainer = new std::unordered_map<std::string,T>();
+            vagueContainer = new std::unordered_map<std::string,T>();
+        }
+
+        template<typename T>
+        UrlPatternMatch<T>::~UrlPatternMatch(){
+            delete explicitContainer;
+            delete vagueContainer;
+        }
+
+        template<typename T>
+        bool UrlPatternMatch<T>::isAguePath(std::string path) {
+            std::regex pattern(R"([*?+]+)");
+            return std::regex_search(path, pattern);
+        }
+
+        template<typename T>
+        void UrlPatternMatch<T>::addPatternMatch(UrlPattern pattern,T t) {
+            auto key = pattern.genHttpMapKey();
+            if (isAguePath(pattern.getPattern())) {
+                vagueContainer->insert({key,t});
             } else{
-                explicitContainer.insert({key,router});
+                explicitContainer->insert({key,t});
             }
         }
 
         template<typename T>
-        Router<T> WebRouter<T>::doMatch(photon::net::http::Verb method, std::string url) {
-            auto key = genHttpMapKey(url,method);
-            auto it = explicitContainer.find(url);
-            if(it != explicitContainer.end()){
+        void UrlPatternMatch<T>::addPatternMatch(photon::net::http::Verb methodIn,std::string urlIn,T t) {
+            zyio::http::UrlPattern urlPatternIn(urlIn,methodIn);
+            addPatternMatch(urlPatternIn,t);
+        }
+
+        template<typename T>
+        T UrlPatternMatch<T>::doMatch(zyio::http::UrlPattern urlPatternIn) {
+            auto key = urlPatternIn.genHttpMapKey();
+            auto it = explicitContainer->find(key);
+            if(it != explicitContainer->end()){
                 return it->second;
             }
             //foreach
-            auto methodStr =  magic_enum::enum_name(method);
-            for(auto it2 : vagueContainer){
+            auto methodStr =  magic_enum::enum_name(urlPatternIn.getMethod());
+            for(auto it2 : *vagueContainer){
                 auto k = it2.first;
-                auto method2 = k.substr(1,k[0]);
+                auto idx = k[0]-48;
+                auto method2 = k.substr(1,idx);
                 if(methodStr == method2){
-                     auto pattern = k.substr(k[0]+1);
-                     if(urlMatch(url,pattern)){
-                         return it2.second;
-                     }
+                    auto pattern = k.substr(idx+1);
+                    if(urlMatch(urlPatternIn.getPattern().c_str(),pattern.c_str())){
+                        return it2.second;
+                    }
                 }
             }
             return nullptr;
         }
 
         template<typename T>
-        bool WebRouter<T>::isAguePath(std::string path) {
-            std::regex pattern(R"([*?+]+)");
-            return std::regex_search(path, pattern);
+        T UrlPatternMatch<T>::doMatch(photon::net::http::Verb methodIn, std::string urlIn) {
+            zyio::http::UrlPattern urlPatternIn(urlIn,methodIn);
+            return doMatch(urlPatternIn);
         }
 
 
-        BizLogicProxy::BizLogicProxy(httpPHandler logic):logic(std::move(logic)){
+
+
+        BizLogicProxy::BizLogicProxy(httpHandler* logic):logic(logic){
 
         }
 
@@ -123,7 +147,7 @@ namespace zyio{
             if (hasExecute) {
                 return;
             }
-            logic(request, response);
+            (*logic)(request, response);
             this->hasExecute = true;
         }
 
@@ -131,16 +155,23 @@ namespace zyio{
 
         }
 
-        HttpFilterChain::HttpFilterChain(std::string pattern,photon::net::http::Verb method) : pattern(pattern),method(method){
-            chain = new std::vector<HttpFilter*>();
+
+        HttpFilterChain::HttpFilterChain(UrlPattern urlPattern) : pattern(urlPattern){
+            vector = new std::vector<HttpFilter*>();
         }
-        HttpFilterChain::~HttpFilterChain() {
-            delete chain;
+
+        HttpFilterChain::HttpFilterChain(photon::net::http::Verb method,std::string url){
+             vector = new std::vector<HttpFilter*>();
+             pattern = UrlPattern(url,method);
+        }
+
+        HttpFilterChain::~HttpFilterChain(){
+            delete vector;
         }
 
         void HttpFilterChain::addFilter(zyio::http::HttpFilter *filter) {
-            chain->push_back(filter);
-            std::sort(chain->begin(), chain->end(), [](auto t1, auto t2) -> bool {
+            vector->push_back(filter);
+            std::sort(vector->begin(), vector->end(), [](auto t1, auto t2) -> bool {
                 return t1->getOrder() > t2->getOrder();
             });
         }
@@ -148,7 +179,7 @@ namespace zyio{
         bool HttpFilterChain::preHandle(photon::net::http::Request &req,
                                         photon::net::http::Response &resp) {
             bool result = true;
-            for (const auto &item: *chain) {
+            for (const auto &item: *vector) {
                 if (!item->preHandle(req, resp)) {
                     result = false;
                     break;
@@ -159,20 +190,29 @@ namespace zyio{
 
         void HttpFilterChain::postHandle(BizLogicProxy &logicProxy, photon::net::http::Request &req,
                                          photon::net::http::Response &resp) {
-            for (const auto &item: *chain) {
+            for (const auto &item: *vector) {
                item->postHandle(logicProxy, req, resp);
             }
         }
 
         void HttpFilterChain::afterHandle(photon::net::http::Request &req,
                                           photon::net::http::Response &resp) {
-            for (const auto &item: *chain) {
+            for (const auto &item: *vector) {
                 item->afterHandle(req, resp);
             }
         }
 
 
+
+
+        XyHttpServer::XyHttpServer() {
+            webRouter = new UrlPatternMatch<httpHandler*>();
+            webFilterChain = new UrlPatternMatch<HttpFilterChain*>();
+        }
+
         XyHttpServer::~XyHttpServer() noexcept {
+            delete webRouter;
+            delete webFilterChain;
             status = ServerStatus::stopping;
             for (const auto& it: connections) {
                 it->sock->shutdown(ShutdownHow::ReadWrite);
@@ -180,26 +220,27 @@ namespace zyio{
             while (workers != 0) {
                 photon::thread_usleep(50 * 1000);
             }
+
         }
 
-//        int not_found_handler(photon::net::http::Request& req, photon::net::http::Response& resp) {
-//            resp.set_result(404);
-//            resp.headers.content_length(0);
-//            return 0;
-//        }
-//
-//        int error_handler(photon::net::http::Request& req, photon::net::http::Response& resp) {
-//            resp.set_result(500);
-//            resp.headers.content_length(0);
-//            return 0;
-//        }
+
 
         photon::net::ISocketServer::Handler XyHttpServer::getConnectionHandler() {
             return {this, &XyHttpServer::handleConnection};
         }
 
 
+        void resp404(photon::net::http::Request& req, photon::net::http::Response& resp){
+            resp.set_result(404);
+            std::string bodyStr = "<p>page not found</p>";
+            resp.keep_alive(false);
+            resp.headers.insert("Content-Type", "text/html; charset=utf-8");
+            resp.write(bodyStr.data(), bodyStr.length());
+        }
 
+        void test(photon::net::http::Request &req){
+
+        }
 
         int XyHttpServer::handleConnection(photon::net::ISocketStream *sock) {
             workers++;
@@ -225,22 +266,29 @@ namespace zyio{
                     return -1;
                 }
 
-                LOG_DEBUG("Request Accepted", VALUE(req.verb()), VALUE(req.target()), VALUE(req.headers["Authorization"]));
+                LOG_DEBUG("Request Accepted", VALUE(req.verb()), VALUE(req.target()), VALUE(req.headers["Authorization"]),
+                          VALUE(req.query()));
 
                 resp.reset(sock, false);
                 resp.keep_alive(req.keep_alive());
+                resp.headers.insert("Server", "nginx/1.14.1");
+                auto verb = req.verb();
+                auto url = std::string(req.target());
 
-                auto logic = findHttpPHandler(req);
+                auto logic = webRouter->doMatch(verb,url);
                 //404
                 if (logic == nullptr) {
                     //write 404
+                    LOG_DEBUG("404:no handle found");
+                    resp404(req,resp);
                     break;
                 }
                 //wrap logic
                 BizLogicProxy logicProxy(logic);
-                HttpFilterChain* httpFilterChain = matchFilterChain(req);
+                HttpFilterChain* httpFilterChain = webFilterChain->doMatch(verb,url);
                 //no filter chain
                 if (httpFilterChain == nullptr) {
+                    LOG_DEBUG("no filter found");
                     logicProxy.executeOnce(req, resp);
                     break;
                 }
@@ -248,6 +296,7 @@ namespace zyio{
                 bool res = httpFilterChain->preHandle(req,resp);
                 if (!res) {
                     //filter stop handle
+                    LOG_DEBUG("filter stop handle");
                     break;
                 }
                 //post
@@ -270,34 +319,13 @@ namespace zyio{
 
 
         void XyHttpServer::bindFilterChain(zyio::http::HttpFilterChain *filterChain) {
-            std::string key = genHttpMapKey(filterChain->getPattern(),filterChain->getMethod());
-            chainContainer.insert({key,filterChain});
+            webFilterChain->addPatternMatch(filterChain->getPattern(),filterChain);
         }
 
-        void XyHttpServer::addHandler(httpPHandler handler,std::string pattern,photon::net::http::Verb method){
-            std::string key = genHttpMapKey(pattern,method);
-            handlerContainer.insert({key,handler});
+        void XyHttpServer::addHandler(httpHandler* handler,std::string pattern,photon::net::http::Verb method){
+            webRouter->addPatternMatch(method,pattern,handler);
         }
 
-        HttpFilterChain* XyHttpServer::matchFilterChain(photon::net::http::Request &req) {
-            auto key = genHttpMapKey(std::string(req.target()) ,req.verb());
-            for (auto m: chainContainer) {
-                if (url_simplematch(m.first.c_str(), key.c_str())) {
-                    auto chain = m.second;
-                    return chain;
-                }
-            }
-            return nullptr;
-        }
-
-        httpPHandler XyHttpServer::findHttpPHandler(photon::net::http::Request &req) {
-            auto key = genHttpMapKey(std::string(req.target()) ,req.verb());
-            auto value = handlerContainer.find(key);
-            if (value != handlerContainer.end()) {
-                return value->second;
-            }
-            return nullptr;
-        }
 
 
     }

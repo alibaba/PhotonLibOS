@@ -13,42 +13,51 @@
 namespace zyio{
     namespace http{
 
-        typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> httpPHandler;
+        typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> httpHandler;
 
-        template<typename T>
-        class Router{
+        class XyReq{
         private:
             CLASS_FAST_PROPERTY_GETTER(std::string ,pattern,Pattern)
-            CLASS_FAST_PROPERTY_GETTER(photon::net::http::Verb ,method,Method)
-            T holder;
-        public:
-            Router()=delete;
-            Router(std::string pattern,photon::net::http::Verb method,T holder);
-            T getHolder();
         };
 
-        template<class T>
-        class WebRouter{
+        class UrlPattern {
         private:
-            std::unordered_map<std::string,Router<T>> explicitContainer ={};
-            std::unordered_map<std::string,Router<T>> vagueContainer ={};
-
-
+            CLASS_FAST_PROPERTY_COMM(std::string ,pattern,Pattern)
+            CLASS_FAST_PROPERTY_COMM(photon::net::http::Verb ,method,Method)
         public:
-            void addRouter(Router<T> router);
-            Router<T> doMatch(photon::net::http::Verb method,std::string url);
-
-            bool isAguePath(std::string path);
+            UrlPattern() = default;
+            UrlPattern(std::string pattern,photon::net::http::Verb method);
+            std::string genHttpMapKey();
+            virtual ~UrlPattern() = default;
         };
 
+
+        template<typename T>
+        class UrlPatternMatch{
+
+        private:
+            std::unordered_map<std::string,T>* explicitContainer;
+            std::unordered_map<std::string,T>* vagueContainer;
+
+        protected:
+            bool isAguePath(std::string path);
+        public:
+            UrlPatternMatch();
+            virtual ~UrlPatternMatch();
+
+            void addPatternMatch(UrlPattern pattern,T t);
+            void addPatternMatch(photon::net::http::Verb methodIn,std::string urlIn,T t);
+            T doMatch(UrlPattern urlPatternIn);
+            T doMatch(photon::net::http::Verb methodIn,std::string urlIn);
+        };
 
 
         class BizLogicProxy {
         private:
-            httpPHandler logic;
+            httpHandler *logic;
             bool hasExecute = false;
         public:
-            explicit BizLogicProxy(httpPHandler logic);
+            explicit BizLogicProxy(httpHandler* logic);
 
             void executeOnce(photon::net::http::Request &request, photon::net::http::Response &response);
         };
@@ -76,15 +85,19 @@ namespace zyio{
             virtual void afterHandle(photon::net::http::Request& req, photon::net::http::Response& resp) = 0;
         };
 
-        class HttpFilterChain {
+
+        class HttpFilterChain  {
+
         private:
-            CLASS_FAST_PROPERTY_GETTER(std::string,pattern,Pattern)
-            CLASS_FAST_PROPERTY_GETTER(photon::net::http::Verb,method,Method)
-            std::vector<HttpFilter*>* chain;
+            CLASS_FAST_PROPERTY_GETTER(UrlPattern ,pattern,Pattern)
+            CLASS_FAST_PROPERTY_GETTER(std::vector<HttpFilter*>* , vector,Vector)
+
+
         public:
-            HttpFilterChain() = delete;
-            HttpFilterChain(std::string pattern,photon::net::http::Verb method);
+            HttpFilterChain(UrlPattern urlPattern);
+            HttpFilterChain(photon::net::http::Verb method,std::string url);
             virtual ~HttpFilterChain();
+
             void addFilter(HttpFilter* filter);
 
             bool preHandle(photon::net::http::Request& req, photon::net::http::Response& resp);
@@ -107,30 +120,25 @@ namespace zyio{
 
         class XyHttpServer : public Object {
         private:
-            WebRouter<HttpFilterChain*> chainContainer = {};
-            WebRouter<httpPHandler> handlerContainer = {};
+            UrlPatternMatch<httpHandler*>* webRouter;
+            UrlPatternMatch<HttpFilterChain*>* webFilterChain;
+
 
             intrusive_list<SockItem> connections = {};
             ServerStatus status = ServerStatus::running;
             uint64_t workers = 0;
         public:
-            XyHttpServer() = default;
+            XyHttpServer();
             virtual ~XyHttpServer();
 
             photon::net::ISocketServer::Handler getConnectionHandler();
             int handleConnection(photon::net::ISocketStream* stream);
 
-
-            void addHandler(httpPHandler handler,std::string pattern,photon::net::http::Verb method);
             void bindFilterChain(HttpFilterChain* filterChain);
+            void addHandler(httpHandler* handler,std::string pattern,photon::net::http::Verb method);
 
 
 
-
-
-        protected:
-            HttpFilterChain* matchFilterChain(photon::net::http::Request& req);
-            httpPHandler findHttpPHandler(photon::net::http::Request& req);
 
         };
 
