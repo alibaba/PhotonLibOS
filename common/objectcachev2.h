@@ -91,26 +91,20 @@ protected:
         }
     };
 
-    photon::thread* reclaimer = nullptr;
-    photon::common::RingChannel<LockfreeMPMCRingQueue<std::shared_ptr<V>, 4096>>
-        reclaim_queue;
-    photon::spinlock maplock;
     std::unordered_set<Box, ItemHash, ItemEqual> map;
-    intrusive_list<Box> cycle_list;
+    intrusive_list<Box> lru_list;
     uint64_t lifespan;
     photon::Timer _timer;
-    bool _exit = false;
+    photon::spinlock maplock;
 
     std::shared_ptr<V> __update(Box& item, std::shared_ptr<V> val) {
         auto ret_val = val;
-        auto old_val = item.writer().update(val, photon::now);
-        reclaim_queue.template send<PhotonPause>(old_val);
+        item.writer().update(val, photon::now);
         return ret_val;
     }
 
     std::shared_ptr<V> __update(Box& item, V* val) {
-        std::shared_ptr<V> ptr(val);
-        return __update(item, ptr);
+        return __update(item, std::shared_ptr<V>(val));
     }
 
     template <typename KeyType>
@@ -120,37 +114,32 @@ protected:
         SCOPED_LOCK(maplock);
         auto it = map.find(keyitem);
         if (it == map.end()) {
-            // item = new Box(std::forward<KeyType>(key));
-            auto rt = map.emplace(key);
+            auto rt = map.emplace(std::forward<KeyType>(key));
             if (rt.second) item = (Box*)&*rt.first;
-        } else
+        } else {
             item = (Box*)&*it;
+        }
         assert(item);
         item->timestamp = photon::now;
-        cycle_list.pop(item);
-        cycle_list.push_back(item);
+        lru_list.pop(item);
+        lru_list.push_back(item);
         return *item;
     }
 
     uint64_t __expire() {
-        intrusive_list<Box> delete_list;
         uint64_t now = photon::now;
-        {
-            SCOPED_LOCK(maplock);
-            if (cycle_list.empty()) return 0;
-            if (photon::sat_add(cycle_list.front()->timestamp, lifespan) >
-                now) {
-                return photon::sat_add(cycle_list.front()->timestamp,
-                                       lifespan) -
-                       now;
-            }
-            auto x = cycle_list.front();
-            while (x && (photon::sat_add(x->timestamp, lifespan) < now)) {
-                cycle_list.pop(x);
-                __update(*x, nullptr);
-                map.erase(*x);
-                x = cycle_list.front();
-            }
+        SCOPED_LOCK(maplock);
+        if (lru_list.empty()) return 0;
+        if (photon::sat_add(lru_list.front()->timestamp, lifespan) > now) {
+            return photon::sat_add(lru_list.front()->timestamp, lifespan) -
+                    now;
+        }
+        auto x = lru_list.front();
+        while (x && (photon::sat_add(x->timestamp, lifespan) < now)) {
+            lru_list.pop(x);
+            __update(*x, nullptr);
+            map.erase(*x);
+            x = lru_list.front();
         }
         return 0;
     }
@@ -164,20 +153,16 @@ public:
 
         Borrow() : _reader(nullptr) {}
 
-        Borrow(ObjectCacheV2* oc, Box* item, std::shared_ptr<V>&& reader)
-            : _oc(oc),
-              _item(item),
-              _reader(std::move(reader)),
-              _recycle(false) {}
+        Borrow(ObjectCacheV2* oc, Box* item, const std::shared_ptr<V>& reader)
+            : _oc(oc), _item(item), _reader(reader), _recycle(false) {}
 
         Borrow(Borrow&& rhs) : _reader(nullptr) { *this = std::move(rhs); }
 
         Borrow& operator=(Borrow&& rhs) {
             std::swap(_oc, rhs._oc);
             std::swap(_item, rhs._item);
-            _reader = std::atomic_exchange(&rhs._reader, _reader);
-            std::swap(_reader, rhs._reader);
             std::swap(_recycle, rhs._recycle);
+            rhs._reader = std::atomic_exchange(&_reader, std::move(rhs._reader));
             return *this;
         }
 
@@ -209,13 +194,13 @@ public:
                         photon::now) {
                         r = __update(item, ctor());
                     }
-                    return Borrow(this, &item, std::move(r));
+                    return Borrow(this, &item, r);
                 }
             }
             photon::thread_yield();
             r = item.reader();
         }
-        return Borrow(this, &item, std::move(r));
+        return Borrow(this, &item, r);
     }
 
     template <typename KeyType>
@@ -228,31 +213,17 @@ public:
     Borrow update(KeyType&& key, Ctor&& ctor) {
         auto item = __find_or_create_item(std::forward<KeyType>(key));
         auto r = __update(item, ctor());
-        return Borrow(this, item, std::move(r));
+        return Borrow(this, item, r);
     }
 
     ObjectCacheV2(uint64_t lifespan)
         : lifespan(lifespan),
           _timer(1UL * 1000 * 1000, {this, &ObjectCacheV2::__expire}, true,
-                 photon::DEFAULT_STACK_SIZE),
-          _exit(false) {
-        reclaimer = photon::thread_create11([this] {
-            while (!_exit) {
-                reclaim_queue.recv();
-            }
-        });
-        photon::thread_enable_join(reclaimer);
-    }
+                 photon::DEFAULT_STACK_SIZE) {}
 
     ~ObjectCacheV2() {
         _timer.stop();
-        if (reclaimer) {
-            _exit = true;
-            reclaim_queue.template send<PhotonPause>(nullptr);
-            photon::thread_join((photon::join_handle*)reclaimer);
-            reclaimer = nullptr;
-        }
         SCOPED_LOCK(maplock);
-        cycle_list.node = nullptr;
+        lru_list.node = nullptr;
     }
 };
