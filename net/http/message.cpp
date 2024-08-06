@@ -352,6 +352,16 @@ int Request::parse_request_line(Parser &p) {
     p.skip_chars(' ');
     auto target = p.extract_until_char(' ');
     m_target = target;
+
+    auto path = std::string_view{m_buf, m_buf_size} | m_target;
+    auto idx = path.find_first_of('?');
+    if(std::string::npos != idx){
+        unsigned int baseIdx = verb_str.size()+1;
+        m_path = {m_target.offset(),idx};
+        unsigned int skip = m_target.offset()+idx+1;
+        m_query= {skip,path.length()-skip+baseIdx};
+    }
+
     p.skip_chars(' ');
     p.skip_string("HTTP/");
     m_version = p.extract_until_char('\r');
