@@ -284,9 +284,9 @@ IFileSystem* new_httpfs_v2(bool default_https, uint64_t conn_timeout,
                          client, client_ownership);
 }
 
-IFile* new_httpfile_v2(const char* url, HttpFs_v2* httpfs, uint64_t conn_timeout,
+IFile* new_httpfile_v2(const char* url, IFileSystem* httpfs, uint64_t conn_timeout,
                     uint64_t stat_timeout) {
-    return new HttpFile_v2(url, httpfs, conn_timeout, stat_timeout);
+    return new HttpFile_v2(url, (HttpFs_v2*) httpfs, conn_timeout, stat_timeout);
 }
 }  // namespace fs
 }

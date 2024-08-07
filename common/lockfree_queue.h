@@ -560,7 +560,8 @@ public:
         while (!push(x)) {
             Pause::pause();
         }
-        if (idler.load(std::memory_order_acquire)) queue_sem.signal(1);
+        // meke sure that idler load happends after push work done.
+        if (idler.load(std::memory_order_seq_cst)) queue_sem.signal(1);
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;

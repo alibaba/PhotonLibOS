@@ -76,17 +76,21 @@ public:
         OpenSSL_add_all_ciphers();
         OpenSSL_add_all_digests();
         OpenSSL_add_all_algorithms();
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
         mtx.clear();
         for (int i = 0; i < CRYPTO_num_locks(); i++) {
             mtx.emplace_back(std::make_unique<photon::mutex>());
         }
-        CRYPTO_set_id_callback(&GlobalSSLContext ::threadid_callback);
+        CRYPTO_set_id_callback(&GlobalSSLContext::threadid_callback);
         CRYPTO_set_locking_callback(&GlobalSSLContext::lock_callback);
+#endif
     }
 
     ~GlobalSSLContext() {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
         CRYPTO_set_id_callback(NULL);
         CRYPTO_set_locking_callback(NULL);
+#endif
     }
 };
 
@@ -172,7 +176,11 @@ public:
     }
 };
 
-void __OpenSSLGlobalInit() { (void)GlobalSSLContext::getInstance(); }
+void __OpenSSLGlobalInit() {
+#ifdef PHOTON_GLOBAL_INIT_OPENSSL
+    (void)GlobalSSLContext::getInstance();
+#endif
+}
 
 TLSContext* new_tls_context(const char* cert_str, const char* key_str,
                             const char* passphrase, TLSVersion version) {
