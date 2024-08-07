@@ -42,7 +42,7 @@ struct Enumerable
             this->obj = nullptr;
         }
         using R = typename std::result_of<decltype(&T::get)(T)>::type;
-        R operator*() { return obj ? obj->get() : nullptr; }
+        R operator*() { return obj ? obj->get() : R{}; }
         bool operator==(const iterator& rhs) const { return obj == rhs.obj; }
         bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
         iterator& operator++()

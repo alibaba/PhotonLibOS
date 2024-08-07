@@ -63,7 +63,7 @@ protected:
             std::swap(r, ref);
             return r;
         }
-        std::shared_ptr<V> clear(uint64_t ts = 0) {
+        std::shared_ptr<V> reset(uint64_t ts = 0) {
             return update({nullptr}, ts);
         }
         std::shared_ptr<V> reader() { return ref; }
@@ -116,7 +116,11 @@ protected:
         return *box;
     }
     uint64_t __expire() {
+#if __cplusplus < 201703L
         std::vector<std::shared_ptr<V>> to_release;
+#else
+        intrusive_list<Box> to_release;
+#endif
         uint64_t now = photon::now;
         uint64_t reclaim_before = photon::sat_sub(now, lifespan);
         {
@@ -132,13 +136,27 @@ protected:
                 if (x->rc == 0) {
                     // make vector holds those shared_ptr
                     // prevent object destroy in critical zone
-                    to_release.push_back(x->clear());
+#if __cplusplus < 201703L
+                    to_release.push_back(x->reset());
                     map.erase(*x);
+#else
+                    // Here is a hacked implementation
+                    auto node = map.extract(*x);
+                    to_release.push_back(&node.value());
+                    /// node_handle should be just key&val pointer
+                    // Force make it empty can prevent destroy object
+                    // when node_handle goes to destroy
+                    memset((void*)&node, 0, sizeof(node));
+#endif
                 }
                 x = lru_list.front();
             }
         }
+#if __cplusplus < 201703L
         to_release.clear();
+#else
+        to_release.delete_all();
+#endif
         return 0;
     }
 
@@ -162,7 +180,7 @@ public:
 
         ~Borrow() {
             if (_recycle) {
-                _box->clear();
+                _box->reset();
             }
             _box->release();
             if (_box->rc == 0) {
@@ -228,7 +246,8 @@ public:
 
     ~ObjectCacheV2() {
         _timer.stop();
-        SCOPED_LOCK(maplock);
+        // Should be no other access during dtor.
+        // modify lru_list do not need a lock.
         lru_list.node = nullptr;
     }
 };
