@@ -360,6 +360,9 @@ int Request::parse_request_line(Parser &p) {
         m_path = {m_target.offset(),idx};
         unsigned int skip = m_target.offset()+idx+1;
         m_query= {skip,path.length()-skip+baseIdx};
+    }else{
+        m_path = m_target;
+        m_query={0,0};
     }
 
     p.skip_chars(' ');
