@@ -232,11 +232,11 @@ public:
 
     template <typename KeyType, typename Ctor>
     Borrow update(KeyType&& key, Ctor&& ctor) {
-        auto box = __find_or_create_box(std::forward<KeyType>(key));
+        auto& box = __find_or_create_box(std::forward<KeyType>(key));
         DEFER(box.release());
-        auto r = ctor();
+        auto r = std::shared_ptr<V>(ctor());
         box.update(r, photon::now);
-        return Borrow(this, box, r);
+        return Borrow(this, &box, r);
     }
 
     ObjectCacheV2(uint64_t lifespan)
