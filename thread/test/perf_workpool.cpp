@@ -31,7 +31,7 @@ DEFINE_uint64(fires, 50'000, "How many tasks to fire in each concurrency");
 static photon::WorkPool* pool;
 static std::atomic<uint64_t> sum_time;
 
-void task_async() {
+void* task_async(void*) {
     photon::semaphore sem(0);
     for (uint64_t i = 0; i < FLAGS_fires; ++i) {
         auto start = std::chrono::steady_clock::now();
@@ -44,15 +44,17 @@ void task_async() {
         photon::thread_yield();
     }
     sem.wait(FLAGS_fires);
+    return nullptr;
 }
 
-void task_sync() {
+void* task_sync(void*) {
     auto start = std::chrono::steady_clock::now();
     pool->call([&, start] {
         auto end = std::chrono::steady_clock::now();
         sum_time.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(),
                            std::memory_order_relaxed);
     });
+    return nullptr;
 }
 
 int main(int argc, char** arg) {
@@ -69,12 +71,7 @@ int main(int argc, char** arg) {
 
     std::vector<photon::join_handle*> jhs;
     auto start = photon::now;
-    for (uint64_t i = 0; i < FLAGS_concurrency; ++i) {
-        jhs.emplace_back(photon::thread_enable_join(photon::thread_create11(task_async)));
-    }
-    for (auto& x : jhs) {
-        photon::thread_join(x);
-    }
+    photon::threads_create_join(FLAGS_concurrency, task_async, nullptr);
     auto end = photon::now;
 
     LOG_INFO("Fire ` async works and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
@@ -86,12 +83,7 @@ int main(int argc, char** arg) {
     jhs.clear();
 
     start = photon::now;
-    for (uint64_t i = 0; i < FLAGS_fires; i++) {
-        jhs.emplace_back(photon::thread_enable_join(photon::thread_create11(task_sync)));
-    }
-    for (auto& x: jhs) {
-        photon::thread_join(x);
-    }
+    photon::threads_create_join(FLAGS_fires, task_sync, nullptr);
     end = photon::now;
     LOG_INFO("Fire ` sync works and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
              FLAGS_fires, FLAGS_vcpu_num, FLAGS_fires * 1000 * 1000 / (end - start),
