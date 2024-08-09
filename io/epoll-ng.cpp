@@ -299,6 +299,8 @@ public:
             return 0;  // Event arrived
         }
         rm_interest(event);
+        // fire events in case of event during notify
+        wait_and_fire_events(0);
         if (ret == 0) {
             errno = ETIMEDOUT;
             return -1;

@@ -396,12 +396,10 @@ TEST_F(RpcTest, shutdown) {
     ASSERT_NE(nullptr, stub);
     DEFER(pool->put_stub(ep, true));
 
-    photon::thread_create11([&]{
+    auto stopper = photon::thread_enable_join(photon::thread_create11([&]{
         photon::thread_sleep(1);
         sk->shutdown();
-        delete sk;
-        sk = nullptr;
-    });
+    }));
 
     auto start = std::chrono::steady_clock::now();
     while (true) {
@@ -415,6 +413,8 @@ TEST_F(RpcTest, shutdown) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     GTEST_ASSERT_GT(duration, 900);
     GTEST_ASSERT_LT(duration, 1100);
+
+    photon::thread_join(stopper);
 }
 
 TEST_F(RpcTest, passive_shutdown) {
