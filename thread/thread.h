@@ -58,6 +58,8 @@ namespace photon
     // Reserved space can be used to passed large arguments to the new thread.
     typedef void* (*thread_entry)(void*);
     const uint64_t DEFAULT_STACK_SIZE = 8 * 1024 * 1024;
+    // Thread stack size should be at least 16KB. The thread struct located at stack bottom,
+    // and the mprotect page is located at stack top-end.
     thread* thread_create(thread_entry start, void* arg,
         uint64_t stack_size = DEFAULT_STACK_SIZE, uint16_t reserved_space = 0);
 

@@ -135,6 +135,7 @@ namespace photon
 #if defined(__linux__)
         madvise(ptr, stack_size, MADV_NOHUGEPAGE);
 #endif
+        mprotect(ptr, PAGE_SIZE, PROT_NONE);
         return ptr;
     }
 
@@ -306,8 +307,6 @@ namespace photon
             assert(state == states::DONE);
             // `buf` and `stack_size` will always store on register
             // when calling deallocating.
-            char* protect_head = (char*)align_up((uint64_t)buf, PAGE_SIZE);
-            mprotect(protect_head, PAGE_SIZE, PROT_READ | PROT_WRITE);
             photon_thread_dealloc(buf, stack_size);
         }
     };
@@ -937,16 +936,16 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
-        stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
-        stack_size += PAGE_SIZE * 2;  // extra 2 pages for alignment and set guard page
+        stack_size = align_up(stack_size, PAGE_SIZE);
+        if (stack_size <
+            sizeof(thread) + randomizer + reserved_space + PAGE_SIZE + 63)
+            LOG_ERROR_RETURN(EINVAL, nullptr, "stack_size too small");
         char* ptr = (char*)photon_thread_alloc(stack_size);
-        char* protect_head = (char*)align_up((uint64_t)ptr, PAGE_SIZE);
-        mprotect(protect_head, PAGE_SIZE, PROT_NONE);
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
         th->buf = ptr;
-        th->stackful_alloc_top = protect_head + PAGE_SIZE;
+        th->stackful_alloc_top = ptr + PAGE_SIZE;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;

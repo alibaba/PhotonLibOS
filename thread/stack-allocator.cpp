@@ -26,6 +26,8 @@ limitations under the License.
 
 namespace photon {
 
+constexpr static size_t PAGE_SIZE = 4UL * 1024;
+
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
           size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024,
           size_t ALIGNMENT = 64>
@@ -57,6 +59,7 @@ protected:
 #if defined(__linux__)
         madvise(ptr, alloc_size, MADV_NOHUGEPAGE);
 #endif
+        mprotect(ptr, PAGE_SIZE, PROT_NONE);
         return ptr;
     }
 
