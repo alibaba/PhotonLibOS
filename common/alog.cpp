@@ -181,7 +181,7 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
     uint64_t ndigits;
     auto begin = buf.ptr;
     // print (in reversed order)
-    if (!x.is_signed() || x.svalue() > 0)
+    if (!x.is_signed() || x.svalue() >= 0)
     {
         put_uint64(this, buf, x.uvalue());
         ndigits = buf.ptr - begin;
