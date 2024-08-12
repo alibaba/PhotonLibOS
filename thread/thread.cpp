@@ -916,9 +916,10 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
-        if (stack_size < 16UL * 1024 ||
-            stack_size <
-                sizeof(thread) + randomizer + reserved_space + PAGE_SIZE + 63)
+        size_t least_stack_size =
+            std::max(16UL * 1024, sizeof(thread) + randomizer + reserved_space +
+                                      PAGE_SIZE + 63);
+        if (stack_size < least_stack_size)
             LOG_ERROR_RETURN(EINVAL, nullptr, "stack_size too small");
         stack_size = align_up(stack_size, PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
