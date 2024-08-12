@@ -53,8 +53,7 @@ protected:
 
         std::shared_ptr<V> update(std::shared_ptr<V> r, uint64_t ts = 0) {
             lastcreate = ts;
-            r = std::atomic_exchange(&ref, r);
-            return r;
+            return std::atomic_exchange(&ref, r);
         }
         std::shared_ptr<V> reset(uint64_t ts = 0) {
             return update({nullptr}, ts);
