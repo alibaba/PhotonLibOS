@@ -143,6 +143,7 @@ namespace photon
 #if !defined(_WIN64) && !defined(__aarch64__)
         madvise(ptr, size, MADV_DONTNEED);
 #endif
+        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
         free(ptr);
     }
 

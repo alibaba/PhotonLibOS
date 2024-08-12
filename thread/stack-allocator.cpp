@@ -64,6 +64,7 @@ protected:
     }
 
     static void __dealloc(void* ptr, size_t size) {
+        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
         madvise(ptr, size, MADV_DONTNEED);
         free(ptr);
     }
