@@ -22,19 +22,18 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <vector>
 
 namespace photon {
 
-constexpr static size_t PAGE_SIZE = 4UL * 1024;
+const static size_t PAGE_SIZE = getpagesize();
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
-          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024,
-          size_t ALIGNMENT = 64>
+          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
 class PooledStackAllocator {
     constexpr static bool is_power2(size_t n) { return (n & (n - 1)) == 0; }
-    static_assert(is_power2(ALIGNMENT), "must be 2^n");
     static_assert(is_power2(MAX_ALLOCATION_SIZE), "must be 2^n");
     const static size_t N_SLOTS =
         __builtin_ffsl(MAX_ALLOCATION_SIZE / MIN_ALLOCATION_SIZE);
@@ -52,7 +51,7 @@ protected:
 
     static void* __alloc(size_t alloc_size) {
         void* ptr;
-        int ret = ::posix_memalign(&ptr, ALIGNMENT, alloc_size);
+        int ret = ::posix_memalign(&ptr, PAGE_SIZE, alloc_size);
         if (ret != 0) {
             errno = ret;
             return nullptr;
@@ -143,10 +142,10 @@ public:
     }
 };
 
-template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE,
-          size_t ALIGNMENT>
-size_t PooledStackAllocator<MIN_ALLOCATION_SIZE, MAX_ALLOCATION_SIZE,
-                            ALIGNMENT>::trim_threshold = 1024UL * 1024 * 1024;
+template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE>
+size_t PooledStackAllocator<MIN_ALLOCATION_SIZE,
+                            MAX_ALLOCATION_SIZE>::trim_threshold =
+    1024UL * 1024 * 1024;
 
 static PooledStackAllocator<>& get_pooled_stack_allocator() {
     thread_local PooledStackAllocator<> _alloc;

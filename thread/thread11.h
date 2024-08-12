@@ -146,13 +146,13 @@ namespace photon {
             thread_create11(cfunc, this, a, b, 3.14);
 
             // thread(stack_size = 64KB) { return this->func(1, 'a'); }
-            thread_create11(/* stack size */ 64*1024, func, this, 1, 'a');
+            thread_create11(/* stack size */ 256*1024, func, this, 1, 'a');
 
             // thread { any_return_type(a, b); return nullptr; }
             thread_create11(&any_return_type, a, b);
 
             // thread(stack_size = 64KB) { any_return_type(1, 'a'); return nullptr; }
-            thread_create11(/* stack size */ 64*1024, &any_return_type, 1, 'a');
+            thread_create11(/* stack size */ 256*1024, &any_return_type, 1, 'a');
 
             thread_create11([&](int, double) { return -1; }, 10, 3.1415926);
 

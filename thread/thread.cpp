@@ -86,7 +86,7 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            #name": "
 #endif
 
-static constexpr size_t PAGE_SIZE = 1 << 12;
+static const size_t PAGE_SIZE = getpagesize();
 
 namespace photon
 {
