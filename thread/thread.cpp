@@ -126,27 +126,6 @@ namespace photon
         }
     };
 
-    void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
-        char* ptr = nullptr;
-        int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
-        if (unlikely(err))
-            LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
-                             ERRNO(err));
-#if defined(__linux__)
-        madvise(ptr, stack_size, MADV_NOHUGEPAGE);
-#endif
-        mprotect(ptr, PAGE_SIZE, PROT_NONE);
-        return ptr;
-    }
-
-    void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
-#if !defined(_WIN64) && !defined(__aarch64__)
-        madvise(ptr, size, MADV_DONTNEED);
-#endif
-        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
-        free(ptr);
-    }
-
     static Delegate<void*, size_t> photon_thread_alloc(
         &default_photon_thread_stack_alloc, nullptr);
     static Delegate<void, void*, size_t> photon_thread_dealloc(
@@ -937,10 +916,11 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
-        stack_size = align_up(stack_size, PAGE_SIZE);
-        if (stack_size <
-            sizeof(thread) + randomizer + reserved_space + PAGE_SIZE + 63)
+        if (stack_size < 16UL * 1024 ||
+            stack_size <
+                sizeof(thread) + randomizer + reserved_space + PAGE_SIZE + 63)
             LOG_ERROR_RETURN(EINVAL, nullptr, "stack_size too small");
+        stack_size = align_up(stack_size, PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);

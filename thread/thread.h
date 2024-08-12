@@ -15,13 +15,14 @@ limitations under the License.
 */
 
 #pragma once
-#include <cinttypes>
-#include <cassert>
-#include <cerrno>
-#include <atomic>
-#include <type_traits>
 #include <photon/common/callback.h>
 #include <photon/common/timeout.h>
+#include <photon/thread/stack-allocator.h>
+
+#include <atomic>
+#include <cassert>
+#include <cerrno>
+#include <type_traits>
 #ifndef __aarch64__
 #include <emmintrin.h>
 #endif
@@ -492,18 +493,6 @@ namespace photon
     // helps allocating when using hybrid C++20 style coroutine
     void* stackful_malloc(size_t size);
     void stackful_free(void* ptr);
-
-    // Set photon allocator/deallocator for photon thread stack
-    // this is a hook for thread allocation, both alloc and dealloc
-    // helps user to do more works like mark GC while allocating
-    void* default_photon_thread_stack_alloc(void*, size_t stack_size);
-    void default_photon_thread_stack_dealloc(void*, void* stack_ptr,
-                                             size_t stack_size);
-    void set_photon_thread_stack_allocator(
-        Delegate<void*, size_t> photon_thread_alloc = {
-            &default_photon_thread_stack_alloc, nullptr},
-        Delegate<void, void*, size_t> photon_thread_dealloc = {
-            &default_photon_thread_stack_dealloc, nullptr});
 };
 
 /*

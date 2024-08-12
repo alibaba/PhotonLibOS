@@ -18,6 +18,7 @@ limitations under the License.
 #include <linux/mman.h>
 #endif
 #include <errno.h>
+#include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -169,5 +170,26 @@ size_t pooled_stack_trim_threshold(size_t x) {
 
 size_t pooled_stack_trim_current_vcpu(size_t keep_size);
 size_t pooled_stack_trim_threshold(size_t x);
+
+void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
+    char* ptr = nullptr;
+    int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
+    if (unlikely(err))
+        LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
+                         ERRNO(err));
+#if defined(__linux__)
+    madvise(ptr, stack_size, MADV_NOHUGEPAGE);
+#endif
+    mprotect(ptr, PAGE_SIZE, PROT_NONE);
+    return ptr;
+}
+
+void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
+    mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+#if !defined(_WIN64) && !defined(__aarch64__)
+    madvise(ptr, size, MADV_DONTNEED);
+#endif
+    free(ptr);
+}
 
 }  // namespace photon
