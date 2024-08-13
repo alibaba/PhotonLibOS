@@ -19,7 +19,7 @@ limitations under the License.
 
 struct SV : public std::string_view {
 	template<size_t N>
-	constexpr SV(const char(&s)[N]) : SV(s, N) { }
+	constexpr SV(const char(&s)[N]) : SV(s, N-1) { }
 	constexpr SV(const char* s, size_t n) : std::string_view(s, n) { }
 };
 
