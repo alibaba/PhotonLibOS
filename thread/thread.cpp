@@ -86,7 +86,7 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            #name": "
 #endif
 
-static constexpr size_t PAGE_SIZE = 1 << 12;
+static const size_t PAGE_SIZE = getpagesize();
 
 namespace photon
 {
@@ -125,25 +125,6 @@ namespace photon
             return 0;
         }
     };
-
-    void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
-        char* ptr = nullptr;
-        int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
-        if (unlikely(err))
-            LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
-                             ERRNO(err));
-#if defined(__linux__)
-        madvise(ptr, stack_size, MADV_NOHUGEPAGE);
-#endif
-        return ptr;
-    }
-
-    void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
-#if !defined(_WIN64) && !defined(__aarch64__)
-        madvise(ptr, size, MADV_DONTNEED);
-#endif
-        free(ptr);
-    }
 
     static Delegate<void*, size_t> photon_thread_alloc(
         &default_photon_thread_stack_alloc, nullptr);
@@ -306,8 +287,6 @@ namespace photon
             assert(state == states::DONE);
             // `buf` and `stack_size` will always store on register
             // when calling deallocating.
-            char* protect_head = (char*)align_up((uint64_t)buf, PAGE_SIZE);
-            mprotect(protect_head, PAGE_SIZE, PROT_READ | PROT_WRITE);
             photon_thread_dealloc(buf, stack_size);
         }
     };
@@ -936,17 +915,25 @@ R"(
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
-        size_t randomizer = (rand() % 32) * (1024 + 8);
-        stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
-        stack_size += PAGE_SIZE * 2;  // extra 2 pages for alignment and set guard page
+        size_t randomizer = (rand() % 512) * 8;
+        // stack contains struct, randomizer space, and reserved_space
+        size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
+        // at least a whole page for mprotect
+        least_stack_size += PAGE_SIZE;
+        // and make sure it's at least 16K
+        least_stack_size = std::max(16UL * 1024, least_stack_size);
+        stack_size = align_up(stack_size, PAGE_SIZE);
+        if (unlikely(stack_size < least_stack_size)) {
+            LOG_WARN("Stack size ` is less than least stack size `, use ` instead",
+                     stack_size, least_stack_size, least_stack_size);
+            stack_size = least_stack_size;
+        }
         char* ptr = (char*)photon_thread_alloc(stack_size);
-        char* protect_head = (char*)align_up((uint64_t)ptr, PAGE_SIZE);
-        mprotect(protect_head, PAGE_SIZE, PROT_NONE);
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
         th->buf = ptr;
-        th->stackful_alloc_top = protect_head + PAGE_SIZE;
+        th->stackful_alloc_top = ptr + PAGE_SIZE;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;

@@ -18,20 +18,22 @@ limitations under the License.
 #include <linux/mman.h>
 #endif
 #include <errno.h>
+#include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <vector>
 
 namespace photon {
 
+const static size_t PAGE_SIZE = getpagesize();
+
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
-          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024,
-          size_t ALIGNMENT = 64>
+          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
 class PooledStackAllocator {
     constexpr static bool is_power2(size_t n) { return (n & (n - 1)) == 0; }
-    static_assert(is_power2(ALIGNMENT), "must be 2^n");
     static_assert(is_power2(MAX_ALLOCATION_SIZE), "must be 2^n");
     const static size_t N_SLOTS =
         __builtin_ffsl(MAX_ALLOCATION_SIZE / MIN_ALLOCATION_SIZE);
@@ -49,7 +51,7 @@ protected:
 
     static void* __alloc(size_t alloc_size) {
         void* ptr;
-        int ret = ::posix_memalign(&ptr, ALIGNMENT, alloc_size);
+        int ret = ::posix_memalign(&ptr, PAGE_SIZE, alloc_size);
         if (ret != 0) {
             errno = ret;
             return nullptr;
@@ -57,10 +59,12 @@ protected:
 #if defined(__linux__)
         madvise(ptr, alloc_size, MADV_NOHUGEPAGE);
 #endif
+        mprotect(ptr, PAGE_SIZE, PROT_NONE);
         return ptr;
     }
 
     static void __dealloc(void* ptr, size_t size) {
+        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
         madvise(ptr, size, MADV_DONTNEED);
         free(ptr);
     }
@@ -138,10 +142,10 @@ public:
     }
 };
 
-template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE,
-          size_t ALIGNMENT>
-size_t PooledStackAllocator<MIN_ALLOCATION_SIZE, MAX_ALLOCATION_SIZE,
-                            ALIGNMENT>::trim_threshold = 1024UL * 1024 * 1024;
+template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE>
+size_t PooledStackAllocator<MIN_ALLOCATION_SIZE,
+                            MAX_ALLOCATION_SIZE>::trim_threshold =
+    1024UL * 1024 * 1024;
 
 static PooledStackAllocator<>& get_pooled_stack_allocator() {
     thread_local PooledStackAllocator<> _alloc;
@@ -165,5 +169,26 @@ size_t pooled_stack_trim_threshold(size_t x) {
 
 size_t pooled_stack_trim_current_vcpu(size_t keep_size);
 size_t pooled_stack_trim_threshold(size_t x);
+
+void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
+    char* ptr = nullptr;
+    int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
+    if (unlikely(err))
+        LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
+                         ERRNO(err));
+#if defined(__linux__)
+    madvise(ptr, stack_size, MADV_NOHUGEPAGE);
+#endif
+    mprotect(ptr, PAGE_SIZE, PROT_NONE);
+    return ptr;
+}
+
+void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
+    mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+#if !defined(_WIN64) && !defined(__aarch64__)
+    madvise(ptr, size, MADV_DONTNEED);
+#endif
+    free(ptr);
+}
 
 }  // namespace photon
