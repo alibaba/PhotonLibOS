@@ -4,6 +4,9 @@ target_link_libraries(simple-example PRIVATE photon_static)
 add_executable(net-perf perf/net-perf.cpp)
 target_link_libraries(net-perf PRIVATE photon_static)
 
+add_executable(workpool-perf perf/workpool-perf.cpp)
+target_link_libraries(workpool-perf PRIVATE photon_static)
+
 if (NOT APPLE)
     add_executable(io-perf perf/io-perf.cpp)
     target_link_libraries(io-perf PRIVATE photon_static)

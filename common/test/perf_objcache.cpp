@@ -40,7 +40,7 @@ void *task(void *arg) {
     for (const auto &x : k) {
         auto strx = std::to_string(x);
         auto b = oc->borrow(strx, [&strx] {
-            // photon::thread_usleep(1 * 1000);
+            photon::thread_usleep(1 * 1000);
             // LOG_INFO("CTOR `", photon::now);
             return new std::string(strx);
         });
