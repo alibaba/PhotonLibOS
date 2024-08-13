@@ -916,12 +916,18 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
         size_t randomizer = (rand() % 32) * (1024 + 8);
-        size_t least_stack_size =
-            std::max(16UL * 1024, sizeof(thread) + randomizer + reserved_space +
-                                      PAGE_SIZE + 63);
-        if (stack_size < least_stack_size)
-            LOG_ERROR_RETURN(EINVAL, nullptr, "stack_size too small");
+        // stack contains struct, randomizer space, and reserved_space
+        size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
+        // at least a whole page for mprotect
+        least_stack_size += PAGE_SIZE;
+        // and make sure it's at least 16K
+        least_stack_size = std::max(16UL * 1024, least_stack_size);
         stack_size = align_up(stack_size, PAGE_SIZE);
+        if (unlikely(stack_size < least_stack_size)) {
+            LOG_WARN("Stack size ` is less than least stack size `, use ` instead",
+                     stack_size, least_stack_size, least_stack_size);
+            stack_size = least_stack_size;
+        }
         char* ptr = (char*)photon_thread_alloc(stack_size);
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
