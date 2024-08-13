@@ -1,17 +1,98 @@
 //
 // Created by jun on 2024/7/25.
 //
-
-#include "photon/extend/xy-http.h"
-#include<algorithm>
+#include <algorithm>
 #include <sstream>
+#include <regex>
+#include <fcntl.h>
+#include "photon/extend/xy-http.h"
 #include "photon/extend/magic_enum/magic_enum.hpp"
 #include "photon/thread/thread.h"
-#include <photon/common/alog-stdstring.h>
-#include <urlmatch.h>
-#include <regex>
+#include "photon/thread/std-compat.h"
+#include "photon/common/alog-stdstring.h"
+#include "photon/fs/localfs.h"
+
 
 namespace zyio{
+
+    namespace common{
+        char *ZTime::default_date_time_fm = "%Y-%m-%d %H:%M:%S";
+        photon::mutex *ZTime::mutex = new photon::mutex();
+        ZTime *ZTime::instance = nullptr;
+        ZTime *ZTime::initInstance() {
+            if (instance == nullptr) {
+                mutex->lock();
+                if(instance != nullptr){
+                    mutex->unlock();
+                    return instance;
+                }
+                // instance is null
+                instance = new ZTime();
+                auto th = photon_std::thread(&ZTime::start, instance);
+                th.detach();
+//                photon_std::thread th([&] {
+//                    instance->start();
+//                });
+//                th.detach();
+                mutex->unlock();
+                return instance;
+            }
+            return instance;
+        }
+
+        ZTime *ZTime::getInstance() {
+            return instance;
+        }
+
+        ZTime::ZTime() {
+            lock = new photon::rwlock();
+        }
+
+        ZTime::~ZTime() {
+            delete lock;
+        }
+
+        void ZTime::start() {
+            while (true) {
+                lock->lock(photon::WLOCK);
+
+                //init epoch ms now
+                auto now = std::chrono::system_clock::now();
+                auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                this->epochMsNow = timestamp;
+
+                std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+                this->localTimeNow = std::localtime(&now_time);
+
+                char timeString[32];
+                auto r = std::strftime(timeString, sizeof(timeString), default_date_time_fm, localTimeNow);
+                this->fmNow = estring(timeString, r);
+
+                lock->unlock();
+                photon::thread_sleep(1);
+            }
+        }
+
+        unsigned long ZTime::nowEpochMs() {
+            lock->lock(photon::RLOCK);
+            DEFER(lock->unlock());
+            return epochMsNow;
+        }
+
+        estring ZTime::now(const char *fm) {
+            lock->lock(photon::RLOCK);
+            DEFER(lock->unlock());
+
+            if (fm == nullptr || epochMsNow == 0) {
+                return "";
+            }
+
+            char timeString[32];
+            auto r = std::strftime(timeString, sizeof(timeString), default_date_time_fm, localTimeNow);
+            return estring(timeString, r);
+        }
+    }
+
     namespace http{
 
 
@@ -57,6 +138,110 @@ namespace zyio{
                     break;
             }
             return false;
+        }
+
+
+        XyReq::XyReq(char *buf, uint16_t len) :photon::net::http::Request(buf,len) {
+
+        }
+
+        char *XyReq::bodyRead(size_t *len) {
+            auto size = body_size();
+            *len = size;
+            if(size == 0){
+                return nullptr;
+            }
+            char* buf = (char*)malloc(sizeof(char)*size);
+            read(buf,size);
+            return buf;
+        }
+
+
+        void XyReq::bodyFree(char *buf) {
+            if(buf == nullptr){
+                return;
+            }
+            free(buf);
+        }
+
+
+        XyResp::XyResp(char* buf,uint16_t len) : photon::net::http::Response(buf,len) {
+
+        }
+
+        void XyResp::writeBody(ContentType type, char *buf, size_t len) {
+            headers.insert("Date",zyio::common::ZTime::getInstance()->now());
+            headers.insert("Server","zy-server/1.0");
+
+            auto entry = MimeTypes::types[type];
+            if(entry.isTextType){
+                auto mimeType = std::string(entry.mimeType);
+                mimeType.append(";charset=UTF-8");
+                headers.insert("Content-Type",mimeType);
+            }else{
+                headers.insert("Content-Type",entry.mimeType);
+            }
+            headers.content_length(len);
+            write(buf, len);
+        }
+
+        void XyResp::writeBody(std::string contentType, char *buf, size_t len) {
+            headers.insert("Date",zyio::common::ZTime::getInstance()->now());
+            headers.insert("Server","zy-server/1.0");
+
+            headers.insert("Content-Type",contentType);
+            headers.content_length(len);
+            write(buf, len);
+        }
+
+        void XyResp::writeFile(std::string contentType,char* buf,size_t len,std::string writeFileName) {
+            headers.insert("Date",zyio::common::ZTime::getInstance()->now());
+            headers.insert("Server","zy-server/1.0");
+
+            headers.insert("Content-Type",contentType);
+            std::string fileName = "attachment;filename=\"";
+            fileName.append(writeFileName);
+            fileName.append("\"");
+            headers.insert("Content-Disposition",fileName);
+            headers.content_length(len);
+            write(buf, len);
+        }
+
+       void XyResp::writeFile(ContentType type, const char* fullFilePath,std::string writeFileName) {
+           auto entry = MimeTypes::types[type];
+           this->writeFile(entry.mimeType,fullFilePath,writeFileName);
+        }
+
+        void XyResp::writeFile(std::string contentType, const char* fullFilePath,std::string writeFileName) {
+            headers.insert("Date",zyio::common::ZTime::getInstance()->now());
+            headers.insert("Server","zy-server/1.0");
+
+            headers.insert("Content-Type",contentType);
+            std::string fileName = "attachment;filename=\"";
+            fileName.append(writeFileName);
+            fileName.append("\"");
+            headers.insert("Content-Disposition",fileName);
+            auto fs = photon::fs::new_localfs_adaptor(".", photon::fs::ioengine_iouring);
+            if (!fs) {
+                LOG_ERROR("failed to create fs");
+            }
+            DEFER(delete fs);
+            auto file = fs->open(fullFilePath,O_RDONLY);
+            if (!file) {
+                LOG_ERROR("failed to open file");
+            }
+            DEFER(delete file);
+            char buf[1024] = {0};
+            int totalSize = 0;
+            while (true){
+                size_t n = file->read(buf,1024);
+                if(n <= 0){
+                    break;
+                }
+                write(buf, n);
+                totalSize+=n;
+            }
+            headers.content_length(totalSize);
         }
 
 
@@ -143,7 +328,7 @@ namespace zyio{
 
         }
 
-        void BizLogicProxy::executeOnce(photon::net::http::Request &request, photon::net::http::Response &response) {
+        void BizLogicProxy::executeOnce(XyReq &request, XyResp &response) {
             if (hasExecute) {
                 return;
             }
@@ -176,8 +361,7 @@ namespace zyio{
             });
         }
 
-        bool HttpFilterChain::preHandle(photon::net::http::Request &req,
-                                        photon::net::http::Response &resp) {
+        bool HttpFilterChain::preHandle(XyReq &req,XyResp &resp) {
             bool result = true;
             for (const auto &item: *vector) {
                 if (!item->preHandle(req, resp)) {
@@ -188,15 +372,13 @@ namespace zyio{
             return result;
         }
 
-        void HttpFilterChain::postHandle(BizLogicProxy &logicProxy, photon::net::http::Request &req,
-                                         photon::net::http::Response &resp) {
+        void HttpFilterChain::postHandle(BizLogicProxy &logicProxy, XyReq &req,XyResp &resp) {
             for (const auto &item: *vector) {
                item->postHandle(logicProxy, req, resp);
             }
         }
 
-        void HttpFilterChain::afterHandle(photon::net::http::Request &req,
-                                          photon::net::http::Response &resp) {
+        void HttpFilterChain::afterHandle(XyReq &req,XyResp &resp) {
             for (const auto &item: *vector) {
                 item->afterHandle(req, resp);
             }
@@ -208,6 +390,10 @@ namespace zyio{
         XyHttpServer::XyHttpServer() {
             webRouter = new UrlPatternMatch<httpHandler*>();
             webFilterChain = new UrlPatternMatch<HttpFilterChain*>();
+            auto time = zyio::common::ZTime::getInstance();
+            if(time == nullptr){
+                zyio::common::ZTime::initInstance();
+            }
         }
 
         XyHttpServer::~XyHttpServer() noexcept {
@@ -230,7 +416,7 @@ namespace zyio{
         }
 
 
-        void resp404(photon::net::http::Request& req, photon::net::http::Response& resp){
+        void resp404(XyReq& req, XyResp& resp){
             resp.set_result(404);
             std::string bodyStr = "<p>page not found</p>";
             resp.keep_alive(false);
@@ -238,9 +424,6 @@ namespace zyio{
             resp.write(bodyStr.data(), bodyStr.length());
         }
 
-        void test(photon::net::http::Request &req){
-
-        }
 
         int XyHttpServer::handleConnection(photon::net::ISocketStream *sock) {
             workers++;
@@ -251,8 +434,8 @@ namespace zyio{
 
             char req_buf[64*1024];
             char resp_buf[64*1024];
-            photon::net::http::Request req(req_buf, 64*1024-1);
-            photon::net::http::Response resp(resp_buf, 64*1024-1);
+            XyReq req(req_buf, 64*1024-1);
+            XyResp resp(resp_buf, 64*1024-1);
 
             while (status == ServerStatus::running) {
                 req.reset(sock, false);
@@ -268,7 +451,6 @@ namespace zyio{
 
                 LOG_DEBUG("Request Accepted", VALUE(req.verb()), VALUE(req.target()), VALUE(req.headers["Authorization"]),
                           VALUE(req.query()));
-
                 resp.reset(sock, false);
                 resp.keep_alive(req.keep_alive());
                 resp.headers.insert("Server", "nginx/1.14.1");

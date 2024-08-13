@@ -9,16 +9,89 @@
 #include "photon/extend/comm-def.h"
 #include "photon/net/http/server.h"
 #include "photon/thread/list.h"
+#include "photon/thread/thread.h"
+#include "MimeTypes.h"
 
 namespace zyio{
+
+    namespace common{
+        class ZTime {
+        private:
+
+            uint64_t epochMsNow = 0;
+
+            estring fmNow = {};
+
+            std::tm* localTimeNow;
+
+            photon::rwlock *lock;
+
+            static char *default_date_time_fm;
+            static photon::mutex *mutex;
+            static ZTime *instance;
+
+            ZTime();
+            void start();
+
+        public:
+
+
+            ~ZTime();
+
+
+            unsigned long nowEpochMs();
+
+            estring now(const char *fm = "%Y-%m-%d %H:%M:%S");
+
+
+            static ZTime *getInstance();
+
+            static ZTime *initInstance();
+        };
+
+    }
+
     namespace http{
 
-        typedef std::function<void(photon::net::http::Request&, photon::net::http::Response&)> httpHandler;
 
-        class XyReq{
+        class XyReq : public photon::net::http::Request{
         private:
-            CLASS_FAST_PROPERTY_GETTER(std::string ,pattern,Pattern)
+
+        public:
+            XyReq() =delete;
+            XyReq(char* buf,uint16_t len);
+
+            char* bodyRead(size_t *len);
+
+            void bodyFree(char* buf);
         };
+
+
+        class XyResp : public photon::net::http::Response {
+        private:
+
+
+        public:
+
+            XyResp() =delete;
+            XyResp(char* buf,uint16_t len);
+
+            void writeBody(ContentType type,char* buf,size_t len);
+
+            void writeBody(std::string contentType,char* buf,size_t len);
+
+            void writeFile(ContentType type,const char* fullFilePath,std::string writeFileName);
+
+            void writeFile(std::string contentType,const char* fullFilePath,std::string writeFileName);
+
+            void writeFile(std::string contentType,char* buf,size_t len,std::string writeFileName);
+
+        };
+
+
+
+        typedef std::function<void(XyReq&, XyResp&)> httpHandler;
+
 
         class UrlPattern {
         private:
@@ -59,7 +132,7 @@ namespace zyio{
         public:
             explicit BizLogicProxy(httpHandler* logic);
 
-            void executeOnce(photon::net::http::Request &request, photon::net::http::Response &response);
+            void executeOnce(XyReq &request, XyResp &response);
         };
 
         class HttpFilter{
@@ -78,11 +151,11 @@ namespace zyio{
              * @param resp
              * @return
              */
-            virtual bool preHandle(photon::net::http::Request& req, photon::net::http::Response& resp) = 0;
+            virtual bool preHandle(XyReq& req, XyResp& resp) = 0;
 
-            virtual void postHandle(BizLogicProxy &bizLogicProxy,photon::net::http::Request& req, photon::net::http::Response& resp) = 0;
+            virtual void postHandle(BizLogicProxy &bizLogicProxy,XyReq& req, XyResp& resp) = 0;
 
-            virtual void afterHandle(photon::net::http::Request& req, photon::net::http::Response& resp) = 0;
+            virtual void afterHandle(XyReq& req, XyResp& resp) = 0;
         };
 
 
@@ -100,11 +173,11 @@ namespace zyio{
 
             void addFilter(HttpFilter* filter);
 
-            bool preHandle(photon::net::http::Request& req, photon::net::http::Response& resp);
+            bool preHandle(XyReq& req, XyResp& resp);
 
-            void postHandle(BizLogicProxy &logicProxy,photon::net::http::Request& req, photon::net::http::Response& resp);
+            void postHandle(BizLogicProxy &logicProxy,XyReq& req, XyResp& resp);
 
-            void afterHandle(photon::net::http::Request& req, photon::net::http::Response& resp);
+            void afterHandle(XyReq& req, XyResp& resp);
 
         };
 

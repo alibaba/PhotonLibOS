@@ -230,7 +230,6 @@ list(APPEND PHOTON_SRC ${Extend_SRC})
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_link_libraries(photon_obj PRIVATE urlmatch)
 
 if (PHOTON_ENABLE_ECOSYSTEM)
     target_link_libraries(photon_obj PRIVATE ecosystem_deps)
