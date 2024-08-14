@@ -8,6 +8,7 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Version 0.8 has been released in August 2024
 * Feb 2024，[中文文档](https://photonlibos.github.io/cn/docs/category/introduction)在官网上线了
 * Since 0.7, Photon will use release branches to enhance the reliability of software delivery. Bugfix will be merged into a stable release at first, then to higher release versions, and finally main.
 * Since version 0.6, Photon can run with a userspace TCP/IP stack on top of `DPDK`.
