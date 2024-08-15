@@ -25,13 +25,12 @@ limitations under the License.
 #include <photon/common/alog.h>
 
 DEFINE_uint64(vcpu_num, 4, "vCPU num");
-DEFINE_uint64(concurrency, 64, "Fire tasks into work-pool in parallel. Only available in async mode.");
-DEFINE_uint64(fires, 50'000, "How many tasks to fire in each concurrency");
+DEFINE_uint64(fires, 80000, "How many tasks to fire");
 
 static photon::WorkPool* pool;
 static std::atomic<uint64_t> sum_time;
 
-void* task_async(void*) {
+void task_async() {
     photon::semaphore sem(0);
     for (uint64_t i = 0; i < FLAGS_fires; ++i) {
         auto start = std::chrono::steady_clock::now();
@@ -41,20 +40,36 @@ void* task_async(void*) {
                                std::memory_order_relaxed);
             sem.signal(1);
         }));
-        photon::thread_yield();
     }
     sem.wait(FLAGS_fires);
-    return nullptr;
 }
 
-void* task_sync(void*) {
-    auto start = std::chrono::steady_clock::now();
-    pool->call([&, start] {
-        auto end = std::chrono::steady_clock::now();
-        sum_time.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(),
-                           std::memory_order_relaxed);
-    });
-    return nullptr;
+void task_sync() {
+    for (uint64_t i = 0; i < FLAGS_fires; ++i) {
+        auto start = std::chrono::steady_clock::now();
+        pool->call<photon::PhotonContext>([&, start] {
+            auto end = std::chrono::steady_clock::now();
+            sum_time.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(),
+                               std::memory_order_relaxed);
+        });
+    }
+}
+
+void task_sync_in_std_context() {
+    for (uint64_t i = 0; i < FLAGS_fires; ++i) {
+        auto start = std::chrono::steady_clock::now();
+        pool->call<photon::StdContext>([&, start] {
+            auto end = std::chrono::steady_clock::now();
+            sum_time.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count(),
+                               std::memory_order_relaxed);
+
+        });
+    }
+}
+
+static inline size_t get_qps(std::chrono::time_point<std::chrono::steady_clock> start,
+                             std::chrono::time_point<std::chrono::steady_clock> end) {
+    return FLAGS_fires * 1000 * 1000 / std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
 int main(int argc, char** arg) {
@@ -66,26 +81,37 @@ int main(int argc, char** arg) {
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     DEFER(photon::fini());
 
-    pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+    // 1. thread mode WorkPool, will create thread for every task
+    pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
     DEFER(delete pool);
-
-    std::vector<photon::join_handle*> jhs;
-    auto start = photon::now;
-    photon::threads_create_join(FLAGS_concurrency, task_async, nullptr);
-    auto end = photon::now;
-
+    auto start = std::chrono::steady_clock::now();
+    task_async();
+    auto end = std::chrono::steady_clock::now();
     LOG_INFO("Fire ` async works and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
-             FLAGS_fires * FLAGS_concurrency, FLAGS_vcpu_num,
-             FLAGS_concurrency * FLAGS_fires * 1000 * 1000 / (end - start),
-             sum_time.load() / FLAGS_fires / FLAGS_concurrency);
+             FLAGS_fires, FLAGS_vcpu_num,
+             get_qps(start, end),
+             sum_time.load() / FLAGS_fires);
 
+    // 2. Same as 1, but use sync API
     sum_time = 0;
-    jhs.clear();
-
-    start = photon::now;
-    photon::threads_create_join(FLAGS_fires, task_sync, nullptr);
-    end = photon::now;
+    start = std::chrono::steady_clock::now();
+    task_sync();
+    end = std::chrono::steady_clock::now();
     LOG_INFO("Fire ` sync works and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
-             FLAGS_fires, FLAGS_vcpu_num, FLAGS_fires * 1000 * 1000 / (end - start),
+             FLAGS_fires, FLAGS_vcpu_num,
+             get_qps(start, end),
+             sum_time.load() / FLAGS_fires);
+
+    // 3. non-thread mode WorkPool. Tasks are from std context
+    delete pool;
+    pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+    sum_time = 0;
+    start = std::chrono::steady_clock::now();
+    std::thread th(task_sync_in_std_context);
+    th.join();
+    end = std::chrono::steady_clock::now();
+    LOG_INFO("Fire ` sync works in std context and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
+             FLAGS_fires, FLAGS_vcpu_num,
+             get_qps(start, end),
              sum_time.load() / FLAGS_fires);
 }
