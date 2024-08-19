@@ -920,8 +920,8 @@ R"(
         size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
         // at least a whole page for mprotect
         least_stack_size += PAGE_SIZE;
-        // and make sure it's at least 16K
-        least_stack_size = std::max(16UL * 1024, least_stack_size);
+        // and make sure it's at least 16K and aligned to page size
+        least_stack_size = align_up(std::max(16UL * 1024, least_stack_size), PAGE_SIZE);
         stack_size = align_up(stack_size, PAGE_SIZE);
         if (unlikely(stack_size < least_stack_size)) {
             LOG_WARN("Stack size ` is less than least stack size `, use ` instead",

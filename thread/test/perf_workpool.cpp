@@ -26,13 +26,24 @@ limitations under the License.
 
 DEFINE_uint64(vcpu_num, 4, "vCPU num");
 DEFINE_uint64(fires, 80000, "How many tasks to fire");
+DEFINE_uint64(workload_time_us, 0, "The workload time cost before each delivery");
 
 static photon::WorkPool* pool;
 static std::atomic<uint64_t> sum_time;
 
-void task_async() {
+static void workload(uint64_t time_us) {
+    auto start = std::chrono::steady_clock::now();
+    long diff_ns;
+    do {
+        auto diff = std::chrono::steady_clock::now() - start;
+        diff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(diff).count();
+    } while (diff_ns < (long) time_us);
+}
+
+static void task_async() {
     photon::semaphore sem(0);
     for (uint64_t i = 0; i < FLAGS_fires; ++i) {
+        workload(FLAGS_workload_time_us);
         auto start = std::chrono::steady_clock::now();
         pool->async_call(new auto([&, start] {
             auto end = std::chrono::steady_clock::now();
@@ -45,8 +56,9 @@ void task_async() {
     sem.wait(FLAGS_fires);
 }
 
-void task_sync() {
+static void task_sync() {
     for (uint64_t i = 0; i < FLAGS_fires; ++i) {
+        workload(FLAGS_workload_time_us);
         auto start = std::chrono::steady_clock::now();
         pool->call<photon::PhotonContext>([&, start] {
             auto end = std::chrono::steady_clock::now();
@@ -56,8 +68,9 @@ void task_sync() {
     }
 }
 
-void task_sync_in_std_context() {
+static void task_sync_in_std_context() {
     for (uint64_t i = 0; i < FLAGS_fires; ++i) {
+        workload(FLAGS_workload_time_us);
         auto start = std::chrono::steady_clock::now();
         pool->call<photon::StdContext>([&, start] {
             auto end = std::chrono::steady_clock::now();
