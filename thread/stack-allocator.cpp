@@ -84,7 +84,7 @@ protected:
                 pool.pop_back();
                 return ret;
             }
-            return __alloc(slotsize);
+            return nullptr;
         }
         void put(void* ptr) { pool.emplace_back(ptr); }
     };
@@ -107,8 +107,11 @@ public:
         }
         auto ptr = slots[idx].get();
         // got from pool
-        in_pool_size -= slots[idx].slotsize;
-        return ptr;
+        if (ptr) {
+            in_pool_size -= slots[idx].slotsize;
+            return ptr;
+        }
+        return __alloc(slots[idx].slotsize);
     }
     int dealloc(void* ptr, size_t size) {
         auto idx = get_slot(size);
