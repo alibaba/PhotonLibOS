@@ -40,6 +40,7 @@ void task_async() {
                                std::memory_order_relaxed);
             sem.signal(1);
         }));
+        photon::thread_yield();
     }
     sem.wait(FLAGS_fires);
 }
@@ -77,6 +78,7 @@ int main(int argc, char** arg) {
     set_log_output_level(ALOG_INFO);
 
     photon::use_pooled_stack_allocator();
+    photon::pooled_stack_trim_threshold(-1UL);
 
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     DEFER(photon::fini());
@@ -94,6 +96,8 @@ int main(int argc, char** arg) {
 
     // 2. Same as 1, but use sync API
     sum_time = 0;
+    delete pool;
+    pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
     start = std::chrono::steady_clock::now();
     task_sync();
     end = std::chrono::steady_clock::now();
@@ -102,7 +106,19 @@ int main(int argc, char** arg) {
              get_qps(start, end),
              sum_time.load() / FLAGS_fires);
 
-    // 3. non-thread mode WorkPool. Tasks are from std context
+    // 2. Same as 1, but will create thread from a thread-pool
+    sum_time = 0;
+    delete pool;
+    pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 65536);
+    start = std::chrono::steady_clock::now();
+    task_async();
+    end = std::chrono::steady_clock::now();
+    LOG_INFO("Fire ` async works (to thread-pool) and solved by ` vCPU, QPS is `, and average task deliver latency is ` ns",
+             FLAGS_fires, FLAGS_vcpu_num,
+             get_qps(start, end),
+             sum_time.load() / FLAGS_fires);
+
+    // 4. non-thread mode WorkPool. Tasks are from std context
     delete pool;
     pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
     sum_time = 0;
