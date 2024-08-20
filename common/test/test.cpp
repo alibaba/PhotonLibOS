@@ -17,6 +17,7 @@ limitations under the License.
 #define protected public
 #define private public
 
+#include "../unordered_inline_set.h"
 #include "../generator.h"
 #include "../estring.h"
 #include "../alog.cpp"
@@ -1257,6 +1258,90 @@ TEST(update_now, after_idle_sleep) {
     EXPECT_GT(after_, before);
 }
 
+TEST(SparseArray, test0) {
+    SparseArray<int> a(100);
+    EXPECT_TRUE(a.empty());
+    a.set(1,  123);
+    EXPECT_FALSE(a.empty());
+    a.set(45, 456);
+    a.set(79, 79);
+    a.set(79, 789);
+    a.emplace(23, 234);
+    a.emplace(65, 654);
+    EXPECT_EQ(a.size(), 5);
+    EXPECT_EQ(a[1], 123);
+    EXPECT_EQ(a[45], 456);
+    EXPECT_EQ(a[79], 789);
+    EXPECT_EQ(a[23], 234);
+    EXPECT_EQ(a[65], 654);
+    vector<int> va(a.begin(), a.end()),
+                vb{123, 234, 456, 654, 789};
+    EXPECT_EQ(va, vb);
+
+    auto it = a.begin();
+    EXPECT_EQ(*++it, 234);
+    EXPECT_EQ(*++it, 456);
+    EXPECT_EQ(*++it, 654);
+    EXPECT_EQ(*--it, 456);
+    EXPECT_EQ(*--it, 234);
+    EXPECT_EQ(*--it, 123);
+}
+
+static int num_of_a = 0;
+
+TEST(SparseArray, test1) {
+    class A {
+    public:
+        float a, b = ++num_of_a;
+        A() = default;
+        A(const A& rhs) { a = rhs.a; };
+        A(double x) { a = x; }
+        bool operator==(const A& rhs) const { return a == rhs.a; }
+        ~A() { --num_of_a; }
+    };
+{
+    SparseArray<A> a(100);
+    EXPECT_TRUE(a.empty());
+    a.set(1,  123);
+    EXPECT_FALSE(a.empty());
+    a.set(45, 456);
+    a.set(79, 79);
+    a.set(79, 789);
+    a.emplace(23, 34);
+    a.emplace(23, 234);
+    a.emplace(65, 654);
+    EXPECT_EQ(a.size(), 5);
+    EXPECT_EQ(a[1], 123);
+    EXPECT_EQ(a[45], 456);
+    EXPECT_EQ(a[79], 789);
+    EXPECT_EQ(a[23], 234);
+    EXPECT_EQ(a[65], 654);
+    EXPECT_EQ(num_of_a, 5);
+    vector<A> va(a.begin(), a.end());
+    EXPECT_EQ(num_of_a, 10);
+    vector<A> vb{123, 234, 456, 654, 789};
+    EXPECT_EQ(num_of_a, 15);
+    EXPECT_EQ(va, vb);
+}
+    EXPECT_EQ(num_of_a, 0);
+}
+
+TEST(unordered_inline_set, test0) {
+    static int a[] = {421, 3, 79, 9785234, 7494};
+    unordered_inline_set<int> set(a, a + LEN(a));
+    for (auto x: a) {
+        EXPECT_EQ(set.count(x), 1);
+        EXPECT_EQ(set.count(-x), 0);
+    }
+    vector<int> va(a, a + LEN(a)),
+        vb(set.begin(), set.end());
+    sort(va.begin(), va.end());
+    sort(vb.begin(), vb.end());
+    EXPECT_EQ(va, vb);
+}
+
+
+#include <vector>
 // #endif
 int main(int argc, char **argv)
 {
