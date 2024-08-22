@@ -37,7 +37,7 @@ static void workload(uint64_t time_us) {
     do {
         auto diff = std::chrono::steady_clock::now() - start;
         diff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(diff).count();
-    } while (diff_ns < (long) time_us);
+    } while (diff_ns < (long) time_us * 1000);
 }
 
 static void task_async() {
