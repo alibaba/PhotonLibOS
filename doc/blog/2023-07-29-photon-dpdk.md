@@ -5,6 +5,9 @@ authors: [beef9999]
 tags: [DPDK, F-Stack]
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 &emsp;&emsp;Since version 0.6, Photon can run on an userspace TCP/IP stack if enabled the `INIT_IO_FSTACK_DPDK` io engine. 
 
 &emsp;&emsp;[F-Stack](https://www.f-stack.org/) is an open-source project that has ported the entire **FreeBSD** 
@@ -22,10 +25,33 @@ to build a high performance net server.
 
 #### 1. Enable IOMMU
 
-```shell
-# Edit /etc/default/grub, expand GRUB_CMDLINE_LINUX with 'intel_iommu=on iommu=pt pci=realloc'
+```mdx-code-block
+<Tabs groupId="os" queryString>
+  <TabItem value="CentOS 7" label="CentOS 7">
+```
+
+```bash
+# Edit /etc/default/grub
+# Expand GRUB_CMDLINE_LINUX with 'intel_iommu=on iommu=pt pci=realloc'
 grub2-mkconfig -o /boot/grub2/grub.cfg
 reboot
+```
+
+```mdx-code-block
+  </TabItem>
+  <TabItem value="Debian 10" label="Debian 10">
+```
+
+```bash
+# Edit /etc/default/grub
+# Expand GRUB_CMDLINE_LINUX with 'intel_iommu=on iommu=pt'
+grub-mkconfig -o /boot/grub/grub.cfg
+reboot
+```
+
+```mdx-code-block
+  </TabItem>
+</Tabs>
 ```
 
 Note the `pci=realloc` is a work-around solution for CentOS and RHEL.
@@ -39,13 +65,18 @@ echo 4 > /sys/class/net/eth0/device/sriov_numvfs
 ```
 
 &emsp;&emsp;If you are having an Intel NIC, this step is likely to succeed. However, for the Mellanox one, 
-it might fail because of the lack of proper mlx driver in your kernel.
-Then you would need to download the official driver from NVidia, and make a full install.
+it might fail because of the lack of proper mlx driver in your kernel. 
+Please check the result by typing `lspci -nn | grep Ethernet` and see if the NICs' virtual function number is correct.
 
-&emsp;&emsp;There are many available releases in https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/,
+&emsp;&emsp;If succeeded, please jump to the part of 'Install DPDK'.
+
+&emsp;&emsp;If failed, you may need to download the official driver from NVidia.
+There are many available releases in https://network.nvidia.com/products/infiniband-drivers/linux/mlnx_ofed/,
 you should choose one that matches to your kernel version and OS version the best.
 An improper version might lead to compiling error when building kernel modules later. 
-My test machine is CentOS 7 with kernel 5.x, so I downloaded MLNX_OFED_LINUX-5.4-3.6.8.1-rhel7.2-x86_64.tgz.
+
+- For example, for CentOS 7 and kernel 5.x, you should choose MLNX_OFED_LINUX-5.4-3.6.8.1-rhel7.2-x86_64.tgz
+- For Debian 10, it is MLNX_OFED_LINUX-5.8-5.1.1.2-debian10.13-x86_64.tgz
 
 #### 3. Install mlnx_ofed driver
 
@@ -134,43 +165,67 @@ lspci -nn | grep 'Ethernet controller'
 
 ### Install DPDK
 
-&emsp;&emsp;The F-Stack version we choose is [1.22](https://github.com/F-Stack/f-stack/releases/tag/v1.22), 
-and it has explicitly required DPDK version to be [20.11](https://github.com/DPDK/dpdk/releases/tag/v20.11).
+&emsp;&emsp;The F-Stack version we choose is [1.22.1](https://github.com/F-Stack/f-stack/releases/tag/v1.22.1), 
+and it has a subdirectory called dpdk that contains the full DPDK 20.11 source code. 
+Let's start with the DPDK install first.
 
-&emsp;&emsp;Install dependencies:
-
-```shell
-yum install python3-pip
-yum install numactl-devel zlib-devel ninja
-pip3 install meson pyelftools
+```mdx-code-block
+<Tabs groupId="os" queryString>
+  <TabItem value="CentOS 7" label="CentOS 7">
 ```
 
-&emsp;&emsp;Build and install:
+```bash
+cd f-stack-1.22.1/dpdk/
+yum install python3-pip
+yum install pkg-config numactl-devel zlib-devel ninja
+pip3 install meson 
+```
+
+```mdx-code-block
+  </TabItem>
+  <TabItem value="Debian 10" label="Debian 10">
+```
+
+```bash
+cd f-stack-1.22.1/dpdk/
+pip3 install ninja meson
+apt install pkg-config python3-pyelftools libnuma-dev
+```
+
+```mdx-code-block
+  </TabItem>
+</Tabs>
+```
+
+Build and install:
 
 ```shell
-cd dpdk-20.11
 CONFIG_RTE_LIBRTE_MLX5_PMD=y meson -Denable_kmods=true -Dtests=false build
 cd build
 ninja
 ninja install
 ```
 
-&emsp;&emsp;Run simple test:
+Allocate 10GB huge-pages
 
 ```shell
-# Allocate 10GB huge-pages
 echo 5120 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+```
 
-# Attach your PF (with main IP) and one of the VFs (idle) to the poll-mode-driver test
+Attach your PF (with main IP) and one of the VFs (idle) to the poll-mode-driver test
+
+```shell
 ./build/app/dpdk-testpmd -l 0-3 -n 4 -a 0000:03:00.0 -a 0000:03:00.2 -- --nb-cores=2 --flow-isolate-all -i -a
 ```
 
-&emsp;&emsp;The `--flow-isolate-all` option is a MUST do. It enables Flow Bifurcation and ensures that all the
+Note: The `--flow-isolate-all` option is a MUST do. It enables Flow Bifurcation and ensures that all the
 undetermined flow will be forwarded to the Linux kernel. Because the default behavior is to drop all packets, so
 unless you configure the flow table or enable the `--flow-isolate-all` option, 
 your network connection will be lost again ...
 
 ### Install F-Stack
+
+Let's go back to the parent dir and install F-Stack.
 
 #### Upgrade pkg-config
 
@@ -178,16 +233,24 @@ your network connection will be lost again ...
 that does not correctly handle gcc's `--whole-archive` option.
 As per F-Stack's document, we can upgrade it to [0.29.2](https://pkg-config.freedesktop.org/releases/pkg-config-0.29.2.tar.gz).
 
+&emsp;&emsp;Debian 10 is OK.
+
 #### Modify make scripts
 
 1. Edit `lib/Makefile`, comment out `DEBUG=...`. We want a release build.
 2. Edit `lib/Makefile`, enable `FF_FLOW_ISOLATE=1`. It is the trigger of Flow Bifurcation for TCP. The hardcoded TCP port is 80.
-3. Edit `mk/kern.mk`, add `-Wno-error=format-overflow` to `CWARNFLAGS`, in case a compiler warning being regarded as error.
+3. For CentOS 7, edit `mk/kern.mk`, add `-Wno-error=format-overflow` to `CWARNFLAGS`, 
+in case a compiler warning being regarded as error. Debian 10 is OK.
 
 #### Build and install
 
-```shell
-export FF_PATH=/root/f-stack-1.22  # Change to your own dir
+```mdx-code-block
+<Tabs groupId="os" queryString>
+  <TabItem value="CentOS 7" label="CentOS 7">
+```
+
+```bash
+export FF_PATH=/root/f-stack-1.22.1  # Change to your own dir
 export REGULAR_PKG_CONFIG_DIR=/usr/lib64/pkgconfig/
 export DPDK_PKG_CONFIG_DIR=/usr/local/lib64/pkgconfig/
 export PKG_CONFIG_PATH=$(pkg-config --variable=pc_path pkg-config):${REGULAR_PKG_CONFIG_DIR}:${DPDK_PKG_CONFIG_DIR}
@@ -196,6 +259,25 @@ cd f-stack-1.22/lib
 make -j
 make install
 ```
+
+```mdx-code-block
+  </TabItem>
+  <TabItem value="Debian 10" label="Debian 10">
+```
+
+```bash
+export FF_PATH=/root/f-stack-1.22.1  # Change to your own dir
+
+cd f-stack-1.22/lib
+make -j
+make install
+```
+
+```mdx-code-block
+  </TabItem>
+</Tabs>
+```
+
 
 #### Configurations
 
@@ -215,8 +297,11 @@ It looks quite alike the old echo server example, only a few lines of changes, b
 
 ```shell
 cd PhotonLibOS
+git checkout release/0.8
 cmake -B build -D PHOTON_BUILD_TESTING=1 -D PHOTON_ENABLE_FSTACK_DPDK=1 -D CMAKE_BUILD_TYPE=Release
-cmake --build build -j -t fstack-dpdk-demo
+cmake --build build -j 32 -t fstack-dpdk-demo
 
 ./build/output/fstack-dpdk-demo
 ```
+
+Now you can set up an echo client on another host, and bench this server via port 80.

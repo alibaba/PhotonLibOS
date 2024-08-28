@@ -649,12 +649,6 @@ class FstackDpdkSocketStream : public KernelSocketStream {
 public:
     using KernelSocketStream::KernelSocketStream;
 
-    FstackDpdkSocketStream(int socket_family, bool nonblocking) {
-        fd = fstack_socket(socket_family, SOCK_STREAM, 0);
-        if (fd < 0) return;
-        setsockopt<int>(fd, IPPROTO_TCP, TCP_NODELAY, 1);
-    }
-
     ~FstackDpdkSocketStream() override {
         if (fd < 0) return;
         fstack_shutdown(fd, (int) ShutdownHow::ReadWrite);
@@ -693,7 +687,9 @@ protected:
     using KernelSocketClient::KernelSocketClient;
 
     KernelSocketStream* create_stream(int socket_family) override {
-        return new FstackDpdkSocketStream(socket_family, true);
+        int fd = fstack_socket(socket_family, SOCK_STREAM, 0);
+        if (fd < 0) return nullptr;
+        return new FstackDpdkSocketStream(fd);
     }
 
     int fd_connect(int fd, const sockaddr* remote, socklen_t addrlen) override {
