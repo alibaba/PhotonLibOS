@@ -19,6 +19,7 @@ limitations under the License.
 #include <sys/socket.h>
 #include <cstdio>
 #include <cstdint>
+#include <photon/common/timeout.h>
 
 namespace photon {
 
