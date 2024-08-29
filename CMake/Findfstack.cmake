@@ -1,3 +1,5 @@
+find_package(PkgConfig REQUIRED)
+
 pkg_check_modules(DPDK REQUIRED libdpdk)
 
 find_path(FSTACK_INCLUDE_DIRS NAMES ff_api.h PATHS /usr/local/include NO_DEFAULT_PATH)
