@@ -1,7 +1,7 @@
 #pragma once
 #include <assert.h>
 #include <inttypes.h>
-#include <unordered_set>
+#include <initializer_list>
 #include <memory>
 #include <type_traits>
 #include <limits>
@@ -136,6 +136,7 @@ public:
         }
         T extract() {
             assert(_a && _i < _a->size());
+            assert(_a->get_bit(_i));
             auto v = _a->get(_i);
             if (!v) return T();
             auto r = std::move(*v);
@@ -156,7 +157,6 @@ public:
     iterator end() noexcept   { return {this, _capacity}; }
     iterator begin() const noexcept { return ((SparseArray*)this)->_begin(); }
     iterator end() const   noexcept { return {(SparseArray*)this, _capacity}; }
-    iterator make_iterator(size_t i) { return {this, i}; }
     bool iterator_valid(iterator it) const noexcept {
         return it._a == this && it._i <= capacity();
     }
@@ -202,7 +202,7 @@ protected:
 
 
 // A hash table with open addressing, i.e. collision
-// is resolved by probing, or searching through
+// is resolved by probing (searching) through
 // alternative locations in the array. This design
 // avoids allocation and deallocation during insertion
 // and deletion, unless it needs to rehash.
@@ -222,6 +222,7 @@ protected:
     float _load_factor_min = DEFAULT_LOAD_FACTOR_MIN;
     size_t _load_max = MIN_CAPACITY * DEFAULT_LOAD_FACTOR_MAX;
     size_t _load_min = MIN_CAPACITY * DEFAULT_LOAD_FACTOR_MIN;
+    uint8_t _max_collision = 8;
     Hash _hasher;
     KeyEqual _key_equal;
     Allocator _alloc;
@@ -243,10 +244,6 @@ public:
     using const_reference = const value_type&;
     using pointer = typename std::allocator_traits<Allocator>::pointer;
     using const_pointer	= typename std::allocator_traits<Allocator>::const_pointer;
-    using compatible_range_type = int;  // to be defined
-
-    struct node_type;
-    struct insert_return_type;
 
     unordered_inline_set() = default;
 
@@ -410,6 +407,13 @@ public:
         return std::numeric_limits<size_type>::max();
     }
 
+    uint8_t max_collision() const noexcept {
+        return _max_collision;
+    }
+    void max_collision(uint8_t n) {
+        _max_collision = n;
+    }
+
     void clear() noexcept {
         assign(nullptr, nullptr, 0);
     }
@@ -417,28 +421,35 @@ public:
 protected:
     using SAKI = typename SparseArray<Key>::iterator;
     template<typename K>
-    std::pair<SAKI, bool>
-    _make_room( const K& value ) {
+    auto _make_room( const K& value ) -> std::pair<SAKI, bool> {
         assert(_data.size() < _load_max );
         auto capacity = _data.capacity();
-        if (_data.size() + 1 == _load_max)
+        assert(capacity >= _data.size());
+        assert((capacity & (capacity - 1)) == 0); // capacity is 2^n
+        if (_data.size() + 1 >= _load_max) {
+do_rehash:
             rehash(capacity *= 2);
-        return _find(value);
-    }
-    template<typename K>
-    std::pair<SAKI, bool>
-    _find( const K& value ) const {
-        auto capacity = _data.capacity();
-        assert(_data.size() <= capacity);
-        size_t h = _hasher(value);
-        size_t i = h % capacity;
-        while (auto item = _data.get(i)) {
-            if (_key_equal(*item, value)) {
-                return {{(SparseArray<Key>*)&_data, i}, false};
-            }
-            i = (i + 1) % capacity;
         }
-        return {{(SparseArray<Key>*)&_data, i}, true};
+        auto r = _find(value);
+        if (r.first < capacity) // found available slot (true) or collision (false)
+            return {{&_data, r.first}, r.second == capacity};
+        goto do_rehash;
+    }
+
+    template<typename K>
+    auto _find(const K& value) const -> std::pair<size_t, size_t> {
+        auto capacity = _data.capacity();
+        assert(capacity >= _data.size());
+        assert((capacity & (capacity - 1)) == 0); // capacity is 2^n
+        size_t mask = capacity - 1;
+        auto begin = _hasher(value) % capacity;
+        for (size_t i = begin; i < begin + _max_collision; ++i) {
+            auto j = i & mask;
+            auto item = _data.get(j);
+            if (!item) return {j, capacity};
+            if (_key_equal(*item, value)) return {j, j};
+        }
+        return {capacity, capacity};
     }
 public:
     template< class InputIt >
@@ -456,14 +467,12 @@ public:
     }
     std::pair<iterator,bool> insert( value_type&& value ) {
         auto r = _make_room(value);
-        // if (r.second) *r.first = std::move(value);
         if (r.second) r.first.set(std::move(value));
         return r;
     }
     template< class K >
     std::pair<iterator, bool> insert( K&& value ) {
         auto r = _make_room(value);
-        // if (r.second) *r.first = std::forward<K>(value);
         if (r.second) r.first.set(std::forward<K>(value));
         return r;
     }
@@ -477,10 +486,6 @@ public:
     iterator insert( const_iterator hint, K&& value ) {
         return insert<K>(std::forward<K>(value)).first;
     }
-    // struct node_type;
-    // insert_return_type insert( node_type&& nh );
-    // iterator insert( const_iterator hint, node_type&& nh );
-
 
 #if __cplusplus >= 202300L
     template< compatible_range_type R >
@@ -536,22 +541,18 @@ public:
 
 public:
     iterator find( const Key& key ) {
-        auto r = _find(key);
-        return r.second ? end() : r.first;
+        return {&_data, _find(key).second};
     }
     const_iterator find( const Key& key ) const {
-        auto r = _find(key);
-        return r.second ? end() : r.first;
+        return {(SparseArray<Key>*)&_data, _find(key).second};
     }
     template< class K >
     iterator find( const K& x ) {
-        auto r = _find(x);
-        return r.second ? end() : r.first;
+        return {&_data, _find(x).second};
     }
     template< class K >
     const_iterator find( const K& x ) const {
-        auto r = _find(x);
-        return r.second ? end() : r.first;
+        return {&_data, _find(x).second};
     }
 
     iterator erase( iterator pos ) {
@@ -621,9 +622,7 @@ public:
         return extract(find(std::forward<K>(x)));
     }
     value_type&& extract( iterator position ) {
-        assert(position._a == &_data);
-        assert(position != end());
-        assert(_data.get_bit(position._i));
+        assert(_data.iterator_valid(position));
         return position.extract();
     }
     value_type&& extract( const Key& key ) {
@@ -677,13 +676,23 @@ public:
     float load_factor() const {
         return float(_data.size()) / _data.capacity();
     }
+    void load_factor(float min, float max) {
+        if (0 < min && min < max && max < 1) {
+            _load_factor_min = min;
+            _load_factor_max = max;
+            _set_load_min_max();
+        }
+    }
 
     float max_load_factor() const {
         return _load_factor_max;
     }
     void max_load_factor( float mlf ) {
-        _load_factor_max = mlf;
-        _load_max = _data.capacity() * mlf;
+        assert(mlf < 1);
+        if (_load_factor_min < mlf && mlf < 1) {
+            _load_factor_max = mlf;
+            _load_max = _data.capacity() * mlf;
+        }
     }
 
     void rehash( size_type count ) {
