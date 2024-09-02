@@ -171,3 +171,16 @@ jobs:
           export PHOTON_CI_EV_ENGINE=epoll_ng
           ctest -E test-lockfree --timeout 3600 -V
 
+  fstack:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/beef9999/photon-ut-fstack:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build on FStack-DPDK
+        run: |      
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_FSTACK_DPDK=ON
+          cmake --build build -j $(nproc) -t fstack-dpdk-demo
