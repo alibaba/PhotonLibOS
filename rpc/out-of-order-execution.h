@@ -25,8 +25,9 @@ collection of result. The first 2 parts are realized via callbacks.
 */
 
 #pragma once
-#include <cinttypes>
 #include <photon/common/callback.h>
+#include <photon/common/timeout.h>
+#include <atomic>
 
 namespace photon{
 
@@ -75,17 +76,20 @@ namespace rpc {
         // It's guaranteed not to be called concurrently.
         CallbackType do_collect;
 
-        // whether or not the `tag` field is valid
-        bool flag_tag_valid = false;
-
         // thread that binding with this argument
         thread * th;
 
-        // whether the context result is collected
-        bool collected;
+        // Timeout for wait
+        Timeout timeout;
 
         // return value of collection
         int ret;
+
+        // whether or not the `tag` field is valid
+        bool flag_tag_valid = false;
+
+        // whether the context result is collected
+        volatile bool collected = false;
     };
 
 

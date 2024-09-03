@@ -34,6 +34,13 @@ namespace rpc {
         uint64_t m_tag = 0;
         bool m_running = true;
 
+        // rlock used as both reader lock and wait notifier.
+        // add yield in lock will break the assuption that threads
+        // not holding lock should kept in sleep.
+        // so do not yield, just put into sleep when needed
+        // make sure it able to wake by interrupts
+        OooEngine(): m_mutex_r(0) {}
+
         ~OooEngine() {
             shutdown();
         }
@@ -55,7 +62,7 @@ namespace rpc {
         {
             m_issuing ++;
             DEFER(m_issuing --);
-            scoped_lock lock(m_mutex_w);
+            SCOPED_LOCK(m_mutex_w);
             if (!m_running)
                 LOG_ERROR_RETURN(ESHUTDOWN, -1, "engine is been shuting down");
             if (!args.flag_tag_valid)
@@ -89,12 +96,20 @@ namespace rpc {
         {
             // lock with param 1 means allow entry without lock
             // when interuptted
-            scoped_lock lock(m_mutex_r, 1);
+            int lockret = m_mutex_r.lock(args.timeout);
+            ERRNO err;
+            DEFER(if (lockret == 0) m_mutex_r.unlock());
 
             // when wait_completion returned,
             // always have tag removed from the map
             // notify the waiting function (like shutdown())
             DEFER(m_cond_collected.notify_one());
+
+            if (lockret < 0 && err.no == ETIMEDOUT) {
+                // Timed out so return as failure
+                m_map.erase(args.tag);
+                LOG_ERROR_RETURN(ETIMEDOUT, -1, "timeout wait for completion");
+            }
 
             auto o_tag = args.tag;
             {
@@ -106,13 +121,12 @@ namespace rpc {
                 {
                     LOG_ERROR_RETURN(EINVAL, -1, "args tag ` not belong to current thread `", VALUE(args.tag), VALUE(CURRENT));
                 }
-                if (o_it->second->collected) {
+                if (args.collected) {
                     // my completion has been done
                     // just collect it, clear the trace,
                     // then return result
-                    auto ret = o_it->second->ret;
                     m_map.erase(o_it);
-                    return ret;
+                    return args.ret;
                 }
             }
             //Hold the lock, but not get the result.

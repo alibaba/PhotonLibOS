@@ -137,9 +137,7 @@ namespace rpc {
                 FunctionID function;
             };
             iovector *request, *response;
-            Timeout timeout;
-            OooArgs(StubImpl* stub, FunctionID function, iovector* req, iovector* resp, uint64_t timeout_):
-                timeout(timeout_)
+            OooArgs(StubImpl* stub, FunctionID function, iovector* req, iovector* resp, Timeout timeout_)
             {
                 request = req;
                 response = resp;
@@ -148,14 +146,14 @@ namespace rpc {
                 do_issue.bind(stub, &StubImpl::do_send);
                 do_completion.bind(stub, &StubImpl::do_recv_header);
                 do_collect.bind(stub, &StubImpl::do_recv_body);
+                timeout = timeout_;
             }
         };
 
-        int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) override {
+        int do_call(FunctionID function, iovector* request, iovector* response, Timeout tmo) override {
             scoped_rwlock rl(m_rwlock, photon::RLOCK);
-            Timeout tmo(timeout);
             if (tmo.expiration() < photon::now) {
-                LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(timeout), VALUE(tmo.timeout()));
+                LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(tmo.timeout()));
             }
             int ret = 0;
             OooArgs args(this, function, request, response, tmo.timeout());
@@ -421,12 +419,12 @@ namespace rpc {
 
     class StubPoolImpl : public StubPool {
     public:
-        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
+        explicit StubPoolImpl(uint64_t expiration, int64_t connect_timeout, uint64_t transfer_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
             tcpclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
-            m_rpc_timeout = rpc_timeout;
+            m_transfer_timeout = transfer_timeout;
         }
 
         ~StubPoolImpl() {
@@ -456,7 +454,7 @@ namespace rpc {
         }
 
         uint64_t get_timeout() const override {
-            return m_rpc_timeout;
+            return m_transfer_timeout;
         }
 
     protected:
@@ -465,7 +463,7 @@ namespace rpc {
             if (!sock)
                 LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
             LOG_DEBUG("connected to ", ep);
-            sock->timeout(m_rpc_timeout);
+            sock->timeout(m_transfer_timeout);
             if (tls) {
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
             }
@@ -475,7 +473,7 @@ namespace rpc {
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
         net::ISocketClient *tcpclient;
         net::TLSContext* tls_ctx = nullptr;
-        uint64_t m_rpc_timeout;
+        uint64_t m_transfer_timeout;
     };
 
     // dummy pool, for unix domain socket connection to only one point only
@@ -483,8 +481,8 @@ namespace rpc {
     class UDSStubPoolImpl : public StubPoolImpl {
     public:
         explicit UDSStubPoolImpl(const char* path, uint64_t expiration,
-                                 uint64_t connect_timeout, uint64_t rpc_timeout)
-            : StubPoolImpl(expiration, connect_timeout, rpc_timeout),
+                                 uint64_t connect_timeout, uint64_t transfer_timeout)
+            : StubPoolImpl(expiration, connect_timeout, transfer_timeout),
               m_path(path), m_client(net::new_uds_client()) {
                   m_client->timeout(connect_timeout);
               }
@@ -500,7 +498,7 @@ namespace rpc {
                     LOG_ERRNO_RETURN(0, nullptr,
                                      "Connect to unix domain socket failed");
                 }
-                sock->timeout(m_rpc_timeout);
+                sock->timeout(m_transfer_timeout);
                 return new_rpc_stub(sock, true);
             });
         }
@@ -510,15 +508,16 @@ namespace rpc {
         net::ISocketClient * m_client;
     };
 
-    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
-        return new StubPoolImpl(expiration, connect_timeout, rpc_timeout);
+    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout,
+                            uint64_t transfer_timeout) {
+        return new StubPoolImpl(expiration, connect_timeout, transfer_timeout);
     }
 
     StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
                                 uint64_t connect_timeout,
-                                uint64_t rpc_timeout) {
+                                uint64_t transfer_timeout) {
         return new UDSStubPoolImpl(path, expiration, connect_timeout,
-                                   rpc_timeout);
+                                   transfer_timeout);
     }
     }  // namespace rpc
 }
