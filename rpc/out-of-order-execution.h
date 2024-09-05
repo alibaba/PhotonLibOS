@@ -27,7 +27,7 @@ collection of result. The first 2 parts are realized via callbacks.
 #pragma once
 #include <photon/common/callback.h>
 #include <photon/common/timeout.h>
-#include <atomic>
+#include <photon/thread/thread.h>
 
 namespace photon{
 
@@ -42,6 +42,12 @@ namespace rpc {
 
     void delete_ooo_execution_engine(OutOfOrder_Execution_Engine* engine);
 
+    enum class OooPhase : int {
+        BEFORE_ISSUE = 0,
+        ISSUED = 1,
+        WAITING = 2,
+        COLLECTED = 3
+    };
     struct OutOfOrderContext
     {
         OutOfOrder_Execution_Engine* engine;
@@ -49,7 +55,7 @@ namespace rpc {
         // an unique tag of the opeartion, which can be filled
         // by user (together with `flag_tag_valid` = true),
         // by the `engine`, or by `do_completion`.
-        uint64_t tag;
+        uint64_t tag = 0;
 
         // The `CallbackType` have an prototype of
         // either `int (*)(void*, OutOfOrderContext*)`,
@@ -77,19 +83,35 @@ namespace rpc {
         CallbackType do_collect;
 
         // thread that binding with this argument
-        thread * th;
+        thread * th = nullptr;
 
         // Timeout for wait
         Timeout timeout;
 
+        // Context phase
+        photon::spinlock phaselock;
+        volatile OooPhase phase = OooPhase::BEFORE_ISSUE;
+
         // return value of collection
-        int ret;
+        int ret = -1;
 
         // whether or not the `tag` field is valid
         bool flag_tag_valid = false;
 
-        // whether the context result is collected
-        volatile bool collected = false;
+        OutOfOrderContext() = default;
+        OutOfOrderContext& operator=(const OutOfOrderContext& rhs) {
+            engine = rhs.engine;
+            tag = rhs.tag;
+            do_issue = rhs.do_issue;
+            do_completion = rhs.do_completion;
+            do_collect = rhs.do_collect;
+            th = rhs.th;
+            timeout = rhs.timeout;
+            flag_tag_valid = rhs.flag_tag_valid;
+            phase = rhs.phase;
+            ret = rhs.ret;
+            return *this;
+        }
     };
 
 
