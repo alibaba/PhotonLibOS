@@ -419,7 +419,7 @@ namespace rpc {
 
     class StubPoolImpl : public StubPool {
     public:
-        explicit StubPoolImpl(uint64_t expiration, int64_t connect_timeout, uint64_t transfer_timeout) {
+        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t transfer_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
             tcpclient->timeout(connect_timeout);

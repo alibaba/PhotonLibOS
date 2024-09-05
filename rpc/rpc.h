@@ -59,7 +59,7 @@ namespace rpc
         /**
          * @param req Request of Message
          * @param resp Response of Message
-         * @param timeout timeout in milliseconds, -1UL for no timeout
+         * @param timeout RPC timeout, counting from sending request to receiving response header
          * @return The number of bytes received, -1 for failure
          * @note Request and Response should assign to external memory buffers if they have variable-length fields.
          *       Via this, we can achieve zero-copy send and receive.
@@ -70,7 +70,7 @@ namespace rpc
         template<typename Operation>
         int call(typename Operation::Request& req,
                  typename Operation::Response& resp,
-                 uint64_t timeout = -1UL)
+                 Timeout timeout = {})
         {
             SerializerIOV reqmsg;
             reqmsg.serialize(req);
