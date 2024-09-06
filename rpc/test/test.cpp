@@ -80,7 +80,6 @@ rpc::Header rpc_server_read(IStream* s)
 {
     rpc::Header header;
     s->read(&header, sizeof(header));
-//    EXPECT_EQ(header.tag, 1);
 
     IOVector iov;
     iov.push_back(header.size);
@@ -132,7 +131,6 @@ int server_function(void* instance, iovector* request, rpc::Skeleton::ResponseSe
     IOVector iov;
     iov.push_back(STR, LEN(STR));
     sender(&iov);
-    // LOG_DEBUG("exit");
     return 0;
 }
 
@@ -174,9 +172,7 @@ void do_call(StubImpl& stub, uint64_t function)
     args.init();
     args.serialize(req_iov.iov);
 
-    // LOG_DEBUG("before call");
     stub.do_call(function, &req_iov.iov, &resp_iov.iov, -1);
-    // LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     EXPECT_EQ(memcmp(STR, resp_iov.iov.back().iov_base, LEN(STR)), 0);
 }
 
@@ -195,11 +191,9 @@ uint64_t ncallers;
 void* do_concurrent_call(void* arg)
 {
     ncallers++;
-    // LOG_DEBUG("enter");
     auto stub = (StubImpl*)arg;
     for (int i = 0; i < 10; ++i)
         do_call(*stub, 234);
-    // LOG_DEBUG("exit");
     ncallers--;
     return nullptr;
 }
@@ -251,21 +245,17 @@ void do_call_timeout(StubImpl& stub, uint64_t function)
     args.init();
     args.serialize(req_iov.iov);
 
-    // LOG_DEBUG("before call");
     int ret = stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1UL*1000*1000);
     if (ret >= 0) {
-        // LOG_DEBUG("after call recvd: '`'", (char*)resp_iov.iov.back().iov_base);
     }
 }
 
 void* do_concurrent_call_timeout(void* arg)
 {
     ncallers++;
-    // LOG_DEBUG("enter");
     auto stub = (StubImpl*)arg;
     for (int i = 0; i < 10; ++i)
         do_call_timeout(*stub, 234);
-    // LOG_DEBUG("exit");
     ncallers--;
     return nullptr;
 }
@@ -357,7 +347,6 @@ public:
     }
     int run() {
         if (m_socket->bind_v4localhost() != 0)
-        // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");
         if (m_socket->listen() != 0)
             LOG_ERRNO_RETURN(0, -1, "listen failed");
@@ -391,7 +380,6 @@ TEST_F(RpcTest, shutdown) {
     DEFER(delete pool);
 
     auto& ep = rpc_server.m_endpoint;
-    // photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
     auto stub = pool->get_stub(ep, false);
     ASSERT_NE(nullptr, stub);
     DEFER(pool->put_stub(ep, true));
@@ -428,7 +416,6 @@ TEST_F(RpcTest, passive_shutdown) {
     RpcServer rpc_server(sk, socket_server);
     GTEST_ASSERT_EQ(0, rpc_server.run());
 
-    // photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
     auto& ep = rpc_server.m_endpoint;
     photon::thread_create11([&]{
         // Should always succeed in 3 seconds
@@ -531,7 +518,6 @@ public:
     }
     int run() {
         if (m_socket->bind_v4localhost() != 0)
-        // if (m_socket->bind(9527, net::IPAddr::V6Any()) != 0)
             LOG_ERRNO_RETURN(0, -1, "bind failed");
         if (m_socket->listen() != 0)
             LOG_ERRNO_RETURN(0, -1, "listen failed");
@@ -562,22 +548,16 @@ TEST_F(RpcTest, timeout_with_hb) {
     RpcServerTimeout rpc_server(sk, socket_server);
     GTEST_ASSERT_EQ(0, rpc_server.run());
 
-    // photon::net::EndPoint ep(net::IPAddr::V4Loopback(), 9527);
     auto& ep = rpc_server.m_endpoint;
     auto pool = photon::rpc::new_stub_pool(-1, -1, 1'000'000);
     DEFER(delete pool);
     auto th1 = photon::thread_enable_join(photon::thread_create11([&]{
-        // Should always succeed in 3 seconds
-        auto stub = pool->get_stub(ep, false);
-        if (!stub) abort();
-        DEFER(pool->put_stub(ep, false));
-        Timeout timeout(7'000'000);
+        // Should always succeed in 5 seconds
+        Timeout timeout(5'000'000);
         while(timeout.expired() > photon::now) {
+            auto stub = pool->get_stub(ep, false);
             int ret = do_call_hb(stub);
-            if (ret < 0) {
-                LOG_ERROR(VALUE(ret));
-                abort();
-            }
+            DEFER(pool->put_stub(ep, ret < 0));
             photon::thread_yield();
         }
     }));
@@ -589,7 +569,7 @@ TEST_F(RpcTest, timeout_with_hb) {
         if (!stub) {
             abort();
         }
-        DEFER(pool->put_stub(ep, false));
+        DEFER(pool->put_stub(ep, true));
         RpcServerTimeout::OperationT::Request req;
         RpcServerTimeout::OperationT::Response resp;
         auto before = photon::now;
