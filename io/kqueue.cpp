@@ -99,7 +99,7 @@ public:
             return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
-        int ret = thread_usleep(timeout);
+        int ret = thread_usleep(timeout.timeout() ? timeout : Timeout(10));
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // event arrived
