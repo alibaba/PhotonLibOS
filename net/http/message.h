@@ -98,6 +98,9 @@ public:
     ssize_t write_stream(IStream *stream, size_t size_limit = -1);
     int close() override { return 0; }
 
+    uint64_t timeout() const override { return -1UL; }
+    void timeout(uint64_t timeout) override {}
+
     // size of body
     size_t body_size() const;
     // size of origin resource

@@ -251,19 +251,14 @@ namespace rpc
     About timeout:
     1. When a socket/stub not used by any caller for `expiration` microsecs, it will be dropped.
     2. When socket connecting, it will fail by be timed out after `connect_timeout` microsecs.
-    3. When socket needs to read/write (like sending request and waiting for any response), but got
-       nothing in `transfer_timeout` microsecs, it will be timed out. It's just a timeout for a single
-       read/write operation, not a RPC timeout, which is controlled by the caller when invoking `Stub::call`.
     4. `Stub::call` measures the time from invoking `call` before sending request to received
        response head. Receiving response body is not considered.
     **/
     extern "C" StubPool* new_stub_pool(uint64_t expiration,
-                                       uint64_t connect_timeout,
-                                       uint64_t transfer_timeout);
+                                       uint64_t connect_timeout);
     extern "C" StubPool* new_uds_stub_pool(const char* path,
                                            uint64_t expiration,
-                                           uint64_t connect_timeout,
-                                           uint64_t transfer_timeout);
+                                           uint64_t connect_timeout);
     extern "C" Skeleton* new_skeleton(uint32_t pool_size = 128);
 
     __attribute__((deprecated))

@@ -174,7 +174,7 @@ TEST(rpc, message) {
     TestRPCServer server;
     ASSERT_EQ(0, server.run());
 
-    auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+    auto pool = photon::rpc::new_stub_pool(-1, -1);
     DEFER(delete pool);
 
     photon::net::EndPoint ep;

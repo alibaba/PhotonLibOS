@@ -376,7 +376,7 @@ TEST_F(RpcTest, shutdown) {
     RpcServer rpc_server(sk, socket_server);
     GTEST_ASSERT_EQ(0, rpc_server.run());
 
-    auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+    auto pool = photon::rpc::new_stub_pool(-1, -1);
     DEFER(delete pool);
 
     auto& ep = rpc_server.m_endpoint;
@@ -419,7 +419,7 @@ TEST_F(RpcTest, passive_shutdown) {
     auto& ep = rpc_server.m_endpoint;
     photon::thread_create11([&]{
         // Should always succeed in 3 seconds
-        auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+        auto pool = photon::rpc::new_stub_pool(-1, -1);
         DEFER(delete pool);
         auto stub = pool->get_stub(ep, false);
         if (!stub) abort();
@@ -437,7 +437,7 @@ TEST_F(RpcTest, passive_shutdown) {
     photon::thread_create11([&]{
         photon::thread_sleep(2);
         // Should get connection refused after 2 seconds. Because socket closed listen fd at 1 second.
-        auto pool = photon::rpc::new_stub_pool(-1, -1, -1);
+        auto pool = photon::rpc::new_stub_pool(-1, -1);
         DEFER(delete pool);
         auto stub = pool->get_stub(ep, false);
         if (stub) {
@@ -549,7 +549,7 @@ TEST_F(RpcTest, timeout_with_hb) {
     GTEST_ASSERT_EQ(0, rpc_server.run());
 
     auto& ep = rpc_server.m_endpoint;
-    auto pool = photon::rpc::new_stub_pool(-1, -1, 1'000'000);
+    auto pool = photon::rpc::new_stub_pool(-1, -1);
     DEFER(delete pool);
     auto th1 = photon::thread_enable_join(photon::thread_create11([&]{
         // Should always succeed in 5 seconds
