@@ -47,8 +47,13 @@ public:
     }
 
     // get/set default timeout, in us, (default +∞)
-    virtual uint64_t timeout() const = 0;
-    virtual void timeout(uint64_t tm) = 0;
+    virtual uint64_t timeout() const {
+        errno = ENOSYS;
+        return -1;
+    }
+    virtual void timeout(uint64_t tm) {
+        errno = ENOSYS;
+    }
 
     struct ReadAll {
         struct FreeDeleter {
