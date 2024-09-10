@@ -271,7 +271,7 @@ public:
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         // if timeout is just simple 0, wait for a tiny little moment
         // so that events can be collect.
-        ret = thread_usleep(timeout.timeout() ? timeout : Timeout(10));
+        ret = thread_usleep(timeout ? timeout : 10);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // Event arrived

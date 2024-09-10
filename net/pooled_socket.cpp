@@ -230,7 +230,6 @@ public:
 
     bool release(EndPoint ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
-        ERRNO err;
         if (!stream_reusable(fd)) return false;
         auto node = new StreamListNode(ep, stream, fd, expiration);
         push_into_pool(node);

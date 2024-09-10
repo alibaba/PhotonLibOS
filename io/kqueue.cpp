@@ -80,7 +80,7 @@ public:
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
-        int ret = thread_usleep(timeout.timeout() ? timeout : Timeout(10));
+        int ret = thread_usleep(timeout ? timeout : 10);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // event arrived
