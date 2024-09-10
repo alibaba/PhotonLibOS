@@ -54,11 +54,6 @@ public:
         if (closed) return -1;
         return m_ringbuf.writev(iov, iovcnt);
     }
-    virtual uint64_t timeout() const override
-    {
-        return -1;
-    }
-    virtual void timeout(uint64_t) override {}
 };
 
 class DuplexMemoryStreamImpl : public DuplexMemoryStream
@@ -96,11 +91,6 @@ public:
             if (closed) return -1;
             return s2->writev(iov, iovcnt);
         }
-        virtual uint64_t timeout() const override
-        {
-            return -1;
-        }
-        virtual void timeout(uint64_t) override {}
     };
 
     EndPoint epa, epb;
@@ -206,11 +196,6 @@ public:
         return m_stream->writev(iov, iovcnt);
     }
 
-    virtual uint64_t timeout() const override
-    {
-        return -1;
-    }
-    virtual void timeout(uint64_t) override {}
 };
 
 IStream* new_fault_stream(IStream* stream, int flag, bool ownership) {

@@ -103,13 +103,6 @@ public:
         return ret;
     }
 
-    virtual uint64_t timeout() const override {
-        return m_stream ? m_stream->timeout() : -1UL;
-    }
-    virtual void timeout(uint64_t timeout) override {
-        if (m_stream) m_stream->timeout(timeout);
-    }
-
 protected:
     net::ISocketStream *m_stream;
     char* m_partial_body_buf;

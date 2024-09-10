@@ -98,10 +98,6 @@ namespace fs
         UNIMPLEMENTED(int sync_file_range(off_t offset, off_t nbytes, unsigned int flags));
         UNIMPLEMENTED(int fallocate(int mode, off_t offset, off_t len));
         UNIMPLEMENTED(int fiemap(struct fiemap* map));   // query the extent map for
-        UNIMPLEMENTED(uint64_t timeout() const override);
-        void timeout(uint64_t tm) override {
-            // unimplemented by default
-        }
 
         // append write to the file
         // if `offset` is specified, it must be equal to current size of the
