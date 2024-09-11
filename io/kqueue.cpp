@@ -111,7 +111,7 @@ public:
         nev += ret;
         for (int i = 0; i < ret; ++i) {
             if (_events[i].filter == EVFILT_USER) continue;
-            event_callback(_events[i].udata);
+            event_callback((thread*)_events[i].udata);
         }
         if (ret == (int) LEN(_events)) {  // there may be more events
             tm.tv_sec = tm.tv_nsec = 0;
@@ -124,18 +124,18 @@ public:
         if (unlikely(interests == 0))
             return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
-        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT, timeout.expired());
+        auto current = CURRENT;
+        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current, true);
         if (timeout.expired()) {
             int ret = -1;
-            do_wait_and_fire_events(0, [&](void* data) {
-                auto th = (thread*)data;
-                if (th == CURRENT)
+            do_wait_and_fire_events(0, [current, &ret](thread* th) {
+                if (th == current)
                     ret = 0;
                 else
                     thread_interrupt(th);
             });
             if (ret <0) {
-                enqueue(fd, ev, EV_DELETE, 0, CURRENT, true);
+                enqueue(fd, ev, EV_DELETE, 0, current, true);
                 errno = ETIMEDOUT;
             }
             return ret;
@@ -147,13 +147,12 @@ public:
         }
     
         errno = (ret == 0) ? ETIMEDOUT : err.no;
-        enqueue(fd, ev, EV_DELETE, 0, CURRENT, true);
+        enqueue(fd, ev, EV_DELETE, 0, current, true);
         return -1;
     }
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
-        return do_wait_and_fire_events(timeout, [](void* data) {
-            auto th = (thread*)data;
+        return do_wait_and_fire_events(timeout, [](thread* th) {
             thread_interrupt(th);
         });
     }
