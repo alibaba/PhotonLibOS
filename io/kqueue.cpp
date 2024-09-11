@@ -84,7 +84,7 @@ public:
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
         if (immediate || _n == LEN(_events)) {
-            struct timespec tm {0, 0};
+            struct timespec tm{0, 0};
             int ret = kevent(_kq, _events, _n, nullptr, 0, &tm);
             if (ret < 0) {
                 // debug_breakpoint();
@@ -111,7 +111,8 @@ public:
         nev += ret;
         for (int i = 0; i < ret; ++i) {
             if (_events[i].filter == EVFILT_USER) continue;
-            event_callback((thread*)_events[i].udata);
+            auto th = (thread*) _events[i].udata;
+            if (th) event_callback(th);
         }
         if (ret == (int) LEN(_events)) {  // there may be more events
             tm.tv_sec = tm.tv_nsec = 0;
@@ -121,8 +122,6 @@ public:
     }
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
-        if (unlikely(interests == 0))
-            return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         auto current = CURRENT;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current, true);
@@ -132,7 +131,7 @@ public:
                 if (th == current)
                     ret = 0;
                 else
-                    thread_interrupt(th);
+                    thread_interrupt(th, EOK);
             });
             if (ret <0) {
                 enqueue(fd, ev, EV_DELETE, 0, current, true);
@@ -145,16 +144,14 @@ public:
         if (ret == -1 && err.no == EOK) {
             return 0;  // event arrived
         }
-    
+
         errno = (ret == 0) ? ETIMEDOUT : err.no;
         enqueue(fd, ev, EV_DELETE, 0, current, true);
         return -1;
     }
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
-        return do_wait_and_fire_events(timeout, [](thread* th) {
-            thread_interrupt(th);
-        });
+        return do_wait_and_fire_events(timeout, [](thread *th) { thread_interrupt(th, EOK); });
     }
 
     int cancel_wait() override {

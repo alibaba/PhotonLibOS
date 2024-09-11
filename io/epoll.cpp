@@ -299,7 +299,8 @@ ok:     entry.interests |= eint;
             LOG_ERROR_RETURN(EINVAL, -1, "can not wait for multiple interests");
         if (unlikely(interest == 0))
             return rm_interest({fd, EVENT_RWE| ONE_SHOT, 0}); // remove fd from epoll
-        int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
+        thread* current = CURRENT;
+        int ret = add_interest({fd, interest | ONE_SHOT, current});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         // if timeout is just simple 0, wait for a tiny little moment
         // so that events can be collect.
@@ -307,8 +308,8 @@ ok:     entry.interests |= eint;
             ret = -1;
             wait_for_events(
                 0,
-                [&](void* data) __INLINE__ {
-                    if ((thread*)data == CURRENT) {
+                [current, &ret](void* data) __INLINE__ {
+                    if ((thread*)data == current) {
                         ret = 0;
                     } else {
                         thread_interrupt((thread*)data, EOK);
