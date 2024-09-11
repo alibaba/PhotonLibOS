@@ -84,7 +84,8 @@ public:
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
         if (immediate || _n == LEN(_events)) {
-            int ret = kevent(_kq, _events, _n, nullptr, 0, nullptr);
+            struct timespec tm {0, 0};
+            int ret = kevent(_kq, _events, _n, nullptr, 0, &tm);
             if (ret < 0) {
                 // debug_breakpoint();
                 LOG_ERRNO_RETURN(0, -1, "failed to submit events with kevent()");
