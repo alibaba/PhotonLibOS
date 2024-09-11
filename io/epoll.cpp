@@ -271,6 +271,21 @@ public:
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         // if timeout is just simple 0, wait for a tiny little moment
         // so that events can be collect.
+        if (!timeout) {
+            ret = -1;
+            wait_for_events(
+                0,
+                [&](void* data) __INLINE__ {
+                    if ((thread*)data == CURRENT) {
+                        ret = 0;
+                    } else {
+                        thread_interrupt((thread*)data, EOK);
+                    }
+                },
+                [&]() __INLINE__ { return true; });
+            if (ret < 0) errno = ETIMEDOUT;
+            return ret;
+        }
         ret = thread_usleep(timeout ? timeout : 10);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {

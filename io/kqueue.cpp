@@ -77,21 +77,8 @@ public:
         return 0;
     }
 
-    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
-        short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
-        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
-        int ret = thread_usleep(timeout ? timeout : 10);
-        ERRNO err;
-        if (ret == -1 && err.no == EOK) {
-            return 0;  // event arrived
-        }
-
-        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
-        errno = (ret == 0) ? ETIMEDOUT : err.no;
-        return -1;
-    }
-
-    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+    template<typename EVCB>
+    ssize_t do_wait_and_fire_events(uint64_t timeout, EVCB&& event_callback) {
         ssize_t nev = 0;
         struct timespec tm;
         tm.tv_sec = timeout / 1000 / 1000;
@@ -106,14 +93,46 @@ public:
         nev += ret;
         for (int i = 0; i < ret; ++i) {
             if (_events[i].filter == EVFILT_USER) continue;
-            auto th = (thread*) _events[i].udata;
-            if (th) thread_interrupt(th, EOK);
+            event_callback(_events[i].udata);
         }
         if (ret == (int) LEN(_events)) {  // there may be more events
             tm.tv_sec = tm.tv_nsec = 0;
             goto again;
         }
         return nev;
+    }
+
+    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
+        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
+        if (!timeout) {
+            int ret = -1;
+            do_wait_and_fire_events(0, [&](void* data) {
+                auto th = (thread*)data;
+                if (th == CURRENT)
+                    ret = 0;
+                else if (th)
+                    thread_interrupt(th, EOK);
+            });
+            if (ret < 0) errno = ETIMEDOUT;
+            return ret;
+        }
+        int ret = thread_usleep(timeout);
+        ERRNO err;
+        if (ret == -1 && err.no == EOK) {
+            return 0;  // event arrived
+        }
+
+        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
+        errno = (ret == 0) ? ETIMEDOUT : err.no;
+        return -1;
+    }
+
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
+        return do_wait_and_fire_events(timeout, [&](void* data){
+            auto th = (thread*)data;
+            if (th) thread_interrupt(th, EOK);
+        });
     }
 
     int cancel_wait() override {
