@@ -266,7 +266,8 @@ public:
     virtual int cancel_wait() override { return eventfd_write(_evfd, 1); }
 
     int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
-        Event event{fd, interests | ONE_SHOT, CURRENT};
+        thread* current = CURRENT;
+        Event event{fd, interests | ONE_SHOT, current};
         int ret = add_interest(event);
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         // if timeout is just simple 0, wait for a tiny little moment
@@ -275,30 +276,28 @@ public:
             ret = -1;
             wait_for_events(
                 0,
-                [&](void* data) __INLINE__ {
-                    if ((thread*)data == CURRENT) {
+                [current, &ret](void* data) __INLINE__ {
+                    if ((thread*)data == current) {
                         ret = 0;
                     } else {
                         thread_interrupt((thread*)data, EOK);
                     }
                 },
                 [&]() __INLINE__ { return true; });
-            if (ret < 0) errno = ETIMEDOUT;
-            return ret;
+            if (ret < 0) {
+                rm_interest({fd, interests, 0});
+                errno = ETIMEDOUT;
+            }
         }
-        ret = thread_usleep(timeout ? timeout : 10);
+        ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // Event arrived
-        } else if (ret == 0) {
-            rm_interest(event);  // Timeout
-            errno = ETIMEDOUT;
-            return -1;
-        } else {
-            rm_interest(event);  // Interrupted by other thread
-            errno = err.no;
-            return -1;
         }
+        rm_interest({fd, interests, 0}); // no ONE_SHOT, to reconfig epoll
+        errno = (ret == 0) ? ETIMEDOUT :    // Timeout
+                             err.no; // Interrupted by other thread
+        return -1;
     }
 };
 
