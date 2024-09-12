@@ -322,7 +322,7 @@ ok:     entry.interests |= eint;
             }
             return ret;
         }
-        ret = thread_usleep(timeout.timeout() ? timeout : Timeout(10));
+        ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // Event arrived

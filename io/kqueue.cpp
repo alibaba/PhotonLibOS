@@ -77,9 +77,6 @@ public:
     }
 
     int enqueue(int fd, short event, uint16_t action, uint32_t event_flags, void* udata, bool immediate = false) {
-        // if (fd == _kq) debug_breakpoint();
-        // immediate = true;
-        // LOG_DEBUG(VALUE(_kq), VALUE(fd), VALUE(event), VALUE(action), VALUE(event_flags), VALUE(udata), VALUE(immediate));
         assert(_n < LEN(_events));
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
@@ -87,7 +84,6 @@ public:
             struct timespec tm{0, 0};
             int ret = kevent(_kq, _events, _n, nullptr, 0, &tm);
             if (ret < 0) {
-                // debug_breakpoint();
                 LOG_ERRNO_RETURN(0, -1, "failed to submit events with kevent()");
             }
             _n = 0;
@@ -122,11 +118,16 @@ public:
     }
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+        if (unlikely(interests == 0)) {
+            errno = ENOSYS;
+            return -1;
+        }
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         auto current = CURRENT;
-        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current, true);
+        int ret = enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current);
+        if (ret < 0) return ret;
         if (timeout.expired()) {
-            int ret = -1;
+            ret = -1;
             do_wait_and_fire_events(0, [current, &ret](thread* th) {
                 if (th == current)
                     ret = 0;
@@ -139,14 +140,14 @@ public:
             }
             return ret;
         }
-        int ret = thread_usleep(timeout);
+        ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // event arrived
         }
 
-        errno = (ret == 0) ? ETIMEDOUT : err.no;
         enqueue(fd, ev, EV_DELETE, 0, current, true);
+        errno = (ret == 0) ? ETIMEDOUT : err.no;
         return -1;
     }
 
