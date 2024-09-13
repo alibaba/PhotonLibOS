@@ -285,7 +285,7 @@ public:
                 },
                 [&]() __INLINE__ { return true; });
             if (ret < 0) {
-                rm_interest({fd, interests, 0});
+                rm_interest(event);
                 errno = ETIMEDOUT;
             }
         }
@@ -294,7 +294,7 @@ public:
         if (ret == -1 && err.no == EOK) {
             return 0;  // Event arrived
         }
-        rm_interest({fd, interests, 0}); // no ONE_SHOT, to reconfig epoll
+        rm_interest(event); // no ONE_SHOT, to reconfig epoll
         errno = (ret == 0) ? ETIMEDOUT :    // Timeout
                              err.no; // Interrupted by other thread
         return -1;

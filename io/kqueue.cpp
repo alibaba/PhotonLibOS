@@ -192,7 +192,7 @@ public:
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
-        static const struct timespec _tm = {0, 0};
+        struct timespec _tm = {0, 0};
         ret = kevent(_kq, _events, _n, _events, count, &_tm);
         if (ret < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
