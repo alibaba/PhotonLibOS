@@ -59,15 +59,18 @@ namespace rpc
         /**
          * @param req Request of Message
          * @param resp Response of Message
+         * @param timeout RPC timeout, counting from sending request to receiving response header
          * @return The number of bytes received, -1 for failure
          * @note Request and Response should assign to external memory buffers if they have variable-length fields.
          *       Via this, we can achieve zero-copy send and receive.
          *       For Response, there could be only 1 buffer at most. For Request, there is no limit.
+         *       Attention: RPC stub do not support multi vCPU, when multiple vCPUs are used, the RPC stub should be
+         *       vCPU local object.
          */
         template<typename Operation>
         int call(typename Operation::Request& req,
                  typename Operation::Response& resp,
-                 uint64_t timeout = -1UL)
+                 Timeout timeout = {})
         {
             SerializerIOV reqmsg;
             reqmsg.serialize(req);
@@ -107,6 +110,7 @@ namespace rpc
         /**
          * @param req Request of Message
          * @param resp_iov iovector for the Response
+         * @param timeout timeout in milliseconds, -1UL for no timeout. 
          * @return Pointer of the Response. nullptr for failure. No need to delete.
          * @note For this call, we don't need to assign buffers for the Response any more.
          *       `resp_iov` will use its internal allocator to fulfill the memory requirement.
@@ -114,7 +118,7 @@ namespace rpc
          */
         template<typename Operation>
         typename Operation::Response* call(typename Operation::Request& req, iovector& resp_iov,
-                                            uint64_t timeout = -1UL) {
+                                            Timeout timeout = {}) {
             assert(resp_iov.iovcnt() == 0);
             SerializerIOV reqmsg;
             reqmsg.serialize(req);
@@ -136,7 +140,7 @@ namespace rpc
     protected:
         // This call can be invoked concurrently, and may return out-of-order.
         // Return the number of bytes received.
-        virtual int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) = 0;
+        virtual int do_call(FunctionID function, iovector* request, iovector* response, Timeout timeout) = 0;
     };
 
     class Skeleton : public Object
@@ -243,10 +247,18 @@ namespace rpc
     };
 
     extern "C" Stub* new_rpc_stub(IStream* stream, bool ownership = false);
-    extern "C" StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout);
-    extern "C" StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
-                                uint64_t connect_timeout,
-                                uint64_t rpc_timeout);
+    /**
+    About timeout:
+    1. When a socket/stub not used by any caller for `expiration` microsecs, it will be dropped.
+    2. When socket connecting, it will fail by be timed out after `connect_timeout` microsecs.
+    4. `Stub::call` measures the time from invoking `call` before sending request to received
+       response head. Receiving response body is not considered.
+    **/
+    extern "C" StubPool* new_stub_pool(uint64_t expiration,
+                                       uint64_t connect_timeout);
+    extern "C" StubPool* new_uds_stub_pool(const char* path,
+                                           uint64_t expiration,
+                                           uint64_t connect_timeout);
     extern "C" Skeleton* new_skeleton(uint32_t pool_size = 128);
 
     __attribute__((deprecated))

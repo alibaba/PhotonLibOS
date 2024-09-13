@@ -80,6 +80,8 @@ namespace rpc {
             auto iov = args->request;
             auto ret = iov->push_front({&header, sizeof(header)});
             if (ret != sizeof(header)) return -1;
+            m_stream->timeout(args->timeout.timeout());
+            DEFER(m_stream->timeout(-1));
             ret = args->RET = m_stream->writev(iov->iovec(), iov->iovcnt());
             if (ret != header.size + sizeof(header)) {
                 ERRNO err;
@@ -96,6 +98,8 @@ namespace rpc {
                 // m_stream->shutdown(ShutdownHow::ReadWrite);
                 LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timeout before read header ");
             }
+            m_stream->timeout(args->timeout.timeout());
+            DEFER(m_stream->timeout(-1));
             auto ret = args->RET = m_stream->read(&m_header, sizeof(m_header));
             args->tag = m_header.tag;
             if (ret != sizeof(m_header)) {
@@ -119,6 +123,8 @@ namespace rpc {
             if (iov->iovcnt() == 0) {
                 iov->malloc(m_header.size);
             }
+            m_stream->timeout(args->timeout.timeout());
+            DEFER(m_stream->timeout(-1));
             auto ret = m_stream->readv((const iovec*)iov->iovec(), iov->iovcnt());
             // return 0 means it has been disconnected
             // should take as fault
@@ -137,9 +143,7 @@ namespace rpc {
                 FunctionID function;
             };
             iovector *request, *response;
-            Timeout timeout;
-            OooArgs(StubImpl* stub, FunctionID function, iovector* req, iovector* resp, uint64_t timeout_):
-                timeout(timeout_)
+            OooArgs(StubImpl* stub, FunctionID function, iovector* req, iovector* resp, Timeout timeout_)
             {
                 request = req;
                 response = resp;
@@ -148,14 +152,14 @@ namespace rpc {
                 do_issue.bind(stub, &StubImpl::do_send);
                 do_completion.bind(stub, &StubImpl::do_recv_header);
                 do_collect.bind(stub, &StubImpl::do_recv_body);
+                timeout = timeout_;
             }
         };
 
-        int do_call(FunctionID function, iovector* request, iovector* response, uint64_t timeout) override {
+        int do_call(FunctionID function, iovector* request, iovector* response, Timeout tmo) override {
             scoped_rwlock rl(m_rwlock, photon::RLOCK);
-            Timeout tmo(timeout);
             if (tmo.expiration() < photon::now) {
-                LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(timeout), VALUE(tmo.timeout()));
+                LOG_ERROR_RETURN(ETIMEDOUT, -1, "Timed out before rpc start", VALUE(tmo.timeout()));
             }
             int ret = 0;
             OooArgs args(this, function, request, response, tmo.timeout());
@@ -421,12 +425,11 @@ namespace rpc {
 
     class StubPoolImpl : public StubPool {
     public:
-        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
+        explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
             tcpclient = net::new_tcp_socket_client();
             tcpclient->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
-            m_rpc_timeout = rpc_timeout;
         }
 
         ~StubPoolImpl() {
@@ -456,7 +459,7 @@ namespace rpc {
         }
 
         uint64_t get_timeout() const override {
-            return m_rpc_timeout;
+            return tcpclient->timeout();
         }
 
     protected:
@@ -465,7 +468,7 @@ namespace rpc {
             if (!sock)
                 LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
             LOG_DEBUG("connected to ", ep);
-            sock->timeout(m_rpc_timeout);
+            sock->timeout(-1UL);
             if (tls) {
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
             }
@@ -475,7 +478,6 @@ namespace rpc {
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
         net::ISocketClient *tcpclient;
         net::TLSContext* tls_ctx = nullptr;
-        uint64_t m_rpc_timeout;
     };
 
     // dummy pool, for unix domain socket connection to only one point only
@@ -483,8 +485,8 @@ namespace rpc {
     class UDSStubPoolImpl : public StubPoolImpl {
     public:
         explicit UDSStubPoolImpl(const char* path, uint64_t expiration,
-                                 uint64_t connect_timeout, uint64_t rpc_timeout)
-            : StubPoolImpl(expiration, connect_timeout, rpc_timeout),
+                                 uint64_t connect_timeout)
+            : StubPoolImpl(expiration, connect_timeout),
               m_path(path), m_client(net::new_uds_client()) {
                   m_client->timeout(connect_timeout);
               }
@@ -500,7 +502,8 @@ namespace rpc {
                     LOG_ERRNO_RETURN(0, nullptr,
                                      "Connect to unix domain socket failed");
                 }
-                sock->timeout(m_rpc_timeout);
+                // stub socket always set timeout for single action
+                sock->timeout(-1UL);
                 return new_rpc_stub(sock, true);
             });
         }
@@ -510,15 +513,13 @@ namespace rpc {
         net::ISocketClient * m_client;
     };
 
-    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout, uint64_t rpc_timeout) {
-        return new StubPoolImpl(expiration, connect_timeout, rpc_timeout);
+    StubPool* new_stub_pool(uint64_t expiration, uint64_t connect_timeout) {
+        return new StubPoolImpl(expiration, connect_timeout);
     }
 
     StubPool* new_uds_stub_pool(const char* path, uint64_t expiration,
-                                uint64_t connect_timeout,
-                                uint64_t rpc_timeout) {
-        return new UDSStubPoolImpl(path, expiration, connect_timeout,
-                                   rpc_timeout);
+                                uint64_t connect_timeout) {
+        return new UDSStubPoolImpl(path, expiration, connect_timeout);
     }
     }  // namespace rpc
 }

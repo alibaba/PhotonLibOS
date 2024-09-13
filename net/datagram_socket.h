@@ -52,6 +52,9 @@ protected:
     }
     using IMessage::recv;
     using IMessage::send;
+
+    virtual uint64_t timeout() const = 0;
+    virtual void timeout(uint64_t) = 0;
 };
 
 class UDPSocket : public IDatagramSocket {
