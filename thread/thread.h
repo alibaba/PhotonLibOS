@@ -75,7 +75,10 @@ namespace photon
     // Failing to do so will cause resource leak.
     struct join_handle;
     join_handle* thread_enable_join(thread* th, bool flag = true);
-    void thread_join(join_handle* jh);
+    void* thread_join(join_handle* jh);
+
+    // terminates CURRENT with return value `retval`
+    void thread_exit(void* retval) __attribute__((noreturn));
 
     // switching to other threads (without going into sleep queue)
     // return error_number if interrupted during the rolling

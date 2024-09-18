@@ -45,3 +45,7 @@ add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-lock
 add_executable(test-pooled-stack-allocator test-pooled-stack-allocator.cpp)
 target_link_libraries(test-pooled-stack-allocator PRIVATE photon_shared)
 add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stack-allocator>)
+
+add_executable(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)
+target_link_libraries(test-st-utest PRIVATE photon_shared)
+add_test(NAME test-st-utest COMMAND $<TARGET_FILE:test-st-utest>)
