@@ -122,20 +122,6 @@ public:
         auto current = CURRENT;
         int ret = enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current);
         if (ret < 0) return ret;
-        if (timeout.expired()) {
-            ret = -1;
-            do_wait_and_fire_events(0, [current, &ret](thread* th) {
-                if (th == current)
-                    ret = 0;
-                else
-                    thread_interrupt(th, EOK);
-            });
-            if (ret <0) {
-                enqueue(fd, ev, EV_DELETE, 0, current, true);
-                errno = ETIMEDOUT;
-            }
-            return ret;
-        }
         ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
@@ -152,8 +138,13 @@ public:
     }
 
     int cancel_wait() override {
-        enqueue(_kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, nullptr, true);
-        return 0;
+        // cannot call `enqueue` directly since it will be called from another vCPU.
+        // directly use kqueue to submit event, which is safe.
+        // as same as `enqueue(_kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, nullptr, true)`
+        struct kevent entry;
+        EV_SET(&entry, _kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, 0, nullptr);
+        struct timespec tm{0, 0};
+        return kevent(_kq, _events, _n, nullptr, 0, &tm);
     }
 
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
