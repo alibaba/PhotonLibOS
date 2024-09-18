@@ -82,7 +82,7 @@ struct ThreadPause : PauseBase {
 };
 
 namespace photon {
-void thread_yield();
+int thread_yield();
 }
 struct PhotonPause : PauseBase {
     inline static __attribute__((always_inline)) void pause() {
