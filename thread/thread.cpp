@@ -1162,41 +1162,44 @@ R"(
         return (states) th->state;
     }
 
-    void thread_yield()
+    int thread_yield()
     {
-        assert(!AtomicRunQ().single());
-        auto sw = AtomicRunQ().goto_next();
+        RunQ rq;
         if_update_now();
+        rq.current->error_number = 0;
+        auto sw = AtomicRunQ(rq).goto_next();
         switch_context(sw.from, sw.to);
+        return rq.current->error_number;
     }
 
-    void thread_yield_fast() {
-        assert(!AtomicRunQ().single());
+    inline void thread_yield_fast() {
         auto sw = AtomicRunQ().goto_next();
         switch_context(sw.from, sw.to);
     }
 
-    void thread_yield_to(thread* th) {
+    int thread_yield_to(thread* th) {
         if (unlikely(th == nullptr)) { // yield to any thread
             return thread_yield();
         }
         RunQ rq;
         if (unlikely(th == rq.current)) { // yield to current should just update time
             if_update_now();
-            return;
+            return 0;
         } else if (unlikely(th->vcpu != rq.current->vcpu)) {
-            LOG_ERROR_RETURN(EINVAL, , "target thread ` must be run by the same vcpu as CURRENT!", th);
+            LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be run by the same vcpu as CURRENT!", th);
         } else if (unlikely(th->state == states::STANDBY)) {
             while (th->state == states::STANDBY)
                 resume_threads();
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
-            LOG_ERROR_RETURN(EINVAL, , "target thread ` must be READY!", th);
+            LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be READY!", th);
         }
 
         auto sw = AtomicRunQ(rq).try_goto(th);
         if_update_now();
+        rq.current->error_number = 0;
         switch_context(sw.from, sw.to);
+        return rq.current->error_number;
     }
 
     __attribute__((always_inline)) inline
@@ -1216,13 +1219,16 @@ R"(
         sw.from->get_vcpu()->sleepq.push(sw.from);
         return sw;
     }
-
+    inline int yield_as_sleep() {
+        int ret = thread_yield();
+        if (unlikely(ret)) { errno = ret; return -1; }
+        return 0;
+    }
     // returns 0 if slept well (at lease `useconds`), -1 otherwise
     static int thread_usleep(Timeout timeout, thread_list* waitq)
     {
         if (unlikely(timeout.expired())) {
-            thread_yield();
-            return 0;
+            return yield_as_sleep();
         }
 
         auto r = prepare_usleep(timeout, waitq);
@@ -1292,7 +1298,7 @@ R"(
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, -1, "Photon not initialized in this thread");
         if (unlikely(timeout.expired()))
-            return thread_yield(), 0;
+            return yield_as_sleep();
         if (unlikely(rq.current->is_shutting_down()))
             return do_shutdown_usleep(timeout, rq);
         return do_thread_usleep(timeout, rq);
@@ -1319,9 +1325,16 @@ R"(
     {
         if (unlikely(!th))
             LOG_ERROR_RETURN(EINVAL, , "invalid parameter");
-        if (unlikely(th->state != states::SLEEPING)) return;
+        auto state = th->state;
+        if (unlikely(state != states::SLEEPING)) {
+        out: // may have thread_yield()-ed
+            if (state == states::READY && th->error_number == 0)
+                th->error_number = error_number;
+            return;
+        }
         SCOPED_LOCK(th->lock);
-        if (unlikely(th->state != states::SLEEPING)) return;
+        state = th->state;
+        if (unlikely(state != states::SLEEPING)) goto out;
 
         prelocked_thread_interrupt(th, error_number);
     }
@@ -1550,9 +1563,9 @@ R"(
     int mutex::lock(Timeout timeout) {
         if (try_lock() == 0) return 0;
         for (auto re = retries; re; --re) {
-            thread_yield();
-            if (try_lock() == 0)
-                return 0;
+            int ret = thread_yield();
+            if (unlikely(ret)) { errno = ret; return -1; }
+            if (try_lock() == 0) return 0;
         }
         splock.lock();
         if (try_lock() == 0) {

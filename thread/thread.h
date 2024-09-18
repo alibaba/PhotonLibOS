@@ -78,10 +78,12 @@ namespace photon
     void thread_join(join_handle* jh);
 
     // switching to other threads (without going into sleep queue)
-    void thread_yield();
+    // return error_number if interrupted during the rolling
+    int thread_yield();
 
     // switching to a specific thread, which must be RUNNING
-    void thread_yield_to(thread* th);
+    // return error_number if interrupted during the rolling
+    int thread_yield_to(thread* th);
 
     // suspend CURRENT thread for specified time duration, and switch
     // control to other threads, resuming possible sleepers.
