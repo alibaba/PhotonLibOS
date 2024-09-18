@@ -299,8 +299,7 @@ ok:     entry.interests |= eint;
             LOG_ERROR_RETURN(EINVAL, -1, "can not wait for multiple interests");
         if (unlikely(interest == 0))
             return rm_interest({fd, EVENT_RWE| ONE_SHOT, 0}); // remove fd from epoll
-        thread* current = CURRENT;
-        int ret = add_interest({fd, interest | ONE_SHOT, current});
+        int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
         ret = thread_usleep(timeout);
         ERRNO err;
