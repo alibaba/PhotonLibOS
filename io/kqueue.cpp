@@ -87,32 +87,6 @@ public:
         return 0;
     }
 
-    template<typename EVCB>
-    ssize_t do_wait_and_fire_events(uint64_t timeout, EVCB&& event_callback) {
-        ssize_t nev = 0;
-        struct timespec tm;
-        tm.tv_sec = timeout / 1000 / 1000;
-        tm.tv_nsec = (timeout % (1000 * 1000)) * 1000;
-
-    again:
-        int ret = kevent(_kq, _events, _n, _events, LEN(_events), &tm);
-        if (ret < 0)
-            LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
-
-        _n = 0;
-        nev += ret;
-        for (int i = 0; i < ret; ++i) {
-            if (_events[i].filter == EVFILT_USER) continue;
-            auto th = (thread*) _events[i].udata;
-            if (th) event_callback(th);
-        }
-        if (ret == (int) LEN(_events)) {  // there may be more events
-            tm.tv_sec = tm.tv_nsec = 0;
-            goto again;
-        }
-        return nev;
-    }
-
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         if (unlikely(interests == 0)) {
             errno = ENOSYS;
@@ -134,7 +108,27 @@ public:
     }
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
-        return do_wait_and_fire_events(timeout, [](thread *th) { thread_interrupt(th, EOK); });
+        ssize_t nev = 0;
+        struct timespec tm;
+        tm.tv_sec = timeout / 1000 / 1000;
+        tm.tv_nsec = (timeout % (1000 * 1000)) * 1000;
+
+    again:
+        int ret = kevent(_kq, _events, _n, _events, LEN(_events), &tm);
+        if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
+
+        _n = 0;
+        nev += ret;
+        for (int i = 0; i < ret; ++i) {
+            if (_events[i].filter == EVFILT_USER) continue;
+            auto th = (thread*)_events[i].udata;
+            if (th) thread_interrupt(th, EOK);
+        }
+        if (ret == (int)LEN(_events)) {  // there may be more events
+            tm.tv_sec = tm.tv_nsec = 0;
+            goto again;
+        }
+        return nev;
     }
 
     int cancel_wait() override {
