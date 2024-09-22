@@ -6,7 +6,7 @@ add_executable(perf_workpool perf_workpool.cpp)
 target_link_libraries(perf_workpool PRIVATE photon_shared)
 add_test(NAME perf_workpool COMMAND $<TARGET_FILE:perf_workpool>)
 
-add_executable(test-thread test.cpp x.cpp)
+add_executable(test-thread test-thread.cpp x.cpp)
 target_link_libraries(test-thread PRIVATE photon_shared)
 add_test(NAME test-thread COMMAND $<TARGET_FILE:test-thread>)
 

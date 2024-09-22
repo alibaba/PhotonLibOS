@@ -86,11 +86,15 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            #name": "
 #endif
 
-static const size_t PAGE_SIZE = getpagesize();
-
 namespace photon
 {
     inline uint64_t min(uint64_t a, uint64_t b) { return (a<b) ? a : b; }
+
+    inline uint32_t get_pagesize() {
+        static uint32_t page_size = getpagesize();
+        return page_size;
+    }
+
     class NullEventEngine : public MasterEventEngine {
     public:
         std::mutex _mutex;
@@ -919,21 +923,23 @@ R"(
         // stack contains struct, randomizer space, and reserved_space
         size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
         // at least a whole page for mprotect
-        least_stack_size += PAGE_SIZE;
+        least_stack_size += get_pagesize();
         // and make sure it's at least 16K
         least_stack_size = std::max(16UL * 1024, least_stack_size);
-        stack_size = align_up(stack_size, PAGE_SIZE);
+        stack_size = align_up(stack_size, get_pagesize());
         if (unlikely(stack_size < least_stack_size)) {
             LOG_WARN("Stack size ` is less than least stack size `, use ` instead",
                      stack_size, least_stack_size, least_stack_size);
             stack_size = least_stack_size;
         }
         char* ptr = (char*)photon_thread_alloc(stack_size);
+        if (unlikely(!ptr))
+            return nullptr;
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
         th->buf = ptr;
-        th->stackful_alloc_top = ptr + PAGE_SIZE;
+        th->stackful_alloc_top = ptr + get_pagesize();
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
@@ -1349,7 +1355,7 @@ R"(
             return;
         }
         auto rsp = (char*)th->stack._ptr;
-        auto len = align_down(rsp - buf, PAGE_SIZE);
+        auto len = align_down(rsp - buf, get_pagesize());
         madvise(buf, len, MADV_DONTNEED);
 #endif
     }

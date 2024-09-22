@@ -378,7 +378,7 @@ void test_thread_switch(uint64_t nth, uint64_t stack_size)
 
 TEST(Perf, ThreadSwitch)
 {
-    test_thread_switch(10, 16 * PAGE_SIZE);
+    test_thread_switch(10, 16 * getpagesize());
     return;
 
     const uint64_t stack_size = 8 * 1024 * 1024;
@@ -400,7 +400,7 @@ TEST(Perf, ThreadSwitchWithStandaloneTSUpdater)
 {
     timestamp_updater_init();
     DEFER(timestamp_updater_fini());
-    test_thread_switch(10, 16 * PAGE_SIZE);
+    test_thread_switch(10, 16 * getpagesize());
     return;
 }
 
@@ -685,7 +685,7 @@ TEST(Semaphore, heavy) {
     semaphore sem(0);
     const int thread_num = 100000;
     for (int i=1; i<=thread_num;i++) {
-        thread_create11(16 * PAGE_SIZE, semaphore_heavy, sem, i);
+        thread_create11(16 * getpagesize(), semaphore_heavy, sem, i);
     }
     LOG_DEBUG("created ` threads", thread_num);
     sem.signal(1);
@@ -1763,12 +1763,13 @@ TEST(future, test2) {
 
 int main(int argc, char** arg)
 {
+    srand(time(0));
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
+    set_log_output_level(ALOG_INFO);
     photon::vcpu_init();
-    set_log_output_level(ALOG_DEBUG);
 
     if (FLAGS_vcpus <= 1)
     {
@@ -1790,8 +1791,6 @@ int main(int argc, char** arg)
     // return 0;
     test_sat_add();
 //    test_sleepqueue();
-
-    srand(time(0));
 
     //aSem.wait(1);
     aSem.wait(3);

@@ -154,9 +154,9 @@ namespace net {
         IPAddr addr;
         uint16_t port = 0;
         EndPoint() = default;
-        EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
+        EndPoint(IPAddr ip, uint16_t port_) : addr(ip), port(port_) {}
         explicit EndPoint(const char* ep);
-        EndPoint(const char* ip, uint16_t port) : addr(ip), port(port) {}
+        EndPoint(const char* ip, uint16_t port_) : addr(ip), port(port_) {}
         bool is_ipv4() const {
             return addr.is_ipv4();
         };

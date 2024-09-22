@@ -28,7 +28,10 @@ limitations under the License.
 
 namespace photon {
 
-const static size_t PAGE_SIZE = getpagesize();
+inline uint32_t get_pagesize() {
+    static uint32_t page_size = getpagesize();
+    return page_size;
+}
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
           size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
@@ -51,7 +54,7 @@ protected:
 
     static void* __alloc(size_t alloc_size) {
         void* ptr;
-        int ret = ::posix_memalign(&ptr, PAGE_SIZE, alloc_size);
+        int ret = ::posix_memalign(&ptr, get_pagesize(), alloc_size);
         if (ret != 0) {
             errno = ret;
             return nullptr;
@@ -59,12 +62,12 @@ protected:
 #if defined(__linux__)
         madvise(ptr, alloc_size, MADV_NOHUGEPAGE);
 #endif
-        mprotect(ptr, PAGE_SIZE, PROT_NONE);
+        mprotect(ptr, get_pagesize(), PROT_NONE);
         return ptr;
     }
 
     static void __dealloc(void* ptr, size_t size) {
-        mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+        mprotect(ptr, get_pagesize(), PROT_READ | PROT_WRITE);
         madvise(ptr, size, MADV_DONTNEED);
         free(ptr);
     }
@@ -175,19 +178,19 @@ size_t pooled_stack_trim_threshold(size_t x);
 
 void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
     char* ptr = nullptr;
-    int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
+    int err = posix_memalign((void**)&ptr, get_pagesize(), stack_size);
     if (unlikely(err))
         LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
                          ERRNO(err));
 #if defined(__linux__)
     madvise(ptr, stack_size, MADV_NOHUGEPAGE);
 #endif
-    mprotect(ptr, PAGE_SIZE, PROT_NONE);
+    mprotect(ptr, get_pagesize(), PROT_NONE);
     return ptr;
 }
 
 void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
-    mprotect(ptr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+    mprotect(ptr, get_pagesize(), PROT_READ | PROT_WRITE);
 #if !defined(_WIN64) && !defined(__aarch64__)
     madvise(ptr, size, MADV_DONTNEED);
 #endif
