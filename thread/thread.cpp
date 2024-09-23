@@ -86,11 +86,21 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            #name": "
 #endif
 
-static const size_t PAGE_SIZE = getpagesize();
+#define PAGE_SIZE __getpagesize()
 
 namespace photon
 {
     inline uint64_t min(uint64_t a, uint64_t b) { return (a<b) ? a : b; }
+    inline size_t __getpagesize() {
+        static uint8_t page_shift = 0;
+        if (unlikely(page_shift == 0)) {
+            size_t pagesize = ::getpagesize();
+            assert(is_power_of_2(pagesize));
+            page_shift = log2_truncate(pagesize);
+            return pagesize;
+        }
+        return 1UL << page_shift;
+    }
     class NullEventEngine : public MasterEventEngine {
     public:
         std::mutex _mutex;

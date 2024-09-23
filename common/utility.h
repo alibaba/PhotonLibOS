@@ -132,6 +132,29 @@ inline bool is_power_of_2(uint64_t x)
     return __builtin_popcountl(x) == 1;
 }
 
+inline uint8_t log2_truncate(size_t x) {
+    assert(x > 0);
+    uint8_t exp = sizeof(x) * 8 - 1 - __builtin_clzl(x);
+    assert(x & (1UL << exp));
+    return exp;
+}
+
+inline uint8_t log2_round(size_t x) {
+    assert(x > 0);
+    uint8_t exp = log2_truncate(x);
+    assert(x & (1UL << exp));
+    bool carry = exp && (x & (1UL << (exp - 1)));
+    return exp + carry;
+}
+
+inline uint8_t log2_round_up(size_t x) {
+    assert(x > 0);
+    uint8_t exp = log2_truncate(x);
+    assert(x & (1UL << exp));
+    bool carry = exp && (x ^ (1UL << exp));
+    return exp + carry;
+}
+
 template<typename INT>
 struct xrange_t
 {

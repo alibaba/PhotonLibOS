@@ -151,7 +151,6 @@ public:
     }
 
 protected:
-    const int BASE_OFF = log2_round(ALIGNMENT);
     class Slot : public IdentityPool<void, SLOT_CAPACITY>
     {
     public:
@@ -177,18 +176,14 @@ protected:
         }
     };
 
-    static inline int log2_round(unsigned int x, bool round_up = false) {
-        assert(x > 0);
-        int ret = sizeof(x)*8 - 1 - __builtin_clz(x);
-        if (round_up && (1U << ret) < x)
-            return ret + 1;
-        return ret;
+    int log2_round(unsigned int x, bool round_up = false) {
+        return round_up ? log2_round_up(x) : log2_truncate(x);
     }
 
     int get_slot(unsigned int x, bool round_up = false) {
         int i = log2_round(x, round_up);
-        if (i < BASE_OFF)
-            return 0;
+        const int BASE_OFF = log2_round(ALIGNMENT);
+        if (i < BASE_OFF) return 0;
         return i - BASE_OFF;
     }
 

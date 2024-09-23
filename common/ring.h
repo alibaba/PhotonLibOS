@@ -45,9 +45,9 @@ protected:
     static uint32_t round_up_to_exp2(uint32_t x)
     {
         if (x == 0) return 1;
-        auto clz = __builtin_clz(x);   // 'count leading zero'
-        uint32_t y =  1 << (31 - clz);
-        return (clz == 0 || y == x) ? y : y * 2;
+        uint32_t y =  1UL << log2_truncate(x);
+        assert(x&y);
+        return y << (!!(x^y));
     }
 
     int ensure_not_full()
