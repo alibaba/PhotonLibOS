@@ -113,14 +113,14 @@ TEST(IOAlloc, basic) {
     for (auto &x:mem) {
         alloc.dealloc(x);
     }
-    while (mpool.slots[mpool.get_slot(64*1024, true)].m_size < 32) {
+    while (mpool.slots[mpool.get_slot(64*1024)].m_size < 32) {
         photon::thread_usleep(1000);
     }
-    while (mpool.slots[mpool.get_slot(64*1024, true)].m_size > 0) {
+    while (mpool.slots[mpool.get_slot(64*1024)].m_size > 0) {
         photon::thread_usleep(1000 * 1000);
-        LOG_DEBUG(VALUE(mpool.slots[mpool.get_slot(64*1024, true)].m_size));
+        LOG_DEBUG(VALUE(mpool.slots[mpool.get_slot(64*1024)].m_size));
     }
-    EXPECT_EQ(0U, mpool.slots[mpool.get_slot(64*1024, true)].m_size);
+    EXPECT_EQ(0U, mpool.slots[mpool.get_slot(64*1024)].m_size);
 }
 int main(int argc, char **argv)
 {

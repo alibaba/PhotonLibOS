@@ -61,13 +61,13 @@ char str[] = "2018/01/05 21:53:28|DEBUG| 2423423|test.cpp:254|virtual void LOGPe
 
 TEST(ring, round_up_to_exp2)
 {
-    EXPECT_EQ(RingBase::round_up_to_exp2(0), 1);
-    EXPECT_EQ(RingBase::round_up_to_exp2(1), 1);
+    EXPECT_EQ(round_up_to_exp2(0), 1);
+    EXPECT_EQ(round_up_to_exp2(1), 1);
 
     uint32_t i = 2;
     for (uint32_t exp2 = 2; exp2 <= (1<<25); exp2 *= 2)
         for ((void)i; i <= exp2; ++i)
-            EXPECT_EQ(RingBase::round_up_to_exp2(i), exp2);
+            EXPECT_EQ(round_up_to_exp2(i), exp2);
 }
 
 int rq_step = 0;

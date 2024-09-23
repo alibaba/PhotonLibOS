@@ -127,9 +127,35 @@ struct is_function_pointer
 #define ENABLE_IF_NOT_POINTER(T)    ENABLE_IF(!IS_POINTER(T))
 
 
-inline bool is_power_of_2(uint64_t x)
-{
-    return __builtin_popcountl(x) == 1;
+inline constexpr bool is_power_of_2(uint64_t x) {
+    return !x || __builtin_popcountl(x) == 1;
+}
+
+inline constexpr uint8_t log2_truncate(size_t x) {
+    assert(x > 0);
+    uint8_t exp = sizeof(x) * 8 - 1 - __builtin_clzl(x);
+    assert(x & (1UL << exp));
+    return exp;
+}
+
+inline constexpr uint8_t log2_round(size_t x) {
+    assert(x > 0);
+    uint8_t exp = log2_truncate(x);
+    assert(x & (1UL << exp));
+    bool carry = exp && (x & (1UL << (exp - 1)));
+    return exp + carry;
+}
+
+inline constexpr uint8_t log2_round_up(size_t x) {
+    assert(x > 0);
+    return (x <= 1) ? x : log2_truncate(x - 1) + 1;
+}
+
+inline size_t round_up_to_exp2(size_t x) {
+    if (x == 0) return 1;
+    uint32_t y =  1UL << log2_truncate(x);
+    assert(x&y);
+    return y << (!!(x^y));
 }
 
 template<typename INT>
