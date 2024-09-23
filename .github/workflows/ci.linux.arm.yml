@@ -7,7 +7,7 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  centos8-gcc921-epoll-release:
+  gcc921:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
@@ -40,7 +40,7 @@ jobs:
           cd build
           ctest -E test-lockfree --timeout 3600 -V
 
-  centos8-gcc921-epoll-debug:
+  gcc921-build-debug:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
@@ -67,8 +67,3 @@ jobs:
             -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
-
-      - name: Test
-        run: |
-          cd build
-          ctest -E test-lockfree --timeout 3600 -V
