@@ -919,7 +919,7 @@ R"(
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
-        size_t randomizer = (rand() % 512) * 8;
+        size_t randomizer = (photon::rand32() % 512) * 8;
         // stack contains struct, randomizer space, and reserved_space
         size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
         // at least a whole page for mprotect

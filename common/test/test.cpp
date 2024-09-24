@@ -256,7 +256,7 @@ TEST(Callback, virtual_function)
 
     for (int i=0; i<100; ++i)
     {
-        int x = rand();
+        int x = photon::rand32();
         EXPECT_EQ(ca(x), RET + x);
         EXPECT_EQ(cb(x), RET - x);
         EXPECT_EQ(cc(x), RET + x*2);

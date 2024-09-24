@@ -22,7 +22,7 @@ using namespace photon;
 
 void *func1(void *)
 {
-    thread_sleep(rand()%5);
+    thread_sleep(photon::rand32()%5);
     return nullptr;
 }
 

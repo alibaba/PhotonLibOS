@@ -830,7 +830,7 @@ TEST(range_split, range_split_aligned_case)
 }
 
 TEST(range_split, random_test) {
-    uint64_t begin=rand(), length=rand(), interval=rand();
+    uint64_t begin=photon::rand32(), length=photon::rand32(), interval=photon::rand32();
     LOG_DEBUG("begin=", begin, " length=", length, " interval=", interval);
     fs::range_split split(begin, length, interval);
     EXPECT_EQ(split.begin, begin);
@@ -870,9 +870,9 @@ TEST(range_split_power2, basic) {
 
 TEST(range_split_power2, random_test) {
     uint64_t offset, length, interval;
-    offset = rand();
-    length = rand();
-    auto interval_shift = rand()%32 + 1;
+    offset = photon::rand32();
+    length = photon::rand32();
+    auto interval_shift = photon::rand32()%32 + 1;
     interval = uint64_t(1) << interval_shift;
     fs::range_split_power2 split(offset, length, interval);
     EXPECT_EQ(offset, split.begin);
@@ -939,7 +939,7 @@ std::unique_ptr<char[]> random_block(uint64_t size) {
     std::unique_ptr<char[]> buff(new char[size]);
     char * p = buff.get();
     while (size--) {
-        *(p++) = rand() % UCHAR_MAX;
+        *(p++) = photon::rand32() % UCHAR_MAX;
     }
     return buff;
 }
@@ -1199,7 +1199,7 @@ TEST(XFile, error_stiuation) {
 
 void fill_random_buff(char * buff, size_t length) {
     for (size_t i = 0; i< length; i++) {
-        buff[i] = rand() % UCHAR_MAX;
+        buff[i] = photon::rand32() % UCHAR_MAX;
     }
 }
 
@@ -1210,8 +1210,8 @@ void pread_pwrite_test(IFile *target, IFile *standard) {
     char data[max_piece_length];
     char buff[max_piece_length];
     for (int i = 0;i < test_round; i++) {
-        off_t off = rand() % max_file_size / getpagesize() * getpagesize();
-        size_t len = rand() % max_piece_length / getpagesize() * getpagesize();
+        off_t off = photon::rand32() % max_file_size / getpagesize() * getpagesize();
+        size_t len = photon::rand32() % max_piece_length / getpagesize() * getpagesize();
         if (off+len > max_file_size) {
             continue;
         }
@@ -1228,8 +1228,8 @@ void pread_pwrite_test(IFile *target, IFile *standard) {
         EXPECT_EQ(0, memcmp(data, buff, ret));
     }
     for (int i = 0;i < test_round; i++) {
-        off_t off = rand() % max_file_size;
-        size_t len = rand() % max_piece_length;
+        off_t off = photon::rand32() % max_file_size;
+        size_t len = photon::rand32() % max_piece_length;
         if (off+len > max_file_size) {
             len = max_file_size - off;
         }
@@ -1373,7 +1373,6 @@ TEST(Walker, basic) {
 }
 
 int main(int argc, char **argv){
-    srand(time(nullptr));
     ::testing::InitGoogleTest(&argc, argv);
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;

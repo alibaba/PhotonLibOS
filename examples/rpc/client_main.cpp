@@ -52,7 +52,7 @@ void run_some_task(ExampleClient* client) {
     IOVector iov;
     char writebuf[] = "write data like pwrite";
     iov.push_back(writebuf, sizeof(writebuf));
-    auto tmpfile = "/tmp/test_file_" + std::to_string(rand());
+    auto tmpfile = "/tmp/test_file_" + std::to_string(photon::rand32());
     auto ret = client->RPCWrite(ep, tmpfile, iov.iovec(), iov.iovcnt());
     LOG_INFO("Write to tmpfile ` ret=`", tmpfile, ret);
 
@@ -73,7 +73,6 @@ void handle_term(int) {
 
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
-    srand(time(NULL));
     photon::init();
     DEFER(photon::fini());
 

@@ -134,7 +134,7 @@ public:
 
     static inline bool gen()
     {
-        if (rand() % 100 < 1)
+        if (photon::rand32() % 100 < 1)
         {
             static const uint16_t e[] = {
                    1,    2,   83,  111,  112,
@@ -163,7 +163,7 @@ public:
                 1143, 1144, 1145, 1146, 1147,
                 1148, 1149, 1150, 1151, 1152,
             };
-            errno = e[rand() % LEN(e)];
+            errno = e[photon::rand32() % LEN(e)];
             return true;
         }
         return false;

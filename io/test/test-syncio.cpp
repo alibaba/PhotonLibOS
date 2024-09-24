@@ -51,7 +51,7 @@ void* rand_read(void* _args)
 
     for (size_t i = 0; i < args->n; ++i)
     {
-        off_t offset = rand() % length * alignment + args->start;
+        off_t offset = photon::rand32() % length * alignment + args->start;
         ssize_t ret;
         // LOG_DEBUG("rand_read round:`", i);
         if (i&1)
@@ -89,7 +89,7 @@ void* rand_write(void* _args)
 
     for (size_t i = 0; i < args->n; ++i)
     {
-        off_t offset = rand() % length * alignment + args->start;
+        off_t offset = photon::rand32() % length * alignment + args->start;
         ssize_t ret;
         if (i&1)
         {

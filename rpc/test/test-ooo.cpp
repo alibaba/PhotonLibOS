@@ -187,7 +187,7 @@ TEST(OutOfOrder, heavy_test) {
 }
 
 inline int error_issue(void*, OutOfOrderContext* args) {
-    if ((rand()%2) == 0) {
+    if ((photon::rand32()%2) == 0) {
         return -1;
     }
     return heavy_issue(nullptr, args);
@@ -196,7 +196,7 @@ inline int error_issue(void*, OutOfOrderContext* args) {
 inline int error_complete(void*, OutOfOrderContext* args) {
     while (processing_queue.empty()) { thread_yield_to(nullptr); } //waiting till something comming
     args->tag = processing_queue.front();
-    if (rand()%2)
+    if (photon::rand32()%2)
         return -1;
     processing_queue.pop();
     return 0;
@@ -207,7 +207,7 @@ inline int error_process() {
         thread_yield_to(nullptr);
         shuffle(issue_list.begin(), issue_list.end());
         auto val = issue_list.back();
-        if (rand()%2)
+        if (photon::rand32()%2)
             val = UINT64_MAX;
         processing_queue.push(val);
         issue_list.pop_back();

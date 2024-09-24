@@ -37,7 +37,7 @@ int main() {
                 for (int i = 0; i < 100; i++) {
                     photon::thread_create11([&cntr, &ptr, &sem]() {
                         for (int j = 0; j < 1000; j++) {
-                            auto x = rand() % 10;
+                            auto x = photon::rand32() % 10;
                             if (x) {  // 99% reader
                                 // ptr.read_lock();
                                 auto x = ptr->val;
@@ -92,7 +92,7 @@ int main() {
                 for (int i = 0; i < 100; i++) {
                     photon::thread_create11([&cntr, &ptr, &sem, &rwlock]() {
                         for (int j = 0; j < 1000; j++) {
-                            auto x = rand() % 10;
+                            auto x = photon::rand32() % 10;
                             if (x) {  // 90% reader
                                 photon::scoped_rwlock _(rwlock, photon::RLOCK);
                                 (void)ptr.load()->val;

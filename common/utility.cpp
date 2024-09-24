@@ -16,6 +16,7 @@ limitations under the License.
 
 #include <sys/utsname.h>
 #include <execinfo.h>
+#include <random>
 #include "utility.h"
 #include "estring.h"
 #include "alog.h"
@@ -70,3 +71,28 @@ void print_stacktrace() {
     free(stacktrace);
 }
 
+namespace photon {
+
+static std::random_device rd;
+thread_local std::mt19937 gen32(rd());
+thread_local std::mt19937_64 gen64(rd());
+
+uint32_t rand32() {
+    return gen32();
+}
+
+uint32_t rand32_distribution(uint32_t min, uint32_t max) {
+    std::uniform_int_distribution<uint32_t> dist(min, max);
+    return dist(gen32);
+}
+
+uint64_t rand64() {
+    return gen64();
+}
+
+uint64_t rand64_distribution(uint64_t min, uint64_t max) {
+    std::uniform_int_distribution<uint64_t> dist(min, max);
+    return dist(gen64);
+}
+
+}

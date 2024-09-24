@@ -42,9 +42,9 @@ thread_local semaphore aSem(4);
 void* asdf(void* arg)
 {
     LOG_DEBUG("Hello world, in photon thread-`! step 1", (uint64_t)arg);
-    photon::thread_usleep(rand() % 1000 + 1000*500);
+    photon::thread_usleep(photon::rand32() % 1000 + 1000*500);
     LOG_DEBUG("Hello world, in photon thread-`! step 2", (uint64_t)arg);
-    photon::thread_usleep(rand() % 1000 + 1000*500);
+    photon::thread_usleep(photon::rand32() % 1000 + 1000*500);
     LOG_DEBUG("Hello world, in photon thread-`! step 3", (uint64_t)arg);
     aSem.signal(1);
     return arg;
@@ -176,8 +176,6 @@ TEST(Sleep, queue)  //Sleep_queue_Test::TestBody
     const int heap_size  = 1000000;
     const int rand_limit = 100000000;
 
-    auto seed = /* time(0); */10007;
-    srand(seed);
     SleepQueue sleepq;
     sleepq.q.reserve(heap_size);
     vector<photon::thread*> items;
@@ -185,14 +183,14 @@ TEST(Sleep, queue)  //Sleep_queue_Test::TestBody
     LOG_INFO("ITEMS WITH SAME VALUE.");
     for (int i = 0; i < heap_size; i++){
         auto th = new photon::thread();
-        th->ts_wakeup = 1000;/* rand() % 100000000 */;
+        th->ts_wakeup = 1000;/* photon::rand32() % 100000000 */;
         items.emplace_back(th);
     }
     sleepq_perf(sleepq, items);
 
     LOG_INFO("ITEMS WITH RANDOM VALUE.");
     for (auto th: items)
-        th->ts_wakeup = rand() % rand_limit;
+        th->ts_wakeup = photon::rand32() % rand_limit;
     sleepq_perf(sleepq, items);
 
     LOG_INFO("sleepq test done.");
@@ -350,7 +348,7 @@ void test_thread_switch(uint64_t nth, uint64_t stack_size)
     uint64_t count = total / nth;
 
     for (uint64_t i = 0; i < nth - 2; ++i)
-        photon::thread_create(&thread_pong, (void*)(uint64_t)(rand() % 32), stack_size);
+        photon::thread_create(&thread_pong, (void*)(uint64_t)(photon::rand32() % 32), stack_size);
 
     for (uint64_t i = 0; i < count; ++i)
         thread_yield_fast();
@@ -739,7 +737,7 @@ TEST(RWLock, checklock) {
     rw_count = 0;
     writing = false;
     for (uint64_t i=0; i<100;i++) {
-        uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
+        uint64_t arg = (i << 32) | (photon::rand32()%10 < 7 ? photon::RLOCK : photon::WLOCK);
         handles.emplace_back(
             photon::thread_enable_join(
                 photon::thread_create(&rwlocktest, (void*)arg)
@@ -939,7 +937,7 @@ void test_smp_waitq_resumer(int n, smp_args* args)
 {
     for (int j = 0; j < n*n*n; ++j)
     {
-        ::usleep(rand()%1024 + 1024);
+        ::usleep(photon::rand32()%1024 + 1024);
         args->q.resume_one();
     }
 }
@@ -1027,7 +1025,7 @@ TEST(smp, rwlock) {
         DEFER(photon::vcpu_fini());
         std::vector<photon::join_handle*> handles;
         for (uint64_t i=0; i<100;i++) {
-            uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
+            uint64_t arg = (i << 32) | (photon::rand32()%10 < 7 ? photon::RLOCK : photon::WLOCK);
             handles.emplace_back(
                 photon::thread_enable_join(
                     photon::thread_create(&smprwlocktest, (void*)arg)
@@ -1064,7 +1062,7 @@ void* test_smp_cvar_recver(void* args_)
             args->recvd++;
         }
         if (args->senders == 0) break;
-        thread_usleep(rand() % 128);
+        thread_usleep(photon::rand32() % 128);
     }
     args->recvers--;
     return 0;
@@ -1077,7 +1075,7 @@ void* test_smp_cvar_sender(void* args_)
     auto m = args->n * args->n;
     for (int i=0; i<m*m; ++i)
     {
-        if (rand() % 16) {
+        if (photon::rand32() % 16) {
             auto th = args->cvar.notify_one();
             if (th) args->sent++;
             else args->missed++;
@@ -1086,7 +1084,7 @@ void* test_smp_cvar_sender(void* args_)
             // LOG_DEBUG("notify_all()ed to ` threads", n);
             args->sent += n;
         }
-        thread_usleep(rand() % 128);
+        thread_usleep(photon::rand32() % 128);
     }
     args->senders--;
     return 0;
@@ -1101,7 +1099,7 @@ void* test_smp_cvar(void* args_)
     if (args->senders == 0)
         while(args->recvers > 0)
         {
-            thread_usleep(rand() % 128);
+            thread_usleep(photon::rand32() % 128);
             auto n = args->cvar.notify_all();
             args->sent += n;
         }
@@ -1134,7 +1132,7 @@ void* test_smp_semaphore(void* args_)
     for (int i=1; i<=m*m; ++i)
     {
         args->sem.wait(i);
-        thread_usleep(rand()%64 + i*32);
+        thread_usleep(photon::rand32()%64 + i*32);
         args->sem.signal(i+1);
     }
     return 0;
@@ -1433,7 +1431,7 @@ struct member_function_bind {
 void func(void*, char) {}
 
 TEST(thread11, functor_trait) {
-    char x = rand();
+    char x = photon::rand32();
     auto lambda = [](){};
     auto lambda2 = [x](char) {(void)x; };
     auto lambda3 = [lambda, &x]()->int { lambda(); return (int)x; };
@@ -1630,8 +1628,8 @@ TEST(interrupt, mutex) {
     // lock first
     mtx.lock();
     auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
+    int reason = photon::rand32();
+    while (reason == 0) reason = photon::rand32();
     photon::thread_create11([th, reason]() {
         // any errno except 0 is able to stop waiting
         photon::thread_interrupt(th, reason);
@@ -1647,8 +1645,8 @@ TEST(interrupt, mutex) {
 TEST(interrupt, condition_variable) {
     photon::condition_variable cond;
     auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
+    int reason = photon::rand32();
+    while (reason == 0) reason = photon::rand32();
     photon::thread_create11([th, reason]() {
         // any errno except 0 is able to stop waiting
         photon::thread_interrupt(th, reason);
@@ -1662,8 +1660,8 @@ TEST(interrupt, condition_variable) {
 TEST(interrupt, semaphore) {
     photon::semaphore sem(0);
     auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
+    int reason = photon::rand32();
+    while (reason == 0) reason = photon::rand32();
     photon::thread_create11([th, reason]() {
         // any errno except 0 is able to stop waiting
         photon::thread_interrupt(th, reason);
@@ -1763,7 +1761,6 @@ TEST(future, test2) {
 
 int main(int argc, char** arg)
 {
-    srand(time(0));
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);

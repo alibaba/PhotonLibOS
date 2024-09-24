@@ -94,7 +94,7 @@ public:
         // assert(count > remain);
         // LOG_DEBUG(remain);
         if (remain > 200) {
-            auto len = rand() % 100 + 1;
+            auto len = photon::rand32() % 100 + 1;
             // cout << string(ptr, len);
             memcpy(buf, ptr, len);
             ptr += len;
@@ -154,7 +154,6 @@ TEST(headers, resp_header) {
 
     char rand_buf[64 * 1024 - 1];
     Response rand_header(rand_buf, sizeof(rand_buf));
-    srand(time(0));
     test_stream stream(2000);
     do {
         auto ret = rand_header.receive_bytes(&stream);
@@ -174,7 +173,6 @@ TEST(headers, resp_header) {
 
     char exceed_buf[64 * 1024 - 1];
     Response exceed_header(exceed_buf, sizeof(exceed_buf));
-    srand(time(0));
     test_stream exceed_stream(3000);
     do {
         auto ret = exceed_header.receive_bytes(&exceed_stream);

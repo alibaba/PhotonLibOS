@@ -232,7 +232,7 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
             break;
         }
         auto max_seg = std::min(remain - 1024, 2 * 4 * 1024UL);
-        auto seg = 1024 + rand() % max_seg;
+        auto seg = 1024 + photon::rand32() % max_seg;
         chunked_send(offset, seg, sock);
         rec.push_back(seg);
         offset += seg;
@@ -271,7 +271,6 @@ TEST(http_server, proxy_handler_get) {
     for (auto &c : std_data) {
         c = '0' + ((++num) % 10);
     }
-    srand(time(0));
     //------------start source server---------------
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });
@@ -459,7 +458,6 @@ TEST(http_server, mux_handler) {
     for (auto &c : std_data) {
         c = '0' + ((++num) % 10);
     }
-    srand(time(0));
     //------------start source server---------------
     auto source_server = net::new_tcp_socket_server();
     DEFER({ delete source_server; });

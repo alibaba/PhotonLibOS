@@ -318,7 +318,7 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
             break;
         }
         auto max_seg = std::min(remain - 1024, 2 * 4 * 1024UL);
-        auto seg = 1024 + rand() % max_seg;
+        auto seg = 1024 + photon::rand32() % max_seg;
         chunked_send(offset, seg, sock);
         rec.push_back(seg);
         offset += seg;
@@ -373,7 +373,6 @@ TEST(http_client, chunked) {
     for (auto &c : std_data) {
         c = '0' + ((++num) % 10);
     }
-    srand(time(0));
     server->set_handler({nullptr, &chunked_handler_pt});
     for (auto tmp = 0; tmp < 20; tmp++) {
         auto op_test = client->new_operation(Verb::GET, url);

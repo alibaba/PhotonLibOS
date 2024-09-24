@@ -16,7 +16,7 @@ TEST(Throttle, basic) {
     auto start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = photon::rand32() % (1UL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         total -= step;
     }
@@ -36,7 +36,7 @@ TEST(Throttle, basic) {
     start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = photon::rand32() % (1UL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         t.consume(step);
         total -= step;
@@ -61,11 +61,11 @@ TEST(Throttle, restore) {
     auto start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = photon::rand32() % (1UL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         submit += step;
         t.consume(step);
-        if (rand() % 2) {
+        if (photon::rand32() % 2) {
             // 1 of 2 chance to fail and restore consumed chance
             t.restore(step);
             restore += step;

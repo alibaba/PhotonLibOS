@@ -309,6 +309,22 @@ uint64_t sat_sub(uint64_t x, uint64_t y) {
     return c ? 0 : z;
 }
 
+// Generate random number in [0, UINT32_MAX]
+// The random engine is std::mt19937, which is even faster then rand() in C lib
+uint32_t rand32();
+
+// Generate random number, uniformly distributed on the closed interval [min, max]
+// Equals to rand32() % (max - min + 1) + min, but slower than it
+uint32_t rand32_distribution(uint32_t min, uint32_t max);
+
+// Generate random number in [0, UINT64_MAX]
+// The random engine is std::mt19937, which is even faster then rand() in C lib
+uint64_t rand64();
+
+// Generate random number, uniformly distributed on the closed interval [min, max]
+// Equals to rand64() % (max - min + 1) + min, but slower than it
+uint64_t rand64_distribution(uint64_t min, uint64_t max);
+
 }
 
 

@@ -40,7 +40,7 @@ void* stream_writer(void* stream_)
         auto p = STR;
         while(count > 0)
         {
-            size_t len = rand() % 8;
+            size_t len = photon::rand32() % 8;
             len = min(len, count);
             LOG_DEBUG("Begin write ", VALUE(len));
             auto ret = s->write(p, len);

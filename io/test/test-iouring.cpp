@@ -615,7 +615,6 @@ TEST_F(event_engine, cascading_one_shot) {
 }
 
 int main(int argc, char** arg) {
-    srand(time(nullptr));
     set_log_output_level(ALOG_INFO);
     testing::InitGoogleTest(&argc, arg);
     testing::FLAGS_gtest_break_on_failure = true;

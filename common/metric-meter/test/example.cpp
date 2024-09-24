@@ -58,7 +58,7 @@ int main() {
         SCOPE_LATENCY(table.pread_latency);
         SCOPE_LATENCY(table.pread_max);
         table.maxv.put(photon::now % 10000000 / 1000000);
-        photon::thread_usleep(1000 + rand() % 1000);
+        photon::thread_usleep(1000 + photon::rand32() % 1000);
     }
     photon::thread_usleep(5000 * 1000);
 }
