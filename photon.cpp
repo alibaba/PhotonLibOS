@@ -73,8 +73,7 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     const uint64_t ALL_ENGINES =
             INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
-            INIT_EVENT_SELECT  | INIT_EVENT_IOCP |
-            INIT_EVENT_EPOLL_NG;
+            INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
         bool ok = false;
         for (auto x : recommended_order) {

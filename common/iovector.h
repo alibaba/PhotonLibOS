@@ -1008,24 +1008,24 @@ public:
     }
 };
 
-inline size_t iovector_view::memcpy_to(iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_to(iov, size);
+inline size_t iovector_view::memcpy_to(iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_to(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_from(iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_from(iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_to(const iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_to(const iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
-inline size_t iovector_view::memcpy_from(const iovector_view* iov, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
-    return co_iov.view().memcpy_from(iov, size);
+inline size_t iovector_view::memcpy_from(const iovector_view* iov_, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
+    return co_iov.view().memcpy_from(iov_, size);
 }
 
 
