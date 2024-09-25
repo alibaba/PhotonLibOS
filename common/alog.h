@@ -595,8 +595,8 @@ struct __LogAppender : public Builder {
     using Builder::logger;
     using Builder::done;
     Append append;
-    explicit __LogAppender(Builder&& rhs, Append&& append)
-        : Builder(std::move(rhs)), append(std::move(append)) {}
+    explicit __LogAppender(Builder&& rhs, Append&& append_)
+        : Builder(std::move(rhs)), append(std::move(append_)) {}
     __LogAppender(__LogAppender&& rhs)
         : Builder(std::move(rhs)), append(std::move(rhs.append)) {}
     ~__LogAppender() {
