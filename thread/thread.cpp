@@ -51,6 +51,7 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
 #include <photon/common/alog.h>
 #include <photon/common/alog-functionptr.h>
 #include <photon/thread/thread-key.h>
+#include <photon/thread/arch.h>
 
 /* notes on the scheduler:
 
@@ -85,8 +86,6 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            ".type "#name", @function\n" \
                            #name": "
 #endif
-
-static const size_t PAGE_SIZE = getpagesize();
 
 namespace photon
 {
@@ -929,6 +928,8 @@ R"(
             stack_size = least_stack_size;
         }
         char* ptr = (char*)photon_thread_alloc(stack_size);
+        if (unlikely(!ptr))
+            return nullptr;
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
@@ -1660,8 +1661,8 @@ R"(
         int ret = thread_usleep_defer(timeout, q, unlock, m);
         auto en = ret < 0 ? errno : 0;
         while (true) {
-            int ret = lock(m);
-            if (ret == 0) break;
+            int lock_ret = lock(m);
+            if (lock_ret == 0) break;
             LOG_ERROR("failed to get mutex lock, ` `, try again", VALUE(ret), ERRNO());
             thread_usleep(1000, nullptr);
         }
@@ -1884,6 +1885,8 @@ R"(
     }
 
     int vcpu_init() {
+        if (unlikely(PAGE_SIZE == 0))
+            PAGE_SIZE = getpagesize();
         RunQ rq;
         if (rq.current) return -1;      // re-init has no side-effect
         char* ptr = nullptr;

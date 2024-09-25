@@ -20,6 +20,7 @@ limitations under the License.
 #include <errno.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
+#include <photon/thread/arch.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -27,8 +28,6 @@ limitations under the License.
 #include <vector>
 
 namespace photon {
-
-const static size_t PAGE_SIZE = getpagesize();
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
           size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
