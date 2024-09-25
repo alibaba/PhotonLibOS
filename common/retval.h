@@ -71,7 +71,7 @@ struct retval : public retval_base {
 
 template<>
 struct retval<void> : public retval_base {
-    retval(int _errno = 0) : retval_base{(uint64_t)_errno} { }
+    retval(int errno_ = 0) : retval_base{(uint64_t)errno_} { }
     retval(const retval_base& rvb) : retval_base(rvb) { }
     void get() const { }
     retval_base base() const {
