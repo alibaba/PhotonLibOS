@@ -1204,6 +1204,23 @@ TEST(string_key, unordered_map_string_kv_perf) {
     basic_map_test(test_map);
 }
 
+template<typename M> static
+void test_map_case_insensitive() {
+    M m;
+    m.emplace("asdf", "jkl;");
+    auto it = m.find("ASDF");
+    EXPECT_NE(it, m.end());
+    EXPECT_EQ(it->second, "jkl;");
+    EXPECT_EQ(m.count("kuherqf"), 0);
+}
+
+TEST(string_key, case_insensitive) {
+    test_map_case_insensitive<unordered_map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<unordered_map_string_kv_case_insensitive>();
+    test_map_case_insensitive<map_string_key_case_insensitive<estring>>();
+    test_map_case_insensitive<map_string_kv_case_insensitive>();
+}
+
 TEST(RangeLock, Basic) {
   RangeLock m;
 
