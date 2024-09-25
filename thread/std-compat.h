@@ -55,8 +55,6 @@ inline uint64_t __duration_to_microseconds(const ::std::chrono::duration<Rep, Pe
 
 class thread {
 public:
-    using id = photon::thread*;
-
     thread() = default;
 
     ~thread() {
@@ -92,6 +90,17 @@ public:
     bool joinable() const {
         return m_th != nullptr;
     }
+
+    class id {
+    public:
+        id() = default;
+        id(photon::thread* th_id) : th_id_(th_id) {}
+        bool operator==(const id& rhs) const { return th_id_ == rhs.th_id_; }
+        bool operator!=(const id& rhs) const { return !(rhs == *this); }
+        uint64_t value() const { return uint64_t(th_id_); }
+    private:
+        photon::thread* th_id_ = nullptr;
+    };
 
     id get_id() const noexcept {
         return m_th;
@@ -423,5 +432,13 @@ template<class Mutex>
 inline void swap(photon_std::unique_lock<Mutex>& lhs, photon_std::unique_lock<Mutex>& rhs) noexcept {
     lhs.swap(rhs);
 }
+
+template<>
+struct hash<photon_std::thread::id> {
+    size_t operator()(const photon_std::thread::id& x) const {
+        hash<uint64_t> hasher;
+        return hasher(x.value());
+    }
+};
 
 }
