@@ -138,7 +138,7 @@ public:
         struct kevent entry;
         EV_SET(&entry, _kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, 0, nullptr);
         struct timespec tm{0, 0};
-        return kevent(_kq, _events, _n, nullptr, 0, &tm);
+        return kevent(_kq, &entry, 1, nullptr, 0, &tm);
     }
 
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
