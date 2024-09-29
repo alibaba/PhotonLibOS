@@ -166,7 +166,8 @@ TEST(Throttle, try_consume) {
 }
 
 ////////////////////////////////////////
-#if defined(NDEBUG) && !defined(__APPLE__)
+// The sleep and semaphore in macOS is less efficient and always cause variance, so skip macOS
+#ifndef __APPLE__
 
 struct FindAppropriateSliceNumSuite {
     uint64_t slice_num;
@@ -177,6 +178,8 @@ class FindAppropriateSliceNumTest : public testing::TestWithParam<FindAppropriat
 };
 
 // More slices in a time window means sleep more frequently.
+// In a fixed total time (10s), we measure how many IO were throttled (consumed),
+// and compare to the dest amount, figure out the loss ratio brought by the throttler.
 TEST_P(FindAppropriateSliceNumTest, run) {
     const auto& p = GetParam();
 
@@ -244,7 +247,7 @@ class ThrottlePriorityTest : public testing::TestWithParam<PriorityTestSuite> {
 
 INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
         PriorityTestSuite{
-                // 0
+                // 0. Simulate same priority and equally divide the BW
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 100'000, photon::throttle::Priority::High},
@@ -253,7 +256,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.4, 0.6,
         },
         PriorityTestSuite{
-                // 1
+                // 1. Simulate same priority but different BW, results are still the same
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 1'000'000, photon::throttle::Priority::High},
@@ -262,7 +265,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.4, 0.6,
         },
         PriorityTestSuite{
-                // 2
+                // 2. Simulate different priorities with the same BW. Total BW exceeds limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {100'000'000, 500'000, photon::throttle::Priority::High},
@@ -271,7 +274,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.0, 0.1,
         },
         PriorityTestSuite{
-                // 3
+                // 3. Simulate different priorities with the same BW. Total BW under the limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {30'000'000, 1'000'000, photon::throttle::Priority::High},
@@ -280,7 +283,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.3, 0.7,
         },
         PriorityTestSuite{
-                // 4
+                // 4. Simulate different priorities with different BW. Total BW exceeds limit
                 PriorityTestSuite::Simulate,
                 100'000'000,
                 {50'000'000, 5'000'000, photon::throttle::Priority::High},
@@ -289,7 +292,8 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.45, 0.6,
         },
         PriorityTestSuite{
-                // 5. For now there is no way to balance throttle throughput of the same priority.
+                // 5. Real socket. For now there is no way to balance throttle throughput of the same priority.
+                // Maybe we need a WFQ in the future.
                 PriorityTestSuite::RealSocket,
                 1'000'000'000,
                 {1'000'000'000, 1048576, photon::throttle::Priority::High},
@@ -298,7 +302,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.0, 1.0,
         },
         PriorityTestSuite{
-                // 6
+                // 6. Real socket. High priority get most BW
                 PriorityTestSuite::RealSocket,
                 1'000'000'000,
                 {800'000'000, 32768, photon::throttle::Priority::High},
@@ -307,7 +311,7 @@ INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
                 0.1, 0.3,
         },
         PriorityTestSuite{
-                // 7
+                // 7. Real socket. Low priority gets the rest BW that high priority doesn't need
                 PriorityTestSuite::RealSocket,
                 10'000'000,
                 {5'000'000, 10'000, photon::throttle::Priority::High},
@@ -429,8 +433,8 @@ TEST_P(ThrottlePriorityTest, run) {
 #endif
 
 int main(int argc, char** argv) {
-    if (!photon::is_using_default_engine()) return 0;
-    photon::init(0, 0);
+    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    if (ret) return -1;
     DEFER(photon::fini());
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
