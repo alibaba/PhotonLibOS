@@ -513,19 +513,19 @@ struct ERRNO
 
 LogBuffer& operator << (LogBuffer& log, ERRNO e);
 
-inline LogBuffer& operator << (LogBuffer& log, const photon::retval_base& rvb) {
+inline LogBuffer& operator << (LogBuffer& log, const photon::reterr& rvb) {
     auto x = rvb._errno;
     return x ? (log << ERRNO((int)x)) : log;
 }
 
 template<typename T> inline
 LogBuffer& operator << (LogBuffer& log, const photon::retval<T>& v) {
-    return v.succeeded() ? (log << v.get()) : (log << v.base());
+    return v.succeeded() ? (log << v.get()) : (log << v.error());
 }
 
 template<> inline
 LogBuffer& operator << <void> (LogBuffer& log, const photon::retval<void>& v) {
-    return log << v.base();
+    return log << v.error();
 }
 
 template<typename T>
@@ -573,17 +573,14 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     return retv;                                    \
 }
 
+// err can be either an error number of int, or an retval<T>
 #define LOG_ERROR_RETVAL(err, ...) do {             \
-    if (std::is_same<decltype(err), int>::value) {  \
-        retval_base e{err};                         \
-        assert(e.failed());                         \
-        LOG_ERROR(__VA_ARGS__, ' ', e);             \
-        return e;                                   \
-    } else {                                        \
-        LOG_ERROR(__VA_ARGS__);                     \
-        return err;                                 \
-    }                                               \
+    reterr e{err};                                  \
+    LOG_ERROR(__VA_ARGS__, ' ', e);                 \
+    return e;                                       \
 } while(0)
+
+#define LOG_ERRNO_RETVAL(...) LOG_ERROR_RETVAL(errno, __VA_ARGS__)
 
 // Acts like a LogBuilder
 // but able to do operations when log builds

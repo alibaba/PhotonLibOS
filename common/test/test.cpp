@@ -893,7 +893,7 @@ TEST(generator, example)
 }
 
 retval<double> bar() {
-    return {EALREADY, 0};   // return a failure
+    return {-1, EALREADY};   // return a failure
 }
 
 photon::retval<int> foo(int i) {
@@ -901,7 +901,7 @@ photon::retval<int> foo(int i) {
     default:
         return 32;
     case 1:
-        return retval_base{EINVAL};
+        return reterr{EINVAL};
     case 2:
         LOG_ERROR_RETVAL(EADDRINUSE, "trying to use LOG_ERROR_RETVAL() with an error number constant");
     case 3:
@@ -920,13 +920,24 @@ retval<void> ret_succeeded() {
     return {/* 0 */};
 }
 
+template<typename T>
+void check(T rv, decltype(T::_val) v, bool succeeded, int error) {
+    EXPECT_EQ(rv, v);
+    EXPECT_EQ(rv.succeeded(), succeeded);
+    EXPECT_EQ(rv.error(), error);
+}
+
 TEST(retval, basic) {
+    errno = EALREADY;
     const static retval<int> rvs[] =
-        {{32}, {EINVAL, -2345}, {EADDRINUSE, -1234}, {EALREADY, -5234}};
-    EXPECT_EQ(rvs[0], 32);
-    EXPECT_EQ(rvs[1], -2345);
-    EXPECT_EQ(rvs[2], -1234);
-    EXPECT_EQ(rvs[3], -5234);
+        {{32}, {-2345, EINVAL}, {-1234, EADDRINUSE}, {-5234}};
+    check(rvs[0],  32,   true,  0);
+    check(rvs[1], -2345, false, EINVAL);
+    check(rvs[2], -1234, false, EADDRINUSE);
+    check(rvs[3], -5234, false, EALREADY);
+
+    retval<float*> asdf = {nullptr, ECANCELED};
+    check(asdf, nullptr, false, ECANCELED);
 
     for (auto i: xrange(LEN(rvs))) {
         static_assert(std::is_same<decltype(i), size_t>::value, "...");

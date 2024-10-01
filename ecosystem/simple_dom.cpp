@@ -233,7 +233,7 @@ public:
     unique_ptr<XMLNode> __attributes__{nullptr};
     retval<XMLNode*> emplace_back(vector<XMLNode>& nodes, xml_base<char>* x) {
         if (x->name_size() == 0)
-            return {ECANCELED, 0};
+            return {nullptr, ECANCELED};
         str k{x->name(),  x->name_size()};
         str v{x->value(), x->value_size()};
         nodes.emplace_back(k, v, get_root());

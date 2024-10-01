@@ -26,7 +26,9 @@ GTEST_API_ int main(int argc, char **argv) {
 #endif
 
     // Initialize state-threads, create idle coroutine.
-    assert(st_init() == 0);
+    int ret = st_init();
+    assert(ret == 0);
+    if (ret < 0) return ret;
 
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
@@ -40,4 +42,3 @@ VOID TEST(SampleTest, ExampleIntSizeTest)
     EXPECT_EQ(4, (int)sizeof(int32_t));
     EXPECT_EQ(8, (int)sizeof(int64_t));
 }
-
