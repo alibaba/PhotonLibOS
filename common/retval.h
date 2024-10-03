@@ -36,7 +36,7 @@ template<typename T>
 struct retval : public retval_base {
     T _val;
     retval(T x) : _val(x) { }
-    retval(int _errno, T val) : retval_base{(uint64_t)_errno}, _val(val) {
+    retval(int errno_, T val) : retval_base{(uint64_t)errno_}, _val(val) {
         assert(failed());
     }
     retval(const retval_base& rvb) : retval_base(rvb) {

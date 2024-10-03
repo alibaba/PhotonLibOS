@@ -61,22 +61,22 @@ struct iovector_view
     constexpr iovector_view() : iov(0), iovcnt(0) { }
 
     explicit constexpr
-    iovector_view(iovec* iov, int iovcnt) : iov(iov), iovcnt(iovcnt) { }
+    iovector_view(iovec* iov_, int iovcnt_) : iov(iov_), iovcnt(iovcnt_) { }
 
     template<int N> explicit constexpr
-    iovector_view(iovec (&iov)[N]) : iov(iov), iovcnt(N) { }
+    iovector_view(iovec (&iov_)[N]) : iov(iov_), iovcnt(N) { }
 
-    void assign(iovec* iov, int iovcnt)
+    void assign(iovec* iov_, int iovcnt_)
     {
-        this->iov = iov;
-        this->iovcnt = iovcnt;
+        iov = iov_;
+        iovcnt = iovcnt_;
     }
 
     template<int N>
-    void assign(iovec (&iov)[N])
+    void assign(iovec (&iov_)[N])
     {
-        this->iov = iov;
-        this->iovcnt = N;
+        iov = iov_;
+        iovcnt = N;
     }
 
     bool empty()     { return iovcnt == 0; }
@@ -178,28 +178,28 @@ struct iovector_view
 
     // copy data to a iovector_view of size `size`
     // return # of bytes actually copied
-    size_t memcpy_to(iovector_view* iov, size_t size=SIZE_MAX) {
-        return memcpy_iov(iov, this, size);
+    size_t memcpy_to(iovector_view* iov_, size_t size=SIZE_MAX) {
+        return memcpy_iov(iov_, this, size);
     }
 
     // copy data from a iovector_view of size `size`
     // return # of bytes actually copied
-    size_t memcpy_from(iovector_view* iov, size_t size=SIZE_MAX) {
-        return memcpy_iov(this, iov, size);
+    size_t memcpy_from(iovector_view* iov_, size_t size=SIZE_MAX) {
+        return memcpy_iov(this, iov_, size);
     }
 
     // copy data to a iovector_view of size `size`
     // `iov` will not change after copy
     // return # of bytes actually copied
-    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_from(this, size);
+    size_t memcpy_to(const iovector_view* iov_, size_t size=SIZE_MAX) {
+        return iov_->memcpy_from(this, size);
     }
 
     // copy data from a iovector_view of size `size`
     // `iov` will not change after copy
     // return # of bytes actually copied
-    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_to(this, size);
+    size_t memcpy_from(const iovector_view* iov_, size_t size=SIZE_MAX) {
+        return iov_->memcpy_to(this, size);
     }
 
     // copy data to a iovector_view of size `size`
@@ -857,9 +857,9 @@ protected:
     }
 
     // not allowed to freely construct / destruct
-    iovector(uint16_t capacity, uint16_t preserve)
+    iovector(uint16_t capacity_, uint16_t preserve)
     {
-        this->capacity = capacity;
+        capacity = capacity_;
         iov_begin = iov_end = preserve;
         nbases = 0;
     }
@@ -874,14 +874,14 @@ protected:
     struct IOVAllocation_ : public IOAlloc
     {
         void* bases[];
-        void* do_allocate(int size, uint16_t& nbases, uint16_t capacity)
+        void* do_allocate(int size, uint16_t& nbases_, uint16_t capacity_)
         {
-            return do_allocate(size, size, nbases, capacity);
+            return do_allocate(size, size, nbases_, capacity_);
         }
-        void* do_allocate(int size_min, int& size_max, uint16_t& nbases, uint16_t capacity)
+        void* do_allocate(int size_min, int& size_max, uint16_t& nbases_, uint16_t capacity_)
         {
             assert(allocate);
-            if (nbases >= capacity) {
+            if (nbases_ >= capacity_) {
                 errno = ENOBUFS;
                 return nullptr;
             }
@@ -890,21 +890,21 @@ protected:
             size_max = ret;
             void **pbase = bases;
             if (ret >= size_min)
-                pbase[nbases++] = ptr;
+                pbase[nbases_++] = ptr;
             return ptr;
         }
-        void dispose(uint16_t& nbases)
+        void dispose(uint16_t& nbases_)
         {
             void **pbase = bases;
-            for (uint16_t i = 0; i < nbases; ++i)
+            for (uint16_t i = 0; i < nbases_; ++i)
                 deallocate(pbase[i]);
-            nbases = 0;
+            nbases_ = 0;
         }
-        void copy(IOAlloc* rhs, uint16_t nbases)
+        void copy(IOAlloc* rhs, uint16_t nbases_)
         {
             *(IOAlloc*)this = *rhs;
             auto rhs_ = (IOVAllocation_*)rhs;
-            memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases);
+            memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases_);
         }
     };
 
@@ -975,9 +975,9 @@ public:
         iov_end += iovcnt;
     }
 
-    explicit IOVectorEntity(IOAlloc allocator,
+    explicit IOVectorEntity(IOAlloc allocator_,
                             uint16_t preserve = DEF_PRESERVE) :
-        iovector(CAPACITY, preserve), allocator(allocator)
+        iovector(CAPACITY, preserve), allocator(allocator_)
     {
     }
 
@@ -1065,12 +1065,12 @@ class SmartCloneIOV
 public:
     iovec iov[INLINE_CAPACITY];
     iovec* ptr;
-    SmartCloneIOV(const iovec* iov, int iovcnt)
+    SmartCloneIOV(const iovec* iov_, int iovcnt)
     {
         ptr = (iovcnt <= (int)INLINE_CAPACITY) ?
-            this->iov :
+            iov :
             new iovec[iovcnt];
-        memcpy(ptr, iov, iovcnt * sizeof(*iov));
+        memcpy(ptr, iov_, iovcnt * sizeof(*iov_));
     }
     ~SmartCloneIOV()
     {

@@ -272,7 +272,7 @@ class intrusive_list
 public:
     NodeType* node = nullptr;
     intrusive_list() = default;
-    explicit intrusive_list(NodeType* node): node(node) {}
+    explicit intrusive_list(NodeType* node_): node(node_) {}
     ~intrusive_list()
     {   // node (NodeType*) MUST be intrusive_list_node<T>, which
         // should be implicitly convertible to __intrusive_list_node*
