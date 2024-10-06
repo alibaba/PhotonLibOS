@@ -187,7 +187,8 @@ TEST(Socket, endpoint) {
 
     photon::net::sockaddr_storage s(saddrin);
     ep = s.to_endpoint();
-    EXPECT_TRUE(ep == EndPoint(IPAddr("12.34.56.78"), 4321));
+    IPAddr addr12345678("12.34.56.78");
+    EXPECT_TRUE(ep == EndPoint(addr12345678, 4321));
 
     auto rsai = (sockaddr_in*) s.get_sockaddr();
     EXPECT_EQ(saddrin.sin_addr.s_addr, rsai->sin_addr.s_addr);
@@ -200,6 +201,18 @@ TEST(Socket, endpoint) {
     LOG_DEBUG(ep.addr);
     EXPECT_NE(nullptr, strstr(log_output_test._log_buf, "12.34.56.78"));
     log_output = log_output_stdout;
+
+    EndPoint epfsv1("12.34.56.78:4321"), epfsv2("12.34.56.78", 4321);
+    EXPECT_EQ(epfsv1.addr, addr12345678);
+    EXPECT_EQ(epfsv1.port, 4321);
+    EXPECT_EQ(epfsv1, epfsv2);
+
+    std::vector<EndPoint> addrs;
+    parse_address_list("1.1.1.1:1,2.2.2.2:2,3.3.3.3:3,4.4.4.4", &addrs, 4);
+    EXPECT_EQ(addrs[0], EndPoint("1.1.1.1:1"));
+    EXPECT_EQ(addrs[1], EndPoint("2.2.2.2:2"));
+    EXPECT_EQ(addrs[2], EndPoint("3.3.3.3:3"));
+    EXPECT_EQ(addrs[3], EndPoint("4.4.4.4:4"));
 }
 
 TEST(Socket, timeout) {

@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
+#include <photon/common/string_view.h>
 
 #ifdef __linux__
 #define _in_addr_field s6_addr32
@@ -154,9 +155,10 @@ namespace net {
         IPAddr addr;
         uint16_t port = 0;
         EndPoint() = default;
+        explicit EndPoint(const char*  ep);
         EndPoint(IPAddr ip, uint16_t port) : addr(ip), port(port) {}
-        explicit EndPoint(const char* ep);
         EndPoint(const char* ip, uint16_t port) : addr(ip), port(port) {}
+        static EndPoint parse(std::string_view ep, uint16_t default_port);
         bool is_ipv4() const {
             return addr.is_ipv4();
         };

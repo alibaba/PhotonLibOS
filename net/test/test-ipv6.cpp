@@ -9,6 +9,9 @@
 TEST(ipv6, endpoint) {
     auto c = photon::net::EndPoint("127.0.0.1");
     EXPECT_TRUE(c.undefined()); // must have ':port' included
+    c = photon::net::EndPoint::parse("127.0.0.1", 1234);
+    EXPECT_FALSE(c.undefined());
+    EXPECT_EQ(c.port, 1234);
     c = photon::net::EndPoint("127.0.0.1:8888");
     EXPECT_FALSE(c.undefined());
     c = photon::net::EndPoint("[::1]:8888");

@@ -174,5 +174,9 @@ public:
  */
 Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
 
+// parse a string list of endpoints into vector
+// ip[:port],ip[:port],ip[:port],...
+int parse_address_list(std::string_view list, std::vector<EndPoint>* addresses, uint16_t default_port = 0);
+
 }  // namespace net
 }
