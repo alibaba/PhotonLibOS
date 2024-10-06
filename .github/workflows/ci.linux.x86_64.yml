@@ -184,3 +184,23 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_FSTACK_DPDK=ON
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
+
+  RocksDB:
+    runs-on: ubuntu-latest
+    container:
+      image: almalinux:8
+      options: --cpus 4 --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          export TZ=Asia/Shanghai
+          dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
+          dnf config-manager --set-enabled powertools
+          dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel
+          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git
+          cd rocksdb
+          ./photon-auto-convert.sh
+          cmake -B build -D WITH_TESTS=on -D INIT_PHOTON_IN_ENV=on -D WITH_LZ4=on -D WITH_SNAPPY=on \
+            -D CMAKE_BUILD_TYPE=Debug
+          cmake --build build -j `nproc`
