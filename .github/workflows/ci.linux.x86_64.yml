@@ -19,9 +19,8 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Build850
+      - name: Build
         run: |
-          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -29,15 +28,18 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-      - name: test
+          cmake --build build -j $(nproc) -- VERBOSE=1
+      - name: Test epoll
         run: |
-          cd build/output/
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test io_uring
+        run: |
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test epoll_ng
+        run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
     runs-on: ubuntu-latest
@@ -51,10 +53,9 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Build921
+      - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -62,15 +63,18 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-      - name: test
+          cmake --build build -j $(nproc) -- VERBOSE=1
+      - name: Test epoll
         run: |
-          cd build/output/
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test io_uring
+        run: |
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test epoll_ng
+        run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
     runs-on: ubuntu-latest
@@ -84,10 +88,9 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Build1031
+      - name: Build
         run: |
           source /opt/rh/gcc-toolset-10/enable
-          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -95,15 +98,18 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-      - name: test
+          cmake --build build -j $(nproc) -- VERBOSE=1
+      - name: Test epoll
         run: |
-          cd build/output/
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test io_uring
+        run: |
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test epoll_ng
+        run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
     runs-on: ubuntu-latest
@@ -117,10 +123,9 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Build1121
+      - name: Build
         run: |
           source /opt/rh/gcc-toolset-11/enable
-          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -128,15 +133,18 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-      - name: test
+          cmake --build build -j $(nproc) -- VERBOSE=1
+      - name: Test epoll
         run: |
-          cd build/output/
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test io_uring
+        run: |
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test epoll_ng
+        run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
     runs-on: ubuntu-latest
@@ -150,10 +158,9 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Build1211
+      - name: Build
         run: |
           source /opt/rh/gcc-toolset-12/enable
-          rm -fr build
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -161,15 +168,18 @@ jobs:
                          -D PHOTON_ENABLE_FUSE=ON         \
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
-      - name: test
+          cmake --build build -j $(nproc) -- VERBOSE=1
+      - name: Test epoll
         run: |
-          cd build/output/
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test io_uring
+        run: |
           export PHOTON_CI_EV_ENGINE=io_uring
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
+      - name: Test epoll_ng
+        run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest -E test-lockfree --timeout 3600 -V
 
   fstack:
     runs-on: ubuntu-latest
@@ -178,8 +188,8 @@ jobs:
       options: --cpus 4 --privileged
     steps:
       - uses: actions/checkout@v4
-      - name: Build on FStack-DPDK
-        run: |      
+      - name: Build
+        run: |
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_FSTACK_DPDK=ON
@@ -194,7 +204,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          export TZ=Asia/Shanghai
           dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
           dnf config-manager --set-enabled powertools
           dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel
