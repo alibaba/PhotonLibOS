@@ -269,6 +269,7 @@ ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int 
         if (ret < 0) return ret;
         if (ret == 0) break;    // EOF
         if ((n += ret) >= least) break;
+        (char*&)buf += ret;
         count -= ret;
     } while (count);
     return n;
