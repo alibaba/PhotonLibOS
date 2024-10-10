@@ -243,6 +243,7 @@ bool ISocketStream::skip_read(size_t count) {
 
 ssize_t ISocketStream::recv_at_least(void* buf, size_t count, size_t least, int flags) {
     return DOIO_LOOP_LAMBDA(recv(buf, count, flags), {
+        (char*&)buf += ret;
         count -= ret;
         return n < least;
     });
