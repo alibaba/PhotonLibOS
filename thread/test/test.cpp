@@ -685,7 +685,7 @@ TEST(Semaphore, heavy) {
     semaphore sem(0);
     const int thread_num = 100000;
     for (int i=1; i<=thread_num;i++) {
-        thread_create11(16 * PAGE_SIZE, semaphore_heavy, sem, i);
+        thread_create11(4 * PAGE_SIZE, semaphore_heavy, sem, i);
     }
     LOG_DEBUG("created ` threads", thread_num);
     sem.signal(1);
@@ -1764,11 +1764,12 @@ TEST(future, test2) {
 int main(int argc, char** arg)
 {
     if (!photon::is_using_default_engine()) return 0;
+    srand(time(nullptr));
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
     photon::vcpu_init();
-    set_log_output_level(ALOG_DEBUG);
+    set_log_output_level(ALOG_INFO);
 
     if (FLAGS_vcpus <= 1)
     {
