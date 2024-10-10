@@ -11,30 +11,30 @@ jobs:
     runs-on: macos-13
 
     steps:
-    - uses: szenius/set-timezone@v2.0
-      with:
-        timezoneLinux: "Asia/Shanghai"
-        timezoneMacos: "Asia/Shanghai"
-        timezoneWindows: "China Standard Time"
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
 
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install Dependencies
-      shell: bash
-      run: |
-        brew install cmake openssl gflags googletest gsasl
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          brew install cmake openssl gflags googletest gsasl
 
-    - name: Build
-      run: |
-        cmake -B ${{github.workspace}}/build \
-          -D PHOTON_ENABLE_ECOSYSTEM=ON \
-          -D PHOTON_BUILD_TESTING=ON \
-          -D CMAKE_BUILD_TYPE=MinSizeRel \
-          -D PHOTON_ENABLE_SASL=ON \
-          -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
-        cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
+      - name: Build
+        run: |
+          cmake -B ${{github.workspace}}/build \
+            -D PHOTON_ENABLE_ECOSYSTEM=ON \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D CMAKE_BUILD_TYPE=MinSizeRel \
+            -D PHOTON_ENABLE_SASL=ON \
+            -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+          cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 
-    - name: Test
-      working-directory: ${{github.workspace}}/build
-      run: ctest -E test-lockfree --timeout 3600 -V
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: ctest -E test-lockfree --timeout 3600 -V
 
