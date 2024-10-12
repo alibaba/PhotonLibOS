@@ -10,7 +10,7 @@
 #include "photon/net/http/server.h"
 #include "photon/thread/list.h"
 #include "photon/thread/thread.h"
-#include "MimeTypes.h"
+#include "mime-types.h"
 
 namespace zyio{
 

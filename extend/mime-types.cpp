@@ -1,4 +1,4 @@
-#include "photon/extend/MimeTypes.h"
+#include "photon/extend/mime-types.h"
 
 const char* MimeTypes::getType(const char * extension)  {
   const char *dot = strrchr(extension, '.');

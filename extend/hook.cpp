@@ -35,7 +35,7 @@ namespace zyio{
                 return;
             }
             HookFlag::INS = new HookFlag(hookFlag,isDebug);
-            printf("enable block socket api hook\n");
+            printf("socket api hook flag:%s\n",hookFlag ? "enable" : "disable");
             #else
             fprintf(stderr, "not support hook for this system\n");
             #endif
