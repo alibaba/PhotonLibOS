@@ -343,5 +343,19 @@ Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout) {
     return new DefaultResolver(cache_ttl, resolve_timeout);
 }
 
+int parse_address_list(std::string_view list, std::vector<EndPoint>* addresses, uint16_t default_port) {
+    addresses->clear();
+    if (list.empty()) return 0;
+    for (auto p = list.begin(); p < list.end();) {
+        auto q = p + 1;
+        while (q < list.end() && *q != ',') ++q;
+        std::string_view epsv(p, q - p);
+        addresses->push_back(EndPoint::parse(epsv, default_port));
+        p = q + 1;
+    }
+    return 0;
+}
+
+
 }  // namespace net
 }

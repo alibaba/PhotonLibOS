@@ -18,6 +18,7 @@ limitations under the License.
 #include <utility>
 #include <unistd.h>
 #include <cstdlib>
+#include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 
 // RingBase exists only to reduce the size of template RingQueue
@@ -40,14 +41,6 @@ protected:
         m_capacity = round_up_to_exp2(capacity);
         m_mask = m_capacity - 1;
         return m_capacity;
-    }
-
-    static uint32_t round_up_to_exp2(uint32_t x)
-    {
-        if (x == 0) return 1;
-        auto clz = __builtin_clz(x);   // 'count leading zero'
-        uint32_t y =  1 << (31 - clz);
-        return (clz == 0 || y == x) ? y : y * 2;
     }
 
     int ensure_not_full()

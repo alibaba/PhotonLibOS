@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
     DEFER(delete[] g_read_buffers);
     prepare_read_buffers();
 
-    auto pool = rpc::new_stub_pool(60 * 1000 * 1000, 10 * 1000 * 1000, -1);
+    auto pool = rpc::new_stub_pool(60 * 1000 * 1000, 10 * 1000 * 1000);
     DEFER(delete pool);
 
     photon::thread_create11(show_performance_statis);

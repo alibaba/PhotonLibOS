@@ -29,8 +29,7 @@ struct ExampleClient {
     // TCP connection will failed in 1 second(1UL*1000*1000) if not accepted
     // and connection send/recv will take 5 socneds(5UL*1000*1000) as timedout
     ExampleClient()
-        : pool(photon::rpc::new_stub_pool(10UL * 1000 * 1000, 1UL * 1000 * 1000,
-                                          5UL * 1000 * 1000)) {}
+        : pool(photon::rpc::new_stub_pool(10UL * 1000 * 1000, 1UL * 1000 * 1000)) {}
 
     int64_t RPCHeartbeat(photon::net::EndPoint ep);
 

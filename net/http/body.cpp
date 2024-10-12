@@ -255,6 +255,13 @@ public:
         return wc;
     }
 
+    virtual uint64_t timeout() const override {
+        return m_stream ? m_stream->timeout() : -1UL;
+    }
+    virtual void timeout(uint64_t timeout) override {
+        if (m_stream) m_stream->timeout(timeout);
+    }
+
 protected:
     net::ISocketStream *m_stream;
     size_t m_size = 0;
@@ -295,6 +302,13 @@ public:
         if (m_stream->writev(iov, iovcnt) != count) return -1;
         if (m_stream->write(&chunk_size[size - 2], 2) != 2) return -1;
         return count;
+    }
+
+    virtual uint64_t timeout() const override {
+        return m_stream ? m_stream->timeout() : -1UL;
+    }
+    virtual void timeout(uint64_t timeout) override {
+        if (m_stream) m_stream->timeout(timeout);
     }
 
 protected:

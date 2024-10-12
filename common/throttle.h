@@ -79,8 +79,8 @@ public:
             if (sem.count() * 100 < m_limit * fulfil_percent) {
                 // Request are fulfilled only if they saw enough percent of tokens,
                 // otherwise wait a `time_window_per_slice`.
-                ret = photon::thread_usleep(m_time_window_per_slice);
-                if (ret != 0) {
+                int sleep_ret = photon::thread_usleep(m_time_window_per_slice);
+                if (sleep_ret != 0) {
                     // Interrupted, just return
                     return -1;
                 }

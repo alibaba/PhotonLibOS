@@ -17,44 +17,52 @@ limitations under the License.
 #pragma once
 #include <inttypes.h>
 #include <assert.h>
+#include <errno.h>
+#include <type_traits>
+#include <photon/common/utility.h>
 
 namespace photon {
 
-struct retval_base {
-    // use uint64_t to make sure the result is returned
+struct reterr {
+    // use int64_t to make sure the result is returned
     // via another register, so that it is accessed easily
-    uint64_t _errno = 0;
-    bool failed() const { return _errno; }
+    int64_t _errno = 0;
+    bool failed() const { return unlikely(_errno); }
     bool succeeded() const { return !failed(); }
-    int get_errno() const { assert(_errno > 0); return (int)_errno; }
+    int get_errno() const { return (int)_errno; }
+    operator int() const { return get_errno(); }
 };
 
-template<typename T> inline
-T failure_value() { return 0; }
+template<typename T> inline typename
+std::enable_if<std::is_signed<T>::value, T>::type
+failure_value() { return -1; }
+
+template<typename T> inline typename
+std::enable_if<!std::is_signed<T>::value, T>::type
+failure_value() { return 0; }
+
+template<typename T> inline typename
+std::enable_if<std::is_signed<T>::value, bool>::type
+is_failure(T x) { return unlikely(x < 0); }
+
+template<typename T> inline typename
+std::enable_if<!std::is_signed<T>::value, bool>::type
+is_failure(T x) { return unlikely(x == 0); }
 
 template<typename T>
-struct retval : public retval_base {
+struct retval : public reterr {
     T _val;
-    retval(T x) : _val(x) { }
-    retval(int _errno, T val) : retval_base{(uint64_t)_errno}, _val(val) {
-        assert(failed());
-    }
-    retval(const retval_base& rvb) : retval_base(rvb) {
-        assert(failed());
+    retval(const retval&) = default;
+    retval(T val) : reterr{is_failure(val) ? errno : 0}, _val(val) { }
+    retval(T val, int _errno) : reterr{_errno}, _val(val) { }
+    retval(const reterr& rvb) : reterr(rvb) {  // for failure
         _val = failure_value<T>();
+        assert(failed());
     }
-    operator T() const {
-        return get();
-    }
-    T operator->() {
-        return get();
-    }
-    T get() const {
-        return _val;
-    }
-    retval_base base() const {
-        return *this;
-    }
+    operator T() const { return get(); }
+    T operator->() { return get(); }
+    T get() const { return _val; }
+    reterr error() const { return (const reterr) *this; }
     bool operator==(const retval& rhs) const {
         return _errno ? (_errno == rhs._errno) : (_val == rhs._val);
     }
@@ -70,13 +78,11 @@ struct retval : public retval_base {
 };
 
 template<>
-struct retval<void> : public retval_base {
-    retval(int _errno = 0) : retval_base{(uint64_t)_errno} { }
-    retval(const retval_base& rvb) : retval_base(rvb) { }
+struct retval<void> : public reterr {
+    retval(int errno_ = 0) : reterr{errno_} { }
+    retval(const reterr& rvb) : reterr(rvb) { }
     void get() const { }
-    retval_base base() const {
-        return *this;
-    }
+    reterr error() const { return (const reterr) *this; }
     bool operator==(const retval& rhs) const {
         return _errno == rhs._errno;
     }
@@ -86,12 +92,3 @@ struct retval<void> : public retval_base {
 };
 
 }
-
-#define DEFINE_FAILURE_VALUE(type, val) namespace photon {  \
-    template<> inline type failure_value<type>() { return val; } }
-
-DEFINE_FAILURE_VALUE(int8_t,  -1)
-DEFINE_FAILURE_VALUE(int16_t, -1)
-DEFINE_FAILURE_VALUE(int32_t, -1)
-DEFINE_FAILURE_VALUE(int64_t, -1)
-

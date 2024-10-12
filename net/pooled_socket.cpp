@@ -121,9 +121,10 @@ protected:
     photon::Timer timer;
 
     // all fd < 0 treated as socket not based on fd
-    // and always alive. Using such socket needs user
+    // and always reuseable. Using such socket needs user
     // to check if connected socket is still usable.
-    bool stream_alive(int fd) {
+    // if there still have unread bytes in strema, it should be closed.
+    bool stream_reusable(int fd) {
         return (fd < 0) || (wait_for_fd_readable(fd, 0) != 0);
     }
 
@@ -196,7 +197,7 @@ public:
         if (!stream) {
             stream = m_underlay->connect(remote, local);
             if (!stream) return nullptr;
-        } else if (!stream_alive(stream->get_underlay_fd())) {
+        } else if (!stream_reusable(stream->get_underlay_fd())) {
             delete stream;
             goto again;
         }
@@ -231,7 +232,7 @@ public:
     bool release(const EndPoint& ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
         ERRNO err;
-        if (!stream_alive(fd)) return false;
+        if (!stream_reusable(fd)) return false;
         auto node = new StreamListNode(ep, stream, fd, TTL_us);
         push_into_pool(node);
         errno = err.no;
