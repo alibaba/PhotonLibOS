@@ -25,7 +25,7 @@ namespace photon {
 using namespace net;
 namespace redis {
 
-any BufferedStream::parse_item() {
+any BufferedStream::parse_response_item() {
     switch (auto mark = this->get_char()) {
     case simple_string::mark():
         return get_simple_string();
@@ -35,9 +35,11 @@ any BufferedStream::parse_item() {
         return get_integer();
     case bulk_string::mark():
         return get_bulk_string();
-    case array<>::mark():
-        return {array<>(), get_integer()};
+    case array_header::mark(): {
+        auto x = get_integer();
+        return array_header{x};}
     default:
+        LOG_ERROR("uncognized mark: ", mark);
         return {};
     }
 }
