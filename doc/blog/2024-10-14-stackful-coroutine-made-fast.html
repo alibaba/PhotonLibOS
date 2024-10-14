@@ -1,0 +1,1779 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Submission #17 for ASPLOS’24" />
+  <title>Stackful Coroutine Made Fast</title>
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    div.abstract {
+      margin: 2em 2em 2em 2em;
+      text-align: left;
+      font-size: 85%;
+    }
+    div.abstract-title {
+      font-weight: bold;
+      text-align: center;
+      padding: 0;
+      margin-bottom: 0.5em;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+    /* CSS for citations */
+    div.csl-bib-body { }
+    div.csl-entry {
+      clear: both;
+      margin-bottom: 0em;
+    }
+    .hanging-indent div.csl-entry {
+      margin-left:2em;
+      text-indent:-2em;
+    }
+    div.csl-left-margin {
+      min-width:2em;
+      float:left;
+    }
+    div.csl-right-inline {
+      margin-left:2em;
+      padding-left:1em;
+    }
+    div.csl-indent {
+      margin-left: 2em;
+    }  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Stackful Coroutine Made Fast</h1>
+<p style="color:#4070a0">This is a manuscript submitted to ASPLOS’24. It was
+  highly affirmed by the anonymous reviewers for its value in design of
+  coroutine, as well as related components of systems software and
+  computer architecture. It was, however, rejected due to lack of novelty:
+  the key proposal, CACS, had already been implemented before in libfringe.
+  So we give up the attempt to publish this manuscript as a research paper
+  in ASPLOS, nor other academic conferences. And we upload it to Photon’s
+  project site as-is, hoping everyone gets the message that <b><i>stackful
+  coroutine has been made fast</i></b>.</p>
+<p class="author">Submission #17 for ASPLOS’24</p>
+<p style="color:#606060"><i>Huiba Li, Rui Du and Windsor Hsu<br/>Alibaba Cloud</i></p>
+<div class="abstract">
+<div class="abstract-title">Abstract</div>
+<p>Stackful coroutine, also known as user-space cooperative thread,
+offers the promise of more intuitive and accessible concurrent
+programming. With the growing demand for highly concurrent programs,
+stackful coroutine has gained increasing interest in recent years. It
+has, however, been much maligned for poor performance compared to
+stackless coroutine because of its heavy reliance on context switching.
+In this paper we perform in-depth measurement and analysis of several
+advanced implementations of stackful and stackless coroutine. Our
+analysis indicates that although current implementations of stackful
+coroutines are indeed significantly slower than their stackless
+counterparts, stackful coroutine is not intrinsically slow. Rather,
+stackful coroutine performs poorly mainly because the current
+implementations do not fully leverage the fact that control flow is
+cooperatively passed among stackful coroutines. Based on this
+observation, we propose context-aware context switching (CACS) among
+stackful coroutines. Instead of a full set of registers, CACS saves
+(restores) only the minimum necessary set of registers according to the
+caller (callee) context. It also enables the branch to be inlined at the
+caller site so that branch prediction is more accurate. We have
+implemented CACS in Photon, a highly optimized libOS based on coroutine.
+Performance measurements show that with the optimizations proposed in
+this paper, stackful coroutine out-performs stackless coroutine in most
+cases, and ties in the generator paradigm which is an especially
+challenging scenario for stackful coroutine. We also suggest a few
+supporting changes in computer architecture, programming language,
+compiler and OS that can further improve the performance of stackful
+coroutine. Our work is open-sourced on GitHub<a href="#fn1"
+class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a>.</p>
+</div>
+</header>
+<h1 id="introduction">Introduction</h1>
+<p>Modern servers may have network connectivity with bandwidth that is
+on the same order as that of its memory or CPU interconnect <span
+class="citation" data-cites="eflops">[<a href="#ref-eflops"
+role="doc-biblioref">27</a>]</span>, and host dozens of SSDs each
+offering more than 10GB/s of throughput <span class="citation"
+data-cites="memblaze7940">[<a href="#ref-memblaze7940"
+role="doc-biblioref">34</a>]</span>. With such advances in the hardware
+I/O capability, software stacks must become both highly concurrent and
+efficient to unleash the growing performance potential of the modern
+server. Recent software improvements to this effect include the
+development of high-performance I/O frameworks, such as DPDK <span
+class="citation" data-cites="dpdk">[<a href="#ref-dpdk"
+role="doc-biblioref">5</a>]</span> and SPDK <span class="citation"
+data-cites="spdk">[<a href="#ref-spdk"
+role="doc-biblioref">10</a>]</span>, that budget to process a single
+packet or request in terms of CPU cycles.</p>
+<p>Coroutine has also been gaining increasing attention in recent years
+to handle concurrent programming efficiently and effectively.
+Programming languages that have or are embracing coroutine include
+C++20 <span class="citation" data-cites="cpp20std">[<a
+href="#ref-cpp20std" role="doc-biblioref">3</a>]</span>, Rust 1.39 <span
+class="citation" data-cites="rust139">[<a href="#ref-rust139"
+role="doc-biblioref">2</a>]</span> in 2019, C# 5.0 <span
+class="citation" data-cites="csharp">[<a href="#ref-csharp"
+role="doc-biblioref">15</a>]</span> in 2012, Python 3.5 <span
+class="citation" data-cites="py35">[<a href="#ref-py35"
+role="doc-biblioref">19</a>]</span> in 2015, JavaScript ES2017 <span
+class="citation" data-cites="js17">[<a href="#ref-js17"
+role="doc-biblioref">8</a>]</span>, Swift 5.5 <span class="citation"
+data-cites="swift55">[<a href="#ref-swift55"
+role="doc-biblioref">11</a>]</span> in 2021, Java 21 <span
+class="citation" data-cites="java">[<a href="#ref-java"
+role="doc-biblioref">7</a>]</span> in 2023, Dragonwell 8 <span
+class="citation" data-cites="dragonwell">[<a href="#ref-dragonwell"
+role="doc-biblioref">1</a>]</span> in 2019, etc. Golang <span
+class="citation" data-cites="golang">[<a href="#ref-golang"
+role="doc-biblioref">14</a>]</span> has provided coroutine (goroutine)
+as a first-class construct since its initial design.</p>
+<p>There are two types of coroutine — stackless and stackful. The former
+shares a default stack among all the coroutines while the latter assigns
+a separate stack to each coroutine. With stackless coroutine, the code
+is transformed into event handlers at compile time, and driven by an
+event engine at run time, i.e. the scheduler of stackless coroutine.
+Transferring control of CPU to a stackless coroutine is merely a
+function call with an argument pointing to its context. Conversely,
+transferring CPU control to a stackful coroutine requires a context
+switch. This context switch is widely regarded as a heavy-weight
+operation when compared to the function call. In reality, this context
+switch is much more efficient than a kernel task switch because it does
+not incur the overhead of a round-trip transition from user-space to
+kernel-space, and it is also possible to perform optimizations by making
+use of the cooperative nature of the coroutines within a single
+program.</p>
+<p>Nevertheless, due primarily to the perceived performance concern
+(among other issues), more and more systems are abandoning stackful
+coroutine for stackless coroutine, especially systems that emphasize
+performance such as C++20, Rust, C#, Swift, etc. There was once a heated
+debate <span class="citation"
+data-cites="fibers-no-scheduler fibers-glass re-fibers-glass re-re-fibers-glass">[<a
+href="#ref-fibers-no-scheduler" role="doc-biblioref">29</a>, <a
+href="#ref-re-fibers-glass" role="doc-biblioref">37</a>–<a
+href="#ref-re-re-fibers-glass" role="doc-biblioref">39</a>]</span> in
+the C++ standards committee over stackless or stackful coroutine for
+C++20. Although stackful coroutine is generally easier to use, more
+compatible with existing codebases and more efficient in many scenarios,
+the proponents of stackless coroutine constructed a microbenchmark <span
+class="citation" data-cites="wanbox">[<a href="#ref-wanbox"
+role="doc-biblioref">17</a>]</span> to show that “fibers (stackful
+coroutines) have 20 times larger context switch overhead” than stackless
+coroutine <span class="citation" data-cites="fibers-glass">[<a
+href="#ref-fibers-glass" role="doc-biblioref">38</a>]</span>. The
+defendants of stackful coroutine did not give a direct response to the
+challenge <span class="citation" data-cites="re-fibers-glass">[<a
+href="#ref-re-fibers-glass" role="doc-biblioref">37</a>]</span>, and
+ultimately the committee adopted stackless coroutine for C++20. We
+believe that the demonstrated outsized difference in overhead played an
+important role in this decision, as well as similar decisions for other
+systems.</p>
+<p>In this paper we argue that stackful coroutine is not intrinsically
+slow. It just has not been implemented to fully exploit the cooperative
+nature of stackful coroutine, and there are opportunities to make
+context switching more efficient. We perform in-depth measurement and
+analysis of several current coroutine implementations. Based on the
+analysis, we propose context-aware context switching (CACS) to improve
+the efficiency of register saving, accuracy of branch prediction, and
+hit rate of CPU cache. CACS leverages the fact that context switches
+among stackful coroutines occur only at specific caller sites. With
+CACS, each context switching saves only the registers that will be
+needed after it switches back, and these registers are determined by the
+compiler at the caller site. CACS also enables the branching to be
+inlined at the caller site so that branch prediction is more accurate.
+We apply CACS to optimize stackful asymmetric coroutine by designing
+in-stack generator. With CACS, it performs as efficiently as the
+corresponding stackless coroutine implementation. We also introduce a
+new function calling convention named <code>preserve_none</code> as an
+expansion of CACS for all switching functions to further improve
+performance. With our work the cost of yield operation (scheduling and
+switching to the next coroutine) is greatly reduced. CACS is implemented
+in Photon <span class="citation" data-cites="photon">[<a
+href="#ref-photon" role="doc-biblioref">9</a>]</span>, a sophisticated
+libOS based on coroutine. The proposed calling convention is implemented
+in Clang <span class="citation" data-cites="clang">[<a href="#ref-clang"
+role="doc-biblioref">4</a>]</span>.</p>
+<p>On the other hand, we demonstrate that stackless coroutine is
+inefficient in handling multi-level invocation, an inevitable pattern in
+real-world programs. It even incurs an overhead proportional to the
+length of the call chain when dealing with recursion. Despite there are
+optimizations that can reduce this overhead to a constant in some
+scenarios, it is still much higher than the corresponding overhead with
+stackful coroutine. Our results suggest that stackful coroutine is the
+better choice for efficient concurrency.</p>
+<p>The contributions of this paper are as follows:</p>
+<ol>
+<li><p>We conduct an in-depth performance characterization of
+state-of-the-art implementations of both stackless and stackful
+coroutines, analyzing the root causes for various measured
+differences.</p></li>
+<li><p>We observe that there are untapped opportunities to improve the
+performance of stackful coroutine by exploiting the fact that coroutines
+are cooperatively scheduled user-space threads.</p></li>
+<li><p>We propose and implement CACS to optimize the performance of
+stackful coroutine, and demonstrate that it can effectively eliminate
+the performance concern of context switching, thereby raising the
+performance upper bound of stackful coroutine. CACS makes stackful
+coroutine even feasible for challenging scenarios such as the generator
+paradigm. The overall result is promising: a single Xeon CPU core can
+perform a yield operation in ~1.52 ns or ~3.34 cycles, comparable to the
+cost of a function call, and out-performing state-of-the-art result by
+several times.</p></li>
+<li><p>While we demonstrate promising results with CACS, the current
+implementation is still constrained by existing architecture,
+programming language, compiler and OS. We suggest several supporting
+changes in these areas that can further improve the performance of
+stackful coroutine.</p></li>
+</ol>
+<h1 id="sec:measurement">Performance Measurement of Coroutines</h1>
+<p>In this section, we carry out in-depth measurement of coroutine
+implementations, trying to find out how such a big difference as “20
+times” <span class="citation" data-cites="fibers-glass">[<a
+href="#ref-fibers-glass" role="doc-biblioref">38</a>]</span> in speed
+was formed, and whether there are opportunities for optimizations. We
+begin with the micro benchmark of sequence’s sum that was used in the
+test, then expand its structure in two ways respectively: callee
+recursion (Hanoi) and caller nesting (write_fully) with concurrent
+execution. These expansions represents some common scenarios in real
+applications.</p>
+<p>Besides the classification of stackful or stackless coroutine, they
+can also be classified as symmetric or asymmetric coroutine <span
+class="citation" data-cites="moura2009revisiting">[<a
+href="#ref-moura2009revisiting" role="doc-biblioref">36</a>]</span>. The
+former provides a single control-transfer operation that allows
+coroutines to explicitly pass control between themselves. The latter
+provides two control-transfer operations: one for invoking a coroutine
+and one for suspending it, possibly carrying return value(s) to the
+caller. Asymmetric coroutine can be resumed repeatedly to generate a
+series of return values. That’s why it is also called generator.</p>
+<h2 id="coroutines-under-the-microscope">Coroutines under the
+Microscope</h2>
+<p>We revisit the performance benchmark <span class="citation"
+data-cites="wanbox">[<a href="#ref-wanbox"
+role="doc-biblioref">17</a>]</span> that was used in C++ committee, and
+we are able to reproduce similar results in our environment, with latest
+compiler (Clang 15.0.3), latest dependent library (Boost 1.81), and
+trivial changes to the source code (e.g., removing the “experimental”
+namespace). The benchmark includes two cases, respectively for stackful
+coroutine implemented by Boost.Coroutine2 and stackless coroutine
+built-in C++20. Both of them consist of a generator that produces
+natural number from <span class="math inline"><em>N</em></span> down to
+<span class="math inline">1</span>, and a reducer that sums the numbers
+up.</p>
+<p>We have managed to reduce the overhead of stackful coroutine down to
+~4 times with some simple efforts such as: disabling assertion, raising
+up optimization level from -O2 to -O3, forced inlining all possible
+functions involved in the kernel loops, and re-implementing a third test
+case using Boost.Context directly. The overall result is depicted in
+Fig <a href="#fig:ss-brkdn" data-reference-type="ref"
+data-reference="fig:ss-brkdn">1</a>.</p>
+<figure id="fig:ss-brkdn">
+<embed src="figures/sum-seq-breakdown.pdf.png" style="width:98.0%" />
+<figcaption><span id="fig:ss-brkdn" data-label="fig:ss-brkdn"></span>
+Breakdown of the ~20 times overhead of Boost stackful coroutine compared
+to C++20 stackless coroutine in the micro benchmark of sequence’s
+sum.</figcaption>
+</figure>
+<p>To find possible opportunities for further improvements, we analyze
+the implementation by disassembling its machine code. We find that a
+function jump_fcontext() contributes to most of the remaining overhead.
+It is a handcrafted assembly function consisting 24 instructions to
+perform context switching. It saves and restores a set of registers
+including <code>r12</code>~<code>r15</code>, <code>rbx</code>,
+<code>rbp</code>, x87 FPU control word (FCW), MMX/SSE control status
+register (MXCSR) and finally <code>rsp</code>, the stack pointer
+register. The list is determined by the function calling convention in
+use, and classic context switching functions save and restore all these
+registers in order to conform to the convention. But most of these
+registers are not used at all in such simple case as this, and it is a
+great waste to do it blindly. We believe it is better for the compiler
+to smartly determine what actually needs to be done before and after
+each context switching operation at the calling site, and do it all by
+itself. We have realized this optimization with some inline assembly
+code and a simple optional compiler extension. As a result, the cost of
+a context switching becomes similar to that of an ordinary function
+call. We’ll describe this work in section <a href="#sec:optimal"
+data-reference-type="ref" data-reference="sec:optimal">3</a>.</p>
+<p>It’s also worth noting that, when we change the stackless
+producer()’s implementation from <code>for</code> loop to simpler and
+identical <code>while</code> loop, as shown in Fig. <a
+href="#fig:gen_for_while" data-reference-type="ref"
+data-reference="fig:gen_for_while">2</a>, its time cost increases
+unexpectedly by ~50% (see section <a href="#sec:eval"
+data-reference-type="ref" data-reference="sec:eval">4</a> for details).
+We suspect it’s due to the limitation of current compiler optimization
+for stackless coroutine, as it involves somewhat complex translation of
+the code.</p>
+<figure id="fig:gen_for_while">
+<div class="sourceCode" id="cb1" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">__attribute__((noinline))</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>generator<span class="op">&lt;</span><span class="dt">uint64_t</span><span class="op">&gt;</span> </span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>producer<span class="op">(</span><span class="dt">uint64_t</span> count<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(;</span> count<span class="op">!=</span><span class="dv">0</span><span class="op">;</span> <span class="op">--</span>count<span class="op">)</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">co_yield</span> count<span class="op">;</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb2" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="ex">__attribute__((noinline))</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>generator<span class="op">&lt;</span><span class="dt">uint64_t</span><span class="op">&gt;</span> </span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>producer<span class="op">(</span><span class="dt">uint64_t</span> count<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  <span class="cf">while</span><span class="op">(</span>count<span class="op">)</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">co_yield</span> count<span class="op">--;</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<figcaption><span id="fig:gen_for_while"
+data-label="fig:gen_for_while"></span> Stackless generator with for-loop
+and while-loop.</figcaption>
+</figure>
+<figure id="fig:nested-call-yeild">
+<embed src="figures/stackless-nested-call-yield.pdf.png"
+style="width:98.0%" />
+<figcaption><span id="fig:nested-call-yeild"
+data-label="fig:nested-call-yeild"></span> The recursive call chain of
+stackless coroutine implies a possible <span
+class="math inline"><em>O</em>(<em>n</em>)</span> complexity in most
+implementations.</figcaption>
+</figure>
+<h2 id="coroutines-in-the-telescope">Coroutines in the Telescope</h2>
+<p>Stackless coroutine can be inefficient when it yields some value to
+the original caller from a deep call chain of recursion, because the
+operation is designed to be targeting at the direct caller, and it may
+incur a high overhead of <span
+class="math inline"><em>O</em>(<em>n</em>)</span> to cross multiple
+levels. This scenario is depicted in Fig <a
+href="#fig:nested-call-yeild" data-reference-type="ref"
+data-reference="fig:nested-call-yeild">3</a>.</p>
+<p>Many important recursive algorithms fits this pattern, such as
+traversing a tree and yielding every node to the caller, or performing a
+depth-first-search in a graph (or other state spaces) and yielding each
+item found. Most coroutine implementations are subject to this problem,
+such as C#, Python, etc. Python provides “<code>yield from</code>” for
+this scenario to forward values from multi-level invocations, but only
+as a syntax sugar without any improvement to its performance. Rust has
+experimental support for generator, and it does not yet support
+multi-level invocations of generators. C++23 introduced an optimized
+implementation as <code>std::generator</code>, which achieves <span
+class="math inline"><em>O</em>(1)</span> delivery for multi-level
+invocations in stackless coroutines, by sophisticated manipulation of
+coroutine handles. But it still incurs a great overhead compared to
+generators based on stackful coroutine.</p>
+<figure id="fig:hanoi">
+<div class="sourceCode" id="cb3" data-language="c++"><pre
+class="sourceCode c++"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="dt">void</span> Hanoi<span class="op">(</span><span class="dt">char</span> n<span class="op">,</span> <span class="dt">char</span> from<span class="op">,</span> <span class="dt">char</span> to<span class="op">,</span> <span class="dt">char</span> aux<span class="op">,</span> Callback cb<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="op">(</span>n<span class="op">==</span><span class="dv">0</span><span class="op">)</span> <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    Hanoi<span class="op">(</span>g<span class="op">,</span> n<span class="op">-</span><span class="dv">1</span><span class="op">,</span> from<span class="op">,</span> aux<span class="op">,</span> to<span class="op">);</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    cb<span class="op">(</span>n<span class="op">,</span> from<span class="op">,</span> to<span class="op">);</span> <span class="co">// move the n-th disk</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    Hanoi<span class="op">(</span>g<span class="op">,</span> n<span class="op">-</span><span class="dv">1</span><span class="op">,</span> aux<span class="op">,</span> to<span class="op">,</span> from<span class="op">);</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<figcaption><span id="fig:hanoi" data-label="fig:hanoi"></span> Hanoi
+using function recursion &amp; callback.</figcaption>
+</figure>
+<figure id="fig:hanoi-perf">
+<embed src="figures/hanoi.pdf.png" style="width:98.0%" />
+<figcaption><span id="fig:hanoi-perf"
+data-label="fig:hanoi-perf"></span> Time cost of coroutine recursion
+normalized to function recursion in their corresponding languages,
+solving the puzzle of Hanoi.</figcaption>
+</figure>
+<p>We study this problem by solving the classic puzzle Tower of Hanoi in
+both stackful and stackless coroutine. As depicted in Fig. <a
+href="#fig:hanoi" data-reference-type="ref"
+data-reference="fig:hanoi">4</a>, it is a simple recursive algorithm
+consisting only 4 lines of effective code. It is good a representative
+for recursion in real applications. We reimplement it respectively with
+C++20 stackless coroutine, C++23 stackless generator, and Boost stackful
+coroutine.</p>
+<p>The results are shown in Fig <a href="#fig:hanoi-perf"
+data-reference-type="ref" data-reference="fig:hanoi-perf">5</a>, as
+relative time cost of coroutines compared to classic function recursion,
+so as to eliminate the exponential growth of the algorithm, and clearly
+reflect the overhead of coroutine yield and resume. The <span
+class="math inline"><em>O</em>(1)</span> and <span
+class="math inline"><em>O</em>(<em>n</em>)</span> overhead growths are
+clearly shown in the results, and the overhead of C++20 coroutine can
+even reach 50 times when the number of disks is 20. C++23 generator has
+<span class="math inline"><em>O</em>(1)</span> asymptotic growth,
+though, its overhead is still much higher than that of stackful
+coroutine with Boost. The results suggest that stackless coroutine is
+not efficient for recursion. And we’ll also show in section <a
+href="#Macroscope" data-reference-type="ref"
+data-reference="Macroscope">2.3</a> that it is not efficient either for
+non-recursive multi-level invocation, which is a common practice in
+non-trivial applications.</p>
+<p>To further study C++23 std::generator (Gen23) and Boost, we use the
+<code>perf</code> tool to respectively monitor them solving Hanoi(1~20).
+We see that Gen23 has executed ~15 billions of instructions in ~5.8
+billions of cycles (2.58 per cycle). And Boost has executed ~2.05
+billions of instructions in 938 millions of cycles (2.19 per cycle). The
+former executes much more instructions at a higher IPC (Instructions Per
+Cycle) speed than the latter, indicating a more complex solution. We
+also notice that Boost has a 5.36% miss rate for branch prediction,
+which is much higher than that of Gen23 (0.76%). We believe it’s due to
+the context switching function, jump_fcontext(), which jumps to a
+location different from that of the previous run, thus hard to predict.
+We’ll solve this problem with context-aware context switching. See
+details in section <a href="#sec:cacs" data-reference-type="ref"
+data-reference="sec:cacs">3.1</a>.</p>
+<h2 id="Macroscope">Coroutines in the “Macroscope”</h2>
+<p>We measure how coroutines perform in a scenario of multiple
+conceptual threads of execution running concurrently. We simulate a
+server-type workload with both coroutine models, by creating 10
+concurrent tasks, with each sending 100 MB of data through a network
+connection to its client. We mimic the non-blocking socket API that can
+send some number (&gt;0) of bytes in each invocation if it is ready for
+write (there’s some room in its internal buffer), and we have to repeat
+it in a loop until all data has been sent. In order that the measurement
+is repeatable and not too fast, we assume that every invocation to
+send_some() can send exactly 800 bytes, and is preceded by an invocation
+to <code>wait_for_ready()</code> that only switches execution to other
+tasks. This is effectively the pattern of non-recursive multi-level
+invocation. As the actual networking and event engine (e.g. epoll) are
+not the target of this test, they are not included in order that we
+focus on the coroutine part of the program.</p>
+<p>Two implementations are involved in this measurement, C++20 stackless
+coroutine and Boost.Context stackful coroutine. We employ simple
+round-robin scheduling for both of them.</p>
+<figure id="fig:write-fully">
+<embed src="figures/write-fully.pdf.png" style="width:98.0%" />
+<figcaption><span id="fig:write-fully"
+data-label="fig:write-fully"></span> Execution time for simulation of
+concurrent write_fully(). Rust (based on tokio) and C# (compiled to
+native code) are included as references only.</figcaption>
+</figure>
+<p>Fig. <a href="#fig:write-fully" data-reference-type="ref"
+data-reference="fig:write-fully">6</a> shows the results of our
+measurement, including those from Rust and C# as references only. Boost
+achieves the best performance with stackful coroutine. We further study
+the cases in C++ with <code>perf</code> tool, in order to investigate
+any other reasons for such differences besides multi-level invocation.
+We find that C++20 coroutine incurs major overhead in memory
+allocation/deallocation for coroutine context. This indicates that
+memory pooling is very important for stackless coroutine, the ideal
+pooling might be a linear data structure for each conceptual thread of
+execution, and it grows with <code>co_await</code> and shrinks with
+<code>co_return</code>, as suggested in <span class="citation"
+data-cites="re-fibers-glass">[<a href="#ref-re-fibers-glass"
+role="doc-biblioref">37</a>]</span>.</p>
+<p>We also find that the scheduler for C++20 coroutine incurs an
+overhead higher than that for Boost, despite we try to make both of them
+as simple and identical as possible. The question is answered with some
+extra counters: C++20 coroutine invokes scheduler several times more
+than Boost coroutine. It turns out that every <code>co_await</code> in
+the program makes the control return to the scheduler then calls the
+target coroutine from there. <code>co_return</code> and
+<code>co_yield</code> follow the reversed control flow. It is possible
+for stackless coroutine to apply an optimistic optimization: invoke the
+target first without returning to the scheduler, speculating that the
+target will complete without actually <code>co_yield</code>-ing or
+<code>co_await</code>-ing. This optimization can be applied repeatedly
+until it eventually has to go back to the scheduler, by successive
+returning. This pattern is useful for submitting asynchronous I/O
+operations that may complete immediately in some cases (e.g. there’s
+enough internal buffer for write), so there is no need to wait for its
+completion in this case. We don’t employ this optimization because we
+are focusing on the coroutine part of the program in the measurement,
+whereas this optimization avoids the part in the case of successful
+speculation.</p>
+<p>We also notice with <code>perf</code> that the Boost-based case
+incurs a miss rate of 13.08% for L1 data cache load, which is much
+higher than the case with C++20 coroutine (0.01%). In such a micro
+benchmark, all data loads in the kernel loop should be cache-hit. We
+believe it’s due to not-too-coincidental collisions in the set-associate
+algorithm of cache, and it should be caused almost deterministically by
+the default alignment of allocation for stack, combined with the
+homogenization of the running coroutines. And we believe that’s why the
+application part of stackful case is slower than that of stackless case.
+The issue probably influences context switching too, because the context
+is also saved on stack. And the issue probably occurs in many other
+benchmarks and applications based on stackful coroutine or user-space
+threads, because this pair of conditions are easy to meet in real
+applications, especially on servers. We resolve this issue by simply
+introducing a random factor to the starting address of stack, making the
+stackful case significantly faster. See section <a href="#sec:eval"
+data-reference-type="ref" data-reference="sec:eval">4</a> for further
+results.</p>
+<h1 id="sec:optimal">Context-Aware Context Switching (CACS)</h1>
+<p>In this section, we present our proposals to make stackful coroutine
+fast. We first propose a novel approach to perform context-aware context
+switching (CACS), which saves and restores a least necessary number of
+registers decided by the compiler at the calling site. It makes use of
+inline assembly, and spreads out the indirect jump of CACS, possibly
+improving the rate of correct branch prediction. We then apply CACS to
+asymmetric coroutines by proposing in-stack generator, a new design that
+realize efficient yield() and resume(), as well as stack reuse in the
+case of non-concurrent generators. Thirdly we propose a new calling
+convention, preserve_none, for functions that are expected to switch
+context, so as to further improve performance. This is actually an
+expansion of CACS for caller functions to make sure the gains are not
+masked by them.</p>
+<h2 id="sec:cacs">Design</h2>
+<p>As discussed in previous section, the classic context switching
+function saves and restores a fixed list of registers before making an
+indirect jump to the target location. The function is usually
+implemented in separate assembly code that is completely unaware of the
+functions that invoke context switching. All that it can do is saving
+and restoring every callee-saved register as specified in the function
+calling convention in use, treating every switching like a worst case
+function call.</p>
+<p>To address the problem and make every cycle count, we propose a novel
+design of context-aware context switching (CACS), which saves and
+restores a least necessary number of registers decided by the compiler
+at the caller site. The compiler will generate instructions to save all
+necessary registers to stack before executing context switching, and
+restore them after switching. The compiler will also do a trade-off
+between saving / restoring a register and recomputing it.</p>
+<figure id="fig:CACS">
+<pre><code>__asm__ volatile (R&quot;(
+  lea 1f(%%rip), %%rax   # calculate switch-back address (label 1)
+  push %%rax             # store it to stack
+  mov %%rsp, 0x10(%0)    # store sp to control struct `from`
+  mov 0x10(%1), %%rsp.   # load sp from control struct `to`
+  pop %%rax              # load execution address from stack
+  jmp *%%rax             # jump to target coroutine
+1:
+)&quot; : : &quot;r&quot;(from), &quot;r&quot;(to) : &quot;rax&quot;,&quot;rbx&quot;,&quot;rcx&quot;,&quot;rdx&quot;,&quot;rbp&quot;,&quot;rsi&quot;,
+&quot;rdi&quot;,&quot;r8&quot;,&quot;r9&quot;,&quot;r10&quot;,&quot;r11&quot;,&quot;r12&quot;,&quot;r13&quot;,&quot;r14&quot;,&quot;r15&quot;); # all regs</code></pre>
+<figcaption><span id="fig:CACS" data-label="fig:CACS"></span> The code
+template for Context-Aware Context Switching (CACS) using inline
+assembly. The key point is informing the compiler that <em>all</em>
+registers will be clobbered by this code template, so the compiler
+itself will generate instructions before and after this code template to
+exactly save and restore necessary registers at this site.</figcaption>
+</figure>
+<p>We design CACS as a code template using standard inline assembly, as
+shown in Fig. <a href="#fig:CACS" data-reference-type="ref"
+data-reference="fig:CACS">7</a>. The instructions should be adapted to
+coroutine type and control structure definition. The key point is the
+bottom lines that define a list of all registers clobbered by the
+assembly code, so that the compiler will save and restore the registers
+that are needed after the code template. CACS is inlined at the caller
+site, making branch predictions for the jump easier to be correct. This
+is more useful for asymmetric coroutine (generator) where users directly
+make context switching without resorting to a scheduler. In contrast,
+classic context switching is typically implemented as a stand-alone
+assembly function, which is written and compiled without any knowledge
+of the particular contexts that make the invocation. If CACS is invoked
+at the end of a function, we can apply tail call optimization by using
+the function’s return address as switch-back address, avoiding an extra
+indirect jumping.</p>
+<h2 id="sec:in-stack-gen">In-Stack Generator with CACS</h2>
+<p>In the previous section stackful coroutine implemented with Boost
+remained ~4 times overhead compared to stackless coroutine in the
+microbenchmark of sum of sequence. According to our analysis, stackless
+coroutine transforms the code into event-driven form at compile time,
+and each invocation to the generator corresponds still to a function
+call. Whereas stackful coroutine creates a new stack for the generator,
+and each invocation corresponds to a context switching. We monitor the
+execution of both test cases with <code>perf</code> tool, and find that
+they show similar instruction per cycle (IPC): 2.29 for stackful and
+2.49 for stackless. So their difference in performance must come
+primarily from the number of instructions executed in their kernel
+loops. By disassembling we find that, the context switching function,
+jump_fcontext(), consists 24 instructions, which gets executed twice in
+each iteration. While a pair of function call and return in this case
+costs only few instructions.</p>
+<p>To resolve the problem, we (1) use CACS to greatly reduce the number
+of instructions for saving and restoring registers; we (2) reuse the
+current stack to further simplify switching (in addition to eliminating
+the allocation of a new stack); and (3) we exploit the fact that there
+exists a conceptual relationship of caller-callee, by defining a simple
+&amp; efficient convention to ease the cooperation. We realize
+switchings with only 3 instructions, for both back and forth. The cost
+is similar to that of a function call / return, making stackful
+coroutine as performant as stackless coroutine.</p>
+<figure id="fig:in-stack-gen">
+<embed src="figures/in-stack-gen.pdf.png" style="width:80.0%" />
+<figcaption><span id="fig:in-stack-gen"
+data-label="fig:in-stack-gen"></span> Stack layout and context (frame)
+switching of in-stack generator.</figcaption>
+</figure>
+<figure id="fig:gen">
+<figure>
+<div class="sourceCode" id="cb5" data-language="c++"><pre
+class="sourceCode c++"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>u64 seq<span class="op">(</span>GCTX<span class="op">*</span> fp<span class="op">,</span> u64 c<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>  GPromise gp<span class="op">(</span>fp<span class="op">);</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">while</span><span class="op">(</span>c<span class="op">)</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    gp<span class="op">.</span>yield<span class="op">(</span>c<span class="op">--);</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>u64 sum_seq<span class="op">(</span>u64 c<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>  u64 sum <span class="op">=</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>  Generator g<span class="op">(&amp;</span>seq<span class="op">,</span> c<span class="op">);</span> </span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> <span class="op">(;</span> g<span class="op">;</span> g<span class="op">.</span>resume<span class="op">())</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>    sum <span class="op">+=</span> g<span class="op">.</span>value<span class="op">();</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> sum<span class="op">;</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<figcaption>Sum of Sequence</figcaption>
+</figure>
+<figure>
+<div class="sourceCode" id="cb6" data-language="c++"><pre
+class="sourceCode c++"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="dt">void</span> _H<span class="op">(</span>GPromise<span class="op">&amp;</span> g<span class="op">,</span> <span class="dt">char</span> n<span class="op">,</span> </span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>     <span class="dt">char</span> f<span class="op">,</span> <span class="dt">char</span> t<span class="op">,</span> <span class="dt">char</span> a<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> <span class="op">(</span>n <span class="op">==</span> <span class="dv">0</span><span class="op">)</span> <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>  _H<span class="op">(</span>g<span class="op">,</span> n<span class="op">-</span><span class="dv">1</span><span class="op">,</span> f<span class="op">,</span> a<span class="op">,</span> t<span class="op">);</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>  g<span class="op">.</span>yield<span class="op">(</span>n<span class="op">+(</span>f<span class="op">&lt;&lt;</span><span class="dv">8</span><span class="op">)+(</span>t<span class="op">&lt;&lt;</span><span class="dv">16</span><span class="op">));</span></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>  _H<span class="op">(</span>g<span class="op">,</span> n<span class="op">-</span><span class="dv">1</span><span class="op">,</span> a<span class="op">,</span> t<span class="op">,</span> f<span class="op">);</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a>u64 hanoi<span class="op">(</span>GCTX <span class="op">*</span>fp<span class="op">,</span> <span class="dt">char</span> n<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>  GPromise g<span class="op">(</span>fp<span class="op">);</span></span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>  _H<span class="op">(</span>g<span class="op">,</span> n<span class="op">,</span> <span class="ch">&#39;a&#39;</span><span class="op">,</span> <span class="ch">&#39;b&#39;</span><span class="op">,</span> <span class="ch">&#39;c&#39;</span><span class="op">);</span></span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>  <span class="cf">return</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<figcaption>Hanoi (generator recursion)</figcaption>
+</figure>
+<figcaption><span id="fig:gen" data-label="fig:gen"></span>
+Implementations with in-stack generator</figcaption>
+</figure>
+<p>We define new primitives to allow a function (generator) to switch
+the execution (yield) to the caller without terminating its execution,
+resulting a stack layout as shown in Fig. <a href="#fig:in-stack-gen"
+data-reference-type="ref" data-reference="fig:in-stack-gen">8</a>. The
+yield operation carries an application-defined value in register
+<code>rax</code> to the caller, as a form of “return value”. The
+operation also carries additional information (frame pointer in
+<code>rsi</code> and instruction pointer in <code>rdx</code>), so that
+the caller can later resume the generator’s execution. The resume
+operation is also a context switching, carrying additional information
+(frame pointer in <code>rsi</code> and instruction pointer in
+<code>rdi</code>) for the generator to yield back.</p>
+<p>As shown in Fig. <a href="#fig:gen" data-reference-type="ref"
+data-reference="fig:gen">9</a>, an in-stack generator (<code>seq</code>
+or <code>hanoi</code>) is implemented like a normal function, with the
+first argument being GCTX*, which actually points to the caller’s stack
+frame. And the function must create a GPromise object on entry, so as
+for the generator to yield results back to the caller. The first yield
+jumps to the caller right after the invocation, making it seem as if it
+comes back from a normal return. The promise object gets destructed
+automatically on exit of the generator, and on this occasion it
+overrides the generator function’s return address with an actual
+position where the caller has executed to. It also sets the resume
+address as NULL, indicating termination of the generator.</p>
+<figure id="fig:gen-asm-cmp">
+<figure>
+<div class="sourceCode" id="cb7" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co">// generator&#39;s kernel loop</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">32</span><span class="op">&gt;:</span> movq <span class="op">%</span>rax<span class="op">,</span> <span class="op">-</span><span class="dv">8</span><span class="op">(%</span>rbp<span class="op">)</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">36</span><span class="op">&gt;:</span> movq <span class="op">-</span><span class="dv">8</span><span class="op">(%</span>rbp<span class="op">),</span> <span class="op">%</span>rax <span class="co">// ??</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">40</span><span class="op">&gt;:</span> leaq <span class="dv">5</span><span class="op">(%</span>rip<span class="op">),</span> <span class="op">%</span>rdx <span class="op">;&lt;+</span><span class="dv">52</span><span class="op">&gt;</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">47</span><span class="op">&gt;:</span> xchgq <span class="op">%</span>rbp<span class="op">,</span> <span class="op">%</span>rsi</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">50</span><span class="op">&gt;:</span> jmpq <span class="op">*%</span>rdi</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">52</span><span class="op">&gt;:</span> movq <span class="op">-</span><span class="dv">8</span><span class="op">(%</span>rbp<span class="op">),</span> <span class="op">%</span>rax</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">56</span><span class="op">&gt;:</span> decq <span class="op">%</span>rax</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">59</span><span class="op">&gt;:</span> jne <span class="bn">0x7d0</span><span class="op">;</span> <span class="op">&lt;+</span><span class="dv">32</span><span class="op">&gt;</span></span></code></pre></div>
+<div class="sourceCode" id="cb8" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="co">// sum()&#39;s kernel loop</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">32</span><span class="op">&gt;:</span> addq <span class="op">%</span>rax<span class="op">,</span> <span class="op">%</span>rcx</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">35</span><span class="op">&gt;:</span> movq <span class="op">%</span>rcx<span class="op">,</span> <span class="op">-</span><span class="bn">0x8</span><span class="op">(%</span>rbp<span class="op">)</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">39</span><span class="op">&gt;:</span> leaq <span class="dv">5</span><span class="op">(%</span>rip<span class="op">),</span> <span class="op">%</span>rdi <span class="op">;&lt;+</span><span class="dv">51</span><span class="op">&gt;</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">46</span><span class="op">&gt;:</span> xchgq <span class="op">%</span>rbp<span class="op">,</span> <span class="op">%</span>rsi</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">49</span><span class="op">&gt;:</span> jmpq <span class="op">*%</span>rdx</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">51</span><span class="op">&gt;:</span> movq <span class="op">-</span><span class="dv">8</span><span class="op">(%</span>rbp<span class="op">),</span> <span class="op">%</span>rcx</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">55</span><span class="op">&gt;:</span> testq <span class="op">%</span>rdx<span class="op">,</span> <span class="op">%</span>rdx</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">58</span><span class="op">&gt;:</span> jne <span class="bn">0x9e0</span> <span class="op">;&lt;+</span><span class="dv">32</span><span class="op">&gt;</span></span></code></pre></div>
+<figcaption>Stackful with CACS</figcaption>
+</figure>
+<figure>
+<div class="sourceCode" id="cb9" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co">// generator&#39;s kernel loop</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">0</span><span class="op">&gt;:</span>  cmpb <span class="er">$</span><span class="bn">0x0</span><span class="op">,</span> <span class="bn">0x28</span><span class="op">(%</span>rdi<span class="op">)</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">4</span><span class="op">&gt;:</span>  je <span class="bn">0x4d7c</span> <span class="op">;&lt;+</span><span class="dv">28</span><span class="op">&gt;</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">6</span><span class="op">&gt;:</span>  movq <span class="bn">0x20</span><span class="op">(%</span>rdi<span class="op">),</span> <span class="op">%</span>rax</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">10</span><span class="op">&gt;:</span> decq <span class="op">%</span>rax</span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">13</span><span class="op">&gt;:</span> je <span class="bn">0x4d85</span><span class="op">;</span> <span class="op">&lt;+</span><span class="dv">37</span><span class="op">&gt;</span></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">15</span><span class="op">&gt;:</span> movq <span class="op">%</span>rax<span class="op">,</span> <span class="bn">0x20</span><span class="op">(%</span>rdi<span class="op">)</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">19</span><span class="op">&gt;:</span> movq <span class="op">%</span>rax<span class="op">,</span> <span class="bn">0x10</span><span class="op">(%</span>rdi<span class="op">)</span></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">23</span><span class="op">&gt;:</span> movb <span class="er">$</span><span class="bn">0x1</span><span class="op">,</span> <span class="bn">0x28</span><span class="op">(%</span>rdi<span class="op">)</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">27</span><span class="op">&gt;:</span> retq</span></code></pre></div>
+<div class="sourceCode" id="cb10" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="co">// sum()&#39;s kernel loop</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">48</span><span class="op">&gt;:</span> movq <span class="bn">0x10</span><span class="op">(%</span>r14<span class="op">),</span> <span class="op">%</span>rbx</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">52</span><span class="op">&gt;:</span> movq <span class="op">%</span>r14<span class="op">,</span> <span class="op">%</span>rdi</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">55</span><span class="op">&gt;:</span> callq <span class="op">*(%</span>r14<span class="op">)</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">58</span><span class="op">&gt;:</span> addq <span class="op">%</span>rbx<span class="op">,</span> <span class="op">%</span>r15</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">61</span><span class="op">&gt;:</span> cmpq <span class="er">$</span><span class="bn">0x0</span><span class="op">,</span> <span class="op">(%</span>r14<span class="op">)</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">65</span><span class="op">&gt;:</span> jne <span class="bn">0x1770</span> <span class="op">;&lt;+</span><span class="dv">48</span><span class="op">&gt;</span></span></code></pre></div>
+<figcaption>Stackless with C++20</figcaption>
+</figure>
+<figcaption><span id="fig:gen-asm-cmp"
+data-label="fig:gen-asm-cmp"></span> The disassembly code of the kernel
+loops of in-stack generator (a) and stackless generator (b). They have
+identical number of instructions. Note that there is a redundant
+instruction in stackful generator at &lt;+36&gt;, due to limitation of
+compiler optimization.</figcaption>
+</figure>
+<p>Fig. <a href="#fig:gen-asm-cmp" data-reference-type="ref"
+data-reference="fig:gen-asm-cmp">10</a> shows a direct comparison of
+compiled kernel loops of the proposed stackful generator with CACS and
+those of C++20 stackless generator, using the sequence’s sum test case.
+As a result the two implementations have exactly the same number of
+instructions, and they show similar performance numbers (see section <a
+href="#sec:eval" data-reference-type="ref"
+data-reference="sec:eval">4</a> for details).</p>
+<h2 id="sec:ccpn">Calling Convention for Switching Functions</h2>
+<p>The default calling convention (CC) is sub-optimal for functions that
+are expected to switch context, either directly or indirectly. The
+default CC is designed for general cases, in which some registers are
+expected not to be modified by the callee function. This condition is
+not met if the execution of callee clobbers all registers, and context
+switching is one of such cases.</p>
+<p>The optimal strategy to call a switching function is to expect all
+registers will be clobbered, and define all registers as caller-saved,
+so as to avoid unnecessary saving and restoring. We have designed such a
+new CC named as preserve_none, meaning that the function will preserve
+none of the registers, and the callers must spill all necessary
+registers themselves. Applying this new CC to a switching function is
+either beneficial (if the caller is simple) or not worse (if the caller
+is complex), because the number of spilled registers in the new CC can
+not be greater than the total number of caller-saved registers and
+callee-saved registers in the default CC. Note that non-switching
+functions, such as <code>malloc</code>, should use the default CC as
+before.</p>
+<p>The new CC acts as an expansion of CACS for the caller functions to
+unleash the full potential. It is important for simple switching
+functions. Take the yield() function in symmetric coroutine for example,
+which does simple scheduling (e.g. round-robin) then switch the context.
+It doesn’t save / restore any registers by itself, but adopting CACS
+will make it so for all necessary registers to comply to the default CC.
+As a result, there would be hardly performance gain, because the cost is
+only teleported from context_switch() to yield().</p>
+<figure id="fig:yield-preserve-none">
+<figure>
+<div class="sourceCode" id="cb11" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="at">extern</span> Coroutine<span class="op">*</span> CURRENT<span class="op">;</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="pp">#define CO </span><span class="op">\</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a><span class="pp">  </span><span class="ex">__attribute__((preserve_none))</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>CO <span class="dt">void</span> yield<span class="op">()</span> <span class="op">{</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>  <span class="kw">auto</span> from <span class="op">=</span> CURRENT<span class="op">;</span></span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>  <span class="kw">auto</span> to <span class="op">=</span> from<span class="op">-&gt;</span>next<span class="op">;</span></span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>  <span class="cf">if</span> <span class="op">(</span>from <span class="op">==</span> to<span class="op">)</span> <span class="cf">return</span><span class="op">;</span></span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>  CURRENT <span class="op">=</span> to<span class="op">;</span></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>  from<span class="op">-&gt;</span>state <span class="op">=</span> READY<span class="op">;</span></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>  to<span class="op">-&gt;</span>state <span class="op">=</span> RUNNING<span class="op">;</span></span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>  CACS_tail<span class="op">(</span>from<span class="op">,</span> to<span class="op">);</span></span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+</figure>
+<figure>
+<div class="sourceCode" id="cb12" data-language="c++"
+data-numbers="none"><pre class="sourceCode c++"><code class="sourceCode cpp"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">0</span><span class="op">&gt;:</span>  movq <span class="bn">0x1799</span><span class="op">(%</span>rip<span class="op">),</span> <span class="op">%</span>rsi</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">7</span><span class="op">&gt;:</span>  movq <span class="op">(%</span>rsi<span class="op">),</span> <span class="op">%</span>rdi</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">10</span><span class="op">&gt;:</span> cmpq <span class="op">%</span>rsi<span class="op">,</span> <span class="op">%</span>rdi</span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">13</span><span class="op">&gt;:</span> je <span class="bn">0x199f</span> <span class="op">;&lt;+</span><span class="dv">47</span><span class="op">&gt;</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">15</span><span class="op">&gt;:</span> movq <span class="op">%</span>rdi<span class="op">,</span> <span class="bn">0x178a</span><span class="op">(%</span>rip<span class="op">)</span></span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">22</span><span class="op">&gt;:</span> movl <span class="er">$</span><span class="bn">0x0</span><span class="op">,</span> <span class="bn">0x18</span><span class="op">(%</span>rsi<span class="op">)</span></span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">29</span><span class="op">&gt;:</span> movl <span class="er">$</span><span class="bn">0x1</span><span class="op">,</span> <span class="bn">0x18</span><span class="op">(%</span>rdi<span class="op">)</span></span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">36</span><span class="op">&gt;:</span> movq <span class="op">%</span>rsp<span class="op">,</span> <span class="bn">0x8</span><span class="op">(%</span>rsi<span class="op">)</span></span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">40</span><span class="op">&gt;:</span> movq <span class="bn">0x8</span><span class="op">(%</span>rdi<span class="op">),</span> <span class="op">%</span>rsp</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">44</span><span class="op">&gt;:</span> popq <span class="op">%</span>rax</span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">45</span><span class="op">&gt;:</span> jmpq <span class="op">*%</span>rax</span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a><span class="op">&lt;+</span><span class="dv">47</span><span class="op">&gt;:</span> retq</span></code></pre></div>
+</figure>
+<figcaption><span id="fig:yield-preserve-none"
+data-label="fig:yield-preserve-none"></span> The yield() function with
+<code>preserve_none</code> calling convention (left) is compiled to 12
+instructions (right) .</figcaption>
+</figure>
+<p>As shown in Fig. <a href="#fig:yield-preserve-none"
+data-reference-type="ref"
+data-reference="fig:yield-preserve-none">11</a>, a possible yield()
+function with preserve_none CC could be compiled to only 12 machine
+instructions, containing no register saving at all. The callers will
+save and restore registers according to their real needs. The
+implementation also makes use of the fact that the switching is the tail
+of the function, by combining “jumping to target context” and “returning
+to the caller” as a single step — jmpq *%rax, without resorting to the
+final retq<a href="#fn2" class="footnote-ref" id="fnref2"
+role="doc-noteref"><sup>2</sup></a>. If yield() uses the default CC, its
+compiled code will have 12 more instructions for spilling 6 registers as
+required, and the tail-call optimization will become infeasible
+either.</p>
+<p>Applying the new CC is simply to add a new attribute to the target
+function, and the syntax can be further simplified by using the macro
+CO, as shown in Fig <a href="#fig:yield-preserve-none"
+data-reference-type="ref"
+data-reference="fig:yield-preserve-none">11</a>. The burden of applying
+the new CC is much less than that of applying stackless coroutine, which
+forces to change the return types of all involving functions, as well as
+the syntax of every invocation. Whereas the proposed CC is only an
+option to further improve performance.</p>
+<p>The new CC is also applicable to in-stack generators, because they
+switch context too, and the switching functions, yield() and resume() in
+our work, clobber all registers as well. This behavior makes preserving
+registers useless for them.</p>
+<h2 id="implementation">Implementation</h2>
+<p>We have implemented CACS for Clang/GCC compilers, x86-64
+architecture, SysV (AMD64) ABI. The implementation is a library of 2
+header files, respectively for symmetric and asymmetric coroutine
+(generator). The former is ~40 lines, including tail-call optimization;
+and the latter one is ~90 lines, including support for both sides of the
+generators. CACS doesn’t require modifications to compiler tool chain.
+The implementation is based on Photon <span class="citation"
+data-cites="photon">[<a href="#ref-photon"
+role="doc-biblioref">9</a>]</span>, assuming control struct of symmetric
+coroutine defined in it. Specifically, we store switch-back address at
+top of stack, and stack pointer (SP) in the control struct by an offset
+of 0x10.</p>
+<p>We have implemented in-stack generator in the library too, using the
+core concept of CACS. The differences here are: (1) we switch stack
+frames instead of the whole stack; (2) a value is passed in a register
+along with each switching from the generator to its caller; (3) as the
+switching target is fixed and known at compile time for both sides, so
+we can pass the switch-back address to the opposite side via a register,
+in order to exploit a chance to avoid storing it to memory. The
+implementation is a header file of ~90 lines.</p>
+<p>We have implemented the new CC <code>preserve_none</code> in Clang
+and its backend LLVM, primarily in 3 steps. Firstly we define the new CC
+in LLVM’s header file CallingConv.h by adding a new enum member
+PreserveNone. And we define the list for its callee-saved registers in
+the TableGen file X86CallingConv.td, by inheriting the class
+CalleeSavedRegs and setting the list as CSR_NoRegs, a predefined
+constant in LLVM representing an empty list. Then we implement the new
+CC’s behaviors in LLVM. Such as, extending the function
+getCalleeSavedRegs() in class X86RegisterInfo so that it recognizes the
+new CC as argument, and returns an empty list of registers for callee to
+save. We also update the instruction selector’s function
+canGuaranteeTCO() in X86ISelLowering.cpp so that tail-call optimization
+can be applied to invocations with the new CC. Finally we extend the
+frontend clang to accept the new CC as an attribute of function. So that
+if a function is tagged as “__attribute__((preserve_none))”, all
+invocations to that function will be using the proposed CC.</p>
+<p>We have also implemented some helper tools in Clang/LLVM compiler
+tool chain to assist applying the proposed CC to large applications
+without modifying the source code. First, we add an option for Clang to
+accept a list of functions from a file. All functions that occur in the
+list during compilation will be implicitly applied with the proposed CC.
+Second, we add another option for the compiler to automatically applying
+the preserve_none CC (APN) to proper functions. When a function
+<code>foo</code> with default CC calls another function with
+preserve_none CC, we infect <code>foo</code> as preserve_none if (1) its
+address is never taken, not even by a virtual function table; (2) its
+symbol is not exported in the final outcome (the main function is
+considered exported). If these functions do need preserve_none, we must
+mark it explicitly in the source code. APN is realized as an extra pass
+in LLVM, just before instruction selector (PreISel). We first create a
+work list including all functions that are explicitly marked as
+preserve_none. Then for each function in the list, we enumerate its
+callers to determine whether it is possible to infect the caller as
+preserve_none, and if so, we add it to the work list as well after
+infection. The process repeats until the work list becomes empty.</p>
+<h1 id="sec:eval">Evaluation</h1>
+<p>In this section we evaluate stackful coroutine equipped with all the
+proposed optimizations, denoted as CACS in a unification. Because
+in-stack generator is the application of CACS in asymmetric coroutine,
+and the preserve_none CC is an expansion of CACS for the caller
+functions to unleash the full potential of CACS. The CC seems to be
+useful only with CACS together. We also include stack address
+randomization in the evaluation, although it is an independent technique
+and applicable to other systems. We compare the results with Boost and
+C++20 stackless coroutines. Our testbed is a physical server with dual
+Intel Xeon CPU @ 2.2GHz and 128GB of memory.</p>
+<figure id="fig:sum-of-seq">
+<embed src="figures/sum-of-seq.pdf.png" style="width:100.0%" />
+<figcaption><span id="fig:sum-of-seq"
+data-label="fig:sum-of-seq"></span> CACS (in-stack generator) performs
+equally well with C++20 stackless coroutine in sum of
+sequence.</figcaption>
+</figure>
+<figure id="fig:hanoi-proton">
+<embed src="figures/hanoi-proton.pdf.png" style="width:100.0%" />
+<figcaption><span id="fig:hanoi-proton"
+data-label="fig:hanoi-proton"></span> Time cost of coroutine recursion
+normalized to function recursion + callback, solving the puzzle of
+Hanoi. The proposed CACS (in-stack generator) performs
+best.</figcaption>
+</figure>
+<h2 id="sum-of-sequence">Sum of Sequence</h2>
+<p>We evaluate CACS (in-stack generator) using sum-of-sequence
+benchmark, and compare it with other implementations. We also include a
+derived edition of the test case in C++20, by replacing the for-loop in
+producer() with a seemingly equivalent while-loop.</p>
+<p>Fig. <a href="#fig:sum-of-seq" data-reference-type="ref"
+data-reference="fig:sum-of-seq">12</a> shows the results. It is as
+speculated in previous section that CACS performs similarly well with
+C++20 coroutine. It is unexpected that the two editions in C++20 perform
+differently. This suggests that compiler optimization has a room for
+improvement, and this may also suggest that measurement at
+nano-second-scale is difficult, as slight changes may lead to noticeable
+difference.</p>
+<p>We anticipate that CACS and in-stack generator would perform better
+in non-trivial applications, because its target code has less branches
+and memory accesses than those in stackless coroutine (4+4 vs 5+7, as
+shown in Fig. <a href="#fig:gen-asm-cmp" data-reference-type="ref"
+data-reference="fig:gen-asm-cmp">10</a>). These instructions tend to
+have higher miss rate in reality, due to resource contentions in TLB,
+branch predictor, multiple levels of caches, etc.</p>
+<h2 id="hanoi">Hanoi</h2>
+<p>We evaluate CACS (in-stack generator) using the puzzle of Hanoi, and
+compare it with other implementations. Fig. <a href="#fig:hanoi-proton"
+data-reference-type="ref" data-reference="fig:hanoi-proton">13</a> shows
+the results of relative time costs of coroutines normalized to that of
+function recursion + callback. CACS is roughly twice as fast as Boost,
+and they are both much faster than stackless coroutines. C# performs
+close to C++ in function recursion, so we are able to include its result
+as a reference. (Rust currently doesn’t support yielding from recursive
+generator.)</p>
+<figure id="fig:write-fully-proton">
+<embed src="figures/write-fully-proton.pdf.png" style="width:100.0%" />
+<figcaption><span id="fig:write-fully-proton"
+data-label="fig:write-fully-proton"></span> CACS performs better in
+write_fully() than C++20 coroutine and Boost.</figcaption>
+</figure>
+<figure id="fig:yield+cacs">
+<embed src="figures/yield+cacs.pdf.png" style="width:100.0%" />
+<figcaption><span id="fig:yield+cacs"
+data-label="fig:yield+cacs"></span> Breakdown of proposed optimizations
+in yield()</figcaption>
+</figure>
+<p>And we also see with <code>perf</code> tool that CACS reduces the
+number of branch-misses from ~11.8M in Boost to ~1.62M in CACS,
+exhibiting a significant improvement, though it is still lightly worse
+than function recursion and callback. The reason is that the switching
+of context clobbers all registers on both sides, whereas the the
+callback can preserve some registers on the caller’s side. We believe
+there is room for further improvement on this issue, and the optimal
+performance should be very close to that of function recursion.</p>
+<h2 id="write_fully">write_fully()</h2>
+<p>We evaluate CACS using write_fully() in symmetric coroutines, and
+compare it with other implementations. Fig. <a
+href="#fig:write-fully-proton" data-reference-type="ref"
+data-reference="fig:write-fully-proton">14</a> shows the results. CACS
+is much faster than Boost and C++20 stackless coroutine. And the
+breakdown shows that CACS is fast in both scheduling (together with
+context switching) and application, we believe it is due to stack entry
+randomization that avoids coincidental cache collisions between the
+concurrent coroutines. And we confirm this speculation with
+<code>perf</code> tool. It shows that the miss rate of L1 data cache
+drops from 15.83% of Boost to ~0.00% of CACS.</p>
+<h2 id="yield">yield()</h2>
+<p>We evaluate CACS with yield() operation, by making 10 coroutines
+yielding to one another in a loop. We repeat the loop many times and
+calculate the average time cost of a single yield. We then subtract the
+cost of an empty loop from the result, because it can not be ignored in
+the measurement at nano-second-scale. We have managed to avoid any
+compiler optimizations applying to the empty loop, and we also emulate
+the effect of losing all registers after calling to a preserve_none
+function, with a piece of volatile inline assembly code.</p>
+<p>In order to break down the optimizations, we first evaluate vanilla
+Photon without these optimizations. Then we apply them one by one,
+including a special case of small stack. We coincidentally find that
+stack size can influence performance, and a small one that is not
+aligned<a href="#fn3" class="footnote-ref" id="fnref3"
+role="doc-noteref"><sup>3</sup></a> to special numbers can often result
+in better performance. In this benchmark we use 4,112 bytes for the case
+of small stack.</p>
+<p>Fig. <a href="#fig:yield+cacs" data-reference-type="ref"
+data-reference="fig:yield+cacs">15</a> shows the results. The time cost
+of a single yield is reduced dramatically from 8.97ns to 1.52ns.</p>
+<h2 id="http-and-rpc-clients">HTTP and RPC Clients</h2>
+<p>We evaluate CACS with HTTP and RPC client respectively, which can
+represent close-to-reality workloads. We use those components also from
+Photon <span class="citation" data-cites="photon">[<a href="#ref-photon"
+role="doc-biblioref">9</a>]</span>, because they allow us to easily mock
+their networking layers so as for the results are not affected and
+bounded by the physical network hardware. We have managed to avoid most
+of the data-copy (except the header of HTTP response), effectively
+assuming modern offloaded zero-copy network transport. We run the
+benchmarks with a single CPU core, as parallelism is orthogonal to our
+proposals. The RPC framework avoids excessive string parsing operations,
+making every cycle count for the payload. It is especially useful for
+high-performance I/O systems. The test cases are both sending requests
+to obtain 1MB of data in each response. The RPC messages are real ones
+used in our distributed storage system, deployed at scale in our
+production environments. As shown in Fig. <a href="#fig:http-rpc-client"
+data-reference-type="ref" data-reference="fig:http-rpc-client">16</a>,
+CACS clearly improves real-world HTTP and RPC clients.</p>
+<figure id="fig:http-rpc-client">
+<figure>
+<embed src="figures/http-client.pdf.png" style="height:4.9cm" />
+</figure>
+<figure>
+<embed src="figures/rpc-client.pdf.png" style="height:4.9cm" />
+</figure>
+<figcaption><span id="fig:http-rpc-client"
+data-label="fig:http-rpc-client"></span> Performance improvements of
+CACS in HTTP and RPC client respecitvely. In the cases of “CACS w/o APN”
+we don’t enable the automatic applying of preserve_none, thus only the
+coroutine library has that CC explicitly. The two cases of CACS improves
+performance respectively by 11.2% and 18.8% for HTTP client; and 26.2%
+and 45.2% for RPC client.</figcaption>
+</figure>
+<h1 id="related-work">Related Work</h1>
+<p>Coroutine is a form of generalized subroutine that dates back to
+decades ago. There are two types of coroutine: stackful and stackless.
+The former is also known as user-space thread. It assigns a separate
+stack to every coroutine. Whereas the latter makes the default stack
+shared by all coroutines. It realizes so usually by transforming the
+code into event-driven form at compile time. Both coroutine types depend
+on underlaying asynchronous interface to achieve the illusion of
+synchronous I/O (storage, network, etc.). There has been a long-standing
+debate over which model is better for concurrent programming, events or
+threads. The revival of coroutine in recent years may give us a
+different view on this problem.</p>
+<h2 id="stackful-coroutine-and-user-space-threading">Stackful Coroutine
+and User-Space Threading</h2>
+<p>One of the most influential stackful coroutine implementation is
+perhaps the cooperatively scheduled threads and processes in Windows
+3.x, which dominated PC market along with the success of Windows. This
+form of threading was easier to implement and more efficient to run in
+resource-constrained devices, like PCs at that time. However, the model
+requires each thread / process (coroutine) to cooperate with others by
+voluntarily yielding its control of CPU to others at appropriate
+occasions. Otherwise a buggy (non-cooperative) application can block the
+entire system from responding. So this cooperative threading got
+deprecated since Windows 95 in preference of preemptive threading. As a
+matter of fact, the non-cooperation problem is tolerable within a single
+process, and concurrent programming nowadays is becoming increasingly
+important, thus we have the revival of stackful coroutine (stackless
+too), with Go <span class="citation" data-cites="golang">[<a
+href="#ref-golang" role="doc-biblioref">14</a>]</span> being a
+representative.</p>
+<p>Go provides coroutine (goroutine) as a first-class construct since
+its first language design. Goroutine is Go’s answer to concurrent
+programming. It supported only one CPU core (no parallelism) at first,
+and multiple cores later. It was cooperatively scheduled at first, and
+strengthened recently with preemption <span class="citation"
+data-cites="go1.14">[<a href="#ref-go1.14"
+role="doc-biblioref">6</a>]</span>. C/C++ alway have numerous libraries
+of coroutine. Such as state-thread, originally developed by Netscape as
+part of NSPR library, and later maintained by SGI, Yahoo.
+Boost.Coroutine 1, 2 and Boost.Context <span class="citation"
+data-cites="boost">[<a href="#ref-boost"
+role="doc-biblioref">12</a>]</span> are a set of authoritative coroutine
+libraries for modern C++. There are many other languages also have (some
+sort of) support for stackful coroutine, such as Java (since v19) <span
+class="citation" data-cites="java">[<a href="#ref-java"
+role="doc-biblioref">7</a>]</span>, Lua <span class="citation"
+data-cites="lua">[<a href="#ref-lua"
+role="doc-biblioref">16</a>]</span>, PHP (swoole) <span class="citation"
+data-cites="php">[<a href="#ref-php"
+role="doc-biblioref">18</a>]</span>, etc.</p>
+<p>While most coroutines are cooperatively scheduled, which requires a
+task explicitly yields its control of CPU so that one of the others can
+get executed. There are work to add preemption to coroutines. Most
+proposals <span class="citation"
+data-cites="anantaraman2004edf boucher2020lightweight mollison2013bringing">[<a
+href="#ref-anantaraman2004edf" role="doc-biblioref">21</a>, <a
+href="#ref-boucher2020lightweight" role="doc-biblioref">24</a>, <a
+href="#ref-mollison2013bringing" role="doc-biblioref">35</a>]</span> are
+based on timer signal, and this technique has been applied in Go since
+1.14 <span class="citation" data-cites="go1.14">[<a href="#ref-go1.14"
+role="doc-biblioref">6</a>]</span>. This approach is limited due to the
+fact that, some functions are not safe to get preempted by signals, such
+as malloc(). <span class="citation"
+data-cites="shiina2021lightweight">[<a href="#ref-shiina2021lightweight"
+role="doc-biblioref">42</a>]</span> proposed another approach called
+KLT-switching to overcome this issue.</p>
+<p>Stackful coroutine assigns a separate stack to every coroutine. The
+stack must be large enough for maximal possible usage, so it may be a
+waste of memory. Go initially uses segmented stack to save stack memory.
+New stack segments are automatically allocated as function invocations
+need. They are linked for ease of management and traverse. Go switched
+to continuous stack that can grow and shrink after V1.3. The growing is
+realized with memory copy, thus incurs some overhead, and is
+incompatible with C/C++, because it’s impossible to update references to
+stack-allocated objects. Some C/C++ compilers, such as GCC <span
+class="citation" data-cites="gcc">[<a href="#ref-gcc"
+role="doc-biblioref">13</a>]</span> and Clang <span class="citation"
+data-cites="clang">[<a href="#ref-clang"
+role="doc-biblioref">4</a>]</span>, also support segmented stack, but
+this feature have yet to become the mainstream. We want to solve this
+problem with the help of modern hardware. As modern 64-bit address-space
+is big enough for the allocation of many large continuous stacks, we can
+make use of madvise() to request the OS kernel to release unused
+physical memory pages in the stacks, so that they consume only address
+space. When the space is accessed again in the future, OS kernel will
+implicitly allocate new pages via page fault trap to meet the needs. We
+believe this is a sweet point for the trade off between memory
+consumption, execution efficiency and solution compatibility. And we
+call for kernel support for more efficient reclamation of the pages.</p>
+<p>Ref. <span class="citation" data-cites="dolan2013compiler">[<a
+href="#ref-dolan2013compiler" role="doc-biblioref">26</a>]</span> shares
+a common goal with CACS to minimize the number of spilled registers when
+switching context. It proposed a new primitive in compiler backend
+(LLVM) specifically for context switching called <code>SwapStack</code>.
+It also managed to expose the primitive to users throughout the whole
+compiling pipeline. On the other hand, CACS constitutes of a few
+functions in templatized inline assembly code of tens of lines as (part
+of) a library. And it’s only a matter of syntax adjustment for CACS to
+support other compilers (e.g. clang, gcc, cl, etc.) and platforms (e.g.
+Linux, Windows, macOS, etc.). In addition, we propose in-stack generator
+for efficient asymmetric coroutine, which was not addressed in <span
+class="citation" data-cites="dolan2013compiler">[<a
+href="#ref-dolan2013compiler" role="doc-biblioref">26</a>]</span>. And
+we also propose preserve_none calling convention for further
+improvements of all switching functions. It is especially important to
+simple functions, as shown in Fig. <a href="#fig:yield-preserve-none"
+data-reference-type="ref"
+data-reference="fig:yield-preserve-none">11</a>, the yield() function
+would have been compiled to twice more instructions (24 vs 12), if not
+with preserve_none.</p>
+<p>This paper focuses on performance measurement and optimizations of
+coroutine, specifically for stackful coroutine in compiled languages.
+Our work should be applicable for JIT compilation of high-level
+languages. And we believe it is also enlightening for dynamically typed
+languages.</p>
+<h2 id="stackless-coroutine-and-event-driven-paradigm">Stackless
+Coroutine and Event-Driven Paradigm</h2>
+<p>Stackless coroutine in compiled languages is translated into
+event-driven code during compilation, and there exists some work <span
+class="citation"
+data-cites="krohn2007events sallai2007concurrency harris2011ac mccartney2014stackless bernauer2010threads2events bernauer2013comprehensive">[<a
+href="#ref-bernauer2010threads2events" role="doc-biblioref">22</a>, <a
+href="#ref-bernauer2013comprehensive" role="doc-biblioref">23</a>, <a
+href="#ref-harris2011ac" role="doc-biblioref">28</a>, <a
+href="#ref-krohn2007events" role="doc-biblioref">30</a>, <a
+href="#ref-mccartney2014stackless" role="doc-biblioref">33</a>, <a
+href="#ref-sallai2007concurrency" role="doc-biblioref">41</a>]</span>
+that does similar (source-to-source) translation before the advent of
+stackless coroutine in these languages. They usually provide new
+keyword(s) that act(s) like <code>co_await</code> in C++20 stackless
+coroutine, such as <code>tamed</code> in <span class="citation"
+data-cites="krohn2007events">[<a href="#ref-krohn2007events"
+role="doc-biblioref">30</a>]</span> and <code>async</code> in <span
+class="citation" data-cites="harris2011ac">[<a href="#ref-harris2011ac"
+role="doc-biblioref">28</a>]</span>.</p>
+<p>The translations are introduced for dealing with the so-called
+“stacking-ripping” <span class="citation"
+data-cites="adya2002cooperative">[<a href="#ref-adya2002cooperative"
+role="doc-biblioref">20</a>]</span> problem that arises in asynchronous
+even-driven code. They proposed to automatically rip the stacks with
+(pre)compilers instead of doing it manually, as it is complex and
+error-prone. Stackless coroutine can be regarded as the lastest
+evolution of compiler translation in order to get rid of this
+problem.</p>
+<p>Stackful coroutines internally deals with events, too. Take
+Photon <span class="citation" data-cites="photon">[<a href="#ref-photon"
+role="doc-biblioref">9</a>]</span> for example, it has several event
+engines to interoperate with asynchronous &amp; event-driven APIs
+provided by host OS kernel, such as libaio or io_uring, etc. When an
+event occurs, Photon switches to the handling coroutine by loading its
+stack address and jumping to its execution address. This is very similar
+to invoking a callback function in event-driven paradigm, in the
+perspective of machines. The primary difference is that we load the
+address of context into <span>rsp</span> (effectively <span>r7</span>)
+instead of <span>rdi</span> (effectively <span>r5</span>; the 1st
+argument by convention).</p>
+<h2 id="others">Others</h2>
+<p>It has been proved in <span class="citation"
+data-cites="lauer1979duality">[<a href="#ref-lauer1979duality"
+role="doc-biblioref">31</a>]</span> that events and threads are duals,
+though, the debate <span class="citation"
+data-cites="adya2002cooperative ousterhout1996threads von2003events von2003capriccio welsh2001seda">[<a
+href="#ref-adya2002cooperative" role="doc-biblioref">20</a>, <a
+href="#ref-ousterhout1996threads" role="doc-biblioref">40</a>, <a
+href="#ref-von2003events" role="doc-biblioref">43</a>–<a
+href="#ref-welsh2001seda" role="doc-biblioref">45</a>]</span> for the
+better one still seems endless. Today’s debate between stackless and
+stackful coroutines is essentially a continuation of the former one. We
+believe both events and threads have their best-fit scenarios. In
+addition to the optimizations for stackful coroutine, Photon also
+supports scheduling of stackless coroutine in conjunction with stackful
+coroutine, and it provides an optimal memory pool for efficient
+allocation of contexts in stackless coroutine.</p>
+<p>Minimizing the number of registers to spill during context switching
+is also a major goal in preemptive threading, such as <span
+class="citation" data-cites="lin2016enabling">[<a
+href="#ref-lin2016enabling" role="doc-biblioref">32</a>]</span>. It is
+completely different compared to CACS, due to their preemptive
+nature.</p>
+<h1 id="limitations-and-future-work">Limitations and Future Work</h1>
+<p>In this paper, we propose efficient techniques to make stackful
+coroutine fast. Although we have demonstrated promising results, there
+exists limitations that need further improvements.</p>
+<p>We call for compiler / language support for in-stack generator. In
+section <a href="#sec:in-stack-gen" data-reference-type="ref"
+data-reference="sec:in-stack-gen">3.2</a> we have proprosed in-stack
+generator that makes efficient use of registers to pass information
+forth-and-back. When it comes to generator recursion, we have to resort
+to shared memory for passing information about the promise object
+between the frames of recursion. The object actually has a small size of
+16 bytes, and it’s better to share it in a pair of registers. If the
+users create more than one concurrent generator, it’s better for the
+compiler to detect it and create additional stack(s) as needed.
+Compilers can further inline a whole generator if proper conditions are
+met.</p>
+<p>We call for compiler and runtime support for coroutine-local
+variables, in correspondence to thread-local variables. And for an
+optimization that automatically applies the proposed calling convention
+to suitable functions.</p>
+<p>We call for OS kernel support for more efficient page reclamation.
+Stackful coroutine depends on madvise() to request the OS kernel to
+reclaim unused physical memory pages in the stacks (but not releasing
+the virtual addresses). This incurs an overhead to flush involved TLB
+entries in all threads of current process. And the overhead increases
+with the number of threads / CPU cores increasing. There is possibility
+for more efficient flushing policy. For example, current thread can
+flush TLB immediately in the madvise() syscall, whereas others try to
+postpone the flushing until later they enter the kernel themselves.
+There would be an inconsistent view of the process of freeing the unused
+pages. This should be tolerable in many scenarios. And the reclamation
+should take place in an order from the coldest pages to the hottest
+pages.</p>
+<p>We call for architectural support for explicit management of Return
+Stack Buffer (RSB). Modern CPUs generally incorporate an implicit RSB to
+predict target addresses of return instructions, as a special form of
+branch predictor. RSB is supposed to be, after a context switching,
+entirely invalid and inferior to the general predictor in this case.
+That’s why classic context switching functions prefer the pop-and-jmp
+instruction pair to the usual ret. If it’s possible to directly clear
+RSB, or better switch RSB as part of the context, that would be very
+helpful, not only for user-space context switching, but also for
+kernel-space security. There have been reports of vulnerabilities
+regarding RSB, and the kernel developers tried very hard to effectively
+clear RSB <span class="citation" data-cites="fixing-rsb">[<a
+href="#ref-fixing-rsb" role="doc-biblioref">25</a>]</span>, at the cost
+of an “impressive” amount of memory.</p>
+<p>This work is carried out on the x86-64 architecture with SysV (AMD64)
+ABI, which is our primary environment. We expect higher speedups for
+other ABI (e.g. Microsoft x64 ABI) or architecture (e.g. AArch64), as
+they have more registers to spill during a classic context
+switching.</p>
+<h1 id="conclusion">Conclusion</h1>
+<p>In this paper we carry out in-depth measurement on coroutine
+implementations, finding out key issues regarding performance. And we
+propose effective optimizations for stackful coroutine, making its weak
+cases no longer weak, and strong cases even stronger. We also suggest
+some future work for possible further improvement. We implement the
+proposed optimizations in Photon and Clang, respectively. The source
+code is open-sourced on GitHub for blinded review. We’ll try to merge
+our work to corresponding upstreams after review.</p>
+<div id="refs" class="references csl-bib-body" data-entry-spacing="0"
+role="list">
+<div id="ref-dragonwell" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[1] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Alibaba Dragonwell8
+Extended Edition Release Notes</span>. <a
+href="https://github.com/dragonwell-project/dragonwell8/wiki/Alibaba-Dragonwell8-Extended-Edition-Release-Notes"
+class="uri">https://github.com/dragonwell-project/dragonwell8/wiki/Alibaba-Dragonwell8-Extended-Edition-Release-Notes</a>.</div>
+</div>
+<div id="ref-rust139" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[2] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Announcing Rust
+1.39.0</span>. <a
+href="https://blog.rust-lang.org/2019/11/07/Rust-1.39.0.html"
+class="uri">https://blog.rust-lang.org/2019/11/07/Rust-1.39.0.html</a>.</div>
+</div>
+<div id="ref-cpp20std" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[3] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span
+class="nocase">C++20 standard</span>. <a
+href="https://isocpp.org/std/the-standard"
+class="uri">https://isocpp.org/std/the-standard</a>.</div>
+</div>
+<div id="ref-clang" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[4] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span
+class="nocase">Clang: a C language family frontend for LLVM</span>. <a
+href="https://clang.llvm.org/"
+class="uri">https://clang.llvm.org/</a>.</div>
+</div>
+<div id="ref-dpdk" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[5] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Data Plane
+Development Kit</span>. <a href="https://www.dpdk.org/"
+class="uri">https://www.dpdk.org/</a>.</div>
+</div>
+<div id="ref-go1.14" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[6] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Go 1.14 Release
+Notes</span>. <a href="https://golang.org/doc/go1.14"
+class="uri">https://golang.org/doc/go1.14</a>.</div>
+</div>
+<div id="ref-java" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[7] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Java 21 Release
+Notes</span>. <a
+href="https://www.oracle.com/java/technologies/javase/21-relnote-issues.html"
+class="uri">https://www.oracle.com/java/technologies/javase/21-relnote-issues.html</a>.</div>
+</div>
+<div id="ref-js17" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[8] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>JavaScript ES2017
+Specification</span>. <a href="https://262.ecma-international.org/8.0/"
+class="uri">https://262.ecma-international.org/8.0/</a>.</div>
+</div>
+<div id="ref-photon" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[9] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span
+class="nocase">Photon libOS</span>. <a
+href="https://photonlibos.github.io/"
+class="uri">https://photonlibos.github.io/</a>.</div>
+</div>
+<div id="ref-spdk" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[10] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Storage Performance
+Development Kit</span>. <a href="https://spdk.io/"
+class="uri">https://spdk.io/</a>.</div>
+</div>
+<div id="ref-swift55" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[11] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>Swift 5.5 Release
+Notes</span>. <a href="https://www.swift.org/blog/swift-5.5-released/"
+class="uri">https://www.swift.org/blog/swift-5.5-released/</a>.</div>
+</div>
+<div id="ref-boost" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[12] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">The
+Boost libraries</span>. <a
+href="https://www.boost.org/users/history/version_1_81_0.htm/"
+class="uri">https://www.boost.org/users/history/version_1_81_0.htm/</a>.</div>
+</div>
+<div id="ref-gcc" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[13] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">the
+GNU Compiler Collection</span>. <a href="https://gcc.gnu.org/"
+class="uri">https://gcc.gnu.org/</a>.</div>
+</div>
+<div id="ref-golang" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[14] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span>The Go Programming
+Language</span>. <a href="https://go.dev/"
+class="uri">https://go.dev/</a>.</div>
+</div>
+<div id="ref-csharp" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[15] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">The
+history of C#</span>. <a
+href="https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-version-history"
+class="uri">https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-version-history</a>.</div>
+</div>
+<div id="ref-lua" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[16] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">The
+Lua programming language</span>. <a href="https://www.lua.org/"
+class="uri">https://www.lua.org/</a>.</div>
+</div>
+<div id="ref-wanbox" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[17] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">The
+micro benchmarks once used by C++ committee to demonstrate the advantage
+of stackless coroutine over stackful coroutine</span>. <a
+href="https://wandbox.org/permlink/J2xY7U4Hf6rryeCr"
+class="uri">https://wandbox.org/permlink/J2xY7U4Hf6rryeCr</a>.</div>
+</div>
+<div id="ref-php" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[18] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span class="nocase">The
+Swoole Extension of PHP</span>. <a
+href="https://www.php.net/manual/en/book.swoole.php"
+class="uri">https://www.php.net/manual/en/book.swoole.php</a>.</div>
+</div>
+<div id="ref-py35" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[19] </div><div
+class="csl-right-inline">Accessed: 2023-11-28. <span
+class="nocase">What’s new in Python 3.5</span>. <a
+href="https://docs.python.org/3/whatsnew/3.5.html"
+class="uri">https://docs.python.org/3/whatsnew/3.5.html</a>.</div>
+</div>
+<div id="ref-adya2002cooperative" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[20] </div><div
+class="csl-right-inline">Adya, A. et al. 2002. Cooperative task
+management without manual stack management. <em>USENIX annual technical
+conference, general track</em> (2002), 289–302.</div>
+</div>
+<div id="ref-anantaraman2004edf" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[21] </div><div
+class="csl-right-inline">Anantaraman, A. et al. 2004. Edf-dvs scheduling
+on the ibm embedded powerpc 405lp. <em>Proceedings of the IBM p= ac2
+conference</em> (2004).</div>
+</div>
+<div id="ref-bernauer2010threads2events" class="csl-entry"
+role="listitem">
+<div class="csl-left-margin">[22] </div><div
+class="csl-right-inline">Bernauer, A. et al. 2010. Threads2events: An
+automatic code generation approach. <em>Proceedings of the 6th workshop
+on hot topics in embedded networked sensors</em> (2010), 1–5.</div>
+</div>
+<div id="ref-bernauer2013comprehensive" class="csl-entry"
+role="listitem">
+<div class="csl-left-margin">[23] </div><div
+class="csl-right-inline">Bernauer, A. and Römer, K. 2013. A
+comprehensive compiler-assisted thread abstraction for
+resource-constrained systems. <em>Proceedings of the 12th international
+conference on information processing in sensor networks</em> (2013),
+167–178.</div>
+</div>
+<div id="ref-boucher2020lightweight" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[24] </div><div
+class="csl-right-inline">Boucher, S. et al. 2020. Lightweight
+preemptible functions. <em>2020 USENIX annual technical conference
+(USENIX ATC 20)</em> (2020), 465–477.</div>
+</div>
+<div id="ref-fixing-rsb" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[25] </div><div
+class="csl-right-inline">Corbet, J. Accessed: 2023-11-28. <span
+class="nocase">Stuffing the return stack buffer</span>. <a
+href="https://lwn.net/Articles/901834/"
+class="uri">https://lwn.net/Articles/901834/</a>.</div>
+</div>
+<div id="ref-dolan2013compiler" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[26] </div><div
+class="csl-right-inline">Dolan, S. et al. 2013. Compiler support for
+lightweight context switching. <em>ACM Transactions on Architecture and
+Code Optimization (TACO)</em>. 9, 4 (2013), 1–25.</div>
+</div>
+<div id="ref-eflops" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[27] </div><div
+class="csl-right-inline">Dong, J. et al. 2020. Eflops: Algorithm and
+system co-design for a high performance distributed training platform.
+<em>2020 IEEE international symposium on high performance computer
+architecture (HPCA)</em> (2020), 610–622.</div>
+</div>
+<div id="ref-harris2011ac" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[28] </div><div
+class="csl-right-inline">Harris, T. et al. 2011. AC: Composable
+asynchronous IO for native languages. <em>ACM SIGPLAN Notices</em>. 46,
+10 (2011), 903–920.</div>
+</div>
+<div id="ref-fibers-no-scheduler" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[29] </div><div
+class="csl-right-inline">Kowalke, O. 2018-02-11. Fibers without
+scheduler. <em>C++ commiittee conference</em> ( 2018-02-11),
+P0876R0.</div>
+</div>
+<div id="ref-krohn2007events" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[30] </div><div
+class="csl-right-inline">Krohn, M.N. et al. 2007. Events can make sense.
+<em>USENIX annual technical conference</em> (2007), 87–100.</div>
+</div>
+<div id="ref-lauer1979duality" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[31] </div><div
+class="csl-right-inline">Lauer, H.C. and Needham, R.M. 1979. On the
+duality of operating system structures. <em>ACM SIGOPS Operating Systems
+Review</em>. 13, 2 (1979), 3–19.</div>
+</div>
+<div id="ref-lin2016enabling" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[32] </div><div
+class="csl-right-inline">Lin, Z. et al. 2016. Enabling efficient
+preemption for SIMT architectures with lightweight context switching.
+<em>SC’16: Proceedings of the international conference for high
+performance computing, networking, storage and analysis</em> (2016),
+898–908.</div>
+</div>
+<div id="ref-mccartney2014stackless" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[33] </div><div
+class="csl-right-inline">McCartney, W.P. and Sridhar, N. 2014. Stackless
+multi-threading for embedded systems. <em>IEEE Transactions on
+Computers</em>. 64, 10 (2014), 2940–2952.</div>
+</div>
+<div id="ref-memblaze7940" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[34] </div><div
+class="csl-right-inline">Memblaze Accessed: 2023-11-28. <span
+class="nocase">PBlaze®7 7940 Series NVMe™ SSD: PCIe 5.0, High
+Performance for any Workload</span>. <a
+href="https://www.memblaze.com/en/product/pblaze7/658.html"
+class="uri">https://www.memblaze.com/en/product/pblaze7/658.html</a>.</div>
+</div>
+<div id="ref-mollison2013bringing" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[35] </div><div
+class="csl-right-inline">Mollison, M.S. and Anderson, J.H. 2013.
+Bringing theory into practice: A userspace library for multicore
+real-time scheduling. <em>2013 IEEE 19th real-time and embedded
+technology and applications symposium (RTAS)</em> (2013), 283–292.</div>
+</div>
+<div id="ref-moura2009revisiting" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[36] </div><div
+class="csl-right-inline">Moura, A.L.D. and Ierusalimschy, R. 2009.
+Revisiting coroutines. <em>ACM Transactions on Programming Languages and
+Systems (TOPLAS)</em>. 31, 2 (2009), 1–31.</div>
+</div>
+<div id="ref-re-fibers-glass" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[37] </div><div
+class="csl-right-inline">Nat Goodspeed, O.K. 2019-01-06. Response to
+<span>“fibers under the magnifying glass.”</span> <em>C++ commiittee
+conference</em> ( 2019-01-06), P0866R0.</div>
+</div>
+<div id="ref-fibers-glass" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[38] </div><div
+class="csl-right-inline">Nishanov, G. 2018-11-20. Fibers under the
+magnifying glass. <em>C++ commiittee conference</em> (2018-11-20),
+P1364R0.</div>
+</div>
+<div id="ref-re-re-fibers-glass" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[39] </div><div
+class="csl-right-inline">Nishanov, G. 2019-03-08. Response to response
+to <span>“fibers under the magnifying glass.”</span> <em>C++ commiittee
+conference</em> (2019-03-08), P1520R0.</div>
+</div>
+<div id="ref-ousterhout1996threads" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[40] </div><div
+class="csl-right-inline">Ousterhout, J. 1996. Why threads are a bad idea
+(for most purposes). <em>Presentation given at the 1996 usenix annual
+technical conference</em> (1996), 33–131.</div>
+</div>
+<div id="ref-sallai2007concurrency" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[41] </div><div
+class="csl-right-inline">Sallai, J. et al. 2007. A concurrency
+abstraction for reliable sensor network applications. <em>Reliable
+systems on unreliable networked platforms: 12th monterey workshop 2005,
+laguna beach, CA, USA, september 22-24, 2005. Revised selected papers
+12</em> (2007), 143–160.</div>
+</div>
+<div id="ref-shiina2021lightweight" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[42] </div><div
+class="csl-right-inline">Shiina, S. et al. 2021. Lightweight preemptive
+user-level threads. <em>Proceedings of the 26th ACM SIGPLAN symposium on
+principles and practice of parallel programming</em> (2021),
+374–388.</div>
+</div>
+<div id="ref-von2003events" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[43] </div><div
+class="csl-right-inline">Von Behren, J.R. et al. 2003. Why events are a
+bad idea (for high-concurrency servers). <em>HotOS</em> (2003),
+19–24.</div>
+</div>
+<div id="ref-von2003capriccio" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[44] </div><div
+class="csl-right-inline">Von Behren, R. et al. 2003. Capriccio: Scalable
+threads for internet services. <em>ACM SIGOPS Operating Systems
+Review</em>. 37, 5 (2003), 268–281.</div>
+</div>
+<div id="ref-welsh2001seda" class="csl-entry" role="listitem">
+<div class="csl-left-margin">[45] </div><div
+class="csl-right-inline">Welsh, M. et al. 2001. SEDA: An architecture
+for scalable, well-conditioned internet services. <em>Proceedings of the
+18th symposium on operating systems principles (SOSP-18), lake louise,
+canada</em> (2001).</div>
+</div>
+</div>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>For blind review purpose, we have put related resources
+at <a href="https://github.com/for-blinded-review"
+class="uri">https://github.com/for-blinded-review</a>. We’ll try to
+merge them to corresponding upstreams after review.<a href="#fnref1"
+class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+<li id="fn2"><p>jmpq is faster than retq in this case, because its
+general-purpose branch predictor has a somewhat higher hit rate than
+that of retq, which uses Return Stack Buffer (RSB) for branch target
+prediction, and it is supposed to miss in this case due to the switching
+of stack.<a href="#fnref2" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn3"><p>but required to be 16-byte-aligned<a href="#fnref3"
+class="footnote-back" role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section>
+</body>
+</html>
