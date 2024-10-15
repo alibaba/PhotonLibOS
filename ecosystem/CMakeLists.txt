@@ -3,7 +3,7 @@
 
 include(FetchContent)
 
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0") 
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
     # set DOWNLOAD_EXTRACT_TIMESTAMP ON cmake 3.24 or above
     cmake_policy(SET CMP0135 NEW)
 endif()
@@ -50,26 +50,11 @@ if (CMAKE_VERSION VERSION_LESS "3.18.0")
 endif()
 message(STATUS "Rapidyaml source dir: ${rapidyaml_SOURCE_DIR}")
 
-# cpp-redis
-FetchContent_Declare(
-    cpp-redis
-    URL ${PHOTON_CPP_REDIS_SOURCE}
-    URL_HASH
-        SHA256=3859289d8254685fc775bda73de03dad27df923423b8ceb375b02d036c03b02f
-    UPDATE_DISCONNECTED 1)
-# uses only a simple header, so do not add sub directory to avoid unnecessary build
-# do not use FetchContent_MakeAvailable, just populate it.
-FetchContent_GetProperties(cpp-redis)
-if(NOT cpp-redis_POPULATED)
-  FetchContent_Populate(cpp-redis)
-endif()
-message(STATUS "cpp-redis source dir: ${cpp-redis_SOURCE_DIR}")
-
 add_library(ecosystem_deps INTERFACE)
 target_include_directories(
     ecosystem_deps
     INTERFACE ${rapidjson_SOURCE_DIR}/include ${rapidxml_SOURCE_DIR} ${rapidyaml_SOURCE_DIR}
-    ${cpp-redis_SOURCE_DIR}/includes)
+    )
 get_property(
     incs
     TARGET ecosystem_deps
