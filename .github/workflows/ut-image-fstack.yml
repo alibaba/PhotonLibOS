@@ -44,7 +44,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           # path context
-          context: .github/workflows/fstack
+          context: .github/workflows/images/fstack
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:${{ github.sha }}

@@ -44,7 +44,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           # path context
-          context: .github/workflows/base
+          context: .github/workflows/images/base
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
