@@ -49,4 +49,4 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/${{ env.IMAGE_NAME}}:latest
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
