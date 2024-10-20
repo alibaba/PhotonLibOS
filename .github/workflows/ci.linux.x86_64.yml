@@ -214,7 +214,7 @@ jobs:
   fstack:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/beef9999/photon-ut-fstack:latest
+      image: ghcr.io/alibaba/photon-ut-fstack:latest
       options: --cpus 4 --privileged
     steps:
       - uses: actions/checkout@v4
