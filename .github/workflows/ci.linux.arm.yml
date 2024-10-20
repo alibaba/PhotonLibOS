@@ -11,7 +11,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4
 
     steps:
@@ -46,7 +46,7 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4
 
     steps:
