@@ -26,7 +26,7 @@ git clone https://github.com/alibaba/PhotonLibOS.git
 ```  
   
 ```bash
-dnf install gcc-c++ cmake
+dnf install git gcc-c++ cmake
 dnf install openssl-devel libcurl-devel libaio-devel zlib-devel
 ```
 
@@ -36,7 +36,7 @@ dnf install openssl-devel libcurl-devel libaio-devel zlib-devel
 ```
 
 ```bash
-apt install cmake
+apt install git cmake
 apt install libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
 ```
 
