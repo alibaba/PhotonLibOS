@@ -10,7 +10,7 @@ jobs:
   gcc850:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -44,7 +44,7 @@ jobs:
   gcc921:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -79,7 +79,7 @@ jobs:
   gcc1031:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -114,7 +114,7 @@ jobs:
   gcc1121:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -149,7 +149,7 @@ jobs:
   gcc1211:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
+      image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -184,7 +184,7 @@ jobs:
   fstack:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/beef9999/photon-ut-fstack:latest
+      image: ghcr.io/alibaba/photon-ut-fstack:latest
       options: --cpus 4 --privileged
     steps:
       - uses: actions/checkout@v4
@@ -204,11 +204,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
+          export PHOTON_SRC_DIR=`pwd`
           dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
           dnf config-manager --set-enabled powertools
           dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel
-          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git
-          cd rocksdb
+          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git /opt/rocksdb
+          cd /opt/rocksdb
+          rm -rf third-party/PhotonLibOS
+          ln -s $PHOTON_SRC_DIR third-party/PhotonLibOS
           ./photon-auto-convert.sh
           cmake -B build -D WITH_TESTS=on -D INIT_PHOTON_IN_ENV=on -D WITH_LZ4=on -D WITH_SNAPPY=on \
             -D CMAKE_BUILD_TYPE=Debug
