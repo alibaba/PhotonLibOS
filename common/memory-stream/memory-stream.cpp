@@ -198,6 +198,96 @@ public:
 
 };
 
+using namespace photon::net;
+class StringSocketStreamImpl : public StringSocketStream {
+public:
+    bool _closed = false;
+    #define ERROR_RETURN(code, retv) {errno = code; return retv; }
+    virtual ssize_t recv(void *buf, size_t count, int flags = 0) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        size_t n = rand() % 8 + 1;
+        if (n > _inv.size()) n = _inv.size();
+        if (n > count) n = count;
+        memcpy(buf, _inv.data(), n);
+        _inv = _inv.substr(n);
+        return n;
+    }
+    virtual ssize_t recv(const struct iovec *iov, int iovcnt, int flags = 0) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        while(!iov->iov_base || !iov->iov_len)
+            if (iovcnt) { ++iov, --iovcnt; }
+            else return -1;
+        return recv(iov->iov_base, iov->iov_len);
+    }
+    virtual ssize_t send(const void *buf, size_t count, int flags = 0) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        size_t n = rand() % 8 + 1;
+        if (n > count) n = count;
+        auto p = (const char*)buf;
+        _out.append(p, p + n);
+        return n;
+    }
+    virtual ssize_t send(const struct iovec *iov, int iovcnt, int flags = 0) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        while(!iov->iov_base || !iov->iov_len)
+            if (iovcnt) { ++iov, --iovcnt; }
+            else return -1;
+        return send(iov->iov_base, iov->iov_len);
+    }
+    virtual int close() override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        _closed = true;
+        _inv = {};
+        _in.clear();
+        _out.clear();
+        return 0;
+    }
+    virtual ssize_t read(void *buf, size_t count) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        if (count > _inv.size()) count = _inv.size();
+        memcpy(buf, _inv.data(), count);
+        return count;
+    }
+    virtual ssize_t readv(const struct iovec *iov, int iovcnt) override {
+        ssize_t s = 0;
+        for (int i = 0; i < iovcnt; ++i) {
+            ssize_t ret = read(iov[i].iov_base, iov[i].iov_len);
+            if (ret < 0) return ret;
+            s += ret;
+            if (ret < (ssize_t)iov[i].iov_len) break;
+        }
+        return s;
+    }
+    virtual ssize_t write(const void *buf, size_t count) override {
+        if (_closed) ERROR_RETURN(ECANCELED, -1);
+        auto p = (const char*)buf;
+        _out.append(p, p + count);
+        return count;
+    }
+    virtual ssize_t writev(const struct iovec *iov, int iovcnt) override {
+        ssize_t s = 0;
+        for (int i = 0; i < iovcnt; ++i) {
+            ssize_t ret = write(iov[i].iov_base, iov[i].iov_len);
+            if (ret < 0) return ret;
+            s += ret;
+            if (ret < (ssize_t)iov[i].iov_len) break;
+        }
+        return s;
+    }
+    virtual Object* get_underlay_object(uint64_t recursion = 0) override { return 0; }
+    virtual ssize_t sendfile(int in_fd, off_t offset, size_t count) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int getsockname(EndPoint& addr) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int getpeername(EndPoint& addr) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int getsockname(char* path, size_t count) override { ERROR_RETURN(ENOSYS, -1); }
+    virtual int getpeername(char* path, size_t count) override { ERROR_RETURN(ENOSYS, -1); }
+};
+
 IStream* new_fault_stream(IStream* stream, int flag, bool ownership) {
     return new FaultStream(stream, flag, ownership);
+}
+
+StringSocketStream* new_string_socket_stream() {
+    return new StringSocketStreamImpl;
 }

@@ -30,29 +30,29 @@ namespace redis {
 #endif
 
 
-class BufferedStream;
+class _RedisClient;
 class refstring : public std::string_view {
-    BufferedStream* _bs = nullptr;
+    _RedisClient* _rc = nullptr;
     void add_ref();
     void del_ref();
 public:
     using std::string_view::string_view;
     refstring(std::string_view sv) : std::string_view(sv) { }
-    refstring(BufferedStream* bs, std::string_view sv) :
-            std::string_view(sv), _bs(bs) { add_ref(); }
+    refstring(_RedisClient* bs, std::string_view sv) :
+            std::string_view(sv), _rc(bs) { add_ref(); }
     refstring(const refstring& rhs) :
-            std::string_view(rhs), _bs(rhs._bs) { add_ref(); }
+            std::string_view(rhs), _rc(rhs._rc) { add_ref(); }
     refstring& operator = (const refstring& rhs) {
         if (this == &rhs) return *this;
         *(std::string_view*)this = rhs;
         del_ref();
-        _bs = rhs._bs;
+        _rc = rhs._rc;
         add_ref();
         return *this;
     }
     void release() {
         del_ref();
-        _bs = nullptr;
+        _rc = nullptr;
         (std::string_view&) *this = {};
     }
     ~refstring() { del_ref(); }
@@ -169,7 +169,7 @@ using net::ISocketStream;
 #define CRLF "\r\n"
 #define BSMARK "$"
 
-class BufferedStream {
+class _RedisClient {
 protected:
     ISocketStream* _s = nullptr;
     uint32_t _i = 0, _j = 0, _o = 0, _bufsize = 0, _refcnt = 0;
@@ -196,7 +196,7 @@ protected:
     size_t __MAX_SIZE(_array_header x) { return 32; }
     size_t __MAX_SIZE(_char x) { return 1; }
 
-    explicit BufferedStream(ISocketStream* s, uint32_t bufsize) :
+    explicit _RedisClient(ISocketStream* s, uint32_t bufsize) :
         _s(s), _bufsize(bufsize) { }
 
 public:
@@ -205,7 +205,7 @@ public:
         return (_o + threshold < _bufsize) ? false :
                           (flush(ebuf, size), true);
     }
-    BufferedStream& put(std::string_view x) {
+    _RedisClient& put(std::string_view x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
         memcpy(_o + obuf(), x.data(), x.size());
         _o += x.size();
@@ -220,7 +220,7 @@ public:
         _o += ret;
         return {buf, (size_t)ret};
     }
-    BufferedStream& put(_strint x) {
+    _RedisClient& put(_strint x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
         static_assert(sizeof(x) == sizeof(long long), "...");
         auto s = _snprintf("$00\r\n%ld\r\n", (long)x._x);
@@ -230,44 +230,44 @@ public:
         (char&)s[2] = '0' + n % 10;
         return *this;
     }
-    BufferedStream& put(int64_t x) {
+    _RedisClient& put(int64_t x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
         _snprintf("%ld", (long)x);
         return *this;
     }
-    BufferedStream& put(_char x) {
+    _RedisClient& put(_char x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
         obuf()[_o++] = x._x;
         return *this;
     }
-    BufferedStream& put() { return *this; }
+    _RedisClient& put() { return *this; }
     template<typename Ta, typename Tb, typename...Ts>
-    BufferedStream& put(const Ta& xa, const Tb& xb, const Ts&...xs) {
+    _RedisClient& put(const Ta& xa, const Tb& xb, const Ts&...xs) {
         return put(xa), put(xb, xs...);
     }
-    BufferedStream& operator << (int64_t x) {
+    _RedisClient& operator << (int64_t x) {
         // flush_if_low_space(__MAX_SIZE(x));
         return put(x);
     }
-    BufferedStream& operator << (_char x) {
+    _RedisClient& operator << (_char x) {
         // flush_if_low_space(__MAX_SIZE(x));
         return put(x);
     }
-    BufferedStream& operator << (const _strint& x) {
+    _RedisClient& operator << (const _strint& x) {
         // flush_if_low_space(__MAX_SIZE(x));
         return put(x);
     }
     template<typename...Ts>
-    BufferedStream& write_item(const Ts&...xs) {
+    _RedisClient& write_item(const Ts&...xs) {
         auto size = _sum(__MAX_SIZE(xs)...);
         flush_if_low_space(size);
         return put(xs...);
     }
-    BufferedStream& operator << (std::string_view x) {
+    _RedisClient& operator << (std::string_view x) {
         return x.empty() ? write_item(BSMARK "-1" CRLF) :
             write_item(_char{BSMARK[0]}, (int64_t)x.size(), CRLF, x, CRLF);
     }
-    BufferedStream& operator << (_array_header x) {
+    _RedisClient& operator << (_array_header x) {
         return write_item(_char{array<>::mark()}, x.n, CRLF);
     }
 
@@ -696,15 +696,17 @@ public:
 
 };
 
-inline void refstring::add_ref() { if (_bs) _bs->_refcnt++; }
-inline void refstring::del_ref() { if (_bs) _bs->_refcnt--; }
+inline void refstring::add_ref() { if (_rc) _rc->_refcnt++; }
+inline void refstring::del_ref() { if (_rc) _rc->_refcnt--; }
 
 template<uint32_t BUF_SIZE = 16*1024UL>
-class _BufferedStream : public BufferedStream {
+class __RedisClient : public _RedisClient {
     char _buf[BUF_SIZE * 2];
 public:
-    _BufferedStream(ISocketStream* s) : BufferedStream(s, BUF_SIZE) { }
+    __RedisClient(ISocketStream* s) : _RedisClient(s, BUF_SIZE) { }
 };
+
+using RedisClient = __RedisClient<16*1024UL>;
 
 #pragma GCC diagnostic pop
 

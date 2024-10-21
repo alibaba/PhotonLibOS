@@ -25,7 +25,7 @@ namespace photon {
 using namespace net;
 namespace redis {
 
-any BufferedStream::parse_response_item() {
+any _RedisClient::parse_response_item() {
     switch (auto mark = this->get_char()) {
     case simple_string::mark():
         return get_simple_string();
@@ -44,7 +44,7 @@ any BufferedStream::parse_response_item() {
     }
 }
 
-void BufferedStream::__refill(size_t atleast) {
+void _RedisClient::__refill(size_t atleast) {
     size_t room = _bufsize - _j;
     if (!room || room < atleast) { if (_refcnt > 0) {
         LOG_ERROR_RETURN(0, , "no enough buffer space");
@@ -60,7 +60,7 @@ void BufferedStream::__refill(size_t atleast) {
     _j += ret;
 }
 
-std::string_view BufferedStream::__getline() {
+std::string_view _RedisClient::__getline() {
     size_t pos;
     assert(_j >= _i);
     estring_view sv(ibuf() + _i, _j - _i);
@@ -85,7 +85,7 @@ std::string_view BufferedStream::__getline() {
     return {begin, size_t(end - begin)};
 }
 
-std::string_view BufferedStream::__getstring(size_t length) {
+std::string_view _RedisClient::__getstring(size_t length) {
     assert(_i <= _j);
     size_t available = _j - _i;
     if (available < length + 2)
@@ -101,7 +101,7 @@ std::string_view BufferedStream::__getstring(size_t length) {
     return {begin, length};
 }
 
-void BufferedStream::flush(const void* extra_buffer, size_t size) {
+void _RedisClient::flush(const void* extra_buffer, size_t size) {
     iovec iov[2];
     iov[0] = {obuf(), _o};
     int iovcnt = 1;
