@@ -8,8 +8,8 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
-* We present a article to illustrate why Photon's stackful coroutine is fast.
-[link](https://photonlibos.github.io/blog/stackful-coroutine-made-fast)
+* We present an article to illustrate the theory of Photon's coroutine.
+[Stackful Coroutine Made Fast](https://photonlibos.github.io/blog/stackful-coroutine-made-fast)
 * Version 0.8 has been released in August 2024
 * Feb 2024，[中文文档](https://photonlibos.github.io/cn/docs/category/introduction)在官网上线了
 * Since 0.7, Photon will use release branches to enhance the reliability of software delivery. Bugfix will be merged into a stable release at first, then to higher release versions, and finally main.
