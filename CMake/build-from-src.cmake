@@ -75,7 +75,7 @@ function(build_from_src [dep])
         ExternalProject_Get_Property(googletest SOURCE_DIR)
         ExternalProject_Get_Property(googletest BINARY_DIR)
         set(GOOGLETEST_INCLUDE_DIRS ${SOURCE_DIR}/googletest/include ${SOURCE_DIR}/googlemock/include PARENT_SCOPE)
-        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgtest.a PARENT_SCOPE)
+        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgtest_main.a ${BINARY_DIR}/lib/libgtest.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "openssl")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/openssl-build)
