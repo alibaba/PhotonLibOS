@@ -54,7 +54,7 @@ static std::atomic<int> work(0);
 
 template<typename T, uint64_t val>
 int callback(void*, AsyncResult<T>* ret) {
-    EXPECT_EQ(val, ret->result);
+    EXPECT_EQ(val, (uint64_t) ret->result);
     LOG_DEBUG("DONE `", VALUE(ret->operation));
     work--;
     return 0;
