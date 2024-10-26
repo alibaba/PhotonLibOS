@@ -136,11 +136,11 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
         photon::thread_create(&ph_act, &a);
     }
     sem.wait(10);
-    EXPECT_EQ(1, ocache._set.size());
+    EXPECT_EQ(1UL, ocache._set.size());
     ocache.expire();
     photon::thread_usleep(1100UL * 1000);
     ocache.expire();
-    EXPECT_EQ(0, ocache._set.size());
+    EXPECT_EQ(0UL, ocache._set.size());
 }
 
 TEST(ObjectCache, multithread) {
