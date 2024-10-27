@@ -649,6 +649,20 @@ namespace photon
     }
 
     static void _photon_thread_die(thread* th) asm("_photon_thread_die");
+    struct __cxa_eh_globals
+    {
+        void *	caughtExceptions;
+        unsigned int	uncaughtExceptions;
+    };
+
+    extern "C" __cxa_eh_globals* __cxa_get_globals (void);
+
+    static void* cxa_get_globals() asm("cxa_get_globals");
+
+    static __attribute__((used))
+    void* cxa_get_globals() {
+        return __cxa_get_globals();
+    }
 
 #if defined(__x86_64__)
 #if !defined(_WIN64)
@@ -812,6 +826,11 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        sub sp, sp, #16
+        bl  cxa_get_globals
+        add sp, sp, #16
+        str xzr, [x0, #0x0]
+        str wzr, [x0, #0x8]
         ldp x0, x1, [x29, #0x40] //; load arg, start into x0, x1
         str xzr, [x29, #0x40]    //; set arg as 0
         blr x1                   //; start(x0)
@@ -828,6 +847,7 @@ R"(
 
     inline void switch_context(thread* from, thread* to) {
         prepare_switch(from, to);
+        auto exception_state = *__cxa_get_globals();
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("x0") = from->stack.pointer_ref();
         register auto t asm("x1") = _t_;
@@ -842,6 +862,7 @@ R"(
                      // Corouptable register, may change ,should save
                      "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
                      "x17", "x18");
+        *__cxa_get_globals() = exception_state;
     }
 
     inline void switch_context_defer(thread* from, thread* to,

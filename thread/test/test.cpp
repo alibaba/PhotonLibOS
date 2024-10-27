@@ -21,6 +21,7 @@ limitations under the License.
 #include <stdlib.h>
 #include <queue>
 #include <algorithm>
+#include <exception>
 #include <sys/time.h>
 #include <gflags/gflags.h>
 #include "../../test/gtest.h"
@@ -402,6 +403,49 @@ TEST(Perf, ThreadSwitchWithStandaloneTSUpdater)
     DEFER(timestamp_updater_fini());
     test_thread_switch(10, 16 * PAGE_SIZE);
     return;
+}
+
+TEST(exception, switch)
+{
+    class Foo {
+    public:
+        ~Foo() {
+            LOG_INFO("before thread_yield():", VALUE(std::uncaught_exceptions()));
+            photon::thread_yield();
+            LOG_INFO("after  thread_yield():", VALUE(std::uncaught_exceptions()));
+        }
+    };
+
+    class Bar {
+    public:
+        ~Bar() {
+            try {
+                Foo foo;
+                throw "asdf";
+            } catch(...) { }
+        }
+    };
+
+    bool quit = false;
+    auto th = photon::thread_create11([&](){
+        while(!quit) {
+            LOG_INFO(VALUE(std::uncaught_exceptions()));
+            EXPECT_EQ(std::uncaught_exceptions(), 0);
+            try {
+                throw 3.1415926f;
+            } catch(...) { }
+            photon::thread_yield();
+        }
+    });
+    thread_enable_join(th);
+    try {
+        Foo foo;
+        Bar bar;
+        throw 123;
+    } catch(...) { }
+
+    quit = true;
+    thread_join((join_handle*)th);
 }
 
 thread_local int shot_count;
