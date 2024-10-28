@@ -405,14 +405,22 @@ TEST(Perf, ThreadSwitchWithStandaloneTSUpdater)
     return;
 }
 
+inline int std_uncaught_exceptions() {
+#if __cplusplus > 201700L
+    return std::uncaught_exceptions();
+#else
+    return std::uncaught_exception();
+#endif
+}
+
 TEST(exception, switch)
 {
     class Foo {
     public:
         ~Foo() {
-            LOG_INFO("before thread_yield():", VALUE(std::uncaught_exceptions()));
+            LOG_INFO("before thread_yield():", VALUE(std_uncaught_exceptions()));
             photon::thread_yield();
-            LOG_INFO("after  thread_yield():", VALUE(std::uncaught_exceptions()));
+            LOG_INFO("after  thread_yield():", VALUE(std_uncaught_exceptions()));
         }
     };
 
@@ -429,8 +437,8 @@ TEST(exception, switch)
     bool quit = false;
     auto th = photon::thread_create11([&](){
         while(!quit) {
-            LOG_INFO(VALUE(std::uncaught_exceptions()));
-            EXPECT_EQ(std::uncaught_exceptions(), 0);
+            LOG_INFO(VALUE(std_uncaught_exceptions()));
+            EXPECT_EQ(std_uncaught_exceptions(), 0);
             try {
                 throw 3.1415926f;
             } catch(...) { }
