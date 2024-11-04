@@ -42,30 +42,25 @@ jobs:
           ctest -E test-lockfree --timeout 3600 -V
           pkill redis-server
 
-  gcc921-build-debug:
-    runs-on: [self-hosted, Linux, ARM64]
-
+  debug-build-from-source:
+    runs-on: ubuntu-latest
     container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4
-
+      image: almalinux:8
     steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-
       - uses: actions/checkout@v4
-
       - name: Build
         run: |
+          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ openssl-devel libcurl-devel
+          dnf -q -y install autoconf automake libtool
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build \
-            -D CMAKE_BUILD_TYPE=Debug \
-            -D PHOTON_ENABLE_ECOSYSTEM=ON \
-            -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON \
-            -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=OFF        \
+                         -D PHOTON_ENABLE_FUSE=OFF        \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=OFF       \
+                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                         -D PHOTON_OPENSSL_SOURCE=""      \
+                         -D PHOTON_CURL_SOURCE=""
           cmake --build build -j $(nproc) -- VERBOSE=1
