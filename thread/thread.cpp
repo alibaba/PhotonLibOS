@@ -31,6 +31,7 @@ limitations under the License.
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <pthread.h>
 
 #ifdef _WIN64
 #include <processthreadsapi.h>
@@ -52,6 +53,10 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
 #include <photon/common/alog-functionptr.h>
 #include <photon/thread/thread-key.h>
 #include <photon/thread/arch.h>
+
+struct pthread_attr;
+extern "C" int allocate_stack(const struct pthread_attr *attr,
+    struct pthread **pdp, void **stack, size_t *stacksize);
 
 /* notes on the scheduler:
 
@@ -136,7 +141,7 @@ namespace photon
     {
     public:
         template<typename F>
-        void init(void* ptr, F ret2func, thread* th)
+        void init(void* ptr, F ret2func, thread* th, void* tcb_tls)
         {
             _ptr = ptr;
             assert((uint64_t)_ptr % 16 == 0);
@@ -144,6 +149,7 @@ namespace photon
             push(0);
             push(ret2func);
             push(th);   // rbp <== th
+            push(tcb_tls);   // fs <== tcb_tls
         }
         void** pointer_ref()
         {
@@ -534,14 +540,7 @@ namespace photon
             vcpu = current->get_vcpu();
             (plock = &vcpu->runq_lock) -> foreground_lock();
         }
-        mutable bool update_current = false;
-        void set_current(thread* th) const {
-            current = th;
-            update_current = true;
-        }
         ~AtomicRunQ() {
-            if (update_current)
-                *pc = current;
             plock->foreground_unlock();
         }
         static void prefetch_context(thread* from, thread* to)
@@ -560,7 +559,6 @@ namespace photon
             assert(!current->single());
             auto from = current;
             auto to = from->remove_from_list();
-            set_current(to);
             prefetch_context(from, to);
             from->state = new_state;
             to->state = states::RUNNING;
@@ -571,7 +569,6 @@ namespace photon
             prefetch_context(from, to);
             from->state = states::READY;
             to->state = states::RUNNING;
-            set_current(to);
             return {from, to};
         }
         Switch goto_next() const {
@@ -648,41 +645,37 @@ namespace photon
         to->get_vcpu()->switch_count++;
     }
 
-    static void _photon_thread_die(thread* th) asm("_photon_thread_die");
-
 #if defined(__x86_64__)
 #if !defined(_WIN64)
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rdi_to, void** rsi_from)
 R"(
+        rdfsbase %rax
         push    %rbp
+        push    %rax
         mov     %rsp, (%rsi)
         mov     (%rdi), %rsp
+        pop     %rax
         pop     %rbp
+        wrfsbase %rax
         ret
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to, void** rcx_from)
 R"(
+        rdfsbase %rax
         push    %rbp
+        push    %rax
         mov     %rsp, (%rcx)
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
 R"(
         mov     (%rdx), %rsp
+        pop     %rax
         pop     %rbp
+        wrfsbase %rax
         jmp     *%rsi
-)"
-
-DEF_ASM_FUNC(_photon_thread_stub)
-R"(
-        mov     0x40(%rbp), %rdi
-        movq    $0, 0x40(%rbp)
-        call    *0x48(%rbp)
-        mov     %rax, 0x48(%rbp)
-        mov     %rbp, %rdi
-        call    _photon_thread_die
 )"
     );
 
@@ -896,13 +889,16 @@ R"(
         _photon_switch_context_defer_die(
             arg, func, sw.to->stack.pointer_ref());
     }
-    static __attribute__((used, noreturn))
-    void _photon_thread_die(thread* th) {
+    static __attribute__((noreturn))
+    void _photon_thread_stub() {
+        register thread* th asm("rbp");
+        CURRENT = th;   // CURRENT is now fiber-local
+        auto arg = th->arg;
+        th->tls = 0;    // union with th->arg
+        th->retval = th->start(arg);
         assert(th == CURRENT);
         th->die();
     }
-
-    extern "C" void _photon_thread_stub() asm ("_photon_thread_stub");
 
     thread* thread_create(thread_entry start, void* arg,
                 uint64_t stack_size, uint16_t reserved_space) {
@@ -922,7 +918,24 @@ R"(
                      stack_size, least_stack_size, least_stack_size);
             stack_size = least_stack_size;
         }
-        char* ptr = (char*)photon_thread_alloc(stack_size);
+        // char* ptr = (char*)photon_thread_alloc(stack_size);
+        struct pthread* pd;
+        char* ptr;  // ptr to stack
+        size_t pstacksize;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        allocate_stack((struct pthread_attr*)&attr, &pd, (void**)&ptr, &pstacksize);
+
+// this should be moved into allocate_stack(),
+// as we don't have the defination of *pd
+#if TLS_TCB_AT_TP
+        /* Reference to the TCB itself.  */
+        pd->header.self = pd;
+
+        /* Self-reference for TLS.  */
+        pd->header.tcb = pd;
+#endif
+
         if (unlikely(!ptr))
             return nullptr;
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
@@ -934,7 +947,7 @@ R"(
         th->stack_size = stack_size;
         th->arg = arg;
         auto sp = align_down(p - reserved_space, 64);
-        th->stack.init((void*)sp, &_photon_thread_stub, th);
+        th->stack.init((void*)sp, &_photon_thread_stub, th, pd);
         AtomicRunQ arq(rq);
         th->vcpu = arq.vcpu;
         arq.vcpu->nthreads++;
@@ -1405,7 +1418,7 @@ R"(
     }
     void thread_exit(void* retval) {
         CURRENT->retval = retval;
-        _photon_thread_die(CURRENT);
+        CURRENT->die();
     }
 
     int thread_shutdown(thread* th, bool flag)
