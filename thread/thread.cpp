@@ -926,16 +926,6 @@ R"(
         pthread_attr_init(&attr);
         allocate_stack((struct pthread_attr*)&attr, &pd, (void**)&ptr, &pstacksize);
 
-// this should be moved into allocate_stack(),
-// as we don't have the defination of *pd
-#if TLS_TCB_AT_TP
-        /* Reference to the TCB itself.  */
-        pd->header.self = pd;
-
-        /* Self-reference for TLS.  */
-        pd->header.tcb = pd;
-#endif
-
         if (unlikely(!ptr))
             return nullptr;
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
