@@ -9,3 +9,45 @@
  allocate_stack (const struct pthread_attr *attr, struct pthread **pdp,
                 void **stack, size_t *stacksize)
  {
+@@ -403,6 +403,18 @@ allocate_stack (const struct pthread_attr *attr, struct pthread **pdp,
+                }
+            }
+
++  /* Initialize the TCB.  All initializations with zero should be
++     performed in 'get_cached_stack'.  This way we avoid doing this if
++     the stack freshly allocated with 'mmap'.  */
++
++#if TLS_TCB_AT_TP
++    /* Reference to the TCB itself.  */
++    pd->header.self = pd;
++
++    /* Self-reference for TLS.  */
++    pd->header.tcb = pd;
++#endif
++
+          /* Remember the stack-related values.  */
+          pd->stackblock = mem;
+          pd->stackblock_size = size;
+diff --git a/nptl/pthread_create.c b/nptl/pthread_create.c
+index 1d3665d5..6ee79035 100644
+--- a/nptl/pthread_create.c
++++ b/nptl/pthread_create.c
+@@ -665,18 +665,6 @@ __pthread_create_2_1 (pthread_t *newthread, const pthread_attr_t *attr,
+     }
+
+
+-  /* Initialize the TCB.  All initializations with zero should be
+-     performed in 'get_cached_stack'.  This way we avoid doing this if
+-     the stack freshly allocated with 'mmap'.  */
+-
+-#if TLS_TCB_AT_TP
+-  /* Reference to the TCB itself.  */
+-  pd->header.self = pd;
+-
+-  /* Self-reference for TLS.  */
+-  pd->header.tcb = pd;
+-#endif
+-
+   /* Store the address of the start routine and the parameter.  Since
+      we do not start the function directly the stillborn thread will
+      get the information from its thread descriptor.  */
