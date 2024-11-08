@@ -145,7 +145,7 @@ namespace photon
     struct partial_thread {
         uint64_t _, __;
         volatile vcpu_base* vcpu;
-        uint64_t ___[5];
+        uint64_t ___[6];
         void* tls;
     };
 

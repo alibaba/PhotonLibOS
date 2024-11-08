@@ -141,7 +141,7 @@ namespace photon
     {
     public:
         template<typename F>
-        void init(void* ptr, F ret2func, thread* th, void* tcb_tls)
+        void init(void* ptr, F ret2func, thread* th)
         {
             _ptr = ptr;
             assert((uint64_t)_ptr % 16 == 0);
@@ -149,7 +149,6 @@ namespace photon
             push(0);
             push(ret2func);
             push(th);   // rbp <== th
-            push(tcb_tls);   // fs <== tcb_tls
         }
         void** pointer_ref()
         {
@@ -179,6 +178,7 @@ namespace photon
     struct thread : public intrusive_list_node<thread> {
         volatile vcpu_t* vcpu;
         Stack stack;
+        pthread_t tcb_or_tp;
 // offset 32B
         int idx = -1;                       /* index in the sleep queue array */
         int error_number = 0;
@@ -264,7 +264,8 @@ namespace photon
             stack_size = stack_high - stack_low;
 #elif defined(__linux__)
             pthread_attr_t gattr;
-            pthread_getattr_np(pthread_self(), &gattr);
+            tcb_or_tp = pthread_self();
+            pthread_getattr_np(tcb_or_tp, &gattr);
             pthread_attr_getstack(&gattr,
                 (void**)&stackful_alloc_top, &stack_size);
             pthread_attr_destroy(&gattr);
@@ -293,6 +294,7 @@ namespace photon
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
     static_assert(offsetof(thread,  tls) == offsetof(partial_thread,  tls), "...");
+    static_assert(offsetof(thread, tcb_or_tp) - offsetof(thread, stack) == 8, "...");
 #pragma GCC diagnostic pop
 
     struct thread_list : public intrusive_list<thread>
@@ -615,12 +617,6 @@ namespace photon
         }
     };
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-    static_assert(offsetof(thread, arg)   == 0x40, "...");
-    static_assert(offsetof(thread, start) == 0x48, "...");
-#pragma GCC diagnostic pop
-
     inline void thread::dequeue_ready_atomic(states newstat)
     {
         assert("this is not in runq, and this->lock is locked");
@@ -650,30 +646,26 @@ namespace photon
     asm(
 DEF_ASM_FUNC(_photon_switch_context) // (void** rdi_to, void** rsi_from)
 R"(
-        rdfsbase %rax
         push    %rbp
-        push    %rax
         mov     %rsp, (%rsi)
         mov     (%rdi), %rsp
-        pop     %rax
         pop     %rbp
+        mov     8(%rdi), %rax
         wrfsbase %rax
         ret
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to, void** rcx_from)
 R"(
-        rdfsbase %rax
         push    %rbp
-        push    %rax
         mov     %rsp, (%rcx)
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
 R"(
         mov     (%rdx), %rsp
-        pop     %rax
         pop     %rbp
+        mov     8(%rdx), %rax
         wrfsbase %rax
         jmp     *%rsi
 )"
@@ -937,7 +929,8 @@ R"(
         th->stack_size = stack_size;
         th->arg = arg;
         auto sp = align_down(p - reserved_space, 64);
-        th->stack.init((void*)sp, &_photon_thread_stub, th, pd);
+        th->tcb_or_tp = (pthread_t)pd;
+        th->stack.init((void*)sp, &_photon_thread_stub, th);
         AtomicRunQ arq(rq);
         th->vcpu = arq.vcpu;
         arq.vcpu->nthreads++;
