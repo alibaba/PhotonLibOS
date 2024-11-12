@@ -50,17 +50,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ openssl-devel libcurl-devel
-          dnf -q -y install autoconf automake libtool
+          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
                          -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_ENABLE_SASL=OFF        \
                          -D PHOTON_ENABLE_FUSE=OFF        \
                          -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_EXTFS=OFF       \
-                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
-                         -D PHOTON_OPENSSL_SOURCE=""      \
-                         -D PHOTON_CURL_SOURCE=""
-          cmake --build build -j $(nproc) -- VERBOSE=1
+                         -D PHOTON_ENABLE_EXTFS=OFF
+          cmake --build build -j $(nproc)
