@@ -1,3 +1,6 @@
+link_libraries(${GFLAGS_LIBRARIES})
+include_directories(${GFLAGS_INCLUDE_DIRS})
+
 add_executable(simple-example simple/simple.cpp)
 target_link_libraries(simple-example PRIVATE photon_static)
 
