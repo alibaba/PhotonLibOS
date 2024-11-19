@@ -361,7 +361,22 @@ public:
         int err = 0;
         while ((err = ERR_get_error())) {
             LOG_ERROR("SSL error: `", ERR_error_string(err, nullptr));
-            errno = EPERM;
+            switch (ERR_GET_REASON(err)) {
+                case ERR_R_BIO_LIB:
+                    errno = ECONNRESET;
+                    break;
+                case ERR_R_FATAL:
+                case ERR_R_MALLOC_FAILURE:
+                case ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED:
+                case ERR_R_PASSED_NULL_PARAMETER:
+                case ERR_R_INTERNAL_ERROR:
+                case ERR_R_DISABLED:
+                    errno = EIO;
+                    break;
+                default:
+                    errno = EPERM;
+                    break;
+            }
         }
     }
 
