@@ -32,14 +32,23 @@ enum class SecurityRole {
     Server = 2,
 };
 
+enum class VerifyMode : int {
+    NONE = 0x00,                  // SSL_VERIFY_NONE
+    PEER = 0x01,                  // SSL_VERIFY_PEER
+    FAIL_IF_NO_PEER_CERT = 0x02,  // SSL_VERIFY_IF_NO_PEER_CERT
+    CLIENT_ONCE = 0x04,           // SSL_VERIFY_CLIENT_ONCE
+};
+
 /**
  * @brief TLSContext managers TLS key and cert
  * These parameters is able to set after created
  */
 class TLSContext : public Object {
+public:
     virtual int set_pass_phrase(const char* pass) = 0;
     virtual int set_cert(const char* cert_str) = 0;
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
+    virtual int set_verify_mode(VerifyMode mode = VerifyMode::NONE) = 0;
 };
 
 enum class TLSVersion{

@@ -174,6 +174,12 @@ public:
         }
         return 0;
     }
+
+    int set_verify_mode(VerifyMode mode) override {
+        SSL_CTX_set_default_verify_paths(ctx);
+        SSL_CTX_set_verify(ctx, (int)mode, nullptr);
+        return 0;
+    }
 };
 
 void __OpenSSLGlobalInit() {
@@ -351,8 +357,18 @@ public:
         SSL_free(ssl);
     }
 
+    void deal_error() {
+        int err = 0;
+        while ((err = ERR_get_error())) {
+            LOG_ERROR("SSL error: `", ERR_error_string(err, nullptr));
+            errno = EPERM;
+        }
+    }
+
     ssize_t recv(void* buf, size_t cnt, int flags = 0) override {
-        return SSL_read(ssl, buf, cnt);
+        auto ret = SSL_read(ssl, buf, cnt);
+        if (ret < 0) deal_error();
+        return ret;
     }
 
     ssize_t recv(const struct iovec* iov, int iovcnt, int flags = 0) override {
@@ -360,7 +376,9 @@ public:
         return recv(iov[0].iov_base, iov[0].iov_len);
     }
     ssize_t send(const void* buf, size_t cnt, int flags = 0) override {
-        return SSL_write(ssl, buf, cnt);
+        auto ret = SSL_write(ssl, buf, cnt);
+        if (ret < 0) deal_error();
+        return ret;
     }
     ssize_t send(const struct iovec* iov, int iovcnt, int flags = 0) override {
         // since send allows partial write

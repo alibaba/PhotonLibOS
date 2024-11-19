@@ -62,6 +62,7 @@ public:
         if (!tls_ctx) {
             tls_ctx_ownership = true;
             tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
+            tls_ctx->set_verify_mode(VerifyMode::PEER);  // act like curl
         }
         auto tcp_cli = new_tcp_socket_client();
         auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
