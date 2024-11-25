@@ -649,8 +649,6 @@ namespace photon
         to->get_vcpu()->switch_count++;
     }
 
-    static void _photon_thread_die(thread* th) asm("_photon_thread_die");
-
 #if defined(__x86_64__)
 #if !defined(_WIN64)
     asm(
@@ -867,9 +865,9 @@ R"(
 
 #endif  // x86 or arm
 
-    extern "C" __attribute__((noreturn))
-    void _photon_switch_context_defer_die(void* arg, uint64_t defer_func_addr,
-        void** to) asm ("_photon_switch_context_defer_die");
+    static __attribute__((noreturn))
+    void _photon_switch_context_defer_die(void* arg, uint64_t defer_func_addr, void** to)
+    asm("_photon_switch_context_defer_die");
 
     __attribute__((noreturn))
     inline void thread::die() {
@@ -896,14 +894,22 @@ R"(
         }
         _photon_switch_context_defer_die(
             arg, func, sw.to->stack.pointer_ref());
+        __builtin_unreachable();
     }
-    static __attribute__((used, noreturn))
+
+    static __attribute__((noreturn))
+    void _photon_thread_die(thread* th) asm("_photon_thread_die");
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
         th->die();
+        __builtin_unreachable();
     }
 
-    extern "C" void _photon_thread_stub() asm ("_photon_thread_stub");
+    // the function is written in assembly to make use of the fact
+    // that CURRENT is passed in via rbp/x29 as the first argument,
+    // eliminating a TLS access.
+    static __attribute__((noreturn))
+    void _photon_thread_stub() asm("_photon_thread_stub");
 
     thread* thread_create(thread_entry start, void* arg,
                 uint64_t stack_size, uint16_t reserved_space) {
