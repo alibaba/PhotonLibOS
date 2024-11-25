@@ -297,6 +297,7 @@ namespace photon
             this->node = head;
         }
         thread* eject_whole_atomic() {
+            if (!node) return nullptr;
             SCOPED_LOCK(lock);
             auto p = node;
             node = nullptr;
@@ -1066,24 +1067,26 @@ R"(
     #endif
     }
     static uint32_t last_tsc = 0;
-    static inline void if_update_now(bool accurate = false) {
+    static inline bool if_update_now(bool accurate = false) {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86)) {
             return photon::now = __mimic_vdso_time_x86.get_now(accurate);
         }
 #endif
         if (likely(ts_updater.load(std::memory_order_relaxed))) {
-            return;
+            return true;
         }
         if (unlikely(accurate)) {
             update_now();
-            return;
+            return true;
         }
         uint32_t tsc = _rdtsc();
         if (unlikely(last_tsc != tsc)) {
             last_tsc = tsc;
             update_now();
+            return true;
         }
+        return false;
     }
     NowTime __update_now() {
         last_tsc = _rdtsc();
@@ -1136,10 +1139,10 @@ R"(
             }
             return count;
         }
-
-        if_update_now();
-        while(!sleepq.empty())
-        {
+        if (sleepq.empty() || !if_update_now()) {
+            return count;
+        }
+        do {
             auto th = sleepq.front();
             if (th->ts_wakeup > now) break;
             SCOPED_LOCK(th->lock);
@@ -1149,7 +1152,7 @@ R"(
                 AtomicRunQ().insert_tail(th);
                 count++;
             }
-        }
+        } while(!sleepq.empty());
         return count;
     }
 
@@ -1782,18 +1785,16 @@ R"(
     void reset_master_event_engine_default() {
         CURRENT->get_vcpu()->reset_master_event_engine_default();
     }
-    static void* idle_stub(void*)
-    {
+    static void* idler(void*) {
         RunQ rq;
         auto last_idle = now;
         auto vcpu = rq.current->get_vcpu();
         while (vcpu->state != states::DONE) {
-            while (!AtomicRunQ(rq).single()) {
+            while (resume_threads() > 0 || !AtomicRunQ(rq).single()) {
                 thread_yield();
                 if (unlikely(sat_sub(now, last_idle) >= 1000UL)) {
                     last_idle = now;
                     vcpu->master_event_engine->wait_and_fire_events(0);
-                    resume_threads();
                 }
             }
             if (vcpu->state == states::DONE)
@@ -1803,12 +1804,10 @@ R"(
             // fall in actual sleep
             auto usec = 10 * 1024 * 1024; // max
             auto& sleepq = vcpu->sleepq;
-            if (!sleepq.empty())
-                usec = min(usec,
-                    sat_sub(sleepq.front()->ts_wakeup, now));
+            if (!sleepq.empty()) usec = min(usec,
+                sat_sub(sleepq.front()->ts_wakeup, now));
             last_idle = now;
             vcpu->master_event_engine->wait_and_fire_events(usec);
-            resume_threads();
         }
         return nullptr;
     }
@@ -1900,7 +1899,7 @@ R"(
         th->state = states::RUNNING;
         th->init_main_thread_stack();
         auto vcpu = new (ptr) vcpu_t;
-        vcpu->idle_worker = thread_create(&idle_stub, nullptr);
+        vcpu->idle_worker = thread_create(&idler, nullptr);
         thread_enable_join(vcpu->idle_worker);
         if_update_now(true);
         return ++_n_vcpu;
@@ -1915,7 +1914,7 @@ R"(
         auto vcpu = rq.current->get_vcpu();
         wait_all(rq, vcpu);
         assert(!AtomicRunQ(rq).single());
-        assert(vcpu->nthreads == 2); // idle_stub & current alive
+        assert(vcpu->nthreads == 2); // idler & current alive
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;
