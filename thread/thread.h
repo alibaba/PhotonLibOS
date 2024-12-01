@@ -29,12 +29,16 @@ limitations under the License.
 
 namespace photon
 {
-    int vcpu_init();
+    constexpr uint8_t  VCPU_ENABLE_ACTIVE_WORK_STEALING     = 1;    // allow this vCPU to steal work from other vCPUs
+    constexpr uint8_t  VCPU_ENABLE_PASSIVE_WORK_STEALING    = 2;    // allow this vCPU to be stolen by other vCPUs
+    constexpr uint32_t THREAD_JOINABLE                      = 1;    // allow this thread to be joined
+    constexpr uint32_t THREAD_ENABLE_WORK_STEALING          = 2;    // allow this thread to be stolen by other vCPUs
+
+    int vcpu_init(uint64_t flags = 0);
     int vcpu_fini();
     int wait_all();
     int timestamp_updater_init();
     int timestamp_updater_fini();
-
 
     struct thread;
     extern __thread thread* CURRENT;
@@ -61,8 +65,10 @@ namespace photon
     const uint64_t DEFAULT_STACK_SIZE = 8 * 1024 * 1024;
     // Thread stack size should be at least 16KB. The thread struct located at stack bottom,
     // and the mprotect page is located at stack top-end.
+    // reserved_space must be <= stack_size / 2
     thread* thread_create(thread_entry start, void* arg,
-        uint64_t stack_size = DEFAULT_STACK_SIZE, uint16_t reserved_space = 0);
+        uint64_t stack_size = DEFAULT_STACK_SIZE,
+        uint32_t reserved_space = 0, uint64_t flags = 0);
 
     // get the address of reserved space, which is right below the thread struct.
     template<typename T = void> inline

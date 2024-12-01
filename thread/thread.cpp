@@ -178,7 +178,14 @@ namespace photon
         int error_number = 0;
         thread_list* waitq = nullptr;       /* the q if WAITING in a queue */
         uint16_t state = states::READY;
-        spinlock lock, _;
+        spinlock lock, _;                   // Current usage of thread.lock:
+                                            //  interrupt()
+                                            //  die()
+                                            //  resume_threads()
+                                            //  prepare_usleep()
+                                            //  thread_join()
+                                            //  ScopedLockHead
+                                            //  try_work_stealing()?
         int flags = 0;
         uint64_t ts_wakeup = 0;             /* Wakeup time when thread is sleeping */
 // offset 64B
@@ -200,7 +207,8 @@ namespace photon
 
         enum shift {
             joinable = 0,
-            shutting_down = 1,              // the thread should cancel what is doing, and quit
+            enable_work_stealing = 1,
+            shutting_down = 2,              // the thread should cancel what is doing, and quit
         };                                  // current job ASAP; not allowed to sleep or block more
                                             // than 10ms, otherwise -1 will be returned and errno == EPERM
         bool is_bit(int i) { return flags & (1<<i); }
@@ -211,6 +219,7 @@ namespace photon
         void set_joinable(bool flag = true) { set_bit(shift::joinable, flag); }
         bool is_shutting_down() { return is_bit(shift::shutting_down); }
         void set_shutting_down(bool flag = true) { set_bit(shift::shutting_down, flag); }
+        bool allow_work_stealing() { return is_bit(shift::enable_work_stealing); }
 
         int set_error_number() {
             if (likely(error_number)) {
@@ -299,6 +308,9 @@ namespace photon
         thread* eject_whole_atomic() {
             if (!node) return nullptr;
             SCOPED_LOCK(lock);
+            return eject_whole();
+        }
+        thread* eject_whole() {
             auto p = node;
             node = nullptr;
             return p;
@@ -454,12 +466,25 @@ namespace photon
         }
     };
 
+    static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
+    static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
+    static vcpu_t* pvcpu = nullptr;
     struct vcpu_t : public vcpu_base {
+// offset 16B
         SleepQueue sleepq;  // sizeof(sleepq) should be 24: ptr, size and capcity
+// offset 40B
         asymmetric_spinLock runq_lock;
-        uint16_t state = states::RUNNING;
+        uint8_t flags = 0;
+        uint8_t state = states::RUNNING;
         std::atomic<uint32_t> nthreads{1};
 // offset 48B
+        thread* idle_worker;
+        // threads scheduled by other vCPUs are added to standbyq by those vCPUs,
+        // then moved to runq later by this vCPU at some proper occasion.
+        thread_list standbyq;
+// offset 64B
+        vcpu_t *prev, *next;
+
         template<typename T>
         void move_to_standbyq_atomic(T x)
         {
@@ -486,12 +511,30 @@ namespace photon
             standbyq.push_back(th);
         }
 
-        thread* idle_worker;
-
         NullEventEngine _default_event_engine;
 
-        vcpu_t() {
+        vcpu_t(uint8_t flags_) {
+            flags = flags_;
             master_event_engine = &_default_event_engine;
+            SCOPED_LOCK(vcpu_list_lock);
+            if (!pvcpu) {
+                pvcpu = prev = next = this;
+            } else {
+                next = pvcpu;
+                prev = pvcpu->prev;
+                prev->next = this;
+                pvcpu->prev = this;
+            }
+        }
+        void remove_from_list() {
+            scoped_rwlock _(vcpu_list_rwlock, WLOCK);
+            SCOPED_LOCK(vcpu_list_lock);
+            auto pr = prev;
+            auto nx = next;
+            pr->next = nx;
+            nx->prev = pr;
+            if (pvcpu == this)
+                pvcpu = (nx != this) ? nx : nullptr;
         }
 
         bool is_master_event_engine_default() {
@@ -504,16 +547,7 @@ namespace photon
             delete mee;
             mee = &_default_event_engine;
         }
-
-        // standby queue stores the threads that are running, but not
-        // yet added to the run queue, until the run queue becomes empty
-        thread_list standbyq;   // make it NOT in the first cache line (64B)
-    };                          // where private fields reside
-
-    #define SCOPED_FOREGROUND_LOCK(x) \
-        auto __px = &(x); __px->foreground_lock(); DEFER(__px->foreground_unlock());
-    #define SCOPED_BACKGROUND_LOCK(x) \
-        (x).background_lock(); DEFER((x).background_unlock());
+    };
 
     class RunQ {
     public:
@@ -594,6 +628,10 @@ namespace photon
         }
         void insert_list_before(thread* th) const {
             current->insert_list_before(th);
+        }
+        void insert_list_before(thread_list& list) const {
+            current->insert_list_before(list.node);
+            list.node = nullptr;
         }
         void remove_from_list(thread* th) const {
             assert(th->state == states::READY);
@@ -865,7 +903,7 @@ R"(
 
 #endif  // x86 or arm
 
-    static __attribute__((noreturn))
+    extern "C" __attribute__((noreturn))
     void _photon_switch_context_defer_die(void* arg, uint64_t defer_func_addr, void** to)
     asm("_photon_switch_context_defer_die");
 
@@ -897,7 +935,7 @@ R"(
         __builtin_unreachable();
     }
 
-    static __attribute__((noreturn))
+    extern "C" __attribute__((noreturn))
     void _photon_thread_die(thread* th) asm("_photon_thread_die");
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
@@ -908,11 +946,18 @@ R"(
     // the function is written in assembly to make use of the fact
     // that CURRENT is passed in via rbp/x29 as the first argument,
     // eliminating a TLS access.
-    static __attribute__((noreturn))
+    extern "C" __attribute__((noreturn))
     void _photon_thread_stub() asm("_photon_thread_stub");
 
-    thread* thread_create(thread_entry start, void* arg,
-                uint64_t stack_size, uint16_t reserved_space) {
+    thread* thread_create(thread_entry start, void* arg, uint64_t stack_size,
+                uint32_t reserved_space, uint64_t flags) {
+        if (!stack_size)
+            stack_size = DEFAULT_STACK_SIZE;
+        if (unlikely((uint64_t)reserved_space > stack_size / 2))
+            LOG_ERROR_RETURN(EINVAL, nullptr, VALUE(reserved_space), "must be <= half of ", VALUE(stack_size));
+        uint64_t FLAGS = THREAD_JOINABLE | THREAD_ENABLE_WORK_STEALING;
+        if (unlikely(flags & ~FLAGS))
+            LOG_ERRNO_RETURN(EINVAL, nullptr, "invalid flags", HEX(flags));
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
@@ -925,8 +970,7 @@ R"(
         least_stack_size = align_up(std::max(16UL * 1024, least_stack_size), PAGE_SIZE);
         stack_size = align_up(stack_size, PAGE_SIZE);
         if (unlikely(stack_size < least_stack_size)) {
-            LOG_WARN("Stack size ` is less than least stack size `, use ` instead",
-                     stack_size, least_stack_size, least_stack_size);
+            LOG_WARN(VALUE(stack_size), " is less than minimal value `, use the minimal value instead", least_stack_size);
             stack_size = least_stack_size;
         }
         char* ptr = (char*)photon_thread_alloc(stack_size);
@@ -940,6 +984,7 @@ R"(
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
+        th->flags = flags;
         auto sp = align_down(p - reserved_space, 64);
         th->stack.init((void*)sp, &_photon_thread_stub, th);
         AtomicRunQ arq(rq);
@@ -1123,29 +1168,25 @@ R"(
         return -1;
     }
 
-    static int resume_threads()
+    inline __attribute__((always_inline))
+    int resume_threads_inlined(vcpu_t* vcpu, const RunQ& runq)
     {
         int count = 0;
-        auto vcpu = CURRENT->get_vcpu();
+        thread_list list;
         auto& standbyq = vcpu->standbyq;
         auto& sleepq = vcpu->sleepq;
-        if (!standbyq.empty())
-        {   // threads interrupted by other vcpus were not popped from sleepq
-            auto q = standbyq.eject_whole_atomic();
-            if (q) {
-                thread_list list(q);
-                for (auto th: list) {
-                    assert(th->state == states::STANDBY);
-                    th->state = states::READY;
-                    sleepq.pop(th);
-                    ++count;
-                }
-                list.node = nullptr;
-                AtomicRunQ().insert_list_before(q);
+        // threads interrupted by other vcpus were not popped from sleepq
+        if ((list.node = standbyq.eject_whole_atomic())) {
+            for (auto th: list) {
+                assert(th->state == states::STANDBY);
+                th->state = states::READY;
+                sleepq.pop(th);
+                count++;
             }
-            return count;
+            goto insert_list;
         }
-        if (sleepq.empty() || !if_update_now()) {
+        if (likely(sleepq.empty() || !if_update_now())) {
+            assert(count == 0);
             return count;
         }
         do {
@@ -1153,13 +1194,26 @@ R"(
             if (th->ts_wakeup > now) break;
             SCOPED_LOCK(th->lock);
             sleepq.pop_front();
-            if (th->state == states::SLEEPING) {
+            if (likely(th->state == states::SLEEPING)) {
                 th->dequeue_ready_atomic();
-                AtomicRunQ().insert_tail(th);
-                count++;
+            } else {
+                // interrupted between standbyq.eject_whole_atomic()
+                // and SCOPED_LOCK(th->lock).
+                assert(th->state == states::STANDBY);
+                th->state = states::READY;
             }
+            list.push_back(th);
+            count++;
         } while(!sleepq.empty());
+        if (count) {
+insert_list:
+            AtomicRunQ(runq).insert_list_before(list);
+        }
         return count;
+    }
+    __attribute__((noinline))
+    static int resume_threads(vcpu_t* vcpu, const RunQ& runq) {
+        return resume_threads_inlined(vcpu, runq);
     }
 
     states thread_stat(thread* th)
@@ -1194,7 +1248,7 @@ R"(
             LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be run by the same vcpu as CURRENT!", th);
         } else if (unlikely(th->state == states::STANDBY)) {
             while (th->state == states::STANDBY)
-                resume_threads();
+                resume_threads(th->get_vcpu(), rq);
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
             LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be READY!", th);
@@ -1791,16 +1845,90 @@ R"(
     void reset_master_event_engine_default() {
         CURRENT->get_vcpu()->reset_master_event_engine_default();
     }
+    inline __attribute__((always_inline))
+    thread* ws_scan_q(vcpu_t* v, thread* first, bool possibly_running) {
+        // the first must be unstealable
+        assert(!first->allow_work_stealing());
+        thread_list stolen;
+        uint64_t count = 0;
+        auto th = first->next();
+        while(th != first) {
+            SCOPED_LOCK(th->lock);
+            if ((possibly_running && th->state == states::RUNNING) ||
+                                    !th->allow_work_stealing()) {
+                th = th->next();
+            } else {
+                auto next = th->remove_from_list();
+                stolen.push_back(th); count++;
+                th->vcpu->nthreads--;
+                th->vcpu = v;
+                v->nthreads++;
+                th = next;
+            }
+        }
+        (void)count;
+        return stolen.eject_whole();
+    }
+    inline __attribute__((always_inline))
+    thread* ws_scan_standbyq(vcpu_t* v, vcpu_t* u) {
+        auto& q = u->standbyq;
+        if (q.empty()) return nullptr;
+        SCOPED_LOCK(q.lock);
+        if (q.empty()) return nullptr;
+        if (!q.front()->allow_work_stealing())
+            return ws_scan_q(v, q.front(), false);
+
+        thread_list stolen;
+        do {
+            SCOPED_LOCK(q.front()->lock);
+            auto th = q.pop_front();
+            stolen.push_back(th);
+            th->vcpu->nthreads--;
+            th->vcpu = v;
+            v->nthreads++;
+        } while (q.front()->allow_work_stealing());
+        return stolen.eject_whole();
+    }
+    inline __attribute__((always_inline))
+    thread* ws_scan_runq(vcpu_t* v, vcpu_t* u) {
+        if (!u->runq_lock.background_try_lock()) return 0;
+        DEFER(u->runq_lock.background_unlock());
+        return ws_scan_q(v, u->idle_worker, true);
+    }
+    static bool try_work_stealing(vcpu_t* vcpu) {
+        assert(CURRENT->get_vcpu() == vcpu);
+        assert(CURRENT == vcpu->idle_worker);
+        if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
+            return false;
+        scoped_rwlock _(vcpu_list_rwlock, RLOCK);
+        auto u = vcpu->next;
+        while (u != vcpu) {
+            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING))
+                continue;
+            thread* th;
+            if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
+                vcpu->idle_worker->insert_list_tail(th);
+                return true;
+            }
+            SCOPED_LOCK(vcpu_list_lock);
+            u = u->next;
+        }
+        return false;
+    }
     static void* idler(void*) {
         RunQ rq;
         auto last_idle = now;
         auto vcpu = rq.current->get_vcpu();
         while (vcpu->state != states::DONE) {
-            while (resume_threads() > 0 || !AtomicRunQ(rq).single()) {
+            while (unlikely(resume_threads_inlined(vcpu, rq) > 0) ||
+                   likely(!AtomicRunQ(rq).single())   ||
+                   likely(try_work_stealing(vcpu))) {
                 thread_yield();
+                if (vcpu->state == states::DONE)
+                    break;
                 if (unlikely(sat_sub(now, last_idle) >= 1000UL)) {
-                    last_idle = now;
                     vcpu->master_event_engine->wait_and_fire_events(0);
+                    last_idle = now;
                 }
             }
             if (vcpu->state == states::DONE)
@@ -1812,8 +1940,8 @@ R"(
             auto& sleepq = vcpu->sleepq;
             if (!sleepq.empty()) usec = min(usec,
                 sat_sub(sleepq.front()->ts_wakeup, now));
-            last_idle = now;
             vcpu->master_event_engine->wait_and_fire_events(usec);
+            last_idle = now;
         }
         return nullptr;
     }
@@ -1890,7 +2018,11 @@ R"(
         return _n_vcpu.load(std::memory_order_relaxed);
     }
 
-    int vcpu_init() {
+    int vcpu_init(uint64_t flags) {
+        uint64_t FLAGS = VCPU_ENABLE_ACTIVE_WORK_STEALING |
+                         VCPU_ENABLE_PASSIVE_WORK_STEALING;
+        if (unlikely(flags & ~FLAGS))
+            LOG_ERROR_RETURN(EINVAL, -1, "invalid flags ", HEX(flags));
         if (unlikely(PAGE_SIZE == 0))
             PAGE_SIZE = getpagesize();
         RunQ rq;
@@ -1904,7 +2036,7 @@ R"(
         th->vcpu = (vcpu_t*)ptr;
         th->state = states::RUNNING;
         th->init_main_thread_stack();
-        auto vcpu = new (ptr) vcpu_t;
+        auto vcpu = new (ptr) vcpu_t(uint8_t(flags & FLAGS));
         vcpu->idle_worker = thread_create(&idler, nullptr);
         thread_enable_join(vcpu->idle_worker);
         if_update_now(true);
@@ -1916,11 +2048,12 @@ R"(
         if (!rq.current)
             LOG_ERROR_RETURN(ENOSYS, -1, "vcpu not initialized");
 
-        deallocate_tls(&rq.current->tls);
         auto vcpu = rq.current->get_vcpu();
         wait_all(rq, vcpu);
         assert(!AtomicRunQ(rq).single());
         assert(vcpu->nthreads == 2); // idler & current alive
+        deallocate_tls(&rq.current->tls);
+        vcpu->remove_from_list();
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;
