@@ -24,7 +24,6 @@ limitations under the License.
 #include <cstdlib>
 #include <string>
 
-#include <photon/net/curl.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
 #include "../client.cpp"

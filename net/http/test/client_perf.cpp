@@ -22,7 +22,9 @@ limitations under the License.
 #include <gflags/gflags.h>
 
 #include <photon/net/http/client.h>
+#ifdef ENABLE_CURL
 #include <photon/net/curl.h>
+#endif
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
@@ -36,7 +38,9 @@ DEFINE_uint64(port, 19876, "port");
 DEFINE_uint64(count, -1UL, "request count per thread, -1 for endless loop");
 DEFINE_uint64(threads, 4, "num threads");
 DEFINE_uint64(body_size, 4096, "http body size");
+#ifdef ENABLE_CURL
 DEFINE_bool(curl, false, "use curl client rather than http client");
+#endif
 
 class StringStream {
     std::string s;
@@ -81,6 +85,8 @@ inline uint64_t GetSteadyTimeUs() {
                now.time_since_epoch())
         .count() / 1000;
 }
+
+#ifdef ENABLE_CURL
 void curl_thread_entry(result* res) {
     net::cURL client;
     StringStream buffer;
@@ -112,6 +118,8 @@ void test_curl(result &res) {
     }
     res.t_end = GetSteadyTimeUs();
 }
+#endif
+
 void client_thread_entry(result *res, net::http::Client *client, int idx) {
     std::string body_buf;
     body_buf.resize(FLAGS_body_size);
@@ -157,25 +165,28 @@ int main(int argc, char** argv) {
         return -1;
     DEFER(photon::fini());
     int ret;
+    result res_curl, res_client;
 #ifdef __linux__
     ret = net::et_poller_init();
     if (ret < 0) return -1;
     DEFER(net::et_poller_fini());
 #endif
+#ifdef ENABLE_CURL
     ret = net::cURL::init(CURL_GLOBAL_ALL, 0, 0);
     if (ret < 0) return -1;
     DEFER({ photon::thread_sleep(1); net::cURL::fini(); });
-
-    result res_curl, res_client;
     if (FLAGS_curl) {
         test_curl(res_curl);
     } else {
+#endif
         test_client(res_client);
+#ifdef ENABLE_CURL
     }
     if (res_curl.cnt != 0) LOG_INFO("libcurl latency = `us , throughput = `MB/s, failed = `, read_size = `, threads = `",
                 res_curl.sum_latency / res_curl.cnt,
                 res_curl.sum_throuput * 1000 * 1000 / (res_curl.t_end - res_curl.t_begin) / 1024 / 1024,
                 res_curl.failed, FLAGS_body_size, FLAGS_threads);
+#endif
     if (res_client.cnt != 0) LOG_INFO("http_client latency = `us , throughput = `MB/s, failed = `, read_size = `, threads = `",
                 res_client.sum_latency / res_client.cnt,
                 res_client.sum_throuput * 1000 * 1000 / (res_client.t_end - res_client.t_begin) / 1024 / 1024,
