@@ -31,10 +31,10 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_ENABLE_SASL=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
             -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
           cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 
       - name: Test
         working-directory: ${{github.workspace}}/build
         run: ctest -E test-lockfree --timeout 3600 -V
-

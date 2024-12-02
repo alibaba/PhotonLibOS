@@ -32,6 +32,7 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
             -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
@@ -65,5 +66,6 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
             -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1

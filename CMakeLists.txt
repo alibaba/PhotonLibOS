@@ -27,6 +27,7 @@ option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
 option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
+option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -122,7 +123,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 #   lib:        XXX_LIBRARIES
 #   source:     PHOTON_XXX_SOURCE
 
-set(dependencies zlib openssl curl)
+set(dependencies zlib openssl)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     LIST(APPEND dependencies aio)
@@ -141,6 +142,9 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif ()
 if (PHOTON_ENABLE_EXTFS)
     LIST(APPEND dependencies e2fs)
+endif()
+if (PHOTON_ENABLE_LIBCURL)
+    LIST(APPEND dependencies curl)
 endif()
 if (PHOTON_BUILD_TESTING)
     LIST(APPEND dependencies gflags googletest)
@@ -168,7 +172,7 @@ if (PHOTON_ENABLE_ECOSYSTEM)
 endif ()
 
 # Compile photon objects
-file(GLOB PHOTON_SRC
+file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         photon.cpp
         common/*.cpp
         common/checksum/*.cpp
@@ -218,6 +222,10 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
     list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
 endif ()
+if (NOT ${PHOTON_ENABLE_LIBCURL})
+    list(REMOVE_ITEM PHOTON_SRC net/curl.cpp fs/httpfs/httpfs.cpp)
+endif ()
+
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
@@ -246,6 +254,9 @@ endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
 endif()
+if (PHOTON_ENABLE_LIBCURL)
+    target_compile_definitions(photon_obj PRIVATE ENABLE_CURL)
+endif()
 
 if (actually_built)
     add_dependencies(photon_obj ${actually_built})
@@ -256,7 +267,6 @@ endif ()
 set(static_deps
         easy_weak
         fstack_weak
-        ${CURL_LIBRARIES}
         ${OPENSSL_LIBRARIES}
         ${ZLIB_LIBRARIES}
 )
@@ -284,6 +294,9 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif ()
 if (PHOTON_ENABLE_EXTFS)
     list(APPEND static_deps ${E2FS_LIBRARIES})
+endif ()
+if (PHOTON_ENABLE_LIBCURL)
+    list(APPEND static_deps ${CURL_LIBRARIES})
 endif ()
 
 # Find out dynamic libs and append to `shared_deps`.
