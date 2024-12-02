@@ -25,6 +25,7 @@ limitations under the License.
 #include <thread>
 #include <gtest/gtest.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 #include <photon/common/alog.h>
 #include "../../test/ci-tools.h"
 
@@ -489,6 +490,51 @@ TEST(ObjCache, with_list) {
         }
         EXPECT_EQ(10, cnt);
     }
+}
+
+TEST(ObjectCache, no_destroy) {
+    ObjectCache<int, int*> oc(1000UL * 1000);
+    int* ptr = nullptr;
+    auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.acquire(0, [] { return new int(1); });
+        ptr = a;
+        photon::thread_yield();
+        auto x = oc.release(0, true, false);
+        EXPECT_EQ(x, a);
+    }));
+    auto th2 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.acquire(0, [] { return new int(2); });
+        EXPECT_EQ(a, ptr);
+        photon::thread_yield();
+        auto x = oc.release(0);
+        EXPECT_EQ(nullptr, x);
+    }));
+    photon::thread_join(th1);
+    photon::thread_join(th2);
+    auto x = oc.acquire(0, [] { return new int(3);});
+    EXPECT_EQ(3, *x);
+    oc.release(0);
+}
+TEST(ObjectCache, movedout) {
+    ObjectCache<int, int*> oc(1000UL * 1000);
+    int* ptr = nullptr;
+    auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.borrow(0, [] { return new int(1); });
+        ptr = &*a;
+        photon::thread_yield();
+        a.recycle(true);
+        a.moveout(true);
+        EXPECT_TRUE(a.moved());
+    }));
+    auto th2 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
+        auto a = oc.borrow(0, [] { return new int(2); });
+        EXPECT_EQ(ptr, &*a);
+        photon::thread_yield();
+    }));
+    photon::thread_join(th1);
+    photon::thread_join(th2);
+    auto x = oc.borrow(0, [] { return new int(3);});
+    EXPECT_EQ(3, *x);
 }
 
 int main(int argc, char** argv) {

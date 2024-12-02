@@ -450,7 +450,8 @@ namespace rpc {
         }
 
         int put_stub(const net::EndPoint& endpoint, bool immediately) override {
-            return m_pool->release(endpoint, immediately);
+            m_pool->release(endpoint, immediately);
+            return 0;
         }
 
         Stub* acquire(const net::EndPoint& endpoint) override {
