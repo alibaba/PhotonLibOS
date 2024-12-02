@@ -1733,6 +1733,37 @@ static void* promise_worker(void* arg) {
     return 0;
 }
 
+static void* ws_basic(void* arg) {
+    auto& stolen = *(bool*)arg;
+    EXPECT_FALSE(stolen);
+    LOG_INFO("this work (thread) has been stolen");
+    stolen = true;
+    return nullptr;
+}
+
+TEST(WorkStealing, basic) {
+    bool running = true, stolen = false;
+    std::thread vcpu([&](){
+        vcpu_init(VCPU_ENABLE_ACTIVE_WORK_STEALING);
+        while(running)
+            thread_usleep(1000);
+        DEFER(vcpu_fini());
+    });
+    auto th = thread_create(&ws_basic, &stolen, 0, 0,
+            THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+    thread_pause_work_stealing(true, th);
+    ::usleep(1000 * 10);    // emulate a busy work of 10ms
+    EXPECT_FALSE(stolen);
+
+    thread_pause_work_stealing(false, th);
+    ::usleep(1000 * 10);    // emulate a busy work of 10ms
+    EXPECT_TRUE(stolen);
+
+    thread_join((join_handle*)th);
+    running = false;
+    vcpu.join();
+}
+
 TEST(future, test1) {
     Future<int> fut;
     auto th = thread_create(promise_worker, &fut);
@@ -1768,7 +1799,7 @@ int main(int argc, char** arg)
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
-    photon::vcpu_init();
+    photon::vcpu_init(VCPU_ENABLE_PASSIVE_WORK_STEALING);
     set_log_output_level(ALOG_INFO);
 
     if (FLAGS_vcpus <= 1)

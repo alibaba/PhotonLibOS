@@ -301,6 +301,7 @@ ok:     entry.interests |= eint;
             return rm_interest({fd, EVENT_RWE| ONE_SHOT, 0}); // remove fd from epoll
         int ret = add_interest({fd, interest | ONE_SHOT, CURRENT});
         if (ret < 0) LOG_ERROR_RETURN(0, -1, "failed to add event interest");
+        SCOPED_PAUSE_WORK_STEALING;
         ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {

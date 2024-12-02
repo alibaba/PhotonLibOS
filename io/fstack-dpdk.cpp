@@ -107,6 +107,7 @@ public:
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
         enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
+        SCOPED_PAUSE_WORK_STEALING;
         int ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
