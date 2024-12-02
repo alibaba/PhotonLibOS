@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
 
     LOG_INFO(VALUE(FLAGS_host), VALUE(FLAGS_port), VALUE(FLAGS_jobs));
 
-    auto server = new_rsocket_server();
+    auto server = photon::net::new_rsocket_server();
     if (!server) {
         LOG_ERRNO_RETURN(0, -1, "new_rsocket_client");
     }
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
 
     server->start_loop(false);
 
-    auto client = new_rsocket_client();
+    auto client = photon::net::new_rsocket_client();
     if (!client) {
         LOG_ERRNO_RETURN(0, -1, "new_rsocket_client");
     }
