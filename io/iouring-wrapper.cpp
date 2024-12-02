@@ -198,6 +198,7 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
+        SCOPED_PAUSE_WORK_STEALING;
         photon::thread_sleep(-1);
 
         if (likely(errno == EOK)) {

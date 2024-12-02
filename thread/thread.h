@@ -33,6 +33,7 @@ namespace photon
     constexpr uint8_t  VCPU_ENABLE_PASSIVE_WORK_STEALING    = 2;    // allow this vCPU to be stolen by other vCPUs
     constexpr uint32_t THREAD_JOINABLE                      = 1;    // allow this thread to be joined
     constexpr uint32_t THREAD_ENABLE_WORK_STEALING          = 2;    // allow this thread to be stolen by other vCPUs
+    constexpr uint32_t THREAD_PAUSE_WORK_STEALING           = 4;    // temporarily pause work-stealing for a thread
 
     int vcpu_init(uint64_t flags = 0);
     int vcpu_fini();
@@ -149,11 +150,25 @@ namespace photon
     // A helper struct in order to make some function calls inline.
     // The memory layout of its first 4 fields is the same as the one of thread.
     struct partial_thread {
-        uint64_t _, __;
+        uint64_t _[2];
         volatile vcpu_base* vcpu;
-        uint64_t ___[5];
+        uint64_t __[3];
+        uint32_t flags, ___[3];
         void* tls;
     };
+
+    // this function doesn't affect whether WS is enabled or not for the thread
+    inline void thread_pause_work_stealing(bool flag, thread* th = CURRENT) {
+        auto& flags = ((partial_thread*)th)->flags;
+        if (flag) {
+            flags |= THREAD_PAUSE_WORK_STEALING;
+        } else {
+            flags &= ~THREAD_PAUSE_WORK_STEALING;
+        }
+    }
+    #define SCOPED_PAUSE_WORK_STEALING               \
+        thread_pause_work_stealing(true);            \
+        DEFER(thread_pause_work_stealing(false));
 
     inline vcpu_base* get_vcpu(thread* th = CURRENT) {
         auto vcpu = ((partial_thread*)th) -> vcpu;

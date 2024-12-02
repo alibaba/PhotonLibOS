@@ -177,6 +177,7 @@ namespace photon
         int idx = -1;                       /* index in the sleep queue array */
         int error_number = 0;
         thread_list* waitq = nullptr;       /* the q if WAITING in a queue */
+        uint32_t flags = 0;
         uint16_t state = states::READY;
         spinlock lock, _;                   // Current usage of thread.lock:
                                             //  interrupt()
@@ -186,7 +187,6 @@ namespace photon
                                             //  thread_join()
                                             //  ScopedLockHead
                                             //  try_work_stealing()?
-        int flags = 0;
         uint64_t ts_wakeup = 0;             /* Wakeup time when thread is sleeping */
 // offset 64B
         union {
@@ -208,7 +208,8 @@ namespace photon
         enum shift {
             joinable = 0,
             enable_work_stealing = 1,
-            shutting_down = 2,              // the thread should cancel what is doing, and quit
+            pause_work_stealing = 2,
+            shutting_down = 3,              // the thread should cancel what is doing, and quit
         };                                  // current job ASAP; not allowed to sleep or block more
                                             // than 10ms, otherwise -1 will be returned and errno == EPERM
         bool is_bit(int i) { return flags & (1<<i); }
@@ -219,8 +220,8 @@ namespace photon
         void set_joinable(bool flag = true) { set_bit(shift::joinable, flag); }
         bool is_shutting_down() { return is_bit(shift::shutting_down); }
         void set_shutting_down(bool flag = true) { set_bit(shift::shutting_down, flag); }
-        bool allow_work_stealing() { return is_bit(shift::enable_work_stealing); }
-
+        bool allow_work_stealing() { return is_bit(shift::enable_work_stealing) &&
+                                          !(flags & THREAD_PAUSE_WORK_STEALING); }
         int set_error_number() {
             if (likely(error_number)) {
                 errno = error_number;
@@ -296,6 +297,7 @@ namespace photon
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
     static_assert(offsetof(thread,  tls) == offsetof(partial_thread,  tls), "...");
+    static_assert(offsetof(thread,flags) == offsetof(partial_thread,flags), "...");
 #pragma GCC diagnostic pop
 
     struct thread_list : public intrusive_list<thread>
@@ -657,12 +659,6 @@ namespace photon
         }
     };
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-    static_assert(offsetof(thread, arg)   == 0x40, "...");
-    static_assert(offsetof(thread, start) == 0x48, "...");
-#pragma GCC diagnostic pop
-
     inline void thread::dequeue_ready_atomic(states newstat)
     {
         assert("this is not in runq, and this->lock is locked");
@@ -686,6 +682,13 @@ namespace photon
         assert(to->state == states::RUNNING);
         to->get_vcpu()->switch_count++;
     }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+    // the offsets are used in _photon_thread_stub() assembly code
+    static_assert(offsetof(thread, arg)   == 0x40, "...");
+    static_assert(offsetof(thread, start) == 0x48, "...");
+#pragma GCC diagnostic pop
 
 #if defined(__x86_64__)
 #if !defined(_WIN64)

@@ -1751,8 +1751,14 @@ TEST(WorkStealing, basic) {
     });
     auto th = thread_create(&ws_basic, &stolen, 0, 0,
             THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
+    thread_pause_work_stealing(true, th);
+    ::usleep(1000 * 10);    // emulate a busy work of 10ms
+    EXPECT_FALSE(stolen);
+
+    thread_pause_work_stealing(false, th);
     ::usleep(1000 * 10);    // emulate a busy work of 10ms
     EXPECT_TRUE(stolen);
+
     thread_join((join_handle*)th);
     running = false;
     vcpu.join();
