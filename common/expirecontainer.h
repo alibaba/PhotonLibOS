@@ -243,7 +243,7 @@ protected:
     Item* ref_acquire(const Item& key_item, Delegate<void, void*> ctor,
                       uint64_t failure_cooldown = 0);
 
-    int ref_release(ItemPtr item, bool recycle = false);
+    void* ref_release(ItemPtr item, bool recycle, bool destroy);
 
     void* acquire(const Item& key_item, Delegate<void, void*> ctor,
                   uint64_t failure_cooldown = 0) {
@@ -252,7 +252,7 @@ protected:
     }
 
     // the argument `key` plays the roles of (type-erased) key
-    int release(const Item& key_item, bool recycle = false);
+    void* release(const Item& key_item, bool recycle, bool destroy);
 
 public:
     template <typename KeyType, typename ValType>
@@ -324,11 +324,12 @@ public:
         ObjectCache* _oc;
         Item* _ref;
         bool _recycle = false;
+        bool _moveout = false;
 
         Borrow(ObjectCache* oc, Item* ref, bool recycle)
             : _oc(oc), _ref(ref), _recycle(recycle) {}
         ~Borrow() {
-            if (_ref) _oc->ref_release(_ref, _recycle);
+            if (_ref) _oc->ref_release(_ref, _recycle, !_moveout);
         }
 
         Borrow() = delete;
@@ -345,6 +346,9 @@ public:
 
         typename Item::ValPtr operator->() { return _ref->get_ptr(); }
         typename Item::ValEntity& operator*() { return _ref->get_ref(); }
+
+        bool moved() const { return _moveout; }
+        bool moveout(bool x) { return _moveout = x; }
 
     protected:
         void move(Borrow&& rhs) {
@@ -391,14 +395,6 @@ public:
         return Item::get_content(ref_acquire(key, ctor, failure_cooldown));
     }
 
-    int ref_release(ItemPtr item, bool recycle = false) {
-        return Base::ref_release(item, recycle);
-    }
-
-    int release(const InterfaceKey& key, bool recycle = false) {
-        return Base::release(Item(key), recycle);
-    }
-
     using iterator = typename ExpireContainerBase::TypedIterator<Item>;
     iterator begin() { return Base::begin(); }
     iterator end() { return Base::end(); }
@@ -427,9 +423,21 @@ class ObjectCache
     : public __ObjectCache<KeyType, ValPtr,
                            ObjectCacheBase::PtrItem<KeyType, ValPtr>> {
 public:
-    using __ObjectCache<
-        KeyType, ValPtr,
-        ObjectCacheBase::PtrItem<KeyType, ValPtr>>::__ObjectCache;
+    using Base = __ObjectCache<KeyType, ValPtr,
+                               ObjectCacheBase::PtrItem<KeyType, ValPtr>>;
+    using Base::Base;
+
+    ValPtr ref_release(typename Base::ItemPtr item, bool recycle = false,
+                       bool destroy = true) {
+        return reinterpret_cast<ValPtr>(
+            Base::ref_release(item, recycle, destroy));
+    }
+
+    ValPtr release(const typename Base::InterfaceKey& key, bool recycle = false,
+                   bool destroy = true) {
+        return reinterpret_cast<ValPtr>(
+            Base::release(typename Base::Item(key), recycle, destroy));
+    }
 };
 
 template <typename KeyType, typename NodeType>
@@ -438,7 +446,20 @@ class ObjectCache<KeyType, intrusive_list<NodeType>>
           KeyType, intrusive_list<NodeType>,
           ObjectCacheBase::ListItem<KeyType, intrusive_list<NodeType>>> {
 public:
-    using __ObjectCache<KeyType, intrusive_list<NodeType>,
-                        ObjectCacheBase::ListItem<
-                            KeyType, intrusive_list<NodeType>>>::__ObjectCache;
+    using Base = __ObjectCache<
+        KeyType, intrusive_list<NodeType>,
+        ObjectCacheBase::ListItem<KeyType, intrusive_list<NodeType>>>;
+    using Base::Base;
+
+    NodeType* ref_release(typename Base::ItemPtr item, bool recycle = false,
+                          bool destroy = true) {
+        return reinterpret_cast<NodeType*>(
+            Base::ref_release(item, recycle, destroy));
+    }
+
+    NodeType* release(const typename Base::InterfaceKey& key,
+                      bool recycle = false, bool destroy = true) {
+        return reinterpret_cast<NodeType*>(
+            Base::release(typename Base::Item(key), recycle, destroy));
+    }
 };

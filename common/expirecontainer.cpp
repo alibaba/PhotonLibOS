@@ -108,15 +108,16 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
         }
     }
     if (!item->_obj) {
-        ref_release(item, false);
+        ref_release(item, false, true);
         return nullptr;
     }
     return item;
 }
 
-int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
+void* ObjectCacheBase::ref_release(ItemPtr item, bool recycle, bool destroy) {
     DEFER(expire());
     photon::semaphore sem;
+    void * ret = nullptr;
     {
         SCOPED_LOCK(_lock);
         if (item->_recycle) recycle = false;
@@ -140,15 +141,18 @@ int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
             assert(item->_refcnt == 0);
             _set.erase(item);
         }
+        if (!destroy) {
+            std::swap(ret, item->_obj);
+        }
         delete item;
         blocker.notify_all();
     }
-    return 0;
+    return ret;
 }
 
 // the argument `key` plays the roles of (type-erased) key
-int ObjectCacheBase::release(const Item& key_item, bool recycle) {
+void* ObjectCacheBase::release(const Item& key_item, bool recycle, bool destroy) {
     auto item = ExpireContainerBase::TypedIterator<Item>(Base::find(key_item));
-    if (item == end()) return -1;
-    return ref_release(*item, recycle);
+    if (item == end()) return nullptr;
+    return ref_release(*item, recycle, destroy);
 }
