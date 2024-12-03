@@ -112,6 +112,16 @@ function(build_from_src [dep])
         add_dependencies(curl openssl)
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(CURL_LIBRARIES ${BINARY_DIR}/lib64/libcurl.a PARENT_SCOPE)
+
+    elseif (dep STREQUAL "rdmacore")
+    set(BINARY_DIR ${PROJECT_BINARY_DIR}/rdmacore-build)
+    ExternalProject_Add(
+            rdmacore
+            URL ${PHOTON_RDMACORE_SOURCE}
+            URL_MD5 96758c5cd34cf13584ebc59d4621fdad
+            CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${BINARY_DIR}
+    )
+
     endif ()
 
     list(APPEND actually_built ${dep})
