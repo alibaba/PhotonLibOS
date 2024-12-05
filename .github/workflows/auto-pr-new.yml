@@ -1,4 +1,4 @@
-name: Auto PR
+name: Precise Auto PR
 
 on:
   push:
@@ -34,8 +34,8 @@ jobs:
             set -x
           fi
           git checkout $NEXT_BRANCH
-          $FROM=${{github.event.commits[0].id}}
-          $TO=${{github.event.head_commit.id}}
+          FROM=${{github.event.commits[0].id}}
+          TO=${{github.event.head_commit.id}}
           BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
           git checkout -b $BRANCH
           git cherry-pick --strategy=theirs $FROM..$TO
