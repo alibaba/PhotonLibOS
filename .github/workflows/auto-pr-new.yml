@@ -36,10 +36,10 @@ jobs:
           git checkout $NEXT_BRANCH
           FROM=${{github.event.commits[0].id}}
           TO=${{github.event.head_commit.id}}
-          BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
-          git checkout -b $BRANCH
+          # BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
+          # git checkout -b $BRANCH
           git cherry-pick --strategy=theirs $FROM~..$TO
-          git push
-          gh pr create --base "$BRANCH" --head "release/$CURRENT_VERSION" \
+          # git push --set-upstream origin $BRANCH
+          gh pr create \
               --title "Auto PR from release/$CURRENT_VERSION" \
               --body 'Created by Github action'
