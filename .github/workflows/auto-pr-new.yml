@@ -13,7 +13,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create Pull Request to the next higher release version
 
@@ -33,10 +33,13 @@ jobs:
             NEXT_BRANCH="main"
             set -x
           fi
+          git -v
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"          git checkout $NEXT_BRANCH
           git checkout $NEXT_BRANCH
           FROM=${{github.event.commits[0].id}}
           TO=${{github.event.head_commit.id}}
-          git cherry-pick -X theirs $FROM || true
-          gh pr create
+          git cherry-pick -X theirs $TO || true
+          gh pr create \
               --title "Auto PR from release/$CURRENT_VERSION" \
               --body 'Created by Github action'
