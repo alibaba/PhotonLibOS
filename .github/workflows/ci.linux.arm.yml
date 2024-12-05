@@ -32,32 +32,40 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
             -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test
         run: |
           cd build
-          nohup redis-server &
           ctest -E test-lockfree --timeout 3600 -V
-          pkill redis-server
 
-  debug-build-from-source:
-    runs-on: ubuntu-latest
+  gcc921-build-debug:
+    runs-on: [self-hosted, Linux, ARM64]
+
     container:
-      image: almalinux:8
+      image: ghcr.io/alibaba/photon-ut-base:latest
+      options: --cpus 4
+
     steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+
       - uses: actions/checkout@v4
+
       - name: Build
         run: |
-          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
-                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_ENABLE_SASL=OFF        \
-                         -D PHOTON_ENABLE_FUSE=OFF        \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_EXTFS=OFF
-          cmake --build build -j $(nproc)
+          cmake -B build \
+            -D CMAKE_BUILD_TYPE=Debug \
+            -D PHOTON_ENABLE_ECOSYSTEM=ON \
+            -D PHOTON_BUILD_TESTING=ON \
+            -D PHOTON_ENABLE_SASL=ON \
+            -D PHOTON_ENABLE_FUSE=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
+            -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1

@@ -15,12 +15,10 @@ limitations under the License.
 */
 
 #pragma once
-#include <errno.h>
-#include <photon/common/object.h>
 #include <stdlib.h>
 #include <sys/types.h>
-
 #include <memory>
+#include <photon/common/object.h>
 
 struct iovec;
 
@@ -46,15 +44,6 @@ public:
     virtual ssize_t writev_mutable(struct iovec *iov, int iovcnt)
     {   // there might be a faster implementaion in derived class
         return writev(iov, iovcnt);
-    }
-
-    // get/set default timeout, in us, (default +∞)
-    virtual uint64_t timeout() const {
-        errno = ENOSYS;
-        return -1;
-    }
-    virtual void timeout(uint64_t tm) {
-        errno = ENOSYS;
     }
 
     struct ReadAll {

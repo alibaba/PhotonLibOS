@@ -196,6 +196,13 @@ protected:
 
 class KernelSocketClient : public SocketClientBase {
 public:
+    std::vector<sockaddr_storage> bind_ss;
+
+    KernelSocketClient(IPAddr* bind_ip = nullptr, int bind_ip_n = 0) {
+        for (int i = 0; i < bind_ip_n; i++)
+            bind_ss.emplace_back(EndPoint(bind_ip[i], 0));
+    }
+
     ISocketStream* connect(const char* path, size_t count) override {
         struct sockaddr_un addr_un;
         if (fill_uds_path(addr_un, path, count) != 0) return nullptr;
@@ -206,6 +213,10 @@ public:
     ISocketStream* connect(const EndPoint& remote, const EndPoint* local) override {
         sockaddr_storage r(remote);
         if (likely(!local || local->is_ipv4() != remote.is_ipv4())) {
+            if (bind_ss.size() > 0) {
+                int rid = rand() % bind_ss.size();
+                return do_connect(&r, &bind_ss[rid]);
+            }
             return do_connect(&r);
         }
         sockaddr_storage l(*local);
@@ -981,8 +992,8 @@ protected:
 
 /* ET Socket - End */
 
-extern "C" ISocketClient* new_tcp_socket_client() {
-    return new KernelSocketClient();
+extern "C" ISocketClient* new_tcp_socket_client(IPAddr* bind_ip, uint32_t bind_ip_n) {
+    return new KernelSocketClient(bind_ip, bind_ip_n);
 }
 extern "C" ISocketServer* new_tcp_socket_server() {
     return NewObj<KernelSocketServer>()->init();
@@ -1040,43 +1051,25 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 
 /* Implementations in socket.h */
 
-static int parse_port(estring_view& ep) {
+EndPoint::EndPoint(const char* _ep) {
+    estring_view ep(_ep);
     auto pos = ep.find_last_of(':');
-    if (pos == estring::npos) return -1;
+    if (pos == 0 || pos == estring::npos)
+        return;
     auto port_str = ep.substr(pos + 1);
-    if (!port_str.all_digits()) return -1;
-    auto port = port_str.to_uint64();
-    if (port > UINT16_MAX) return -1;
-    ep = (pos > 2 && ep[0] == '[') ? ep.substr(1, pos - 2)
-                                   : ep.substr(0, pos);
-    return (int)port;
-}
-
-static void parse_addr(std::string_view s, IPAddr* addr) {
-    if (s.length() >= INET6_ADDRSTRLEN - 1) return;
+    if (!port_str.all_digits())
+        return;
+    auto _port = port_str.to_uint64();
+    if (_port > UINT16_MAX)
+        return;
+    port = (uint16_t)_port;
+    auto ipsv = (ep[0] == '[') ? ep.substr(1, pos - 2) : ep.substr(0, pos);
+    if (ipsv.length() >= INET6_ADDRSTRLEN - 1)
+        return;
     char ip_str[INET6_ADDRSTRLEN];
-    memcpy(ip_str, s.data(), s.length());
-    ip_str[s.length()] = '\0';
-    *addr = IPAddr(ip_str);
-}
-
-EndPoint::EndPoint(const char* s_) {
-    estring_view s(s_);
-    if (s.empty()) return;
-    int port_ = parse_port(s);
-    if (port_ < 0) return;
-    port = (uint16_t)port_;
-    parse_addr(s, &addr);
-}
-
-EndPoint EndPoint::parse(std::string_view s, uint16_t default_port) {
-    if (s.empty()) return {};
-    int port = parse_port((estring_view&)s);
-    if (port < 0) port = default_port;
-    IPAddr addr;
-    parse_addr(s, &addr);
-    if (addr.undefined()) return {};
-    return {addr, (uint16_t)port};
+    memcpy(ip_str, ipsv.data(), ipsv.length());
+    ip_str[ipsv.length()] = '\0';
+    addr = IPAddr(ip_str);
 }
 
 LogBuffer& operator<<(LogBuffer& log, const IPAddr& addr) {

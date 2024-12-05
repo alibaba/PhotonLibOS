@@ -75,19 +75,19 @@ function(build_from_src [dep])
         ExternalProject_Get_Property(googletest SOURCE_DIR)
         ExternalProject_Get_Property(googletest BINARY_DIR)
         set(GOOGLETEST_INCLUDE_DIRS ${SOURCE_DIR}/googletest/include ${SOURCE_DIR}/googlemock/include PARENT_SCOPE)
-        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgtest_main.a ${BINARY_DIR}/lib/libgtest.a PARENT_SCOPE)
+        set(GOOGLETEST_LIBRARIES ${BINARY_DIR}/lib/libgmock.a ${BINARY_DIR}/lib/libgtest.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "openssl")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/openssl-build)
         ExternalProject_Add(
                 openssl
                 URL ${PHOTON_OPENSSL_SOURCE}
-                URL_MD5 3f76825f195e52d4b10c70040681a275
+                URL_MD5 bad68bb6bd9908da75e2c8dedc536b29
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared
-                BUILD_COMMAND $(MAKE)
-                INSTALL_COMMAND $(MAKE) install
+                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} shared
+                BUILD_COMMAND make -j 1  # https://github.com/openssl/openssl/issues/5762#issuecomment-376622684
+                INSTALL_COMMAND make -j 1 install
                 LOG_CONFIGURE ON
                 LOG_BUILD ON
                 LOG_INSTALL ON
@@ -104,24 +104,26 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 curl
                 URL ${PHOTON_CURL_SOURCE}
-                URL_MD5 1211d641ae670cebce361ab6a7c6acff
-                CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR}
-                    -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
-                    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                URL_MD5 a66270f11e3fbfad709600bbd1686704
+                UPDATE_DISCONNECTED ON
+                BUILD_IN_SOURCE ON
+                CONFIGURE_COMMAND autoreconf -i COMMAND ./configure --with-ssl=${OPENSSL_ROOT_DIR}
+                    --without-libssh2 --enable-static --enable-shared=no --enable-optimize
+                    --disable-manual --without-libidn
+                    --disable-ftp --disable-file --disable-ldap --disable-ldaps
+                    --disable-rtsp --disable-dict --disable-telnet --disable-tftp
+                    --disable-pop3 --disable-imap --disable-smb --disable-smtp
+                    --disable-gopher --without-nghttp2 --enable-http --disable-verbose
+                    --with-pic=PIC --prefix=${BINARY_DIR}
+                BUILD_COMMAND $(MAKE)
+                INSTALL_COMMAND $(MAKE) install
+                DEPENDS openssl
+                LOG_CONFIGURE ON
+                LOG_BUILD ON
+                LOG_INSTALL ON
         )
-        add_dependencies(curl openssl)
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
-        set(CURL_LIBRARIES ${BINARY_DIR}/lib64/libcurl.a PARENT_SCOPE)
-
-    elseif (dep STREQUAL "rdmacore")
-    set(BINARY_DIR ${PROJECT_BINARY_DIR}/rdmacore-build)
-    ExternalProject_Add(
-            rdmacore
-            URL ${PHOTON_RDMACORE_SOURCE}
-            URL_MD5 96758c5cd34cf13584ebc59d4621fdad
-            CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${BINARY_DIR}
-    )
-
+        set(CURL_LIBRARIES ${BINARY_DIR}/lib/libcurl.a PARENT_SCOPE)
     endif ()
 
     list(APPEND actually_built ${dep})

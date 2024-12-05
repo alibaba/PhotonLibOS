@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
 
 project(
         photon
-        VERSION 0.8
+        VERSION 0.7
         LANGUAGES C CXX ASM
 )
 
@@ -27,13 +27,13 @@ option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
 option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
-option(PHOTON_ENABLE_RSOCKET "enable rsocket" OFF)
+option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
-set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz" CACHE STRING "")
-set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz" CACHE STRING "")
+set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz" CACHE STRING "")
+set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz" CACHE STRING "")
 set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz" CACHE STRING "")
 set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
 set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
@@ -44,7 +44,7 @@ set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/
 set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
 set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapidxml/rapidxml%201.13/rapidxml-1.13.zip/download" CACHE STRING "")
 set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
-set(PHOTON_RDMACORE_SOURCE "https://github.com/linux-rdma/rdma-core/releases/download/v44.7/rdma-core-44.7.tar.gz" CACHE STRING "")
+set(PHOTON_CPP_REDIS_SOURCE "https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz" CACHE STRING "")
 
 # Get CPU arch
 execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -123,7 +123,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 #   lib:        XXX_LIBRARIES
 #   source:     PHOTON_XXX_SOURCE
 
-set(dependencies zlib openssl curl)
+set(dependencies zlib openssl)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     LIST(APPEND dependencies aio)
@@ -143,15 +143,14 @@ endif ()
 if (PHOTON_ENABLE_EXTFS)
     LIST(APPEND dependencies e2fs)
 endif()
-if (PHOTON_ENABLE_RSOCKET)
-    LIST(APPEND dependencies rdmacore)
-endif ()
+if (PHOTON_ENABLE_LIBCURL)
+    LIST(APPEND dependencies curl)
+endif()
 if (PHOTON_BUILD_TESTING)
     LIST(APPEND dependencies gflags googletest)
 endif ()
 
 FOREACH (dep ${dependencies})
-    message(STATUS "Checking dependency ${dep}")
     string(TOUPPER ${dep} DEP)
     set(source_url "${PHOTON_${DEP}_SOURCE}")
     if (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
@@ -173,7 +172,7 @@ if (PHOTON_ENABLE_ECOSYSTEM)
 endif ()
 
 # Compile photon objects
-file(GLOB PHOTON_SRC
+file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         photon.cpp
         common/*.cpp
         common/checksum/*.cpp
@@ -223,9 +222,10 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
     list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
 endif ()
-if (PHOTON_ENABLE_RSOCKET)
-    list(APPEND PHOTON_SRC net/rsocket/rsocket.cpp)
+if (NOT ${PHOTON_ENABLE_LIBCURL})
+    list(REMOVE_ITEM PHOTON_SRC net/curl.cpp fs/httpfs/httpfs.cpp)
 endif ()
+
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
@@ -239,9 +239,6 @@ target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${
 target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
 if (PHOTON_GLOBAL_INIT_OPENSSL)
     target_compile_definitions(photon_obj PRIVATE PHOTON_GLOBAL_INIT_OPENSSL)
-endif ()
-if (PHOTON_ENABLE_SASL)
-    target_include_directories(photon_obj PRIVATE ${GSASL_INCLUDE_DIRS})
 endif ()
 if (PHOTON_ENABLE_URING)
     target_include_directories(photon_obj PRIVATE ${URING_INCLUDE_DIRS})
@@ -257,6 +254,9 @@ endif()
 if (PHOTON_ENABLE_EXTFS)
     target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
 endif()
+if (PHOTON_ENABLE_LIBCURL)
+    target_compile_definitions(photon_obj PRIVATE ENABLE_CURL)
+endif()
 
 if (actually_built)
     add_dependencies(photon_obj ${actually_built})
@@ -267,7 +267,6 @@ endif ()
 set(static_deps
         easy_weak
         fstack_weak
-        ${CURL_LIBRARIES}
         ${OPENSSL_LIBRARIES}
         ${ZLIB_LIBRARIES}
 )
@@ -296,8 +295,8 @@ endif ()
 if (PHOTON_ENABLE_EXTFS)
     list(APPEND static_deps ${E2FS_LIBRARIES})
 endif ()
-if (PHOTON_ENABLE_RSOCKET)
-    list(APPEND shared_deps ${RDMACORE_LIBRARIES})
+if (PHOTON_ENABLE_LIBCURL)
+    list(APPEND static_deps ${CURL_LIBRARIES})
 endif ()
 
 # Find out dynamic libs and append to `shared_deps`.
@@ -368,9 +367,11 @@ else ()
     )
 endif ()
 
-# Build examples and test cases
+# Build test cases
 if (PHOTON_BUILD_TESTING)
+    include_directories(photon_static ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/examples-output)
+    link_libraries(${GFLAGS_LIBRARIES})
     add_subdirectory(examples)
 
     include(CTest)
@@ -380,8 +381,7 @@ if (PHOTON_BUILD_TESTING)
     add_library(ci-tools STATIC test/ci-tools.cpp)
     target_include_directories(ci-tools PRIVATE include)
 
-    target_include_directories(photon_shared PUBLIC ${CURL_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
-    target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
+    link_libraries(${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
 
     add_subdirectory(common/checksum/test)
     add_subdirectory(common/test)
@@ -400,21 +400,5 @@ if (PHOTON_BUILD_TESTING)
     if (PHOTON_ENABLE_EXTFS)
         add_subdirectory(fs/extfs/test)
     endif ()
-    if (PHOTON_ENABLE_RSOCKET)
-        add_subdirectory(net/rsocket/test)
-    endif ()
     GenerateStandaloneCTestScript(${CMAKE_SOURCE_DIR} ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/CTestTestfile.cmake)
 endif ()
-
-################################################################################
-
-# Install headers and libs
-add_custom_target(copy_includes ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include
-    COMMENT "Copying include files to build directory: ${PROJECT_BINARY_DIR}/include"
-)
-add_dependencies(copy_includes photon_static)
-
-install(DIRECTORY ${PROJECT_BINARY_DIR}/include/ DESTINATION include)
-install(FILES ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/libphoton.a DESTINATION lib)
-install(PROGRAMS ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}/libphoton.so DESTINATION lib)

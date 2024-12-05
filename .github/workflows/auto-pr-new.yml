@@ -1,0 +1,48 @@
+name: Precise Auto PR
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Pull Request to the next higher release version
+
+        run: |
+          git fetch
+          RELEASE_VERSIONS=$(git branch -r | grep 'release/' | cut -d '/' -f 3 | sort -V)
+          CURRENT_VERSION=$(echo $GITHUB_REF | rev | cut -d '/' -f 1 | rev)
+          ME_AND_MY_NEXT=$(echo "$RELEASE_VERSIONS" | grep -w $CURRENT_VERSION -A 1)
+          NUM=$(echo "$ME_AND_MY_NEXT" | wc -l)
+          if (( NUM > 1 )); then
+            NEXT_VERSION=$(echo "$ME_AND_MY_NEXT" | tail -n 1)
+            NEXT_BRANCH="release/$NEXT_VERSION"
+            set -x
+          else
+            echo "No more higher release versions, will merge to main"
+            NEXT_VERSION="main"
+            NEXT_BRANCH="main"
+            set -x
+          fi
+          git -v
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout $NEXT_BRANCH
+          FROM=${{github.event.commits[0].id}}
+          TO=${{github.event.head_commit.id}}
+          TEMP_BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
+          git checkout -b $TEMP_BRANCH
+          git cherry-pick -X theirs $TO
+          git push --set-upstream origin $TEMP_BRANCH
+          gh pr create --base $NEXT_BRANCH --head $TEMP_BRANCH  \
+              --title "Auto PR from release/$CURRENT_VERSION" \
+              --body 'Created by Github action'

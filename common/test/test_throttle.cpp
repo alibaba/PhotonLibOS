@@ -212,14 +212,7 @@ TEST_P(FindAppropriateSliceNumTest, run) {
     GTEST_ASSERT_LE(loss, p.performance_loss_max_ratio);
 }
 
-#ifdef INSTANTIATE_TEST_SUITE_P
-#define INSTANTIATE_TEST_P INSTANTIATE_TEST_SUITE_P
-#else
-#define INSTANTIATE_TEST_P INSTANTIATE_TEST_CASE_P
-#endif
-
-INSTANTIATE_TEST_P(Throttle,
-        FindAppropriateSliceNumTest, testing::Values(
+INSTANTIATE_TEST_CASE_P(Throttle, FindAppropriateSliceNumTest, testing::Values(
         FindAppropriateSliceNumSuite{10, 0.01},
         FindAppropriateSliceNumSuite{50, 0.02},
         FindAppropriateSliceNumSuite{100, 0.03},
@@ -252,7 +245,7 @@ struct PriorityTestSuite {
 class ThrottlePriorityTest : public testing::TestWithParam<PriorityTestSuite> {
 };
 
-INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
+INSTANTIATE_TEST_CASE_P(Throttle, ThrottlePriorityTest, testing::Values(
         PriorityTestSuite{
                 // 0. Simulate same priority and equally divide the BW
                 PriorityTestSuite::Simulate,

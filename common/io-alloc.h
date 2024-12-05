@@ -116,8 +116,9 @@ template<
     size_t ALIGNMENT = 4096>
 class PooledAllocator
 {
-    static_assert(is_power_of_2(ALIGNMENT), "must be 2^n");
-    static_assert(is_power_of_2(MAX_ALLOCATION_SIZE), "must be 2^n");
+    constexpr static bool is_power2(size_t n) { return (n & (n-1)) == 0; }
+    static_assert(is_power2(ALIGNMENT), "must be 2^n");
+    static_assert(is_power2(MAX_ALLOCATION_SIZE), "must be 2^n");
     static_assert(MAX_ALLOCATION_SIZE >= ALIGNMENT, "...");
     const static size_t N_SLOTS = __builtin_ffsl(MAX_ALLOCATION_SIZE / 4096);
 public:
@@ -150,6 +151,7 @@ public:
     }
 
 protected:
+    const int BASE_OFF = log2_round(ALIGNMENT);
     class Slot : public IdentityPool<void, SLOT_CAPACITY>
     {
     public:
@@ -175,10 +177,19 @@ protected:
         }
     };
 
-    int get_slot(unsigned int x, bool round_up = true) {
-        auto i = round_up ? log2_round_up(x) : log2_truncate(x);
-        auto BASE_OFF = log2_truncate(ALIGNMENT);
-        return (i < BASE_OFF) ? 0 : (i - BASE_OFF);
+    static inline int log2_round(unsigned int x, bool round_up = false) {
+        assert(x > 0);
+        int ret = sizeof(x)*8 - 1 - __builtin_clz(x);
+        if (round_up && (1U << ret) < x)
+            return ret + 1;
+        return ret;
+    }
+
+    int get_slot(unsigned int x, bool round_up = false) {
+        int i = log2_round(x, round_up);
+        if (i < BASE_OFF)
+            return 0;
+        return i - BASE_OFF;
     }
 
     Slot slots[N_SLOTS];
@@ -200,7 +211,7 @@ protected:
         size_t size = malloc_usable_size(ptr);
 #endif
         assert(size > 0);
-        slots[get_slot(size, false)].put(ptr);
+        slots[get_slot(size)].put(ptr);
         return 0;
     }
 };

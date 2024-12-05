@@ -188,7 +188,7 @@ public:
         ioCtx timer_ctx(true, false);
         __kernel_timespec ts;
         auto usec = timeout.timeout_us();
-        if (usec < (uint64_t) std::numeric_limits<int64_t>::max()) {
+        if (usec < std::numeric_limits<int64_t>::max()) {
             sqe->flags |= IOSQE_IO_LINK;
             ts = usec_to_timespec(usec);
             sqe = _get_sqe();
@@ -198,7 +198,6 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
-        SCOPED_PAUSE_WORK_STEALING;
         photon::thread_sleep(-1);
 
         if (likely(errno == EOK)) {
@@ -335,7 +334,7 @@ public:
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
         // Prepare own timeout
-        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
+        if (timeout > std::numeric_limits<int64_t>::max()) {
             timeout = std::numeric_limits<int64_t>::max();
         }
 
