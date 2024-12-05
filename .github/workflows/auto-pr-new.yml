@@ -35,7 +35,7 @@ jobs:
           fi
           git -v
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"          git checkout $NEXT_BRANCH
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout $NEXT_BRANCH
           FROM=${{github.event.commits[0].id}}
           TO=${{github.event.head_commit.id}}
