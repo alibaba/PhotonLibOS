@@ -40,6 +40,6 @@ jobs:
           FROM=${{github.event.commits[0].id}}
           TO=${{github.event.head_commit.id}}
           git cherry-pick -X theirs $TO || true
-          gh pr create \
+          gh pr create --head $NEXT_BRANCH \
               --title "Auto PR from release/$CURRENT_VERSION" \
               --body 'Created by Github action'
