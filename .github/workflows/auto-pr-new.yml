@@ -36,10 +36,7 @@ jobs:
           git checkout $NEXT_BRANCH
           FROM=${{github.event.commits[0].id}}
           TO=${{github.event.head_commit.id}}
-          BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
-          git checkout -b $BRANCH
-          git cherry-pick -X theirs $FROM~..$TO || (echo "$FROM~..$TO" > cherry-pick-failed.txt)
-          git push
-          gh pr create --base "$BRANCH" --head "release/$CURRENT_VERSION" \
+          git cherry-pick -X theirs $FROM~..$TO || (echo "$FROM~..$TO" > cherry-pick-failed.txt; git add cherry-pick-failed.txt; git commit -m cherry-pick-failed.txt)
+          gh pr create
               --title "Auto PR from release/$CURRENT_VERSION" \
               --body 'Created by Github action'
