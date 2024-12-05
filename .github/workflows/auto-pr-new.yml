@@ -38,7 +38,7 @@ jobs:
           TO=${{github.event.head_commit.id}}
           BRANCH=auto_pr/$NEXT_VERSION/$FROM-$TO
           git checkout -b $BRANCH
-          git cherry-pick --strategy=theirs $FROM..$TO
+          git cherry-pick --strategy=theirs $FROM~..$TO
           git push
           gh pr create --base "$BRANCH" --head "release/$CURRENT_VERSION" \
               --title "Auto PR from release/$CURRENT_VERSION" \
