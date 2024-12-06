@@ -18,12 +18,13 @@ limitations under the License.
 
 #include <string>
 #include <photon/net/socket.h>
-#include <photon/common/estring.h>
 
 namespace photon {
 namespace net {
 
-inline void __to_string(const IPAddr& addr, char* text) {
+inline std::string to_string(const photon::net::IPAddr& addr) {
+    std::string str;
+    char text[INET6_ADDRSTRLEN];
     if (addr.is_ipv4()) {
         in_addr ip4;
         ip4.s_addr = addr.to_nl();
@@ -31,19 +32,16 @@ inline void __to_string(const IPAddr& addr, char* text) {
     } else {
         inet_ntop(AF_INET6, &addr, text, INET6_ADDRSTRLEN);
     }
+    str.assign(text, strlen(text));
+    return str;
 }
 
-inline std::string to_string(const IPAddr& addr) {
-    char ip4or6[INET6_ADDRSTRLEN];
-    __to_string(addr, ip4or6);
-    return ip4or6;
-}
-
-inline estring to_string(const photon::net::EndPoint& ep) {
-    char ip4or6[INET6_ADDRSTRLEN];
-    __to_string(ep.addr, ip4or6);
-    return ep.is_ipv4() ? estring().appends(ip4or6, ':', ep.port):
-                          estring().appends('[', ip4or6, "]:", ep.port);
+inline std::string to_string(const photon::net::EndPoint& ep) {
+    if (ep.is_ipv4()) {
+        return to_string(ep.addr) + ":" + std::to_string(ep.port);
+    } else {
+        return "[" + to_string(ep.addr) + "]:" + std::to_string(ep.port);
+    }
 }
 
 }

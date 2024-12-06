@@ -13,7 +13,6 @@
 #include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 #include "../../test/ci-tools.h"
-#include <thread>
 
 DEFINE_int32(ths_total, 100, "total threads when testing threadpool.");
 
@@ -28,7 +27,7 @@ void *func1(void *)
 
 TEST(ThreadPool, test)
 {
-    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
+    ThreadPool<64> pool(64*1024);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i<FLAGS_ths_total; i++)
@@ -43,7 +42,7 @@ TEST(ThreadPool, test)
 
 TEST(ThreadPool, migrate) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
+    ThreadPool<64> pool(64 * 1024);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -60,7 +59,7 @@ TEST(ThreadPool, migrate) {
 
 TEST(ThreadPool, multithread) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
+    ThreadPool<64> pool(64 * 1024);
     vector<TPControl*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
@@ -171,7 +170,7 @@ TEST(workpool, async_work_lambda) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([r]() {
+            new auto ([i, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -197,7 +196,7 @@ TEST(workpool, async_work_lambda_threadcreate) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, r]() {
+            new auto ([&sem, i, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -226,7 +225,7 @@ TEST(workpool, async_work_lambda_threadpool) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, r]() {
+            new auto ([&sem, i, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);
@@ -264,7 +263,7 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     for (int i = 0; i < 4; i++) {
         CopyMoveRecord *r = new CopyMoveRecord();
         pool->async_call(
-            new auto ([&sem, r]() {
+            new auto ([&sem, i, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
                 EXPECT_EQ(0, r->copy);

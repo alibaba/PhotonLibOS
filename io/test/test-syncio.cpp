@@ -26,7 +26,7 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
-#include "../../test/gtest.h"
+#include <gtest/gtest.h>
 using namespace photon;
 
 
@@ -226,5 +226,6 @@ int main(int argc, char** arg) {
     test_posix_libaio("/tmp/test-syncio");
 
     usleep(0);
-    return RUN_ALL_TESTS();
+    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+
 }

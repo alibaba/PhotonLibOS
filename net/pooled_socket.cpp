@@ -105,10 +105,10 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
     EndPoint key;
     std::unique_ptr<ISocketStream> stream;
     int fd;
-    Timeout timeout;
+    Timeout expire;
 
-    StreamListNode(const EndPoint& key, ISocketStream* stream, int fd, uint64_t TTL_us)
-        : key(key), stream(stream), fd(fd), timeout(TTL_us) {
+    StreamListNode(EndPoint key, ISocketStream* stream, int fd, uint64_t expire)
+        : key(key), stream(stream), fd(fd), expire(expire) {
     }
 };
 
@@ -117,14 +117,13 @@ protected:
     CascadingEventEngine* ev;
     photon::thread* collector;
     std::unordered_map<EndPoint, intrusive_list<StreamListNode>> fdmap;
-    uint64_t TTL_us;
+    uint64_t expiration;
     photon::Timer timer;
 
     // all fd < 0 treated as socket not based on fd
-    // and always reuseable. Using such socket needs user
+    // and always alive. Using such socket needs user
     // to check if connected socket is still usable.
-    // if there still have unread bytes in strema, it should be closed.
-    bool stream_reusable(int fd) {
+    bool stream_alive(int fd) {
         return (fd < 0) || (wait_for_fd_readable(fd, 0) != 0);
     }
 
@@ -136,7 +135,7 @@ protected:
         if (node->fd >= 0) ev->rm_interest({node->fd, EVENT_READ, node});
     }
 
-    ISocketStream* get_from_pool(const EndPoint& ep) {
+    ISocketStream* get_from_pool(EndPoint ep) {
         auto it = fdmap.find(ep);
         if (it == fdmap.end()) return nullptr;
         assert(it != fdmap.end());
@@ -163,12 +162,12 @@ protected:
     }
 
 public:
-    TCPSocketPool(ISocketClient* client, uint64_t TTL_us,
+    TCPSocketPool(ISocketClient* client, uint64_t expiration,
                   bool client_ownership = false)
         : ForwardSocketClient(client, client_ownership),
           ev(photon::new_default_cascading_engine()),
-          TTL_us(TTL_us),
-          timer(TTL_us, {this, &TCPSocketPool::evict}) {
+          expiration(expiration),
+          timer(expiration, {this, &TCPSocketPool::evict}) {
         collector = (photon::thread*)photon::thread_enable_join(
             photon::thread_create11(&TCPSocketPool::collect, this));
     }
@@ -190,14 +189,14 @@ public:
                          "Socket pool supports TCP-like socket only");
     }
 
-    ISocketStream* connect(const EndPoint& remote,
-                           const EndPoint* local) override {
+    ISocketStream* connect(EndPoint remote,
+                           EndPoint local = EndPoint()) override {
     again:
         auto stream = get_from_pool(remote);
         if (!stream) {
             stream = m_underlay->connect(remote, local);
             if (!stream) return nullptr;
-        } else if (!stream_reusable(stream->get_underlay_fd())) {
+        } else if (!stream_alive(stream->get_underlay_fd())) {
             delete stream;
             goto again;
         }
@@ -206,18 +205,18 @@ public:
     uint64_t evict() {
         // remove empty entry in fdmap
         intrusive_list<StreamListNode> freelist;
-        uint64_t near_expire = TTL_us + now;
+        uint64_t near_expire = expiration;
         for (auto it = fdmap.begin(); it != fdmap.end();) {
             auto& list = it->second;
-            uint64_t exp;
-            while (!list.empty() && now >=
-                   (exp = list.front()->timeout.expiration())) {
+            while (!list.empty() &&
+                   list.front()->expire.expire() < photon::now) {
                 freelist.push_back(list.pop_front());
             }
-            if (list.empty()) {
+            if (it->second.empty()) {
                 it = fdmap.erase(it);
             } else {
-                near_expire = std::min(near_expire, exp);
+                near_expire =
+                    std::min(near_expire, it->second.front()->expire.timeout());
                 it++;
             }
         }
@@ -225,17 +224,14 @@ public:
             rm_watch(node);
         }
         freelist.delete_all();
-        assert(near_expire > now);
-        return sat_sub(near_expire, now);
+        return near_expire;
     }
 
-    bool release(const EndPoint& ep, ISocketStream* stream) {
+    bool release(EndPoint ep, ISocketStream* stream) {
         auto fd = stream->get_underlay_fd();
-        ERRNO err;
-        if (!stream_reusable(fd)) return false;
-        auto node = new StreamListNode(ep, stream, fd, TTL_us);
+        if (!stream_alive(fd)) return false;
+        auto node = new StreamListNode(ep, stream, fd, expiration);
         push_into_pool(node);
-        errno = err.no;
         return true;
     }
 
@@ -260,8 +256,8 @@ PooledTCPSocketStream::~PooledTCPSocketStream() {
     }
 }
 
-extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t TTL_us, bool client_ownership) {
-    return new TCPSocketPool(client, TTL_us, client_ownership);
+extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expire, bool client_ownership) {
+    return new TCPSocketPool(client, expire, client_ownership);
 }
 
 }

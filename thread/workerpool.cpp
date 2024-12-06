@@ -32,8 +32,6 @@ namespace photon {
 class WorkPool::impl {
 public:
     static constexpr uint32_t RING_SIZE = 256;
-    static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
-    static constexpr uint64_t QUEUE_YIELD_US = 1024;
 
     photon::mutex worker_mtx;
     std::vector<std::thread> owned_std_threads;
@@ -104,46 +102,33 @@ public:
         exit_cv.notify_all();
     }
 
-    struct TaskLB {
-        Delegate<void> task;
-        std::atomic<uint64_t> *count;
-    };
-
     void main_loop() {
         add_vcpu();
         DEFER(remove_vcpu());
-        std::atomic<uint64_t> running_tasks{0};
         photon::ThreadPoolBase *pool = nullptr;
         if (mode > 0) pool = photon::new_thread_pool(mode);
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
         for (;;) {
-            auto task = ring.recv(running_tasks.load() ? 0 : QUEUE_YIELD_COUNT,
-                                  QUEUE_YIELD_US);
+            auto task = ring.recv();
             if (!task) break;
-            running_tasks.fetch_add(std::memory_order_acq_rel);
-            TaskLB tasklb{task, &running_tasks};
             if (mode < 0) {
-                delegate_helper(&tasklb);
+                task();
             } else if (mode == 0) {
                 auto th = photon::thread_create(
-                    &WorkPool::impl::delegate_helper, &tasklb);
+                    &WorkPool::impl::delegate_helper, &task);
                 photon::thread_yield_to(th);
             } else {
                 auto th = pool->thread_create(&WorkPool::impl::delegate_helper,
-                                              &tasklb);
+                                              &task);
                 photon::thread_yield_to(th);
             }
         }
-        while (running_tasks.load(std::memory_order_acquire))
-            photon::thread_yield();
     }
 
     static void *delegate_helper(void *arg) {
-        // must copy to keep tasklb alive
-        TaskLB tasklb = *(TaskLB*)arg;
-        tasklb.task();
-        tasklb.count->fetch_sub(std::memory_order_acq_rel);
+        auto task = *(Delegate<void> *)arg;
+        task();
         return nullptr;
     }
 

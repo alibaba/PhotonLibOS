@@ -18,7 +18,10 @@ limitations under the License.
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
+
+#include <gtest/gtest.h>
 #include <gflags/gflags.h>
+
 #include <photon/io/fd-events.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
@@ -30,7 +33,6 @@ limitations under the License.
 #include <photon/io/iouring-wrapper.h>
 #include <photon/common/alog.h>
 #include <photon/photon.h>
-#include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
 using namespace photon;
@@ -54,11 +56,11 @@ static void handle_signal(int sig) {
     LOG_INFO("try to stop test");
     stop_test = true;
 }
-/*
+
 static void ignore_signal(int sig) {
     LOG_INFO("ignore signal `", sig);
 }
-*/
+
 static void show_qps_loop() {
     while (!stop_test) {
         photon::thread_sleep(FLAGS_show_loop_interval);

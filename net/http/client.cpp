@@ -24,7 +24,6 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/net/security-context/tls-stream.h>
 #include <photon/net/utils.h>
-#include <photon/photon.h>
 
 namespace photon {
 namespace net {
@@ -36,49 +35,25 @@ static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
+    bool tls_ctx_ownership;
     std::unique_ptr<ISocketClient> tcpsock;
     std::unique_ptr<ISocketClient> tlssock;
     std::unique_ptr<ISocketClient> udssock;
     std::unique_ptr<Resolver> resolver;
-    photon::mutex init_mtx;
-    bool initialized = false;
-    bool tls_ctx_ownership = false;
-    std::vector<IPAddr> src_ips;
 
-    // If there is a photon thread switch during construction, the constructor might be called
-    // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
-    // thread switch inside the constructor. Place the initialization work in init() and ensure it
-    // is initialized only once.
-    PooledDialer() {
-        photon::fini_hook({this, &PooledDialer::at_photon_fini});
-    }
-
-    int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips) {
-        if (initialized)
-            return 0;
-        SCOPED_LOCK(init_mtx);
-        if (initialized)
-            return 0;
-        tls_ctx = _tls_ctx;
-        if (!tls_ctx) {
-            tls_ctx_ownership = true;
-            tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
-        }
-        auto tcp_cli = new_tcp_socket_client(src_ips.data(), src_ips.size());
-        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(src_ips.data(), src_ips.size()), true);
+    //etsocket seems not support multi thread very well, use tcp_socket now. need to find out why
+    PooledDialer(TLSContext *_tls_ctx) :
+            tls_ctx(_tls_ctx ? _tls_ctx : new_tls_context(nullptr, nullptr, nullptr)),
+            tls_ctx_ownership(_tls_ctx == nullptr),
+            resolver(new_default_resolver(kDNSCacheLife)) {
+        auto tcp_cli = new_tcp_socket_client();
+        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
         tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
         tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
         udssock.reset(new_uds_client());
-        resolver.reset(new_default_resolver(kDNSCacheLife));
-        initialized = true;
-        return 0;
     }
 
-    void at_photon_fini() {
-        resolver.reset();
-        udssock.reset();
-        tlssock.reset();
-        tcpsock.reset();
+    ~PooledDialer() {
         if (tls_ctx_ownership)
             delete tls_ctx;
     }
@@ -95,8 +70,9 @@ public:
 };
 
 ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
-    LOG_DEBUG("Dialing to `:`", host, port);
-    auto ipaddr = resolver->resolve(host);
+    LOG_DEBUG("Dial to ` `", host, port);
+    std::string strhost(host);
+    auto ipaddr = resolver->resolve(strhost.c_str());
     if (ipaddr.undefined()) {
         LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
     }
@@ -107,19 +83,20 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     if (secure) {
         tlssock->timeout(timeout);
         sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, host.data());
+        tls_stream_set_hostname(sock, strhost.c_str());
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
     }
     if (sock) {
-        LOG_DEBUG("Connected ` ", ep, VALUE(host), VALUE(secure));
+        LOG_DEBUG("Connected ` host : ` ssl: ` `", ep, host, secure, sock);
         return sock;
     }
     LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
+    if (ipaddr.undefined()) LOG_DEBUG("No connectable resolve result");
     // When failed, remove resolved result from dns cache so that following retries can try
     // different ips.
-    resolver->discard_cache(host, ipaddr);
+    resolver->discard_cache(strhost.c_str(), ipaddr);
     return nullptr;
 }
 
@@ -152,17 +129,12 @@ enum RoundtripStatus {
 
 class ClientImpl : public Client {
 public:
+    PooledDialer m_dialer;
     CommonHeaders<> m_common_headers;
-    TLSContext *m_tls_ctx;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
-        m_tls_ctx(tls_ctx),
+        m_dialer(tls_ctx),
         m_cookie_jar(cookie_jar) {
-    }
-    PooledDialer& get_dialer() {
-        thread_local PooledDialer dialer;
-        dialer.init(m_tls_ctx, m_bind_ips);
-        return dialer;
     }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
@@ -195,18 +167,22 @@ public:
         return ROUNDTRIP_REDIRECT;
     }
 
+    int concurreny = 0;
     int do_roundtrip(Operation* op, Timeout tmo) {
+        concurreny++;
+        LOG_DEBUG(VALUE(concurreny));
+        DEFER(concurreny--);
         op->status_code = -1;
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
         ISocketStream* s;
         if (m_proxy && !m_proxy_url.empty())
-            s = get_dialer().dial(m_proxy_url, tmo.timeout());
+            s = m_dialer.dial(m_proxy_url, tmo.timeout());
         else if (!op->uds_path.empty())
-            s = get_dialer().dial(op->uds_path, tmo.timeout());
+            s = m_dialer.dial(op->uds_path, tmo.timeout());
         else
-            s = get_dialer().dial(req, tmo.timeout());
+            s = m_dialer.dial(req, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -314,7 +290,7 @@ public:
     }
 
     ISocketStream* native_connect(std::string_view host, uint16_t port, bool secure, uint64_t timeout) override {
-        return get_dialer().dial(host, port, secure, timeout);
+        return m_dialer.dial(host, port, secure, timeout);
     }
 
     CommonHeaders<>* common_headers() override {

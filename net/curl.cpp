@@ -19,7 +19,6 @@ limitations under the License.
 #include <shared_mutex>
 #include <vector>
 #include <memory>
-#include <sstream>
 
 #include <photon/common/alog.h>
 #include <photon/common/event-loop.h>

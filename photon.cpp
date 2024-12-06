@@ -20,21 +20,13 @@ limitations under the License.
 #include "io/fd-events.h"
 #include "io/signal.h"
 #include "io/aio-wrapper.h"
-#include "thread/thread.h"
-#include "thread/thread-pool.h"
-#include "thread/stack-allocator.h"
 #ifdef ENABLE_FSTACK_DPDK
 #include "io/fstack-dpdk.h"
 #endif
 #include "io/reset_handle.h"
-#ifdef ENABLE_CURL
 #include "net/curl.h"
-#endif
 #include "net/socket.h"
 #include "fs/exportfs.h"
-#include "common/alog.h"
-#include "common/callback.h"
-#include <vector>
 
 namespace photon {
 
@@ -44,7 +36,7 @@ using namespace net;
 static bool reset_handle_registed = false;
 static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
-#define INIT_IO(name, prefix, ...)    if (INIT_IO_##name & io_engine) { if (prefix##_init(__VA_ARGS__) < 0) return -1; }
+#define INIT_IO(name, prefix)    if (INIT_IO_##name & io_engine) { if (prefix##_init() < 0) return -1; }
 #define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
 
 class Shift {
@@ -57,24 +49,16 @@ public:
 // Try to init master engine with the recommended order
 static const Shift recommended_order[] = {
 #if defined(__linux__)
-    INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_EPOLL_NG, INIT_EVENT_SELECT};
+    INIT_EVENT_EPOLL, INIT_EVENT_IOURING, INIT_EVENT_SELECT};
 #else   // macOS, FreeBSD ...
     INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
 
-int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
-    if (options.use_pooled_stack_allocator) {
-        use_pooled_stack_allocator();
-    }
-    if (options.bypass_threadpool) {
-        set_bypass_threadpool(true);
-    }
-
+int __photon_init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
-    const uint64_t ALL_ENGINES =
-            INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
+    const uint64_t ALL_ENGINES = INIT_EVENT_EPOLL  |
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
             INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
@@ -97,11 +81,9 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     INIT_IO(FSTACK_DPDK, fstack_dpdk);
 #endif
     INIT_IO(EXPORTFS, exportfs)
-#ifdef ENABLE_CURL
     INIT_IO(LIBCURL, libcurl)
-#endif
 #ifdef __linux__
-    INIT_IO(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
+    INIT_IO(LIBAIO, libaio_wrapper)
     INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
     g_event_engine = event_engine;
@@ -114,30 +96,16 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     return 0;
 }
 
-int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
-    return __photon_init(event_engine, io_engine, options);
-}
-
-static std::vector<Delegate<void>>& get_hook_vector() {
-    thread_local std::vector<Delegate<void>> hooks;
-    return hooks;
-}
-
-void fini_hook(Delegate<void> handler) {
-    get_hook_vector().emplace_back(handler);
+int init(uint64_t event_engine, uint64_t io_engine) {
+    return __photon_init(event_engine, io_engine);
 }
 
 int fini() {
-    for (auto h : get_hook_vector()) {
-        h.fire();
-    }
 #ifdef __linux__
     FINI_IO(LIBAIO, libaio_wrapper)
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
-#ifdef ENABLE_CURL
     FINI_IO(LIBCURL, libcurl)
-#endif
     FINI_IO(EXPORTFS, exportfs)
 #ifdef ENABLE_FSTACK_DPDK
     FINI_IO(FSTACK_DPDK, fstack_dpdk)

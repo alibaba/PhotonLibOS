@@ -40,10 +40,8 @@ limitations under the License.
 #include <photon/common/io-alloc.h>
 
 #pragma GCC diagnostic push
-#if defined(__clang__)
-#pragma GCC diagnostic ignored "-Wunknown-warning-option"
-#endif
-#if __GNUC__ >= 12
+#if __GNUC__ >= 13
+// #pragma GCC diagnostic ignored "-Wunknown-warning-option"
 #pragma GCC diagnostic ignored "-Wzero-length-bounds"
 #endif
 
@@ -902,8 +900,8 @@ protected:
         }
         void copy(IOAlloc* rhs, uint16_t nbases)
         {
-            *(IOAlloc*)this = *rhs;
             auto rhs_ = (IOVAllocation_*)rhs;
+            *this = *rhs_;
             memcpy(bases, rhs_->bases, sizeof(bases[0]) * nbases);
         }
     };
@@ -1008,24 +1006,24 @@ public:
     }
 };
 
-inline size_t iovector_view::memcpy_to(iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_to(iov_, size);
+inline size_t iovector_view::memcpy_to(iovector_view* iov, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
+    return co_iov.view().memcpy_to(iov, size);
 }
 
-inline size_t iovector_view::memcpy_from(iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
+inline size_t iovector_view::memcpy_from(iovector_view* iov, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
+    return co_iov.view().memcpy_from(iov, size);
 }
 
-inline size_t iovector_view::memcpy_to(const iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
+inline size_t iovector_view::memcpy_to(const iovector_view* iov, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
+    return co_iov.view().memcpy_from(iov, size);
 }
 
-inline size_t iovector_view::memcpy_from(const iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
+inline size_t iovector_view::memcpy_from(const iovector_view* iov, size_t size) const {
+    IOVectorEntity<32, 0> co_iov(this->iov, iovcnt);
+    return co_iov.view().memcpy_from(iov, size);
 }
 
 
@@ -1059,15 +1057,15 @@ inline void delete_iovector(iovector* ptr)
 
 // Allocate io-vectors on heap if CAPACITY is not enough,
 // otherwise just copy them into array.
-template<size_t INLINE_CAPACITY>
+template<size_t CAPACITY>
 class SmartCloneIOV
 {
 public:
-    iovec iov[INLINE_CAPACITY];
+    iovec iov[CAPACITY];
     iovec* ptr;
     SmartCloneIOV(const iovec* iov, int iovcnt)
     {
-        ptr = (iovcnt <= (int)INLINE_CAPACITY) ?
+        ptr = (iovcnt <= (int)CAPACITY) ?
             this->iov :
             new iovec[iovcnt];
         memcpy(ptr, iov, iovcnt * sizeof(*iov));
@@ -1078,7 +1076,6 @@ public:
             delete [] ptr;
     }
 };
-
 
 
 #undef IF_ASSERT_RETURN

@@ -17,7 +17,7 @@ limitations under the License.
 #include <atomic>
 #include <chrono>
 #include <vector>
-#include "../../test/gtest.h"
+#include <gtest/gtest.h>
 #include <photon/photon.h>
 #include <photon/thread/std-compat.h>
 #include <photon/common/alog.h>

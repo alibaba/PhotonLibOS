@@ -18,7 +18,6 @@ limitations under the License.
 #include <cstdint>
 #include <cstddef>
 #include <type_traits>
-#include <assert.h>
 #include <utility>
 #include "string_view.h"
 // #include <string>
@@ -67,8 +66,6 @@ struct ptr_array_t
     T* pend;
     T* begin() { return pbegin; }
     T* end()   { return pend; }
-    T& front() { return pbegin[0]; }
-    T& back()  { return pend[-1]; }
 };
 
 template<typename T>
@@ -152,7 +149,7 @@ struct xrange_t
         }
         bool operator == (const iterator& rhs) const
         {
-            return _xrange == rhs._xrange && i == rhs.i;
+            return _xrange == rhs._xrange && (i == rhs.i || (i >= _xrange->_end && rhs.i >= _xrange->_end));
         }
         bool operator != (const iterator& rhs) const
         {
@@ -174,16 +171,19 @@ struct xrange_t
 // xrange() function of Python
 // usage: for (auto i: xrange(2, 8)) { ... }
 
-template<typename T> inline
-xrange_t<T> xrange(T begin, T end, int64_t step = 1) {
+template<typename T, ENABLE_IF(std::is_signed<T>::value)>
+xrange_t<int64_t> xrange(T begin, T end, int64_t step = 1)
+{
     static_assert(std::is_integral<T>::value, "...");
-    assert(begin < end && (end - begin) % step == 0);
-    return xrange_t<T>{begin, end, step};
+    return xrange_t<int64_t>{begin, end, step};
 }
 
-template<typename T> inline
-xrange_t<T> xrange(T end) { return xrange<T>(0, end); }
-/*
+template<typename T, ENABLE_IF(std::is_signed<T>::value)>
+xrange_t<int64_t> xrange(T end)
+{
+    return xrange<T>(0, end);
+}
+
 template<typename T, ENABLE_IF(!std::is_signed<T>::value)>
 xrange_t<uint64_t> xrange(T begin, T end, int64_t step = 1)
 {
@@ -196,9 +196,6 @@ xrange_t<uint64_t> xrange(T end)
 {
     return xrange<T>(0, end);
 }
-*/
-
-#define FOR_LOOP(N) for (auto i = N; i; --i)
 
 inline uint64_t align_down(uint64_t x, uint64_t alignment)
 {
@@ -292,24 +289,4 @@ constexpr bool unlikely(bool expr) { return __builtin_expect(expr, false); }
 int version_compare(std::string_view a, std::string_view b, int& result);
 int kernel_version_compare(std::string_view dst, int& result);
 void print_stacktrace();
-
-namespace photon {
-
-// Saturating addition, no upward overflow
-__attribute__((always_inline)) inline
-uint64_t sat_add(uint64_t x, uint64_t y) {
-	uint64_t z, c = __builtin_uaddl_overflow(x, y, (unsigned long*)&z);
-	return -c | z;
-}
-
-// Saturating subtract, no downward overflow
-__attribute__((always_inline)) inline
-uint64_t sat_sub(uint64_t x, uint64_t y) {
-    uint64_t z, c = __builtin_usubl_overflow(x, y, (unsigned long*)&z);
-    return c ? 0 : z;
-}
-
-}
-
-
 

@@ -23,14 +23,13 @@ limitations under the License.
 #include <algorithm>
 #include <sys/time.h>
 #include <gflags/gflags.h>
-#include "../../test/gtest.h"
+#include <gtest/gtest.h>
 #include <photon/common/alog-audit.h>
 
 #define private public
 #include "../thread.cpp"
 #include "../thread11.h"
 #include "../../test/ci-tools.h"
-#include "../future.h"
 
 
 using namespace std;
@@ -114,7 +113,7 @@ void print_heap(SleepQueue& sleepq)
     LOG_INFO("    ");
     int i = 0, k = 1;
     for (auto it : sleepq.q) {
-        printf("%lu(%d)", (unsigned long)it->ts_wakeup, it->idx);
+        printf("%lu(%d)", it->ts_wakeup, it->idx);
         i++;
         if (i == k) {
             printf("\n");
@@ -141,7 +140,7 @@ void sleepq_perf(SleepQueue& sleepq, const vector<photon::thread*>& items)
     check(sleepq);
 
     auto pops = items;
-    shuffle(pops.begin(), pops.end());
+    random_shuffle(pops.begin(), pops.end());
     pops.resize(pops.size()/2);
     {
         update_now();
@@ -378,7 +377,7 @@ void test_thread_switch(uint64_t nth, uint64_t stack_size)
 
 TEST(Perf, ThreadSwitch)
 {
-    test_thread_switch(10, 16 * PAGE_SIZE);
+    test_thread_switch(10, 64 * 1024);
     return;
 
     const uint64_t stack_size = 8 * 1024 * 1024;
@@ -400,7 +399,7 @@ TEST(Perf, ThreadSwitchWithStandaloneTSUpdater)
 {
     timestamp_updater_init();
     DEFER(timestamp_updater_fini());
-    test_thread_switch(10, 16 * PAGE_SIZE);
+    test_thread_switch(10, 64 * 1024);
     return;
 }
 
@@ -685,7 +684,7 @@ TEST(Semaphore, heavy) {
     semaphore sem(0);
     const int thread_num = 100000;
     for (int i=1; i<=thread_num;i++) {
-        thread_create11(4 * PAGE_SIZE, semaphore_heavy, sem, i);
+        thread_create11(64 * 1024, semaphore_heavy, sem, i);
     }
     LOG_DEBUG("created ` threads", thread_num);
     sem.signal(1);
@@ -742,7 +741,7 @@ TEST(RWLock, checklock) {
         uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
         handles.emplace_back(
             photon::thread_enable_join(
-                photon::thread_create(&rwlocktest, (void*)arg)
+                photon::thread_create(&rwlocktest, (void*)arg, 64*1024)
             )
         );
     }
@@ -1030,7 +1029,7 @@ TEST(smp, rwlock) {
             uint64_t arg = (i << 32) | (rand()%10 < 7 ? photon::RLOCK : photon::WLOCK);
             handles.emplace_back(
                 photon::thread_enable_join(
-                    photon::thread_create(&smprwlocktest, (void*)arg)
+                    photon::thread_create(&smprwlocktest, (void*)arg, 64*1024)
                 )
             );
         }
@@ -1060,7 +1059,7 @@ void* test_smp_cvar_recver(void* args_)
             thread_yield();
             SCOPED_LOCK(args->mutex);
             int ret = args->cvar.wait(args->mutex);
-            EXPECT_EQ(ret, 0);
+            assert(ret == 0);
             args->recvd++;
         }
         if (args->senders == 0) break;
@@ -1625,151 +1624,14 @@ TEST(intrusive_list, split) {
 
 }
 
-TEST(interrupt, mutex) {
-    photon::mutex mtx(0);
-    // lock first
-    mtx.lock();
-    auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
-    photon::thread_create11([th, reason]() {
-        // any errno except 0 is able to stop waiting
-        photon::thread_interrupt(th, reason);
-    });
-    // this time will goto sleep
-    auto ret = mtx.lock();
-    ERRNO err;
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(reason, err.no);
-    mtx.unlock();
-}
-
-TEST(interrupt, condition_variable) {
-    photon::condition_variable cond;
-    auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
-    photon::thread_create11([th, reason]() {
-        // any errno except 0 is able to stop waiting
-        photon::thread_interrupt(th, reason);
-    });
-    auto ret = cond.wait_no_lock();
-    ERRNO err;
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(reason, err.no);
-}
-
-TEST(interrupt, semaphore) {
-    photon::semaphore sem(0);
-    auto th = photon::CURRENT;
-    int reason = rand();
-    while (reason == 0) reason = rand();
-    photon::thread_create11([th, reason]() {
-        // any errno except 0 is able to stop waiting
-        photon::thread_interrupt(th, reason);
-    });
-    auto ret = sem.wait_interruptible(1); // nobody
-    ERRNO err;
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(reason, err.no);
-}
-
-
-TEST(condition_variable, pred) {
-    photon::condition_variable cond;
-    int flag = 0;
-    photon::thread_create11([&cond, &flag]() {
-        // any errno except 0 is able to stop waiting
-        flag = 1;
-        cond.notify_one();
-        // first notify should not wake up condition variable
-        photon::thread_usleep(1000 * 1000);
-        flag = 2;
-        cond.notify_one();
-
-    });
-    auto ret = cond.wait_no_lock([&flag](){ return flag == 2;});
-    EXPECT_EQ(0, ret);
-    EXPECT_EQ(2, flag);
-    ret = cond.wait_no_lock([&flag](){ return flag == 3; }, 1000);
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(ETIMEDOUT, errno);
-    flag = 0;
-    photon::mutex mtx;
-    SCOPED_LOCK(mtx);
-    photon::thread_create11([&cond, &flag, &mtx]() {
-        // any errno except 0 is able to stop waiting
-        {
-            SCOPED_LOCK(mtx);
-            flag = 1;
-            cond.notify_one();
-        }
-        // first notify should not wake up condition variable
-        photon::thread_usleep(1000 * 1000);
-        {
-            SCOPED_LOCK(mtx);
-            flag = 2;
-            cond.notify_one();
-        }
-    });
-    ret = cond.wait(mtx, [&flag](){ return flag == 2;});
-    EXPECT_EQ(0, ret);
-    EXPECT_EQ(2, flag);
-    ret = cond.wait(mtx, [&flag](){ return flag == 3; }, 1000);
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(ETIMEDOUT, errno);
-}
-
-const int PROMISE_VALUE = 1024;
-static void _promise_worker(Promise<int> promise) {
-    thread_usleep(1000 * 10);
-    LOG_DEBUG("set value as ", PROMISE_VALUE);
-    promise.set_value(PROMISE_VALUE);
-}
-
-static void* promise_worker(void* arg) {
-    auto fut = (Future<int>*) arg;
-    _promise_worker(fut->get_promise());
-    return 0;
-}
-
-TEST(future, test1) {
-    Future<int> fut;
-    auto th = thread_create(promise_worker, &fut);
-    auto jh = thread_enable_join(th);
-    thread_usleep(1000 * 4);
-    LOG_DEBUG("before getting the value from future");
-    fut.wait();
-    auto v = fut.get_value();
-    LOG_DEBUG("got value ` from worker via promise/future", v);
-    EXPECT_EQ(v, PROMISE_VALUE);
-    thread_join(jh);
-}
-
-static std::shared_ptr<Future<int>> get_future() {
-    auto fut = std::make_shared<Future<int>>();
-    thread_create11(_promise_worker, fut->get_promise());
-    thread_usleep(1000 * 4);
-    return fut;
-}
-
-TEST(future, test2) {
-    auto fut = get_future();
-    LOG_DEBUG("before getting the value from future");
-    auto v = fut->get_value();;
-    LOG_DEBUG("got value ` from worker via promise/future", v);
-    EXPECT_EQ(v, PROMISE_VALUE);
-}
-
 int main(int argc, char** arg)
 {
     if (!photon::is_using_default_engine()) return 0;
-    srand(time(nullptr));
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     default_audit_logger.log_output = log_output_stdout;
     photon::vcpu_init();
-    set_log_output_level(ALOG_INFO);
+    set_log_output_level(ALOG_DEBUG);
 
     if (FLAGS_vcpus <= 1)
     {

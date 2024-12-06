@@ -31,7 +31,6 @@ limitations under the License.
 #include "client.h"
 #include "message.h"
 #include "body.h"
-#include <atomic>
 
 
 #ifndef MSG_MORE
@@ -66,9 +65,8 @@ public:
     } status = Status::running;
 
     HandlerRecord m_default_handler = {"", nullptr, false, {this, &HTTPServerImpl::not_found_handler}};
-    std::atomic<uint64_t> m_workers{0};
+    uint64_t m_workers = 0;
     intrusive_list<SockItem> m_connection_list;
-    photon::spinlock m_connection_list_lock;
     std::vector<HandlerRecord> m_handlers;
 
     HTTPServerImpl() {}
@@ -109,14 +107,8 @@ public:
         m_workers++;
         DEFER(m_workers--);
         SockItem sock_item(sock);
-        {
-            SCOPED_LOCK(m_connection_list_lock);
-            m_connection_list.push_back(&sock_item);
-        }
-        DEFER({
-            SCOPED_LOCK(m_connection_list_lock);
-            m_connection_list.erase(&sock_item);
-        });
+        m_connection_list.push_back(&sock_item);
+        DEFER(m_connection_list.erase(&sock_item));
 
         char req_buf[64*1024];
         char resp_buf[64*1024];

@@ -97,7 +97,7 @@ public:
             // reset m_ring so that the destructor won't do duplicate munmap cleanup (io_uring_queue_exit)
             delete m_ring;
             m_ring = nullptr;
-            LOG_ERROR_RETURN(0, -1, "iouring: failed to init queue: ", ERRNO(-ret));
+            LOG_ERRNO_RETURN(0, -1, "iouring: failed to init queue");
         }
 
         // Check feature supported
@@ -172,7 +172,7 @@ public:
      *     be set to ETIMEDOUT. If failed because of external interruption, errno will also be set accordingly.
      */
     template<typename Prep, typename... Args>
-    int32_t async_io(Prep prep, Timeout timeout, uint32_t ring_flags, Args... args) {
+    int32_t async_io(Prep prep, uint64_t timeout, uint32_t ring_flags, Args... args) {
         auto* sqe = _get_sqe();
         if (sqe == nullptr)
             return -1;
@@ -180,17 +180,16 @@ public:
         return _async_io(sqe, timeout, ring_flags);
     }
 
-    int32_t _async_io(io_uring_sqe* sqe, Timeout timeout, uint32_t ring_flags) {
+    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
         sqe->flags |= (uint8_t) (ring_flags & 0xff);
         ioCtx io_ctx(false, false);
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx(true, false);
-        __kernel_timespec ts;
-        auto usec = timeout.timeout_us();
-        if (usec < std::numeric_limits<int64_t>::max()) {
+        __kernel_timespec ts{};
+        if (timeout < std::numeric_limits<int64_t>::max()) {
             sqe->flags |= IOSQE_IO_LINK;
-            ts = usec_to_timespec(usec);
+            usec_to_timespec(timeout, &ts);
             sqe = _get_sqe();
             if (sqe == nullptr)
                 return -1;
@@ -224,7 +223,7 @@ public:
         }
     }
 
-    int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
         if (unlikely(interests == 0))
             return 0;
         unsigned poll_mask = evmap.translate_bitwisely(interests);
@@ -286,9 +285,9 @@ public:
         return 0;
     }
 
-    ssize_t wait_for_events(void** data, size_t count, Timeout timeout) override {
+    ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) override {
         // Use master engine to wait for self event fd
-        int ret = ::photon::wait_for_fd_readable(m_eventfd, timeout);
+        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(m_eventfd, timeout);
         if (ret < 0) {
             return errno == ETIMEDOUT ? 0 : -1;
         }
@@ -332,20 +331,21 @@ public:
         return num;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
         // Prepare own timeout
+        __kernel_timespec ts{};
         if (timeout > std::numeric_limits<int64_t>::max()) {
             timeout = std::numeric_limits<int64_t>::max();
         }
+        usec_to_timespec(timeout, &ts);
 
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
+        io_uring_cqe* cqe = nullptr;
+        if (m_submit_wait_func(m_ring, &ts, &cqe) != 0) {
             return -1;
         }
 
         uint32_t head = 0;
         unsigned i = 0;
-        io_uring_cqe* cqe;
         io_uring_for_each_cqe(m_ring, head, cqe) {
             i++;
             auto ctx = (ioCtx*) io_uring_cqe_get_data(cqe);
@@ -463,7 +463,7 @@ private:
         return sqe;
     }
 
-    static int submit_wait_by_timer(io_uring* ring, __kernel_timespec* ts) {
+    static int submit_wait_by_timer(io_uring* ring, __kernel_timespec* ts, io_uring_cqe** cqe) {
         io_uring_sqe* sqe = io_uring_get_sqe(ring);
         if (!sqe) {
             LOG_ERROR_RETURN(EBUSY, -1, "iouring: submission queue is full");
@@ -479,17 +479,16 @@ private:
         return 0;
     }
 
-    static int submit_wait_by_api(io_uring* ring, __kernel_timespec* ts) {
+    static int submit_wait_by_api(io_uring* ring, __kernel_timespec* ts, io_uring_cqe** cqe) {
         // Batch submit all SQEs
-        io_uring_cqe* cqe;
-        int ret = io_uring_submit_and_wait_timeout(ring, &cqe, 1, ts, nullptr);
+        int ret = io_uring_submit_and_wait_timeout(ring, cqe, 1, ts, nullptr);
         if (ret < 0 && ret != -ETIME) {
             LOG_ERRNO_RETURN(0, -1, "iouring: failed to submit io");
         }
         return 0;
     }
 
-    using SubmitWaitFunc = int (*)(io_uring* ring, __kernel_timespec* ts);
+    using SubmitWaitFunc = int (*)(io_uring* ring, __kernel_timespec* ts, io_uring_cqe** cqe);
     static SubmitWaitFunc m_submit_wait_func;
 
     static void set_submit_wait_function() {
@@ -530,10 +529,11 @@ private:
         }
     }
 
-    __kernel_timespec usec_to_timespec(int64_t usec) {
-        int64_t sec = usec / 1000000L;
-        long long nsec = (usec % 1000000L) * 1000L;
-        return {sec, nsec};
+    static void usec_to_timespec(int64_t usec, __kernel_timespec* ts) {
+        int64_t usec_rounded_to_sec = usec / 1000000L * 1000000L;
+        long long nsec = (usec - usec_rounded_to_sec) * 1000L;
+        ts->tv_sec = usec_rounded_to_sec / 1000000L;
+        ts->tv_nsec = nsec;
     }
 
     static constexpr const uint32_t REQUIRED_FEATURES[] = {
@@ -565,67 +565,67 @@ inline size_t do_async_io(Ts...xs) {
     return mee->async_io(xs...);
 }
 
-ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, uint64_t timeout) {
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, uint64_t timeout) {
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, uint64_t timeout) {
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, uint64_t timeout) {
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
-ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, uint64_t timeout) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
     return do_async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, Timeout timeout) {
+int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, uint64_t timeout) {
     return do_async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
 }
 
-int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, Timeout timeout) {
+int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, uint64_t timeout) {
     return do_async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
 }
 

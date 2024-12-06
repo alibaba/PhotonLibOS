@@ -1,13 +1,9 @@
-set(TEST_WORKING_DIR ${CMAKE_CURRENT_SOURCE_DIR}/)
-add_definitions(-DDATA_DIR=${TEST_WORKING_DIR})
+SET(TEST_WORKING_DIR ${CMAKE_CURRENT_SOURCE_DIR}/)
+ADD_DEFINITIONS(-w -DDATA_DIR=${TEST_WORKING_DIR})
 
 add_executable(test-objcache test_objcache.cpp)
 target_link_libraries(test-objcache PRIVATE photon_shared)
 add_test(NAME test-objcache COMMAND $<TARGET_FILE:test-objcache>)
-
-add_executable(perf-objcache perf_objcache.cpp)
-target_link_libraries(perf-objcache PRIVATE photon_shared)
-add_test(NAME perf-objcache COMMAND $<TARGET_FILE:test-objcache>)
 
 add_executable(test-common test.cpp)
 target_link_libraries(test-common PRIVATE photon_shared)
@@ -32,6 +28,3 @@ add_test(NAME test-lockfree COMMAND $<TARGET_FILE:test-lockfree>)
 add_executable(test-alog test_alog.cpp x.cpp)
 target_link_libraries(test-alog PRIVATE photon_shared)
 add_test(NAME test-alog COMMAND $<TARGET_FILE:test-alog>)
-
-add_executable(perf-rcuptr perf_rcuptr.cpp)
-target_link_libraries(perf-rcuptr PRIVATE photon_shared)

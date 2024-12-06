@@ -1,25 +1,7 @@
-if (NOT APPLE)
-    find_path(OPENSSL_INCLUDE_DIRS openssl/ssl.h openssl/crypto.h)
-    find_library(OPENSSL_SSL_LIBRARIES ssl)
-    find_library(OPENSSL_CRYPTO_LIBRARIES crypto)
+find_path(OPENSSL_INCLUDE_DIRS openssl/ssl.h openssl/crypto.h)
 
-else ()
-    find_path(OPENSSL_INCLUDE_DIRS
-            NAMES openssl/ssl.h openssl/crypto.h
-            PATHS ${OPENSSL_ROOT_DIR}/include
-            NO_DEFAULT_PATH
-    )
-    find_library(OPENSSL_SSL_LIBRARIES
-            NAMES ssl
-            PATHS ${OPENSSL_ROOT_DIR}/lib
-            NO_DEFAULT_PATH
-    )
-    find_library(OPENSSL_CRYPTO_LIBRARIES
-            NAMES crypto
-            PATHS ${OPENSSL_ROOT_DIR}/lib
-            NO_DEFAULT_PATH
-    )
-endif ()
+find_library(OPENSSL_SSL_LIBRARIES ssl)
+find_library(OPENSSL_CRYPTO_LIBRARIES crypto)
 
 set(OPENSSL_LIBRARIES ${OPENSSL_SSL_LIBRARIES} ${OPENSSL_CRYPTO_LIBRARIES})
 
