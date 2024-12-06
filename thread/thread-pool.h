@@ -96,10 +96,6 @@ namespace photon
         ThreadPoolBase::delete_thread_pool(p);
     }
 
-    // Use `photon::thread_create` directly for all thread-pool
-    // When using pooled-stack-allocator, or other high performance stack
-    // allocator
-    void set_bypass_threadpool(bool flag = true);
 
     template<uint32_t CAPACITY>
     class ThreadPool : public ThreadPoolBase

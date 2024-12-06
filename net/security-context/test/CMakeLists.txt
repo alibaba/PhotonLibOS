@@ -1,3 +1,5 @@
+add_definitions(-w)
+
 add_executable(test-tls test.cpp)
 target_link_libraries(test-tls PRIVATE photon_shared)
 add_test(NAME test-tls COMMAND $<TARGET_FILE:test-tls>)

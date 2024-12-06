@@ -18,7 +18,6 @@ limitations under the License.
 #include <sys/types.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
-#include <photon/common/timeout.h>
 
 namespace photon {
 
@@ -42,21 +41,21 @@ public:
     virtual ~MasterEventEngine() = default;
 
     /**
-     * @param interest EVENT_READ, EVENT_WRITE, or EVENT_ERROR
+     * @param interests bitwisely OR-ed EVENT_READ, EVENT_WRITE
      * @return 0 for success, which means event arrived in time
      *         -1 for failure, could be timeout or interrupted by another thread
      */
-    virtual int wait_for_fd(int fd, uint32_t interest, Timeout timeout) = 0;
+    virtual int wait_for_fd(int fd, uint32_t interest, uint64_t timeout) = 0;
 
-    int wait_for_fd_readable(int fd, Timeout timeout = {}) {
+    int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
         return wait_for_fd(fd, EVENT_READ, timeout);
     }
 
-    int wait_for_fd_writable(int fd, Timeout timeout = {}) {
+    int wait_for_fd_writable(int fd, uint64_t timeout = -1) {
         return wait_for_fd(fd, EVENT_WRITE, timeout);
     }
 
-    int wait_for_fd_error(int fd, Timeout timeout = {}) {
+    int wait_for_fd_error(int fd, uint64_t timeout = -1) {
         return wait_for_fd(fd, EVENT_ERROR, timeout);
     }
 
@@ -68,20 +67,20 @@ public:
      * @warning Do NOT invoke photon::usleep() or photon::sleep() in this function, because their
      *          implementations also rely on this function.
      */
-    virtual ssize_t wait_and_fire_events(uint64_t timeout) = 0;
+    virtual ssize_t wait_and_fire_events(uint64_t timeout = -1) = 0;
 
     virtual int cancel_wait() = 0;
 };
 
-inline int wait_for_fd_readable(int fd, Timeout timeout = {}) {
+inline int wait_for_fd_readable(int fd, uint64_t timeout = -1) {
     return get_vcpu()->master_event_engine->wait_for_fd_readable(fd, timeout);
 }
 
-inline int wait_for_fd_writable(int fd, Timeout timeout = {}) {
+inline int wait_for_fd_writable(int fd, uint64_t timeout = -1) {
     return get_vcpu()->master_event_engine->wait_for_fd_writable(fd, timeout);
 }
 
-inline int wait_for_fd_error(int fd, Timeout timeout = {}) {
+inline int wait_for_fd_error(int fd, uint64_t timeout = -1) {
     return get_vcpu()->master_event_engine->wait_for_fd_error(fd, timeout);
 }
 
@@ -118,7 +117,7 @@ public:
      * @return -1 for error, positive integer for the number of events, 0 for no events and should run it again
      * @warning Do NOT block vcpu
      */
-    virtual ssize_t wait_for_events(void** data, size_t count, Timeout timeout = {}) = 0;
+    virtual ssize_t wait_for_events(void** data, size_t count, uint64_t timeout = -1) = 0;
 };
 
 template<typename Ctor> inline
@@ -138,15 +137,12 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(epoll);
 DECLARE_MASTER_AND_CASCADING_ENGINE(select);
 DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
-DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
 
 inline int fd_events_init(uint64_t master_engine) {
     switch (master_engine) {
 #ifdef __linux__
         case INIT_EVENT_EPOLL:
             return _fd_events_init(&new_epoll_master_engine);
-        case INIT_EVENT_EPOLL_NG:
-            return _fd_events_init(&new_epoll_ng_master_engine);
 #endif
         case INIT_EVENT_SELECT:
             return _fd_events_init(&new_select_master_engine);

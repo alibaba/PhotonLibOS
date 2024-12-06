@@ -1,0 +1,230 @@
+name: Linux x86 (new)
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+  pull_request:
+    branches: [ "main", "release/*" ]
+
+jobs:
+  gcc850:
+    runs-on: [self-hosted, compiler]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build850
+        run: |
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_EXTFS=ON        \
+                        #  -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                        #  -D PHOTON_AIO_SOURCE=""          \
+                        #  -D PHOTON_ZLIB_SOURCE=""         \
+                        #  -D PHOTON_CURL_SOURCE=""         \
+                        #  -D PHOTON_OPENSSL_SOURCE=""      \
+                        #  -D PHOTON_GFLAGS_SOURCE=""       \
+                        #  -D PHOTON_GOOGLETEST_SOURCE=""   \
+                        #  -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz
+
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+          ln -f common/checksum/test/checksum.in build/output/
+          tar -c -h --use-compress-program=zstdmt -f output850.tzs build/output/
+      - name: Upload850
+        uses: actions/upload-artifact@v4
+        with:
+          name: output850
+          path: output850.tzs
+          retention-days: 5
+          compression-level: 0
+
+  test850:
+    needs: gcc850
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output850
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output850.tzs
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc921:
+    needs: gcc850
+    runs-on: [self-hosted, compiler]
+    steps:
+      - name: Build921
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+          ln -f common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output921.tzs build/output/
+      - name: Upload921
+        uses: actions/upload-artifact@v4
+        with:
+          name: output921
+          path: output921.tzs
+          retention-days: 5
+          compression-level: 0
+
+  test921:
+    needs: gcc921
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output921
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output921.tzs
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1031:
+    needs: gcc921
+    runs-on: [self-hosted, compiler]
+    steps:
+      - name: Build1031
+        run: |
+          source /opt/rh/gcc-toolset-10/enable
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+          ln -f common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1031.tzs build/output/
+      - name: Upload1031
+        uses: actions/upload-artifact@v4
+        with:
+          name: output1031
+          path: output1031.tzs
+          retention-days: 5
+          compression-level: 0
+
+  test1031:
+    needs: gcc1031
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1031
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1031.tzs
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1121:
+    needs: gcc1031
+    runs-on: [self-hosted, compiler]
+    steps:
+      - name: Build1121
+        run: |
+          source /opt/rh/gcc-toolset-10/enable
+          cmake --build build -j --clean-first -- VERBOSE=1
+          ln -f common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1121.tzs build/output/
+      - name: Upload1121
+        uses: actions/upload-artifact@v4
+        with:
+          name: output1121
+          path: output1121.tzs
+          retention-days: 5
+          compression-level: 0
+
+  test1121:
+    needs: gcc1121
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1121
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1121.tzs
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+
+  gcc1211:
+    needs: gcc1121
+    runs-on: [self-hosted, compiler]
+    steps:
+      - name: Build1211
+        run: |
+          source /opt/rh/gcc-toolset-10/enable
+          cmake --build build -j $(nproc) --clean-first -- VERBOSE=1
+          ln -f common/checksum/test/checksum.in build/output/
+          tar -c --use-compress-program=zstdmt -f output1211.tzs build/output/
+      - name: Upload1211
+        uses: actions/upload-artifact@v4
+        with:
+          name: output1211
+          path: output1211.tzs
+          retention-days: 5
+          compression-level: 0
+
+  test1211:
+    needs: gcc1211
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/coldwings/photon-ut-base:latest
+      options: --cpus 4 --privileged
+    steps:
+      - uses: szenius/set-timezone@v1.2
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: actions/download-artifact@v4
+        with:
+          name: output1211
+      - name: test
+        run: |
+          tar -x --use-compress-program=zstdmt -f output1211.tzs
+          cd build/output/
+          ctest -E test-lockfree --timeout 3600 -V
+          export PHOTON_CI_EV_ENGINE=io_uring
+          ctest -E test-lockfree --timeout 3600 -V
+
+

@@ -15,13 +15,13 @@ limitations under the License.
 */
 
 #include <cmath>
+#include <gtest/gtest.h>
 #include <photon/photon.h>
 #include <photon/rpc/rpc.h>
 #include <photon/rpc/serialize.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
-#include "../../test/gtest.h"
 
 
 struct map_value : photon::rpc::Message {
@@ -110,17 +110,17 @@ public:
         assert(req->code == 999);
         for (size_t i = 0; i < req->buf.size(); ++i) {
             char* c = (char*) req->buf.addr() + i;
-            EXPECT_EQ(*c, 'x');
+            assert(*c == 'x');
         }
 
         auto iter = req->map.find("2");
-        EXPECT_NE(iter, req->map.end());
+        assert(iter != req->map.end());
         auto k = iter->first;
-        EXPECT_EQ(k, "2");
+        assert(k == "2");
         auto v = iter->second;
-        EXPECT_EQ(v.a, 2);
-        EXPECT_EQ(v.b, "val-2");
-        EXPECT_EQ(v.c, '2');
+        assert(v.a == 2);
+        assert(v.b == "val-2");
+        assert(v.c == '2');
 
         iter = req->map.find("4");
         if (iter != req->map.end()) {

@@ -12,8 +12,6 @@
 /.clang_complete
 /.ccls*
 /.cquery*
-/.cache
-/compile_commands.json
 
 # alimake
 /.dep_create/

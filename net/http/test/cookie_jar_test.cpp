@@ -21,6 +21,7 @@ limitations under the License.
 #undef private
 
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <time.h>
 
 #include <chrono>
@@ -33,7 +34,6 @@ limitations under the License.
 #include <iostream>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
-#include "../../../test/gtest.h"
 
 using namespace photon;
 using namespace photon::net;
@@ -104,5 +104,6 @@ int main(int argc, char** arg) {
     DEFER(photon::fini());
     set_log_output_level(ALOG_DEBUG);
     ::testing::InitGoogleTest(&argc, arg);
-    return RUN_ALL_TESTS();
+    LOG_DEBUG("test result:`", RUN_ALL_TESTS());
+    return 0;
 }

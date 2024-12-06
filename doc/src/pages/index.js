@@ -4,7 +4,6 @@ import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import HomepageFeatures from '@site/src/components/HomepageFeatures';
-import Translate from '@docusaurus/Translate';
 
 import styles from './index.module.css';
 
@@ -19,7 +18,7 @@ function HomepageHeader() {
           <Link
             className="button button--secondary button--lg"
             to="/docs/category/introduction">
-            <Translate>Get started</Translate>
+            Get started
           </Link>
         </div>
       </div>
@@ -33,7 +32,7 @@ export default function Home() {
   return (
     <Layout
       title={`${siteConfig.title}`}
-      description="Probably the fastest coroutine lib in the world!">
+      description="Probably the fastest coroutine lib of the world">
       <HomepageHeader />
       <main>
         <HomepageFeatures />

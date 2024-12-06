@@ -39,6 +39,7 @@ public:
     struct kevent _events[32];
     int _kq = -1;
     uint32_t _n = 0;    // # of events to submit
+    struct timespec _tm = {0, 0};  // used for poll
 
     int init() {
         if (_kq >= 0)
@@ -48,7 +49,6 @@ public:
         if (_kq < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to create kqueue()");
 
-        LOG_DEBUG("kqueue_fd = ", _kq);
         if (enqueue(_kq, EVFILT_USER, EV_ADD | EV_CLEAR, 0, nullptr, true) < 0) {
             DEFER({ close(_kq); _kq = -1; });
             LOG_ERRNO_RETURN(0, -1, "failed to setup self-wakeup EVFILT_USER event by kevent()");
@@ -61,6 +61,7 @@ public:
         _kq = -1;                   // kqueue fd is not inherited from the parent process
         _inflight_events.clear();   // reset members
         _n = 0;
+        _tm = {0, 0};
         return init();              // re-init
     }
 
@@ -73,41 +74,36 @@ public:
     }
 
     int enqueue(int fd, short event, uint16_t action, uint32_t event_flags, void* udata, bool immediate = false) {
+        // LOG_INFO("enqueue _kq: `, fd: `, event: `, action: `", _kq, fd, event, action);
         assert(_n < LEN(_events));
         auto entry = &_events[_n++];
         EV_SET(entry, fd, event, action, event_flags, 0, udata);
         if (immediate || _n == LEN(_events)) {
-            struct timespec tm{0, 0};
-            int ret = kevent(_kq, _events, _n, nullptr, 0, &tm);
-            if (ret < 0) {
+            int ret = kevent(_kq, _events, _n, nullptr, 0, nullptr);
+            if (ret < 0)
                 LOG_ERRNO_RETURN(0, -1, "failed to submit events with kevent()");
-            }
             _n = 0;
         }
         return 0;
     }
 
-    int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
-        if (unlikely(interests == 0)) {
-            errno = ENOSYS;
-            return -1;
-        }
+    int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
+        if (unlikely(interests == 0))
+            return 0;
         short ev = (interests == EVENT_READ) ? EVFILT_READ : EVFILT_WRITE;
-        auto current = CURRENT;
-        int ret = enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, current);
-        if (ret < 0) return ret;
-        ret = thread_usleep(timeout);
+        enqueue(fd, ev, EV_ADD | EV_ONESHOT, 0, CURRENT);
+        int ret = thread_usleep(timeout);
         ERRNO err;
         if (ret == -1 && err.no == EOK) {
             return 0;  // event arrived
         }
 
-        enqueue(fd, ev, EV_DELETE, 0, current, true);
+        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
         errno = (ret == 0) ? ETIMEDOUT : err.no;
         return -1;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
+    ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
         ssize_t nev = 0;
         struct timespec tm;
         tm.tv_sec = timeout / 1000 / 1000;
@@ -115,16 +111,17 @@ public:
 
     again:
         int ret = kevent(_kq, _events, _n, _events, LEN(_events), &tm);
-        if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
 
         _n = 0;
         nev += ret;
         for (int i = 0; i < ret; ++i) {
             if (_events[i].filter == EVFILT_USER) continue;
-            auto th = (thread*)_events[i].udata;
+            auto th = (thread*) _events[i].udata;
             if (th) thread_interrupt(th, EOK);
         }
-        if (ret == (int)LEN(_events)) {  // there may be more events
+        if (ret == (int) LEN(_events)) {  // there may be more events
             tm.tv_sec = tm.tv_nsec = 0;
             goto again;
         }
@@ -132,13 +129,8 @@ public:
     }
 
     int cancel_wait() override {
-        // cannot call `enqueue` directly since it will be called from another vCPU.
-        // directly use kqueue to submit event, which is safe.
-        // as same as `enqueue(_kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, nullptr, true)`
-        struct kevent entry;
-        EV_SET(&entry, _kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, 0, nullptr);
-        struct timespec tm{0, 0};
-        return kevent(_kq, &entry, 1, nullptr, 0, &tm);
+        enqueue(_kq, EVFILT_USER, EV_ONESHOT, NOTE_TRIGGER, nullptr, true);
+        return 0;
     }
 
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
@@ -184,12 +176,11 @@ public:
     }
 
     ssize_t wait_for_events(void** data,
-            size_t count, Timeout timeout) override {
-        int ret = ::photon::wait_for_fd_readable(_kq, timeout);
+            size_t count, uint64_t timeout = -1) override {
+        int ret = get_vcpu()->master_event_engine->wait_for_fd_readable(_kq, timeout);
         if (ret < 0) return errno == ETIMEDOUT ? 0 : -1;
         if (count > LEN(_events))
             count = LEN(_events);
-        static const struct timespec _tm = {0, 0};
         ret = kevent(_kq, _events, _n, _events, count, &_tm);
         if (ret < 0)
             LOG_ERRNO_RETURN(0, -1, "failed to call kevent()");
@@ -204,7 +195,7 @@ public:
 };
 
 __attribute__((noinline))
-static KQueue* new_kqueue_engine() {
+KQueue* new_kqueue_engine() {
     LOG_INFO("Init event engine: kqueue");
     return NewObj<KQueue>()->init();
 }

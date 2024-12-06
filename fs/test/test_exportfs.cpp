@@ -20,6 +20,7 @@ limitations under the License.
 #include "../exportfs.cpp"
 
 #include <errno.h>
+#include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <type_traits>
 #include <photon/common/alog.h>
@@ -33,7 +34,6 @@ limitations under the License.
 #else
 #include  <sys/types.h>
 #endif
-#include "../../test/gtest.h"
 
 using namespace photon;
 using namespace photon::fs;

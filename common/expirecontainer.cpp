@@ -15,24 +15,27 @@ limitations under the License.
 */
 
 #include "expirecontainer.h"
+
 #include <photon/thread/thread.h>
 
-ExpireContainerBase::ExpireContainerBase(uint64_t lifespan,
+ExpireContainerBase::ExpireContainerBase(uint64_t expiration,
                                          uint64_t timer_cycle)
-    : _lifespan(lifespan),
+    : _expiration(expiration),
       _timer(std::max(static_cast<uint64_t>(1000), timer_cycle),
              {this, &ExpireContainerBase::expire}, true, 8UL * 1024 * 1024) {}
 
-auto ExpireContainerBase::insert(Item* item) -> std::pair<iterator, bool> {
+std::pair<ExpireContainerBase::iterator, bool> ExpireContainerBase::insert(
+    Item* item) {
     return _set.emplace(item);
 }
 
-auto ExpireContainerBase::__find_prelock(const Item& key_item)  -> iterator {
+ExpireContainerBase::iterator ExpireContainerBase::__find_prelock(
+    const Item& key_item) {
     auto it = _set.find((Item*)&key_item);
     return it;
 }
 
-auto ExpireContainerBase::find(const Item& key_item) -> iterator {
+ExpireContainerBase::iterator ExpireContainerBase::find(const Item& key_item) {
     SCOPED_LOCK(_lock);
     return __find_prelock(key_item);
 }
@@ -51,7 +54,7 @@ uint64_t ExpireContainerBase::expire() {
     ({
         SCOPED_LOCK(_lock);
         _list.split_by_predicate([&](Item* x) {
-            bool ret = x->_timeout.expiration() < photon::now;
+            bool ret = x->_timeout.expire() < photon::now;
             if (ret) _set.erase(x);
             return ret;
         });
@@ -74,9 +77,9 @@ bool ExpireContainerBase::keep_alive(const Item& x, bool insert_if_not_exists) {
     return true;
 }
 
-auto ObjectCacheBase::ref_acquire(const Item& key_item,
-                                  Delegate<void, void*> ctor,
-                                  uint64_t failure_cooldown) -> Item* {
+ObjectCacheBase::Item* ObjectCacheBase::ref_acquire(const Item& key_item,
+                                                    Delegate<void*> ctor,
+                                                    uint64_t failure_cooldown) {
     Base::iterator holder;
     Item* item = nullptr;
     expire();
@@ -101,23 +104,22 @@ auto ObjectCacheBase::ref_acquire(const Item& key_item,
     } while (!item);
     {
         SCOPED_LOCK(item->_mtx);
-        auto ts = photon::sat_sub(photon::now, failure_cooldown);
-        if (!item->_obj && item->_failure <= ts) {
-            ctor(item);
+        if (!item->_obj && (item->_failure <=
+                            photon::sat_sub(photon::now, failure_cooldown))) {
+            item->_obj = ctor();
             if (!item->_obj) item->_failure = photon::now;
         }
     }
     if (!item->_obj) {
-        ref_release(item, false, true);
+        ref_release(item, false);
         return nullptr;
     }
     return item;
 }
 
-void* ObjectCacheBase::ref_release(ItemPtr item, bool recycle, bool destroy) {
+int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
     DEFER(expire());
     photon::semaphore sem;
-    void * ret = nullptr;
     {
         SCOPED_LOCK(_lock);
         if (item->_recycle) recycle = false;
@@ -141,18 +143,16 @@ void* ObjectCacheBase::ref_release(ItemPtr item, bool recycle, bool destroy) {
             assert(item->_refcnt == 0);
             _set.erase(item);
         }
-        if (!destroy) {
-            std::swap(ret, item->_obj);
-        }
         delete item;
         blocker.notify_all();
     }
-    return ret;
+    return 0;
 }
 
 // the argument `key` plays the roles of (type-erased) key
-void* ObjectCacheBase::release(const Item& key_item, bool recycle, bool destroy) {
-    auto item = ExpireContainerBase::TypedIterator<Item>(Base::find(key_item));
-    if (item == end()) return nullptr;
-    return ref_release(*item, recycle, destroy);
+int ObjectCacheBase::release(const ObjectCacheBase::Item& key_item,
+                             bool recycle) {
+    auto item = find(key_item);
+    if (item == end()) return -1;
+    return ref_release(*item, recycle);
 }

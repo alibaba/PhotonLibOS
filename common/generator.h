@@ -161,7 +161,7 @@ inline void ___example_of_generator____()
     };
 
     {
-        int i = 0; (void)i;
+        int i = 0;
         for (auto x: example_generator1(10))
         {
             assert(x == i); i++;
@@ -198,7 +198,7 @@ inline void ___example_of_generator____()
     };
 
     {
-        int i = 0; (void)i;
+        int i = 0;
         for (auto x: example_generator2(10))
         {
             assert(x == i); i++;

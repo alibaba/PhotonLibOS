@@ -16,8 +16,10 @@ limitations under the License.
 
 #include <unistd.h>
 #include <sys/wait.h>
+#include <gtest/gtest.h>
 #include <thread>
 #include <fcntl.h>
+
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
@@ -25,11 +27,6 @@ limitations under the License.
 #include <photon/io/signal.h>
 #include <photon/net/curl.h>
 #include <photon/fs/localfs.h>
-#include "../../test/gtest.h"
-
-#if __GNUC__ >= 11
-#pragma GCC diagnostic ignored "-Wmismatched-dealloc"
-#endif
 
 bool exit_flag = false;
 bool exit_normal = false;
@@ -323,5 +320,6 @@ int main(int argc, char **argv) {
     set_log_output_level(0);
 
     ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    auto ret = RUN_ALL_TESTS();
+    if (ret) LOG_ERROR_RETURN(0, ret, VALUE(ret));
 }

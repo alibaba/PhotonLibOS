@@ -23,11 +23,9 @@ public:
     CBList queue;
     photon::ThreadPoolBase *pool;
 
-    ExecutorImpl(int init_ev, int init_io, const PhotonOptions& options,
-                 const ExecutorQueueOption& queue_options)
-        : queue(queue_options.max_yield_turn, queue_options.max_yield_usec) {
+    ExecutorImpl(int init_ev, int init_io) {
         th.reset(
-            new std::thread(&ExecutorImpl::launch, this, init_ev, init_io, options));
+            new std::thread(&ExecutorImpl::launch, this, init_ev, init_io));
     }
 
     ExecutorImpl() {}
@@ -77,16 +75,15 @@ public:
         pool = nullptr;
     }
 
-    void launch(int init_ev, int init_io, const PhotonOptions& options) {
-        photon::init(init_ev, init_io, options);
+    void launch(int init_ev, int init_io) {
+        photon::init(init_ev, init_io);
         DEFER(photon::fini());
         do_loop();
     }
 };
 
-Executor::Executor(int init_ev, int init_io, const PhotonOptions& options,
-                   const ExecutorQueueOption& queue_options)
-    : e(new Executor::ExecutorImpl(init_ev, init_io, options, queue_options)) {}
+Executor::Executor(int init_ev, int init_io)
+    : e(new Executor::ExecutorImpl(init_ev, init_io)) {}
 
 Executor::Executor(create_on_current_vcpu) : e(new Executor::ExecutorImpl()) {}
 

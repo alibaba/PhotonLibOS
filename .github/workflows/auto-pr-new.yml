@@ -1,0 +1,85 @@
+name: Precise Auto PR
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+jobs:
+  auto-pr-pick:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: set git config
+      run: |
+        git config --global user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+        git config --global user.name "${GITHUB_ACTOR}"
+        git config -l
+
+    - name: check branch names
+      id: branch_info
+      run: |
+        git fetch
+        RELEASE_VERSIONS=$(git branch -r | grep 'release/' | cut -d '/' -f 3 | sort -V)
+        CURRENT_VERSION=$(echo $GITHUB_REF | rev | cut -d '/' -f 1 | rev)
+        CURRENT_BRANCH="release/$CURRENT_VERSION"
+        ME_AND_MY_NEXT=$(echo "$RELEASE_VERSIONS" | grep -w $CURRENT_VERSION -A 1)
+        NUM=$(echo "$ME_AND_MY_NEXT" | wc -l)
+        if (( NUM > 1 )); then
+          NEXT_VERSION=$(echo "$ME_AND_MY_NEXT" | tail -n 1)
+          NEXT_BRANCH="release/$NEXT_VERSION"
+          set -x
+        else
+          echo "No more higher release versions, will merge to main"
+          NEXT_VERSION="main"
+          NEXT_BRANCH="main"
+          set -x
+        fi
+        echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
+        echo "NEXT_BRANCH=$NEXT_BRANCH" >> $GITHUB_OUTPUT
+        echo "CURRENT_VERSION=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        echo "CURRENT_BRANCH=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
+
+    - name: create pr branch
+      id: create_branch
+      run: |
+        git fetch
+        PRBRANCH=auto-pr-${{github.event.after}}-${{steps.branch_info.outputs.NEXT_VERSION}}
+        git switch -C ${PRBRANCH} origin/${{steps.branch_info.outputs.NEXT_BRANCH}}
+        echo "PRBRANCH=$PRBRANCH" >> $GITHUB_OUTPUT
+
+    - name: Pick up commits
+      id: pick_up_commits
+      run: |
+        set -x
+        echo "PICKRESULT<<EOF" >> $GITHUB_OUTPUT
+        echo "Pick up commits:" >> $GITHUB_OUTPUT
+        RANGE=$(git rev-list ${{github.event.before}}..${{github.event.after}} --reverse || echo ${{github.event.after}})
+        for commit in $RANGE; do
+          echo "" >> $GITHUB_OUTPUT
+          MSG=$(git cherry-pick -X theirs $commit)
+          if [ $? -ne 0 ]; then
+            echo "Failed to cherry-pick $commit" >> pick_up_failure.log
+            echo "$MSG" >> pick_up_failure.log
+          fi
+          echo "$MSG" >> $GITHUB_OUTPUT
+        done
+        echo "EOF" >> $GITHUB_OUTPUT
+        if [ -s pick_up_failure.log ]; then
+          git add pick_up_failure.log
+          git commit -m "Cherry-pick failed"
+        fi
+        git push --set-upstream origin ${{steps.create_branch.outputs.PRBRANCH}}
+        cat ${GITHUB_OUTPUT}
+
+    - name: Create Pull Request
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "${{steps.pick_up_commits.outputs.PRBRANCH}}"
+        gh pr create \
+              --base ${{steps.branch_info.outputs.NEXT_BRANCH}} \
+              --head ${{steps.create_branch.outputs.PRBRANCH}} \
+              --title "Auto PR from ${{steps.branch_info.outputs.CURRENT_BRANCH}}" \
+              --body "${{steps.pick_up_commits.outputs.PICKRESULT}}"

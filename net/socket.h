@@ -37,6 +37,7 @@ LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr_in& addr);
 LogBuffer& operator << (LogBuffer& log, const in6_addr& iaddr);
 LogBuffer& operator << (LogBuffer& log, const sockaddr_in6& addr);
+LogBuffer& operator << (LogBuffer& log, const sockaddr& addr);
 
 namespace photon {
 namespace net {
@@ -85,31 +86,28 @@ namespace net {
         }
         // Check if it's actually an IPv4 address mapped in IPV6
         bool is_ipv4() const {
-            return addr._in_addr_field[0] == 0 &&
-                   addr._in_addr_field[1] == 0 &&
-                   addr._in_addr_field[2] == htonl(0x0000ffff);
-        }
-        bool is_ipv6() const {
-            return !is_ipv4();
+            if (ntohl(addr._in_addr_field[2]) != 0x0000ffff) {
+                return false;
+            }
+            if (addr._in_addr_field[0] != 0 || addr._in_addr_field[1] != 0) {
+                return false;
+            }
+            return true;
         }
         // We regard the default IPv4 0.0.0.0 as undefined
         bool undefined() const {
-            return mem_equal(V4Any());
+            return *this == V4Any();
         }
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
-            assert(is_ipv4());
             return addr._in_addr_field[3];
         }
         bool is_loopback() const {
-            return is_ipv4() ? mem_equal(V4Loopback()) : mem_equal(V6Loopback());
-        }
-        bool is_localhost() const {
-            return is_loopback();
+            return is_ipv4() ? (*this == V4Loopback()) : (*this == V6Loopback());
         }
         bool is_broadcast() const {
             // IPv6 does not support broadcast
-            return is_ipv4() && mem_equal(V4Broadcast());
+            return is_ipv4() && (*this == V4Broadcast());
         }
         bool is_link_local() const {
             if (is_ipv4()) {
@@ -119,11 +117,12 @@ namespace net {
             }
         }
         bool operator==(const IPAddr& rhs) const {
-            return mem_equal(rhs);
+            return memcmp(this, &rhs, sizeof(rhs)) == 0;
         }
         bool operator!=(const IPAddr& rhs) const {
             return !(*this == rhs);
         }
+    public:
         static IPAddr V6None() {
             return IPAddr(htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff), htonl(0xffffffff));
         }
@@ -132,11 +131,7 @@ namespace net {
         static IPAddr V4Broadcast() { return IPAddr(htonl(INADDR_BROADCAST)); }
         static IPAddr V4Any() { return IPAddr(htonl(INADDR_ANY)); }
         static IPAddr V4Loopback() { return IPAddr(htonl(INADDR_LOOPBACK)); }
-        static IPAddr Localhost() { return V4Loopback(); }
     private:
-        bool mem_equal(const IPAddr& rhs) const {
-            return memcmp(this, &rhs, sizeof(rhs)) == 0;
-        }
         void map_v4(in_addr addr_) {
             map_v4(addr_.s_addr);
         }
@@ -174,8 +169,8 @@ namespace net {
     static_assert(sizeof(EndPoint) == 18, "Endpoint size incorrect");
 
     // operators to help with logging IP addresses
-    LogBuffer& operator << (LogBuffer& log, const IPAddr& addr);
-    LogBuffer& operator << (LogBuffer& log, const EndPoint& ep);
+    LogBuffer& operator << (LogBuffer& log, const IPAddr addr);
+    LogBuffer& operator << (LogBuffer& log, const EndPoint ep);
 
     class ISocketBase {
     public:
@@ -189,23 +184,17 @@ namespace net {
 
         virtual int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) = 0;
         virtual int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) = 0;
-
-        template<typename P, typename T> // must write type P explicitly!
-        int setsockopt(int level, int option_name, const T& value) {
-            P v = value;
-            return setsockopt(level, option_name, &v, sizeof(v));
+        template<typename T>
+        int setsockopt(int level, int option_name, T value) {
+            return setsockopt(level, option_name, &value, sizeof(value));
         }
-
-        template<typename P, typename T> // must write type P explicitly!
+        template<typename T>
         int getsockopt(int level, int option_name, T* value) {
-            P v;
-            socklen_t len = sizeof(v);
-            int ret = getsockopt(level, option_name, &v, &len);
-            if (ret >= 0) *value = v;
-            return ret;
+            socklen_t len = sizeof(*value);
+            return getsockopt(level, option_name, value, &len);
         }
 
-        // get/set default timeout, in us, (default +∞)
+        // get/set timeout, in us, (default +∞)
         virtual uint64_t timeout() const = 0;
         virtual void timeout(uint64_t tm) = 0;
     };
@@ -249,25 +238,18 @@ namespace net {
 
     class ISocketClient : public ISocketBase, public Object {
     public:
-        // Connect to a remote endpoint.
+        // Connect to a remote IPv4 endpoint.
         // If `local` endpoint is not empty, its address will be bind to the socket before connecting to the `remote`.
-        virtual ISocketStream* connect(const EndPoint& remote, const EndPoint* local = nullptr) = 0;
+        virtual ISocketStream* connect(EndPoint remote, EndPoint local = EndPoint()) = 0;
         // Connect to a Unix Domain Socket.
         virtual ISocketStream* connect(const char* path, size_t count = 0) = 0;
     };
 
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
-        virtual int bind(const EndPoint& ep) = 0;
+        virtual int bind(uint16_t port = 0, IPAddr addr = IPAddr()) = 0;
         virtual int bind(const char* path, size_t count) = 0;
-        int bind(uint16_t port = 0)       { return bind_v4any(port); }
-        int bind(uint16_t port, IPAddr a) { return bind(EndPoint(a, port)); }
-        int bind_v4any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Any(), port)); }
-        int bind_v6any(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Any(), port)); }
-        int bind_v4localhost(uint16_t port = 0) { return bind(EndPoint(IPAddr::V4Loopback(), port)); }
-        int bind_v6localhost(uint16_t port = 0) { return bind(EndPoint(IPAddr::V6Loopback(), port)); }
         int bind(const char* path) { return bind(path, strlen(path)); }
-
         virtual int listen(int backlog = 1024) = 0;
         virtual ISocketStream* accept(EndPoint* remote_endpoint = nullptr) = 0;
 
@@ -278,8 +260,10 @@ namespace net {
         virtual void terminate() = 0;
     };
 
-    extern "C" ISocketClient* new_tcp_socket_client(IPAddr* bind_ip = nullptr, uint32_t bind_ip_n = 0);
+    extern "C" ISocketClient* new_tcp_socket_client();
     extern "C" ISocketServer* new_tcp_socket_server();
+    extern "C" ISocketClient* new_tcp_socket_client_ipv6();
+    extern "C" ISocketServer* new_tcp_socket_server_ipv6();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
     extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
@@ -297,17 +281,6 @@ namespace net {
     extern "C" ISocketServer* new_smc_socket_server();
     extern "C" ISocketClient* new_fstack_dpdk_socket_client();
     extern "C" ISocketServer* new_fstack_dpdk_socket_server();
-
-
-    [[deprecated("deprecated since v0.8; use new_tcp_socket_client() instead;")]]
-    inline ISocketClient* new_tcp_socket_client_ipv6() {
-        return new_tcp_socket_client();
-    }
-
-    [[deprecated("deprecated since v0.8; use new_tcp_socket_server() instead;")]]
-    inline ISocketServer* new_tcp_socket_server_ipv6() {
-        return new_tcp_socket_server();
-    }
 }
 }
 

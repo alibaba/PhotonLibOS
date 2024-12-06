@@ -22,9 +22,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 
 #include <photon/net/http/client.h>
-#ifdef ENABLE_CURL
 #include <photon/net/curl.h>
-#endif
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
@@ -34,13 +32,11 @@ limitations under the License.
 using namespace photon;
 
 DEFINE_string(ip, "127.0.0.1", "server ip");
-DEFINE_uint64(port, 19876, "port");
+DEFINE_int32(port, 19876, "port");
 DEFINE_uint64(count, -1UL, "request count per thread, -1 for endless loop");
-DEFINE_uint64(threads, 4, "num threads");
-DEFINE_uint64(body_size, 4096, "http body size");
-#ifdef ENABLE_CURL
+DEFINE_int32(threads, 4, "num threads");
+DEFINE_int32(body_size, 4096, "http body size");
 DEFINE_bool(curl, false, "use curl client rather than http client");
-#endif
 
 class StringStream {
     std::string s;
@@ -85,8 +81,6 @@ inline uint64_t GetSteadyTimeUs() {
                now.time_since_epoch())
         .count() / 1000;
 }
-
-#ifdef ENABLE_CURL
 void curl_thread_entry(result* res) {
     net::cURL client;
     StringStream buffer;
@@ -97,7 +91,7 @@ void curl_thread_entry(result* res) {
         buffer.clean();
         client.GET(target.c_str(), &buffer);
         auto t_end = GetSteadyTimeUs();
-        if (buffer.ptr != (int)FLAGS_body_size) {
+        if (buffer.ptr != FLAGS_body_size) {
             LOG_ERROR(VALUE(buffer.ptr), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
             res->failed = true;
         }
@@ -109,7 +103,7 @@ void curl_thread_entry(result* res) {
 void test_curl(result &res) {
     res.t_begin = GetSteadyTimeUs();
     std::vector<photon::join_handle*> jhs;
-    FOR_LOOP(FLAGS_threads) {
+    for (auto i = 0; i < FLAGS_threads; ++i) {
         jhs.emplace_back(photon::thread_enable_join(
             photon::thread_create11(&curl_thread_entry, &res)));
     }
@@ -118,8 +112,6 @@ void test_curl(result &res) {
     }
     res.t_end = GetSteadyTimeUs();
 }
-#endif
-
 void client_thread_entry(result *res, net::http::Client *client, int idx) {
     std::string body_buf;
     body_buf.resize(FLAGS_body_size);
@@ -134,7 +126,7 @@ void client_thread_entry(result *res, net::http::Client *client, int idx) {
             res->failed = true;
         }
         auto ret = op->resp.read((void*)body_buf.data(), FLAGS_body_size);
-        if (ret != (ssize_t)FLAGS_body_size) {
+        if (ret != FLAGS_body_size) {
             LOG_ERROR(VALUE(ret), VALUE(errno), VALUE(i), VALUE(FLAGS_body_size));
             res->failed = true;
         }
@@ -149,7 +141,7 @@ void test_client(result &res) {
     auto client = net::http::new_http_client();
     DEFER(delete client);
     std::vector<photon::join_handle*> jhs;
-    for (auto i: xrange(FLAGS_threads)) {
+    for (auto i = 0; i < FLAGS_threads; ++i) {
         jhs.emplace_back(photon::thread_enable_join(
             photon::thread_create11(&client_thread_entry, &res, client, i)));
     }
@@ -165,28 +157,25 @@ int main(int argc, char** argv) {
         return -1;
     DEFER(photon::fini());
     int ret;
-    result res_curl, res_client;
 #ifdef __linux__
     ret = net::et_poller_init();
     if (ret < 0) return -1;
     DEFER(net::et_poller_fini());
 #endif
-#ifdef ENABLE_CURL
     ret = net::cURL::init(CURL_GLOBAL_ALL, 0, 0);
     if (ret < 0) return -1;
     DEFER({ photon::thread_sleep(1); net::cURL::fini(); });
+
+    result res_curl, res_client;
     if (FLAGS_curl) {
         test_curl(res_curl);
     } else {
-#endif
         test_client(res_client);
-#ifdef ENABLE_CURL
     }
     if (res_curl.cnt != 0) LOG_INFO("libcurl latency = `us , throughput = `MB/s, failed = `, read_size = `, threads = `",
                 res_curl.sum_latency / res_curl.cnt,
                 res_curl.sum_throuput * 1000 * 1000 / (res_curl.t_end - res_curl.t_begin) / 1024 / 1024,
                 res_curl.failed, FLAGS_body_size, FLAGS_threads);
-#endif
     if (res_client.cnt != 0) LOG_INFO("http_client latency = `us , throughput = `MB/s, failed = `, read_size = `, threads = `",
                 res_client.sum_latency / res_client.cnt,
                 res_client.sum_throuput * 1000 * 1000 / (res_client.t_end - res_client.t_begin) / 1024 / 1024,

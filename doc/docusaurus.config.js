@@ -7,7 +7,7 @@ const darkCodeTheme = require('prism-react-renderer/themes/dracula');
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'PhotonLibOS',
-  tagline: 'Probably the fastest coroutine lib in the world!',
+  tagline: 'Probably the fastest coroutine lib of the world',
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
@@ -32,19 +32,7 @@ const config = {
   // to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
-    locales: ['cn', 'en'],
-    path: 'i18n',
-    localeConfigs: {
-      cn: {
-        label: '中文',
-        path: 'cn',
-      },
-      en: {
-        label: 'English',
-        path: 'en',
-      },
-
-    },
+    locales: ['en'],
   },
 
   presets: [
@@ -89,10 +77,6 @@ const config = {
             to: '/blog',
             label: 'Blog', 
             position: 'left',
-          },
-          {
-            type: 'localeDropdown',
-            position: 'right',
           },
           {
             href: 'https://github.com/alibaba/PhotonLibOS',

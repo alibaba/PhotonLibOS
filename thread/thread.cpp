@@ -51,7 +51,6 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
 #include <photon/common/alog.h>
 #include <photon/common/alog-functionptr.h>
 #include <photon/thread/thread-key.h>
-#include <photon/thread/arch.h>
 
 /* notes on the scheduler:
 
@@ -87,6 +86,8 @@ inline int posix_memalign(void** memptr, size_t alignment, size_t size) {
                            #name": "
 #endif
 
+static constexpr size_t PAGE_SIZE = 1 << 12;
+
 namespace photon
 {
     inline uint64_t min(uint64_t a, uint64_t b) { return (a<b) ? a : b; }
@@ -97,7 +98,7 @@ namespace photon
         std::atomic_bool notify{false};
 
         __attribute__((noinline))
-        int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
+        int wait_for_fd(int fd, uint32_t interests, uint64_t timeout) override {
             return -1;
         }
 
@@ -112,7 +113,7 @@ namespace photon
         }
 
         __attribute__((noinline))
-        ssize_t wait_and_fire_events(uint64_t timeout) override {
+        ssize_t wait_and_fire_events(uint64_t timeout = -1) override {
             DEFER(notify.store(false, std::memory_order_release));
             if (!timeout) return 0;
             timeout = min(timeout, 1000 * 100UL);
@@ -124,6 +125,25 @@ namespace photon
             return 0;
         }
     };
+
+    void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
+        char* ptr = nullptr;
+        int err = posix_memalign((void**)&ptr, PAGE_SIZE, stack_size);
+        if (unlikely(err))
+            LOG_ERROR_RETURN(err, nullptr, "Failed to allocate photon stack! ",
+                             ERRNO(err));
+#if defined(__linux__)
+        madvise(ptr, stack_size, MADV_NOHUGEPAGE);
+#endif
+        return ptr;
+    }
+
+    void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
+#if !defined(_WIN64) && !defined(__aarch64__)
+        madvise(ptr, size, MADV_DONTNEED);
+#endif
+        free(ptr);
+    }
 
     static Delegate<void*, size_t> photon_thread_alloc(
         &default_photon_thread_stack_alloc, nullptr);
@@ -304,7 +324,6 @@ namespace photon
             this->node = head;
         }
         thread* eject_whole_atomic() {
-            if (!node) return nullptr;
             SCOPED_LOCK(lock);
             auto p = node;
             node = nullptr;
@@ -915,27 +934,14 @@ R"(
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, nullptr, "Photon not initialized in this vCPU (OS thread)");
-        size_t randomizer = (rand() % 512) * 8;
-        // stack contains struct, randomizer space, and reserved_space
-        size_t least_stack_size = sizeof(thread) + randomizer + 63 + reserved_space;
-        // at least a whole page for mprotect
-        least_stack_size += PAGE_SIZE;
-        // and make sure it's at least 16K
-        least_stack_size = std::max(16UL * 1024, least_stack_size);
-        stack_size = align_up(stack_size, PAGE_SIZE);
-        if (unlikely(stack_size < least_stack_size)) {
-            LOG_WARN("Stack size ` is less than least stack size `, use ` instead",
-                     stack_size, least_stack_size, least_stack_size);
-            stack_size = least_stack_size;
-        }
+        size_t randomizer = (rand() % 32) * (1024 + 8);
+        stack_size = align_up(randomizer + stack_size + sizeof(thread), PAGE_SIZE);
         char* ptr = (char*)photon_thread_alloc(stack_size);
-        if (unlikely(!ptr))
-            return nullptr;
-        uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
+        uint64_t p = (uint64_t) ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
-        auto th = new ((char*)p) thread;
+        auto th = new((char*) p) thread;
         th->buf = ptr;
-        th->stackful_alloc_top = ptr + PAGE_SIZE;
+        th->stackful_alloc_top = ptr;
         th->start = start;
         th->stack_size = stack_size;
         th->arg = arg;
@@ -1072,26 +1078,24 @@ R"(
     #endif
     }
     static uint32_t last_tsc = 0;
-    static inline bool if_update_now(bool accurate = false) {
+    static inline void if_update_now(bool accurate = false) {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86)) {
             return photon::now = __mimic_vdso_time_x86.get_now(accurate);
         }
 #endif
         if (likely(ts_updater.load(std::memory_order_relaxed))) {
-            return true;
+            return;
         }
         if (unlikely(accurate)) {
             update_now();
-            return true;
+            return;
         }
         uint32_t tsc = _rdtsc();
         if (unlikely(last_tsc != tsc)) {
             last_tsc = tsc;
             update_now();
-            return true;
         }
-        return false;
     }
     NowTime __update_now() {
         last_tsc = _rdtsc();
@@ -1144,10 +1148,10 @@ R"(
             }
             return count;
         }
-        if (sleepq.empty() || !if_update_now()) {
-            return count;
-        }
-        do {
+
+        if_update_now();
+        while(!sleepq.empty())
+        {
             auto th = sleepq.front();
             if (th->ts_wakeup > now) break;
             SCOPED_LOCK(th->lock);
@@ -1157,7 +1161,7 @@ R"(
                 AtomicRunQ().insert_tail(th);
                 count++;
             }
-        } while(!sleepq.empty());
+        }
         return count;
     }
 
@@ -1166,48 +1170,45 @@ R"(
         return (states) th->state;
     }
 
-    int thread_yield()
+    void thread_yield()
     {
-        RunQ rq;
+        assert(!AtomicRunQ().single());
+        auto sw = AtomicRunQ().goto_next();
         if_update_now();
-        rq.current->error_number = 0;
-        auto sw = AtomicRunQ(rq).goto_next();
         switch_context(sw.from, sw.to);
-        return rq.current->error_number;
     }
 
-    inline void thread_yield_fast() {
+    void thread_yield_fast() {
+        assert(!AtomicRunQ().single());
         auto sw = AtomicRunQ().goto_next();
         switch_context(sw.from, sw.to);
     }
 
-    int thread_yield_to(thread* th) {
+    void thread_yield_to(thread* th) {
         if (unlikely(th == nullptr)) { // yield to any thread
             return thread_yield();
         }
         RunQ rq;
         if (unlikely(th == rq.current)) { // yield to current should just update time
             if_update_now();
-            return 0;
+            return;
         } else if (unlikely(th->vcpu != rq.current->vcpu)) {
-            LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be run by the same vcpu as CURRENT!", th);
+            LOG_ERROR_RETURN(EINVAL, , "target thread ` must be run by the same vcpu as CURRENT!", th);
         } else if (unlikely(th->state == states::STANDBY)) {
             while (th->state == states::STANDBY)
                 resume_threads();
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
-            LOG_ERROR_RETURN(EINVAL, -1, "target thread ` must be READY!", th);
+            LOG_ERROR_RETURN(EINVAL, , "target thread ` must be READY!", th);
         }
 
         auto sw = AtomicRunQ(rq).try_goto(th);
         if_update_now();
-        rq.current->error_number = 0;
         switch_context(sw.from, sw.to);
-        return rq.current->error_number;
     }
 
     __attribute__((always_inline)) inline
-    Switch prepare_usleep(Timeout timeout, thread_list* waitq, RunQ rq = {})
+    Switch prepare_usleep(uint64_t useconds, thread_list* waitq, RunQ rq = {})
     {
         spinlock* waitq_lock = waitq ? &waitq->lock : nullptr;
         SCOPED_LOCK(waitq_lock, ((bool) waitq) * 2);
@@ -1219,93 +1220,92 @@ R"(
             sw.from->waitq = waitq;
         }
         if_update_now(true);
-        sw.from->ts_wakeup = timeout.expiration();
+        sw.from->ts_wakeup = sat_add(now, useconds);
         sw.from->get_vcpu()->sleepq.push(sw.from);
         return sw;
     }
-    inline int yield_as_sleep() {
-        int ret = thread_yield();
-        if (unlikely(ret)) { errno = ret; return -1; }
-        return 0;
-    }
+
     // returns 0 if slept well (at lease `useconds`), -1 otherwise
-    static int thread_usleep(Timeout timeout, thread_list* waitq)
+    static int thread_usleep(uint64_t useconds, thread_list* waitq)
     {
-        if (unlikely(timeout.expired())) {
-            return yield_as_sleep();
+        if (unlikely(useconds == 0)) {
+            thread_yield();
+            return 0;
         }
 
-        auto r = prepare_usleep(timeout, waitq);
+        auto r = prepare_usleep(useconds, waitq);
         switch_context(r.from, r.to);
         assert(r.from->waitq == nullptr);
         return r.from->set_error_number();
     }
 
     typedef void (*defer_func)(void*);
-    static int thread_usleep_defer(Timeout timeout,
+    static int thread_usleep_defer(uint64_t useconds,
         thread_list* waitq, defer_func defer, void* defer_arg)
     {
-        auto r = prepare_usleep(timeout, waitq);
+        auto r = prepare_usleep(useconds, waitq);
         switch_context_defer(r.from, r.to, defer, defer_arg);
         assert(r.from->waitq == nullptr);
         return r.from->set_error_number();
     }
 
     __attribute__((noinline))
-    static int do_thread_usleep_defer(Timeout timeout,
+    static int do_thread_usleep_defer(uint64_t useconds,
             defer_func defer, void* defer_arg, RunQ rq) {
-        auto r = prepare_usleep(timeout, nullptr, rq);
+        auto r = prepare_usleep(useconds, nullptr, rq);
         switch_context_defer(r.from, r.to, defer, defer_arg);
         assert(r.from->waitq == nullptr);
         return r.from->set_error_number();
     }
-    static int do_shutdown_usleep_defer(Timeout timeout,
+    static int do_shutdown_usleep_defer(uint64_t useconds,
                 defer_func defer, void* defer_arg, RunQ rq) {
-        timeout.timeout_at_most(10 * 1000);
-        int ret = do_thread_usleep_defer(timeout, defer, defer_arg, rq);
+        if (likely(useconds > 10*1000))
+            useconds = 10*1000;
+        int ret = do_thread_usleep_defer(useconds, defer, defer_arg, rq);
         if (ret >= 0)
             errno = EPERM;
         return -1;
     }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
-    int thread_usleep_defer(Timeout timeout, defer_func defer, void* defer_arg) {
+    int thread_usleep_defer(uint64_t useconds, defer_func defer, void* defer_arg) {
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, -1, "Photon not initialized in this thread");
         if (unlikely(AtomicRunQ(rq).defer_to_new_thread())) {
             thread_create((thread_entry&)defer, defer_arg);
-            return thread_usleep(timeout);
+            return thread_usleep(useconds);
         }
         if (unlikely(rq.current->is_shutting_down()))
-            return do_shutdown_usleep_defer(timeout, defer, defer_arg, rq);
-        return do_thread_usleep_defer(timeout, defer, defer_arg, rq);
+            return do_shutdown_usleep_defer(useconds, defer, defer_arg, rq);
+        return do_thread_usleep_defer(useconds, defer, defer_arg, rq);
     }
 #pragma GCC diagnostic pop
 
     __attribute__((noinline))
-    static int do_thread_usleep(Timeout timeout, RunQ rq) {
-        auto r = prepare_usleep(timeout, nullptr, rq);
+    static int do_thread_usleep(uint64_t useconds, RunQ rq) {
+        auto r = prepare_usleep(useconds, nullptr, rq);
         switch_context(r.from, r.to);
         assert(r.from->waitq == nullptr);
         return r.from->set_error_number();
     }
-    static int do_shutdown_usleep(Timeout timeout, RunQ rq) {
-        timeout.timeout_at_most(10 * 1000);
-        int ret = do_thread_usleep(timeout, rq);
+    static int do_shutdown_usleep(uint64_t useconds, RunQ rq) {
+        if (likely(useconds > 10*1000))
+            useconds = 10*1000;
+        int ret = do_thread_usleep(useconds, rq);
         if (ret >= 0)
             errno = EPERM;
         return -1;
     }
-    int thread_usleep(Timeout timeout) {
+    int thread_usleep(uint64_t useconds) {
         RunQ rq;
         if (unlikely(!rq.current))
             LOG_ERROR_RETURN(ENOSYS, -1, "Photon not initialized in this thread");
-        if (unlikely(timeout.expired()))
-            return yield_as_sleep();
+        if (unlikely(!useconds))
+            return thread_yield(), 0;
         if (unlikely(rq.current->is_shutting_down()))
-            return do_shutdown_usleep(timeout, rq);
-        return do_thread_usleep(timeout, rq);
+            return do_shutdown_usleep(useconds, rq);
+        return do_thread_usleep(useconds, rq);
     }
 
     static void prelocked_thread_interrupt(thread* th, int error_number)
@@ -1329,16 +1329,9 @@ R"(
     {
         if (unlikely(!th))
             LOG_ERROR_RETURN(EINVAL, , "invalid parameter");
-        auto state = th->state;
-        if (unlikely(state != states::SLEEPING)) {
-        out: // may have thread_yield()-ed
-            if (state == states::READY && th->error_number == 0)
-                th->error_number = error_number;
-            return;
-        }
+        if (unlikely(th->state != states::SLEEPING)) return;
         SCOPED_LOCK(th->lock);
-        state = th->state;
-        if (unlikely(state != states::SLEEPING)) goto out;
+        if (unlikely(th->state != states::SLEEPING)) return;
 
         prelocked_thread_interrupt(th, error_number);
     }
@@ -1503,16 +1496,16 @@ R"(
             *perrno = ETIMEDOUT;
             return -1;
         }
-        return (*perrno == -1) ? 0 : -1;
+        return (*perrno == ECANCELED) ? 0 : -1;
     }
-    int waitq::wait(Timeout timeout)
+    int waitq::wait(uint64_t timeout)
     {
         static_assert(sizeof(q) == sizeof(thread_list), "...");
         auto lst = (thread_list*)&q;
         int ret = thread_usleep(timeout, lst);
         return waitq_translate_errno(ret);
     }
-    int waitq::wait_defer(Timeout timeout, void(*defer)(void*), void* arg) {
+    int waitq::wait_defer(uint64_t timeout, void(*defer)(void*), void* arg) {
         static_assert(sizeof(q) == sizeof(thread_list), "...");
         auto lst = (thread_list*)&q;
         int ret = thread_usleep_defer(timeout, lst, defer, arg);
@@ -1564,12 +1557,12 @@ R"(
         auto splock = (spinlock*)s_;
         splock->unlock();
     }
-    int mutex::lock(Timeout timeout) {
+    int mutex::lock(uint64_t timeout) {
         if (try_lock() == 0) return 0;
         for (auto re = retries; re; --re) {
-            int ret = thread_yield();
-            if (unlikely(ret)) { errno = ret; return -1; }
-            if (try_lock() == 0) return 0;
+            thread_yield();
+            if (try_lock() == 0)
+                return 0;
         }
         splock.lock();
         if (try_lock() == 0) {
@@ -1577,7 +1570,7 @@ R"(
             return 0;
         }
 
-        if (timeout.expired()) {
+        if (timeout == 0) {
             errno = ETIMEDOUT;
             splock.unlock();
             return -1;
@@ -1600,7 +1593,7 @@ R"(
         ScopedLockHead h(m);
         m->owner.store(h);
         if (h)
-            prelocked_thread_interrupt(h, -1);
+            prelocked_thread_interrupt(h, ECANCELED);
     }
     static void mutex_unlock(void* m_)
     {
@@ -1622,7 +1615,7 @@ R"(
         do_mutex_unlock(this);
     }
 
-    int recursive_mutex::lock(Timeout timeout) {
+    int recursive_mutex::lock(uint64_t timeout) {
         if (owner == CURRENT || mutex::lock(timeout) == 0) {
             recursive_count++;
             return 0;
@@ -1657,15 +1650,15 @@ R"(
     int spinlock_lock(void* arg) {
         return ((spinlock*)arg)->lock();
     }
-    static int cvar_do_wait(thread_list* q, void* m, Timeout timeout, int(*lock)(void*), void(*unlock)(void*)) {
+    static int cvar_do_wait(thread_list* q, void* m, uint64_t timeout, int(*lock)(void*), void(*unlock)(void*)) {
         assert(m);
         if (!m)
             LOG_ERROR_RETURN(EINVAL, -1, "there must be a lock");
         int ret = thread_usleep_defer(timeout, q, unlock, m);
         auto en = ret < 0 ? errno : 0;
         while (true) {
-            int lock_ret = lock(m);
-            if (lock_ret == 0) break;
+            int ret = lock(m);
+            if (ret == 0) break;
             LOG_ERROR("failed to get mutex lock, ` `, try again", VALUE(ret), ERRNO());
             thread_usleep(1000, nullptr);
         }
@@ -1673,30 +1666,28 @@ R"(
         return waitq_translate_errno(ret);
 
     }
-    int condition_variable::wait(mutex* m, Timeout timeout)
+    int condition_variable::wait(mutex* m, uint64_t timeout)
     {
         return cvar_do_wait((thread_list*)&q, m, timeout, mutex_lock, mutex_unlock);
     }
-    int condition_variable::wait(spinlock* m, Timeout timeout)
+    int condition_variable::wait(spinlock* m, uint64_t timeout)
     {
         return cvar_do_wait((thread_list*)&q, m, timeout, spinlock_lock, spinlock_unlock);
     }
-    int semaphore::wait_interruptible(uint64_t count, Timeout timeout)
+    int semaphore::wait(uint64_t count, uint64_t timeout)
     {
         if (count == 0) return 0;
         splock.lock();
         CURRENT->semaphore_count = count;
+        Timeout tmo(timeout);
         int ret = 0;
-        while (!try_subtract(count)) {
-            ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
-            ERRNO err;
+        while (!try_substract(count)) {
+            ret = waitq::wait_defer(tmo.timeout(), spinlock_unlock, &splock);
             splock.lock();
-            if (ret < 0) {
+            if (ret < 0 && errno == ETIMEDOUT) {
                 CURRENT->semaphore_count = 0;
-                // when timeout, we need to try to resume next thread(s) in q
-                if (err.no == ETIMEDOUT) try_resume();
-                splock.unlock();
-                errno = err.no;
+                try_resume();       // when timeout, we need to try
+                splock.unlock();    // to resume next thread(s) in q
                 return ret;
             }
         }
@@ -1716,10 +1707,10 @@ R"(
             if (qfcount > cnt) break;
             cnt -= qfcount;
             qfcount = 0;
-            prelocked_thread_interrupt(th, -1);
+            prelocked_thread_interrupt(th, ECANCELED);
         }
     }
-    bool semaphore::try_subtract(uint64_t count)
+    bool semaphore::try_substract(uint64_t count)
     {
         while(true)
         {
@@ -1731,7 +1722,7 @@ R"(
                 return true;
         }
     }
-    int rwlock::lock(int mode, Timeout timeout)
+    int rwlock::lock(int mode, uint64_t timeout)
     {
         if (mode != RLOCK && mode != WLOCK)
             LOG_ERROR_RETURN(EINVAL, -1, "mode unknow");
@@ -1784,16 +1775,18 @@ R"(
     void reset_master_event_engine_default() {
         CURRENT->get_vcpu()->reset_master_event_engine_default();
     }
-    static void* idler(void*) {
+    static void* idle_stub(void*)
+    {
         RunQ rq;
         auto last_idle = now;
         auto vcpu = rq.current->get_vcpu();
         while (vcpu->state != states::DONE) {
-            while (resume_threads() > 0 || !AtomicRunQ(rq).single()) {
+            while (!AtomicRunQ(rq).single()) {
                 thread_yield();
                 if (unlikely(sat_sub(now, last_idle) >= 1000UL)) {
                     last_idle = now;
                     vcpu->master_event_engine->wait_and_fire_events(0);
+                    resume_threads();
                 }
             }
             if (vcpu->state == states::DONE)
@@ -1803,10 +1796,12 @@ R"(
             // fall in actual sleep
             auto usec = 10 * 1024 * 1024; // max
             auto& sleepq = vcpu->sleepq;
-            if (!sleepq.empty()) usec = min(usec,
-                sat_sub(sleepq.front()->ts_wakeup, now));
+            if (!sleepq.empty())
+                usec = min(usec,
+                    sat_sub(sleepq.front()->ts_wakeup, now));
             last_idle = now;
             vcpu->master_event_engine->wait_and_fire_events(usec);
+            resume_threads();
         }
         return nullptr;
     }
@@ -1884,8 +1879,6 @@ R"(
     }
 
     int vcpu_init() {
-        if (unlikely(PAGE_SIZE == 0))
-            PAGE_SIZE = getpagesize();
         RunQ rq;
         if (rq.current) return -1;      // re-init has no side-effect
         char* ptr = nullptr;
@@ -1898,7 +1891,7 @@ R"(
         th->state = states::RUNNING;
         th->init_main_thread_stack();
         auto vcpu = new (ptr) vcpu_t;
-        vcpu->idle_worker = thread_create(&idler, nullptr);
+        vcpu->idle_worker = thread_create(&idle_stub, nullptr);
         thread_enable_join(vcpu->idle_worker);
         if_update_now(true);
         return ++_n_vcpu;
@@ -1913,7 +1906,7 @@ R"(
         auto vcpu = rq.current->get_vcpu();
         wait_all(rq, vcpu);
         assert(!AtomicRunQ(rq).single());
-        assert(vcpu->nthreads == 2); // idler & current alive
+        assert(vcpu->nthreads == 2); // idle_stub & current alive
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;

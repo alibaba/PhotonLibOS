@@ -17,7 +17,6 @@ limitations under the License.
 #pragma once
 
 #include <inttypes.h>
-#include <photon/common/callback.h>
 
 namespace photon {
 
@@ -29,7 +28,6 @@ const uint64_t INIT_EVENT_IOURING = SHIFT(1);
 const uint64_t INIT_EVENT_SELECT = SHIFT(2);
 const uint64_t INIT_EVENT_KQUEUE = SHIFT(3);
 const uint64_t INIT_EVENT_IOCP = SHIFT(4);
-const uint64_t INIT_EVENT_EPOLL_NG = SHIFT(5);
 const uint64_t INIT_EVENT_SIGNAL = SHIFT(10);
 
 const uint64_t INIT_IO_NONE = 0;
@@ -49,29 +47,17 @@ const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBCURL;
 
 #undef SHIFT
 
-struct PhotonOptions {
-    int libaio_queue_depth = 32;
-    bool use_pooled_stack_allocator = false;
-    bool bypass_threadpool = false;
-};
-
 /**
  * @brief Initialize the main photon thread and ancillary threads by flags.
  *        Ancillary threads will be running in background.
  * @return 0 for success
  */
 int init(uint64_t event_engine = INIT_EVENT_DEFAULT,
-         uint64_t io_engine = INIT_IO_DEFAULT,
-         const PhotonOptions& options = {});
+         uint64_t io_engine = INIT_IO_DEFAULT);
 
 /**
  * @brief Destroy/join ancillary threads, and finish the main thread.
  */
 int fini();
-
-/**
- * @brief add callbacks on fini()
- */
-void fini_hook(Delegate<void> handler);
 
 }
