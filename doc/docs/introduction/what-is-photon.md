@@ -33,6 +33,7 @@ Some open source projects are using Photon as well, for instance:
 - [containerd/overlaybd](https://github.com/containerd/overlaybd) The storage backend of accelerated container image, providing a layering block-level image format, designed for container, secure container and virtual machine.
 - [data-accelerator/photon-libtcmu](https://github.com/data-accelerator/photon-libtcmu) A TCMU implementation, reworked from tcmu-runner, acting as a iSCSI target.
 - The [V language](https://vlang.io/) is trying Photon as an experimental coroutine runtime. [link](https://github.com/vlang/v/blob/master/vlib/coroutines/coroutines.v)
+- [aliyun/oss-connector-for-ai-ml](https://github.com/aliyun/oss-connector-for-ai-ml) A high-performance Python library for connecting AI/ML frameworks with OSS storage.
 
 Any addition to this list is appreciated, if you have been using Photon, or just enlightened by its coroutine design.
 
