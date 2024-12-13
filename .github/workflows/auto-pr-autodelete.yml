@@ -1,0 +1,26 @@
+name: Auto PR Branch Cleanup
+
+on:
+  pull_request:
+    types:
+      - closed
+
+jobs:
+  clean-auto-pr:
+    if: ${{ github.event.pull_request.merged }} &&
+        ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id }} &&
+        ${{ github.event.pull_request.head.ref == 'auto-pr-*' }}
+    runs-on: ubuntu-latest
+    steps:
+        - uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: set git config
+          run: |
+            git config --global user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+            git config --global user.name "${GITHUB_ACTOR}"
+            git config --global advice.mergeConflict false
+            git config --global --add safe.directory "${{ github.workspace }}"
+            git config -l
+            git push -d origin ${{ github.event.pull_request.head.ref }}
