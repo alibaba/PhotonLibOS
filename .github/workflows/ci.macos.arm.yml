@@ -31,6 +31,7 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_ENABLE_SASL=ON \
+            -D PHOTON_ENABLE_LIBCURL=ON \
             -D OPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@1.1/1.1.1w
           cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 

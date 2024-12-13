@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
 #include <photon/net/socket.h>
-
+#include <vector>
 
 namespace photon {
 namespace net {
@@ -129,6 +129,9 @@ public:
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
+    void set_bind_ips(std::vector<IPAddr> &ips) {
+        m_bind_ips = ips;
+    }
     StoredURL* get_proxy() {
         return &m_proxy_url;
     }
@@ -146,12 +149,13 @@ public:
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000UL * 1000UL); }
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
-                                    bool secure = false, uint64_t timeout = -1UL) = 0;
+                                          bool secure = false, uint64_t timeout = -1UL) = 0;
 protected:
     StoredURL m_proxy_url;
     std::string m_user_agent;
     uint64_t m_timeout = -1UL;
     bool m_proxy = false;
+    std::vector<IPAddr> m_bind_ips;
 };
 
 //A Client without cookie_jar would ignore all response-header "Set-Cookies"

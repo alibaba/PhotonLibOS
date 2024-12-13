@@ -282,7 +282,7 @@ namespace net {
         virtual void timeout(uint64_t) = 0;
     };
 
-    extern "C" ISocketClient* new_tcp_socket_client();
+    extern "C" ISocketClient* new_tcp_socket_client(IPAddr* bind_ip = nullptr, uint32_t bind_ip_n = 0);
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);

@@ -23,7 +23,9 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/io/fd-events.h>
 #include <photon/io/signal.h>
+#ifdef ENABLE_CURL
 #include <photon/net/curl.h>
+#endif
 #include <photon/fs/localfs.h>
 #include "../../test/gtest.h"
 
@@ -33,6 +35,12 @@ limitations under the License.
 
 bool exit_flag = false;
 bool exit_normal = false;
+
+#ifdef ENABLE_CURL
+static int k_init_io_engine = photon::INIT_IO_LIBCURL;
+#else
+static int k_init_io_engine = photon::INIT_IO_NONE;
+#endif
 
 void sigint_handler(int signal = SIGINT) {
     LOG_INFO("signal ` received, pid `", signal, getpid());
@@ -136,7 +144,7 @@ int fork_parent_process(uint64_t event_engine) {
         return m_pid;
     }
     photon::fini();
-    photon::init(event_engine, photon::INIT_IO_LIBCURL);
+    photon::init(event_engine, k_init_io_engine);
 
     photon::block_all_signal();
     photon::sync_signal(SIGINT, &sigint_handler);
@@ -202,7 +210,7 @@ TEST(ForkTest, Fork) {
 }
 
 TEST(ForkTest, ForkInThread) {
-    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBCURL);
+    photon::init(photon::INIT_EVENT_DEFAULT, k_init_io_engine);
     DEFER(photon::fini());
 
     int ret = -1;
@@ -225,7 +233,7 @@ TEST(ForkTest, ForkInThread) {
 }
 
 TEST(ForkTest, PopenInThread) {
-    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_LIBCURL);
+    photon::init(photon::INIT_EVENT_DEFAULT, k_init_io_engine);
     DEFER(photon::fini());
 
     photon::semaphore sem(0);

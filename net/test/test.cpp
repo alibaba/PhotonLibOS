@@ -21,7 +21,9 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/net/socket.h>
+#ifdef ENABLE_CURL
 #include <photon/net/curl.h>
+#endif
 #include <photon/net/utils.h>
 #include <photon/net/iostream.h>
 #include <photon/net/security-context/tls-stream.h>
@@ -700,6 +702,7 @@ void test_writer(Writer& writer) {
     EXPECT_EQ(0, strncmp("123456", writer.alog_string().s, 6));
 }
 
+#ifdef ENABLE_CURL
 TEST(writers, multiple_segment) {
     StringWriter sw;
     test_writer(sw);
@@ -709,6 +712,7 @@ TEST(writers, multiple_segment) {
     BufferWriter<256> bfw;
     test_writer(bfw);
 }
+#endif
 
 void* start_server(void*) {
     test_socket_server();

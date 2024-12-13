@@ -43,6 +43,7 @@ public:
     photon::mutex init_mtx;
     bool initialized = false;
     bool tls_ctx_ownership = false;
+    std::vector<IPAddr> src_ips;
 
     // If there is a photon thread switch during construction, the constructor might be called
     // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
@@ -52,7 +53,7 @@ public:
         photon::fini_hook({this, &PooledDialer::at_photon_fini});
     }
 
-    int init(TLSContext *_tls_ctx) {
+    int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips) {
         if (initialized)
             return 0;
         SCOPED_LOCK(init_mtx);
@@ -64,8 +65,8 @@ public:
             tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
             tls_ctx->set_verify_mode(VerifyMode::PEER);  // act like curl
         }
-        auto tcp_cli = new_tcp_socket_client();
-        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(), true);
+        auto tcp_cli = new_tcp_socket_client(src_ips.data(), src_ips.size());
+        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(src_ips.data(), src_ips.size()), true);
         tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
         tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
         udssock.reset(new_uds_client());
@@ -159,10 +160,9 @@ public:
         m_tls_ctx(tls_ctx),
         m_cookie_jar(cookie_jar) {
     }
-
     PooledDialer& get_dialer() {
         thread_local PooledDialer dialer;
-        dialer.init(m_tls_ctx);
+        dialer.init(m_tls_ctx, m_bind_ips);
         return dialer;
     }
 
