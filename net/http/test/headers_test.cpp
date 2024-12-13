@@ -30,7 +30,6 @@ limitations under the License.
 #include <string>
 #include <gflags/gflags.h>
 
-#include "../../curl.h"
 #include "../../socket.h"
 #include "../../base_socket.h"
 #include <photon/common/alog-stdstring.h>
