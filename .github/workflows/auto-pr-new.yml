@@ -74,7 +74,7 @@ jobs:
       name: Open pick PR to ${{steps.branch_info.outputs.NEXT_BRANCH}}
       if: steps.merge-changes.outputs.merge == 'true'
       with:
-        github-token: ${{ github.token }}
+        github-token: ${{ secrets.AUTOPR_SECRET }}
         script: |
           await github.rest.pulls.create({
             ...context.repo,
@@ -88,7 +88,7 @@ jobs:
       name: Open merge PR to ${{steps.branch_info.outputs.NEXT_BRANCH}}
       if: steps.merge-changes.outputs.merge == 'false'
       with:
-        github-token: ${{ github.token }}
+        github-token: ${{ secrets.AUTOPR_SECRET }}
         script: |
           await github.rest.pulls.create({
             ...context.repo,
