@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <photon/common/estring.h>
 #include <photon/common/string_view.h>
 #include <photon/common/hash_combine.h>
 #include <cstring>
@@ -159,20 +160,18 @@ using unordered_map_string_key = basic_map_string_key<
 
 class Hasher_CaseInsensitive {
     const size_t BUF_CAP = 64;
-    size_t partial_hash(std::string_view sv, size_t i, size_t n) const {
+    size_t partial_hash(std::string_view sv) const {
         char buf[BUF_CAP];
-        sv = sv.substr(i, n);
         assert(sv.size() <= BUF_CAP);
-        for (size_t j = 0; j < sv.size(); ++j)
-            buf[j] = (char)tolower(sv[j]);
-        return std::hash<std::string_view>()({buf, n});
+        photon::tolower_fast(buf, sv.data(), sv.size());
+        return std::hash<std::string_view>()({buf, sv.size()});
     }
 public:
     size_t operator()(std::string_view sv) const {
         size_t h = 0;
         for (size_t i = 0; i < sv.size(); i += BUF_CAP) {
             auto len = std::min(BUF_CAP, sv.size() - i);
-            auto ph = partial_hash(sv, i, len);
+            auto ph = partial_hash(sv.substr(i, len));
             h = photon::hash_combine(h, ph);
         }
         return h;
@@ -182,8 +181,7 @@ public:
 class Equal_CaseInsensitive {
 public:
     bool operator()(std::string_view a, std::string_view b) const {
-        return a.size() == b.size() && strncasecmp(
-               a.begin(), b.begin(), a.size()) == 0;
+        return a.size() == b.size() && photon::stricmp_fast(a, b) == 0;
     }
 };
 

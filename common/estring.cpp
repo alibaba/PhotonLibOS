@@ -158,3 +158,47 @@ static_assert(
     std::is_same<estring&, decltype(std::declval<estring>() += std::declval<std::string_view>())>::value,
     "estring += std::string_view should return estring"
 );
+
+namespace photon {
+
+void tolower_fast(char* out, const char* in, size_t len) {
+    size_t i = 0;
+    for (; i < len/8*8; i+=8)
+        *(uint64_t*)&out[i] = tolower_fast8(*(uint64_t*)&in[i]);
+    for (; i < len; i++)
+        out[i] = tolower_fast(in[i]);
+    out[len] = '\0';
+}
+
+void toupper_fast(char* out, const char* in, size_t len) {
+    size_t i = 0;
+    for (; i < len/8*8; i += 8)
+        *(uint64_t*)&out[i] = toupper_fast8(*(uint64_t*)&in[i]);
+    for (;i < len; i++)
+        out[i] = toupper_fast(in[i]);
+    out[len] = '\0';
+}
+
+
+int stricmp_fast(std::string_view a, std::string_view b) {
+    size_t i = 0, min = std::min(a.size(), b.size());
+    for (; i < min/8*8; i+=8) {
+        auto ca = tolower_fast8(*(uint64_t*)&a[i]);
+        auto cb = tolower_fast8(*(uint64_t*)&b[i]);
+        if (ca == cb) continue;
+        auto c = ca - cb;
+        for (; c; c>>=8) {
+            auto delta = (char)(c & 0xff);
+            if (delta) return delta;
+        }
+    }
+    for (; i < min; i++) {
+        auto ca = tolower_fast(a[i]);
+        auto cb = tolower_fast(b[i]);
+        auto delta = ca - cb;
+        if (delta) return delta;
+    }
+    return int(a.size() - b.size());
+}
+
+}
