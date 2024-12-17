@@ -45,6 +45,7 @@ limitations under the License.
 #include <vector>
 #include <memory>
 #include <string>
+#include <string.h>
 //#include <gmock/gmock.h>
 //#include <malloc.h>
 #ifndef __clang__
@@ -1271,6 +1272,38 @@ TEST(PooledAllocator, allocFailed) {
     alloc.dealloc(p1);
     auto p2 = alloc.alloc(1024 * 1024 + 1);
     EXPECT_EQ(nullptr, p2);
+}
+
+TEST(tolowerupper, basic) {
+    EXPECT_EQ(tolower_fast('A'), 'a');
+    EXPECT_EQ(tolower_fast('3'), '3');
+    EXPECT_EQ(tolower_fast('Z'), 'z');
+    EXPECT_EQ(toupper_fast('a'), 'A');
+    EXPECT_EQ(toupper_fast('3'), '3');
+    EXPECT_EQ(toupper_fast('z'), 'Z');
+
+    const static char s1[]="abC1dEf2%^&", s2[]="ABc1DeF2%^&";
+    EXPECT_EQ(toupper_fast8(*(uint64_t*)s1),
+              toupper_fast8(*(uint64_t*)s2));
+    EXPECT_EQ(tolower_fast8(*(uint64_t*)s1),
+              tolower_fast8(*(uint64_t*)s2));
+    EXPECT_EQ(stricmp_fast(string_view(s1), string_view(s2)), 0);
+}
+
+const static char S1[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                  S2[]="abcdefghijklmnopqrstuvwxyz";
+TEST(tolowerupper, perf_strncasecmp) {
+    for (int i = 1000000; i; --i) {
+        auto ret = strncasecmp(S1, S2, LEN(S1) - 1);
+        asm volatile(""::"r"(ret));
+    }
+}
+
+TEST(tolowerupper, perf_photon_stricmp) {
+    for (int i = 1000000; i; --i) {
+        auto ret = stricmp_fast(S1, S2);
+        asm volatile(""::"r"(ret));
+    }
 }
 
 TEST(update_now, after_idle_sleep) {
