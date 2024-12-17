@@ -1749,44 +1749,52 @@ insert_list:
     {
         if (count == 0) return 0;
         splock.lock();
-        CURRENT->semaphore_count = count;
-        int ret = 0;
+        DEFER(splock.unlock());
+        auto& counter = CURRENT->semaphore_count;
+        counter = count;
+        DEFER(counter = 0);
         while (!try_subtract(count)) {
-            ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
-            ERRNO err;
-            splock.lock();
-            if (ret < 0) {
-                CURRENT->semaphore_count = 0;
-                // when timeout, we need to try to resume next thread(s) in q
-                if (err.no == ETIMEDOUT) try_resume();
-                splock.unlock();
-                errno = err.no;
+            int ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
+            splock.lock();  // assuming errno NOT changed
+            if (unlikely(ret < 0)) {    // got interrupted
+                uint64_t cnt;
+                if (!m_ooo_resume && (cnt = m_count.load())) {
+                    auto eno = errno;
+                    try_resume(cnt);
+                    errno = eno;
+                }
                 return ret;
             }
         }
-        try_resume();
-        splock.unlock();
         return 0;
     }
-    void semaphore::try_resume()
-    {
-        auto cnt = m_count.load();
-        while(true)
-        {
+    void semaphore::try_resume(uint64_t cnt) {
+        assert(cnt);
+        while(true) {
             ScopedLockHead h(this);
-            if (!h) return;
+            if (!h) break;
             auto th = (thread*)h;
-            auto& qfcount = th->semaphore_count;
-            if (qfcount > cnt) break;
-            cnt -= qfcount;
-            qfcount = 0;
+            auto& c = th->semaphore_count;
+            if (c > cnt) break;
+            cnt -= c;
             prelocked_thread_interrupt(th, -1);
         }
+        if (!q.th || !cnt || !m_ooo_resume)
+            return;
+        SCOPED_LOCK(q.lock);
+        for (auto th = q.th->next();
+                  th!= q.th && cnt;
+                  th = th->next()) {
+            SCOPED_LOCK(th->lock);
+            auto& c = th->semaphore_count;
+            if (c <= cnt) {
+                cnt -= c;
+                prelocked_thread_interrupt(th, -1);
+            }
+        }
     }
-    bool semaphore::try_subtract(uint64_t count)
-    {
-        while(true)
-        {
+    inline bool semaphore::try_subtract(uint64_t count) {
+        while(true) {
             auto mc = m_count.load();
             if (mc < count)
                 return false;

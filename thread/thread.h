@@ -432,7 +432,8 @@ namespace photon
     class semaphore : protected waitq
     {
     public:
-        explicit semaphore(uint64_t count = 0) : m_count(count) { }
+        explicit semaphore(uint64_t count = 0, bool in_order_resume = true)
+            : m_count(count), m_ooo_resume(!in_order_resume) { }
         int wait(uint64_t count, Timeout timeout = {}) {
             int ret = 0;
             do {
@@ -441,12 +442,11 @@ namespace photon
             return ret;
         }
         int wait_interruptible(uint64_t count, Timeout timeout = {});
-        int signal(uint64_t count)
-        {
+        int signal(uint64_t count) {
             if (count == 0) return 0;
             SCOPED_LOCK(splock);
-            m_count.fetch_add(count);
-            resume_one();
+            auto cnt = m_count.fetch_add(count) + count;
+            try_resume(cnt);
             return 0;
         }
         uint64_t count() const {
@@ -455,9 +455,10 @@ namespace photon
 
     protected:
         std::atomic<uint64_t> m_count;
+        bool m_ooo_resume;
         spinlock splock;
         bool try_subtract(uint64_t count);
-        void try_resume();
+        void try_resume(uint64_t count);
     };
 
     // to be different to timer flags
