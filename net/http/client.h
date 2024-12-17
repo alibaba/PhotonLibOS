@@ -62,9 +62,10 @@ public:
         bool enable_proxy = false;
         std::string_view uds_path;                // If set, Unix Domain Socket will be used instead of TCP.
                                                   // URL should still be the format of http://localhost/xxx
-        IStream* body_stream = nullptr;                 // use body_stream as body
-        using BodyWriter = Delegate<ssize_t, Request*>; // or call body_writer if body_stream
-        BodyWriter body_writer = {};                    // is not set
+
+        IStream* body_stream = nullptr;           // priority: set_body > body_stream > body_writer
+        using BodyWriter = Delegate<ssize_t, Request*>;
+        BodyWriter body_writer = {};
 
         static Operation* create(Client* c, Verb v, std::string_view url,
                             uint16_t buf_size = 64 * 1024 - 1) {
@@ -91,9 +92,22 @@ public:
             uds_path = unix_socket_path;
             return _client->call(this);
         }
+        // set body buffer and set content length automatically
+        void set_body(const void *buf, size_t size) {
+            body_buffer = buf;
+            body_buffer_size = size;
+            req.headers.content_length(size);
+        }
+        void set_body(std::string_view buf) {
+            set_body(buf.data(), buf.length());
+        }
+
 
     protected:
         Client* _client;
+        const void *body_buffer = nullptr;
+        size_t body_buffer_size = 0;
+
         char _buf[0];
         Operation(Client* c, Verb v, std::string_view url, uint16_t buf_size)
             : req(_buf, buf_size, v, url, c->has_proxy()),
@@ -106,6 +120,8 @@ public:
         explicit Operation(uint16_t buf_size) : req(_buf, buf_size), _client(nullptr) {}
         Operation() = delete;
         ~Operation() = default;
+
+        friend class ClientImpl;
     };
 
     template<uint16_t BufferSize = UINT16_MAX>

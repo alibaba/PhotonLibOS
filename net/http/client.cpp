@@ -223,7 +223,14 @@ public:
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
         }
         sock->timeout(tmo.timeout());
-        if (op->body_stream) {
+        if (op->body_buffer_size > 0) {
+            // send body_buffer
+            if (req.write(op->body_buffer, op->body_buffer_size) < 0) {
+                sock->close();
+                req.reset_status();
+                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body buffer failed, retry");
+            }
+        } else if (op->body_stream) {
             // send body_stream
             if (req.write_stream(op->body_stream) < 0) {
                 sock->close();

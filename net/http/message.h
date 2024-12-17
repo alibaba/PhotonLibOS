@@ -98,9 +98,9 @@ public:
     ssize_t write_stream(IStream *stream, size_t size_limit = -1);
     int close() override { return 0; }
 
-    // size of body
+    // size of body: infer from Content-Range/Content-Length in response header
     size_t body_size() const;
-    // size of origin resource
+    // size of origin resource: infer from Content-Range/Content-Length in response header
     ssize_t resource_size() const;
 
     // in general, it is called automatically

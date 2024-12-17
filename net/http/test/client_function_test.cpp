@@ -213,6 +213,18 @@ TEST(http_client, post) {
     ret = op2->resp.read(buf, 4096);
     EXPECT_EQ(ret, 7);
     EXPECT_EQ(0, strncmp(buf, "success", ret));
+
+    // body buffer test
+    auto op3 = client->new_operation(Verb::POST, target);
+    DEFER(client->destroy_operation(op3));
+    void *body_buf = malloc(st.st_size);
+    EXPECT_EQ(st.st_size, file->pread(body_buf, st.st_size, 0));
+    op3->set_body(body_buf, st.st_size);
+    client->call(op3);
+    EXPECT_EQ(200, op3->resp.status_code());
+    ret = op3->resp.read(buf, 4096);
+    EXPECT_EQ(ret, 7);
+    EXPECT_EQ(0, strncmp(buf, "success", ret));
 }
 
 
