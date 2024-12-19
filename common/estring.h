@@ -22,6 +22,7 @@ limitations under the License.
 #include <limits>
 #include <string>
 #include <bitset>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 
@@ -75,6 +76,42 @@ public:
     size_t find_last_of(const charset& set) const;
     size_t find_last_not_of(const charset& set) const;
 
+    template<size_t N>
+    class Extraction {
+        char _buf[N];
+        std::unique_ptr<char> _s;
+        bool _ownership;
+    public:
+        Extraction(std::string_view sv, bool strict = false) {
+            //for regular strings, sv[sv.size()] should be accessible
+            if (!strict && sv[sv.size()] == '\0') {
+                _s.reset((char*)sv.data());
+                _ownership = false;
+            } else if (sv.size() < N) {
+                memcpy(_buf, sv.data(), sv.size());
+                _buf[sv.size()] = '\0';
+                _s.reset(_buf);
+                _ownership = false;
+            } else {
+                auto ptr = (char*)malloc(sv.size() + 1);
+                memcpy(ptr, sv.data(), sv.size());
+                ptr[sv.size()] = '\0';
+                _s.reset(ptr);
+                _ownership = true;
+            }
+        }
+        operator const char* () const {
+            return _s.get();
+        }
+        ~Extraction() {
+            if (!_ownership)
+                _s.release();
+        }
+    };
+    template<size_t N = 256>
+    Extraction<N> extract_c_str() const {
+        return {*this};
+    }
     operator std::string ()
     {
         return to_string();

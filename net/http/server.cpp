@@ -196,24 +196,25 @@ public:
         DEFER(LOG_DEBUG("leave fs handler"));
         auto target = req.target();
         auto pos = target.find("?");
-        std::string query;
+        estring_view query;
         if (pos != std::string_view::npos) {
-            query = std::string(target.substr(pos + 1));
+            query = target.substr(pos + 1);
             target = target.substr(0, pos);
         }
-        estring filename(target);
 
+        estring_view filename(target);
         if (!prefix.empty())
             filename = filename.substr(prefix.size() - 1);
 
         LOG_DEBUG(VALUE(filename));
-        auto file = m_fs->open(filename.c_str(), O_RDONLY);
+        auto file = m_fs->open(filename.extract_c_str(), O_RDONLY);
         if (!file) {
             failed_resp(resp);
             LOG_ERROR_RETURN(0, 0, "open file ` failed", target);
         }
         DEFER(delete file);
-        if (!query.empty()) file->ioctl(fs::HTTP_URL_PARAM, query.c_str());
+        if (!query.empty())
+            file->ioctl(fs::HTTP_URL_PARAM, (const char*) query.extract_c_str());
 
         struct stat buf;
         if (file->fstat(&buf) < 0) {
