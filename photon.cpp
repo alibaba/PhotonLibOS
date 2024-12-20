@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include "photon.h"
+#include <photon/photon.h>
 #include <inttypes.h>
 
 #include "io/fd-events.h"
@@ -44,12 +44,12 @@ using namespace net;
 static bool reset_handle_registed = false;
 static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
-#define INIT_IO(name, prefix, ...)    if (INIT_IO_##name & io_engine) { if (prefix##_init(__VA_ARGS__) < 0) return -1; }
-#define FINI_IO(name, prefix)    if (INIT_IO_##name & g_io_engine) { prefix##_fini(); }
+#define INIT_IO(name, prefix, ...) if (INIT_IO_##name & io_engine)   { if (prefix##_init(__VA_ARGS__) < 0) return -1; }
+#define FINI_IO(name, prefix)      if (INIT_IO_##name & g_io_engine) {     prefix##_fini(); }
 
 class Shift {
-    uint8_t _n;
 public:
+    uint8_t _n;
     constexpr Shift(uint64_t x) : _n(__builtin_ctz(x)) { }
     operator uint64_t() { return 1UL << _n; }
 };
@@ -61,6 +61,27 @@ static const Shift recommended_order[] = {
 #else   // macOS, FreeBSD ...
     INIT_EVENT_KQUEUE, INIT_EVENT_SELECT};
 #endif
+
+inline iouring_args mkargs(uint64_t flags, const PhotonOptions& opt) {
+    return {
+    .is_master          = true,
+    .setup_sqpoll       = bool(flags & INIT_EVENT_IOURING_SQPOLL),
+    .setup_sq_aff       = bool(flags & INIT_EVENT_IOURING_SQ_AFF),
+    .setup_iopoll       = bool(flags & INIT_EVENT_IOURING_IOPOLL),
+    .sq_thread_cpu      = opt.iouring_sq_thread_cpu,
+    .sq_thread_idle_ms  = opt.iouring_sq_thread_idle_ms,
+};   }
+
+static int init_event_engine(uint64_t engine, uint64_t flags, const PhotonOptions& opt) {
+#ifdef PHOTON_URING
+    auto mee = (engine != INIT_EVENT_IOURING) ?
+        new_master_event_engine(engine) :
+        new_iouring_master_engine(mkargs(flags, opt));
+#else
+    auto mee = new_master_event_engine(engine);
+#endif
+    return fd_events_init(mee);
+}
 
 int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
     if (options.use_pooled_stack_allocator) {
@@ -78,18 +99,14 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
             INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
-        bool ok = false;
         for (auto x : recommended_order) {
-            if ((x & event_engine) && fd_events_init(x) == 0) {
-                ok = true;
-                break;
+            if ((x & event_engine) && init_event_engine(x, event_engine, options) == 0) {
+                goto next;
             }
         }
-        if (!ok) {
-            LOG_ERROR_RETURN(0, -1, "All master engines init failed");
-        }
+        LOG_ERROR_RETURN(0, -1, "All master engines init failed");
     }
-
+next:
     if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
         return -1;
 

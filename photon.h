@@ -30,6 +30,9 @@ const uint64_t INIT_EVENT_SELECT = SHIFT(2);
 const uint64_t INIT_EVENT_KQUEUE = SHIFT(3);
 const uint64_t INIT_EVENT_IOCP = SHIFT(4);
 const uint64_t INIT_EVENT_EPOLL_NG = SHIFT(5);
+const uint64_t INIT_EVENT_IOURING_SQPOLL = SHIFT(6);
+const uint64_t INIT_EVENT_IOURING_SQ_AFF = SHIFT(7);
+const uint64_t INIT_EVENT_IOURING_IOPOLL = SHIFT(8);
 const uint64_t INIT_EVENT_SIGNAL = SHIFT(10);
 
 const uint64_t INIT_IO_NONE = 0;
@@ -40,17 +43,21 @@ const uint64_t INIT_IO_EXPORTFS = SHIFT(10);
 const uint64_t INIT_IO_FSTACK_DPDK = SHIFT(20);
 
 #if defined(__linux__)
-const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_IOURING | INIT_EVENT_EPOLL | INIT_EVENT_SELECT | INIT_EVENT_SIGNAL;
-const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBAIO | INIT_IO_LIBCURL;
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_IOURING | INIT_EVENT_EPOLL |
+                                    INIT_EVENT_SELECT  | INIT_EVENT_SIGNAL;
+const uint64_t INIT_IO_DEFAULT    = INIT_IO_LIBAIO     | INIT_IO_LIBCURL;
 #else   // macOS, FreeBSD ...
-const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_KQUEUE | INIT_EVENT_SELECT | INIT_EVENT_SIGNAL;
-const uint64_t INIT_IO_DEFAULT = INIT_IO_LIBCURL;
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_KQUEUE | INIT_EVENT_SELECT |
+                                    INIT_EVENT_SIGNAL;
+const uint64_t INIT_IO_DEFAULT    = INIT_IO_LIBCURL;
 #endif
 
 #undef SHIFT
 
 struct PhotonOptions {
     int libaio_queue_depth = 32;
+    uint32_t iouring_sq_thread_cpu;
+    uint32_t iouring_sq_thread_idle_ms = 1000;     // by default polls for 1s
     bool use_pooled_stack_allocator = false;
     bool bypass_threadpool = false;
 };
