@@ -390,11 +390,12 @@ if (PHOTON_BUILD_TESTING)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
     include(generate-ctest-packed-script)
 
-    add_library(ci-tools STATIC test/ci-tools.cpp)
+    add_library(ci-tools OBJECT test/ci-tools.cpp)
     target_include_directories(ci-tools PRIVATE include)
 
     target_include_directories(photon_shared PUBLIC ${CURL_INCLUDE_DIRS} ${GFLAGS_INCLUDE_DIRS} ${GOOGLETEST_INCLUDE_DIRS})
-    target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES} ci-tools)
+    target_link_libraries(photon_shared PUBLIC ${CURL_LIBRARIES} ${GFLAGS_LIBRARIES} ${GOOGLETEST_LIBRARIES})
+    link_libraries(ci-tools)
 
     add_subdirectory(common/checksum/test)
     add_subdirectory(common/test)
