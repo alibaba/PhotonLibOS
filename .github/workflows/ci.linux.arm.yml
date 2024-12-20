@@ -26,14 +26,14 @@ jobs:
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
-          cmake -B build \
-            -D CMAKE_BUILD_TYPE=MinSizeRel \
-            -D PHOTON_ENABLE_ECOSYSTEM=ON \
-            -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON \
-            -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_LIBCURL=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test

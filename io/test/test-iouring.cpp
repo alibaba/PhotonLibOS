@@ -35,6 +35,8 @@ limitations under the License.
 
 using namespace photon;
 
+const auto IOURING_FLAGS = INIT_EVENT_IOURING | INIT_EVENT_IOURING_SQPOLL;
+
 // Common parameters
 bool stop_test = false;
 uint64_t qps = 0;
@@ -221,7 +223,7 @@ static void do_io_test(IOTestType type) {
     off_t max_offset = st_buf.st_size - max_io_size;
     ASSERT_GT(max_offset, 0);
 
-    photon::WorkPool wp(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    WorkPool wp(FLAGS_vcpu_num, IOURING_FLAGS, INIT_IO_NONE);
     std::vector<photon::thread*> join_threads;
 
 #ifdef TEST_IOURING_REGISTER_FILES
@@ -340,14 +342,8 @@ TEST(perf, DISABLED_read) {
 class event_engine : public testing::Test {
 protected:
     void SetUp() override {
-        GTEST_ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
-                                        photon::INIT_IO_NONE));
-#ifdef PHOTON_URING
-        engine = (ci_ev_engine == photon::INIT_EVENT_EPOLL) ? photon::new_epoll_cascading_engine()
-                                                          : photon::new_iouring_cascading_engine();
-#else
-        engine = photon::new_default_cascading_engine();
-#endif
+        GTEST_ASSERT_EQ(0, init(IOURING_FLAGS, INIT_IO_NONE));
+        engine = photon::new_epoll_cascading_engine();
     }
     void TearDown() override {
         delete engine;

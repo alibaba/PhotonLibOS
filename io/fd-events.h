@@ -136,31 +136,67 @@ CascadingEventEngine* new_##name##_cascading_engine();      \
 
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll);
 DECLARE_MASTER_AND_CASCADING_ENGINE(select);
-DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
+// DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
 
-inline int fd_events_init(uint64_t master_engine) {
+struct iouring_args {
+    bool is_master    = true;
+    bool setup_sqpoll = false;
+    bool setup_sq_aff = false;
+    bool setup_iopoll = false;
+    uint32_t sq_thread_cpu;
+    uint32_t sq_thread_idle_ms = 1000;     // by default polls for 1s
+};
+
+void* new_iouring_event_engine(iouring_args args = {});
+
+inline MasterEventEngine*
+new_iouring_master_engine(iouring_args args = {}) {
+    args.is_master = true;
+    auto e = new_iouring_event_engine(args);
+    return (MasterEventEngine*)e;
+}
+
+inline CascadingEventEngine*
+new_iouring_cascading_engine(iouring_args args = {}) {
+    args.is_master = false;
+    auto e = new_iouring_event_engine(args);
+    return (CascadingEventEngine*)e;
+}
+
+template<typename...Ts> inline MasterEventEngine*
+new_master_event_engine(uint64_t master_engine, const Ts&...xs) {
     switch (master_engine) {
 #ifdef __linux__
         case INIT_EVENT_EPOLL:
-            return _fd_events_init(&new_epoll_master_engine);
+            return new_epoll_master_engine(xs...);
         case INIT_EVENT_EPOLL_NG:
-            return _fd_events_init(&new_epoll_ng_master_engine);
+            return new_epoll_ng_master_engine(xs...);
 #endif
         case INIT_EVENT_SELECT:
-            return _fd_events_init(&new_select_master_engine);
+            return new_select_master_engine(xs...);
 #ifdef PHOTON_URING
         case INIT_EVENT_IOURING:
-            return _fd_events_init(&new_iouring_master_engine);
+            return new_iouring_master_engine(xs...);
 #endif
 #ifdef __APPLE__
         case INIT_EVENT_KQUEUE:
-            return _fd_events_init(&new_kqueue_master_engine);
+            return new_kqueue_master_engine(xs...);
 #endif
         default:
-            return -1;
+            return nullptr;
     }
+}
+
+inline int fd_events_init(MasterEventEngine* master_engine) {
+    return !master_engine ? -1 :
+        (get_vcpu()->master_event_engine = master_engine, 0);
+}
+
+
+inline int fd_events_init(uint64_t master_engine) {
+    return fd_events_init(new_master_event_engine(master_engine));
 }
 
 inline int fd_events_fini() {
