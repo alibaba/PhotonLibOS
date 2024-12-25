@@ -262,7 +262,7 @@ namespace rpc
     extern "C" Skeleton* new_skeleton(uint32_t pool_size = 128);
 
     __attribute__((deprecated))
-    inline Skeleton* new_skeleton(bool /*concurrent*/, uint32_t pool_size = 128) {
+    inline Skeleton* new_skeleton(bool /*concurrent*/, uint32_t pool_size) {
         return new_skeleton(pool_size);
     }
 
