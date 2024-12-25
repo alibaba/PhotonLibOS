@@ -45,6 +45,7 @@ namespace net {
     public:
         union {
             in6_addr addr = {};
+            // all data is in network byte order
             struct { uint16_t _1, _2, _3, _4, _5, _6; uint8_t a, b, c, d; };
         } __attribute__((packed));
         // For compatibility, the default constructor is still 0.0.0.0 (IPv4)
@@ -96,6 +97,8 @@ namespace net {
         bool undefined() const {
             return mem_equal(V4Any());
         }
+        void reset() { *this = IPAddr(); }
+        void clear() { reset(); }
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
             assert(is_ipv4());
@@ -167,7 +170,14 @@ namespace net {
             return !operator==(rhs);
         }
         bool undefined() const {
-            return addr.undefined();
+            return addr.undefined() && port == 0;
+        }
+        void reset() {
+            addr.reset();
+            port = 0;
+        }
+        void clear() {
+            reset();
         }
     };
 
