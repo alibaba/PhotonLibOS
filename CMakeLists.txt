@@ -202,6 +202,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         rpc/*.cpp
         thread/*.cpp
         )
+if ((${ARCH} STREQUAL aarch64) OR (${ARCH} STREQUAL arm64))
+    list(APPEND PHOTON_SRC common/checksum/crc64_ecma_refl_pmull.S)
+endif ()
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()

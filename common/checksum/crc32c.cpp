@@ -15,21 +15,37 @@
  */
 
 #include "crc32c.h"
+#include "crc64ecma.h"
+#if defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
 
-static uint32_t (*crc32c_func)(const uint8_t*, size_t, uint32_t) = nullptr;
+uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
+uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
 
-__attribute__((constructor)) static void crc_init() {
-#if ((defined(__x86_64__) || defined(__i386__)) && defined(__SSE4_2__))
-  __builtin_cpu_init();
-  if (__builtin_cpu_supports("sse4.2")) {
-    crc32c_func = crc32c_hw;
-  } else {
-    crc32c_func = crc32c_sw;
-  }
-#elif (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32))
-  crc32c_func = crc32c_hw;
+__attribute__((constructor))
+static void crc_init() {
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    bool hw = __builtin_cpu_supports("sse4.2");
+    crc32c_auto = hw ? crc32c_hw : crc32c_sw;
+    crc64ecma_auto = crc64ecma_sw;
+#elif defined(__aarch64__)
+#ifdef __APPLE__  // apple silicon has hw for both crc
+    crc32c_auto = crc32c_hw;
+    crc64ecma_auto = crc64ecma_hw;
+#elif defined(__linux__)  // linux on arm: runtime detection
+    long hwcaps= getauxval(AT_HWCAP);
+    crc32c_auto = (hwcaps & HWCAP_CRC32) ? crc32c_hw : crc32c_sw;
+    crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw : crc64ecma_sw;
 #else
-  crc32c_func = crc32c_sw;
+    crc32c_auto = crc32c_sw;
+    crc64ecma_auto = crc64ecma_sw;
+#endif
+#else // not __aarch64__, not __x86_64__
+    crc32c_auto = crc32c_sw;
+    crc64ecma_auto = crc64ecma_sw;
 #endif
 }
 
@@ -43,127 +59,56 @@ __attribute__((constructor)) static void crc_init() {
 #endif
 #elif (defined(__aarch64__))
 static inline uint32_t _crc32di(uint32_t crc, uint64_t value) {
-  __asm__("crc32cx %w[c], %w[c], %x[v]":[c]"+r"(crc):[v]"r"(value));
-  return crc;
+    __asm__("crc32cx %w[c], %w[c], %x[v]":[c]"+r"(crc):[v]"r"(value));
+    return crc;
 }
 static inline uint32_t _crc32qi(uint32_t crc, uint8_t value) {
-  __asm__("crc32cb %w[c], %w[c], %w[v]":[c]"+r"(crc):[v]"r"(value));
-  return crc;
+    __asm__("crc32cb %w[c], %w[c], %w[v]":[c]"+r"(crc):[v]"r"(value));
+    return crc;
 }
 #else
 #define _crc32di __builtin_ia32_crc32di
 #define _crc32qi __builtin_ia32_crc32qi
 #endif
 
-uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
-  uint32_t sum = crc;
-  size_t offset = 0;
-
-  // Process bytes one at a time until we reach an 8-byte boundary and can
-  // start doing aligned 64-bit reads.
-  static uintptr_t ALIGN_MASK = sizeof(uint64_t) - 1;
-  size_t mask = (size_t)((uintptr_t)data & ALIGN_MASK);
-  if (mask != 0) {
-    size_t limit = std::min(nbytes, sizeof(uint64_t) - mask);
-    while (offset < limit) {
-      sum = (uint32_t)_crc32qi(sum, data[offset]);
-      offset++;
+template<typename F1, typename F8> inline
+uint32_t do_crc32c(const uint8_t *data, size_t nbytes, uint32_t crc, F1 f1, F8 f8) {
+    size_t offset = 0;
+    // Process bytes one at a time until we reach an 8-byte boundary and can
+    // start doing aligned 64-bit reads.
+    static uintptr_t ALIGN_MASK = sizeof(uint64_t) - 1;
+    size_t mask = (size_t)((uintptr_t)data & ALIGN_MASK);
+    if (mask != 0) {
+        size_t limit = std::min(nbytes, sizeof(uint64_t) - mask);
+        while (offset < limit) {
+            crc = f1(crc, data[offset]);
+            offset++;
+      }
     }
+
+    // Process 8 bytes at a time until we have fewer than 8 bytes left.
+    while (offset + sizeof(uint64_t) <= nbytes) {
+        crc = f8(crc, *(uint64_t*)(data + offset));
+        offset += sizeof(uint64_t);
+    }
+
+    // Process any bytes remaining after the last aligned 8-byte block.
+    while (offset < nbytes) {
+        crc = f1(crc, data[offset]);
+        offset++;
+    }
+    return crc;
   }
 
-  // Process 8 bytes at a time until we have fewer than 8 bytes left.
-  while (offset + sizeof(uint64_t) <= nbytes) {
-    const uint64_t *src = (const uint64_t *)(data + offset);
-    sum = _crc32di(sum, *src);
-    offset += sizeof(uint64_t);
-  }
-
-  // Process any bytes remaining after the last aligned 8-byte block.
-  while (offset < nbytes) {
-    sum = (uint32_t)_crc32qi(sum, data[offset]);
-    offset++;
-  }
-  return sum;
-}
-
-/* CRC32C routines, these use a different polynomial */
-/*****************************************************************/
-/*                                                               */
-/* CRC LOOKUP TABLE                                              */
-/* ================                                              */
-/* The following CRC lookup table was generated automagically    */
-/* by the Rocksoft^tm Model CRC Algorithm Table Generation       */
-/* Program V1.0 using the following model parameters:            */
-/*                                                               */
-/*    Width   : 4 bytes.                                         */
-/*    Poly    : 0x1EDC6F41L                                      */
-/*    Reverse : TRUE.                                            */
-/*                                                               */
-/* For more information on the Rocksoft^tm Model CRC Algorithm,  */
-/* see the document titled "A Painless Guide to CRC Error        */
-/* Detection Algorithms" by Ross Williams                        */
-/* (ross@guest.adelaide.edu.au.). This document is likely to be  */
-/* in the FTP archive "ftp.adelaide.edu.au/pub/rocksoft".        */
-/*                                                               */
-/*****************************************************************/
-
-static const uint32_t crc32Table[256] = {
-    0x00000000L, 0xF26B8303L, 0xE13B70F7L, 0x1350F3F4L, 0xC79A971FL,
-    0x35F1141CL, 0x26A1E7E8L, 0xD4CA64EBL, 0x8AD958CFL, 0x78B2DBCCL,
-    0x6BE22838L, 0x9989AB3BL, 0x4D43CFD0L, 0xBF284CD3L, 0xAC78BF27L,
-    0x5E133C24L, 0x105EC76FL, 0xE235446CL, 0xF165B798L, 0x030E349BL,
-    0xD7C45070L, 0x25AFD373L, 0x36FF2087L, 0xC494A384L, 0x9A879FA0L,
-    0x68EC1CA3L, 0x7BBCEF57L, 0x89D76C54L, 0x5D1D08BFL, 0xAF768BBCL,
-    0xBC267848L, 0x4E4DFB4BL, 0x20BD8EDEL, 0xD2D60DDDL, 0xC186FE29L,
-    0x33ED7D2AL, 0xE72719C1L, 0x154C9AC2L, 0x061C6936L, 0xF477EA35L,
-    0xAA64D611L, 0x580F5512L, 0x4B5FA6E6L, 0xB93425E5L, 0x6DFE410EL,
-    0x9F95C20DL, 0x8CC531F9L, 0x7EAEB2FAL, 0x30E349B1L, 0xC288CAB2L,
-    0xD1D83946L, 0x23B3BA45L, 0xF779DEAEL, 0x05125DADL, 0x1642AE59L,
-    0xE4292D5AL, 0xBA3A117EL, 0x4851927DL, 0x5B016189L, 0xA96AE28AL,
-    0x7DA08661L, 0x8FCB0562L, 0x9C9BF696L, 0x6EF07595L, 0x417B1DBCL,
-    0xB3109EBFL, 0xA0406D4BL, 0x522BEE48L, 0x86E18AA3L, 0x748A09A0L,
-    0x67DAFA54L, 0x95B17957L, 0xCBA24573L, 0x39C9C670L, 0x2A993584L,
-    0xD8F2B687L, 0x0C38D26CL, 0xFE53516FL, 0xED03A29BL, 0x1F682198L,
-    0x5125DAD3L, 0xA34E59D0L, 0xB01EAA24L, 0x42752927L, 0x96BF4DCCL,
-    0x64D4CECFL, 0x77843D3BL, 0x85EFBE38L, 0xDBFC821CL, 0x2997011FL,
-    0x3AC7F2EBL, 0xC8AC71E8L, 0x1C661503L, 0xEE0D9600L, 0xFD5D65F4L,
-    0x0F36E6F7L, 0x61C69362L, 0x93AD1061L, 0x80FDE395L, 0x72966096L,
-    0xA65C047DL, 0x5437877EL, 0x4767748AL, 0xB50CF789L, 0xEB1FCBADL,
-    0x197448AEL, 0x0A24BB5AL, 0xF84F3859L, 0x2C855CB2L, 0xDEEEDFB1L,
-    0xCDBE2C45L, 0x3FD5AF46L, 0x7198540DL, 0x83F3D70EL, 0x90A324FAL,
-    0x62C8A7F9L, 0xB602C312L, 0x44694011L, 0x5739B3E5L, 0xA55230E6L,
-    0xFB410CC2L, 0x092A8FC1L, 0x1A7A7C35L, 0xE811FF36L, 0x3CDB9BDDL,
-    0xCEB018DEL, 0xDDE0EB2AL, 0x2F8B6829L, 0x82F63B78L, 0x709DB87BL,
-    0x63CD4B8FL, 0x91A6C88CL, 0x456CAC67L, 0xB7072F64L, 0xA457DC90L,
-    0x563C5F93L, 0x082F63B7L, 0xFA44E0B4L, 0xE9141340L, 0x1B7F9043L,
-    0xCFB5F4A8L, 0x3DDE77ABL, 0x2E8E845FL, 0xDCE5075CL, 0x92A8FC17L,
-    0x60C37F14L, 0x73938CE0L, 0x81F80FE3L, 0x55326B08L, 0xA759E80BL,
-    0xB4091BFFL, 0x466298FCL, 0x1871A4D8L, 0xEA1A27DBL, 0xF94AD42FL,
-    0x0B21572CL, 0xDFEB33C7L, 0x2D80B0C4L, 0x3ED04330L, 0xCCBBC033L,
-    0xA24BB5A6L, 0x502036A5L, 0x4370C551L, 0xB11B4652L, 0x65D122B9L,
-    0x97BAA1BAL, 0x84EA524EL, 0x7681D14DL, 0x2892ED69L, 0xDAF96E6AL,
-    0xC9A99D9EL, 0x3BC21E9DL, 0xEF087A76L, 0x1D63F975L, 0x0E330A81L,
-    0xFC588982L, 0xB21572C9L, 0x407EF1CAL, 0x532E023EL, 0xA145813DL,
-    0x758FE5D6L, 0x87E466D5L, 0x94B49521L, 0x66DF1622L, 0x38CC2A06L,
-    0xCAA7A905L, 0xD9F75AF1L, 0x2B9CD9F2L, 0xFF56BD19L, 0x0D3D3E1AL,
-    0x1E6DCDEEL, 0xEC064EEDL, 0xC38D26C4L, 0x31E6A5C7L, 0x22B65633L,
-    0xD0DDD530L, 0x0417B1DBL, 0xF67C32D8L, 0xE52CC12CL, 0x1747422FL,
-    0x49547E0BL, 0xBB3FFD08L, 0xA86F0EFCL, 0x5A048DFFL, 0x8ECEE914L,
-    0x7CA56A17L, 0x6FF599E3L, 0x9D9E1AE0L, 0xD3D3E1ABL, 0x21B862A8L,
-    0x32E8915CL, 0xC083125FL, 0x144976B4L, 0xE622F5B7L, 0xF5720643L,
-    0x07198540L, 0x590AB964L, 0xAB613A67L, 0xB831C993L, 0x4A5A4A90L,
-    0x9E902E7BL, 0x6CFBAD78L, 0x7FAB5E8CL, 0x8DC0DD8FL, 0xE330A81AL,
-    0x115B2B19L, 0x020BD8EDL, 0xF0605BEEL, 0x24AA3F05L, 0xD6C1BC06L,
-    0xC5914FF2L, 0x37FACCF1L, 0x69E9F0D5L, 0x9B8273D6L, 0x88D28022L,
-    0x7AB90321L, 0xAE7367CAL, 0x5C18E4C9L, 0x4F48173DL, 0xBD23943EL,
-    0xF36E6F75L, 0x0105EC76L, 0x12551F82L, 0xE03E9C81L, 0x34F4F86AL,
-    0xC69F7B69L, 0xD5CF889DL, 0x27A40B9EL, 0x79B737BAL, 0x8BDCB4B9L,
-    0x988C474DL, 0x6AE7C44EL, 0xBE2DA0A5L, 0x4C4623A6L, 0x5F16D052L,
-    0xAD7D5351L};
-
-static uint32_t singletable_crc32c(uint32_t crc, const uint8_t* buf, size_t size) {
-  while (size--) crc = crc32Table[(crc ^ *buf++) & 0xff] ^ (crc >> 8);
-  return crc;
+  uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
+    return do_crc32c(data, nbytes, crc,
+        [](uint32_t crc, uint8_t b) {
+            return (uint32_t)_crc32qi(crc, b);
+        },
+        [](uint32_t crc, uint64_t x) {
+            return (uint32_t)_crc32di(crc, x);
+        }
+    );
 }
 
 /*
@@ -237,26 +182,6 @@ static const uint32_t sctp_crc_tableil8_o32[256] = {
     0xD5CF889D, 0x27A40B9E, 0x79B737BA, 0x8BDCB4B9, 0x988C474D, 0x6AE7C44E,
     0xBE2DA0A5, 0x4C4623A6, 0x5F16D052, 0xAD7D5351};
 
-/*
- * end of the CRC lookup table crc_tableil8_o32
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
-
 static const uint32_t sctp_crc_tableil8_o40[256] = {
     0x00000000, 0x13A29877, 0x274530EE, 0x34E7A899, 0x4E8A61DC, 0x5D28F9AB,
     0x69CF5132, 0x7A6DC945, 0x9D14C3B8, 0x8EB65BCF, 0xBA51F356, 0xA9F36B21,
@@ -301,26 +226,6 @@ static const uint32_t sctp_crc_tableil8_o40[256] = {
     0x449A2E7E, 0x5738B609, 0x63DF1E90, 0x707D86E7, 0x0A104FA2, 0x19B2D7D5,
     0x2D557F4C, 0x3EF7E73B, 0xD98EEDC6, 0xCA2C75B1, 0xFECBDD28, 0xED69455F,
     0x97048C1A, 0x84A6146D, 0xB041BCF4, 0xA3E32483};
-
-/*
- * end of the CRC lookup table crc_tableil8_o40
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
 
 static const uint32_t sctp_crc_tableil8_o48[256] = {
     0x00000000, 0xA541927E, 0x4F6F520D, 0xEA2EC073, 0x9EDEA41A, 0x3B9F3664,
@@ -367,26 +272,6 @@ static const uint32_t sctp_crc_tableil8_o48[256] = {
     0x0C158713, 0xA954156D, 0xE5F54FC1, 0x40B4DDBF, 0xAA9A1DCC, 0x0FDB8FB2,
     0x7B2BEBDB, 0xDE6A79A5, 0x3444B9D6, 0x91052BA8};
 
-/*
- * end of the CRC lookup table crc_tableil8_o48
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
-
 static const uint32_t sctp_crc_tableil8_o56[256] = {
     0x00000000, 0xDD45AAB8, 0xBF672381, 0x62228939, 0x7B2231F3, 0xA6679B4B,
     0xC4451272, 0x1900B8CA, 0xF64463E6, 0x2B01C95E, 0x49234067, 0x9466EADF,
@@ -431,26 +316,6 @@ static const uint32_t sctp_crc_tableil8_o56[256] = {
     0xC747336E, 0x1A0299D6, 0x782010EF, 0xA565BA57, 0xBC65029D, 0x6120A825,
     0x0302211C, 0xDE478BA4, 0x31035088, 0xEC46FA30, 0x8E647309, 0x5321D9B1,
     0x4A21617B, 0x9764CBC3, 0xF54642FA, 0x2803E842};
-
-/*
- * end of the CRC lookup table crc_tableil8_o56
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
 
 static const uint32_t sctp_crc_tableil8_o64[256] = {
     0x00000000, 0x38116FAC, 0x7022DF58, 0x4833B0F4, 0xE045BEB0, 0xD854D11C,
@@ -497,26 +362,6 @@ static const uint32_t sctp_crc_tableil8_o64[256] = {
     0x5D1E0A9E, 0x650F6532, 0x081E60E7, 0x300F0F4B, 0x783CBFBF, 0x402DD013,
     0xE85BDE57, 0xD04AB1FB, 0x9879010F, 0xA0686EA3};
 
-/*
- * end of the CRC lookup table crc_tableil8_o64
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
-
 static const uint32_t sctp_crc_tableil8_o72[256] = {
     0x00000000, 0xEF306B19, 0xDB8CA0C3, 0x34BCCBDA, 0xB2F53777, 0x5DC55C6E,
     0x697997B4, 0x8649FCAD, 0x6006181F, 0x8F367306, 0xBB8AB8DC, 0x54BAD3C5,
@@ -561,26 +406,6 @@ static const uint32_t sctp_crc_tableil8_o72[256] = {
     0x57F4CA8E, 0xB8C4A197, 0x8C786A4D, 0x63480154, 0xE501FDF9, 0x0A3196E0,
     0x3E8D5D3A, 0xD1BD3623, 0x37F2D291, 0xD8C2B988, 0xEC7E7252, 0x034E194B,
     0x8507E5E6, 0x6A378EFF, 0x5E8B4525, 0xB1BB2E3C};
-
-/*
- * end of the CRC lookup table crc_tableil8_o72
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
 
 static const uint32_t sctp_crc_tableil8_o80[256] = {
     0x00000000, 0x68032CC8, 0xD0065990, 0xB8057558, 0xA5E0C5D1, 0xCDE3E919,
@@ -627,26 +452,6 @@ static const uint32_t sctp_crc_tableil8_o80[256] = {
     0x5B3FECD4, 0x333CC01C, 0x60F48DC6, 0x08F7A10E, 0xB0F2D456, 0xD8F1F89E,
     0xC5144817, 0xAD1764DF, 0x15121187, 0x7D113D4F};
 
-/*
- * end of the CRC lookup table crc_tableil8_o80
- */
-
-
-
-/*
- * The following CRC lookup table was generated automagically using the
- * following model parameters:
- *
- * Generator Polynomial = ................. 0x1EDC6F41
- * Generator Polynomial Length = .......... 32 bits
- * Reflected Bits = ....................... TRUE
- * Table Generation Offset = .............. 32 bits
- * Number of Slices = ..................... 8 slices
- * Slice Lengths = ........................ 8 8 8 8 8 8 8 8
- * Directory Name = ....................... .\
- * File Name = ............................ 8x256_tables.c
- */
-
 static const uint32_t sctp_crc_tableil8_o88[256] = {
     0x00000000, 0x493C7D27, 0x9278FA4E, 0xDB448769, 0x211D826D, 0x6821FF4A,
     0xB3657823, 0xFA590504, 0x423B04DA, 0x0B0779FD, 0xD043FE94, 0x997F83B3,
@@ -692,75 +497,20 @@ static const uint32_t sctp_crc_tableil8_o88[256] = {
     0x14124958, 0x5D2E347F, 0xE54C35A1, 0xAC704886, 0x7734CFEF, 0x3E08B2C8,
     0xC451B7CC, 0x8D6DCAEB, 0x56294D82, 0x1F1530A5};
 
-/*
- * end of the CRC lookup table crc_tableil8_o88
- */
-
-static uint32_t crc32c_sb8_64_bit(uint32_t crc, const unsigned char *p_buf,
-                                  uint32_t length, uint32_t init_bytes) {
-  uint32_t li;
-  uint32_t term1, term2;
-  uint32_t running_length;
-  uint32_t end_bytes;
-
-  running_length = ((length - init_bytes) / 8) * 8;
-  end_bytes = length - init_bytes - running_length;
-
-  for (li = 0; li < init_bytes; li++) {
-    crc = sctp_crc_tableil8_o32[(crc ^ *p_buf++) & 0x000000FF] ^ (crc >> 8);
-  }
-  for (li = 0; li < running_length / 8; li++) {
-    crc ^= *(const uint32_t *)p_buf;
-    p_buf += 4;
-
-    term1 = sctp_crc_tableil8_o88[crc & 0x000000FF] ^
-            sctp_crc_tableil8_o80[(crc >> 8) & 0x000000FF];
-    term2 = crc >> 16;
-    crc = term1 ^ sctp_crc_tableil8_o72[term2 & 0x000000FF] ^
-          sctp_crc_tableil8_o64[(term2 >> 8) & 0x000000FF];
-
-    term1 =
-        sctp_crc_tableil8_o56[(*(const uint32_t *)p_buf) & 0x000000FF] ^
-        sctp_crc_tableil8_o48[((*(const uint32_t *)p_buf) >> 8) & 0x000000FF];
-
-    term2 = (*(const uint32_t *)p_buf) >> 16;
-    crc = crc ^ term1 ^ sctp_crc_tableil8_o40[term2 & 0x000000FF] ^
-          sctp_crc_tableil8_o32[(term2 >> 8) & 0x000000FF];
-    p_buf += 4;
-  }
-  for (li = 0; li < end_bytes; li++) {
-    crc = sctp_crc_tableil8_o32[(crc ^ *p_buf++) & 0x000000FF] ^ (crc >> 8);
-  }
-  return crc;
-}
-
-static uint32_t multitable_crc32c(uint32_t crc32c, const unsigned char *buffer,
-                                  unsigned int length) {
-  uint32_t to_even_word;
-
-  if (length == 0) {
-    return (crc32c);
-  }
-  to_even_word = (4 - (((uintptr_t)buffer) & 0x3));
-  return (crc32c_sb8_64_bit(crc32c, buffer, length, to_even_word));
-}
-
 uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
-  if (nbytes < 4) {
-    return (singletable_crc32c(crc, buffer, nbytes));
-  } else {
-    return (multitable_crc32c(crc, buffer, nbytes));
-  }
-}
-
-uint32_t crc32c_extend(const void *data, size_t nbytes, uint32_t crc) {
-  return crc32c_func(reinterpret_cast<const uint8_t*>(data), nbytes, crc);
-}
-
-uint32_t crc32c(const void *data, size_t nbytes) {
-  return crc32c_extend(reinterpret_cast<const uint8_t*>(data), nbytes, 0);
-}
-
-bool is_crc32c_hw_available() {
-    return crc32c_func == crc32c_hw;
+  auto f1 = [](uint32_t crc, uint8_t b) {
+      return sctp_crc_tableil8_o32[(crc ^ b) & 0xff] ^ (crc >> 8);
+  };
+  auto f2 = [](uint32_t crc, uint64_t x) {
+      x ^= crc;
+      return sctp_crc_tableil8_o88[(x >>  0) & 0xff] ^
+            sctp_crc_tableil8_o80[(x >>  8) & 0xff] ^
+            sctp_crc_tableil8_o72[(x >> 16) & 0xff] ^
+            sctp_crc_tableil8_o64[(x >> 24) & 0xff] ^
+            sctp_crc_tableil8_o56[(x >> 32) & 0xff] ^
+            sctp_crc_tableil8_o48[(x >> 40) & 0xff] ^
+            sctp_crc_tableil8_o40[(x >> 48) & 0xff] ^
+            sctp_crc_tableil8_o32[(x >> 56) & 0xff] ;
+    };
+    return do_crc32c(buffer, nbytes, crc, f1, f2);
 }
