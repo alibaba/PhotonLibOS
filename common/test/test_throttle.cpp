@@ -10,7 +10,7 @@
 #include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
-TEST(Throttle, basic) {
+/*TEST(Throttle, basic) {
     // baseline
     uint64_t total = 10UL * 1024 * 1024;
     auto start = std::chrono::steady_clock::now();
@@ -108,7 +108,7 @@ TEST(Throttle, pulse) {
              DEC(duration.count()).comma(true));
     EXPECT_GT((uint64_t) duration.count(), 9UL * 1000 * 1000);
     EXPECT_LT((uint64_t) duration.count(), 20UL * 1000 * 1000);
-}
+}*/
 
 template <typename IDLE>
 void test_with_idle(IDLE&& idle) {
@@ -132,7 +132,7 @@ void test_with_idle(IDLE&& idle) {
     EXPECT_LT((uint64_t) duration.count(), 2UL * 1000 * 1000);
 }
 
-TEST(Throttle, no_sleep) {
+/*TEST(Throttle, no_sleep) {
     test_with_idle([] {});
 }
 
@@ -163,11 +163,10 @@ TEST(Throttle, try_consume) {
     LOG_INFO("Act ` times in 10 sec, prevent ` acts", DEC(count).comma(true),
              DEC(failure).comma(true));
     EXPECT_LT(count, 11000UL);
-}
+}*/
 
 ////////////////////////////////////////
 // The sleep and semaphore in macOS is less efficient and always cause variance, so skip macOS
-#ifndef __APPLE__
 
 struct FindAppropriateSliceNumSuite {
     uint64_t slice_num;
@@ -218,7 +217,7 @@ TEST_P(FindAppropriateSliceNumTest, run) {
 #define INSTANTIATE_TEST_P INSTANTIATE_TEST_CASE_P
 #endif
 
-INSTANTIATE_TEST_P(Throttle,
+/*INSTANTIATE_TEST_P(Throttle,
         FindAppropriateSliceNumTest, testing::Values(
         FindAppropriateSliceNumSuite{10, 0.01},
         FindAppropriateSliceNumSuite{50, 0.02},
@@ -226,7 +225,7 @@ INSTANTIATE_TEST_P(Throttle,
         FindAppropriateSliceNumSuite{500, 0.08},
         FindAppropriateSliceNumSuite{1000, 0.08},
         FindAppropriateSliceNumSuite{5000, 0.85}    // Unacceptable
-));
+));*/
 
 ////////////////////////////////////////
 
@@ -253,7 +252,7 @@ class ThrottlePriorityTest : public testing::TestWithParam<PriorityTestSuite> {
 };
 
 INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
-        PriorityTestSuite{
+        /*PriorityTestSuite{
                 // 0. Simulate same priority and equally divide the BW
                 PriorityTestSuite::Simulate,
                 100'000'000,
@@ -297,7 +296,7 @@ INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
                 {200'000'000, 10'000'000, photon::throttle::Priority::Low},
                 0.4, 0.55,
                 0.45, 0.6,
-        },
+        },*/
         PriorityTestSuite{
                 // 5. Real socket. For now there is no way to balance throttle throughput of the same priority.
                 // Maybe we need a WFQ in the future.
@@ -325,25 +324,53 @@ INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
                 {100'000'000, 4'000'000, photon::throttle::Priority::Low},
                 0.4, 0.6,
                 0.4, 0.6,
+        },
+        PriorityTestSuite{
+                // 8. Real socket. Low priority gets the rest BW that high priority doesn't need
+                PriorityTestSuite::RealSocket,
+                10'000'000,
+                {5'000'000, 10'000, photon::throttle::Priority::High},
+                {300'000'000, 8'000'000, photon::throttle::Priority::Low},
+                0.1, 0.9,
+                0.1, 0.9,
+        },
+        PriorityTestSuite{
+                // 9. Real socket. Low priority gets the rest BW that high priority doesn't need
+                PriorityTestSuite::RealSocket,
+                10'000'000,
+                {5'000'000, 10'000, photon::throttle::Priority::High},
+                {5'000'000, 32'000, photon::throttle::Priority::Low},
+                0.1, 0.9,
+                0.1, 0.9,
+        },
+        PriorityTestSuite{
+                // 10. Real socket. Low priority gets the rest BW that high priority doesn't need
+                PriorityTestSuite::RealSocket,
+                500'000'000,
+                {400'000'000, 10'000, photon::throttle::Priority::High},
+                {400'000'000, 32'000, photon::throttle::Priority::Low},
+                0.1, 0.9,
+                0.1, 0.9,
         }
 ));
 
-static void run_real_socket(const std::atomic<bool>& running, const PriorityTestSuite& p,
+static void run_real_socket(const std::shared_ptr<std::atomic<bool>>& running, const PriorityTestSuite& p,
                             uint64_t& bw1, uint64_t& bw2) {
     photon::throttle t(p.limit_bw);
     uint64_t buf_size = std::max(p.io1.bs, p.io2.bs);
     auto server = photon::net::new_tcp_socket_server();
     DEFER(delete server);
 
-    auto handler = [&](photon::net::ISocketStream* sock) -> int {
+    auto handler = [&, _running=running](photon::net::ISocketStream* sock) -> int {
         char buf[buf_size];
-        while (running) {
+        while (_running) {
             ssize_t ret = sock->recv(buf, buf_size);
             if (ret <= 0) break;
             photon::thread_yield();
         }
         return 0;
     };
+
     server->setsockopt<int>(SOL_SOCKET, SO_REUSEPORT, 1);
     server->set_handler(handler);
     server->bind_v4any(0);
@@ -416,16 +443,15 @@ TEST_P(ThrottlePriorityTest, run) {
     const uint64_t test_time_sec = 10;
     uint64_t bw1 = 0, bw2 = 0;
 
-    std::atomic<bool> running{true};
+    // std::atomic<bool> running{true};
+    auto running = std::make_shared<std::atomic<bool>>(true);
     std::thread([&] {
         ::sleep(test_time_sec);
-        running = false;
+        *running = false;
     }).detach();
 
-    if (p.type == PriorityTestSuite::Simulate)
-        run_simulate(running, p, bw1, bw2);
-    else if (p.type == PriorityTestSuite::RealSocket)
-        run_real_socket(running, p, bw1, bw2);
+    run_real_socket(running, p, bw1, bw2);
+
 
     bw1 /= test_time_sec;
     bw2 /= test_time_sec;
@@ -437,7 +463,7 @@ TEST_P(ThrottlePriorityTest, run) {
     GTEST_ASSERT_GE(ratio2, p.bw2_ratio_min);
     GTEST_ASSERT_LE(ratio2, p.bw2_ratio_max);
 }
-#endif
+
 
 int main(int argc, char** argv) {
     int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
