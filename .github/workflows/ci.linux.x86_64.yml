@@ -29,23 +29,23 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   gcc921:
@@ -71,23 +71,23 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   gcc1031:
@@ -113,23 +113,23 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   gcc1121:
@@ -155,23 +155,23 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   gcc1211:
@@ -197,23 +197,23 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -E test-lockfree --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   fstack:
