@@ -34,13 +34,13 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
+          cmake --build build -j $(nproc)
 
       - name: Test
         run: |
           cd build
           nohup redis-server &
-          ctest -E test-lockfree --timeout 3600 -V
+          ctest --timeout 3600 -V
           pkill redis-server
 
   debug-build-from-source:
