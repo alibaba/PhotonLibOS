@@ -363,7 +363,7 @@ static void run_real_socket(const std::shared_ptr<std::atomic<bool>>& running, c
 
     auto handler = [&, _running=running](photon::net::ISocketStream* sock) -> int {
         char buf[buf_size];
-        while (_running) {
+        while (_running->load()) {
             ssize_t ret = sock->recv(buf, buf_size);
             if (ret <= 0) break;
             photon::thread_yield();
