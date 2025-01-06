@@ -2,7 +2,7 @@ FROM debian:11
 
 RUN apt update -y && \
     apt install -y build-essential git curl cmake libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev && \
-    apt install -y python3-pip python3-pyelftools libnuma-dev && \
+    apt install -y python3-pip python3-pyelftools libnuma-dev nasm && \
     pip3 install ninja meson && \
     cd /root && \
     curl -LO https://github.com/F-Stack/f-stack/archive/refs/tags/v1.22.tar.gz && \

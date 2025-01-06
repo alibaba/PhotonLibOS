@@ -5,7 +5,7 @@ RUN dnf install -y git cmake gcc-c++ openssl-devel libcurl-devel libaio-devel su
     dnf config-manager --set-enabled powertools && \
     dnf install -y gtest-devel gmock-devel fuse-devel libgsasl-devel e2fsprogs-devel && \
     dnf install -y gcc-toolset-9-gcc-c++ gcc-toolset-10-gcc-c++ gcc-toolset-11-gcc-c++ gcc-toolset-12-gcc-c++ && \
-    dnf install -y redis && \
+    dnf install -y redis nasm && \
     dnf clean all && rm -rf /var/cache/yum && \
     wget https://github.com/gflags/gflags/archive/refs/tags/v2.1.2.tar.gz -O - | tar -xvz && \
     cd gflags-2.1.2 && export CXXFLAGS="-fPIC" && cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=1 -DBUILD_STATIC_LIBS=1 . && make -j 8 && make install && \
