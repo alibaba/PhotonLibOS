@@ -1,18 +1,18 @@
 /*
- * Copyright 2013-present Facebook, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright 2022 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 #include "crc32c.h"
 #include "crc64ecma.h"
@@ -20,6 +20,7 @@
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
 #endif
+#include <photon/common/utility.h>
 
 uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
 uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
@@ -30,7 +31,7 @@ static void crc_init() {
     __builtin_cpu_init();
     bool hw = __builtin_cpu_supports("sse4.2");
     crc32c_auto = hw ? crc32c_hw : crc32c_sw;
-    crc64ecma_auto = crc64ecma_sw;
+    crc64ecma_auto = hw ? crc64ecma_hw : crc64ecma_sw;
 #elif defined(__aarch64__)
 #ifdef __APPLE__  // apple silicon has hw for both crc
     crc32c_auto = crc32c_hw;
@@ -51,24 +52,62 @@ static void crc_init() {
 
 #if (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32))
 #if (defined(__clang__))
-#define _crc32di __builtin_arm_crc32cd
-#define _crc32qi __builtin_arm_crc32cb
+inline uint32_t crc32c(uint32_t crc, uint8_t data) {
+    return __builtin_arm_crc32cb(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint16_t data) {
+    return __builtin_arm_crc32ch(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint32_t data) {
+    return __builtin_arm_crc32cw(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint64_t data) {
+    return (uint32_t) __builtin_arm_crc32cd(crc, data);
+}
 #else
-#define _crc32di __builtin_aarch64_crc32cx
-#define _crc32qi __builtin_aarch64_crc32cb
+inline uint32_t crc32c(uint32_t crc, uint8_t data) {
+    return __builtin_aarch64_crc32cb(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint16_t data) {
+    return __builtin_aarch64_crc32ch(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint32_t data) {
+    return __builtin_aarch64_crc32cw(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint64_t data) {
+    return (uint32_t) __builtin_aarch64_crc32cx(crc, data);
+}
 #endif
 #elif (defined(__aarch64__))
-static inline uint32_t _crc32di(uint32_t crc, uint64_t value) {
-    __asm__("crc32cx %w[c], %w[c], %x[v]":[c]"+r"(crc):[v]"r"(value));
-    return crc;
-}
-static inline uint32_t _crc32qi(uint32_t crc, uint8_t value) {
+inline uint32_t crc32c(uint32_t crc, uint8_t value) {
     __asm__("crc32cb %w[c], %w[c], %w[v]":[c]"+r"(crc):[v]"r"(value));
     return crc;
 }
+inline uint32_t crc32c(uint32_t crc, uint16_t value) {
+    __asm__("crc32ch %w[c], %w[c], %w[v]":[c]"+r"(crc):[v]"r"(value));
+    return crc;
+}
+inline uint32_t crc32c(uint32_t crc, uint32_t value) {
+    __asm__("crc32cw %w[c], %w[c], %w[v]":[c]"+r"(crc):[v]"r"(value));
+    return crc;
+}
+inline uint32_t crc32c(uint32_t crc, uint64_t value) {
+    __asm__("crc32cx %w[c], %w[c], %x[v]":[c]"+r"(crc):[v]"r"(value));
+    return crc;
+}
 #else
-#define _crc32di __builtin_ia32_crc32di
-#define _crc32qi __builtin_ia32_crc32qi
+inline uint32_t crc32c(uint32_t crc, uint8_t data) {
+    return __builtin_ia32_crc32qi(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint16_t data) {
+    return __builtin_ia32_crc32hi(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint32_t data) {
+    return __builtin_ia32_crc32si(crc, data);
+}
+inline uint32_t crc32c(uint32_t crc, uint64_t data) {
+    return (uint32_t) __builtin_ia32_crc32di(crc, data);
+}
 #endif
 
 template<typename F1, typename F8> inline
@@ -83,7 +122,7 @@ uint32_t do_crc32c(const uint8_t *data, size_t nbytes, uint32_t crc, F1 f1, F8 f
         while (offset < limit) {
             crc = f1(crc, data[offset]);
             offset++;
-      }
+        }
     }
 
     // Process 8 bytes at a time until we have fewer than 8 bytes left.
@@ -98,17 +137,32 @@ uint32_t do_crc32c(const uint8_t *data, size_t nbytes, uint32_t crc, F1 f1, F8 f
         offset++;
     }
     return crc;
-  }
+}
 
-  uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
+extern "C" uint32_t crc32_iscsi_crc_ext(const uint8_t* buffer, size_t len, uint32_t crc_init);
+#if !defined(__APPLE__) || !defined(__x86_64__)
+extern "C" uint32_t crc32_iscsi_00(const uint8_t* buffer, size_t len, uint32_t crc_init);
+#else
+extern "C" uint32_t crc32_iscsi_00(const uint8_t* buffer, size_t len, uint32_t crc_init)
+               asm("crc32_iscsi_00");
+#endif
+
+
+uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
+#if defined(__x86_64__)
+    return crc32_iscsi_00(data, nbytes, crc);
+#elif defined(__aarch64__)
+    return crc32_iscsi_crc_ext(data, nbytes, crc);
+#else
     return do_crc32c(data, nbytes, crc,
         [](uint32_t crc, uint8_t b) {
-            return (uint32_t)_crc32qi(crc, b);
+            return crc32c(crc, b);
         },
         [](uint32_t crc, uint64_t x) {
-            return (uint32_t)_crc32di(crc, x);
+            return crc32c(crc, x);
         }
     );
+#endif
 }
 
 /*
@@ -501,7 +555,7 @@ uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
   auto f1 = [](uint32_t crc, uint8_t b) {
       return sctp_crc_tableil8_o32[(crc ^ b) & 0xff] ^ (crc >> 8);
   };
-  auto f2 = [](uint32_t crc, uint64_t x) {
+  auto f8 = [](uint32_t crc, uint64_t x) {
       x ^= crc;
       return sctp_crc_tableil8_o88[(x >>  0) & 0xff] ^
             sctp_crc_tableil8_o80[(x >>  8) & 0xff] ^
@@ -512,5 +566,5 @@ uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
             sctp_crc_tableil8_o40[(x >> 48) & 0xff] ^
             sctp_crc_tableil8_o32[(x >> 56) & 0xff] ;
     };
-    return do_crc32c(buffer, nbytes, crc, f1, f2);
+    return do_crc32c(buffer, nbytes, crc, f1, f8);
 }

@@ -80,7 +80,7 @@
 .equ	br_high_b3, 0x92d8
 
 	.text
-ASM_DEF_RODATA
+; ASM_DEF_RODATA
 	.align	4
 	.set	.lanchor_crc_tab,. + 0
 #ifndef __APPLE__
@@ -404,6 +404,9 @@ crc64_tab:
 	.global	cdecl(\name)
 #ifndef __APPLE__
 	.type	\name, %function
+	.weak cdecl(\name)
+#else
+	.weak_definition cdecl(\name)
 #endif
 
 /* uint64_t crc64_refl_func(uint64_t seed, const uint8_t * buf, uint64_t len) */
@@ -504,4 +507,4 @@ cdecl(\name\()):
 .endm
 ; #include "crc64_refl_common_pmull.h"
 
-crc64_refl_func crc64_ecma_refl_pmull__
+crc64_refl_func crc64_ecma_refl_pmull
