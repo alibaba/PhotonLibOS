@@ -22,7 +22,7 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install cmake openssl gflags googletest gsasl
+          brew install cmake openssl gflags googletest gsasl nasm
 
       - name: Build
         run: |

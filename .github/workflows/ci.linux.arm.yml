@@ -51,7 +51,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++
+          dnf install -y 'dnf-command(config-manager)'
+          dnf config-manager --set-enabled powertools
+          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
                          -D PHOTON_BUILD_DEPENDENCIES=ON  \

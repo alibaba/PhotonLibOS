@@ -54,12 +54,13 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 
 # Global compile options, only effective within this project
-set(global_compile_options -Wall -Wno-error=pragmas)
+set(global_compile_options "-Wall -Wno-error=pragmas")
 if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
     # Hint: -faligned-new is enabled by default after -std=c++17
-    list(APPEND global_compile_options -Werror -faligned-new)
+    set(global_compile_options "${global_compile_options} -Werror -faligned-new")
 endif ()
-add_compile_options(${global_compile_options})
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   ${global_compile_options}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${global_compile_options}")
 
 if (PHOTON_BUILD_WITH_ASAN)
     if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
@@ -202,9 +203,15 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         rpc/*.cpp
         thread/*.cpp
         )
-if ((${ARCH} STREQUAL aarch64) OR (${ARCH} STREQUAL arm64))
-    list(APPEND PHOTON_SRC common/checksum/crc64_ecma_refl_pmull.S)
+if (${ARCH} STREQUAL x86_64)
+    enable_language(ASM_NASM)
+    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_by8.asm
+                           ${PROJECT_SOURCE_DIR}/common/checksum/crc32_iscsi_00.asm)
+else ()
+    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_pmull.S
+                           ${PROJECT_SOURCE_DIR}/common/checksum/crc32_iscsi_crc_ext.S)
 endif ()
+
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
