@@ -242,7 +242,7 @@ jobs:
           export PHOTON_SRC_DIR=`pwd`
           dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
           dnf config-manager --set-enabled powertools
-          dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel
+          dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel nasm
           git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git /opt/rocksdb
           cd /opt/rocksdb
           rm -rf third-party/PhotonLibOS
