@@ -205,11 +205,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         )
 if (${ARCH} STREQUAL x86_64)
     enable_language(ASM_NASM)
-    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_by8.asm
-                           ${PROJECT_SOURCE_DIR}/common/checksum/crc32_iscsi_00.asm)
+    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_by8.asm)
 else ()
-    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_pmull.S
-                           ${PROJECT_SOURCE_DIR}/common/checksum/crc32_iscsi_crc_ext.S)
+    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_pmull.S)
 endif ()
 
 if (APPLE)
