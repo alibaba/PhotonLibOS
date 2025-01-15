@@ -86,9 +86,9 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 if (${ARCH} STREQUAL x86_64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse4.2 -mpclmul")
 elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
 endif ()
 
 if (${ARCH} STREQUAL x86_64)
@@ -203,12 +203,6 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         rpc/*.cpp
         thread/*.cpp
         )
-if (${ARCH} STREQUAL x86_64)
-    enable_language(ASM_NASM)
-    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_by8.asm)
-else ()
-    list(APPEND PHOTON_SRC ${PROJECT_SOURCE_DIR}/common/checksum/crc64_ecma_refl_pmull.S)
-endif ()
 
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
