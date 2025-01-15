@@ -219,18 +219,3 @@ uint64_t crc64ecma_sw(const uint8_t *buf, size_t len, uint64_t crc) {
                          crc64_big(crc, buf, len);
 }
 
-extern "C" uint64_t crc64_ecma_refl_pmull(uint64_t seed, const uint8_t *buf, uint64_t len);
-#if !defined(__APPLE__) || !defined(__x86_64__)
-extern "C" uint64_t crc64_ecma_refl_by8  (uint64_t seed, const uint8_t *buf, uint64_t len);
-#else
-extern "C" uint64_t crc64_ecma_refl_by8  (uint64_t seed, const uint8_t *buf, uint64_t len)
-               asm("crc64_ecma_refl_by8");
-#endif
-
-uint64_t crc64ecma_hw(const uint8_t *buf, size_t len, uint64_t crc) {
-#ifdef __aarch64__
-    return crc64_ecma_refl_pmull(crc, buf, len);
-#else
-    return crc64_ecma_refl_by8(crc, buf, len);
-#endif
-}
