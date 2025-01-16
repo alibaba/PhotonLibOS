@@ -597,6 +597,177 @@ uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
     return crc32c_hw_portable(data, nbytes, crc);
 }
 
+// rk1 ~ rk20
+__attribute__((aligned(16), used))
+const static uint64_t rk[20] = {
+    0xdabe95afc7875f40,
+    0xe05dd497ca393ae4,
+    0xd7d86b2af73de740,
+    0x8757d71d4fcc1000,
+    0xdabe95afc7875f40,
+    0x0000000000000000,
+    0x9c3e466c172963d5,
+    0x92d8af2baf0e1e84,
+    0x947874de595052cb,
+    0x9e735cb59b4724da,
+    0xe4ce2cd55fea0037,
+    0x2fe3fd2920ce82ec,
+    0x0e31d519421a63a5,
+    0x2e30203212cac325,
+    0x081f6054a7842df4,
+    0x6ae3efbb9dd441f3,
+    0x69a35d91c3730254,
+    0xb5ea1af9c013aca4,
+    0x3be653a30fe1af51,
+    0x60095b008a9efa44,
+};
+
+#define RK(i) &rk[i-1]
+
+__attribute__((aligned(16), used))
+const static uint64_t mask[6] = {
+    0xFFFFFFFFFFFFFFFF, 0x0000000000000000,
+    0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,
+    0x8080808080808080, 0x8080808080808080,
+};
+
+#define MASK(i) ({auto p = &mask[((i)-1)*2]; *(v128*)p;})
+
+const static uint64_t pshufb_shf_table[4] = {
+    0x8786858483828100, 0x8f8e8d8c8b8a8988,
+    0x0706050403020100, 0x000e0d0c0b0a0908};
+
+inline void* get_shf_table(size_t i) {
+    return (char*)pshufb_shf_table + i;
+}
+
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+
+inline uint64_t mm_load_tail_tiny(const void* data, size_t n) {
+    uint64_t x = 0;
+    (char*&)data += n;
+    if (n & 4) x = *--(const uint32_t*&)data;
+    if (n & 2) x = (x<<16) | *--(const uint16_t*&)data ;
+    if (n & 1) x = (x <<8) | *--(const uint8_t *&)data ;
+    return x;
+}
+
+#ifdef __x86_64__
+#include <immintrin.h>
+#elif defined(__aarch64__)
+#if !defined(__clang__) && defined(__GNUC__)
+#undef __GNUC__
+#define __GNUC__ 10
+#endif
+#define SSE2NEON_SUPPRESS_WARNINGS
+#include "sse2neon.h"
+#else
+#error "Unsupported architecture"
+#endif
+
+struct SSE {
+public:
+    typedef __m128i v128;
+    static v128 loadu(const void* ptr) {
+        return _mm_loadu_si128((v128*)ptr);
+    }
+    static v128 pshufb(v128& x, const v128& y) {
+        return (v128)_mm_shuffle_epi8((__m128i&)x, (const __m128i&)y);
+    }
+    static v128 pblendvb(v128& x, v128& y, v128& z) {
+        return (v128)_mm_blendv_epi8((__m128i&)x, (__m128i&)y, (__m128i&)z);
+    }
+    template<uint8_t imm>
+    static v128 pclmulqdq(v128& x, const uint64_t* rk) {
+        return _mm_clmulepi64_si128(x, *(const v128*)rk, imm);
+    }
+    static v128 op(v128& x, const uint64_t* rk) {
+        return pclmulqdq<0x10>(x, rk) ^ pclmulqdq<0x01>(x, rk);
+    }
+    static v128 load_small(const void* data, size_t n) {
+        assert(n < 16);
+        long x = mm_load_tail_tiny(data, n);
+        return (n & 8) ? v128{*(long*)data, x} : v128{x, 0};
+    }
+    static v128 bsl8(v128 x) {
+        return _mm_bslli_si128(x, 8);
+    }
+    static v128 bsr8(v128 x) {
+        return _mm_bsrli_si128(x, 8);
+    }
+};
+
+
+inline __attribute__((always_inline))
+uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc) {
+    if (unlikely(!nbytes || !data)) return crc;
+    using SIMD = SSE;
+    using v128 = typename SIMD::v128;
+    v128 xmm7 = {(long)~crc};
+    auto& ptr = (const v128*&)data;
+    if (nbytes >= 256) {
+        v128 xmm[8];
+        assert(nbytes >= 256);
+        static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
+        xmm[0] ^= xmm7; ptr += 8; nbytes -= 128;
+        do {
+            static_loop<0, 7, 1>(BODY(i) {
+                xmm[i] = SIMD::op(xmm[i], RK(3)) ^ SIMD::loadu(ptr+i);
+            });
+            ptr += 8; nbytes -= 128;
+        } while (nbytes >= 128);
+        static_loop<0, 6, 1>(BODY(i) {
+            auto I = (i == 6) ? 1 : (9 + i * 2);
+            xmm[7] ^= SIMD::op(xmm[i], RK(I));
+        });
+        xmm7 = xmm[7];
+    } else if (nbytes >= 16) {
+        xmm7 ^= SIMD::loadu(ptr++);
+        nbytes -= 16;
+    } else /* 0 < nbytes < 16*/ {
+        xmm7 ^= SIMD::load_small(data, nbytes);
+        if (nbytes >= 8) {
+            auto shf = SIMD::loadu(get_shf_table(nbytes));
+            xmm7 = SIMD::pshufb(xmm7, shf);
+            goto _128_done;
+        } else {
+            auto shf = SIMD::loadu(get_shf_table(nbytes + 8));
+            xmm7 = SIMD::pshufb(xmm7, shf);
+            goto _barrett;
+        }
+    }
+
+    while (nbytes >= 16) {
+        xmm7 = SIMD::op(xmm7, RK(1)) ^ SIMD::loadu(ptr++);
+        nbytes -= 16;
+    }
+
+    if (nbytes) {
+        auto p = data + nbytes - 16;
+        auto remainder = SIMD::loadu((v128*)p);
+        auto xmm0 = SIMD::loadu(get_shf_table(nbytes));
+        auto xmm2 = xmm7;
+        xmm7 = SIMD::pshufb(xmm7, xmm0);
+        xmm0 ^= MASK(3);
+        xmm2 = SIMD::pshufb(xmm2, xmm0);
+        xmm2 = SIMD::pblendvb(xmm2, remainder, xmm0);
+        xmm7 = xmm2 ^ SIMD::op(xmm7, RK(1));
+    }
+_128_done:
+    xmm7  =  SIMD::pclmulqdq<0>(xmm7, RK(5)) ^ SIMD::bsr8(xmm7);
+_barrett:
+    auto t = SIMD::pclmulqdq<0>(xmm7, RK(7));
+    xmm7  ^= SIMD::pclmulqdq<0x10>(t, RK(7)) ^ SIMD::bsl8(t);
+    auto p = (uint64_t*)&xmm7;
+    crc = ~p[1];
+    return crc;
+}
+
+uint64_t crc64ecma_hw(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_portable(buf, len, crc);
+}
+
+
 /*
  * Copyright (c) 2004-2006 Intel Corporation - All Rights Reserved
  *
