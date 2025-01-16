@@ -172,6 +172,7 @@ using net::ISocketStream;
 class _RedisClient {
 protected:
     ISocketStream* _s = nullptr;
+    bool _s_ownership = false;
     uint32_t _i = 0, _j = 0, _o = 0, _bufsize = 0, _refcnt = 0;
     char _xbuf[0];
 
@@ -196,11 +197,15 @@ protected:
     size_t __MAX_SIZE(_array_header x) { return 32; }
     size_t __MAX_SIZE(_char x) { return 1; }
 
-    explicit _RedisClient(ISocketStream* s, uint32_t bufsize) :
-        _s(s), _bufsize(bufsize) { }
+    explicit _RedisClient(ISocketStream* s, bool s_ownership, uint32_t bufsize) :
+        _s(s), _s_ownership(s_ownership), _bufsize(bufsize) { }
+    ~_RedisClient() {
+        if (_s_ownership)
+            delete _s;
+    }
 
 public:
-    void flush(const void* extra_buffer = 0, size_t size = 0);
+    ssize_t flush(const void* extra_buffer = 0, size_t size = 0);
     bool flush_if_low_space(size_t threshold, const void* ebuf = 0, size_t size = 0) {
         return (_o + threshold < _bufsize) ? false :
                           (flush(ebuf, size), true);
@@ -272,7 +277,9 @@ public:
     }
 
     char get_char() {
-        ensure_input_data(__MAX_SIZE(_char{'c'}));
+        if (ensure_input_data(__MAX_SIZE(_char{'c'})) < 0) {
+            return '\0';
+        }
         return ibuf()[_i++];
     }
     refstring getline() {
@@ -290,12 +297,14 @@ public:
             return getstring((size_t)length);
         return {};
     }
-    void __refill(size_t atleast);  // refill input buffer
-    void ensure_input_data(size_t min_available) {
+    ssize_t __refill(size_t atleast);  // refill input buffer
+    int ensure_input_data(size_t min_available) {
         assert(_j >= _i);
         size_t available = _j - _i;
-        if (available < min_available)
-            __refill(min_available - available);
+        if (available < min_available && __refill(min_available - available) < 0) {
+            return -1;
+        }
+        return 0;
     }
 
     void write_items() { }
@@ -318,7 +327,9 @@ public:
     template<typename...Args>
     any execute(bulk_string cmd, const Args&...args) {
         send_cmd_no_flush(cmd, args...);
-        flush();
+        if (flush() < 0) {
+            return error_message("flush failed");
+        }
         return parse_response_item();
     }
 
@@ -703,7 +714,7 @@ template<uint32_t BUF_SIZE = 16*1024UL>
 class __RedisClient : public _RedisClient {
     char _buf[BUF_SIZE * 2];
 public:
-    __RedisClient(ISocketStream* s) : _RedisClient(s, BUF_SIZE) { }
+    __RedisClient(ISocketStream* s, bool s_ownership) : _RedisClient(s, s_ownership, BUF_SIZE) { }
 };
 
 using RedisClient = __RedisClient<16*1024UL>;
@@ -713,4 +724,3 @@ using RedisClient = __RedisClient<16*1024UL>;
 
 }
 }
-

@@ -39,15 +39,15 @@ any _RedisClient::parse_response_item() {
         auto x = get_integer();
         return array_header{x};}
     default:
-        LOG_ERROR("uncognized mark: ", mark);
-        return {};
+        LOG_ERROR("unrecognized mark: ", mark);
+        return error_message("unrecognized mark");
     }
 }
 
-void _RedisClient::__refill(size_t atleast) {
+ssize_t _RedisClient::__refill(size_t atleast) {
     size_t room = _bufsize - _j;
     if (!room || room < atleast) { if (_refcnt > 0) {
-        LOG_ERROR_RETURN(0, , "no enough buffer space");
+        LOG_ERROR_RETURN(0, -1 , "no enough buffer space");
     } else {
         size_t available = _j - _i;
         memmove(ibuf(), ibuf() + _i, available);
@@ -56,8 +56,9 @@ void _RedisClient::__refill(size_t atleast) {
     } }
     ssize_t ret = _s->recv_at_least(ibuf() + _j, room, atleast);
     if (ret < (ssize_t)atleast)
-        LOG_ERRNO_RETURN(0,, "failed to recv at least ` bytes", atleast);
+        LOG_ERRNO_RETURN(0, -1, "failed to recv at least ` bytes", atleast);
     _j += ret;
+    return ret;
 }
 
 std::string_view _RedisClient::__getline() {
@@ -66,7 +67,9 @@ std::string_view _RedisClient::__getline() {
     estring_view sv(ibuf() + _i, _j - _i);
     while ((pos = sv.find('\n')) == sv.npos) {
         size_t j = _j;
-        __refill(0);
+        if (__refill(0) < 0) {
+            return {};
+        }
         assert(_j > j);
         sv = {ibuf() + j, (uint32_t)(_j - j)};
     }
@@ -88,8 +91,9 @@ std::string_view _RedisClient::__getline() {
 std::string_view _RedisClient::__getstring(size_t length) {
     assert(_i <= _j);
     size_t available = _j - _i;
-    if (available < length + 2)
-        __refill(length + 2 - available);
+    if (available < length + 2 && __refill(length + 2 - available) < 0) {
+        return {};
+    }
     auto begin = ibuf() + _i;
     _i += length;
     assert(_i + 2 <= _j);
@@ -101,7 +105,7 @@ std::string_view _RedisClient::__getstring(size_t length) {
     return {begin, length};
 }
 
-void _RedisClient::flush(const void* extra_buffer, size_t size) {
+ssize_t _RedisClient::flush(const void* extra_buffer, size_t size) {
     iovec iov[2];
     iov[0] = {obuf(), _o};
     int iovcnt = 1;
@@ -112,8 +116,9 @@ void _RedisClient::flush(const void* extra_buffer, size_t size) {
     }
     ssize_t ret = _s->writev_mutable(iov, iovcnt);
     if (ret < sum)
-        LOG_ERRNO_RETURN(0,, "failed to write to socket stream");
+        LOG_ERRNO_RETURN(0, -1, "failed to write to socket stream");
     _o = 0;
+    return ret;
 }
 
 }
