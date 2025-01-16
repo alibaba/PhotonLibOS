@@ -46,7 +46,7 @@ public:
 TEST(redis, serialization) {
     auto s = new_string_socket_stream();
     DEFER(delete s);
-    RedisClient rc(s);
+    RedisClient rc(s, false);
     rc  << "asldkfjasfkd"
         << __RC::_strint{234}
         << "this-is-another-string"
@@ -75,7 +75,7 @@ TEST(redis, deserialization) {
         ARRAY_HEADER(3) SSTR(asdf) INTEGER(75) BSTR(3,jkl) INTEGER(-1234234);
     s->set_input(RESP, false);
     print_resp(s->input());
-    RedisClient rc(s);
+    RedisClient rc(s, false);
     auto a = rc.parse_response_item();
     EXPECT_EQ(a.mark, simple_string::mark());
     EXPECT_EQ(a.get<simple_string>(), "asldkfjasfkd");
@@ -118,7 +118,7 @@ void asdfjkl(RedisClient& bs) {
 TEST(redis, cmd_serialization) {
     auto s = new_string_socket_stream();
     DEFER(delete s);
-    RedisClient rc(s);
+    RedisClient rc(s, false);
 #define ERRMSG "ERR unknown command 'asdf'"
 #define TEST_CMD(cmd, truth) {                  \
     s->set_input("-" ERRMSG CRLF, false);       \
@@ -191,7 +191,7 @@ TEST(redis, cmd) {
         #endif
     }
     DEFER(delete s);
-    RedisClient rc(s);
+    RedisClient rc(s, false);
     const char key[] = "zvxbhm";
     rc.DEL(key);
     DEFER(rc.DEL(key));
