@@ -92,7 +92,8 @@ public:
 
     virtual ssize_t readv(const struct iovec *iov, int iovcnt) override {
         ssize_t ret = 0;
-        auto iovec = IOVector(iov, iovcnt);
+        SmartCloneIOV<32> ciovec(iov, iovcnt);
+        iovector_view iovec(ciovec.ptr, iovcnt);
         while (!iovec.empty()) {
             auto tmp = read(iovec.front().iov_base, iovec.front().iov_len);
             if (tmp < 0) return tmp;
