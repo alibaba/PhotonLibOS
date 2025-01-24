@@ -21,13 +21,13 @@ limitations under the License.
 
 // in C++14, string_view is still in experimental stage
 // compilers actually using higher c++14 standard
-// can directly using 
+// can directly using
 
 // gcc    201402 is c++14 in gcc 5.1.0
 //        201300 is c++1y in gcc 4.9.2 since 4.9.2 do not support c++14
 // clang  201402 is c++14 in clang 3.5+
 
-// string_view in c++14 is experimental/string_view 
+// string_view in c++14 is experimental/string_view
 // and become standard in c++17
 //
 // In gcc, std=c++14/c++1y have no string view support
@@ -38,7 +38,7 @@ limitations under the License.
 // std::experimental::string_view
 // which requires __cplusplus >= 201402
 
-#ifdef __APPLE__
+#ifdef __clang__
     #include <string_view>
 #elif __cplusplus >= 201700L
     // C++ 17 supported

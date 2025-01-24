@@ -23,8 +23,147 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
 
+template<typename T, typename F1, typename F8> __attribute__((always_inline))
+inline T do_crc(const uint8_t *data, size_t nbytes, T crc, F1 f1, F8 f8) {
+    size_t offset = 0;
+    // Process bytes one at a time until we reach an 8-byte boundary and can
+    // start doing aligned 64-bit reads.
+    static uintptr_t ALIGN_MASK = sizeof(uint64_t) - 1;
+    size_t mask = (size_t)((uintptr_t)data & ALIGN_MASK);
+    if (mask != 0) {
+        size_t limit = std::min(nbytes, sizeof(uint64_t) - mask);
+        while (offset < limit) {
+            crc = f1(crc, data[offset]);
+            offset++;
+        }
+    }
+
+    // Process 8 bytes at a time until we have fewer than 8 bytes left.
+    while (offset + sizeof(uint64_t) <= nbytes) {
+        crc = f8(crc, *(uint64_t*)(data + offset));
+        offset += sizeof(uint64_t);
+    }
+
+    // Process any bytes remaining after the last aligned 8-byte block.
+    while (offset < nbytes) {
+        crc = f1(crc, data[offset]);
+        offset++;
+    }
+    return crc;
+}
+
+template<size_t begin, size_t end, ssize_t step, typename F,
+        typename = typename std::enable_if<begin != end>::type>
+inline __attribute__((always_inline))
+void static_loop(const F& f) {
+    f(begin);
+    static_loop<begin + step, end, step>(f);
+}
+
+template<size_t begin, size_t end, ssize_t step, typename F, typename = void,
+        typename = typename std::enable_if<begin == end>::type>
+inline __attribute__((always_inline))
+void static_loop(const F& f) {
+    f(begin);
+}
+
+// gcc sometimes doesn't allow always_inline
+#define BODY(i) [&](size_t i) /*__attribute__((always_inline))*/
+
+template<typename T>
+struct TableCRC {
+    typedef T (*Table)[256];
+    Table table = (Table) malloc(sizeof(*table) * 8);
+    ~TableCRC() { free(table); }
+    TableCRC(T POLY) {
+        for (int n = 0; n < 256; n++) {
+            T crc = n;
+            static_loop<0, 7, 1>(BODY(k) {
+                crc = ((crc & 1) * POLY) ^ (crc >> 1);
+            });
+            table[0][n] = crc;
+        }
+        for (int n = 0; n < 256; n++) {
+            T crc = table[0][n];
+            static_loop<1, 7, 1>(BODY(k) {
+                crc = table[0][crc & 0xff] ^ (crc >> 8);
+                table[k][n] = crc;
+            });
+        }
+    }
+    __attribute__((always_inline))
+    T operator()(const uint8_t *buffer, size_t nbytes, T crc) const {
+        auto f1 = [&](T crc, uint8_t b) {
+            return table[0][(crc ^ b) & 0xff] ^ (crc >> 8);
+        };
+        auto f8 = [&](T crc, uint64_t x) {
+            x ^= crc; crc = 0;
+            static_loop<0, 7, 1>(BODY(i) {
+                crc ^= table[7-i][(x >> (i*8)) & 0xff];
+            });
+            return crc;
+        };
+        return do_crc(buffer, nbytes, crc, f1, f8);
+    }
+};
+
+uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
+    const static TableCRC<uint32_t> calc(0x82f63b78);
+    return calc(buffer, nbytes, crc);
+}
+
+uint64_t crc64ecma_sw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
+    const static TableCRC<uint64_t> calc(0xc96c5795d7870f42);
+    return ~calc(buffer, nbytes, ~crc);
+}
+
+uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc);
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc);
+uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
+uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
+
+__attribute__((constructor))
+static void crc_init() {
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    crc32c_auto = __builtin_cpu_supports("sse4.2") ? crc32c_hw : crc32c_sw;
+    auto avx512 = __builtin_cpu_supports("avx512f")  &&
+                  __builtin_cpu_supports("avx512dq") &&
+                  __builtin_cpu_supports("avx512vl") &&
+                  __builtin_cpu_supports("vpclmulqdq");
+    crc64ecma_auto = avx512 ? crc64ecma_hw_avx512 :
+                 (__builtin_cpu_supports("sse") &&
+                  __builtin_cpu_supports("pclmul")) ?
+                        crc64ecma_hw_sse128 : crc64ecma_sw;
+#elif defined(__aarch64__)
+#ifdef __APPLE__  // apple silicon has hw for both crc
+    crc32c_auto = crc32c_hw;
+    crc64ecma_auto = crc64ecma_hw_sse128;
+#elif defined(__linux__)  // linux on arm: runtime detection
+    long hwcaps= getauxval(AT_HWCAP);
+    crc32c_auto = (hwcaps & HWCAP_CRC32) ? crc32c_hw : crc32c_sw;
+    crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw_sse128 : crc64ecma_sw;
+#else
+    crc32c_auto = crc32c_sw;
+    crc64ecma_auto = crc64ecma_sw;
+#endif
+#else // not __aarch64__, not __x86_64__
+    crc32c_auto = crc32c_sw;
+    crc64ecma_auto = crc64ecma_sw;
+#endif
+}
+
 #ifdef __x86_64__
 #include <immintrin.h>
+#ifdef __clang__
+#pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul"))), apply_to=function)
+#else // __GNUC__
+#pragma GCC push_options
+#pragma GCC target ("crc32,sse4.1,pclmul")
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#pragma GCC diagnostic ignored "-Winit-self"
+#endif
 #elif defined(__aarch64__)
 #if !defined(__clang__) && defined(__GNUC__) && (__GNUC__ < 10)
 #undef __GNUC__
@@ -72,34 +211,6 @@ public:
         return _mm_bsrli_si128(x, 8);
     }
 };
-
-uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
-uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
-
-__attribute__((constructor))
-static void crc_init() {
-#if defined(__x86_64__)
-    __builtin_cpu_init();
-    bool hw = __builtin_cpu_supports("sse4.2");
-    crc32c_auto = hw ? crc32c_hw : crc32c_sw;
-    crc64ecma_auto = hw ? crc64ecma_hw : crc64ecma_sw;
-#elif defined(__aarch64__)
-#ifdef __APPLE__  // apple silicon has hw for both crc
-    crc32c_auto = crc32c_hw;
-    crc64ecma_auto = crc64ecma_hw;
-#elif defined(__linux__)  // linux on arm: runtime detection
-    long hwcaps= getauxval(AT_HWCAP);
-    crc32c_auto = (hwcaps & HWCAP_CRC32) ? crc32c_hw : crc32c_sw;
-    crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw : crc64ecma_sw;
-#else
-    crc32c_auto = crc32c_sw;
-    crc64ecma_auto = crc64ecma_sw;
-#endif
-#else // not __aarch64__, not __x86_64__
-    crc32c_auto = crc32c_sw;
-    crc64ecma_auto = crc64ecma_sw;
-#endif
-}
 
 #if (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32))
 #if (defined(__clang__))
@@ -296,23 +407,6 @@ static const uint64_t crc32_merge_table_pclmulqdq[128*2] = {
     0x1a0f717c4, 0x0170076fa,
 };
 
-template<size_t begin, size_t end, ssize_t step, typename F,
-        typename = typename std::enable_if<begin != end>::type>
-inline __attribute__((always_inline))
-void static_loop(const F& f) {
-    f(begin);
-    static_loop<begin + step, end, step>(f);
-}
-
-template<size_t begin, size_t end, ssize_t step, typename F, typename = void,
-        typename = typename std::enable_if<begin == end>::type>
-inline __attribute__((always_inline))
-void static_loop(const F& f) {
-    f(begin);
-}
-
-#define BODY(i) [&](size_t i) __attribute__((always_inline))
-
 template<size_t blksz, typename T> inline __attribute__((always_inline))
 void crc32c_hw_block(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     if (nbytes & blksz) {
@@ -394,39 +488,10 @@ uint32_t crc32c_hw_portable(const uint8_t *data, size_t nbytes, uint32_t crc) {
     return crc;
 }
 
-template<typename T, typename F1, typename F8> __attribute__((always_inline))
-inline T do_crc(const uint8_t *data, size_t nbytes, T crc, F1 f1, F8 f8) {
-    size_t offset = 0;
-    // Process bytes one at a time until we reach an 8-byte boundary and can
-    // start doing aligned 64-bit reads.
-    static uintptr_t ALIGN_MASK = sizeof(uint64_t) - 1;
-    size_t mask = (size_t)((uintptr_t)data & ALIGN_MASK);
-    if (mask != 0) {
-        size_t limit = std::min(nbytes, sizeof(uint64_t) - mask);
-        while (offset < limit) {
-            crc = f1(crc, data[offset]);
-            offset++;
-        }
-    }
-
-    // Process 8 bytes at a time until we have fewer than 8 bytes left.
-    while (offset + sizeof(uint64_t) <= nbytes) {
-        crc = f8(crc, *(uint64_t*)(data + offset));
-        offset += sizeof(uint64_t);
-    }
-
-    // Process any bytes remaining after the last aligned 8-byte block.
-    while (offset < nbytes) {
-        crc = f1(crc, data[offset]);
-        offset++;
-    }
-    return crc;
-}
-
 uint32_t crc32c_hw_simple(const uint8_t *data, size_t nbytes, uint32_t crc) {
-    auto f1 = [](uint32_t crc, uint8_t b)  { return crc32c(crc, b); };
-    auto f2 = [](uint32_t crc, uint64_t x) { return crc32c(crc, x); };
-    return do_crc(data, nbytes, crc, f1, f2);
+    auto f1 = [](uint32_t crc, uint8_t x)  { return crc32c(crc, x); };
+    auto f8 = [](uint32_t crc, uint64_t x) { return crc32c(crc, x); };
+    return do_crc(data, nbytes, crc, f1, f8);
 }
 
 uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
@@ -478,28 +543,35 @@ inline void* get_shf_table(size_t i) {
 }
 
 inline __attribute__((always_inline))
-uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc) {
+__m128i crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
+    using SIMD = SSE;
+    using v128 = typename SIMD::v128;
+    v128 xmm[8];
+    auto& ptr = (const v128*&)data;
+    static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
+    xmm[0] ^= v128{(long)~crc, 0}; ptr += 8; nbytes -= 128;
+    do {
+        static_loop<0, 7, 1>(BODY(i) {
+            xmm[i] = SIMD::op(xmm[i], RK(3)) ^ SIMD::loadu(ptr+i);
+        });
+        ptr += 8; nbytes -= 128;
+    } while (nbytes >= 128);
+    static_loop<0, 6, 1>(BODY(i) {
+        auto I = (i == 6) ? 1 : (9 + i * 2);
+        xmm[7] ^= SIMD::op(xmm[i], RK(I));
+    });
+    return xmm[7];
+}
+
+template<typename F> inline __attribute__((always_inline))
+uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc, F hw_big) {
     if (unlikely(!nbytes || !data)) return crc;
     using SIMD = SSE;
     using v128 = typename SIMD::v128;
     v128 xmm7 = {(long)~crc};
     auto& ptr = (const v128*&)data;
     if (nbytes >= 256) {
-        v128 xmm[8];
-        assert(nbytes >= 256);
-        static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
-        xmm[0] ^= xmm7; ptr += 8; nbytes -= 128;
-        do {
-            static_loop<0, 7, 1>(BODY(i) {
-                xmm[i] = SIMD::op(xmm[i], RK(3)) ^ SIMD::loadu(ptr+i);
-            });
-            ptr += 8; nbytes -= 128;
-        } while (nbytes >= 128);
-        static_loop<0, 6, 1>(BODY(i) {
-            auto I = (i == 6) ? 1 : (9 + i * 2);
-            xmm[7] ^= SIMD::op(xmm[i], RK(I));
-        });
-        xmm7 = xmm[7];
+        xmm7 = hw_big(data, nbytes, crc);
     } else if (nbytes >= 16) {
         xmm7 ^= SIMD::loadu(ptr++);
         nbytes -= 16;
@@ -542,53 +614,112 @@ _barrett:
     return crc;
 }
 
-uint64_t crc64ecma_hw(const uint8_t *buf, size_t len, uint64_t crc) {
-    return crc64ecma_hw_portable(buf, len, crc);
+uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_sse);
 }
 
-template<typename T>
-struct TableCRC {
-    typedef T (*Table)[256];
-    Table table = (Table) malloc(sizeof(*table) * 8);
-    ~TableCRC() { free(table); }
-    TableCRC(T POLY) {
-        for (int n = 0; n < 256; n++) {
-            T crc = n;
-            static_loop<0, 7, 1>(BODY(k) {
-                crc = ((crc & 1) * POLY) ^ (crc >> 1);
-            });
-            table[0][n] = crc;
-        }
-        for (int n = 0; n < 256; n++) {
-            T crc = table[0][n];
-            static_loop<1, 7, 1>(BODY(k) {
-                crc = table[0][crc & 0xff] ^ (crc >> 8);
-                table[k][n] = crc;
-            });
-        }
-    }
-    __attribute__((always_inline))
-    T operator()(const uint8_t *buffer, size_t nbytes, T crc) const {
-        auto f1 = [&](T crc, uint8_t b) {
-            return table[0][(crc ^ b) & 0xff] ^ (crc >> 8);
-        };
-        auto f8 = [&](T crc, uint64_t x) {
-            x ^= crc; crc = 0;
-            static_loop<0, 7, 1>(BODY(i) {
-                crc ^= table[7-i][(x >> (i*8)) & 0xff];
-            });
-            return crc;
-        };
-        return do_crc(buffer, nbytes, crc, f1, f8);
-    }
+#ifdef __x86_64__
+#ifdef __clang__
+#pragma clang attribute pop
+#pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq"))), apply_to=function)
+#else // __GNUC__
+#pragma GCC push_options
+#pragma GCC target ("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq")
+#endif
+static const uint64_t rk512[] = {
+    0xf31fd9271e228b79, // rk_1
+    0x8260adf2381ad81c, // rk_2
+    0xdabe95afc7875f40, // rk1
+    0xe05dd497ca393ae4, // rk2
+    0xd7d86b2af73de740, // rk3
+    0x8757d71d4fcc1000, // rk4
+    0xdabe95afc7875f40,
+    0x0000000000000000,
+    0x9c3e466c172963d5,
+    0x92d8af2baf0e1e84,
+    0x947874de595052cb,
+    0x9e735cb59b4724da,
+    0xe4ce2cd55fea0037,
+    0x2fe3fd2920ce82ec,
+    0x0e31d519421a63a5,
+    0x2e30203212cac325,
+    0x081f6054a7842df4,
+    0x6ae3efbb9dd441f3,
+    0x69a35d91c3730254,
+    0xb5ea1af9c013aca4,
+    0x3be653a30fe1af51,
+    0x60095b008a9efa44, // rk20
+    0xdabe95afc7875f40, // rk_1b
+    0xe05dd497ca393ae4, // rk_2b
+    0x0000000000000000,
+    0x0000000000000000,
+};
+#define _RK(i) &rk512[(i)+1]
+
+using v512 = __m512i_u;
+inline __attribute__((always_inline))
+v512 OP(v512 a, v512 b, v512 c) {
+    auto x = _mm512_clmulepi64_epi128((a), (b), 0x01);
+    auto y = _mm512_clmulepi64_epi128((a), (b), 0x10);
+    return   _mm512_ternarylogic_epi64(x, y, (c), 0x96);
 };
 
-uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
-    const static TableCRC<uint32_t> calc(0x82f63b78);
-    return calc(buffer, nbytes, crc);
+inline __attribute__((always_inline))
+v512 OP(v512 a, v512 b, const v512* c) {
+    return OP(a, b, _mm512_loadu_si512(c));
 }
 
-uint64_t crc64ecma_sw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
-    const static TableCRC<uint64_t> calc(0xc96c5795d7870f42);
-    return ~calc(buffer, nbytes, ~crc);
+inline __attribute__((always_inline))
+__m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
+    assert(nbytes >= 256);
+    __attribute__((aligned(16)))
+    v512 crc0 = {(long)~crc};
+    auto& ptr = (const v512*&)data;
+    auto zmm0 = _mm512_loadu_si512(ptr++); zmm0 ^= crc0;
+    auto zmm4 = _mm512_loadu_si512(ptr++);
+    nbytes -= 128;
+    if (nbytes < 384) {
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        do { // fold 128 bytes each iteration
+            zmm0 = OP(zmm0, rk3, ptr++);
+            zmm4 = OP(zmm4, rk3, ptr++);
+            nbytes -= 128;
+        } while (nbytes >= 128);
+    } else { // nbytes >= 384
+        auto rk_1_2 = _mm512_broadcast_i32x4(*(__m128i*)&rk512[0]);
+        auto zmm7   = _mm512_loadu_si512(ptr++);
+        auto zmm8   = _mm512_loadu_si512(ptr++);
+        nbytes -= 128;
+        do { // fold 256 bytes each iteration
+            zmm0 = OP(zmm0, rk_1_2, ptr++);
+            zmm4 = OP(zmm4, rk_1_2, ptr++);
+            zmm7 = OP(zmm7, rk_1_2, ptr++);
+            zmm8 = OP(zmm8, rk_1_2, ptr++);
+            nbytes -= 256;
+        } while (nbytes >= 256);
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        zmm0 = OP(zmm0, rk3, zmm7);
+        zmm4 = OP(zmm4, rk3, zmm8);
+    }
+    auto t = _mm512_extracti64x2_epi64(zmm4, 0x03);
+    auto zmm7 = v512{t[0], t[1]};
+    auto zmm1 = OP(zmm0, *(v512*)_RK(9), zmm7);
+         zmm1 = OP(zmm4, *(v512*)_RK(17), zmm1);
+    auto zmm8 = _mm512_shuffle_i64x2(zmm1, zmm1, 0x4e);
+    auto ymm8 = ((__m256i&)zmm8) ^ ((__m256i&)zmm1);
+    return _mm256_extracti64x2_epi64(ymm8, 0) ^
+           _mm256_extracti64x2_epi64(ymm8, 1) ;
 }
+
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_avx512);
+}
+#ifdef __clang__
+#pragma clang attribute pop
+#endif
+#endif  // __x86_64__
+
+uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
+    return crc64ecma_auto(buffer, nbytes, crc);
+}
+
