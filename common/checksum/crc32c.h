@@ -46,5 +46,5 @@ inline uint32_t crc32c(std::string_view text) {
 
 inline bool is_crc32c_hw_available() {
     extern uint32_t (*crc32c_auto)(const uint8_t *data, size_t nbytes, uint32_t crc);
-    return crc32c_auto == crc32c_hw;
+    return crc32c_auto != crc32c_sw;
 }

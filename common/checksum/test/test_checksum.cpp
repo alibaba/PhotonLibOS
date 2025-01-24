@@ -67,9 +67,9 @@ void do_test_crc(const char* name, CRC32C calcurlator) {
 }
 
 void do_test_crc_small(CRC64ECMA calc_sw, CRC64ECMA calc_hw, uint16_t begin, uint16_t end) {
-    alignas(16) unsigned char buf[64 * 1024 + 16];
+    unsigned char buf[64 * 1024 + 16];
+    for (uint16_t i = 0; i < begin; ++i) buf[i] = 'a' + i % 26;
     for (uint16_t i = begin; i < end; ++i) {
-        buf[i] = 0;
         auto crc_sw = calc_sw(buf, i, 0);
         auto crc_hw = calc_hw(buf, i, 0);
         if (crc_sw != crc_hw) printf("i=%d\n", i);
@@ -121,39 +121,50 @@ TEST(TestChecksum, crc32c_hw_small) {
     do_test_crc_small(crc32c_sw, crc32c_hw_portable, 0, 4000);
 }
 
-void do_test_crc_big(const char* name, CRC32C crc32c) {
-    static unsigned char buf[512 * 1024 * 1024];
-    memset(buf, 0, sizeof(buf));
+void do_perf_crc(const char* name, CRC32C crc32c, unsigned long size) {
+    const unsigned long SIZE = 1 * 1024 * 1024 * 1024;
+    __attribute__((aligned(16)))
+    static unsigned char buf[SIZE+1];
+    if (size > SIZE) size = SIZE;
+    memset(buf+1, 0, size);
     auto start = std::chrono::system_clock::now();
-    const uint64_t MAX = 100;
-    for (auto i = MAX; i; --i) {
-        crc32c(buf, sizeof(buf), 0);
+    unsigned long rounds = SIZE / size * 10;
+    for (auto i = rounds; i; --i) {
+        crc32c(buf+1, size, 0); // test for memory un-alignment
     }
-    int time_cost = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start).count();
-    printf("%s time spent: %d us (%0.2f GB/s)\n", name, time_cost,
-        sizeof(buf) * MAX / 1024 / 1024 / 1024 / (double(time_cost) / 1000 / 1000));
+    unsigned long time_cost = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - start).count();
+    auto perf = size * rounds / (double(time_cost) / 1000 / 1000) / 1024 / 1024 / 1024;
+    printf("%s (%lu bytes * %lu rounds = %lu GB), time spent: %lu us (%0.2f GB/s)\n",
+        name, size, rounds, rounds * size / SIZE, time_cost, perf);
 }
 
-inline void do_test_crc_big(const char* name, CRC64ECMA crc64ecma) {
-    return do_test_crc_big(name, (CRC32C&)crc64ecma);
+inline void do_perf_crc(const char* name, CRC64ECMA crc64ecma, unsigned long size) {
+    return do_perf_crc(name, (CRC32C&)crc64ecma, size);
 }
 
-TEST(TestChecksumBig, crc32c_hw_simple) {
-    do_test_crc_big("crc32c_hw_simple", crc32c_hw_simple);
+const size_t _128KB = 128 * 1024;
+const size_t _1GB = 1024 * 1024 * 1024;
+
+TEST(Perf, crc32c_hw_simple) {
+    do_perf_crc("crc32c_hw_simple", crc32c_hw_simple, _128KB);
+    do_perf_crc("crc32c_hw_simple", crc32c_hw_simple, _1GB);
 }
 
-TEST(TestChecksumBig, crc32c_hw_portable) {
-    do_test_crc_big("crc32c_hw_portable", crc32c_hw_portable);
+TEST(Perf, crc32c_hw_portable) {
+    do_perf_crc("crc32c_hw_portable", crc32c_hw_portable, _128KB);
+    do_perf_crc("crc32c_hw_portable", crc32c_hw_portable, _1GB);
 }
 
-TEST(TestChecksumBig, crc32c_hw_asm) {
-    do_test_crc_big(crc32c_hw_asm_name, crc32c_hw_asm);
+TEST(Perf, crc32c_hw_asm) {
+    do_perf_crc(crc32c_hw_asm_name, crc32c_hw_asm, _128KB);
+    do_perf_crc(crc32c_hw_asm_name, crc32c_hw_asm, _1GB);
 }
-/*
-TEST(TestChecksumBig, crc32c_sw) {
-    do_test_crc_big("crc32c_sw", crc32c_sw);
+
+TEST(Perf, crc32c_sw) {
+    do_perf_crc("crc32c_sw", crc32c_sw, _128KB);
+    do_perf_crc("crc32c_sw", crc32c_sw, _1GB);
 }
-*/
+
 void do_test64(const char* name, CRC64ECMA crc64ecma) {
     auto start = std::chrono::system_clock::now();
     for (int i = 0; i < 100; ++i)
@@ -188,12 +199,19 @@ TEST(TestChecksum, crc64ecma_hw) {
     do_test64("crc64ecma_hw_portable", crc64ecma_hw);
 }
 
-TEST(TestChecksumBig, crc64ecma_hw) {
-    do_test_crc_big("crc64ecma_hw_portable", crc64ecma_hw);
+TEST(Perf, crc64ecma_hw) {
+    do_perf_crc("crc64ecma_hw_portable", crc64ecma_hw, _128KB);
+    do_perf_crc("crc64ecma_hw_portable", crc64ecma_hw, _1GB);
 }
 
-TEST(TestChecksumBig, crc64ecma_hw_asm) {
-    do_test_crc_big(crc64ecma_hw_asm_name, crc64ecma_hw_asm);
+TEST(Perf, crc64ecma_hw_asm) {
+    do_perf_crc(crc64ecma_hw_asm_name, crc64ecma_hw_asm, _128KB);
+    do_perf_crc(crc64ecma_hw_asm_name, crc64ecma_hw_asm, _1GB);
+}
+
+TEST(Perf, crc64ecma_sw) {
+    do_perf_crc("crc64ecma_sw", crc64ecma_sw, _128KB);
+    do_perf_crc("crc64ecma_sw", crc64ecma_sw, _1GB);
 }
 
 TEST(TestChecksum, crc64ecma_small) {
