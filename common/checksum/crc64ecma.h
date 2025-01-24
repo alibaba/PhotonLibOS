@@ -39,5 +39,5 @@ inline uint64_t crc64ecma(const void *buffer, size_t nbytes, uint64_t crc) {
 
 inline bool is_crc64ecma_hw_available() {
     extern uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
-    return crc64ecma_auto == crc64ecma_hw;
+    return crc64ecma_auto != crc64ecma_sw;
 }
