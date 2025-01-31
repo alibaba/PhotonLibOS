@@ -332,6 +332,7 @@ INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
 
 static void run_real_socket(const std::atomic<bool>& running, const PriorityTestSuite& p,
                             uint64_t& bw1, uint64_t& bw2) {
+    photon::semaphore stream_counter;
     photon::throttle t(p.limit_bw);
     uint64_t buf_size = std::max(p.io1.bs, p.io2.bs);
     auto server = photon::net::new_tcp_socket_server();
@@ -345,6 +346,7 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
             if (ret <= 0) break;
             photon::thread_yield();
         }
+        stream_counter.signal(1);
         return 0;
     };
 
@@ -397,6 +399,8 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
 
     photon::thread_join((photon::join_handle*) client_th1);
     photon::thread_join((photon::join_handle*) client_th2);
+
+    stream_counter.wait(2);
 }
 
 static void run_simulate(const std::atomic<bool>& running, const PriorityTestSuite& p,
