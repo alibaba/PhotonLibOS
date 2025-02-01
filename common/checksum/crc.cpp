@@ -75,22 +75,25 @@ public:
 
 uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
 uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
+uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc);
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc);
 
 __attribute__((constructor))
 static void crc_init() {
 #if defined(__x86_64__)
     __builtin_cpu_init();
-    bool hw = __builtin_cpu_supports("sse4.2");
-    crc32c_auto = hw ? crc32c_hw : crc32c_sw;
-    crc64ecma_auto = hw ? crc64ecma_hw : crc64ecma_sw;
+    crc32c_auto = __builtin_cpu_supports("sse4.2") ? crc32c_hw : crc32c_sw;
+    crc64ecma_auto = __builtin_cpu_supports("avx512f") ? crc64ecma_hw_avx512 :
+                         __builtin_cpu_supports("sse") ? crc64ecma_hw_sse128 :
+                                                         crc64ecma_sw;
 #elif defined(__aarch64__)
 #ifdef __APPLE__  // apple silicon has hw for both crc
     crc32c_auto = crc32c_hw;
-    crc64ecma_auto = crc64ecma_hw;
+    crc64ecma_auto = crc64ecma_hw_sse128;
 #elif defined(__linux__)  // linux on arm: runtime detection
     long hwcaps= getauxval(AT_HWCAP);
     crc32c_auto = (hwcaps & HWCAP_CRC32) ? crc32c_hw : crc32c_sw;
-    crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw : crc64ecma_sw;
+    crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw_sse128 : crc64ecma_sw;
 #else
     crc32c_auto = crc32c_sw;
     crc64ecma_auto = crc64ecma_sw;
@@ -477,29 +480,117 @@ inline void* get_shf_table(size_t i) {
     return (char*)pshufb_shf_table + i;
 }
 
+
 inline __attribute__((always_inline))
-uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc) {
+__m128i crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
+    using SIMD = SSE;
+    using v128 = typename SIMD::v128;
+    v128 xmm[8];
+    auto& ptr = (const v128*&)data;
+    static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
+    xmm[0] ^= v128{(long)~crc, 0}; ptr += 8; nbytes -= 128;
+    do {
+        static_loop<0, 7, 1>(BODY(i) {
+            xmm[i] = SIMD::op(xmm[i], RK(3)) ^ SIMD::loadu(ptr+i);
+        });
+        ptr += 8; nbytes -= 128;
+    } while (nbytes >= 128);
+    static_loop<0, 6, 1>(BODY(i) {
+        auto I = (i == 6) ? 1 : (9 + i * 2);
+        xmm[7] ^= SIMD::op(xmm[i], RK(I));
+    });
+    return xmm[7];
+}
+
+#ifdef __AVX512F__
+static const uint64_t rk512[] = {
+    0xf31fd9271e228b79, // rk_1
+    0x8260adf2381ad81c, // rk_2
+    0xdabe95afc7875f40, // rk1
+    0xe05dd497ca393ae4, // rk2
+    0xd7d86b2af73de740, // rk3
+    0x8757d71d4fcc1000, // rk4
+    0xdabe95afc7875f40,
+    0x0000000000000000,
+    0x9c3e466c172963d5,
+    0x92d8af2baf0e1e84,
+    0x947874de595052cb,
+    0x9e735cb59b4724da,
+    0xe4ce2cd55fea0037,
+    0x2fe3fd2920ce82ec,
+    0x0e31d519421a63a5,
+    0x2e30203212cac325,
+    0x081f6054a7842df4,
+    0x6ae3efbb9dd441f3,
+    0x69a35d91c3730254,
+    0xb5ea1af9c013aca4,
+    0x3be653a30fe1af51,
+    0x60095b008a9efa44, // rk20
+    0xdabe95afc7875f40, // rk_1b
+    0xe05dd497ca393ae4, // rk_2b
+    0x0000000000000000,
+    0x0000000000000000,
+};
+#define _RK(i) &rk512[(i)+1]
+
+inline __attribute__((always_inline))
+__m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
+    assert(nbytes >= 256);
+    using v512 = __m512i_u;
+    __attribute__((aligned(16)))
+    v512 crc0 = {(long)~crc};
+    auto& ptr = (const v512*&)data;
+    auto zmm0 = _mm512_loadu_si512(ptr++); zmm0 ^= crc0;
+    auto zmm4 = _mm512_loadu_si512(ptr++);
+    auto OP = [](v512 a, v512 b, v512 c) -> v512 {
+        auto x = _mm512_clmulepi64_epi128((a), (b), 0x01);
+        auto y = _mm512_clmulepi64_epi128((a), (b), 0x10);
+        return   _mm512_ternarylogic_epi64(x, y, (c), 0x96);
+    };
+    #define OP_PTR(a, b, ptr) OP(a, b, _mm512_loadu_si512(ptr))
+    nbytes -= 128;
+    if (nbytes < 384) {
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        do { // fold 128 bytes each iteration
+            zmm0 = OP_PTR(zmm0, rk3, ptr++);
+            zmm4 = OP_PTR(zmm4, rk3, ptr++);
+            nbytes -= 128;
+        } while (nbytes >= 128);
+    } else { // nbytes >= 384
+        auto rk_1_2 = _mm512_broadcast_i32x4(*(__m128i*)&rk512[0]);
+        auto zmm7   = _mm512_loadu_si512(ptr++);
+        auto zmm8   = _mm512_loadu_si512(ptr++);
+        nbytes -= 128;
+        do { // fold 256 bytes each iteration
+            zmm0 = OP_PTR(zmm0, rk_1_2, ptr++);
+            zmm4 = OP_PTR(zmm4, rk_1_2, ptr++);
+            zmm7 = OP_PTR(zmm7, rk_1_2, ptr++);
+            zmm8 = OP_PTR(zmm8, rk_1_2, ptr++);
+            nbytes -= 256;
+        } while (nbytes >= 256);
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        zmm0 = OP(zmm0, rk3, zmm7);
+        zmm4 = OP(zmm4, rk3, zmm8);
+    }
+    auto t = _mm512_extracti64x2_epi64(zmm4, 0x03);
+    auto zmm7 = v512{t[0], t[1]};
+    auto zmm1 = OP(zmm0, *(v512*)_RK(9), zmm7);
+         zmm1 = OP(zmm4, *(v512*)_RK(17), zmm1);
+    auto zmm8 = _mm512_shuffle_i64x2(zmm1, zmm1, 0x4e);
+    auto ymm8 = ((__m256i&)zmm8) ^ ((__m256i&)zmm1);
+    return _mm256_extracti64x2_epi64(ymm8, 0) ^
+           _mm256_extracti64x2_epi64(ymm8, 1) ;
+}
+#endif
+template<typename F> inline __attribute__((always_inline))
+uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc, F hw_big) {
     if (unlikely(!nbytes || !data)) return crc;
     using SIMD = SSE;
     using v128 = typename SIMD::v128;
     v128 xmm7 = {(long)~crc};
     auto& ptr = (const v128*&)data;
     if (nbytes >= 256) {
-        v128 xmm[8];
-        assert(nbytes >= 256);
-        static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
-        xmm[0] ^= xmm7; ptr += 8; nbytes -= 128;
-        do {
-            static_loop<0, 7, 1>(BODY(i) {
-                xmm[i] = SIMD::op(xmm[i], RK(3)) ^ SIMD::loadu(ptr+i);
-            });
-            ptr += 8; nbytes -= 128;
-        } while (nbytes >= 128);
-        static_loop<0, 6, 1>(BODY(i) {
-            auto I = (i == 6) ? 1 : (9 + i * 2);
-            xmm[7] ^= SIMD::op(xmm[i], RK(I));
-        });
-        xmm7 = xmm[7];
+        xmm7 = hw_big(data, nbytes, crc);
     } else if (nbytes >= 16) {
         xmm7 ^= SIMD::loadu(ptr++);
         nbytes -= 16;
@@ -542,8 +633,20 @@ _barrett:
     return crc;
 }
 
-uint64_t crc64ecma_hw(const uint8_t *buf, size_t len, uint64_t crc) {
-    return crc64ecma_hw_portable(buf, len, crc);
+uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_sse);
+}
+
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
+#ifdef __AVX512F__
+    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_avx512);
+#else
+    return crc64ecma_hw_sse128(buf, len, crc);
+#endif
+}
+
+uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
+    return crc64ecma_auto(buffer, nbytes, crc);
 }
 
 template<typename T>
