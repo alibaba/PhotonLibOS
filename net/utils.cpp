@@ -263,8 +263,9 @@ protected:
         IPAddr addr;
         IPAddrNode(IPAddr addr) : addr(addr) {}
     };
-    using IPAddrList = intrusive_list<IPAddrNode>;
-
+    struct IPAddrList : public intrusive_list<IPAddrNode>, rwlock {
+        ~IPAddrList() { delete_all(); }
+    };
     IPAddr do_resolve(std::string_view host, Delegate<bool, IPAddr> filter) {
         auto ctr = [&]() -> IPAddrList* {
             auto addrs = new IPAddrList();
@@ -295,6 +296,7 @@ protected:
         };
         auto ips = dnscache_.borrow(host, ctr);
         if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for '`' failed", host);
+        scoped_rwlock _(*ips, RLOCK);
         auto ret = ips->front();
         ips->node = ret->next();  // access in round robin order
         return ret->addr;
@@ -303,13 +305,6 @@ protected:
 public:
     DefaultResolver(uint64_t cache_ttl, uint64_t resolve_timeout)
         : dnscache_(cache_ttl), resolve_timeout_(resolve_timeout) {}
-    ~DefaultResolver() {
-        for (auto it : dnscache_) {
-            ((IPAddrList*)it->_obj)->delete_all();
-        }
-        dnscache_.clear();
-    }
-
     IPAddr resolve(std::string_view host) override {
         return do_resolve(host, nullptr);
     }
@@ -321,9 +316,9 @@ public:
     void discard_cache(std::string_view host, IPAddr ip) override {
         auto ipaddr = dnscache_.borrow(host);
         if (ip.undefined() || ipaddr->empty()) {
-            ipaddr->delete_all();
             ipaddr.recycle(true);
         } else {
+            scoped_rwlock _(*ipaddr, WLOCK);
             for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
                 if ((*itr)->addr == ip) {
                     ipaddr->erase(*itr);
