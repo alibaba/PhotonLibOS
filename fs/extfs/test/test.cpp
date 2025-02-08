@@ -16,6 +16,7 @@ limitations under the License.
 #include "../extfs.h"
 #include <fcntl.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <utime.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
@@ -28,6 +29,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
 #include "../../../test/gtest.h"
+#include "photon/common/utility.h"
 
 #define FILE_SIZE (2 * 1024 * 1024)
 
@@ -990,6 +992,19 @@ TEST_F(ExtfsTest, Xattr) {
     ret = removexattr(xattr_fs, "/test_xattr2", "user.test1");
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ENOENT, errno);
+}
+
+
+TEST_F(ExtfsTest, InvalidFs) {
+    std::string rootfs = "/tmp/invalid_fs.img";
+    auto file = photon::fs::open_localfile_adaptor(rootfs.c_str(), O_CREAT|O_TRUNC|O_RDWR, 0666);
+    EXPECT_NE(nullptr, file);
+    DEFER({
+        delete file;
+        ::unlink(rootfs.c_str());
+    });
+    auto err_fs = photon::fs::new_extfs(file, false);
+    EXPECT_EQ(err_fs, nullptr);
 }
 
 int main(int argc, char **argv) {
