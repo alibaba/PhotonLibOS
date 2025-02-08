@@ -1298,6 +1298,9 @@ public:
             extfs_io_manager = new_io_manager(_image_file);
         }
         fs = do_ext2fs_open(extfs_io_manager);
+        if (fs == nullptr) {
+            return;
+        }
         memset(fs->reserved, 0, sizeof(fs->reserved));
         auto reserved = reinterpret_cast<std::uintptr_t *>(fs->reserved);
         reserved[0] = reinterpret_cast<std::uintptr_t>(this);
@@ -1505,7 +1508,11 @@ int ExtFile::flush_buffer() {
 
 photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer) {
     auto extfs = new ExtFileSystem(file, buffer);
-    return extfs->fs ? extfs : nullptr;
+    if (extfs->fs == nullptr) {
+        delete extfs;
+        return nullptr;
+    }
+    return extfs;
 }
 
 }
