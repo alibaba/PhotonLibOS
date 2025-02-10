@@ -143,7 +143,7 @@ ctest
 
 ```bash
 # Install additional dependencies
-brew install gflags googletest gsasl
+brew install gflags googletest gsasl nasm
 
 # Build examples and test code
 cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1 -D PHOTON_BUILD_TESTING=ON
