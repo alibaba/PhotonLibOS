@@ -168,13 +168,13 @@ namespace fs
     {
     public:
         Walker(IFileSystem* fs, string_view path);
-        string_view path() { return m_path; }
+        string_view path() { return {m_path_buffer, m_path_len}; }
         string_view get() { return path(); }
-        bool valid() { return !m_path.empty(); }
+        bool valid() { return m_path_len; }
         int next();
 
     protected:
-        string_view m_path;
+        size_t m_path_len = 0;
         IFileSystem* m_filesystem;
         std::stack<std::unique_ptr<DIR>> m_stack;
         char m_path_buffer[PATH_MAX];
