@@ -316,8 +316,9 @@ namespace fs
         virtual dirent* get() override
         {
             if (direntp) {
-                memcpy(&m_dirent, direntp, sizeof(m_dirent));
-                return &m_dirent;
+              memcpy(&m_dirent, direntp,
+                     std::min(sizeof(m_dirent), (size_t)direntp->d_reclen));
+              return &m_dirent;
             }
             return direntp;
         }
