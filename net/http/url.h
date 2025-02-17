@@ -109,7 +109,7 @@ inline bool need_optional_port(const URL& u) {
     return false;
 }
 
-std::string url_escape(std::string_view url);
+std::string url_escape(std::string_view url, bool escape_slash = true);
 std::string url_unescape(std::string_view url);
 
 } // namespace http

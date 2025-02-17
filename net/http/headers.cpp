@@ -33,22 +33,17 @@ public:
     const HeadersBase* _h;
     HeaderAssistant(const HeadersBase* h) : _h(h) {}
 
-    int icmp(estring_view k1, estring_view k2) const {
-        int r = (int)(k1.size() - k2.size());
-        return r ? r : strncasecmp(k1.data(), k2.data(), k1.size());
-    }
-
     bool equal_to(rstring_view16 _k, std::string_view key) const {
-        return icmp(_k | _h->m_buf, key) == 0;
+        return (_k | _h->m_buf).icmp(key) == 0;
     }
     bool less(rstring_view16 _k1, rstring_view16 _k2) const {
-        return icmp(_k1 | _h->m_buf, _k2 | _h->m_buf) < 0;
+        return (_k1 | _h->m_buf).icmp(_k2 | _h->m_buf) < 0;
     }
     bool less(rstring_view16 _k, std::string_view key) const {
-        return icmp(_k | _h->m_buf, key) < 0;
+        return (_k | _h->m_buf).icmp(key) < 0;
     }
     bool less(std::string_view key, rstring_view16 _k) const {
-        return icmp(key, _k | _h->m_buf) < 0;
+        return estring_view(key).icmp(_k | _h->m_buf) < 0;
     }
 
     bool operator()(HeadersBase::KV a, std::string_view b) const { return less(a.first, b); }
