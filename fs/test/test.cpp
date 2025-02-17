@@ -1362,6 +1362,7 @@ TEST(Walker, basic) {
   std::system(std::string("touch " + root + file2).c_str());
   int count = 0;
   for (auto file : enumerable(Walker(srcFs, "/"))) {
+    LOG_INFO(VALUE(file.data()));
     if (file.back() == '2') {
       EXPECT_EQ(0, strcmp(file.data(), file2.c_str()));
     } else {
