@@ -103,13 +103,15 @@ static bool isunreserved(char c) {
     return false;
 }
 
-std::string url_escape(std::string_view url) {
+std::string url_escape(std::string_view url, bool escape_slash) {
     static const char hex[] = "0123456789ABCDEF";
     std::string ret;
     ret.reserve(url.size() * 2);
 
     for (auto c : url) {
         if (isunreserved(c)) {
+            ret.push_back(c);
+        } else if (!escape_slash && c == '/') {
             ret.push_back(c);
         } else {
             ret += '%';
