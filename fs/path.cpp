@@ -254,13 +254,14 @@ namespace fs
         }
         int ret = next();
         if (ret < 0)
-            m_path = {0, 0};
+            m_path_len = 0;
     }
     int Walker::enter_dir()
     {
         auto dir = m_filesystem->opendir(m_path_buffer);
         if (!dir)
-            LOG_ERRNO_RETURN(0, -1, "failed to opendir(`)", m_path);
+            LOG_ERRNO_RETURN(0, -1, "failed to opendir(`)",
+                           std::string_view(m_path_buffer, m_path_len));
         m_stack.emplace(dir);
         return 0;
     }
@@ -273,36 +274,36 @@ namespace fs
             struct stat st;
             auto ret = m_filesystem->lstat(m_path_buffer, &st);
             if (ret < 0)
-                LOG_ERRNO_RETURN(0, -1, "failed to lstat '`'", m_path);
+                LOG_ERRNO_RETURN(0, -1, "failed to lstat '`'",
+                               std::string_view(m_path_buffer, m_path_len));
             return S_ISDIR(st.st_mode);
         }
         return 0;
     }
-    void Walker::path_push_back(string_view s)
-    {
-        auto len0 = m_path.length();
+    void Walker::path_push_back(string_view s) {
+        auto len0 = m_path_len;
         auto len1 = s.length();
         assert(len0 + len1 < sizeof(m_path_buffer) - 1);
         memcpy(m_path_buffer + len0, s.data(), len1 + 1);
-        m_path = string_view(m_path_buffer, len0 + len1);
+        m_path_len = len0 + len1;
     }
-    void Walker::path_pop_back(size_t len1)
-    {
-        auto len0 = m_path.length();
+    void Walker::path_pop_back(size_t len1) {
+        auto len0 = m_path_len;
         assert(len0 > len1);
         len0 -= len1;
         m_path_buffer[len0] = '\0';
-        m_path = string_view(m_path_buffer, len0);
+        m_path_len = len0;
     }
     int Walker::next()
     {
     again:
-        if (m_path.empty()) return -1;
-        if (m_path.back() != '/')
+        if (m_path_len == 0) return -1;
+        std::string_view path(m_path_buffer, m_path_len);
+        if (path.back() != '/')
         {
-            auto m = m_path.rfind('/');
-            if (m != m_path.npos) {
-              auto len0 = m_path.length();
+            auto m = path.rfind('/');
+            if (m != path.npos) {
+              auto len0 = path.length();
               path_pop_back(len0 - m - 1);
               m_stack.top()->next();
             }
@@ -321,10 +322,10 @@ namespace fs
             m_stack.pop();
             if (m_stack.empty())
             {
-                m_path.remove_prefix(m_path.length());
+                m_path_len = 0;
                 return -1; // finished walking
             }
-            assert(m_path.back() == '/');
+            assert(m_path_buffer[m_path_len - 1] == '/');
             path_pop_back(1);
             goto again;
         }
