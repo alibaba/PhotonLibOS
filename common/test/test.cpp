@@ -1282,25 +1282,36 @@ TEST(tolowerupper, basic) {
     EXPECT_EQ(toupper_fast('3'), '3');
     EXPECT_EQ(toupper_fast('z'), 'Z');
 
-    const static char s1[]="abC1dEf2%^&", s2[]="ABc1DeF2%^&";
-    EXPECT_EQ(toupper_fast8(*(uint64_t*)s1),
-              toupper_fast8(*(uint64_t*)s2));
-    EXPECT_EQ(tolower_fast8(*(uint64_t*)s1),
-              tolower_fast8(*(uint64_t*)s2));
-    EXPECT_EQ(stricmp_fast(string_view(s1), string_view(s2)), 0);
+    EXPECT_LT(stricmp_fast("abCd", "ABcD2"), 0);
+    EXPECT_LT(stricmp_fast("abCd1", "ABcD2"), 0);
+    EXPECT_EQ(stricmp_fast("abC1dEf2%^&", "ABc1DeF2%^&"), 0);
+    EXPECT_GT(stricmp_fast("xxxxxxxxxxxjkl;", "xxxxxxxxxxxJKL:"), 0);
+    EXPECT_LT(stricmp_fast("xxxxxxxxxxxaccc", "xxxxxxxxxxxBBBB"), 0);
+
+    auto sign = [](int x) { return (x > 0) ? 1 :
+                                   (x < 0 ? -1 : 0);
+    };
+    const char* headers[] = {"Host", "Content-Length", "Range", "User-Agent", "Connection"};
+    for (auto h1: headers)
+        for (auto h2: headers) {
+            if (sign(stricmp_fast(h1, h2)) != sign(strcasecmp(h1, h2))) {
+                LOG_DEBUG(VALUE(h1), VALUE(h2));
+                EXPECT_EQ(sign(stricmp_fast(h1, h2)), sign(strcasecmp(h1, h2)));
+            }
+    }
 }
 
 const static char S1[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
                   S2[]="abcdefghijklmnopqrstuvwxyz";
 TEST(tolowerupper, perf_strncasecmp) {
-    for (int i = 1000000; i; --i) {
+    for (int i = 10000000; i; --i) {
         auto ret = strncasecmp(S1, S2, LEN(S1) - 1);
         asm volatile(""::"r"(ret));
     }
 }
 
 TEST(tolowerupper, perf_photon_stricmp) {
-    for (int i = 1000000; i; --i) {
+    for (int i = 10000000; i; --i) {
         auto ret = stricmp_fast(S1, S2);
         asm volatile(""::"r"(ret));
     }
