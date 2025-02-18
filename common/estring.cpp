@@ -161,44 +161,79 @@ static_assert(
 
 namespace photon {
 
-void tolower_fast(char* out, const char* in, size_t len) {
-    size_t i = 0;
-    for (; i < len/8*8; i+=8)
-        *(uint64_t*)&out[i] = tolower_fast8(*(uint64_t*)&in[i]);
-    for (; i < len; i++)
-        out[i] = tolower_fast(in[i]);
+inline uint64_t check_cases(uint64_t x, char a, char z) {
+    uint64_t all_bytes = 0x0101010101010101;
+    uint64_t heptets = x & (0x7f * all_bytes);
+    uint64_t is_ascii = ~x & (0x80 * all_bytes);
+    uint64_t is_gt_Z = heptets + (0x7f - z) * all_bytes;
+    uint64_t is_ge_A = heptets + (0x80 - a) * all_bytes;
+    return (is_ge_A ^ is_gt_Z) & is_ascii;
+}
+
+inline uint64_t tolower_fast8(uint64_t x) {
+    uint64_t is_upper = check_cases(x, 'A', 'X');
+    return x | (is_upper >> 2);
+}
+
+inline uint64_t toupper_fast8(uint64_t x) {
+    uint64_t is_lower = check_cases(x, 'a', 'z');
+    return x ^ (is_lower >> 2);
+}
+
+template<typename F1, typename F8> inline
+void convert_case(char* out, const char* in, size_t len, F1 f1, F8 f8) {
+    if (unlikely(len == 0))
+        len = strlen(in);
+    if (unlikely(len < 8)) {
+        for (size_t i = 0; i < len; i++)
+            out[i] = f1(in[i]);
+    } else {
+        for (size_t i = 0; i < len/8*8; i+=8)
+            *(uint64_t*)&out[i] = f8(*(uint64_t*)&in[i]);
+        *(uint64_t*)&out[len-8] = f8(*(uint64_t*)&in[len-8]);
+    }
     out[len] = '\0';
+}
+
+void tolower_fast(char* out, const char* in, size_t len) {
+    convert_case(out, in, len,
+        [](char x)     { return tolower_fast(x); },
+        [](uint64_t x) { return tolower_fast8(x); });
 }
 
 void toupper_fast(char* out, const char* in, size_t len) {
-    size_t i = 0;
-    for (; i < len/8*8; i += 8)
-        *(uint64_t*)&out[i] = toupper_fast8(*(uint64_t*)&in[i]);
-    for (;i < len; i++)
-        out[i] = toupper_fast(in[i]);
-    out[len] = '\0';
+    convert_case(out, in, len,
+        [](char x)     { return toupper_fast(x); },
+        [](uint64_t x) { return toupper_fast8(x); });
 }
 
-
+inline uint64_t icmp8(const char* a, const char* b) {
+    auto ca = tolower_fast8(*(uint64_t*)a);
+    auto cb = tolower_fast8(*(uint64_t*)b);
+    return __builtin_bswap64(ca) - __builtin_bswap64(cb);
+}
+inline int spaceship(uint64_t x) {
+    uint32_t high = x >> 32, low = x & 0xffffffff;
+    return int(high | (low >> 1) | (low & 1));
+}
 int stricmp_fast(std::string_view a, std::string_view b) {
-    size_t i = 0, min = std::min(a.size(), b.size());
-    for (; i < min/8*8; i+=8) {
-        auto ca = tolower_fast8(*(uint64_t*)&a[i]);
-        auto cb = tolower_fast8(*(uint64_t*)&b[i]);
-        if (ca == cb) continue;
-        auto c = ca - cb;
-        for (; c; c>>=8) {
-            auto delta = (char)(c & 0xff);
-            if (delta) return delta;
+    size_t i = 0, len = std::min(a.size(), b.size());
+    if (unlikely(len < 8)) {
+        for (; i < len; i++) {
+            auto ca = tolower_fast(a[i]);
+            auto cb = tolower_fast(b[i]);
+            if (auto x = ca - cb)
+                return x;
         }
+        return spaceship(a.size() - b.size());
     }
-    for (; i < min; i++) {
-        auto ca = tolower_fast(a[i]);
-        auto cb = tolower_fast(b[i]);
-        auto delta = ca - cb;
-        if (delta) return delta;
-    }
-    return int(a.size() - b.size());
+    for (; i < len/8*8; i+=8)
+        if (auto x = icmp8(&a[i], &b[i]))
+            return spaceship(x);
+    if (likely(i < len)) // len >= 8
+        if (auto x = icmp8(&a[len-8], &b[len-8]))
+            return spaceship(x);
+    return spaceship(a.size() - b.size());
 }
 
 }

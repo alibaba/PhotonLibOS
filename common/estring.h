@@ -56,6 +56,7 @@ struct charset : std::bitset<256>
     // }
 };
 
+class estring;
 class estring_view : public std::string_view
 {
 public:
@@ -141,30 +142,23 @@ public:
         return substr(start, end - start + 1);
     }
 #if __cplusplus < 202000L
-    bool starts_with(estring_view x)
-    {
+    bool starts_with(std::string_view x) const {
         auto len = x.size();
         return length() >= len &&
             memcmp(data(), x.data(), len) == 0;
     }
 
-    bool ends_with(estring_view x)
-    {
+    bool ends_with(std::string_view x) const {
         auto len = x.size();
         return length() >= len &&
             memcmp(&*end() - len, x.data(), len) == 0;
     }
 #endif
 
-    bool istarts_with(estring_view x) {
-        return strncasecmp(data(), x.data(), x.size()) == 0;
-    }
-
-    int icmp(estring_view x) {
-        auto ret = strncasecmp(data(), x.data(), std::min(size(), x.size()));
-        if (ret != 0) return ret;
-        return size() - x.size();
-    }
+    bool istarts_with(std::string_view x) const;
+    int icmp(std::string_view x) const;
+    estring tolower_fast() const;
+    estring toupper_fast() const;
 
     template<typename Separator>
     struct _split
@@ -461,7 +455,6 @@ public:
 
     estring() = default;
     estring(const std::string& v) : std::string(v) {}
-    estring(estring_view sv) : std::string(sv) { }
     estring(std::string_view sv) : std::string(sv) { }
 
     estring_view view() const
@@ -473,12 +466,10 @@ public:
         return view().trim(spaces);
     }
 #if __cplusplus < 202000L
-    bool starts_with(estring_view x)
-    {
+    bool starts_with(std::string_view x) const {
         return view().starts_with(x);
     }
-    bool ends_with(estring_view x)
-    {
+    bool ends_with(std::string_view x) const {
         return view().ends_with(x);
     }
 #endif
@@ -705,32 +696,44 @@ inline char toupper_fast(char c) {
     return c - ('a' - 'A') * ('a' <= c && c <= 'z');
 }
 
-inline uint64_t tolower_fast8(uint64_t x) {
-    uint64_t all_bytes = 0x0101010101010101;
-    uint64_t heptets = x & (0x7f * all_bytes);
-    uint64_t is_ascii = ~x & (0x80 * all_bytes);
-    uint64_t is_gt_Z = heptets + (0x7f - 'Z') * all_bytes;
-    uint64_t is_ge_A = heptets + (0x80 - 'A') * all_bytes;
-    uint64_t is_upper = (is_ge_A ^ is_gt_Z) & is_ascii;
-    return x | (is_upper >> 2);
-}
-
-inline uint64_t toupper_fast8(uint64_t x) {
-    uint64_t all_bytes = 0x0101010101010101;
-    uint64_t heptets = x & (0x7f * all_bytes);
-    uint64_t is_ascii = ~x & (0x80 * all_bytes);
-    uint64_t is_gt_z = heptets + (0x7f - 'z') * all_bytes;
-    uint64_t is_ge_a = heptets + (0x80 - 'a') * all_bytes;
-    uint64_t is_lower = (is_ge_a ^ is_gt_z) & is_ascii;
-    return x ^ (is_lower >> 2);
-}
-
-// convert string to lower or upper, the storage of out must be >= len + 1
+// convert string to lower or upper, if len == 0 then len = strlen(in)
+// the storage of out must be >= len + 1
 // it's possible that out == in
 void tolower_fast(char* out, const char* in, size_t len);
 void toupper_fast(char* out, const char* in, size_t len);
+inline void tolower_fast(char* out, std::string_view in) {
+    tolower_fast(out, in.data(), in.size());
+}
+inline void toupper_fast(char* out, std::string_view in) {
+    toupper_fast(out, in.data(), in.size());
+}
+inline estring tolower_fast(std::string_view in) {
+    estring out(in.size(), '\0');
+    tolower_fast(&out[0], in);
+    return out;
+}
+inline estring toupper_fast(std::string_view in) {
+    estring out(in.size(), '\0');
+    toupper_fast(&out[0], in);
+    return out;
+}
 
-// compare 2 strings without case sensitive
+// compare 2 strings ignoring cases
 int stricmp_fast(std::string_view a, std::string_view b);
 
 } // namespace photon
+
+inline bool estring_view::istarts_with(std::string_view x) const {
+    return size() >= x.size() && photon::stricmp_fast(*this, x) == 0;
+}
+
+inline int estring_view::icmp(std::string_view x) const {
+    return photon::stricmp_fast(*this, x);
+}
+
+inline estring estring_view::tolower_fast() const {
+    return photon::toupper_fast(*this);
+}
+inline estring estring_view::toupper_fast() const {
+    return photon::toupper_fast(*this);
+}
