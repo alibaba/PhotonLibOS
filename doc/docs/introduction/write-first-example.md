@@ -78,7 +78,7 @@ std::vector<photon_std::thread> threads;
 for (int i = 0; i < 100; ++i) {
     threads.emplace_back(func, 1, '2');
 }
-for (auth& th : threads) {
+for (auto& th : threads) {
     th.join();
 }
 ```
