@@ -143,22 +143,23 @@ public:
     }
 #if __cplusplus < 202000L
     bool starts_with(std::string_view x) const {
-        auto len = x.size();
-        return length() >= len &&
-            memcmp(data(), x.data(), len) == 0;
+        return size() >= x.size() && substr(0, x.size()) == x;
     }
 
     bool ends_with(std::string_view x) const {
-        auto len = x.size();
-        return length() >= len &&
-            memcmp(&*end() - len, x.data(), len) == 0;
+        return size() >= x.size() && substr(size() - x.size()) == x;
     }
 #endif
 
-    bool istarts_with(std::string_view x) const;
     int icmp(std::string_view x) const;
     estring tolower_fast() const;
     estring toupper_fast() const;
+    bool istarts_with(std::string_view x) const {
+        return size() >= x.size() && icmp(x) == 0;
+    }
+    bool iends_with(std::string_view x) const {
+        return size() >= x.size() && substr(size() - x.size()).icmp(x) == 0;
+    }
 
     template<typename Separator>
     struct _split
@@ -722,10 +723,6 @@ inline estring toupper_fast(std::string_view in) {
 int stricmp_fast(std::string_view a, std::string_view b);
 
 } // namespace photon
-
-inline bool estring_view::istarts_with(std::string_view x) const {
-    return size() >= x.size() && photon::stricmp_fast(*this, x) == 0;
-}
 
 inline int estring_view::icmp(std::string_view x) const {
     return photon::stricmp_fast(*this, x);
