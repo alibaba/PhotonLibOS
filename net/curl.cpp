@@ -48,6 +48,11 @@ struct CurlCallCtx {
     bool canceled = false;
 };
 
+struct CurlRequestPrivateData {
+    photon::semaphore sem{0};
+    CURLcode ret_code = CURLcode::CURLE_OK;
+};
+
 __thread CurlThCtx cctx;
 static CURLcode global_initialized;
 static int do_action(curl_socket_t fd, int event) {
@@ -62,15 +67,16 @@ static int do_action(curl_socket_t fd, int event) {
     while ((msg = curl_multi_info_read(cctx.g_libcurl_multi, &msgs_left))) {
         if (msg->msg == CURLMSG_DONE) {
             auto fcurl = msg->easy_handle;
-            photon::semaphore* sem;
+            CurlRequestPrivateData *private_data;
             char* eff_url;
             curl_easy_getinfo(fcurl, CURLINFO_EFFECTIVE_URL, &eff_url);
             auto res = curl_easy_strerror(msg->data.result);
             LOG_DEBUG("DONE: ` => (`) ", eff_url, res);
-            CURLcode ret = curl_easy_getinfo(fcurl, CURLINFO_PRIVATE, &sem);
-            if (ret == CURLE_OK && sem != nullptr) {
+            CURLcode ret = curl_easy_getinfo(fcurl, CURLINFO_PRIVATE, &private_data);
+            if (ret == CURLE_OK && private_data != nullptr) {
                 LOG_DEBUG(VALUE(fcurl), " FINISHED");
-                sem->signal(1);
+                private_data->ret_code = msg->data.result;
+                private_data->sem.signal(1);
             }
         }
     }
@@ -78,8 +84,8 @@ static int do_action(curl_socket_t fd, int event) {
 }
 int curl_perform(CURL* curl, uint64_t timeout) {
     Timeout tmo(timeout);
-    photon::semaphore sem(0);
-    CURLcode ret = curl_easy_setopt(curl, CURLOPT_PRIVATE, &sem);
+    CurlRequestPrivateData private_data;
+    CURLcode ret = curl_easy_setopt(curl, CURLOPT_PRIVATE, &private_data);
     if (ret != CURLE_OK)
         LOG_ERROR_RETURN(ENXIO, ret, "failed to set libcurl private: ",
                          curl_easy_strerror(ret));
@@ -91,7 +97,7 @@ int curl_perform(CURL* curl, uint64_t timeout) {
         LOG_ERROR_RETURN(EIO, mret, "failed to curl_multi_add_handle(): ",
                          curl_multi_strerror(mret));
     }
-    int wait = sem.wait(1, tmo.timeout());
+    int wait = private_data.sem.wait(1, tmo.timeout());
     curl_easy_setopt(curl, CURLOPT_PRIVATE, nullptr);
     if (wait == -1) {
         ERRNO err;
@@ -103,7 +109,7 @@ int curl_perform(CURL* curl, uint64_t timeout) {
         }
     }
     LOG_DEBUG("FINISHED");
-    return CURLM_OK;
+    return private_data.ret_code;
 }
 static uint64_t on_timer(void* = nullptr) {
     photon::thread_create11(&do_action, CURL_SOCKET_TIMEOUT, 0);
