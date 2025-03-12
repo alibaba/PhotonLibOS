@@ -381,7 +381,8 @@ photon::fs::IFileSystem *init_extfs() {
         delete image_file;
         LOG_ERRNO_RETURN(0, nullptr, "failed open extfs");
     }
-
+    auto underlay_file = (photon::fs::IFile*)(extfs->get_underlay_object());
+    EXPECT_EQ(underlay_file, image_file);
     return extfs;
 }
 class ExtfsTest : public ::testing::Test {
