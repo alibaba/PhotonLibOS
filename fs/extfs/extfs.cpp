@@ -1288,7 +1288,7 @@ class ExtFileSystem : public photon::fs::IFileSystem, public photon::fs::IFileSy
 public:
     ext2_filsys fs;
     io_manager extfs_io_manager;
-    ExtFileSystem(photon::fs::IFile *_image_file, bool buffer = true) : ino_cache(kMinimalInoLife) {
+    ExtFileSystem(photon::fs::IFile *_image_file, bool buffer = true) : ino_cache(kMinimalInoLife), base_file(_image_file) {
         ExtFileSystem::mutex.lock();
         DEFER(ExtFileSystem::mutex.unlock());
         if (buffer) {
@@ -1491,9 +1491,15 @@ public:
         return buffer_file ? buffer_file->fdatasync() : 0;
     }
 
+    Object* get_underlay_object(int i = 0) override {
+        return base_file;
+    }
+
 private:
     ObjectCache<estring, ext2_ino_t *> ino_cache;
     photon::fs::IFile *buffer_file = nullptr;
+    photon::fs::IFile *base_file = nullptr;
+
     static photon::mutex mutex; // lock from init io_manager to ext2fs_open
 };
 // Initialize the static member.
@@ -1505,6 +1511,7 @@ photon::fs::IFileSystem *ExtFile::filesystem() {
 int ExtFile::flush_buffer() {
     return m_fs->flush_buffer();
 }
+
 
 photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer) {
     auto extfs = new ExtFileSystem(file, buffer);
