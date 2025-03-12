@@ -111,7 +111,7 @@ cmake --build build -j 8
 # Install additional dependencies
 dnf install epel-release
 dnf config-manager --set-enabled powertools
-dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
+dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel nasm
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
@@ -129,7 +129,7 @@ ctest
   
 ```bash
 # Install additional dependencies
-apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
+apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev nasm
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
