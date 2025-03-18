@@ -186,10 +186,6 @@
   .global	cdecl(crc32_iscsi_crc_ext)
 #ifndef __APPLE__
 	.type	crc32_iscsi_crc_ext, %function
-  .weak cdecl(crc32_iscsi_crc_ext)
-#else
-  /* todo: failed to be a weak symbol in MacOS */
-  .weak_definition cdecl(crc32_iscsi_crc_ext)
 #endif
 cdecl(crc32_iscsi_crc_ext):
 	crc32_hw_common	crc32c

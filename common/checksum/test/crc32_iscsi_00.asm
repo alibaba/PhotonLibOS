@@ -425,7 +425,7 @@ section .text
 ;;;    crc_init = r8
 ;;;
 
-mk_global  crc32_iscsi_00, weak, function
+mk_global  crc32_iscsi_00, function
 crc32_iscsi_00:
 	endbranch
 
