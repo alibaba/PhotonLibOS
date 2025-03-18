@@ -376,7 +376,7 @@ section .text
 
 
 align 16
-mk_global 	FUNCTION_NAME, weak, function
+mk_global 	FUNCTION_NAME, function
 FUNCTION_NAME:
 	endbranch
         ; uint64_t c = crc ^ 0xffffffff,ffffffffL;

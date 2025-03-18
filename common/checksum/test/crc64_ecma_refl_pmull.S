@@ -404,9 +404,6 @@ crc64_tab:
 	.global	cdecl(\name)
 #ifndef __APPLE__
 	.type	\name, %function
-	.weak cdecl(\name)
-#else
-	.weak_definition cdecl(\name)
 #endif
 
 /* uint64_t crc64_refl_func(uint64_t seed, const uint8_t * buf, uint64_t len) */
