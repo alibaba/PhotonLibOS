@@ -1044,13 +1044,17 @@ R"(
         if (likely(__mimic_vdso_time_x86))
             return photon::now = __mimic_vdso_time_x86.get_now();
 #endif
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        uint64_t nnow = tv.tv_sec;
-        nnow *= 1000 * 1000;
-        nnow += tv.tv_usec;
+        struct timespec tv;
+#ifdef CLOCK_BOOTTIME
+        clock_gettime(CLOCK_BOOTTIME, &tv);
+#else
+        clock_gettime(CLOCK_MONOTONIC, &tv);
+#endif
+        int usec = tv.tv_nsec / 1000ul;
+        uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + usec;
+        assert(tv.tv_sec <= UINT32_MAX && usec < 1000000);
         now = nnow;
-        return tv;
+        return {tv.tv_sec, usec};
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
