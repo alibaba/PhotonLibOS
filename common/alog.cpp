@@ -204,23 +204,26 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
 }
 
 __attribute__((constructor)) static void __initial_timezone() { tzset(); }
-static time_t dayid = 0;
+static time_t dayid = 0, minuteid = 0, tsdelta = 0;
 static struct tm alog_time = {0};
-static struct tm* alog_update_time(time_t now)
-{
-    auto now0 = now;
+static struct tm* alog_update_time(time_t now0) {
+    auto now = now0 + tsdelta;
     int sec = now % 60;    now /= 60;
+    if (unlikely(now != minuteid)) {    // calibrate wall time every minute
+        now = time(0) - timezone;
+        tsdelta = now - now0;
+        sec = now % 60; now /= 60;
+        minuteid = now;
+    }
     int min = now % 60;    now /= 60;
     int hor = now % 24;    now /= 24;
-    if (now != dayid)
-    {
+    if (now != dayid) {
         dayid = now;
-        gmtime_r(&now0, &alog_time);
+        auto now_ = now0 + tsdelta;
+        gmtime_r(&now_, &alog_time);
         alog_time.tm_year+=1900;
         alog_time.tm_mon++;
-    }
-    else
-    {
+    } else {
         alog_time.tm_sec = sec;
         alog_time.tm_min = min;
         alog_time.tm_hour = hor;
@@ -484,7 +487,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     auto t = &alog_time;
 #else
     auto ts = photon::__update_now();
-    auto t = alog_update_time(ts.sec() - timezone);
+    auto t = alog_update_time(ts.sec());
 #endif
 #define DEC_W2P0(x) DEC(x).width(2).padding('0')
     log.printf(t->tm_year, '/');
