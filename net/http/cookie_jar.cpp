@@ -16,7 +16,6 @@ limitations under the License.
 
 #include <vector>
 #include <time.h>
-
 #include "client.h"
 #include "parser.h"
 #include <photon/common/string-keyed.h>
@@ -30,12 +29,12 @@ namespace http {
 using namespace std;
 
 static uint64_t local_gmt_gap_us = 0;
-uint64_t time_gmt_to_local(uint64_t local_now) {
+static uint64_t time_gmt_to_local(uint64_t local_now) {
     if (local_gmt_gap_us == 0) {
         time_t now = time(nullptr);
         tm* gmt = gmtime(&now);
         auto now_s = mktime(gmt);
-        local_gmt_gap_us = (now - now_s) * 1000 * 1000;
+        local_gmt_gap_us = (now - now_s) * 1000ULL * 1000ULL;
     }
     return local_now + local_gmt_gap_us;
 }
@@ -84,8 +83,9 @@ public:
         bool first_kv = true;
         vector<string_view> eliminate;
         if (request->headers.insert("Cookie", "") != 0) return -1;
+        uint64_t now = time(0) * 1000ULL * 1000ULL;
         for (auto it : m_kv) {
-            if (it.second.m_expire <= photon::now) {
+            if (it.second.m_expire <= now) {
                 eliminate.emplace_back(it.first);
                 continue;
             }
