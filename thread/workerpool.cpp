@@ -67,8 +67,16 @@ public:
         while (vcpus.size()) exit_cv.wait(lock, 1UL * 1000);
     }
 
-    void enqueue(Delegate<void> call) { ring.send<PhotonPause>(call); }
-
+    void enqueue(Delegate<void> call, AutoContext = {}) {
+        if (likely(CURRENT)) ring.send<PhotonPause>(call);
+        else                 ring.send<ThreadPause>(call);
+    }
+    void enqueue(Delegate<void> call, StdContext) {
+        ring.send<ThreadPause>(call);
+    }
+    void enqueue(Delegate<void> call, PhotonContext) {
+        ring.send<PhotonPause>(call);
+    }
     template <typename Context>
     void do_call(Delegate<void> call) {
         Awaiter<Context> aop;
@@ -76,7 +84,7 @@ public:
             call();
             aop.resume();
         };
-        enqueue(task);
+        enqueue(task, Context());
         aop.suspend();
     }
 
