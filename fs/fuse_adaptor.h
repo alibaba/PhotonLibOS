@@ -21,20 +21,24 @@ limitations under the License.
 #endif
 
 #ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 29
+#define FUSE_USE_VERSION 35
 #endif
 
+#if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse.h>
+#else
 #include <fuse.h>
-#include <photon/fs/filesystem.h>
+#endif
 
 namespace photon {
 namespace fs {
+class IFileSystem;
 
-int fuser_go(fs::IFileSystem* fs, int argc, char* argv[]);
+int fuser_go(IFileSystem* fs, int argc, char* argv[]);
 
-int fuser_go_exportfs(fs::IFileSystem* fs, int argc, char* argv[]);
+int fuser_go_exportfs(IFileSystem* fs, int argc, char* argv[]);
 
-void set_fuse_fs(fs::IFileSystem* fs);
+void set_fuse_fs(IFileSystem* fs);
 
 fuse_operations* get_fuse_xmp_oper();
 

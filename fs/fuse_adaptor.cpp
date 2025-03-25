@@ -13,17 +13,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
-#include <thread>
-#include <photon/common/alog.h>
-#include "exportfs.h"
-#include <photon/io/fd-events.h>
-#include <photon/thread/thread.h>
 #include "fuse_adaptor.h"
 
-#ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 29
+#if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse_common.h>
+#include <fuse3/fuse_lowlevel.h>
+#include <fuse3/fuse_opt.h>
 #endif
+#include <thread>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -55,9 +52,13 @@ limitations under the License.
 #endif
 #include <sys/file.h> /* flock(2) */
 
-#include "filesystem.h"
+#include <photon/common/alog.h>
 #include <photon/common/utility.h>
+#include <photon/io/fd-events.h>
 #include <photon/io/fuse-adaptor.h>
+#include <photon/fs/exportfs.h>
+#include <photon/fs/filesystem.h>
+#include <photon/thread/thread.h>
 #include <photon/common/perf_counter.h>
 
 REGISTER_PERF(xmp_getattr, TOTAL)
@@ -80,33 +81,44 @@ namespace photon {
 namespace fs{
 
 static IFileSystem* fs = nullptr;
-static uid_t cuid = 0, cgid = 0;
 
 #define CHECK_FS() if (!fs) return -EFAULT;
 
+#if FUSE_USE_VERSION >= 30
+static void* xmp_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
+{
+    REPORT_PERF(xmp_init, 1)
+    conn->max_readahead = 128*1024*1024;
+    conn->max_background = 128;
+    conn->want &= ~FUSE_CAP_AUTO_INVAL_DATA;  // avoid per-read getattr in kernel 4.19
+    (void) conn;
+    (void) cfg;
+    return NULL;
+}
+#else
 static void* xmp_init(struct fuse_conn_info *conn)
 {
     REPORT_PERF(xmp_init, 1)
-    cuid  = geteuid();
-    cgid  = getegid();
-    if ((unsigned int)conn->capable & FUSE_CAP_ATOMIC_O_TRUNC) {
-        conn->want |= FUSE_CAP_ATOMIC_O_TRUNC;
-    }
-    if ((unsigned int)conn->capable & FUSE_CAP_BIG_WRITES) {
-        conn->want |= FUSE_CAP_BIG_WRITES;
-    }
+    (void) conn;
     return NULL;
 }
+#endif
 
 static void xmp_destroy(void *handle)
 {
     REPORT_PERF(xmp_destroy, 1)
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
+#else
 static int xmp_getattr(const char *path, struct stat *stbuf)
+#endif
 {
     REPORT_PERF(xmp_getattr, 1)
     LOG_DEBUG(VALUE(path));
+    static uid_t cuid  = geteuid();
+    static uid_t cgid  = getegid();
     CHECK_FS();
     errno = 0;
     int res = fs->lstat(path, stbuf);
@@ -174,8 +186,13 @@ static inline fs::IFile* get_file(struct fuse_file_info *fi)
     return file;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+                       off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags)
+#else
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi)
+#endif
 {
     REPORT_PERF(xmp_readdir, 1)
     LOG_DEBUG(VALUE(path), VALUE(offset));
@@ -191,7 +208,11 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         st.st_ino = dirp.d_ino;
         st.st_mode = dirp.d_type << 12;
         LOG_DEBUG("dirp.d_name: `", dirp.d_name);
+#if FUSE_USE_VERSION >= 30
+        if (filler(buf, dirp.d_name, &st, 0, FUSE_FILL_DIR_PLUS))
+#else
         if (filler(buf, dirp.d_name, &st, 0))
+#endif
         {
             LOG_DEBUG("xmp_readdir break");
             break;
@@ -257,7 +278,11 @@ static int xmp_symlink(const char *from, const char *to)
     return 0;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_rename(const char *from, const char *to, unsigned int flags)
+#else
 static int xmp_rename(const char *from, const char *to)
+#endif
 {
     LOG_DEBUG(VALUE(from), VALUE(to));
     CHECK_FS();
@@ -277,7 +302,11 @@ static int xmp_link(const char *from, const char *to)
     return 0;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
+#else
 static int xmp_chmod(const char *path, mode_t mode)
+#endif
 {
     LOG_DEBUG(VALUE(path), VALUE(mode));
     CHECK_FS();
@@ -287,7 +316,11 @@ static int xmp_chmod(const char *path, mode_t mode)
     return 0;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
+#else
 static int xmp_chown(const char *path, uid_t uid, gid_t gid)
+#endif
 {
     LOG_DEBUG(VALUE(path), VALUE(uid), VALUE(gid));
     CHECK_FS();
@@ -297,7 +330,11 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
     return 0;
 }
 
+#if FUSE_USE_VERSION >= 30
+static int xmp_truncate(const char *path, off_t size, struct fuse_file_info *fi)
+#else
 static int xmp_truncate(const char *path, off_t size)
+#endif
 {
     LOG_DEBUG(VALUE(path), VALUE(size));
     CHECK_FS();
@@ -307,16 +344,11 @@ static int xmp_truncate(const char *path, off_t size)
     return 0;
 }
 
-#if 0
-static int xmp_ftruncate(const char *path, off_t size, struct fuse_file_info *fi)
-{
-    CHECK_FS();
-    int res = geti_file(fi)->ftruncate(size);
-    return (res == 0) ? 0 : -errno;
-}
-#endif
-
+#if FUSE_USE_VERSION >= 30
+static int xmp_utimens(const char *path, const struct timespec ts[2], struct fuse_file_info *fi)
+#else
 static int xmp_utimens(const char *path, const struct timespec ts[2])
+#endif
 {
     CHECK_FS();
 //    int res;
@@ -364,8 +396,8 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 static int xmp_read(const char *path, char *buf, size_t size, off_t offset,
                     struct fuse_file_info *fi)
 {
-    REPORT_PERF(xmp_read, 1)
-    LOG_DEBUG(VALUE(path), VALUE(offset), VALUE(size));
+    // REPORT_PERF(xmp_read, 1)
+    // LOG_DEBUG(VALUE(path), VALUE(offset), VALUE(size));
     CHECK_FS();
     int res = get_file(fi)->pread(buf, size, offset);
     if(res < 0) \
@@ -540,13 +572,8 @@ static int xmp_flock(const char *path, struct fuse_file_info *fi, int op)
     return -ENOSYS;
 }
 
+#if FUSE_USE_VERSION < 30
 static int xmp_getdir(const char* path, fuse_dirh_t dir, fuse_dirfil_t dirf)
-{
-    LOG_DEBUG(VALUE(path));
-    return -ENOSYS;
-}
-
-static int xmp_mknod(const char* path,  mode_t mode, dev_t dev)
 {
     LOG_DEBUG(VALUE(path));
     return -ENOSYS;
@@ -557,8 +584,21 @@ static int xmp_utime(const char* path, struct utimbuf* tb)
     LOG_DEBUG(VALUE(path));
     return -ENOSYS;
 }
+#endif
+
+static int xmp_mknod(const char* path,  mode_t mode, dev_t dev)
+{
+    LOG_DEBUG(VALUE(path));
+    return -ENOSYS;
+}
 
 #if 0
+static int xmp_ftruncate(const char *path, off_t size, struct fuse_file_info *fi)
+{
+    CHECK_FS();
+    int res = geti_file(fi)->ftruncate(size);
+    return (res == 0) ? 0 : -errno;
+}
 static int xmp_fgetattr(const char *path, struct stat *buf, struct fuse_file_info *fi)
 {
     LOG_DEBUG(VALUE(path));
@@ -581,8 +621,13 @@ static int xmp_bmap(const char *path, size_t blocksize, uint64_t *idx)
     return -ENOSYS;
 }
 
+#if FUSE_USE_VERSION < 35
 static int xmp_ioctl(const char *path, int cmd, void *arg,
                       struct fuse_file_info *fi, unsigned int flags, void *data)
+#else
+static int xmp_ioctl(const char *path, unsigned int cmd, void *arg,
+                      struct fuse_file_info *fi, unsigned int flags, void *data)
+#endif
 {
     LOG_DEBUG(VALUE(path));
     return -ENOSYS;
@@ -599,7 +644,9 @@ static int xmp_poll(const char *path, struct fuse_file_info *fi,
 static struct fuse_operations xmp_oper = {
     .getattr     = xmp_getattr,
     .readlink    = xmp_readlink,
+#if FUSE_USE_VERSION < 30
     .getdir      = xmp_getdir,
+#endif
     .mknod       = xmp_mknod,
     .mkdir       = xmp_mkdir,
     .unlink      = xmp_unlink,
@@ -610,7 +657,9 @@ static struct fuse_operations xmp_oper = {
     .chmod       = xmp_chmod,
     .chown       = xmp_chown,
     .truncate    = xmp_truncate,
+#if FUSE_USE_VERSION < 30
     .utime       = xmp_utime,
+#endif
     .open        = xmp_open,
     .read        = xmp_read,
     .write       = xmp_write,
@@ -630,21 +679,25 @@ static struct fuse_operations xmp_oper = {
     .destroy     = xmp_destroy,
     .access      = xmp_access,
     .create      = xmp_create,
+#if FUSE_USE_VERSION < 30
     .ftruncate   = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
     .fgetattr    = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
+#endif
     .lock        = xmp_lock,
     .utimens     = xmp_utimens,
     .bmap        = xmp_bmap,
+#if FUSE_USE_VERSION < 30
     flag_nullpath_ok:1,
     flag_nopath:1,
     flag_utime_omit_ok:1,
     flag_reserved:29,
+#endif
     .ioctl       = xmp_ioctl,
     .poll        = xmp_poll,
     .write_buf   = nullptr, //xmp_write_buf,
     .read_buf    = nullptr, //xmp_read_buf,
     .flock       = xmp_flock,
-    .fallocate   = xmp_fallocate
+    .fallocate   = xmp_fallocate,
 };
 /*
 static void fuse_logger(enum fuse_log_level level, const char *fmt, va_list ap)
