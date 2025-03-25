@@ -15,7 +15,11 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#include <fuse/fuse_opt.h>
+#if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse.h>
+#else
+#include <fuse.h>
+#endif
 #include <sys/stat.h>
 
 #include <cstdio>
@@ -49,13 +53,13 @@ struct localfs_config {
 struct fuse_opt localfs_opts[] = {MYFS_OPT("src=%s", src, 0), MYFS_OPT("ioengine=%s", ioengine, 0),
                                   MYFS_OPT("exportfs=%s", exportfs, 0), FUSE_OPT_END};
 
-// this simple fuse test MUST run with -s (single thread)
+// this simple fuse test MUST run with -f
 int main(int argc, char *argv[]) {
     // currently they will be initialized inside fuser_go
     // photon::fd_events_init();
     // photon::libaio_wrapper_init();
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct localfs_config cfg;
+    struct localfs_config cfg = {NULL, NULL, NULL};
     fuse_opt_parse(&args, &cfg, localfs_opts, NULL);
     int ioengine = fs::ioengine_libaio;
     if (cfg.ioengine) {
