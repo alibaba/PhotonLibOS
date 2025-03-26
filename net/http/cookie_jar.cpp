@@ -55,8 +55,8 @@ class SimpleCookie {
 public:
     unordered_map_string_key<SimpleValue> m_kv;
     int get_cookies_from_headers(Message* message)  {
-        auto it = message->headers.find("Set-Cookies");
-        while (it != message->headers.end() && it.first() == "Set-Cookies") {
+        auto it = message->headers.find("Set-Cookie");
+        while (it != message->headers.end() && it.first() == "Set-Cookie") {
             LOG_INFO("get cookie");
             auto Cookies = it.second();
             Parser p(Cookies);

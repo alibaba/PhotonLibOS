@@ -49,7 +49,7 @@ public:
 };
 
 ResponseHeaderAdaptor* new_resp(std::string text) {
-    text = "HTTP/1.1 200 ok\r\nSet-Cookies: " + text + "\r\n\r\n";
+    text = "HTTP/1.1 200 ok\r\nSet-Cookie: " + text + "\r\n\r\n";
     ResponseHeaderAdaptor *ret = new ResponseHeaderAdaptor();
     memcpy(ret->m_buf, text.data(), text.size());
     ret->append_bytes(text.size());
