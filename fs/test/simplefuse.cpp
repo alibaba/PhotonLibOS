@@ -87,15 +87,15 @@ int main(int argc, char *argv[]) {
         auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
         return fuser_go_exportfs(wfs, args.argc, args.argv);
     } else if (cfg.exportfs && *cfg.exportfs == 'c') {
-        photon::Executor eth;
+        photon::Executor eth(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_DEFAULT|photon::INIT_IO_EXPORTFS);
         auto afs = eth.perform([&]() {
             auto fs = fs::new_localfs_adaptor(cfg.src, ioengine);
             auto wfs = fs::new_aligned_fs_adaptor(fs, 4096, true, true);
-            fs::exportfs_init();
             return export_as_sync_fs(wfs);
         });
         umask(0);
         set_fuse_fs(afs);
+        DEFER(delete afs);
         auto oper = photon::fs::get_fuse_xmp_oper();
         return fuse_main(args.argc, args.argv, oper, NULL);
     } else {

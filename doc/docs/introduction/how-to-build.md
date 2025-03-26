@@ -168,7 +168,7 @@ ctest
 | PHOTON_BUILD_DEPENDENCIES |   OFF   | Don't find local libs, but build dependencies from source |
 |    PHOTON_CXX_STANDARD    |   14    |           Affects gcc argument of `-std=c++xx`            |
 |    PHOTON_ENABLE_URING    |   OFF   |           Enable io_uring. Requires `liburing`            |
-|    PHOTON_ENABLE_FUSE     |   OFF   |              Enable fuse. Requires `libfuse`              |
+|    PHOTON_ENABLE_FUSE     |   OFF   |              Enable fuse. Requires `libfuse`, Could be `OFF`/`ON`/`2`/`3`              |
 |    PHOTON_ENABLE_SASL     |   OFF   |             Enable SASL. Requires `libgsasl`              |
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
