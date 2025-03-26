@@ -34,7 +34,14 @@ public:
     }
     void skip_chars(char c, bool continuously = false)
     {
-        while (*_ptr == c) {
+        while (_ptr < _end && *_ptr == c) {
+            _ptr++;
+            if (!continuously)
+                return;
+        }
+    }
+    void skip_spaces(bool continuously = false) {
+        while (_ptr < _end && isspace(*_ptr)) {
             _ptr++;
             if (!continuously)
                 return;
