@@ -172,7 +172,7 @@ ctest
 | PHOTON_BUILD_DEPENDENCIES |   OFF   |             不查找本地库作为依赖，而是源码编译第三方依赖             |
 |    PHOTON_CXX_STANDARD    |   14    |              C++标准，影响`-std=c++xx`              |
 |    PHOTON_ENABLE_URING    |   OFF   |            开启 io_uring，需要`liburing`            |
-|    PHOTON_ENABLE_FUSE     |   OFF   |             开启 fuse. 需要 `libfuse`              |
+|    PHOTON_ENABLE_FUSE     |   OFF   |             开启 fuse. 需要 `libfuse`，可以是`OFF`/`ON`/`2`/`3` |
 |    PHOTON_ENABLE_SASL     |   OFF   |             开启 SASL. 需要 `libgsasl`             |
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |           开启 F-Stack and DPDK，需要两者的库           |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             开启 extfs. 需要 `libe2fs`             |

@@ -13,3 +13,7 @@ add_test(NAME test-filecopy COMMAND $<TARGET_FILE:test-filecopy>)
 add_executable(test-throttle-file test_throttledfile.cpp)
 target_link_libraries(test-throttle-file PRIVATE photon_shared)
 add_test(NAME test-throttle-file COMMAND $<TARGET_FILE:test-throttle-file>)
+
+#add_executable(simplefuse simplefuse.cpp)
+#target_link_libraries(simplefuse PRIVATE photon_shared ${FUSE3_LIBRARIES})
+#target_compile_definitions(simplefuse PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=35)
