@@ -38,9 +38,15 @@ class SimpleCookie {
 public:
     unordered_map_string_key<SimpleValue> m_kv;
     int get_cookies_from_headers(Message* message)  {
+<<<<<<< HEAD
         auto r = message->headers.equal_range("Set-Cookie");
         for (auto it = r.first; it != r.second; ++it) {
             LOG_DEBUG("get cookie");
+=======
+        auto it = message->headers.find("Set-Cookie");
+        while (it != message->headers.end() && it.first() == "Set-Cookie") {
+            LOG_INFO("get cookie");
+>>>>>>> f696c50 (fix a typo in cookie)
             auto Cookies = it.second();
             Parser p(Cookies);
             p.skip_string("__Host-");
