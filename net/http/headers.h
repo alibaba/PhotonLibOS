@@ -60,6 +60,7 @@ public:
         bool operator<(const iterator& rhs) const { return i < rhs.i; }
     };
     iterator find(std::string_view key) const;
+    std::pair<iterator, iterator> equal_range(std::string_view key) const;
     iterator begin() const { return {this, 0};}
     iterator end() const   { return {this, m_kv_size};}
     bool empty() const     { return m_kv_size == 0; }

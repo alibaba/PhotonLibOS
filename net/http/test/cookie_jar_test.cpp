@@ -49,7 +49,7 @@ public:
 };
 
 ResponseHeaderAdaptor* new_resp(std::string text) {
-    text = "HTTP/1.1 200 ok\r\nSet-Cookies: " + text + "\r\n\r\n";
+    text = "HTTP/1.1 200 ok\r\nSet-Cookie: " + text + "\r\n\r\n";
     ResponseHeaderAdaptor *ret = new ResponseHeaderAdaptor();
     memcpy(ret->m_buf, text.data(), text.size());
     ret->append_bytes(text.size());
@@ -62,7 +62,7 @@ std::string get_cookie(SimpleCookieJar *jar, std::string host) {
     jar->set_cookies_to_headers(&tmp_headers);
     auto cookie = tmp_headers.headers["Cookie"];
     LOG_DEBUG(VALUE(cookie));
-    return std::string(tmp_headers.headers["Cookie"]);
+    return string(cookie);
 }
 
 TEST(cookie_jar, basic) {
@@ -95,6 +95,7 @@ TEST(cookie_jar, basic) {
     DEFER(delete resp5);
     c.get_cookies_from_headers("host1", resp5);
     s = get_cookie(&c, "host1");
+    LOG_DEBUG(VALUE(s));
     EXPECT_EQ(true, s == "key=value");
 }
 

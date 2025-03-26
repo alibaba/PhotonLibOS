@@ -59,6 +59,13 @@ HeadersBase::iterator HeadersBase::find(std::string_view key) const {
     return {this, (uint16_t)(it - kv_begin())};
 }
 
+std::pair<HeadersBase::iterator, HeadersBase::iterator>
+HeadersBase::equal_range(std::string_view key) const {
+    auto r = std::equal_range(kv_begin(), kv_end(), key, HA(this));
+    return {{this, (uint16_t)(r.first  - kv_begin())},
+            {this, (uint16_t)(r.second - kv_begin())}};
+}
+
 void buf_append(char*& ptr, uint64_t x) {
     auto begin = ptr;
     do {
