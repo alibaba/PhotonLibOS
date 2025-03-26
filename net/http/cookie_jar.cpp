@@ -21,30 +21,13 @@ limitations under the License.
 #include <photon/common/string-keyed.h>
 #include <photon/common/estring.h>
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 
 namespace photon {
 namespace net {
 namespace http {
 
 using namespace std;
-
-static uint64_t local_gmt_gap_us = 0;
-static uint64_t time_gmt_to_local(uint64_t local_now) {
-    if (local_gmt_gap_us == 0) {
-        time_t now = time(nullptr);
-        tm* gmt = gmtime(&now);
-        auto now_s = mktime(gmt);
-        local_gmt_gap_us = (now - now_s) * 1000ULL * 1000ULL;
-    }
-    return local_now + local_gmt_gap_us;
-}
-
-static uint64_t date_to_stamp(const string& date) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    strptime(date.data(), "%a, %d %b %Y %H:%M:%S", &tm);
-    return time_gmt_to_local(mktime(&tm) * 1000 * 1000);
-}
 
 struct SimpleValue{
     uint64_t m_expire;
@@ -55,50 +38,66 @@ class SimpleCookie {
 public:
     unordered_map_string_key<SimpleValue> m_kv;
     int get_cookies_from_headers(Message* message)  {
-        auto it = message->headers.find("Set-Cookies");
-        while (it != message->headers.end() && it.first() == "Set-Cookies") {
-            LOG_INFO("get cookie");
+        auto r = message->headers.equal_range("Set-Cookie");
+        for (auto it = r.first; it != r.second; ++it) {
+            LOG_DEBUG("get cookie");
             auto Cookies = it.second();
             Parser p(Cookies);
-            uint64_t expire = -1UL;
             p.skip_string("__Host-");
             p.skip_string("__Secure-");
             auto key = Cookies | p.extract_until_char('=');
             if (key.size() == 0) return -1;
             p.skip_chars('=');
             auto value = Cookies | p.extract_until_char(';');
-            p.skip_until_string("Expires=");
-            if (!p.is_done()) {
-                p.skip_string("Expires=");
-                auto date = Cookies | p.extract_until_char(';');
-                expire = date_to_stamp(date);
+            p.skip_chars(';'); p.skip_spaces();
+            uint64_t expire = -1ULL;
+            while(!p.is_done()) {
+                auto arg = Cookies | p.extract_until_char(';');
+                p.skip_chars(';'); p.skip_spaces();
+                Parser ap(arg);
+                auto k2 = arg | ap.extract_until_char('=');
+                ap.skip_chars('=');
+                auto v2 = arg | ap.extract_until_char('\0');
+                if (k2 == "Max-Age") {
+                    if (uint64_t age = v2.to_uint64())
+                        expire = time(0) + age;
+                } else if (k2 == "Expires") {
+                    struct tm tm;
+                    const char* ret = strptime(v2.data(), "%a, %d %b %Y %H:%M:%S", &tm);
+                    if (ret != nullptr) // parsed successfully
+                        expire = mktime(&tm);
+                } else if (k2 == "Secure") {
+                } else if (k2 == "HttpOnly") {
+                }
             }
-            m_kv[key] = {expire, value};
-            ++it;
+            m_kv[key].m_expire = expire;
+            auto& v = m_kv[key].m_value;
+            if (v != value) v = value;
         }
         return 0;
     }
 
     int set_cookies_to_headers(Request* request) {
-        bool first_kv = true;
-        vector<string_view> eliminate;
-        if (request->headers.insert("Cookie", "") != 0) return -1;
-        uint64_t now = time(0) * 1000ULL * 1000ULL;
-        for (auto& it : m_kv) {
-            if (it.second.m_expire <= now) {
-                eliminate.emplace_back(it.first);
+        uint64_t now = time(0);
+        auto& h = request->headers;
+        for (auto it = m_kv.begin(); it != m_kv.end(); ) {
+            if (now > it->second.m_expire) {
+                it = m_kv.erase(it);
                 continue;
             }
-            if (!first_kv) {
-                if (!request->headers.value_append("; ")) return -1;
-            } else first_kv = false;
-            if (!request->headers.value_append(it.first) ||
-                !request->headers.value_append("=") ||
-                !request->headers.value_append(it.second.m_value))
-                return -1;
-        }
-        for (auto key : eliminate) {
-            m_kv.erase(key);
+            size_t size = it->first.size() + 1 +
+                          it->second.m_value.size();
+            if (it == m_kv.begin()) {
+                if (h.space_remain() < size + 10+6) return -1;
+                h.insert("Cookie", "");
+            } else {
+                if (h.space_remain() < size + 2+6) return -1;
+                h.value_append("; ");
+            }
+            h.value_append(it->first);
+            h.value_append("=");
+            h.value_append(it->second.m_value);
+            ++it;
         }
         return 0;
     }
