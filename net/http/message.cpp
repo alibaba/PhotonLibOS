@@ -349,15 +349,13 @@ int Request::parse_request_line(Parser &p) {
     m_verb = string_to_verb(m_buf | verb_str);
     if (verb() == Verb::UNKNOWN)
         LOG_ERROR_RETURN(0, -1, "invalid http method");
-    p.skip_chars(' ');
     auto target = p.extract_until_char(' ');
     m_target = target;
-    p.skip_chars(' ');
     p.skip_string("HTTP/");
     m_version = p.extract_until_char('\r');
     if (m_version.size() >= 6)
         LOG_ERROR_RETURN(0, -1, "invalid scheme");
-    p.skip_string("\r\n");
+    p.skip_chars('\n');
     return 0;
 }
 
@@ -366,14 +364,13 @@ int Response::parse_status_line(Parser &p) {
     m_version = p.extract_until_char(' ');
     if (m_version.size() >= 6)
         LOG_ERROR_RETURN(0, -1, "invalid scheme");
-    p.skip_chars(' ');
     auto code = p.extract_integer();
     if (code <= 0 || code >= 1000)
         LOG_ERROR_RETURN(0, -1, "invalid status code ", code);
     m_status_code = (uint16_t)code;
     p.skip_chars(' ');
     m_status_message = p.extract_until_char('\r');
-    p.skip_string("\r\n");
+    p.skip_chars('\n');
     return 0;
 }
 

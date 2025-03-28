@@ -32,18 +32,18 @@ public:
     {
         if (estring_view(_ptr, _end - _ptr).starts_with(sv)) _ptr += sv.length();
     }
-    void skip_chars(char c, bool continuously = false)
+    void skip_chars(char c, bool repeatedly = false)
     {
         while (_ptr < _end && *_ptr == c) {
             _ptr++;
-            if (!continuously)
+            if (!repeatedly)
                 return;
         }
     }
-    void skip_spaces(bool continuously = false) {
+    void skip_spaces(bool repeatedly = false) {
         while (_ptr < _end && isspace(*_ptr)) {
             _ptr++;
-            if (!continuously)
+            if (!repeatedly)
                 return;
         }
     }
@@ -69,9 +69,14 @@ public:
     {
         auto esv = estring_view(_ptr, _end - _ptr);
         auto pos = esv.find_first_of(c);
-        auto ptr = _ptr;
-        if (pos == esv.npos) _ptr = _end; else _ptr += pos;
-        return {(uint16_t)(ptr - _begin), (uint16_t)(_ptr - ptr)};
+        uint16_t off = _ptr - _begin;
+        if (pos == esv.npos) {
+            _ptr = _end;
+            return {off, (uint16_t)esv.size()};
+        } else {
+            _ptr += pos + 1; // skip the delimiter
+            return {off, (uint16_t)pos};
+        }
     }
     bool is_done() { return _ptr == _end; }
     char operator[](size_t i) const
