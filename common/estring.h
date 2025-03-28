@@ -77,6 +77,9 @@ public:
     size_t find_last_of(const charset& set) const;
     size_t find_last_not_of(const charset& set) const;
 
+    bool operator==(char c) const { return size() == 1 && front() == c; }
+    bool operator!=(char c) const { return !(*this == c); }
+
     template<size_t N>
     class Extraction {
         char _buf[N];
@@ -478,6 +481,9 @@ public:
     {
         return view().all_digits();
     }
+
+    bool operator==(char c) const { return size() == 1 && front() == c; }
+    bool operator!=(char c) const { return !(*this == c); }
 
     template<typename...Ts>
     auto split(const Ts&...xs) const ->
