@@ -31,7 +31,7 @@ namespace photon {
 
 class WorkPool::impl {
 public:
-    static constexpr uint32_t RING_SIZE = 256;
+    static constexpr uint32_t RING_SIZE = 65536;
     static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
     static constexpr uint64_t QUEUE_YIELD_US = 1024;
 
@@ -40,7 +40,6 @@ public:
     std::vector<photon::vcpu_base *> vcpus;
     std::atomic<uint64_t> vcpu_index{0};
     photon::semaphore queue_sem;
-    photon::semaphore ready_vcpu;
     photon::condition_variable exit_cv;
     photon::common::RingChannel<
         LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE>>
@@ -48,7 +47,7 @@ public:
     int mode;
 
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-        : queue_sem(0), ready_vcpu(0), mode(mode) {
+        : queue_sem(0), mode(mode), ready_vcpu(0) {
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
@@ -168,6 +167,34 @@ public:
         main_loop();
         return 0;
     }
+
+private:
+    class StdSemaphore {
+    public:
+        explicit StdSemaphore(size_t count = 0) : count_(count) {
+        }
+
+        void signal(size_t n = 1) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                count_ += n;
+            }
+            cv_.notify_one();
+        }
+
+        void wait(size_t n = 1) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this, n] { return count_ >= n; });
+            count_ -= n;
+        }
+
+    private:
+        std::mutex mutex_;
+        std::condition_variable cv_;
+        size_t count_;
+    };
+
+    StdSemaphore ready_vcpu;
 };
 
 WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode)
