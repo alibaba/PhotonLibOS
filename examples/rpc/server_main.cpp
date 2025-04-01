@@ -18,6 +18,8 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/io/signal.h>
 #include <photon/photon.h>
+#include <photon/common/alog.h>
+#include <photon/net/socket.h>
 
 #include "server.h"
 
@@ -29,17 +31,18 @@ void handle_term(int) { rpcservice.reset(); }
 
 int main(int argc, char** argv) {
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+    set_log_output_level(ALOG_INFO);
     photon::init();
     DEFER(photon::fini());
 
     photon::sync_signal(SIGPIPE, &handle_null);
     photon::sync_signal(SIGTERM, &handle_term);
     photon::sync_signal(SIGINT, &handle_term);
-    // start server
 
     // construct rpcservice
     rpcservice.reset(new ExampleServer());
 
+    // start server
     rpcservice->run(FLAGS_port);
 
     return 0;

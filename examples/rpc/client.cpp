@@ -62,6 +62,21 @@ std::string ExampleClient::RPCEcho(photon::net::EndPoint ep,
     return s;
 }
 
+void ExampleClient::RPCEchoPerf(photon::net::EndPoint ep, void *req_buf, void *resp_buf, size_t buf_size) {
+    Echo::Request req;
+    req.str.assign(req_buf, buf_size);
+    Echo::Response resp;
+    resp.str.assign(resp_buf, buf_size);
+
+    int ret = -1;
+    auto stub = pool->get_stub(ep, false);
+    if (!stub) exit(1);
+    DEFER(pool->put_stub(ep, ret < 0));
+
+    ret = stub->call<Echo>(req, resp);
+    if (ret < 0) exit(1);
+}
+
 ssize_t ExampleClient::RPCRead(photon::net::EndPoint ep, const std::string& fn,
                                const struct iovec* iovec, int iovcnt) {
     ReadBuffer::Request req;
