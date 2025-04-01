@@ -42,8 +42,8 @@ int ExampleServer::do_rpc_service(Testrun::Request* req,
 
 int ExampleServer::do_rpc_service(Echo::Request* req, Echo::Response* resp,
                                   IOVector*, IStream*) {
-    resp->str = req->str;
-
+    // Zerocopy assign. Equivalent to resp->str = req->str;
+    resp->str.assign(req->str.addr(), req->str.length());
     return 0;
 }
 
@@ -94,7 +94,7 @@ int ExampleServer::do_rpc_service(WriteBuffer::Request* req,
 }
 
 int ExampleServer::run(int port) {
-    if (server->bind_v4localhost(port) < 0)
+    if (server->bind_v4any(port) < 0)
         LOG_ERRNO_RETURN(0, -1, "Failed to bind port `", port)
     if (server->listen() < 0) LOG_ERRNO_RETURN(0, -1, "Failed to listen");
     server->set_handler({this, &ExampleServer::serve});

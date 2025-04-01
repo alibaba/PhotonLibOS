@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <photon/rpc/rpc.h>
+#include <photon/net/socket.h>
 #include <sys/uio.h>
 
 #include "protocol.h"
@@ -24,16 +25,20 @@ limitations under the License.
 struct ExampleClient {
     std::unique_ptr<photon::rpc::StubPool> pool;
 
-    // create a tcp rpc connection pool
-    // unused connections will be drop after 10 seconds(10UL*1000*1000)
-    // TCP connection will failed in 1 second(1UL*1000*1000) if not accepted
-    // and connection send/recv will take 5 socneds(5UL*1000*1000) as timedout
-    ExampleClient()
-        : pool(photon::rpc::new_stub_pool(10UL * 1000 * 1000, 1UL * 1000 * 1000)) {}
+    // Create a tcp rpc connection pool.
+    // Unused connections will be dropped after 10 seconds(10UL*1000*1000).
+    // Socket I/O timeout is 1 second(1UL*1000*1000).
+    // Socket type could be tcp/udp/zerocopy/rdma ...
+    ExampleClient() {
+        auto sock_client = std::shared_ptr<photon::net::ISocketClient>(photon::net::new_tcp_socket_client());
+        pool.reset(photon::rpc::new_stub_pool(10UL * 1000 * 1000, 1UL * 1000 * 1000, sock_client));
+    }
 
     int64_t RPCHeartbeat(photon::net::EndPoint ep);
 
     std::string RPCEcho(photon::net::EndPoint ep, const std::string& str);
+
+    void RPCEchoPerf(photon::net::EndPoint ep, void* req_buf, void* resp_buf, size_t buf_size);
 
     ssize_t RPCRead(photon::net::EndPoint ep, const std::string& fn,
                     const struct iovec* iovec, int iovcnt);
