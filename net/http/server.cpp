@@ -301,7 +301,7 @@ public:
                      client, client_ownership) {}
 
     int tunnel_copy(ISocketStream *src, ISocketStream *dst) {
-        size_t buf_size = 65536;
+        const size_t buf_size = 65536;
         char seg_buf[buf_size + 4096];
         char *aligned_buf = (char*) (((uint64_t)(&seg_buf[0]) + 4095) / 4096 * 4096);
 
