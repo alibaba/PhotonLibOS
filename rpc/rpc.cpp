@@ -427,13 +427,12 @@ namespace rpc {
     public:
         explicit StubPoolImpl(uint64_t expiration, uint64_t connect_timeout) {
             tls_ctx = net::new_tls_context(nullptr, nullptr, nullptr);
-            tcpclient = net::new_tcp_socket_client();
-            tcpclient->timeout(connect_timeout);
+            sock_client.reset(net::new_tcp_socket_client());
+            sock_client->timeout(connect_timeout);
             m_pool = new ObjectCache<net::EndPoint, rpc::Stub*>(expiration);
         }
 
         ~StubPoolImpl() {
-            delete tcpclient;
             delete m_pool;
             delete tls_ctx;
         }
@@ -460,12 +459,16 @@ namespace rpc {
         }
 
         uint64_t get_timeout() const override {
-            return tcpclient->timeout();
+            return sock_client->timeout();
+        }
+
+        void set_socket_client(std::unique_ptr<net::ISocketClient> socket_client) override {
+            sock_client = std::move(socket_client);
         }
 
     protected:
         net::ISocketStream* get_socket(const net::EndPoint& ep, bool tls) const {
-            auto sock = tcpclient->connect(ep);
+            auto sock = sock_client->connect(ep);
             if (!sock)
                 LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
             LOG_DEBUG("connected to ", ep);
@@ -477,7 +480,7 @@ namespace rpc {
         }
 
         ObjectCache<net::EndPoint, rpc::Stub*>* m_pool;
-        net::ISocketClient *tcpclient;
+        std::unique_ptr<net::ISocketClient> sock_client;
         net::TLSContext* tls_ctx = nullptr;
     };
 
