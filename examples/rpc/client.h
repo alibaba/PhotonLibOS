@@ -35,6 +35,8 @@ struct ExampleClient {
 
     std::string RPCEcho(photon::net::EndPoint ep, const std::string& str);
 
+    void RPCEchoPerf(photon::net::EndPoint ep, void* req_buf, void* resp_buf, size_t buf_size);
+
     ssize_t RPCRead(photon::net::EndPoint ep, const std::string& fn,
                     const struct iovec* iovec, int iovcnt);
 

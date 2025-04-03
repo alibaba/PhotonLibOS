@@ -29,8 +29,7 @@ struct ExampleServer {
     std::unique_ptr<photon::net::ISocketServer> server;
 
     ExampleServer()
-        : skeleton(photon::rpc::new_skeleton()),
-          server(photon::net::new_tcp_socket_server()) {
+        : skeleton(photon::rpc::new_skeleton()) {
         skeleton->register_service<Testrun, Heartbeat, Echo, ReadBuffer,
                                    WriteBuffer>(this);
     }
