@@ -43,7 +43,6 @@ public:
     photon::mutex init_mtx;
     bool initialized = false;
     bool tls_ctx_ownership = false;
-    std::vector<IPAddr> src_ips;
 
     // If there is a photon thread switch during construction, the constructor might be called
     // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
@@ -82,6 +81,8 @@ public:
         tcpsock.reset();
         if (tls_ctx_ownership)
             delete tls_ctx;
+        initialized = false;
+        tls_ctx_ownership = false;
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
