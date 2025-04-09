@@ -22,7 +22,11 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
+<<<<<<< HEAD
           brew install cmake openssl gflags googletest gsasl nasm
+=======
+          brew install openssl gflags googletest gsasl
+>>>>>>> debb0be (macOS CI remove cmake dependency)
 
       - name: Build
         run: |
