@@ -870,7 +870,7 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
-        b _asan_start            //; asan_start()
+        bl _asan_start           //; asan_start()
         ldp x0, x1, [x29, #0x40] //; load arg, start into x0, x1
         str xzr, [x29, #0x40]    //; set arg as 0
         blr x1                   //; start(x0)
