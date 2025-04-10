@@ -52,18 +52,18 @@ def cprint(stat, *args):
 
 
 def get_next_ready(p):
-    return gdb.parse_and_eval("gdb_get_next_thread((void*){})".format(p))
+    return gdb.parse_and_eval("(void*)gdb_get_next_thread((void*){})".format(p))
 
 
 def get_current():
-    return gdb.parse_and_eval("gdb_get_current_thread()")
+    return gdb.parse_and_eval("(void*)gdb_get_current_thread()")
 
 
 def get_vcpu(p):
-    return gdb.parse_and_eval("gdb_get_vcpu((void*){})".format(p))
+    return gdb.parse_and_eval("(void*)gdb_get_vcpu((void*){})".format(p))
 
 def get_thread_stack_ptr(p):
-    return gdb.parse_and_eval("gdb_get_thread_stack_ptr((void*){})".format(p))
+    return gdb.parse_and_eval("(void*)gdb_get_thread_stack_ptr((void*){})".format(p))
 
 def in_sleep(q):
     size = int(gdb.parse_and_eval("(size_t)gdb_get_sleepq_size((void*){})".format(q)))
