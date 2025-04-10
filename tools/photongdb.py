@@ -52,28 +52,25 @@ def cprint(stat, *args):
 
 
 def get_next_ready(p):
-    return gdb.parse_and_eval("(photon::thread*)%s" % p.dereference()['__next_ptr'])
+    return gdb.parse_and_eval("(void*)gdb_get_next_thread((void*){})".format(p))
 
 
 def get_current():
-    return gdb.parse_and_eval("(photon::thread*)photon::CURRENT")
+    return gdb.parse_and_eval("(void*)gdb_get_current_thread()")
 
 
 def get_vcpu(p):
-    return p.dereference()['vcpu'].dereference()
+    return gdb.parse_and_eval("(void*)gdb_get_vcpu((void*){})".format(p))
 
-
-def get_sleepq(vcpu):
-    return vcpu['sleepq']['q']
-
+def get_thread_stack_ptr(p):
+    return gdb.parse_and_eval("(void*)gdb_get_thread_stack_ptr((void*){})".format(p))
 
 def in_sleep(q):
-    size = q['_M_impl']['_M_finish'] - q['_M_impl']['_M_start']
-    return [(q['_M_impl']['_M_start'][i]) for i in range(size)]
+    size = int(gdb.parse_and_eval("(size_t)gdb_get_sleepq_size((void*){})".format(q)))
+    return [gdb.parse_and_eval("(void*)gdb_get_sleepq_item((void*){}, {})".format(q, i)) for i in range(size)]
 
 
 def switch_to_ph(regs, rsp, rbp, rip):
-    cprint('SWITCH', "to {} {} {}".format(hex(rsp), hex(rbp), hex(rip)))
     gdb.parse_and_eval("{}={}".format(regs['sp'], rsp))
     gdb.parse_and_eval("{}={}".format(regs['bp'], rbp))
     gdb.parse_and_eval("{}={}".format(regs['ip'], rip))
@@ -96,7 +93,7 @@ def set_u64_reg(l, r):
 
 
 def get_stkregs(p):
-    t = get_u64_ptr(p['stack']['_ptr'])
+    t = get_u64_ptr(get_thread_stack_ptr(p))
     rsp = t + 8
     rip = get_u64_val(t + 8)
     rbp = get_u64_val(t)
@@ -119,7 +116,7 @@ def load_photon_threads():
         photon.append(('READY', p, rsp, rbp, rip))
         p = get_next_ready(p)
     vcpu = get_vcpu(c)
-    for t in in_sleep(get_sleepq(vcpu)):
+    for t in in_sleep(vcpu):
         rsp, rbp, rip = get_stkregs(t)
         photon.append(('SLEEP', t, rsp, rbp, rip))
     return
@@ -163,6 +160,7 @@ class PhotonFr(gdb.Command):
 
         arch = get_arch()
         regs = get_regs(arch)
+        cprint('SWITCH', "to {} {} {}".format(hex(photon[i][2]), hex(photon[i][3]), hex(photon[i][4])))
         switch_to_ph(regs, photon[i][2], photon[i][3], photon[i][4])
 
 
@@ -225,6 +223,27 @@ class PhotonFini(gdb.Command):
         enabling = False
         cprint('WARNING', "Finished photon thread lookup mode.")
 
+from threading import Lock
+
+class PhotonPs(gdb.Command):
+    def __init__(self):
+        gdb.Command.__init__(self, "photon_ps",
+                             gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
+        self.lock = Lock()
+
+    def invoke(self, arg, tty):
+        with self.lock:
+            photon_init()
+            if len(photon) > 0:
+                for i, (stat, pth, rsp, rbp, rbi) in enumerate(photon): 
+                    cprint(
+                        stat, '[{}]'.format(i), pth, hex(rsp), hex(rbp), hex(rbi))
+                    arch = get_arch()
+                    regs = get_regs(arch)
+                    switch_to_ph(regs, rsp, rbp, rbi)
+                    gdb.execute("bt")
+                switch_to_ph(regs, photon[0][2], photon[0][3], photon[0][4])
+                photon_restore()
 
 PhotonInit()
 PhotonFini()
@@ -232,5 +251,6 @@ PhotonRestore()
 PhotonThreads()
 PhotonLs()
 PhotonFr()
+PhotonPs()
 
 cprint('INFO', 'Photon-GDB-extension loaded')

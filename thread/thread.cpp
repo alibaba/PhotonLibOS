@@ -169,6 +169,51 @@ namespace photon
         void* _ptr;
     };
 
+    #if defined(__has_feature)
+    #   if __has_feature(address_sanitizer) // for clang
+    #       define __SANITIZE_ADDRESS__ // GCC already sets this
+    #   endif
+    #endif
+    
+    #ifdef __SANITIZE_ADDRESS__
+    extern "C" {
+    // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
+    void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom,
+                                        size_t size);
+    void __sanitizer_finish_switch_fiber(void* fake_stack_save,
+                                         const void** bottom_old, size_t* size_old);
+    }
+
+    static void asan_start(void** save, thread* to) {
+        void* bottom = to->buf ? to->buf : to->stackful_alloc_top;
+        __sanitizer_start_switch_fiber(save, bottom,
+                                       to->stack_size);
+    }
+
+    static void asan_finish(void* save) {
+        __sanitizer_finish_switch_fiber(save, nullptr, nullptr);
+    }
+
+#define ASAN_START() asan_finish((void*)nullptr);
+
+#define ASAN_SWITCH(to)      \
+        void* __save;                  \
+        asan_start(&__save, to);       \
+        DEFER({ asan_finish(__save); });
+
+#define ASAN_DIE_SWITCH(to)  \
+        asan_start(nullptr, to);
+
+#else
+#define ASAN_START(ptr)
+#define ASAN_SWITCH(to)
+#define ASAN_DIE_SWITCH(to)
+#endif
+
+    static void _asan_start() asm("_asan_start");
+
+    __attribute__((used)) static void _asan_start() { ASAN_START(); }
+
     struct thread_list;
     struct thread : public intrusive_list_node<thread> {
         volatile vcpu_t* vcpu;
@@ -727,6 +772,7 @@ R"(
     );
 
     inline void switch_context(thread* from, thread* to) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("rsi") = from->stack.pointer_ref();
@@ -740,6 +786,7 @@ R"(
 
     inline void switch_context_defer(thread* from, thread* to,
                                      void (*defer)(void*), void* arg) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("rcx") = from->stack.pointer_ref();
@@ -779,6 +826,7 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        call    _asan_start
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
@@ -789,6 +837,7 @@ R"(
     );
 
     inline void switch_context(thread* from, thread* to) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("rdx") = from->stack.pointer_ref();
@@ -804,6 +853,7 @@ R"(
 
     inline void switch_context_defer(thread* from, thread* to,
                                      void (*defer)(void*), void* arg) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("r9") = from->stack.pointer_ref();
@@ -852,6 +902,7 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        bl _asan_start           //; asan_start()
         ldp x0, x1, [x29, #0x40] //; load arg, start into x0, x1
         str xzr, [x29, #0x40]    //; set arg as 0
         blr x1                   //; start(x0)
@@ -867,6 +918,7 @@ R"(
 #endif
 
     inline void switch_context(thread* from, thread* to) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("x0") = from->stack.pointer_ref();
@@ -886,6 +938,7 @@ R"(
 
     inline void switch_context_defer(thread* from, thread* to,
                                      void (*defer)(void*), void* arg) {
+        ASAN_SWITCH(to);
         prepare_switch(from, to);
         auto _t_ = to->stack.pointer_ref();
         register auto f asm("x3") = from->stack.pointer_ref();
@@ -933,6 +986,7 @@ R"(
             func = (uint64_t)&spinlock_unlock;
             arg = &lock;
         }
+        ASAN_DIE_SWITCH(sw.to);
         _photon_switch_context_defer_die(
             arg, func, sw.to->stack.pointer_ref());
         __builtin_unreachable();
@@ -2093,5 +2147,44 @@ insert_list:
         Delegate<void, void *, size_t> _photon_thread_dealloc) {
         photon_thread_alloc = _photon_thread_alloc;
         photon_thread_dealloc = _photon_thread_dealloc;
+    }
+
+    extern "C" {
+    [[gnu::used]]
+    void *gdb_get_thread_stack_ptr(void *th) {
+      if (!th)
+        return nullptr;
+      return ((thread *)th)->stack._ptr;
+    }
+    [[gnu::used]]
+    void *gdb_get_current_thread() {
+      return CURRENT;
+    }
+    [[gnu::used]]
+    void *gdb_get_next_thread(void *c) {
+      if (!c)
+        return nullptr;
+      return ((thread *)c)->next();
+    }
+    [[gnu::used]]
+    void *gdb_get_vcpu(void *th) {
+      if (!th)
+        return nullptr;
+      return (void *)((thread *)th)->vcpu;
+    }
+    [[gnu::used]]
+    size_t gdb_get_sleepq_size(void *vcpu) {
+      if (!vcpu)
+        return 0;
+      return ((vcpu_t *)vcpu)->sleepq.q.size();
+    }
+    [[gnu::used]]
+    void *gdb_get_sleepq_item(void *vcpu, size_t idx) {
+      if (!vcpu)
+        return nullptr;
+      if (((vcpu_t *)vcpu)->sleepq.q.size() <= idx)
+        return nullptr;
+      return ((vcpu_t *)vcpu)->sleepq.q[idx];
+    }
     }
 }
