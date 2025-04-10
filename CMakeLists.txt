@@ -6,6 +6,9 @@ project(
         LANGUAGES C CXX ASM
 )
 
+# for CMake 4.x compatible
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 # Utility Modules and Find Modules
 include(FindPackageHandleStandardArgs)
 include(CheckCXXCompilerFlag)

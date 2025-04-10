@@ -231,7 +231,11 @@ public:
         ioCtx timer_ctx(true, false);
         __kernel_timespec ts;
         auto usec = timeout.timeout_us();
+<<<<<<< HEAD
         if (usec < (uint64_t) std::numeric_limits<int64_t>::max()) {
+=======
+        if (usec < (uint64_t)std::numeric_limits<int64_t>::max()) {
+>>>>>>> 60da16c (Enhance debug tools (#753))
             sqe->flags |= IOSQE_IO_LINK;
             ts = usec_to_timespec(usec);
             sqe = _get_sqe();
@@ -375,7 +379,11 @@ public:
 
     ssize_t wait_and_fire_events(uint64_t timeout) override {
         // Prepare own timeout
+<<<<<<< HEAD
         if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
+=======
+        if (timeout > (uint64_t)std::numeric_limits<int64_t>::max()) {
+>>>>>>> 60da16c (Enhance debug tools (#753))
             timeout = std::numeric_limits<int64_t>::max();
         }
 
