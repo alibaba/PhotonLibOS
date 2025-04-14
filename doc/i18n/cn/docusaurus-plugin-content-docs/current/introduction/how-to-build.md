@@ -177,6 +177,8 @@ ctest
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |           开启 F-Stack and DPDK，需要两者的库           |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             开启 extfs. 需要 `libe2fs`             |
 |  PHOTON_ENABLE_ECOSYSTEM  |   OFF   |            编译Photon生态库，包含一些三方工具和封装             |
+|   PHOTON_BUILD_OCF_CACHE  |   OFF   |              编译OCF Cache，依赖第三方源码                |
+
 
 #### 例子1
 
@@ -193,7 +195,8 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_CURL_SOURCE=https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz \
 -D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
 -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
--D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+-D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz \
+-D PHOTON_BUILD_OCF_CACHE=ON
 ```
 
 #### 例子2
