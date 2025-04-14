@@ -173,6 +173,8 @@ ctest
 | PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
 |    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
 |  PHOTON_ENABLE_ECOSYSTEM  |   OFF   |            Enable ecosystem tools and wrappers            |
+|   PHOTON_BUILD_OCF_CACHE  |   OFF   |               Build ocf cache from source                |
+
 
 #### Case 1. Staitcally build all third-party libs
 
@@ -189,7 +191,8 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_CURL_SOURCE=https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz \
 -D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
 -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
--D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
+-D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz \
+-D PHOTON_BUILD_OCF_CACHE=ON
 ```
 
 #### Case 2. Dynamically link to libcurl.so and libssl.so
