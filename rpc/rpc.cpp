@@ -236,6 +236,8 @@ namespace rpc {
                 COPY(func);
                 COPY(stream);
                 COPY(sk);
+                COPY(stream_serv_count);
+                COPY(stream_cv);
                 COPY(w_lock);
 #undef COPY
             }
@@ -378,14 +380,14 @@ namespace rpc {
         }
         static void* async_serve(void* args_)
         {
-            auto ctx = (Context*)args_;
-            Context context(std::move(*ctx));
-            ctx->got_it = true;
+            bool &got_it = ((Context*)args_)->got_it;
+            Context context(std::move(*(Context*)args_));
+            got_it = true;
             thread_yield_to(nullptr);
             context.serve_request();
             // serve done, here reduce refcount
-            (*ctx->stream_serv_count) --;
-            ctx->stream_cv->notify_all();
+            (*context.stream_serv_count) --;
+            context.stream_cv->notify_all();
             return nullptr;
         }
         virtual int shutdown_no_wait() override {
