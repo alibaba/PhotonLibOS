@@ -128,7 +128,7 @@ public:
             auto task = ring.recv(running_tasks.load() ? 0 : QUEUE_YIELD_COUNT,
                                   QUEUE_YIELD_US);
             if (!task) break;
-            running_tasks.fetch_add(std::memory_order_acq_rel);
+            running_tasks.fetch_add(1, std::memory_order_acq_rel);
             TaskLB tasklb{task, &running_tasks};
             if (mode < 0) {
                 delegate_helper(&tasklb);
@@ -150,7 +150,7 @@ public:
         // must copy to keep tasklb alive
         TaskLB tasklb = *(TaskLB*)arg;
         tasklb.task();
-        tasklb.count->fetch_sub(std::memory_order_acq_rel);
+        tasklb.count->fetch_sub(1, std::memory_order_acq_rel);
         return nullptr;
     }
 

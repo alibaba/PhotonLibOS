@@ -7,7 +7,7 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  gcc921:
+  arm-linux-build-and-test:
     runs-on: [self-hosted, Linux, ARM64]
 
     container:
@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Build
+      - name: Build-Debug-921-C++14
         run: |
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
@@ -34,7 +34,52 @@ jobs:
                          -D PHOTON_ENABLE_URING=ON        \
                          -D PHOTON_ENABLE_LIBCURL=ON      \
                          -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-921-C++17
+        run: |
+          source /opt/rh/gcc-toolset-9/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=17        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-1121-C++20
+        run: |
+          source /opt/rh/gcc-toolset-11/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=20        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
+
+      - name: Build-Debug-1211-C++23
+        run: |
+          source /opt/rh/gcc-toolset-12/enable
+          rm -fr build
+          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
+                         -D PHOTON_CXX_STANDARD=23        \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_SASL=ON         \
+                         -D PHOTON_ENABLE_FUSE=ON         \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=ON      \
+                         -D PHOTON_ENABLE_EXTFS=ON
+          cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test
         run: |

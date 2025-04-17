@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "crc32c.h"
 #include "crc64ecma.h"
+#include <stdlib.h>
 #if defined(__linux__) && defined(__aarch64__)
 #include <sys/auxv.h>
 #include <asm/hwcap.h>
