@@ -55,10 +55,10 @@ public:
         const allocator_type& alloc = allocator_type()) :
             m_comp(comp), m_vector(alloc) { }
 
-    using reference         = typename allocator_type::reference;
-    using const_reference   = typename allocator_type::const_reference;
-    using pointer           = typename allocator_type::pointer;
-    using const_pointer     = typename allocator_type::const_pointer;
+    using reference         = mapped_type&;
+    using const_reference   = const mapped_type&;
+    using pointer           = mapped_type*;
+    using const_pointer     = const mapped_type*;
     using container_type    = std::vector<value_type, allocator_type>;
     using iterator          = typename container_type::iterator;
     using const_iterator    = typename container_type::const_iterator;

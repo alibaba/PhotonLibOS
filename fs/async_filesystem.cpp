@@ -85,7 +85,11 @@ namespace fs
     {
     public:
         template<typename IF, typename Func, typename...ARGS,
+#if __cplusplus < 201703L
             typename R = typename std::result_of<Func(IF*, ARGS...)>::type >
+#else
+            typename R = typename std::invoke_result<Func, IF*, ARGS...>::type>
+#endif
         R perform(IF* _if, Func func, ARGS...args)
         {
             return th_performer<R>().call(_if, func, args...);
