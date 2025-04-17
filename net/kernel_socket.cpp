@@ -315,7 +315,7 @@ public:
     int bind(const EndPoint& ep) override {
         auto s = sockaddr_storage(ep);
         if (m_listen_fd < 0) {
-            m_listen_fd = socket(s.get_sockaddr()->sa_family, 0, m_nonblocking, false);
+            m_listen_fd = socket(s.get_sockaddr()->sa_family, 0, m_nonblocking, true);
             if (m_listen_fd < 0) return -1;
         }
         if (m_opts.setsockopt(m_listen_fd) != 0) {
@@ -333,7 +333,7 @@ public:
                 LOG_ERRNO_RETURN(0, -1, VALUE(path));
         }
         if (m_listen_fd < 0) {
-            m_listen_fd = socket(AF_UNIX, 0, true, false);
+            m_listen_fd = socket(AF_UNIX, 0, true, true);
             if (m_listen_fd < 0)
                 LOG_ERRNO_RETURN(0, m_listen_fd, "failed to create UNIX domain socket at ", ALogString(path, count));
         }
