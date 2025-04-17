@@ -174,7 +174,7 @@ namespace photon
     #       define __SANITIZE_ADDRESS__ // GCC already sets this
     #   endif
     #endif
-    
+
     #ifdef __SANITIZE_ADDRESS__
     extern "C" {
     // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
@@ -698,7 +698,8 @@ namespace photon
     inline void prepare_switch(thread* from, thread* to) {
         assert(from->vcpu == to->vcpu);
         assert(to->state == states::RUNNING);
-        to->get_vcpu()->switch_count++;
+        auto& cnt = to->get_vcpu()->switch_count;
+        (*(uint64_t*)&cnt)++;   // increment of volatile variable is deprecated
     }
 
     static void _photon_thread_die(thread* th) asm("_photon_thread_die");

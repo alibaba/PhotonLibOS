@@ -15,9 +15,19 @@ limitations under the License.
 */
 
 #pragma once
-#include <chrono>
 #include <cinttypes>
 #include <photon/common/utility.h>
+#ifdef private
+#define _PHOTON_UNIT_TEST
+#undef private
+#undef protected
+#endif
+#include <chrono>
+#ifdef _PHOTON_UNIT_TEST
+#undef _PHOTON_UNIT_TEST
+#define private public
+#define protected public
+#endif
 
 namespace photon {
 
