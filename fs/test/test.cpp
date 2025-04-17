@@ -571,12 +571,17 @@ TEST(AsyncFS, AsyncFS)
     tafs.do_test(f);
 }
 
+#if __cplusplus < 202000
+#define CAPTURE =
+#else
+#define CAPTURE =,this
+#endif
 class AFile : public ExampleAsyncFile
 {
 public:
     OVERRIDE_ASYNC(ssize_t, pread, void *buf, size_t count, off_t offset)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::sleep(1);
             callback_umimplemented<ssize_t>(done);
@@ -588,7 +593,7 @@ public:
     {
         LOG_DEBUG("into afile pwrite `", timeout);
 
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             //only return count/2 for timeout fired
@@ -604,7 +609,7 @@ class ExampleAsyncDir: public AsyncDIR {
     OVERRIDE_ASYNC0(int, closedir) {
     }
     OVERRIDE_ASYNC0(dirent*, get) {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             AsyncResult<dirent*> r;
@@ -631,7 +636,7 @@ class AFS : public ExampleAsyncFileSystem {
 public:
     OVERRIDE_ASYNC(IAsyncFile*, open, const char *pathname, int flags)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             callback(done, UINT32_MAX, exampleAfile, 0);
         });
@@ -640,7 +645,7 @@ public:
 
     OVERRIDE_ASYNC(AsyncDIR*, opendir, const char *name)
     {
-        std::thread t([=]()
+        std::thread t([CAPTURE]()
         {
             ::usleep(timeout);
             if (name[0] == 's') {

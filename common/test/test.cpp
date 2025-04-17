@@ -509,7 +509,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.sum(), 0);
     EXPECT_TRUE(iov.empty());
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
     EXPECT_EQ(iov.begin(), iov.iovec());
 
     iovec v{nullptr, 33}, v2{nullptr, 44};
@@ -525,7 +525,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 3);
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve);
     EXPECT_EQ(iov.sum(), 44+55+33);
 
     iov.push_back(77);
@@ -540,7 +540,7 @@ TEST(iovector, test1)
     EXPECT_EQ(iov.back(), v);
     EXPECT_EQ(iov.iovcnt(), 6);
     EXPECT_EQ(iov.front_free_iovcnt(), IOVector::default_preserve - 3);
-    EXPECT_EQ(iov.back_free_iovcnt(), IOVector::capacity - IOVector::default_preserve - 3);
+    EXPECT_EQ(iov.back_free_iovcnt(), (uint16_t)IOVector::capacity - (uint16_t)IOVector::default_preserve - 3);
     EXPECT_EQ(iov.sum(), 44+55+33 + 77+44+33);
 
     EXPECT_EQ(iov.pop_front(), 44);

@@ -142,8 +142,13 @@ namespace fs
     __attribute__((visibility("hidden"))) Delegate<void> ExportBase::op;
     __attribute__((visibility("hidden"))) ThreadPoolBase* ExportBase::pool = nullptr;
 
+#if __cplusplus > 202000L
+#define PERFORM(ID, expr) \
+    perform(timeout, new auto([=, this]() { do_callback(ID, expr, done); }));
+#else
 #define PERFORM(ID, expr) \
     perform(timeout, new auto([=]() { do_callback(ID, expr, done); }));
+#endif
 
     class ExportAsAsyncFile : public ExportBase, public IAsyncFile, public IAsyncFileXAttr
     {

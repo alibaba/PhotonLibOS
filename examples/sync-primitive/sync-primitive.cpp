@@ -77,8 +77,8 @@ int main() {
                 message.sem.wait(1);
                 auto end = std::chrono::steady_clock::now();
                 auto duration_us = std::chrono::duration_cast<std::chrono::nanoseconds>(end - message.start).count();
-                latency.fetch_add(duration_us, std::memory_order::memory_order_relaxed);
-                qps.fetch_add(1, std::memory_order::memory_order_relaxed);
+                latency.fetch_add(duration_us, std::memory_order_relaxed);
+                qps.fetch_add(1, std::memory_order_relaxed);
             }
         }));
     }

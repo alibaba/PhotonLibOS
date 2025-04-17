@@ -41,7 +41,12 @@ struct Enumerable
           if (obj && !obj->valid())
             this->obj = nullptr;
         }
+#if __cplusplus < 201703L
         using R = typename std::result_of<decltype(&T::get)(T)>::type;
+#else
+        using R = typename std::invoke_result<decltype(&T::get), T>::type;
+#endif
+
         R operator*() { return obj ? obj->get() : R{}; }
         bool operator==(const iterator& rhs) const { return obj == rhs.obj; }
         bool operator!=(const iterator& rhs) const { return !(*this == rhs); }
