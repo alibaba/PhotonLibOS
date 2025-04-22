@@ -157,7 +157,7 @@ public:
 #endif
 
     bool istarts_with(estring_view x) {
-        return strncasecmp(data(), x.data(), x.size()) == 0;
+        return strncasecmp(substr(0, x.size()).data(), x.data(), x.size()) == 0;
     }
 
     int icmp(estring_view x) {
