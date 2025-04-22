@@ -8,6 +8,7 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Version 0.9 has been released in April 2025.
 * We present an article to illustrate the theory of Photon's coroutine.
 [Stackful Coroutine Made Fast](https://photonlibos.github.io/blog/stackful-coroutine-made-fast)
 * Version 0.8 has been released in August 2024
