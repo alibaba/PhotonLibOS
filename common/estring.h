@@ -158,7 +158,7 @@ public:
     estring tolower_fast() const;
     estring toupper_fast() const;
     bool istarts_with(std::string_view x) const {
-        return size() >= x.size() && icmp(x) == 0;
+        return size() >= x.size() && substr(0, x.size()).icmp(x) == 0;
     }
     bool iends_with(std::string_view x) const {
         return size() >= x.size() && substr(size() - x.size()).icmp(x) == 0;
