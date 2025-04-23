@@ -712,6 +712,25 @@ TEST(url, path_fix) {
     EXPECT_EQ(u2.query(), "a=b");
 }
 
+TEST(url, utils) {
+    estring_view u1 = "http://www.taobao.com", u2 = "https://www.taobao.com";
+    estring_view u3 = "HTTPS://www.taobao.com/", u4 = "www.taobao.com";
+    ASSERT_EQ(1, what_protocol(u1));
+    ASSERT_EQ(2, what_protocol(u2));
+    ASSERT_EQ(2, what_protocol(u3));
+    ASSERT_EQ(0, what_protocol(u4));
+    URL url1("http://www.taobao.com:80"), url2("https://www.taobao.com:443");
+    URL url3("http://www.taobao.com:8080"), url4("https://www.taobao.com:4443");
+    ASSERT_EQ(false, need_optional_port(url1));
+    ASSERT_EQ(false, need_optional_port(url2));
+    ASSERT_EQ(true, need_optional_port(url3));
+    ASSERT_EQ(true, need_optional_port(url4));
+    estring_view ul1 = "http://www.taobao.com?a=1&b=2";
+    estring_view ul2 = "http%3A%2F%2Fwww.taobao.com%3Fa%3D1%26b%3D2";
+    ASSERT_EQ(0, url_escape(ul1).compare(ul2));
+    ASSERT_EQ(0, url_unescape(ul2).compare(ul1));
+}
+
 // Only for manual test
 // TEST(http_client, proxy) {
 //     auto client = new_http_client();
