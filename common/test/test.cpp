@@ -886,6 +886,14 @@ TEST(estring, test)
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
+    
+    estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
+    estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";
+    EXPECT_EQ(true, s1.istarts_with(s2));
+    EXPECT_EQ(true, s1.istarts_with(s3));
+    EXPECT_EQ(false, s1.istarts_with(s4));
+    EXPECT_EQ(false, s1.istarts_with(s5));
+    EXPECT_EQ(false, s2.istarts_with(s1));
 }
 
 TEST(generator, example)
