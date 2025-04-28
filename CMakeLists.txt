@@ -307,8 +307,8 @@ endif ()
 ################################################################################
 
 set(static_deps
-        easy_weak
-        fstack_weak
+        $<TARGET_OBJECTS:easy_weak>
+        $<TARGET_OBJECTS:fstack_weak>
         ${OPENSSL_LIBRARIES}
         ${ZLIB_LIBRARIES}
 )
@@ -403,7 +403,7 @@ target_link_libraries(photon_static
 if (NOT APPLE)
     add_custom_target(_photon_static_archive ALL
             COMMAND rm -rf libphoton.a
-            COMMAND ar -qcT libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+            COMMAND ar -qcT libphoton.a ${static_deps}
             COMMAND ar -M < ${PROJECT_SOURCE_DIR}/tools/libphoton.mri
             DEPENDS photon_static
             WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
@@ -412,7 +412,7 @@ if (NOT APPLE)
 else ()
     add_custom_target(_photon_static_archive ALL
             COMMAND rm -rf libphoton.a
-            COMMAND libtool -static -o libphoton.a $<TARGET_FILE:photon_static> $<TARGET_FILE:easy_weak> $<TARGET_FILE:fstack_weak>
+            COMMAND libtool -static -o libphoton.a ${static_deps}
             DEPENDS photon_static
             WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
             VERBATIM
