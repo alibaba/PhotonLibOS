@@ -27,6 +27,7 @@ jobs:
       - name: Build
         run: |
           cmake -B ${{github.workspace}}/build \
+            -D PHOTON_CXX_STANDARD=17 \
             -D PHOTON_ENABLE_ECOSYSTEM=ON \
             -D PHOTON_BUILD_TESTING=ON \
             -D CMAKE_BUILD_TYPE=MinSizeRel \
