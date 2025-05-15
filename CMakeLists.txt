@@ -309,8 +309,6 @@ endif ()
 set(static_deps
         easy_weak
         fstack_weak
-        ${OPENSSL_LIBRARIES}
-        ${ZLIB_LIBRARIES}
 )
 set(shared_deps
         -lpthread
@@ -349,6 +347,7 @@ if (PHOTON_BUILD_OCF_CACHE)
     list(APPEND shared_deps ocf_cache_lib)
     list(APPEND static_deps ocf_cache_lib)
 endif()
+list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
 
 
 # Find out dynamic libs and append to `shared_deps`.
@@ -394,8 +393,8 @@ add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon_sole)
 target_include_directories(photon_static PUBLIC include ${CURL_INCLUDE_DIRS})
 target_link_libraries(photon_static
-        PUBLIC ${shared_deps}
         PRIVATE ${static_deps}
+        PUBLIC ${shared_deps}
 )
 
 # Merge static libs into libphoton.a for manual distribution.
