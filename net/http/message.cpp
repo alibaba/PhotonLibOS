@@ -174,7 +174,7 @@ ssize_t Message::write_stream(IStream *input, size_t size_limit) {
     if (input == nullptr)
         return 0;
 
-    size_t buf_size = 65536;
+    constexpr size_t buf_size = 65536;
     char seg_buf[buf_size + 4096];
     char *aligned_buf = (char*) (((uint64_t)(&seg_buf[0]) + 4095) / 4096 * 4096);
     size_t ret = 0;

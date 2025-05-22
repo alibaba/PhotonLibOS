@@ -72,7 +72,8 @@ static int ping_pong_client() {
     DEFER(delete cli);
 
     auto run_ping_pong_worker = [&]() -> int {
-        char buf[FLAGS_buf_size];
+        auto buf = malloc(FLAGS_buf_size);
+        DEFER(free(buf));
 
         auto conn = cli->connect(ep);
         if (conn == nullptr) {
@@ -127,7 +128,8 @@ static int streaming_client() {
     DEFER(delete conn);
 
     auto send = [&]() -> int {
-        char buf[FLAGS_buf_size];
+        auto buf = malloc(FLAGS_buf_size);
+        DEFER(free(buf));
         while (!stop_test) {
             ssize_t ret = conn->write(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
@@ -137,7 +139,8 @@ static int streaming_client() {
         return 0;
     };
     auto recv = [&]() -> int {
-        char buf[FLAGS_buf_size];
+        auto buf = malloc(FLAGS_buf_size);
+        DEFER(free(buf));
         while (!stop_test) {
             ssize_t ret = conn->read(buf, FLAGS_buf_size);
             if (ret != (ssize_t) FLAGS_buf_size) {
@@ -191,7 +194,8 @@ static int echo_server() {
         if (FLAGS_vcpu_num > 1) {
             work_pool->thread_migrate();
         }
-        char buf[FLAGS_buf_size];
+        auto buf = malloc(FLAGS_buf_size);
+        DEFER(free(buf));
         while (true) {
             ssize_t ret1, ret2;
             ret1 = sock->recv(buf, FLAGS_buf_size);
