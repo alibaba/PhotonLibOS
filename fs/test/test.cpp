@@ -959,7 +959,8 @@ void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, f
     }
     file->fsync();
     file->lseek(0, SEEK_SET);
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     for (const auto &data : rand_data) {
         file->read(buff, test_block_size);
         EXPECT_EQ(0, memcmp(data.get(), buff, test_block_size));
@@ -967,7 +968,8 @@ void random_content_rw_test(uint64_t test_block_size, uint64_t test_block_num, f
 }
 
 void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num, const char* test_seq, fs::IFile* file) {
-    char data[test_block_size];
+    auto data = malloc(test_block_size);
+    DEFER(free(data));
     file->lseek(0, SEEK_SET);
     for (auto i: xrange(test_block_num)) {
         memset(data, test_seq[i], test_block_size);
@@ -975,7 +977,8 @@ void sequence_content_rw_test (uint64_t test_block_size, uint64_t test_block_num
     }
     file->fdatasync();
     file->lseek(0, SEEK_SET);
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     for (uint64_t i = 0; i< test_block_num; i++) {
         file->read(buff, test_block_size);
         memset(data, *(test_seq++), test_block_size);
@@ -1022,7 +1025,8 @@ TEST(XFile, fixed_size_linear_file_basic) {
     sequence_content_rw_test(test_block_size, test_file_num, "abcdefghijklmn", xf.get());
     random_content_rw_test(test_block_size, test_file_num, xf.get());
     xf->lseek(test_block_size*test_file_num, SEEK_SET);
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     log_output = log_output_null;
     DEFER({
         log_output = log_output_stdout;
@@ -1093,7 +1097,8 @@ TEST(XFile, stripe_file_basic) {
     xfile_not_impl_test(xf.get());
     sequence_content_rw_test(test_file_size, test_file_num, "abcdefghijklmn", xf.get());
     random_content_rw_test(test_file_size, test_file_num, xf.get());
-    char buff[test_block_size];
+    auto buff = malloc(test_block_size);
+    DEFER(free(buff));
     log_output = log_output_null;
     DEFER({
         log_output = log_output_stdout;

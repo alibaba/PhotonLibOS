@@ -159,18 +159,18 @@ using unordered_map_string_key = basic_map_string_key<
     std::unordered_map<string_key, T, Hasher, KeyEqual, Alloc>>;
 
 class Hasher_CaseInsensitive {
-    const size_t BUF_CAP = 64;
+    constexpr static size_t BUF_CAP() { return 64; }
     size_t partial_hash(std::string_view sv) const {
-        char buf[BUF_CAP];
-        assert(sv.size() <= BUF_CAP);
+        char buf[BUF_CAP()];
+        assert(sv.size() <= BUF_CAP());
         photon::tolower_fast(buf, sv.data(), sv.size());
         return std::hash<std::string_view>()({buf, sv.size()});
     }
 public:
     size_t operator()(std::string_view sv) const {
         size_t h = 0;
-        for (size_t i = 0; i < sv.size(); i += BUF_CAP) {
-            auto len = std::min(BUF_CAP, sv.size() - i);
+        for (size_t i = 0; i < sv.size(); i += BUF_CAP()) {
+            auto len = std::min(BUF_CAP(), sv.size() - i);
             auto ph = partial_hash(sv.substr(i, len));
             h = photon::hash_combine(h, ph);
         }
