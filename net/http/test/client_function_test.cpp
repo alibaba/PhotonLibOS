@@ -563,8 +563,8 @@ TEST(http_client, vcpu) {
     auto client = new_http_client();
     DEFER(delete client);
 
-    int vcpu_num = 16;
     photon::semaphore sem(0);
+    constexpr int vcpu_num = 16;
     std::thread th[vcpu_num];
     for (int i = 0; i < vcpu_num; i++) {
         th[i] = std::thread([&] {

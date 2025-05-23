@@ -228,7 +228,7 @@ TEST(rpc, variable_length_serialization) {
     char channel[4096] = {};
 
     // Send.
-    const char* send_string = "1";
+    const char send_string[] = "1";
     VariableLengthMessage m_send;
     m_send.a = 1;
     m_send.b.assign(send_string);
@@ -243,7 +243,7 @@ TEST(rpc, variable_length_serialization) {
     // Receive. rpc::string has been assigned to a large buffer
     // Serialize first
     VariableLengthMessage m_recv;
-    const size_t buf_size = strlen(send_string) + 4096;
+    constexpr size_t buf_size = sizeof(send_string) + 4096;
     char buf[buf_size];
     m_recv.b = photon::rpc::string(buf, buf_size);
     photon::rpc::SerializerIOV s_recv;
