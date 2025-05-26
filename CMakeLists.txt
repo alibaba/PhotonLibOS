@@ -199,6 +199,7 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         fs/httpfs/*.cpp
         io/signal.cpp
         io/reset_handle.cpp
+        io/vdma.cpp
         net/*.cpp
         net/http/*.cpp
         net/security-context/tls-stream.cpp

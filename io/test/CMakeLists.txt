@@ -22,3 +22,7 @@ add_executable(test-iouring test-iouring.cpp)
 target_link_libraries(test-iouring PRIVATE photon_shared)
 add_test(NAME test-iouring COMMAND $<TARGET_FILE:test-iouring>)
 endif ()
+
+add_executable(test-vdma test-vdma.cpp)
+target_link_libraries(test-vdma PRIVATE photon_shared)
+add_test(NAME test-vdma COMMAND $<TARGET_FILE:test-vdma>)
