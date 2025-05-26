@@ -20,10 +20,8 @@ class vDMABufferImpl : public vDMABuffer {
 public:
     vDMABufferImpl(int idx, char* begin_ptr, size_t buffer_size, int type)
     :
-    idx_(idx), begin_ptr_(begin_ptr), buffer_size_(buffer_size), type_(type)
-    {
-        logic_addr_.assign(std::to_string(idx_) + "_" + std::to_string(buffer_size_));
-    }
+    idx_(idx), begin_ptr_(begin_ptr), buffer_size_(buffer_size), type_(type), logic_addr_(std::make_tuple(idx_, buffer_size_))
+    {}
 
     ~vDMABufferImpl() {}
 
@@ -37,7 +35,7 @@ public:
         return true; 
     }
 
-    std::string_view logical_address() const override {
+    std::tuple<int, size_t> logical_address() const override {
         return logic_addr_;
     }
 
@@ -55,23 +53,12 @@ public:
 
     int idx() const { return idx_; }
 
-    static int parse_logical_address(std::string_view logical_address, int* idx, size_t* buffer_size) {
-        size_t pos = logical_address.find("_");
-        if (pos == logical_address.npos) {
-            LOG_ERROR("vDMABufferImpl::parse_logical_address, failed");
-            return -1;
-        }
-        *idx = std::stoi(logical_address.substr(0, pos).data());
-        *buffer_size = std::stoul(logical_address.substr(pos+1, logical_address.size()-pos-1).data());
-        return 0;
-    }
-
 private:
     int idx_;
     char* begin_ptr_;
     size_t buffer_size_;
     int type_;
-    std::string logic_addr_;
+    std::tuple<int, size_t> logic_addr_;
 };
 
 class vDMABufferAllocator {
@@ -92,6 +79,8 @@ public:
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
         if (!shm_begin_ptr_) {
             LOG_ERROR("vDMABufferAllocator, mmap failed");
+            close(shm_fd_);
+            return;
         }
 
         nbuffer_ = shm_size_ / unit_;
@@ -208,10 +197,10 @@ public:
         }
     }
 
-    vDMABuffer* map(std::string_view logical_address) override {
-        int idx = -1;
-        size_t buffer_size = 0;
-        if (vDMABufferImpl::parse_logical_address(logical_address, &idx, &buffer_size) < 0 || idx < 0 || buffer_size == 0) {
+    vDMABuffer* map(std::tuple<int, size_t> logical_address) override {
+        int idx = std::get<0>(logical_address);
+        size_t buffer_size = std::get<1>(logical_address);
+        if (idx < 0 || buffer_size == 0) {
             LOG_ERROR("vDMAInitiatorImpl::map, parse logical address failed");
             return nullptr;
         }

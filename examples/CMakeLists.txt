@@ -27,7 +27,7 @@ target_link_libraries(rpc-example-server PRIVATE photon_static)
 add_executable(sync-primitive sync-primitive/sync-primitive.cpp)
 target_link_libraries(sync-primitive PRIVATE photon_static)
 
-add_executable(vdma-example vdma-transfer/example.cpp)
+add_executable(vdma-example vdma-transfer/vdma-example.cpp)
 target_link_libraries(vdma-example PRIVATE photon_static)
 
 if (PHOTON_ENABLE_FSTACK_DPDK)
