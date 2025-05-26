@@ -3,6 +3,7 @@
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
 #include <unistd.h>
+#include <tuple>
 
 namespace photon {
 
@@ -12,7 +13,7 @@ public:
     // both initialtor and target able to translate to physical address
     // logical address does not have to be a visible string
     // just simple binary serialized address
-    virtual std::string_view logical_address() const = 0;
+    virtual std::tuple<int, size_t> logical_address() const = 0;
 
     // physical address for buffer, as memory pointer
     virtual char* physical_address() const = 0;
@@ -58,7 +59,7 @@ public:
 class vDMAInitiator : public Object {
 public:
     // map logical address to vDMABuffer
-    virtual vDMABuffer* map(std::string_view logical_address) = 0;
+    virtual vDMABuffer* map(std::tuple<int, size_t> logical_address) = 0;
 
     // unmap vDMABuffer
     virtual int unmap(vDMABuffer* buffer) = 0;

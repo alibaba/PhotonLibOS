@@ -2,7 +2,6 @@
 #include <photon/common/alog.h>
 #include <photon/io/vdma.h>
 
-
 #include <string>
 
 int main() {
@@ -22,7 +21,7 @@ int main() {
     auto t_buffer = target->alloc(unit);
     auto physical_addr = std::to_string((uint64_t)t_buffer->physical_address());
     auto logical_addr = t_buffer->logical_address();
-    LOG_INFO("step3: shared memory buffer logical addr is ", logical_addr.data(),
+    LOG_INFO("step3: shared memory buffer logical addr is ", std::get<0>(logical_addr), " ", std::get<1>(logical_addr),
              ", physical addr is ", physical_addr.data());
     size_t want_data_size = 4096;
     off_t want_data_offset = 0;

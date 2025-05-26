@@ -15,38 +15,38 @@ TEST(Target, basic) {
 
     // in this version, alloc size must same as unit
     photon::vDMABuffer* buffer = target->alloc(512);
-    ASSERT_EQ(buffer, nullptr);
+    EXPECT_EQ(buffer, nullptr);
     
     // target alloc, initiator map
     photon::vDMABuffer* t_buffer0 = target->alloc(4096);
-    ASSERT_EQ(t_buffer0->buf_size(), 4096);
-    ASSERT_EQ(t_buffer0->logical_address(), "0_4096");
+    EXPECT_EQ(t_buffer0->buf_size(), 4096);
+    EXPECT_EQ(t_buffer0->logical_address(), std::make_tuple(0, 4096));
 
     photon::vDMABuffer* t_buffer1 = target->alloc(4096);
-    ASSERT_EQ(t_buffer1->logical_address(), "1_4096");
-    ASSERT_EQ(t_buffer1->buf_size(), 4096);
-    ASSERT_EQ(t_buffer1->is_valid(), true);
-    ASSERT_EQ(t_buffer1->is_registered(), true);
-    ASSERT_EQ(t_buffer1->physical_address(), t_buffer0->physical_address()+4096);
+    EXPECT_EQ(t_buffer1->logical_address(), std::make_tuple(1, 4096));
+    EXPECT_EQ(t_buffer1->buf_size(), 4096);
+    EXPECT_EQ(t_buffer1->is_valid(), true);
+    EXPECT_EQ(t_buffer1->is_registered(), true);
+    EXPECT_EQ(t_buffer1->physical_address(), t_buffer0->physical_address()+4096);
 
     photon::vDMABuffer* t_buffer2 = target->alloc(4096);
-    ASSERT_EQ(t_buffer2->logical_address(), "2_4096");
-    ASSERT_EQ(t_buffer2->physical_address(), t_buffer1->physical_address()+4096);
+    EXPECT_EQ(t_buffer2->logical_address(), std::make_tuple(2, 4096));
+    EXPECT_EQ(t_buffer2->physical_address(), t_buffer1->physical_address()+4096);
 
     photon::vDMABuffer* i_buffer0 = initiator->map(t_buffer0->logical_address());
-    ASSERT_EQ(i_buffer0->logical_address(), t_buffer0->logical_address());
-    ASSERT_EQ(i_buffer0->buf_size(), t_buffer0->buf_size());
+    EXPECT_EQ(i_buffer0->logical_address(), t_buffer0->logical_address());
+    EXPECT_EQ(i_buffer0->buf_size(), t_buffer0->buf_size());
     char tmp[4096];
     memset(tmp, 0x5F, 4096);
     memcpy(t_buffer0->physical_address(), tmp, 4096);
-    ASSERT_EQ(memcmp(i_buffer0->physical_address(), tmp, 4096), 0);
+    EXPECT_EQ(memcmp(i_buffer0->physical_address(), tmp, 4096), 0);
     memset(tmp, 0x22, 4096);
     memcpy(i_buffer0->physical_address(), tmp, 4096);
-    ASSERT_EQ(memcmp(t_buffer0->physical_address(), tmp, 4096), 0);
+    EXPECT_EQ(memcmp(t_buffer0->physical_address(), tmp, 4096), 0);
 
     initiator->unmap(i_buffer0);
     photon::vDMABuffer* t_buffer3 = target->alloc(4096);
-    ASSERT_EQ(t_buffer3->logical_address(), "3_4096");
+    EXPECT_EQ(t_buffer3->logical_address(), std::make_tuple(3, 4096));
 
     i_buffer0 = initiator->map(t_buffer0->logical_address());
     photon::vDMABuffer* i_buffer1 = initiator->map(t_buffer1->logical_address());
