@@ -130,7 +130,6 @@ private:
     
     size_t unit_;
     int nbuffer_;
-    const int max_retry_ = 10;
 
     photon::mutex mutex_;
     std::vector<vDMABufferImpl*> buffers_;
