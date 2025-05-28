@@ -184,7 +184,7 @@ public:
 
 private:
     vDMABufferAllocator* allocator_;
-    const int max_retry_ = 10000;
+    static const int max_retry_ = 10000;
 };
 
 
