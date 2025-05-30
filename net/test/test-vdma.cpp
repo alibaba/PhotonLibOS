@@ -1,5 +1,5 @@
 #include "../../test/gtest.h"
-#include "../vdma.cpp"
+#include "../vdma/shm.cpp"
 #include <photon/photon.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread11.h>
@@ -7,49 +7,71 @@
 
 #include <vector>
 
+TEST(Buffer, encode_decode) {
+    std::string str;
+    photon::SharedMemoryBuffer::encode_to(str, 111, 222);
+    uint64_t idx, bufsz;
+    photon::SharedMemoryBuffer::decode_from(str, &idx, &bufsz);
+    EXPECT_EQ(111, idx);
+    EXPECT_EQ(222, bufsz);
+}
+
 TEST(Target, basic) {
     photon::vDMATarget* target = photon::new_shm_vdma_target("foo", 65536, 4096);
     DEFER(delete target);
-    photon::vDMAInitiator* initiator= photon::new_shm_vdma_initiator("foo");
+    photon::vDMAInitiator* initiator= photon::new_shm_vdma_initiator("foo", 65536);
     DEFER(delete initiator);
+
+    std::string id_0_4096, id_1_4096, id_2_4096, id_3_4096;
+    photon::SharedMemoryBuffer::encode_to(id_0_4096, 0, 4096);
+    photon::SharedMemoryBuffer::encode_to(id_1_4096, 1, 4096);
+    photon::SharedMemoryBuffer::encode_to(id_2_4096, 2, 4096);
+    photon::SharedMemoryBuffer::encode_to(id_3_4096, 3, 4096);
 
     // in this version, alloc size must same as unit
     photon::vDMABuffer* buffer = target->alloc(512);
     EXPECT_EQ(buffer, nullptr);
     
-    // target alloc, initiator map
+    // target alloc
     photon::vDMABuffer* t_buffer0 = target->alloc(4096);
+    EXPECT_EQ(reinterpret_cast<photon::SharedMemoryBuffer*>(t_buffer0)->idx(), 0);
     EXPECT_EQ(t_buffer0->buf_size(), 4096);
-    EXPECT_EQ(t_buffer0->logical_address(), std::make_tuple(0, 4096));
+    EXPECT_EQ(t_buffer0->id().size(), id_0_4096.size());
+    EXPECT_EQ(memcmp(t_buffer0->id().data(), id_0_4096.data(), id_0_4096.size()), 0);
 
     photon::vDMABuffer* t_buffer1 = target->alloc(4096);
-    EXPECT_EQ(t_buffer1->logical_address(), std::make_tuple(1, 4096));
+    EXPECT_EQ(t_buffer1->id().size(), id_1_4096.size());
+    EXPECT_EQ(memcmp(t_buffer1->id().data(), id_1_4096.data(), id_1_4096.size()), 0);
     EXPECT_EQ(t_buffer1->buf_size(), 4096);
     EXPECT_EQ(t_buffer1->is_valid(), true);
     EXPECT_EQ(t_buffer1->is_registered(), true);
-    EXPECT_EQ(t_buffer1->physical_address(), t_buffer0->physical_address()+4096);
+    EXPECT_EQ(t_buffer1->address(), (char*)t_buffer0->address()+4096);
 
     photon::vDMABuffer* t_buffer2 = target->alloc(4096);
-    EXPECT_EQ(t_buffer2->logical_address(), std::make_tuple(2, 4096));
-    EXPECT_EQ(t_buffer2->physical_address(), t_buffer1->physical_address()+4096);
+    EXPECT_EQ(t_buffer2->id().size(), id_2_4096.size());
+    EXPECT_EQ(memcmp(t_buffer2->id().data(), id_2_4096.data(), id_2_4096.size()), 0);
+    EXPECT_EQ(t_buffer2->address(), (char*)t_buffer1->address()+4096);
 
-    photon::vDMABuffer* i_buffer0 = initiator->map(t_buffer0->logical_address());
-    EXPECT_EQ(i_buffer0->logical_address(), t_buffer0->logical_address());
+    // initiator map
+    photon::vDMABuffer* i_buffer0 = initiator->map(t_buffer0->id());
     EXPECT_EQ(i_buffer0->buf_size(), t_buffer0->buf_size());
+    EXPECT_EQ(i_buffer0->id().size(), t_buffer0->id().size());
+    EXPECT_EQ(memcmp(i_buffer0->id().data(), t_buffer0->id().data(), 16), 0);
+
     char tmp[4096];
     memset(tmp, 0x5F, 4096);
-    memcpy(t_buffer0->physical_address(), tmp, 4096);
-    EXPECT_EQ(memcmp(i_buffer0->physical_address(), tmp, 4096), 0);
+    memcpy(t_buffer0->address(), tmp, 4096);
+    EXPECT_EQ(memcmp(i_buffer0->address(), tmp, 4096), 0);
     memset(tmp, 0x22, 4096);
-    memcpy(i_buffer0->physical_address(), tmp, 4096);
-    EXPECT_EQ(memcmp(t_buffer0->physical_address(), tmp, 4096), 0);
+    memcpy(i_buffer0->address(), tmp, 4096);
+    EXPECT_EQ(memcmp(t_buffer0->address(), tmp, 4096), 0);
 
     initiator->unmap(i_buffer0);
     photon::vDMABuffer* t_buffer3 = target->alloc(4096);
-    EXPECT_EQ(t_buffer3->logical_address(), std::make_tuple(3, 4096));
+    EXPECT_EQ(t_buffer3->id(), id_3_4096);
 
-    i_buffer0 = initiator->map(t_buffer0->logical_address());
-    photon::vDMABuffer* i_buffer1 = initiator->map(t_buffer1->logical_address());
+    i_buffer0 = initiator->map(t_buffer0->id());
+    photon::vDMABuffer* i_buffer1 = initiator->map(t_buffer1->id());
 
     initiator->unmap(i_buffer0);
     initiator->unmap(i_buffer1);
@@ -62,7 +84,7 @@ TEST(Target, basic) {
 
 void func1(photon::vDMATarget* target, int id) {
     auto buf = target->alloc(4096);
-    LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::vDMABufferImpl*>(buf)->idx());
+    LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::SharedMemoryBuffer*>(buf)->idx());
     photon::thread_sleep(1);
     target->dealloc(buf);
     LOG_INFO("thread ", id, " release buf");
@@ -92,7 +114,7 @@ void func2(photon::vDMATarget* target, int id) {
         for (int j=0; j<10; j++) {
             photon::thread_yield();
         }
-        stats[reinterpret_cast<photon::vDMABufferImpl*>(buf)->idx()] += 1;
+        stats[reinterpret_cast<photon::SharedMemoryBuffer*>(buf)->idx()] += 1;
         target->dealloc(buf);
     }
     std::string output;
@@ -117,7 +139,7 @@ TEST(Target, single_vcpu_multi_thread_alloc_2) {
 void func3(photon::vDMATarget* target, int id) {
     auto buf = target->alloc(4096);
     if (buf) {
-        LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::vDMABufferImpl*>(buf)->idx());
+        LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::SharedMemoryBuffer*>(buf)->idx());
         photon::thread_sleep(10);
         target->dealloc(buf);
         LOG_INFO("thread ", id, " release buf");
@@ -147,7 +169,7 @@ TEST(Target, single_vcpu_multi_thread_alloc_3) {
 void func4(photon::vDMATarget* target, int id) {
     auto buf = target->alloc(4096);
     if (buf) {
-        LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::vDMABufferImpl*>(buf)->idx());
+        LOG_INFO("thread ", id, " get buf ", reinterpret_cast<photon::SharedMemoryBuffer*>(buf)->idx());
         photon::thread_usleep(1);
         target->dealloc(buf);
         LOG_INFO("thread ", id, " release buf");
@@ -184,7 +206,7 @@ TEST(Target, multi_vcpu_multi_thread) {
         wp.async_call(new auto ([&]{
             auto buf = target->alloc(4096);
             if (buf) {
-                int buf_idx = reinterpret_cast<photon::vDMABufferImpl*>(buf)->idx();
+                int buf_idx = reinterpret_cast<photon::SharedMemoryBuffer*>(buf)->idx();
                 LOG_INFO("task ", i, " get buf ", buf_idx);
                 photon::thread_usleep(1);
                 target->dealloc(buf);
