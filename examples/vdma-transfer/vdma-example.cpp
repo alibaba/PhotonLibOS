@@ -1,8 +1,16 @@
 #include <photon/photon.h>
 #include <photon/common/alog.h>
-#include <photon/io/vdma.h>
+#include <photon/net/vdma.h>
 
 #include <string>
+#include <iomanip>
+#include <sstream>
+std::string ptr_to_hex_string(void* ptr) {
+    std::stringstream ss;
+    ss << "0x" << std::hex << std::setfill('0') << std::setw(sizeof(void*) * 2)
+       << reinterpret_cast<uint64_t>(ptr);
+    return ss.str();
+}
 
 int main() {
     photon::init();
@@ -16,29 +24,28 @@ int main() {
     // map shm to local addr space, and new a allocator to manage it
     auto target = photon::new_shm_vdma_target(shm_name.c_str(), shm_size, unit);
     // (2) create a initiator (has data)
-    auto initiator = photon::new_shm_vdma_initiator(shm_name.c_str());
+    auto initiator = photon::new_shm_vdma_initiator(shm_name.c_str(), shm_size);
     // (3) target alloc a shared memory buffer
     auto t_buffer = target->alloc(unit);
-    auto physical_addr = std::to_string((uint64_t)t_buffer->physical_address());
-    auto logical_addr = t_buffer->logical_address();
-    LOG_INFO("step3: shared memory buffer logical addr is ", std::get<0>(logical_addr), " ", std::get<1>(logical_addr),
-             ", physical addr is ", physical_addr.data());
+    auto addr = ptr_to_hex_string(t_buffer->address());
+    auto id = t_buffer->id();
+    LOG_INFO("step3: shared memory buffer real address is ", addr.data());
     size_t want_data_size = 4096;
     off_t want_data_offset = 0;
     // (4) target send a request msg to initiator, tell initiator: logical addr + want which data
     // (5) initiator use the logical addr map shm to its local addr space
-    auto i_buffer = initiator->map(logical_addr);
+    auto i_buffer = initiator->map(id);
     // (6) initiator copy corresponding data
     char thedata[4096];
     memset(thedata, 0x22, 4096);
-    memcpy(i_buffer->physical_address() + want_data_offset, thedata, want_data_size);
+    memcpy((char*)i_buffer->address() + want_data_offset, thedata, want_data_size);
     // (7) initiator single-side write
     initiator->write(i_buffer, want_data_size, want_data_offset);
     // (8) initiator unmap the shm buffer
     initiator->unmap(i_buffer);
     // (9) initiator send a response msg to target, tell target: transfer done
     // (10) target check data
-    uint8_t* ptr = (uint8_t*)(t_buffer->physical_address() + want_data_offset);
+    uint8_t* ptr = (uint8_t*)((char*)t_buffer->address() + want_data_offset);
     for (size_t i=0; i<want_data_size; i++) {
         if (ptr[i] != 0x22) {
             LOG_ERROR("failed, not same at ", i, "want ", 0x22, ", now ", ptr[i]);

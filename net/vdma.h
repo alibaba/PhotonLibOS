@@ -3,20 +3,23 @@
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
 #include <unistd.h>
-#include <tuple>
 
 namespace photon {
 
+enum vDMABufferType {
+    kSharedMem
+};
+
 class vDMABuffer {
 public:
-    // transportable logical address for buffer
-    // both initialtor and target able to translate to physical address
-    // logical address does not have to be a visible string
+    // transportable identity for buffer
+    // both initialtor and target able to translate id to `real` address
+    // id haven't to be a visible string
     // just simple binary serialized address
-    virtual std::tuple<int, size_t> logical_address() const = 0;
+    virtual std::string_view id() const = 0;
 
-    // physical address for buffer, as memory pointer
-    virtual char* physical_address() const = 0;
+    // `real` address of buffer (memory pointer)
+    virtual void* address() const = 0;
 
     // size of buffer
     virtual size_t buf_size() const = 0;
@@ -31,7 +34,8 @@ public:
     virtual bool is_valid() const = 0;
 
 protected:
-    // vDMABuffer cannot be destroyed using `delete`
+    // vDMABuffer cannot be destroyed using `delete` by user
+    // vDMABuffer's Instance will be free by Target and Initiator
     virtual ~vDMABuffer() {}
 };
 
@@ -48,7 +52,7 @@ public:
     // Make allocated memory as vDMA blocks
     // maybe not implemented in some certian targets
     // nullptr as failure
-    virtual vDMABuffer* register_memory(char* buf, size_t size) = 0;
+    virtual vDMABuffer* register_memory(void* buf, size_t size) = 0;
 
     // Unregister vDMABuffer, which is registered by register_memory
     // maybe not implemented in some certian targets
@@ -58,8 +62,8 @@ public:
 
 class vDMAInitiator : public Object {
 public:
-    // map logical address to vDMABuffer
-    virtual vDMABuffer* map(std::tuple<int, size_t> logical_address) = 0;
+    // map id to vDMABuffer
+    virtual vDMABuffer* map(std::string_view id) = 0;
 
     // unmap vDMABuffer
     virtual int unmap(vDMABuffer* buffer) = 0;
@@ -74,6 +78,6 @@ public:
 };
 
 vDMATarget* new_shm_vdma_target(const char* shm_name, size_t shm_size, size_t unit);
-vDMAInitiator* new_shm_vdma_initiator(const char* shm_name);
+vDMAInitiator* new_shm_vdma_initiator(const char* shm_name, size_t shm_size);
 
 }  // namespace photon
