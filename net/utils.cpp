@@ -72,7 +72,7 @@ IPAddr gethostbypeer(std::string_view domain) {
     return gethostbypeer(remote);
 }
 
-int _gethostbyname(std::string_view name, Delegate<int, IPAddr> append_op) {
+int _gethostbyname(std::string_view name, Callback<IPAddr> append_op) {
     if (name.empty()) return -1;
     addrinfo* result = nullptr;
     addrinfo hints = {};
