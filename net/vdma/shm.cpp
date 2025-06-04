@@ -137,14 +137,23 @@ private:
 
 class SharedMemoryBufferAllocator {
 public:
-    SharedMemoryBufferAllocator(const char* shm_name, size_t shm_size, size_t unit)
-    :
-    shm_name_(shm_name), shm_size_(shm_size), unit_(unit)
-    {
+    SharedMemoryBufferAllocator() : shm_name_(""), shm_size_(0), unit_(0), is_inited_(false) {}
+
+    int init(const char* shm_name, size_t shm_size, size_t unit) {
+        SCOPED_LOCK(mutex_);
+        if (is_inited_) {
+            LOG_ERROR("SharedMemoryBufferAllocator: already init");
+            return -1;
+        }
+
+        shm_name_.assign(shm_name);
+        shm_size_ = shm_size;
+        unit_ = unit;
+
         shm_fd_ = shm_open(shm_name, O_RDWR | O_CREAT, 0666);
         if (shm_fd_ < 0) {
-            LOG_ERROR("SharedMemoryBufferAllocator::Construct, shm_open failed");
-            return;
+            LOG_ERROR("SharedMemoryBufferAllocator::init, shm_open failed");
+            return -1;
         }
         LOG_INFO("SharedMemoryBufferAllocator: shm_fd=", shm_fd_, ", shm_size=", shm_size_, ", unit=", unit_);
 
@@ -153,7 +162,7 @@ public:
         if (!shm_begin_ptr_) {
             LOG_ERROR("SharedMemoryBufferAllocator, mmap failed");
             close(shm_fd_);
-            return;
+            return -1;
         }
 
         nbuffer_ = shm_size_ / unit_;
@@ -165,21 +174,27 @@ public:
         for (size_t i=0; i<nbuffer_; i++) {
             buffers_[i] = new SharedMemoryBuffer(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem);
         }
+
+        is_inited_ = true;  // allocator init success
+
         LOG_INFO("SharedMemoryBufferAllocator: complete");
+        return 0;
     }
 
     ~SharedMemoryBufferAllocator() {
         SCOPED_LOCK(mutex_);
-        for (size_t i=0; i<nbuffer_; i++) {
-            SharedMemoryBuffer* buf = buffers_[i];
-            if (buf) delete buf;
+        if (is_inited_) {
+            for (size_t i=0; i<nbuffer_; i++) {
+                SharedMemoryBuffer* buf = buffers_[i];
+                if (buf) delete buf;
+            }
+            if (shm_begin_ptr_) {
+                munmap(shm_begin_ptr_, shm_size_);
+            }
+            if (shm_fd_ >= 0) {
+                close(shm_fd_);
+            }
         }
-        if (shm_begin_ptr_) {
-            munmap(shm_begin_ptr_, shm_size_);
-        }
-        if (shm_fd_ >= 0) {
-            close(shm_fd_);
-        } 
     }
 
     vDMABuffer* alloc_one() {
@@ -213,33 +228,33 @@ private:
     photon::mutex mutex_;
     std::vector<SharedMemoryBuffer*> buffers_;
     std::vector<bool> used_mark_;
+
+    bool is_inited_;
 };
 
 class SharedMemoryTarget : public vDMATarget {
 public:
     SharedMemoryTarget(const char* shm_name, size_t shm_size, size_t unit) {
-        allocator_ = new SharedMemoryBufferAllocator(shm_name, shm_size, unit);
-    }
-
-    ~SharedMemoryTarget() {
-        if (allocator_) {
-            delete allocator_;
+        if (allocator_.init(shm_name, shm_size, unit) != 0) {
+            LOG_ERROR("SharedMemoryTarget::init, allocator init failed");
         }
     }
 
+    ~SharedMemoryTarget() {}
+
     vDMABuffer* alloc(size_t size) override {
-        if (size != allocator_->unit()) {
-            LOG_ERROR("current allocator only support ", allocator_->unit(), ", you ", size);
+        if (size != allocator_.unit()) {
+            LOG_ERROR("current allocator only support ", allocator_.unit(), ", you ", size);
             return nullptr;
         }
 
         vDMABuffer* buf = nullptr;
-        buf = allocator_->alloc_one();
+        buf = allocator_.alloc_one();
 
         int retry_count = 0;
         while (!buf && retry_count < max_retry_) {
             thread_yield();
-            buf = allocator_->alloc_one();
+            buf = allocator_.alloc_one();
             retry_count++;
         }
 
@@ -247,7 +262,7 @@ public:
     }
 
     int dealloc(vDMABuffer* buf) override {
-        return allocator_->free_one(buf);
+        return allocator_.free_one(buf);
     }
 
     vDMABuffer* register_memory(void* buf, size_t size) override {
@@ -262,7 +277,7 @@ public:
 
 private:
     // allocator_ has the mutex lock
-    SharedMemoryBufferAllocator* allocator_;
+    SharedMemoryBufferAllocator allocator_;
     static const int max_retry_ = 10000;
 };
 
