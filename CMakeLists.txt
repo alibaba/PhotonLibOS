@@ -215,9 +215,9 @@ if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
     file(GLOB CACHE_SRC 
-        cache/*.cpp
-        cache/full_file_cache/*.cpp 
-        cache/persistent_cache/*.cpp
+        fs/cache/*.cpp
+        fs/cache/full_file_cache/*.cpp 
+        fs/cache/persistent_cache/*.cpp
     )
     list(APPEND PHOTON_SRC
         io/aio-wrapper.cpp
@@ -253,7 +253,7 @@ if (NOT ${PHOTON_ENABLE_LIBCURL})
     list(REMOVE_ITEM PHOTON_SRC net/curl.cpp fs/httpfs/httpfs.cpp)
 endif ()
 if (PHOTON_BUILD_OCF_CACHE)
-    add_subdirectory(cache/ocf_cache)
+    add_subdirectory(fs/cache/ocf_cache)
 endif()
 
 
@@ -446,7 +446,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(thread/test)
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
-        add_subdirectory(cache/test)
+        add_subdirectory(fs/cache/test)
     endif()
     if (PHOTON_ENABLE_ECOSYSTEM)
         add_subdirectory(ecosystem/test)

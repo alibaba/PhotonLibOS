@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/fs/forwardfs.h>
 #include <photon/fs/virtual-file.h>
 #include <photon/common/alog-stdstring.h>
-#include <photon/cache/cache.h>
+#include <photon/fs/cache/cache.h>
 #include "ocf_namespace.h"
 #include "photon_bindings/provider.h"
 
