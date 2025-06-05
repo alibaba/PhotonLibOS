@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <photon/cache/cache.h>
+#include <photon/fs/cache/cache.h>
 #include <photon/common/alog.h>
 #include <photon/common/io-alloc.h>
 #include <photon/common/iovector.h>
 #include <photon/common/string_view.h>
 #include <photon/fs/filesystem.h>
 #include <photon/fs/range-split.h>
-#include <photon/cache/pool_store.h>
+#include <photon/fs/cache/pool_store.h>
 
 namespace photon {
 namespace fs {

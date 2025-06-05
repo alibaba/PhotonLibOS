@@ -32,7 +32,7 @@ limitations under the License.
 #include <photon/fs/aligned-file.h>
 #include <photon/thread/thread.h>
 #include <photon/common/io-alloc.h>
-#include <photon/cache/cache.h>
+#include <photon/fs/cache/cache.h>
 #include "random_generator.h"
 
 namespace photon {
