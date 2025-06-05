@@ -27,7 +27,7 @@
 #include <photon/common/io-alloc.h>
 #include <photon/common/expirecontainer.h>
 #include <photon/common/range-lock.h>
-#include <photon/cache/cache.h>
+#include <photon/fs/cache/cache.h>
 
 #define SET_LOCAL_DIR 118
 #define SET_SIZE 119

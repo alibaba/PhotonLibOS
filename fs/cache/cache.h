@@ -20,7 +20,7 @@ limitations under the License.
 #include <stdlib.h>
 #include <fcntl.h>
 #include <photon/fs/filesystem.h>
-#include <photon/cache/pool_store.h>
+#include <photon/fs/cache/pool_store.h>
 
 #define O_WRITE_THROUGH 0x01000000 // write backing store and cache
 #define O_WRITE_AROUND 0x02000000  // write backing store only, default

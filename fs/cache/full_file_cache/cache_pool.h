@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/thread/timer.h>
 #include <photon/common/string-keyed.h>
 #include "../policy/lru.h"
-#include <photon/cache/pool_store.h>
+#include <photon/fs/cache/pool_store.h>
 
 #include <photon/fs/filesystem.h>
 
