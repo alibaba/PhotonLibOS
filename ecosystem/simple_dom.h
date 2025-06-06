@@ -140,7 +140,8 @@ const int DOC_TYPE_MASK = 0xff;
 
 const int DOC_FREE_TEXT_IF_PARSING_FAILED   = 0x100;
 const int DOC_FREE_TEXT_ON_DESTRUCTION      = 0x200;
-const int DOC_OWN_TEXT                      = 0x300;
+const int DOC_OWN_TEXT                      = DOC_FREE_TEXT_IF_PARSING_FAILED |
+                                              DOC_FREE_TEXT_ON_DESTRUCTION;
 
 using Document = Node;
 
@@ -153,10 +154,12 @@ Node parse(char* text, size_t size, int flags);
 inline Node parse(IStream::ReadAll&& buf, int flags) {
     if (!buf.ptr || buf.size <= 0) return nullptr;
     auto node = parse((char*)buf.ptr.get(), (size_t)buf.size, flags);
-    if (node || (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) {
+    if (node) {
+        buf.ptr.release();
+    } else if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) {
         buf.ptr.reset();
-        buf.size = 0;
     }
+    buf.size = 0;
     return node;
 }
 
@@ -196,26 +199,19 @@ inline auto Node::enumerable_children() const ->
 }
 
 struct Node::SameKeyEnumerator : public Node::ChildrenEnumerator {
-    const char* _base;
-    str _key;
+    const char* _base = nullptr;
     SameKeyEnumerator(const NodeImpl* node) {
-        _impl = node;
-        if (node) {
+        if ((_impl = node)) {
             _base = node->get_root()->_text_begin;
-            _key = node->get_key(_base);
-        } else {
-            _base = nullptr;
-            assert(_key.empty());
         }
     }
     int next() {
-        if (!valid()) return -1;
-        _impl = _impl->next_sibling();
-        if (!valid()) return -1;
-        if (_impl->get_key(_base) != _key) {
-            _impl = nullptr;
-            return -1;
-        }
+        if (!valid() || (_impl->_flags & NodeImpl::FLAG_EQUAL_KEY_LAST)) return -1;
+        auto key = _impl->get_key(_base);
+        do {
+            _impl = _impl->next_sibling();
+            if (!valid()) return -1;
+        } while (key != _impl->get_key(_base));
         return 0;
     }
 };
