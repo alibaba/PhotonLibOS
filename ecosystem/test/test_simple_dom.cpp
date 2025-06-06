@@ -53,6 +53,7 @@ const static char xml[] = R"(
       <DisplayName>1305433xxx</DisplayName>
     </Owner>
   </Contents>
+  <asdf>asdf</asdf>
   <Contents>
     <Key>test100.txt</Key>
     <LastModified>2020-05-26T07:50:20.000Z</LastModified>
@@ -141,15 +142,9 @@ TEST(simple_dom, oss_list) {
     string marker;
     do_list_object("", list, &marker);
     static ObjectList truth = {
-        {0, DT_REG, "test100.txt", 1, false},
         {0, DT_REG, "test10.txt",  1, false},
+        {0, DT_REG, "test100.txt", 1, false},
     };
-    using T = decltype(truth[0]);
-    auto cmp = [](T& a, T& b) {
-        return std::get<2>(a) < std::get<2>(b);
-    };
-    std::sort(truth.begin(), truth.end(), cmp);
-    std::sort(list.begin(),  list.end(),  cmp);
     EXPECT_EQ(list, truth);
     EXPECT_EQ(marker, "test100.txt");
 }
