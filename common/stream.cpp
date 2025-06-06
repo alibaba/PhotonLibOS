@@ -27,11 +27,14 @@ IStream::ReadAll IStream::readall(size_t max_buf, size_t min_buf) {
                 buf.size = -buf.size;
                 LOG_ERROR_RETURN(ENOBUFS, buf, "content size in stream exceeds upper limit ", max_buf);
             }
-            auto ptr = realloc(buf.ptr.get(), capacity *= 2);
+            capacity *= 2;
+            if ((size_t) capacity > max_buf) capacity = max_buf;
+            auto ptr = realloc(buf.ptr.get(), capacity);
             if (!ptr) {
                 buf.size = -buf.size;
                 LOG_ERROR_RETURN(ENOBUFS, buf, "failed to realloc(`)", capacity);
             }
+            buf.ptr.release();
             buf.ptr.reset(ptr);
         }
     }
