@@ -57,7 +57,7 @@ jobs:
         set -x
         git checkout ${{steps.branch_info.outputs.NEXT_BRANCH}}
         git checkout -b ${{steps.create_branch.outputs.PRBRANCH}}
-        TITLE=$(git log --format="| %s" ${{ github.event.commits[0].id }}~..${{ github.event.after }} | xargs)
+        TITLE=$(git log --format="| %s" ${{ github.event.commits[0].id }}~..${{ github.event.after }} | xargs -0)
         echo "TITLE=$TITLE" >> $GITHUB_OUTPUT
         echo "MESSAGE<<__EOF" >> $GITHUB_OUTPUT
         git log --format="> %B" ${{ github.event.commits[0].id }}~..${{ github.event.after }} >> $GITHUB_OUTPUT
