@@ -89,12 +89,12 @@ public:
     Node operator[](const char* key) const  { return get(key); }
     Node operator[](size_t i) const { return get(i); }
     Node get_attributes() const     { return get("__attributes__"); }
-    str to_string() const           { return value(); }
+    str to_string_view() const      { return value(); }
     #undef IF_RET
-    int64_t to_integer(int64_t def_val = 0) const {
+    int64_t to_int64_t(int64_t def_val = 0) const {
         return value().to_int64(def_val);
     }
-    double to_number(double def_val = NAN) const {
+    double to_double(double def_val = NAN) const {
         return value().to_double(def_val);
     }
 
@@ -105,19 +105,19 @@ public:
     bool operator>=(str rhs) const { return value() >= rhs; }
     bool operator> (str rhs) const { return value() >  rhs; }
 
-    bool operator==(int64_t rhs) const { return to_integer() == rhs; }
-    bool operator!=(int64_t rhs) const { return to_integer() != rhs; }
-    bool operator<=(int64_t rhs) const { return to_integer() <= rhs; }
-    bool operator< (int64_t rhs) const { return to_integer() <  rhs; }
-    bool operator>=(int64_t rhs) const { return to_integer() >= rhs; }
-    bool operator> (int64_t rhs) const { return to_integer() >  rhs; }
+    bool operator==(int64_t rhs) const { return to_int64_t() == rhs; }
+    bool operator!=(int64_t rhs) const { return to_int64_t() != rhs; }
+    bool operator<=(int64_t rhs) const { return to_int64_t() <= rhs; }
+    bool operator< (int64_t rhs) const { return to_int64_t() <  rhs; }
+    bool operator>=(int64_t rhs) const { return to_int64_t() >= rhs; }
+    bool operator> (int64_t rhs) const { return to_int64_t() >  rhs; }
 
-    bool operator==(double rhs) const { return to_number() == rhs; }
-    bool operator!=(double rhs) const { return to_number() != rhs; }
-    bool operator<=(double rhs) const { return to_number() <= rhs; }
-    bool operator< (double rhs) const { return to_number() <  rhs; }
-    bool operator>=(double rhs) const { return to_number() >= rhs; }
-    bool operator> (double rhs) const { return to_number() >  rhs; }
+    bool operator==(double rhs) const { return to_double() == rhs; }
+    bool operator!=(double rhs) const { return to_double() != rhs; }
+    bool operator<=(double rhs) const { return to_double() <= rhs; }
+    bool operator< (double rhs) const { return to_double() <  rhs; }
+    bool operator>=(double rhs) const { return to_double() >= rhs; }
+    bool operator> (double rhs) const { return to_double() >  rhs; }
 
     struct SameKeyEnumerator;
     auto enumerable_same_key_siblings() const ->
