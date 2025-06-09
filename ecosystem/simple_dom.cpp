@@ -10,6 +10,7 @@
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/utility.h>
+#include <photon/common/estring.h>
 #include <photon/common/stream.h>
 #include <photon/common/retval.h>
 #include <photon/fs/localfs.h>
@@ -334,8 +335,82 @@ static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
     return root;
 }
 
+class IniNode : public DocNode<IniNode> {
+public:
+    using DocNode<IniNode>::DocNode;
+};
+
+using ini_handler = void (*)(void*, estring_view, estring_view, estring_view);
+static int do_parse_ini(estring_view text, ini_handler h, void* user) {
+    int err_cnt = 0;
+    estring_view section;
+    for (auto line: text.split_lines()) {
+        auto comment = line.rfind(" ;");
+        if (comment < line.size())
+            line = line.substr(0, comment);
+        line = line.trim();
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line[0] == '[') {
+            if (line.back() == ']') {
+                section = line.substr(1, line.size() - 2).trim();
+            } else {
+                err_cnt++;
+                LOG_DEBUG("section with no ending: ", line);
+            }
+        } else {
+            auto eq = line.find_first_of(charset("=:"));
+            if (eq > 0 && eq < line.size() - 1) {
+                auto key = line.substr(0, eq).trim();
+                auto val = line.substr(eq + 1).trim();
+                h(user, section, key, val);
+            } else {
+                err_cnt++;
+                LOG_DEBUG("ill formed kv: ", line);
+            }
+        }
+    }
+    return -err_cnt;
+}
+
 static NodeImpl* parse_ini(char* text, size_t size, int flags) {
-    return nullptr;
+    struct Item {
+        estring_view section, key, val;
+        bool operator < (const Item& rhs) const {
+            return section < rhs.section;
+        }
+    };
+    vector<Item> ctx;
+    auto handler = [](void* user, estring_view section,
+                estring_view key, estring_view val) {
+        auto ctx = (vector<Item>*)user;
+        ctx->push_back({section, key, val});
+        LOG_DEBUG(VALUE(section), VALUE(key), VALUE(val));
+    };
+    int ret = do_parse_ini({text, size}, handler, &ctx);
+    if (ret < 0 && ctx.empty())
+        LOG_ERROR_RETURN(-1, nullptr, "ini_parse_string_length() failed: ", ret);
+
+    sort(ctx.begin(), ctx.end());
+    vector<IniNode> sections, nodes;
+    estring_view prev_sect;
+    auto root = new IniNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    for (auto& x : ctx) {
+        if (prev_sect != x.section) {
+            prev_sect  = x.section;
+            if (!nodes.empty() && !sections.empty()) {
+                sections.back().set_children(std::move(nodes));
+                assert(nodes.empty());
+            }
+            sections.emplace_back(x.section, str{}, root);
+        }
+        nodes.emplace_back(x.key, x.val, root);
+    }
+    if (!sections.empty()) {
+        if (!nodes.empty())
+            sections.back().set_children(std::move(nodes));
+        root->set_children(std::move(sections));
+    }
+    return root;
 }
 
 Node parse(char* text, size_t size, int flags) {

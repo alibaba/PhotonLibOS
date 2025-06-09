@@ -11,6 +11,7 @@ endif()
 # Rapidjson
 FetchContent_Declare(
     rapidjson
+    GIT_SUBMODULES ""
     GIT_REPOSITORY ${PHOTON_RAPIDJSON_GIT}
     GIT_TAG v1.1.0
     PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidjson.patch
