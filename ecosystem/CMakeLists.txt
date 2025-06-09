@@ -3,7 +3,7 @@
 
 include(FetchContent)
 
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0") 
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
     # set DOWNLOAD_EXTRACT_TIMESTAMP ON cmake 3.24 or above
     cmake_policy(SET CMP0135 NEW)
 endif()
@@ -11,6 +11,7 @@ endif()
 # Rapidjson
 FetchContent_Declare(
     rapidjson
+    GIT_SUBMODULES ""
     GIT_REPOSITORY ${PHOTON_RAPIDJSON_GIT}
     GIT_TAG v1.1.0
     PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidjson.patch
