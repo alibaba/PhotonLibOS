@@ -38,7 +38,7 @@ The `io_engine` will setup ancillary threads running in the background, if neces
 - `event_engine` Supported types are:
 	
 	- `INIT_EVENT_NONE` None, only used in test.
-	- `INIT_EVENT_DEFAULT` It will first try `io_uring`, then choose `epoll` if io_uring failed.
+	- `INIT_EVENT_DEFAULT` The default engine in Linux is `epoll`, and the one in macOS is `kqueue`.
 	- `INIT_EVENT_EPOLL`
 	- `INIT_EVENT_IOURING`
 	- `INIT_EVENT_KQUEUE` Only avalaible on macOS or FreeBSD.
