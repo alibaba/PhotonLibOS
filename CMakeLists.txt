@@ -59,13 +59,13 @@ if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${
 endif ()
 
 # Global compile options, only effective within this project
-set(global_compile_options "-Wall -Wno-error=pragmas")
-if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # Hint: -faligned-new is enabled by default after -std=c++17
-    set(global_compile_options "${global_compile_options} -Werror -faligned-new")
-endif ()
+set(global_compile_options "-Werror -Wall -Wno-error=pragmas")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${global_compile_options}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${global_compile_options}")
+if (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
+    # Hint: -faligned-new is enabled by default after -std=c++17
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faligned-new")
+endif ()
 
 if (PHOTON_BUILD_WITH_ASAN)
     if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
@@ -82,6 +82,9 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
 set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
+set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
+set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -91,21 +94,13 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 if (${ARCH} STREQUAL x86_64)
-    # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
-endif ()
-
-if (${ARCH} STREQUAL x86_64)
     check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
     if (COMPILER_HAS_MCRC32_FLAG)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
     endif ()
+elseif (${ARCH} STREQUAL aarch64)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
 endif ()
-
-set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
-set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
-set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 
 # Default build type is Release
 if (NOT CMAKE_BUILD_TYPE)
