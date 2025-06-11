@@ -1,6 +1,8 @@
 #include "photon/net/vdma.h"
 
 #include <photon/common/alog.h>
+#include <photon/common/string-keyed.h>
+#include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 
 #include <unistd.h>
@@ -137,13 +139,12 @@ private:
 
 class SharedMemoryBufferAllocator {
 public:
-    SharedMemoryBufferAllocator() : shm_name_(""), shm_size_(0), unit_(0), is_inited_(false) {}
+    SharedMemoryBufferAllocator() : shm_size_(0), unit_(0), is_inited_(false) {}
 
     int init(const char* shm_name, size_t shm_size, size_t unit) {
         SCOPED_LOCK(mutex_);
         if (is_inited_) {
-            LOG_ERROR("SharedMemoryBufferAllocator: already init");
-            return -1;
+            LOG_ERROR_RETURN(0, -1, "SharedMemoryBufferAllocator: already init");
         }
 
         shm_name_.assign(shm_name);
@@ -152,10 +153,9 @@ public:
 
         shm_fd_ = shm_open(shm_name, O_RDWR | O_CREAT, 0666);
         if (shm_fd_ < 0) {
-            LOG_ERROR("SharedMemoryBufferAllocator::init, shm_open failed");
-            return -1;
+            LOG_ERROR_RETURN(0, -1, "SharedMemoryBufferAllocator::init, shm_open failed");
         }
-        LOG_INFO("SharedMemoryBufferAllocator: shm_fd=", shm_fd_, ", shm_size=", shm_size_, ", unit=", unit_);
+        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(shm_fd_), VALUE(shm_size_), VALUE(unit_));
 
         ftruncate(shm_fd_, shm_size_);
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
@@ -167,12 +167,11 @@ public:
 
         nbuffer_ = shm_size_ / unit_;
         used_mark_.resize(nbuffer_);
-        buffers_.resize(nbuffer_);
-        LOG_INFO("SharedMemoryBufferAllocator: shm_begin_ptr=", shm_begin_ptr_, ", nbuffer=", nbuffer_);
-        LOG_INFO("SharedMemoryBufferAllocator: used_mark.size=", used_mark_.size(), ", buffers.size=", buffers_.size());
+        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(shm_begin_ptr_), VALUE(nbuffer_));
+        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(used_mark_.size()), VALUE(buffers_.size()));
         
         for (size_t i=0; i<nbuffer_; i++) {
-            buffers_[i] = new SharedMemoryBuffer(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem);
+            buffers_.emplace_back(SharedMemoryBuffer(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem));
         }
 
         is_inited_ = true;  // allocator init success
@@ -184,10 +183,6 @@ public:
     ~SharedMemoryBufferAllocator() {
         SCOPED_LOCK(mutex_);
         if (is_inited_) {
-            for (size_t i=0; i<nbuffer_; i++) {
-                SharedMemoryBuffer* buf = buffers_[i];
-                if (buf) delete buf;
-            }
             if (shm_begin_ptr_) {
                 munmap(shm_begin_ptr_, shm_size_);
             }
@@ -202,7 +197,7 @@ public:
         for (size_t i=0; i<nbuffer_; i++) {
             if (!used_mark_[i]) {
                 used_mark_[i] = true;
-                return buffers_[i];
+                return &buffers_[i];
             }
         }
         return nullptr;
@@ -226,7 +221,7 @@ private:
     size_t nbuffer_;
 
     photon::mutex mutex_;
-    std::vector<SharedMemoryBuffer*> buffers_;
+    std::vector<SharedMemoryBuffer> buffers_;
     std::vector<bool> used_mark_;
 
     bool is_inited_;
@@ -234,13 +229,9 @@ private:
 
 class SharedMemoryTarget : public vDMATarget {
 public:
-    SharedMemoryTarget(const char* shm_name, size_t shm_size, size_t unit) {
-        if (allocator_.init(shm_name, shm_size, unit) != 0) {
-            LOG_ERROR("SharedMemoryTarget::init, allocator init failed");
-        }
+    int init(const char* shm_name, size_t shm_size, size_t unit) {
+        return allocator_.init(shm_name, shm_size, unit);
     }
-
-    ~SharedMemoryTarget() {}
 
     vDMABuffer* alloc(size_t size) override {
         if (size != allocator_.unit()) {
@@ -308,10 +299,6 @@ public:
         if (buf_map_.size() > 0) {
             LOG_ERROR("SharedMemoryInitiator::Destruct, buf_map_ is not empty, some user not unmap, below force delete and unmap");
         }
-        for (auto& it : buf_map_) {
-            SharedMemoryBuffer* buf = it.second;
-            if (buf) delete buf;
-        }
         if (shm_begin_ptr_) {
             munmap(shm_begin_ptr_, shm_size_);
         }
@@ -322,14 +309,13 @@ public:
 
     vDMABuffer* map(std::string_view id) override {
         SCOPED_LOCK(mutex_);
-        std::string key(id.data(), id.size());
-        auto it = buf_map_.find(key);
+        auto it = buf_map_.find(id);
         if (it == buf_map_.end()) {
-            SharedMemoryBuffer* buf = new SharedMemoryBuffer(key, shm_begin_ptr_, vDMABufferType::kSharedMem);
-            buf_map_.emplace(key, buf);
+            SharedMemoryBuffer* buf = new SharedMemoryBuffer(id, shm_begin_ptr_, vDMABufferType::kSharedMem);
+            buf_map_.emplace(id, buf);
             return buf;
         }
-        LOG_ERROR("used, map failed: ", key.c_str());
+        LOG_ERROR("used, map failed: ", id.data());
         return nullptr;
     }
 
@@ -338,9 +324,7 @@ public:
         std::string key(buffer->id().data(), buffer->id().size());
         auto it = buf_map_.find(key);
         if (it != buf_map_.end()) {
-            SharedMemoryBuffer* buf = it->second;
             buf_map_.erase(it);
-            delete buf;
             return 0;
         }
         LOG_ERROR("not used, unmap failed: ", key.c_str());
@@ -364,11 +348,11 @@ private:
     char* shm_begin_ptr_;
 
     photon::mutex mutex_;
-    std::unordered_map<std::string, SharedMemoryBuffer*> buf_map_;
+    unordered_map_string_key<std::unique_ptr<SharedMemoryBuffer>> buf_map_;
 };
 
 vDMATarget* new_shm_vdma_target(const char* shm_name, size_t shm_size, size_t unit) {
-    return new SharedMemoryTarget(shm_name, shm_size, unit);
+    return NewObj<SharedMemoryTarget>()->init(shm_name, shm_size, unit);
 }
 
 vDMAInitiator* new_shm_vdma_initiator(const char* shm_name, size_t shm_size) {
