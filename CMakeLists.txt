@@ -48,6 +48,7 @@ set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
 set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
 set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
 set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
+set(PHOTON_SIMDJSON_GIT "https://github.com/simdjson/simdjson.git" CACHE STRING "")
 set(PHOTON_RAPIDXML_SOURCE "https://sourceforge.net/projects/rapidxml/files/rapidxml/rapidxml%201.13/rapidxml-1.13.zip/download" CACHE STRING "")
 set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
 set(PHOTON_RDMACORE_SOURCE "https://github.com/linux-rdma/rdma-core/releases/download/v44.7/rdma-core-44.7.tar.gz" CACHE STRING "")
@@ -209,9 +210,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    file(GLOB CACHE_SRC 
+    file(GLOB CACHE_SRC
         fs/cache/*.cpp
-        fs/cache/full_file_cache/*.cpp 
+        fs/cache/full_file_cache/*.cpp
         fs/cache/persistent_cache/*.cpp
     )
     list(APPEND PHOTON_SRC
@@ -341,6 +342,10 @@ endif ()
 if (PHOTON_BUILD_OCF_CACHE)
     list(APPEND shared_deps ocf_cache_lib)
     list(APPEND static_deps ocf_cache_lib)
+endif()
+if (PHOTON_ENABLE_ECOSYSTEM)
+    list(APPEND shared_deps ecosystem_deps)
+    list(APPEND static_deps ecosystem_deps)
 endif()
 list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
 

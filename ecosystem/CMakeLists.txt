@@ -23,6 +23,14 @@ set(RAPIDJSON_BUILD_TESTS OFF CACHE BOOL "Build rapidjson perftests and unittest
 FetchContent_MakeAvailable(rapidjson)
 message(STATUS "Rapidjson source dir: ${rapidjson_SOURCE_DIR}")
 
+FetchContent_Declare(
+  simdjson
+  GIT_REPOSITORY ${PHOTON_SIMDJSON_GIT}
+  GIT_TAG  tags/v3.13.0
+  GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(simdjson)
+message(STATUS "Simdjson source dir: ${simdjson_SOURCE_DIR}")
+
 # RapidXml
 FetchContent_Declare(
     rapidxml
@@ -55,7 +63,9 @@ add_library(ecosystem_deps INTERFACE)
 target_include_directories(
     ecosystem_deps
     INTERFACE ${rapidjson_SOURCE_DIR}/include ${rapidxml_SOURCE_DIR} ${rapidyaml_SOURCE_DIR}
+              ${simdjson_SOURCE_DIR}/include
     )
+target_link_libraries(ecosystem_deps INTERFACE simdjson)
 get_property(
     incs
     TARGET ecosystem_deps

@@ -22,6 +22,11 @@
 #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #include <rapidyaml-0.5.0.hpp>
 #pragma GCC diagnostic pop
+#if __cplusplus < 201700L
+#undef __cplusplus
+#define __cplusplus 201700L
+#endif
+#include <simdjson.h>
 
 using namespace std;
 
@@ -198,33 +203,35 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         emplace_back(0, 0);
         return true;
     }
+    bool Key(str s) {
+        return Key(s.data(), s.length(), false);
+    }
     bool Key(const char* s, SizeType len, bool copy) {
         assert(!copy);
         _key = {s, len};
         return true;
     }
     bool String(const char* s, SizeType len, bool copy) {
-        assert(!copy);
-        emplace_back(s, len);
-        return true;
+        return RawValue(s, len, copy);
     }
-    bool RawNumber(const Ch* s, SizeType len, bool copy) {
+    bool RawValue(const char* s, SizeType len, bool copy) {
         assert(!copy);
         // LOG_DEBUG(ALogString(s, len));
         emplace_back(s, len);
         return true;
     }
+    bool RawNumber(const Ch* s, SizeType len, bool copy) {
+        return RawValue(s, len, copy);
+    }
     bool RawBool(const Ch* s, SizeType len, bool copy) {
-        assert(!copy);
-        emplace_back(s, len);
-        return true;
+        return RawValue(s, len, copy);
     }
     bool StartObject() {
         emplace_back(0, 0);
         _nodes.emplace_back();
         return true;
     }
-    bool EndObject(SizeType memberCount) {
+    bool EndObject(SizeType /*memberCount*/ = 0) {
         commit(true);
         return true;
     }
@@ -241,7 +248,7 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         _nodes.emplace_back();
         return true;
     }
-    bool EndArray(SizeType elementCount) {
+    bool EndArray(SizeType /*elementCount*/ = 0) {
         commit(false);
         return true;
     }
@@ -256,6 +263,57 @@ static NodeImpl* parse_json(char* text, size_t size, int flags) {
     GenericReader<Encoding, Encoding> reader;
     reader.Parse<kFlags>(s, h);
     return h.get_root();
+}
+
+using namespace simdjson;
+static void simdjson_walk(JHandler& h, ondemand::value element) {
+    switch (element.type()) {
+        default:
+            LOG_ERROR("unknown json data type: ", element.type().take_value());
+
+        case ondemand::json_type::array:
+        h.StartArray();
+        for (auto x: element.get_array())
+            simdjson_walk(h, x.value());
+        h.EndArray();
+        break;
+
+        case ondemand::json_type::object:
+        h.StartObject();
+        for (auto x: element.get_object()) {
+            h.Key((string_view)x.escaped_key());
+            simdjson_walk(h, x.value());
+        }
+        h.EndObject();
+        break;
+
+        case ondemand::json_type::null:
+        element.is_null();
+        h.Null();
+        break;
+
+        case ondemand::json_type::number:
+        case ondemand::json_type::string:
+        case ondemand::json_type::boolean:
+        string_view s = element.get_string();
+        h.RawValue(s.data(), s.size(), false);
+        break;
+    }
+}
+
+static NodeImpl* parse_simdjson(char* text, size_t size, int flags) {
+    try {
+        ondemand::parser parser;
+        padded_string s(text, size);
+        ondemand::document doc = parser.iterate(s);
+        ondemand::value val = doc;
+        JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+        simdjson_walk(h, val);
+        return h.get_root();
+    } catch(const simdjson_error& e) {
+        LOG_ERROR_RETURN(EINVAL, nullptr, "failed to parse with simdjson ` ", e.error(), e.what());
+    }
+    return nullptr;
 }
 
 using namespace rapidxml;
@@ -418,14 +476,15 @@ Node parse(char* text, size_t size, int flags) {
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid argument:", VALUE(text), VALUE(size));
     using Parser = NodeImpl* (*) (char* text, size_t size, int flags);
     constexpr static Parser parsers[] = {&parse_json, &parse_xml,
-                                         &parse_yaml, &parse_ini};
+                                         &parse_yaml, &parse_ini, &parse_simdjson};
+    DEFER(if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text););
     auto i = flags & DOC_TYPE_MASK;
-    if ((size_t) i > LEN(parsers)) {
-        if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
+    if ((size_t) i > LEN(parsers))
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
-    }
     auto r = parsers[i](text, size, flags);
-    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) free(text);
+    if (!r)
+        LOG_ERROR_RETURN(0, nullptr, "failed to parse document of type ", HEX(i));
+    flags = 0;
     return r;
 }
 

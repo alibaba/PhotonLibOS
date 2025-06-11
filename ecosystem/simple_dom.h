@@ -136,6 +136,7 @@ const int DOC_JSON = 0x00;
 const int DOC_XML  = 0x01;
 const int DOC_YAML = 0x02;
 const int DOC_INI  = 0x03;
+const int DOC_SIMDJSON  = 0x04;
 const int DOC_TYPE_MASK = 0xff;
 
 const int DOC_FREE_TEXT_IF_PARSING_FAILED   = 0x100;

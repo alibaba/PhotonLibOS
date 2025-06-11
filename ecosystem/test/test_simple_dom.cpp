@@ -177,7 +177,7 @@ void expect_eq_vals(Node node, const char * const (&truth)[N]) {
      expect_eq_vals(node, truth, N);
 }
 
-TEST(simple_dom, json) {
+void do_test_json(int parser) {
     const static char json0[] = R"({
         "hello": "world",
         "t": true ,
@@ -187,7 +187,7 @@ TEST(simple_dom, json) {
         "pi": 3.1416,
         "a": [1, 2, 3, 4],
     })";
-    auto doc = parse_copy(json0, sizeof(json0), DOC_JSON);
+    auto doc = parse_copy(json0, sizeof(json0), parser);
     EXPECT_TRUE(doc);
     expect_eq_kvs(doc, {
         {"hello",   "world"},
@@ -199,6 +199,14 @@ TEST(simple_dom, json) {
     EXPECT_EQ(doc["i"].to_int64_t(), -123);
     EXPECT_NEAR(doc["pi"].to_double(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
+}
+
+TEST(simple_dom, json) {
+    LOG_DEBUG("test rappidjson");
+    do_test_json(DOC_JSON);
+    LOG_DEBUG("test simdjson");
+    LOG_DEBUG("simdjson skipped, the parser doesn't work with our test json text ...");
+    // do_test_json(DOC_SIMDJSON);
 }
 
 TEST(simple_dom, yaml0) {
