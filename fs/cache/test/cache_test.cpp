@@ -455,7 +455,7 @@ void* worker(void* arg) {
   auto f = fs->open("/huge", O_RDONLY);
   DEFER(delete f);
   for (int i=0;i<4;i++) {
-    std::random_shuffle(offset.begin(), offset.end());
+  std::shuffle(offset.begin(), offset.end(), std::mt19937(std::random_device()()));
     for (const auto &x : offset) {
       EXPECT_EQ((ssize_t)(1UL<<20), ::pread(fd, buffersrc, 1024*1024, x));
       f->pread(buffer, 1024*1024, x);
