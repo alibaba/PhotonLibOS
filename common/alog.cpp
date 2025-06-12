@@ -34,22 +34,44 @@ limitations under the License.
 #include <sys/uio.h>
 using namespace std;
 
+static struct tm alog_time = {0};
+
 class BaseLogOutput : public ILogOutput {
 public:
     uint64_t throttle = -1UL;
     uint64_t count = 0;
     time_t ts = 0;
     int log_file_fd;
+    struct iovec level_prefix[ALOG_AUDIT + 1]{}, level_suffix[ALOG_AUDIT + 1]{};
 
-    constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
+    constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) {}
 
-    void write(int, const char* begin, const char* end) override {
-        std::ignore = ::write(log_file_fd, begin, end - begin);
+    void set_level_color(int level, const char* color) override {
+        level_prefix[level] = {(void*)color, strlen(color)};
+        if (level_prefix[level].iov_base == nullptr ||
+            level_prefix[level].iov_len == 0) {
+            level_suffix[level] = {(void*)"", 0};
+        } else {
+            level_suffix[level] = {(void*)ALOG_COLOR_RESET,
+                                   sizeof(ALOG_COLOR_RESET) - 1};
+        }
+    }
+
+    void write(int level, const char* begin, const char* end) override {
+        struct iovec iov[3] = {
+            level_prefix[level],
+            {
+                .iov_base = (void*)begin,
+                .iov_len = (size_t)(end - begin),
+            },
+            level_suffix[level]
+        };
+        std::ignore = ::writev(log_file_fd, iov, 3);
         throttle_block();
     }
     void throttle_block() {
         if (throttle == -1UL) return;
-        time_t t = time(0);
+        time_t t = mktime(&alog_time);
         if (t > ts) {
             ts = t;
             count = 0;
@@ -208,7 +230,6 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
 
 __attribute__((constructor)) static void __initial_timezone() { tzset(); }
 static time_t dayid = 0, minuteid = 0, tsdelta = 0;
-static struct tm alog_time = {0};
 static struct tm* alog_update_time(time_t now0) {
     auto now = now0 + tsdelta;
     int sec = now % 60;    now /= 60;
@@ -251,15 +272,19 @@ public:
         return open(fn, O_CREAT | O_WRONLY | O_APPEND, mode);
     }
 
-    void write(int, const char* begin, const char* end) override {
+    void write(int level, const char* begin, const char* end) override {
         if (log_file_fd < 0) return;
         uint64_t length = end - begin;
-        iovec iov{(void*)begin, length};
-#ifndef _WIN64
-        std::ignore = ::writev(log_file_fd, &iov, 1); // writev() is atomic, whereas write() is not
-#else
-        std::ignore = ::write(log_file_fd, iov.iov_base, iov.iov_len);
-#endif
+        // iovec iov{(void*)begin, length};
+        struct iovec iov[3] = {
+            level_prefix[level],
+            {
+                .iov_base = (void*)begin,
+                .iov_len = length,
+            },
+            level_suffix[level]
+        };
+        std::ignore = ::writev(log_file_fd, iov, 3);
         throttle_block();
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
