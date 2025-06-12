@@ -28,6 +28,24 @@ limitations under the License.
 #include <photon/common/conststr.h>
 #include <photon/common/retval.h>
 
+#define ALOG_COLOR_BLACK "\033[30m"
+#define ALOG_COLOR_RED "\033[31m"
+#define ALOG_COLOR_GREEN "\033[32m"
+#define ALOG_COLOR_YELLOW "\033[33m"
+#define ALOG_COLOR_BLUE "\033[34m"
+#define ALOG_COLOR_MAGENTA "\033[35m"
+#define ALOG_COLOR_CYAN "\033[36m"
+#define ALOG_COLOR_LIGHTGRAY "\033[37m"
+#define ALOG_COLOR_DARKGRAY "\033[90m"
+#define ALOG_COLOR_LIGHTRED "\033[91m"
+#define ALOG_COLOR_LIGHTGREEN "\033[92m"
+#define ALOG_COLOR_LIGHTYELLOW "\033[93m"
+#define ALOG_COLOR_LIGHTBLUE "\033[94m"
+#define ALOG_COLOR_LIGHTMAGENTA "\033[95m"
+#define ALOG_COLOR_LIGHTCYAN "\033[96m"
+#define ALOG_COLOR_LIGHTWHITE "\033[97m"
+#define ALOG_COLOR_NOTHING ""
+
 class ILogOutput {
 protected:
     // output object should be destructed via `destruct()`
@@ -40,6 +58,14 @@ public:
     virtual uint64_t set_throttle(uint64_t t = -1UL) = 0;
     virtual uint64_t get_throttle() = 0;
     virtual void destruct() = 0;
+    template <size_t N>
+    void set_level_color(int level, const char (&color)[N]) {
+        set_level_color(level, color, N - 1);
+    }
+    virtual void set_level_color(int level, const char* color,
+                                 size_t length) { /* ignored by default */ }
+    void preset_color();
+    void clear_color();
 };
 
 extern ILogOutput * const log_output_null;
@@ -200,6 +226,25 @@ struct ALogBuffer
 #define ALOG_FATAL 4
 #define ALOG_TEMP  5
 #define ALOG_AUDIT 6
+
+inline void ILogOutput::preset_color() {
+    set_level_color(ALOG_DEBUG, ALOG_COLOR_DARKGRAY);
+    set_level_color(ALOG_INFO, ALOG_COLOR_LIGHTGRAY);
+    set_level_color(ALOG_WARN, ALOG_COLOR_YELLOW);
+    set_level_color(ALOG_ERROR, ALOG_COLOR_RED);
+    set_level_color(ALOG_FATAL, ALOG_COLOR_MAGENTA);
+    set_level_color(ALOG_TEMP, ALOG_COLOR_CYAN);
+    set_level_color(ALOG_AUDIT, ALOG_COLOR_GREEN);
+}
+inline void ILogOutput::clear_color() {
+    set_level_color(ALOG_DEBUG, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_INFO, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_WARN, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_ERROR, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_FATAL, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_TEMP, ALOG_COLOR_NOTHING);
+    set_level_color(ALOG_AUDIT, ALOG_COLOR_NOTHING);
+}
 
 class LogFormatter
 {
