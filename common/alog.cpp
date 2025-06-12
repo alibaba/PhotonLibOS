@@ -288,7 +288,6 @@ public:
         uint64_t length = end - begin;
         // iovec iov{(void*)begin, length};
         BaseLogOutput::write(level, begin, end);
-        throttle_block();
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
             if (log_file_size > log_file_size_limit) {
