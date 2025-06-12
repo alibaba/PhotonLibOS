@@ -24,7 +24,7 @@ class SharedMemoryBuffer : public vDMABuffer {
 public:
     SharedMemoryBuffer(uint64_t idx, char* begin_ptr, size_t buffer_size, int type)
     :
-    idx_(idx), begin_ptr_(begin_ptr), buffer_size_(buffer_size), type_(type)
+    idx_(idx), begin_ptr_(begin_ptr), buffer_size_(buffer_size), type_(type), id_(16, 0)
     {
         // encode idx_ and buffer_size_ to id_
         encode_to(id_, idx_, buffer_size_);
@@ -53,49 +53,14 @@ public:
     }
 
     static void encode_to(std::string& str, uint64_t idx, size_t buffer_size) {
-        char tmpbuf[16];
-
-        tmpbuf[0] = static_cast<uint8_t>(idx);
-        tmpbuf[1] = static_cast<uint8_t>(idx >> 8);
-        tmpbuf[2] = static_cast<uint8_t>(idx >> 16);
-        tmpbuf[3] = static_cast<uint8_t>(idx >> 24);
-        tmpbuf[4] = static_cast<uint8_t>(idx >> 32);
-        tmpbuf[5] = static_cast<uint8_t>(idx >> 40);
-        tmpbuf[6] = static_cast<uint8_t>(idx >> 48);
-        tmpbuf[7] = static_cast<uint8_t>(idx >> 56);
-
-        tmpbuf[8] = static_cast<uint8_t>(buffer_size);
-        tmpbuf[9] = static_cast<uint8_t>(buffer_size >> 8);
-        tmpbuf[10] = static_cast<uint8_t>(buffer_size >> 16);
-        tmpbuf[11] = static_cast<uint8_t>(buffer_size >> 24);
-        tmpbuf[12] = static_cast<uint8_t>(buffer_size >> 32);
-        tmpbuf[13] = static_cast<uint8_t>(buffer_size >> 40);
-        tmpbuf[14] = static_cast<uint8_t>(buffer_size >> 48);
-        tmpbuf[15] = static_cast<uint8_t>(buffer_size >> 56);
-
-        str.assign(tmpbuf, 16);
+        std::pair<uint64_t, uint64_t> tmpbuf = {idx, buffer_size};
+        str.assign((char*)&tmpbuf, 16);
     }
 
     static void decode_from(const std::string_view str, uint64_t* idx, size_t* buffer_size) {
-        const uint8_t* tmpbuf = reinterpret_cast<const uint8_t*>(str.data());
-
-        *idx = (static_cast<uint64_t>(tmpbuf[0])) |
-                (static_cast<uint64_t>(tmpbuf[1]) << 8) |
-                (static_cast<uint64_t>(tmpbuf[2]) << 16) |
-                (static_cast<uint64_t>(tmpbuf[3]) << 24) |
-                (static_cast<uint64_t>(tmpbuf[4]) << 32) |
-                (static_cast<uint64_t>(tmpbuf[5]) << 40) |
-                (static_cast<uint64_t>(tmpbuf[6]) << 48) |
-                (static_cast<uint64_t>(tmpbuf[7]) << 56);
-
-        *buffer_size = (static_cast<uint64_t>(tmpbuf[8])) |
-                (static_cast<uint64_t>(tmpbuf[9]) << 8) |
-                (static_cast<uint64_t>(tmpbuf[10]) << 16) |
-                (static_cast<uint64_t>(tmpbuf[11]) << 24) |
-                (static_cast<uint64_t>(tmpbuf[12]) << 32) |
-                (static_cast<uint64_t>(tmpbuf[13]) << 40) |
-                (static_cast<uint64_t>(tmpbuf[14]) << 48) |
-                (static_cast<uint64_t>(tmpbuf[15]) << 56);
+        auto tmpbuf = (std::pair<uint64_t, uint64_t>*)str.data();
+        *idx = tmpbuf->first;
+        *buffer_size = tmpbuf->second;
     }
 
     ~SharedMemoryBuffer() {}
