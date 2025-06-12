@@ -45,7 +45,7 @@ public:
     uint64_t count = 0;
     time_t ts = 0;
     int log_file_fd;
-    struct iovec level_prefix[ALOG_AUDIT + 1], level_suffix[ALOG_AUDIT + 1];
+    struct iovec level_prefix[ALOG_AUDIT + 1];
 
     constexpr BaseLogOutput(int fd = 0)
         : log_file_fd(fd),
@@ -57,27 +57,11 @@ public:
               {(void*)ALOG_COLOR_MAGENTA, sizeof(ALOG_COLOR_MAGENTA) - 1},
               {(void*)ALOG_COLOR_CYAN, sizeof(ALOG_COLOR_CYAN) - 1},
               {(void*)ALOG_COLOR_GREEN, sizeof(ALOG_COLOR_GREEN) - 1},
-          },
-          level_suffix{
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
-              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
           } {}
 
     void set_level_color(int level, const char* color, size_t len) override {
         if (level < 0 || level > ALOG_AUDIT) return;
         level_prefix[level] = {(void*)color, len};
-        if (level_prefix[level].iov_base == nullptr ||
-            level_prefix[level].iov_len == 0) {
-            level_suffix[level] = {0, 0};
-        } else {
-            level_suffix[level] = {(void*)ALOG_COLOR_RESET,
-                                   sizeof(ALOG_COLOR_RESET) - 1};
-        }
     }
 
     void write(int level, const char* begin, const char* end) override {
@@ -87,9 +71,8 @@ public:
                 .iov_base = (void*)begin,
                 .iov_len = (size_t)(end - begin),
             },
-            level_suffix[level]
-        };
-        std::ignore = ::writev(log_file_fd, iov, 3);
+            {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1}};
+        std::ignore = ::writev(log_file_fd, iov, 2 + !!iov[0].iov_len);
         throttle_block();
     }
     void throttle_block() {
