@@ -585,12 +585,12 @@ TEST(ALOG, signed_zero) {
 }
 
 TEST(ALOG, log_with_color) {
-    default_logger.log_output->preset_color();
     LOG_DEBUG("some debug log");
     LOG_INFO("some info log");
     LOG_WARN("some warning log");
     LOG_ERROR("some error log");
     LOG_FATAL("some fatal log");
+    LOG_TEMP("some temp log");
     default_logger << LOG_AUDIT("some audit log");
     default_logger.log_output->clear_color();
     LOG_DEBUG("some debug log");
@@ -598,7 +598,9 @@ TEST(ALOG, log_with_color) {
     LOG_WARN("some warning log");
     LOG_ERROR("some error log");
     LOG_FATAL("some fatal log");
+    LOG_TEMP("some temp log");
     default_logger << LOG_AUDIT("some audit log");
+    default_logger.log_output->preset_color();
 }
 
 int main(int argc, char **argv)

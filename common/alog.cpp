@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <initializer_list>
 #ifdef _WIN64
 #define _POSIX_C_SOURCE 1
 #endif
@@ -36,21 +37,43 @@ using namespace std;
 
 static struct tm alog_time = {0};
 
+#define ALOG_COLOR_RESET "\033[0m"
+
 class BaseLogOutput : public ILogOutput {
 public:
     uint64_t throttle = -1UL;
     uint64_t count = 0;
     time_t ts = 0;
     int log_file_fd;
-    struct iovec level_prefix[ALOG_AUDIT + 1]{}, level_suffix[ALOG_AUDIT + 1]{};
+    struct iovec level_prefix[ALOG_AUDIT + 1], level_suffix[ALOG_AUDIT + 1];
 
-    constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) {}
+    constexpr BaseLogOutput(int fd = 0)
+        : log_file_fd(fd),
+          level_prefix{
+              {(void*)ALOG_COLOR_DARKGRAY, sizeof(ALOG_COLOR_DARKGRAY) - 1},
+              {(void*)ALOG_COLOR_LIGHTGRAY, sizeof(ALOG_COLOR_LIGHTGRAY) - 1},
+              {(void*)ALOG_COLOR_YELLOW, sizeof(ALOG_COLOR_YELLOW) - 1},
+              {(void*)ALOG_COLOR_RED, sizeof(ALOG_COLOR_RED) - 1},
+              {(void*)ALOG_COLOR_MAGENTA, sizeof(ALOG_COLOR_MAGENTA) - 1},
+              {(void*)ALOG_COLOR_CYAN, sizeof(ALOG_COLOR_CYAN) - 1},
+              {(void*)ALOG_COLOR_GREEN, sizeof(ALOG_COLOR_GREEN) - 1},
+          },
+          level_suffix{
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+              {(void*)ALOG_COLOR_RESET, sizeof(ALOG_COLOR_RESET) - 1},
+          } {}
 
-    void set_level_color(int level, const char* color) override {
-        level_prefix[level] = {(void*)color, strlen(color)};
+    void set_level_color(int level, const char* color, size_t len) override {
+        if (level < 0 || level > ALOG_AUDIT) return;
+        level_prefix[level] = {(void*)color, len};
         if (level_prefix[level].iov_base == nullptr ||
             level_prefix[level].iov_len == 0) {
-            level_suffix[level] = {(void*)"", 0};
+            level_suffix[level] = {0, 0};
         } else {
             level_suffix[level] = {(void*)ALOG_COLOR_RESET,
                                    sizeof(ALOG_COLOR_RESET) - 1};
@@ -262,6 +285,11 @@ public:
     atomic<uint64_t> log_file_size{0};
     unsigned int log_file_max_cnt = 10;
 
+    LogOutputFile() {
+        // no colors by default when log into files
+        BaseLogOutput::clear_color(); 
+    }
+
     virtual void destruct() override {
         log_output_file_close();
         delete this;
@@ -276,15 +304,7 @@ public:
         if (log_file_fd < 0) return;
         uint64_t length = end - begin;
         // iovec iov{(void*)begin, length};
-        struct iovec iov[3] = {
-            level_prefix[level],
-            {
-                .iov_base = (void*)begin,
-                .iov_len = length,
-            },
-            level_suffix[level]
-        };
-        std::ignore = ::writev(log_file_fd, iov, 3);
+        BaseLogOutput::write(level, begin, end);
         throttle_block();
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
@@ -406,11 +426,12 @@ public:
 
     AsyncLogOutput(ILogOutput* output) : log_output(output) {
         background = std::thread([&] {
-            auto log_file_fd = log_output->get_log_file_fd();
-            auto wb = [this, log_file_fd] {
+            auto wb = [this] {
                 iovec iov;
                 while (pending.pop(iov)) {
-                    log_output->write(log_file_fd, (char*)iov.iov_base, (char*)iov.iov_base + iov.iov_len);
+                    int level = iov.iov_len & 0x07;
+                    log_output->write(level, (char*)iov.iov_base,
+                                      (char*)iov.iov_base + (iov.iov_len >> 3));
                     delete[] (char*)iov.iov_base;
                 }
             };
@@ -427,11 +448,11 @@ public:
         });
     }
 
-    void write(int, const char* begin, const char* end) override {
+    void write(int level, const char* begin, const char* end) override {
         uint64_t length = end - begin;
         auto buf = new char[length];
         memcpy(buf, begin, length);
-        iovec iov{buf, length};
+        iovec iov{buf, (length << 3) | level};
         bool pushed = ({
             SCOPED_LOCK(lock);
             pending.push(iov);

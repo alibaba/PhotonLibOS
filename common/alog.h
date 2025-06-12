@@ -28,7 +28,6 @@ limitations under the License.
 #include <photon/common/conststr.h>
 #include <photon/common/retval.h>
 
-#define ALOG_COLOR_RESET "\033[0m"
 #define ALOG_COLOR_BLACK "\033[30m"
 #define ALOG_COLOR_RED "\033[31m"
 #define ALOG_COLOR_GREEN "\033[32m"
@@ -59,9 +58,12 @@ public:
     virtual uint64_t set_throttle(uint64_t t = -1UL) = 0;
     virtual uint64_t get_throttle() = 0;
     virtual void destruct() = 0;
-    virtual void set_level_color(int level, const char* color) {
-        // not implemented by default
+    template <size_t N>
+    void set_level_color(int level, const char (&color)[N]) {
+        set_level_color(level, color, N - 1);
     }
+    virtual void set_level_color(int level, const char* color,
+                                 size_t length) { /* ignored by default */ }
     void preset_color();
     void clear_color();
 };
@@ -227,7 +229,7 @@ struct ALogBuffer
 
 inline void ILogOutput::preset_color() {
     set_level_color(ALOG_DEBUG, ALOG_COLOR_DARKGRAY);
-    set_level_color(ALOG_INFO, ALOG_COLOR_RESET);
+    set_level_color(ALOG_INFO, ALOG_COLOR_LIGHTGRAY);
     set_level_color(ALOG_WARN, ALOG_COLOR_YELLOW);
     set_level_color(ALOG_ERROR, ALOG_COLOR_RED);
     set_level_color(ALOG_FATAL, ALOG_COLOR_MAGENTA);
