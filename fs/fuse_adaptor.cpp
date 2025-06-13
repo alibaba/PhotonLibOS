@@ -756,8 +756,10 @@ protected:
     struct fuse_session *se;
 #if FUSE_USE_VERSION < 30
     struct fuse_chan *ch;
-    IdentityPool<void, 32> bufpool;
     size_t bufsize = 0;
+    IdentityPool<void, 32> bufpool;
+#else
+    IdentityPool<struct fuse_buf, 32> bufpool;
 #endif
     ThreadPool<32> threadpool;
     EventLoop *loop;
@@ -782,9 +784,9 @@ protected:
 
     static void *worker(void *args) {
         auto obj = (FuseSessionLoop *)args;
+#if FUSE_USE_VERSION < 30
         struct fuse_buf fbuf;
         memset(&fbuf, 0, sizeof(fbuf));
-#if FUSE_USE_VERSION < 30
         struct fuse_chan *tmpch = obj->ch;
         fbuf.mem = obj->bufpool.get();
         fbuf.size = obj->bufsize;
@@ -793,7 +795,11 @@ protected:
         });
         auto res = fuse_session_receive_buf(obj->se, &fbuf, &tmpch);
 #else
-        auto res = fuse_session_receive_buf(obj->se, &fbuf);
+        struct fuse_buf *pfbuf = obj->bufpool.get();
+        DEFER({
+            obj->bufpool.put(pfbuf);
+        });
+        auto res = fuse_session_receive_buf(obj->se, pfbuf);
 #endif
         DEFER({
             if (--obj->ref == 0) obj->cond.notify_all();
@@ -806,7 +812,7 @@ protected:
 #if FUSE_USE_VERSION < 30
         fuse_session_process_buf(obj->se, &fbuf, tmpch);
 #else
-        fuse_session_process_buf(obj->se, &fbuf);
+        fuse_session_process_buf(obj->se, pfbuf);
 #endif
         return nullptr;
     }
@@ -829,6 +835,23 @@ protected:
         free(buf);
         return 0;
     }
+#else
+    int bufctor(struct fuse_buf **pbuf) {
+        *pbuf = reinterpret_cast<struct fuse_buf *>(malloc(sizeof(struct fuse_buf)));
+        if (*pbuf == nullptr) return -1;
+
+        memset((*pbuf), 0, sizeof(struct fuse_buf));
+        return 0;
+    }
+
+    int bufdtor(struct fuse_buf *fbuf) {
+        if (fbuf->mem)
+            free(fbuf->mem);
+        fbuf->mem = NULL;
+
+        free(fbuf);
+        return 0;
+    }
 #endif
 
 public:
@@ -836,10 +859,10 @@ public:
         : se(session),
 #if FUSE_USE_VERSION < 30
           ch(fuse_session_next_chan(se, NULL)),
-          bufpool({this, &FuseSessionLoop::bufctor},
-                  {this, &FuseSessionLoop::bufdtor}),
           bufsize(fuse_chan_bufsize(ch)),
 #endif
+          bufpool({this, &FuseSessionLoop::bufctor},
+                  {this, &FuseSessionLoop::bufdtor}),
           threadpool(),
           loop(new_event_loop({this, &FuseSessionLoop::wait_for_readable},
                               {this, &FuseSessionLoop::on_accept})) {}
