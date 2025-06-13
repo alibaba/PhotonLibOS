@@ -10,7 +10,8 @@
 TEST(Buffer, encode_decode) {
     std::string str;
     photon::SharedMemoryBuffer::encode_to(str, 111, 222);
-    uint64_t idx, bufsz;
+    uint64_t idx = 0;
+    size_t bufsz = 0;
     photon::SharedMemoryBuffer::decode_from(str, &idx, &bufsz);
     EXPECT_EQ(111, idx);
     EXPECT_EQ(222, bufsz);

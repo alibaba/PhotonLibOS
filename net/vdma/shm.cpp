@@ -42,16 +42,6 @@ public:
         begin_ptr_ = shm_begin_ptr + idx_ * buffer_size_;
     }
 
-    static std::string dump_encoded(const std::string& str) {
-        assert(str.size() == 16);
-        const uint8_t* tmp = (const uint8_t*)str.data();
-        std::stringstream ss;
-        for (int i=0; i<16; i++) {
-            ss << std::hex << (uint64_t)tmp[i] << " ";
-        }
-        return ss.str();
-    }
-
     static void encode_to(std::string& str, uint64_t idx, size_t buffer_size) {
         std::pair<uint64_t, uint64_t> tmpbuf = {idx, buffer_size};
         str.assign((char*)&tmpbuf, 16);
@@ -66,12 +56,10 @@ public:
     ~SharedMemoryBuffer() {}
 
     bool is_registered() const override {
-        LOG_WARN("is_registered is empty function");
         return true; 
     }
 
     bool is_valid() const override { 
-        LOG_WARN("is_valid is empty function");
         return true; 
     }
 
@@ -120,7 +108,7 @@ public:
         if (shm_fd_ < 0) {
             LOG_ERROR_RETURN(0, -1, "SharedMemoryBufferAllocator::init, shm_open failed");
         }
-        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(shm_fd_), VALUE(shm_size_), VALUE(unit_));
+        LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(shm_fd_), VALUE(shm_size_), VALUE(unit_));
 
         ftruncate(shm_fd_, shm_size_);
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
@@ -132,16 +120,16 @@ public:
 
         nbuffer_ = shm_size_ / unit_;
         used_mark_.resize(nbuffer_);
-        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(shm_begin_ptr_), VALUE(nbuffer_));
-        LOG_INFO("SharedMemoryBufferAllocator: ", VALUE(used_mark_.size()), VALUE(buffers_.size()));
+        LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(shm_begin_ptr_), VALUE(nbuffer_));
+        LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(used_mark_.size()), VALUE(buffers_.size()));
         
         for (size_t i=0; i<nbuffer_; i++) {
-            buffers_.emplace_back(SharedMemoryBuffer(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem));
+            buffers_.emplace_back(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem);
         }
 
         is_inited_ = true;  // allocator init success
 
-        LOG_INFO("SharedMemoryBufferAllocator: complete");
+        LOG_DEBUG("SharedMemoryBufferAllocator: complete");
         return 0;
     }
 
@@ -200,8 +188,7 @@ public:
 
     vDMABuffer* alloc(size_t size) override {
         if (size != allocator_.unit()) {
-            LOG_ERROR("current allocator only support ", allocator_.unit(), ", you ", size);
-            return nullptr;
+            LOG_ERROR_RETURN(0, nullptr, "current allocator only support ", allocator_.unit(), ", you ", size);
         }
 
         vDMABuffer* buf = nullptr;
@@ -248,14 +235,13 @@ public:
         if (shm_fd_ < 0) {
             LOG_ERROR("SharedMemoryInitiator::Construct, shm_open failed");
         }
-        LOG_INFO("SharedMemoryInitiator: shm_fd=", shm_fd_, ", shm_size=", shm_size_);
+        LOG_DEBUG("SharedMemoryInitiator: ", VALUE(shm_fd_), VALUE(shm_size_));
 
         ftruncate(shm_fd_, shm_size_);
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
         if (!shm_begin_ptr_) {
             LOG_ERROR("SharedMemoryInitiator, mmap failed");
             close(shm_fd_);
-            return;
         }
     }
 
