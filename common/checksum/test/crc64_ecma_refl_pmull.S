@@ -320,15 +320,15 @@ crc64_tab:
 	add	x_buf_end, x_buf_iter, x_tmp
 
 	mov	x_tmp, p4_low_b0
-	movk	x_tmp, p4_low_b1, lsl 16
-	movk	x_tmp, p4_low_b2, lsl 32
-	movk	x_tmp, p4_low_b3, lsl 48
+	movk	x_tmp, #p4_low_b1, lsl #16
+	movk	x_tmp, #p4_low_b2, lsl #32
+	movk	x_tmp, #p4_low_b3, lsl #48
 	fmov	d_p4_low, x_tmp
 
 	mov	x_tmp2, p4_high_b0
-	movk	x_tmp2, p4_high_b1, lsl 16
-	movk	x_tmp2, p4_high_b2, lsl 32
-	movk	x_tmp2, p4_high_b3, lsl 48
+	movk	x_tmp2, #p4_high_b1, lsl #16
+	movk	x_tmp2, #p4_high_b2, lsl #32
+	movk	x_tmp2, #p4_high_b3, lsl #48
 	fmov	d_p4_high, x_tmp2
 .endm
 
@@ -369,15 +369,15 @@ crc64_tab:
 
 .macro crc64_fold_512b_to_128b
 	mov	x_tmp, p1_low_b0
-	movk	x_tmp, p1_low_b1, lsl 16
-	movk	x_tmp, p1_low_b2, lsl 32
-	movk	x_tmp, p1_low_b3, lsl 48
+	movk	x_tmp, #p1_low_b1, lsl #16
+	movk	x_tmp, #p1_low_b2, lsl #32
+	movk	x_tmp, #p1_low_b3, lsl #48
 	fmov	d_p1_low, x_tmp
 
 	mov	x_tmp2, p1_high_b0
-	movk	x_tmp2, p1_high_b1, lsl 16
-	movk	x_tmp2, p1_high_b2, lsl 32
-	movk	x_tmp2, p1_high_b3, lsl 48
+	movk	x_tmp2, #p1_high_b1, lsl #16
+	movk	x_tmp2, #p1_high_b2, lsl #32
+	movk	x_tmp2, #p1_high_b3, lsl #48
 	fmov	d_p1_high, x_tmp2
 
 	pmull2	v_tmp_high.1q, v_x0.2d, v_p1.2d
@@ -464,9 +464,9 @@ cdecl(\name\()):
 
 // folding 128bit --> 64bit
 	mov	x_tmp, p0_low_b0
-	movk	x_tmp, p0_low_b1, lsl 16
-	movk	x_tmp, p0_low_b2, lsl 32
-	movk	x_tmp, p0_low_b3, lsl 48
+	movk	x_tmp, #p0_low_b1, lsl #16
+	movk	x_tmp, #p0_low_b2, lsl #32
+	movk	x_tmp, #p0_low_b3, lsl #48
 	fmov	d_p0_low, x_tmp
 
 	pmull	v_tmp_low.1q, v_x3.1d, v_p0.1d
@@ -477,15 +477,15 @@ cdecl(\name\()):
 
 // barrett reduction
 	mov	x_tmp, br_low_b0
-	movk	x_tmp, br_low_b1, lsl 16
-	movk	x_tmp, br_low_b2, lsl 32
-	movk	x_tmp, br_low_b3, lsl 48
+	movk	x_tmp, #br_low_b1, lsl #16
+	movk	x_tmp, #br_low_b2, lsl #32
+	movk	x_tmp, #br_low_b3, lsl #48
 	fmov	d_br_low, x_tmp
 
 	mov	x_tmp2, br_high_b0
-	movk	x_tmp2, br_high_b1, lsl 16
-	movk	x_tmp2, br_high_b2, lsl 32
-	movk	x_tmp2, br_high_b3, lsl 48
+	movk	x_tmp2, #br_high_b1, lsl #16
+	movk	x_tmp2, #br_high_b2, lsl #32
+	movk	x_tmp2, #br_high_b3, lsl #48
 	fmov	d_br_high, x_tmp2
 
 	pmull	v_tmp_low.1q, v_x3.1d, v_br_low.1d
