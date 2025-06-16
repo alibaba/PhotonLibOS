@@ -1,6 +1,6 @@
 #include "photon/net/vdma.h"
 
-#include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/common/string-keyed.h>
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
@@ -113,9 +113,8 @@ public:
         ftruncate(shm_fd_, shm_size_);
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
         if (!shm_begin_ptr_) {
-            LOG_ERROR("SharedMemoryBufferAllocator, mmap failed");
             close(shm_fd_);
-            return -1;
+            LOG_ERROR_RETURN(0, -1, "SharedMemoryBufferAllocator, mmap failed");
         }
 
         nbuffer_ = shm_size_ / unit_;
@@ -266,20 +265,17 @@ public:
             buf_map_.emplace(id, buf);
             return buf;
         }
-        LOG_ERROR("used, map failed: ", id.data());
-        return nullptr;
+        LOG_ERROR_RETURN(0, nullptr, "used, map failed: ", id);
     }
 
     int unmap(vDMABuffer* buffer) override {
         SCOPED_LOCK(mutex_);
-        std::string key(buffer->id().data(), buffer->id().size());
-        auto it = buf_map_.find(key);
-        if (it != buf_map_.end()) {
-            buf_map_.erase(it);
-            return 0;
+        auto key = buffer->id();
+        int cnt = buf_map_.erase(key);
+        if (cnt == 0) {
+            LOG_ERROR_RETURN(0, -1, "not used, unmap failed: ", key);
         }
-        LOG_ERROR("not used, unmap failed: ", key.c_str());
-        return -1;
+        return 0;
     }
 
     int write(vDMABuffer* vbuf, size_t size, off_t offset) override {

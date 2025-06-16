@@ -1,16 +1,11 @@
 #include <photon/photon.h>
-#include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/net/vdma.h>
 
 #include <string>
 #include <iomanip>
 #include <sstream>
-std::string ptr_to_hex_string(void* ptr) {
-    std::stringstream ss;
-    ss << "0x" << std::hex << std::setfill('0') << std::setw(sizeof(void*) * 2)
-       << reinterpret_cast<uint64_t>(ptr);
-    return ss.str();
-}
+
 
 int main() {
     photon::init();
@@ -27,9 +22,8 @@ int main() {
     auto initiator = photon::new_shm_vdma_initiator(shm_name.c_str(), shm_size);
     // (3) target alloc a shared memory buffer
     auto t_buffer = target->alloc(unit);
-    auto addr = ptr_to_hex_string(t_buffer->address());
     auto id = t_buffer->id();
-    LOG_INFO("step3: shared memory buffer real address is ", addr.data());
+    LOG_DEBUG("step3: shared memory buffer real address is ", HEX((uint64_t)t_buffer->address()));
     size_t want_data_size = 4096;
     off_t want_data_offset = 0;
     // (4) target send a request msg to initiator, tell initiator: logical addr + want which data
@@ -48,9 +42,8 @@ int main() {
     uint8_t* ptr = (uint8_t*)((char*)t_buffer->address() + want_data_offset);
     for (size_t i=0; i<want_data_size; i++) {
         if (ptr[i] != 0x22) {
-            LOG_ERROR("failed, not same at ", i, "want ", 0x22, ", now ", ptr[i]);
             target->dealloc(t_buffer);
-            return -1;
+            LOG_ERROR_RETURN(0, -1, "failed, not same at ", i, "want ", 0x22, ", now ", ptr[i]);
         }
     }
     // (11) target dealloc the shm buffer
