@@ -108,7 +108,7 @@ std::string url_escape(std::string_view url, bool escape_slash) {
     std::string ret;
     ret.reserve(url.size() * 2);
 
-    for (auto c : url) {
+    for (unsigned char c : url) {
         if (isunreserved(c)) {
             ret.push_back(c);
         } else if (!escape_slash && c == '/') {
@@ -126,7 +126,7 @@ std::string url_unescape(std::string_view url) {
     std::string ret;
     ret.reserve(url.size());
     for (unsigned int i = 0; i < url.size(); i++) {
-        if (url[i] == '%') {
+        if (url[i] == '%' && i + 2 < url.size()) {
             auto c = estring_view(url.substr(i + 1, 2)).hex_to_uint64();
             ret += static_cast<char>(c);
             i += 2;
