@@ -94,9 +94,19 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
     return 0;
 }
 
-static int fuse_session_loop_mpt(struct fuse_session *se) {
-    FuseSessionLoopEPoll loop(se);
-    loop.run();
+static int fuse_session_loop_mpt(struct fuse_session *se, uint64_t looptype = FUSE_SESSION_LOOP_EPOLL) {
+    FuseSessionLoop *loop;
+    switch (looptype) {
+        case FUSE_SESSION_LOOP_SYNC:
+            loop = new FuseSessionLoopSync(se);
+            break;
+        case FUSE_SESSION_LOOP_EPOLL:
+        default:
+            loop = new FuseSessionLoopEPoll(se);
+            break;
+    }
+    loop->run();
+    delete loop;
     return 0;
 }
 
@@ -237,7 +247,7 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
           ths.emplace_back(std::thread([&]() {
               init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
               DEFER(fini());
-              if (fuse_session_loop_mpt(se) != 0) res = -1;
+              if (fuse_session_loop_mpt(se, looptype) != 0) res = -1;
           }));
         }
         for (auto& th : ths) th.join();
