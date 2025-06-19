@@ -72,6 +72,8 @@ private:
     int bufdtor(struct fuse_buf *fbuf);
 #endif
 
+    int set_fd();
+
 public:
     explicit FuseSessionLoopEPoll(struct fuse_session *session);
     ~FuseSessionLoopEPoll();

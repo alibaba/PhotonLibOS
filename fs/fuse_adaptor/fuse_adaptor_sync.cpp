@@ -53,7 +53,7 @@ namespace fs{
 
 static photon::thread_local_ptr<int> iofd;
 
-int FuseSessionLoopSync::prepare_fd() {
+int FuseSessionLoopSync::set_fd() {
     uint32_t masterfd = fuse_session_fd(se_);
     const char *devname = "/dev/fuse";
 #ifndef O_CLOEXEC
@@ -102,7 +102,7 @@ FuseSessionLoopSync::FuseSessionLoopSync(struct fuse_session *se)
     numavail_ = 0;
     waitting_ = false;
 
-    prepare_fd();
+    set_fd();
     for (int i = 0; i < max_workers_; ++i) {
         WorkerArgs<void *, int> *wrkargs = new WorkerArgs<void *, int>();
         wrkargs->args = std::make_tuple(reinterpret_cast<void *>(this), i);

@@ -70,7 +70,7 @@ private:
     std::unordered_map<int, int>idlers_;
     photon::semaphore sem_;
 
-   int prepare_fd();
+   int set_fd();
    static void *fuse_do_work(void *data);
 
 public:

@@ -142,7 +142,9 @@ FuseSessionLoopEPoll::FuseSessionLoopEPoll(struct fuse_session *session)
               {this, &FuseSessionLoopEPoll::bufdtor}),
       threadpool(),
       loop(new_event_loop({this, &FuseSessionLoopEPoll::wait_for_readable},
-                          {this, &FuseSessionLoopEPoll::on_accept})) {}
+                          {this, &FuseSessionLoopEPoll::on_accept})) {
+    set_fd();
+}
 
 FuseSessionLoopEPoll::~FuseSessionLoopEPoll() {
     loop->stop();
@@ -152,6 +154,19 @@ FuseSessionLoopEPoll::~FuseSessionLoopEPoll() {
     }
 
     delete loop;
+}
+
+int FuseSessionLoopEPoll::set_fd() {
+#if FUSE_USE_VERSION < 30
+    auto ch = fuse_session_next_chan(se, NULL);
+    auto fd = fuse_chan_fd(ch);
+#else
+    auto fd = fuse_session_fd(se);
+#endif
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return 0;
 }
 
 }  // namespace fs

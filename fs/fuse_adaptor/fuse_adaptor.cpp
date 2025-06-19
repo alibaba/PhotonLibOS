@@ -229,15 +229,8 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
     if (multithreaded) {
         if (cfg.threads < 1) cfg.threads = 1;
         if (cfg.threads > 64) cfg.threads = 64;
-#if FUSE_USE_VERSION < 30
-        auto ch = fuse_session_next_chan(se, NULL);
-        auto fd = fuse_chan_fd(ch);
-#else
-        auto fd = fuse_session_fd(se);
-#endif
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        std::vector<std::thread> ths;
+
+	std::vector<std::thread> ths;
         for (int i = 0; i < cfg.threads; ++i) {
           ths.emplace_back(std::thread([&]() {
               // TODO(haolianglh): clone fd
