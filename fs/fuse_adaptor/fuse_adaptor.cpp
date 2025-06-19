@@ -170,6 +170,22 @@ struct user_config {
     char *looptype;
 };
 
+uint64_t find_looptype(const char *name) {
+    if (!strncmp(name, "epoll", 5))
+        return FUSE_SESSION_LOOP_EPOLL;
+
+    if (!strncmp(name, "sync", 4))
+        return FUSE_SESSION_LOOP_SYNC;
+
+    if (!strncmp(name, "io_uring_cas", 12))
+        return FUSE_SESSION_LOOP_IOURING_CASCADING;
+
+    if (!strncmp(name, "io_uring", 8))
+        return FUSE_SESSION_LOOP_IOURING;
+
+    return FUSE_SESSION_LOOP_EPOLL;
+}
+
 #define USER_OPT(t, p, v) { t, offsetof(struct user_config, p), v }
 struct fuse_opt user_opts[] = { USER_OPT("threads=%d",  threads, 0),
                                 USER_OPT("looptype=%s", looptype, 0),
@@ -179,29 +195,12 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
              void *user_data) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     struct user_config cfg{ .threads = 4, .looptype = NULL };
-    // uint64_t looptype = FUSE_SESSION_LOOP_EPOLL;
+    uint64_t looptype = FUSE_SESSION_LOOP_EPOLL;
     fuse_opt_parse(&args, &cfg, user_opts, NULL);
-#if 0
-    if (cfg.looptype) {
-       switch (cfg.looptype) {
-           case "sync":
-               looptype = FUSE_SESSION_LOOP_SYNC;
-               break;
-           case "epoll":
-               looptype = FUSE_SESSION_LOOP_EPOLL;
-               break;
-           case "iouring-cas":
-               looptype = FUSE_SESSION_LOOP_IOURING_CASCADING;
-               break;
-           case "iouring":
-               looptype = FUSE_SESSION_LOOP_IOURING_MASTER;
-               break;
-           default:
-               LOG_ERROR_RETURN(EINVAL, -1, "Invalid fuse session loop type ", cfg.looptype);
-       }
-    }
-#endif
-    printf("sanyu sssss, loop type %s\n", cfg.looptype);
+
+    if (cfg.looptype)
+        looptype = find_looptype(cfg.looptype);
+    printf("session loop type %s\n", cfg.looptype);
     struct fuse *fuse;
     struct fuse_session* se;
     char *mountpoint;
@@ -224,6 +223,9 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 #endif
     if (fuse == NULL) return 1;
     se = fuse_get_session(fuse);
+    if (looptype == FUSE_SESSION_LOOP_SYNC) {
+        FuseSessionLoopSync::set_custom_io(se);
+    }
     // fuse_session_custom_io(se, &cio_handle, fuse_session_fd(se));
 
     if (multithreaded) {
@@ -233,7 +235,6 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 	std::vector<std::thread> ths;
         for (int i = 0; i < cfg.threads; ++i) {
           ths.emplace_back(std::thread([&]() {
-              // TODO(haolianglh): clone fd
               init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
               DEFER(fini());
               if (fuse_session_loop_mpt(se) != 0) res = -1;

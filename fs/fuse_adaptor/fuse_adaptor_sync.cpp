@@ -211,20 +211,31 @@ void *FuseSessionLoopSync::fuse_do_work(void *data) {
     }
     return nullptr;
 }
-/*
-static ssize_t inter_writev(int fd, struct iovec *iov, int count, void *userdata)
+
+static ssize_t custom_writev(int fd, struct iovec *iov, int count, void *userdata)
 {
     (void)userdata;
 
     return writev(*iofd, iov, count);
 }
 
-static ssize_t inter_read(int fd, void *buf, size_t len, void *userdata)
+static ssize_t custom_read(int fd, void *buf, size_t len, void *userdata)
 {
     (void)userdata;
     return read(*iofd, buf, len);
 }
-*/
+
+int FuseSessionLoopSync::set_custom_io(struct fuse_session *se) {
+    const struct fuse_custom_io custom_io = {
+        .writev = photon::fs::custom_writev,
+	.read = photon::fs::custom_read,
+	.splice_receive = NULL,
+	.splice_send = NULL,
+	.clone_fd = NULL,
+    };
+
+    return fuse_session_custom_io(se, &custom_io, fuse_session_fd(se));
+}
 
 }  // namespace fs
 }  // namespace photon

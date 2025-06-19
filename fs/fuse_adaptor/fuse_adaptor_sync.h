@@ -77,6 +77,7 @@ public:
     explicit FuseSessionLoopSync(fuse_session *session);
     ~FuseSessionLoopSync();
     void run();
+    static int set_custom_io(struct fuse_session *se);
 };
 
 }  // namespace fs
