@@ -32,6 +32,20 @@ limitations under the License.
 
 namespace photon {
 namespace fs {
+
+#define SHIFT(n) (1 << n)
+const uint64_t FUSE_SESSION_LOOP_NONE = 0;
+const uint64_t FUSE_SESSION_LOOP_EPOLL = SHIFT(0);
+const uint64_t FUSE_SESSION_LOOP_SYNC = SHIFT(1);
+const uint64_t FUSE_SESSION_LOOP_IOURING_CASCADING = SHIFT(2);
+const uint64_t FUSE_SESSION_LOOP_IOURING_MASTER = SHIFT(3);
+
+const uint64_t FUSE_SESSION_LOOP_DEFAULT = FUSE_SESSION_LOOP_EPOLL |
+                                           FUSE_SESSION_LOOP_SYNC  |
+                                           FUSE_SESSION_LOOP_IOURING_CASCADING |
+                                           FUSE_SESSION_LOOP_IOURING_MASTER;
+#undef SHIFT
+
 class IFileSystem;
 
 int fuser_go(IFileSystem* fs, int argc, char* argv[]);

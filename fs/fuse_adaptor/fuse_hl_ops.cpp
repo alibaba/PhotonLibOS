@@ -693,4 +693,4 @@ fuse_operations *get_fuse_xmp_oper() { return &xmp_oper; }
 void set_fuse_fs(fs::IFileSystem *fs_) { fs = fs_; }
 
 }  // namespace fs
-}  // namespace alibaba
+}  // namespace photon

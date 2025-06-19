@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "fuse_adaptor.h"
+#include "fuse_session_loop.h"
+#include "fuse_adaptor_sync.h"
+#include "fuse_adaptor_epoll.h"
 
 #if FUSE_USE_VERSION >= 30
 #include <fuse3/fuse_lowlevel.h>
@@ -30,6 +33,8 @@ limitations under the License.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #include <photon/common/alog.h>
 #include <photon/common/event-loop.h>
@@ -38,6 +43,7 @@ limitations under the License.
 #include <photon/fs/filesystem.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/thread-pool.h>
+#include <photon/thread/thread-local.h>
 
 namespace photon {
 namespace fs{
@@ -88,137 +94,8 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
     return 0;
 }
 
-class FuseSessionLoop {
-protected:
-    struct fuse_session *se;
-#if FUSE_USE_VERSION < 30
-    struct fuse_chan *ch;
-    size_t bufsize = 0;
-    IdentityPool<void, 32> bufpool;
-#else
-    IdentityPool<struct fuse_buf, 32> bufpool;
-#endif
-    ThreadPool<32> threadpool;
-    EventLoop *loop;
-    int ref = 1;
-    condition_variable cond;
-
-    int wait_for_readable(EventLoop *) {
-        if (fuse_session_exited(se)) return -1;
-#if FUSE_USE_VERSION < 30
-        auto ret = wait_for_fd_readable(fuse_chan_fd(ch));
-#else
-        auto ret = wait_for_fd_readable(fuse_session_fd(se));
-#endif
-        if (ret < 0) {
-            if (errno == ETIMEDOUT) {
-                return 0;
-            }
-            return -1;
-        }
-        return 1;
-    }
-
-    static void *worker(void *args) {
-        auto obj = (FuseSessionLoop *)args;
-#if FUSE_USE_VERSION < 30
-        struct fuse_buf fbuf;
-        memset(&fbuf, 0, sizeof(fbuf));
-        struct fuse_chan *tmpch = obj->ch;
-        fbuf.mem = obj->bufpool.get();
-        fbuf.size = obj->bufsize;
-        DEFER({
-            obj->bufpool.put(fbuf.mem);
-        });
-        auto res = fuse_session_receive_buf(obj->se, &fbuf, &tmpch);
-#else
-        struct fuse_buf *pfbuf = obj->bufpool.get();
-        DEFER({
-            obj->bufpool.put(pfbuf);
-        });
-        auto res = fuse_session_receive_buf(obj->se, pfbuf);
-#endif
-        DEFER({
-            if (--obj->ref == 0) obj->cond.notify_all();
-        });
-        if (res == -EINTR || res == -EAGAIN) return nullptr;
-        if (res <= 0) {
-            obj->loop->stop();
-            return nullptr;
-        }
-#if FUSE_USE_VERSION < 30
-        fuse_session_process_buf(obj->se, &fbuf, tmpch);
-#else
-        fuse_session_process_buf(obj->se, pfbuf);
-#endif
-        return nullptr;
-    }
-
-    int on_accept(EventLoop *) {
-        ++ref;
-        auto th = threadpool.thread_create(&FuseSessionLoop::worker, (void *)this);
-        thread_yield_to(th);
-        return 0;
-    }
-
-#if FUSE_USE_VERSION < 30
-    int bufctor(void **buf) {
-        *buf = malloc(bufsize);
-        if (*buf == nullptr) return -1;
-        return 0;
-    }
-
-    int bufdtor(void *buf) {
-        free(buf);
-        return 0;
-    }
-#else
-    int bufctor(struct fuse_buf **pbuf) {
-        *pbuf = reinterpret_cast<struct fuse_buf *>(malloc(sizeof(struct fuse_buf)));
-        if (*pbuf == nullptr) return -1;
-
-        memset((*pbuf), 0, sizeof(struct fuse_buf));
-        return 0;
-    }
-
-    int bufdtor(struct fuse_buf *fbuf) {
-        if (fbuf->mem)
-            free(fbuf->mem);
-        fbuf->mem = NULL;
-
-        free(fbuf);
-        return 0;
-    }
-#endif
-
-public:
-    explicit FuseSessionLoop(struct fuse_session *session)
-        : se(session),
-#if FUSE_USE_VERSION < 30
-          ch(fuse_session_next_chan(se, NULL)),
-          bufsize(fuse_chan_bufsize(ch)),
-#endif
-          bufpool({this, &FuseSessionLoop::bufctor},
-                  {this, &FuseSessionLoop::bufdtor}),
-          threadpool(),
-          loop(new_event_loop({this, &FuseSessionLoop::wait_for_readable},
-                              {this, &FuseSessionLoop::on_accept})) {}
-
-    ~FuseSessionLoop() {
-        loop->stop();
-        --ref;
-        while (ref != 0) {
-            cond.wait_no_lock();
-        }
-
-        delete loop;
-    }
-
-    void run() { loop->run(); }
-};
-
 static int fuse_session_loop_mpt(struct fuse_session *se) {
-    FuseSessionLoop loop(se);
+    FuseSessionLoopEPoll loop(se);
     loop.run();
     return 0;
 }
@@ -290,32 +167,68 @@ out1:
 
 struct user_config {
     int threads;
+    char *looptype;
 };
 
 #define USER_OPT(t, p, v) { t, offsetof(struct user_config, p), v }
-struct fuse_opt user_opts[] = { USER_OPT("threads=%d", threads, 0), FUSE_OPT_END };
+struct fuse_opt user_opts[] = { USER_OPT("threads=%d",  threads, 0),
+                                USER_OPT("looptype=%s", looptype, 0),
+                                FUSE_OPT_END };
 
 int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
              void *user_data) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct user_config cfg{ .threads = 4, };
+    struct user_config cfg{ .threads = 4, .looptype = NULL };
+    // uint64_t looptype = FUSE_SESSION_LOOP_EPOLL;
     fuse_opt_parse(&args, &cfg, user_opts, NULL);
+#if 0
+    if (cfg.looptype) {
+       switch (cfg.looptype) {
+           case "sync":
+               looptype = FUSE_SESSION_LOOP_SYNC;
+               break;
+           case "epoll":
+               looptype = FUSE_SESSION_LOOP_EPOLL;
+               break;
+           case "iouring-cas":
+               looptype = FUSE_SESSION_LOOP_IOURING_CASCADING;
+               break;
+           case "iouring":
+               looptype = FUSE_SESSION_LOOP_IOURING_MASTER;
+               break;
+           default:
+               LOG_ERROR_RETURN(EINVAL, -1, "Invalid fuse session loop type ", cfg.looptype);
+       }
+    }
+#endif
+    printf("sanyu sssss, loop type %s\n", cfg.looptype);
     struct fuse *fuse;
     struct fuse_session* se;
     char *mountpoint;
     int multithreaded;
     int res;
     size_t op_size = sizeof(*(op));
+#if 0
+    const struct fuse_custom_io cio_handle = {
+        .writev = photon::fs::inter_writev,
+        .read = photon::fs::inter_read,
+        .splice_receive = NULL,
+        .splice_send = NULL,
+        .clone_fd = NULL,
+    };
+#endif
 #if FUSE_USE_VERSION < 30
     fuse = fuse_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
 #else
     fuse = fuse3_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
 #endif
     if (fuse == NULL) return 1;
+    se = fuse_get_session(fuse);
+    // fuse_session_custom_io(se, &cio_handle, fuse_session_fd(se));
+
     if (multithreaded) {
         if (cfg.threads < 1) cfg.threads = 1;
         if (cfg.threads > 64) cfg.threads = 64;
-        se = fuse_get_session(fuse);
 #if FUSE_USE_VERSION < 30
         auto ch = fuse_session_next_chan(se, NULL);
         auto fd = fuse_chan_fd(ch);
@@ -327,6 +240,7 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
         std::vector<std::thread> ths;
         for (int i = 0; i < cfg.threads; ++i) {
           ths.emplace_back(std::thread([&]() {
+              // TODO(haolianglh): clone fd
               init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
               DEFER(fini());
               if (fuse_session_loop_mpt(se) != 0) res = -1;
@@ -354,4 +268,4 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 }
 
 }  // namespace fs
-}  // namespace alibaba
+}  // namespace photon

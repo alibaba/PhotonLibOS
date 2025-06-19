@@ -225,7 +225,11 @@ else ()
     endif ()
 endif ()
 if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTON_ENABLE_FUSE STREQUAL "3")
-    list(APPEND PHOTON_SRC fs/fuse_adaptor/fuse_adaptor.cpp fs/fuse_adaptor/fuse_hl_ops.cpp)
+    list(APPEND PHOTON_SRC
+         fs/fuse_adaptor/fuse_adaptor.cpp
+         fs/fuse_adaptor/fuse_hl_ops.cpp
+         fs/fuse_adaptor/fuse_adaptor_epoll.cpp
+         fs/fuse_adaptor/fuse_adaptor_sync.cpp)
 endif ()
 if (PHOTON_ENABLE_SASL)
     list(APPEND PHOTON_SRC net/security-context/sasl-stream.cpp)
