@@ -210,22 +210,18 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 
     if (cfg.looptype)
         looptype = find_looptype(cfg.looptype);
-    printf("session loop type %s\n", cfg.looptype);
+#if FUSE_USE_VERSION < 30
+    looptype = FUSE_SESSION_LOOP_EPOLL;
+#endif
+    LOG_INFO("session loop type: `", VALUE(cfg.looptype));
+
     struct fuse *fuse;
     struct fuse_session* se;
     char *mountpoint;
     int multithreaded;
     int res;
     size_t op_size = sizeof(*(op));
-#if 0
-    const struct fuse_custom_io cio_handle = {
-        .writev = photon::fs::inter_writev,
-        .read = photon::fs::inter_read,
-        .splice_receive = NULL,
-        .splice_send = NULL,
-        .clone_fd = NULL,
-    };
-#endif
+
 #if FUSE_USE_VERSION < 30
     fuse = fuse_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
 #else
@@ -236,7 +232,6 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
     if (looptype == FUSE_SESSION_LOOP_SYNC) {
         FuseSessionLoopSync::set_custom_io(se);
     }
-    // fuse_session_custom_io(se, &cio_handle, fuse_session_fd(se));
 
     if (multithreaded) {
         if (cfg.threads < 1) cfg.threads = 1;
