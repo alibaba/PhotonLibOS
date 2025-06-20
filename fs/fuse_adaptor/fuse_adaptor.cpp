@@ -33,17 +33,12 @@ limitations under the License.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <sys/ioctl.h>
-#include <unistd.h>
 
-#include <photon/common/alog.h>
-#include <photon/common/event-loop.h>
 #include <photon/io/fd-events.h>
+#include <photon/common/alog.h>
 #include <photon/fs/exportfs.h>
 #include <photon/fs/filesystem.h>
 #include <photon/thread/thread.h>
-#include <photon/thread/thread-pool.h>
-#include <photon/thread/thread-local.h>
 
 namespace photon {
 namespace fs{

@@ -22,7 +22,6 @@ limitations under the License.
 #else
 #include <fuse/fuse_lowlevel.h>
 #endif
-#include <thread>
 #include <vector>
 #include <tuple>
 #include <unordered_map>
@@ -37,17 +36,10 @@ limitations under the License.
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include <photon/io/fd-events.h>
-#include <photon/fs/exportfs.h>
-#include <photon/fs/filesystem.h>
 #include <photon/thread/thread.h>
-#include <photon/thread/thread-local.h>
 
 namespace photon {
 namespace fs{
-
-#define FUSE_DEV_IOC_MAGIC  229
-#define FUSE_DEV_IOC_CLONE  _IOR(FUSE_DEV_IOC_MAGIC, 0, uint32_t)
 
 template <typename ...Args>
 class WorkerArgs {
@@ -56,7 +48,6 @@ public:
 };
 
 class FuseSessionLoopSync : public FuseSessionLoop {
-// protected:
 private:
     int error_;
     struct fuse_session *se_;

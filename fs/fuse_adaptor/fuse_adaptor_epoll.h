@@ -21,8 +21,6 @@ limitations under the License.
 #else
 #include <fuse/fuse_lowlevel.h>
 #endif
-#include <thread>
-#include <vector>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -32,16 +30,11 @@ limitations under the License.
 #define _GNU_SOURCE
 #endif
 
-#include <photon/common/alog.h>
 #include <photon/common/event-loop.h>
-#include <photon/io/fd-events.h>
-#include <photon/fs/exportfs.h>
-#include <photon/fs/filesystem.h>
-#include <photon/thread/thread.h>
 #include <photon/thread/thread-pool.h>
 
 namespace photon {
-namespace fs{
+namespace fs {
 
 class FuseSessionLoopEPoll : public FuseSessionLoop {
 private:
@@ -81,4 +74,4 @@ public:
 };
 
 }  // namespace fs
-}  // namespace alibaba
+}  // namespace photon

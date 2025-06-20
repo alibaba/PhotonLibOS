@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "fuse_adaptor.h"
 #include "fuse_adaptor_sync.h"
 
 #if FUSE_USE_VERSION >= 30
@@ -21,10 +20,6 @@ limitations under the License.
 #else
 #include <fuse/fuse_lowlevel.h>
 #endif
-#include <thread>
-#include <vector>
-#include <tuple>
-#include <unordered_map>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -37,16 +32,12 @@ limitations under the License.
 #include <unistd.h>
 
 #include <photon/common/alog.h>
-#include <photon/common/event-loop.h>
 #include <photon/io/fd-events.h>
-#include <photon/fs/exportfs.h>
-#include <photon/fs/filesystem.h>
 #include <photon/thread/thread.h>
-#include <photon/thread/thread-pool.h>
 #include <photon/thread/thread-local.h>
 
 namespace photon {
-namespace fs{
+namespace fs {
 
 #define FUSE_DEV_IOC_MAGIC  229
 #define FUSE_DEV_IOC_CLONE  _IOR(FUSE_DEV_IOC_MAGIC, 0, uint32_t)
@@ -90,7 +81,7 @@ int FuseSessionLoopSync::set_fd() {
     fcntl(noblk_fd, F_SETFL, (flags | O_NONBLOCK));
     nonblk_fd_ = noblk_fd;
 
-    printf("masterfd<%d>, local fd<%d>, non fd<%d>\n", masterfd, blk_fd_, nonblk_fd_);
+    LOG_INFO("masterfd:`", masterfd, " block fd `", blk_fd_, "  nonblock fd: `", nonblk_fd_);
     return 0;
 }
 
@@ -118,7 +109,6 @@ FuseSessionLoopSync::FuseSessionLoopSync(struct fuse_session *se)
         photon::thread_yield_to(th);
     }
     assert(num_worker_ = max_workers_);
-    // sanyulh start here
 }
 
 void FuseSessionLoopSync::run() {

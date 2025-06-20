@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "fuse_adaptor.h"
 #include "fuse_adaptor_epoll.h"
 
 #if FUSE_USE_VERSION >= 30
@@ -21,8 +20,6 @@ limitations under the License.
 #else
 #include <fuse/fuse_lowlevel.h>
 #endif
-#include <thread>
-#include <vector>
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -33,16 +30,11 @@ limitations under the License.
 #endif
 
 #include <photon/common/alog.h>
-#include <photon/common/event-loop.h>
 #include <photon/io/fd-events.h>
-#include <photon/fs/exportfs.h>
-#include <photon/fs/filesystem.h>
 #include <photon/thread/thread.h>
-#include <photon/thread/thread-pool.h>
 
 namespace photon {
-namespace fs{
-
+namespace fs {
 
 int FuseSessionLoopEPoll::wait_for_readable(EventLoop *) {
     if (fuse_session_exited(se)) return -1;
@@ -170,4 +162,4 @@ int FuseSessionLoopEPoll::set_fd() {
 }
 
 }  // namespace fs
-}  // namespace alibaba
+}  // namespace photon
