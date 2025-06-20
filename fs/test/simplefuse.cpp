@@ -33,7 +33,7 @@ limitations under the License.
 #include "../aligned-file.h"
 #include "../async_filesystem.h"
 #include "../exportfs.h"
-#include "../fuse_adaptor.h"
+#include "../fuse_adaptor/fuse_adaptor.h"
 #include "../localfs.h"
 #include "photon/common/executor/executor.h"
 #include "photon/photon.h"
