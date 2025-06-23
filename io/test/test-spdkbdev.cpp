@@ -160,6 +160,32 @@ TEST_F(SPDKBDevTest, rwv) {
     spdk_free(bufread);
 }
 
+TEST_F(SPDKBDevTest, rwv_blocks) {
+    struct spdk_bdev_desc* desc = bdev_info->desc;
+    struct spdk_io_channel* ch = bdev_info->ch;
+
+    uint64_t bufsz = 512;
+
+    void* bufwrite = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
+    void* bufread = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
+    EXPECT_NE(bufwrite, nullptr);
+    EXPECT_NE(bufread, nullptr);
+
+    memset(bufwrite, 0x42, bufsz);
+
+    IOVector iov_write, iov_read;
+    iov_write.push_back(bufwrite, bufsz);
+    iov_read.push_back(bufread, bufsz);
+
+    EXPECT_EQ(photon::spdk::bdev_writev_blocks(desc, ch, iov_write.iovec(), iov_write.iovcnt(), 0, 1), 0);
+    EXPECT_EQ(photon::spdk::bdev_readv_blocks(desc, ch, iov_read.iovec(), iov_read.iovcnt(), 0, 1), 0);
+
+    EXPECT_EQ(memcmp(bufwrite, bufread, bufsz), 0);
+
+    spdk_free(bufwrite);
+    spdk_free(bufread);
+}
+
 int main(int argc, char** argv) {
     testing::AddGlobalTestEnvironment(new SPDKBDevTestEnv);
     testing::InitGoogleTest(&argc, argv);

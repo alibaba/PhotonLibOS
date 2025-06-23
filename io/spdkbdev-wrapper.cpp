@@ -167,13 +167,13 @@ void bdev_close(struct spdk_bdev_desc* desc) {
 
 
 int bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		   void *buf, uint64_t offset, uint64_t nbytes) 
+		    void *buf, uint64_t offset, uint64_t nbytes) 
 {
     return bdev_call(&spdk_bdev_read, desc, ch, buf, offset, nbytes);
 }
 
 int bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			  void *buf, uint64_t offset_blocks, uint64_t num_blocks)
+			void *buf, uint64_t offset_blocks, uint64_t num_blocks)
 {
     return bdev_call(&spdk_bdev_read_blocks, desc, ch, buf, offset_blocks, num_blocks);
 }
@@ -186,8 +186,8 @@ int bdev_readv(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 }
 
 int bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			   struct iovec *iov, int iovcnt,
-			   uint64_t offset_blocks, uint64_t num_blocks)
+			struct iovec *iov, int iovcnt,
+			uint64_t offset_blocks, uint64_t num_blocks)
 {
     return bdev_call(&spdk_bdev_readv_blocks, desc, ch, iov, iovcnt, offset_blocks, num_blocks);
 
@@ -200,21 +200,21 @@ int bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 }
 
 int bdev_write_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			   void *buf, uint64_t offset_blocks, uint64_t num_blocks)
+			void *buf, uint64_t offset_blocks, uint64_t num_blocks)
 {
     return bdev_call(&spdk_bdev_write_blocks, desc, ch, buf, offset_blocks, num_blocks);
 }
             
 int bdev_writev(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-		     struct iovec *iov, int iovcnt,
-		     uint64_t offset, uint64_t len)
+		    struct iovec *iov, int iovcnt,
+		    uint64_t offset, uint64_t len)
 {
     return bdev_call(&spdk_bdev_writev, desc, ch, iov, iovcnt, offset, len);
 }
 
 int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
-			    struct iovec *iov, int iovcnt,
-			    uint64_t offset_blocks, uint64_t num_blocks)
+			struct iovec *iov, int iovcnt,
+			uint64_t offset_blocks, uint64_t num_blocks)
 {
     return bdev_call(&spdk_bdev_writev_blocks, desc, ch, iov, iovcnt, offset_blocks, num_blocks);
 }
