@@ -15,14 +15,12 @@ limitations under the License.
 */
 #include "fuse_adaptor.h"
 #include "fuse_session_loop.h"
-#include "fuse_adaptor_sync.h"
 #include "fuse_adaptor_epoll.h"
-
-#if FUSE_USE_VERSION >= 30
-#include <fuse3/fuse_lowlevel.h>
-#else
-#include <fuse/fuse_lowlevel.h>
+//  The API function `fuse_session_custom_io` was introduced in version 3.13.0
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
+#include "fuse_adaptor_sync.h"
 #endif
+
 #include <thread>
 #include <vector>
 
@@ -92,9 +90,11 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
 static int fuse_session_loop_mpt(struct fuse_session *se, uint64_t looptype = FUSE_SESSION_LOOP_EPOLL) {
     FuseSessionLoop *loop;
     switch (looptype) {
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
         case FUSE_SESSION_LOOP_SYNC:
             loop = new FuseSessionLoopSync(se);
             break;
+#endif
         case FUSE_SESSION_LOOP_EPOLL:
         default:
             loop = new FuseSessionLoopEPoll(se);
@@ -105,7 +105,7 @@ static int fuse_session_loop_mpt(struct fuse_session *se, uint64_t looptype = FU
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 fuse* fuse3_setup(int argc, char *argv[], const struct ::fuse_operations *op,
            size_t op_size, char **mountpoint, int *multithreaded, void *user_data)
 {
@@ -205,10 +205,10 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 
     if (cfg.looptype)
         looptype = find_looptype(cfg.looptype);
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 13)
     looptype = FUSE_SESSION_LOOP_EPOLL;
 #endif
-    LOG_INFO("session loop type: `", VALUE(cfg.looptype));
+    LOG_INFO("session cfg loop type: `", VALUE(cfg.looptype), " loop type: `", VALUE(looptype));
 
     struct fuse *fuse;
     struct fuse_session* se;
@@ -217,16 +217,19 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
     int res;
     size_t op_size = sizeof(*(op));
 
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     fuse = fuse_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
 #else
     fuse = fuse3_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
 #endif
     if (fuse == NULL) return 1;
     se = fuse_get_session(fuse);
+
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
     if (looptype == FUSE_SESSION_LOOP_SYNC) {
         FuseSessionLoopSync::set_custom_io(se);
     }
+#endif
 
     if (multithreaded) {
         if (cfg.threads < 1) cfg.threads = 1;
@@ -248,7 +251,7 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
         fuse_session_reset(se);
     }
     fuse_remove_signal_handlers(fuse_get_session(fuse));
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     fuse_unmount(mountpoint, fuse_session_next_chan(se, NULL));
 #else
     fuse_unmount(fuse);

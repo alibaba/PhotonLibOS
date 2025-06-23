@@ -15,15 +15,14 @@ limitations under the License.
 */
 
 #include <fcntl.h>
-#if FUSE_USE_VERSION >= 30
-#include <fuse3/fuse.h>
-#else
-#include <fuse.h>
-#endif
 #include <sys/stat.h>
 
 #include <cstdio>
 #include <thread>
+
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
 
 #include <photon/common/alog.h>
 #include <photon/common/executor/executor.h>

@@ -16,6 +16,10 @@ limitations under the License.
 #pragma once
 #include "fuse_session_loop.h"
 
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
+
 #if FUSE_USE_VERSION >= 30
 #include <fuse3/fuse_lowlevel.h>
 #else
@@ -39,7 +43,7 @@ namespace fs {
 class FuseSessionLoopEPoll : public FuseSessionLoop {
 private:
     struct fuse_session *se;
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     struct fuse_chan *ch;
     size_t bufsize = 0;
     IdentityPool<void, 32> bufpool;
@@ -57,7 +61,7 @@ private:
 
     int on_accept(EventLoop *);
 
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     int bufctor(void **buf);
     int bufdtor(void *buf);
 #else

@@ -17,11 +17,16 @@ limitations under the License.
 #pragma once
 #include "fuse_session_loop.h"
 
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
+
 #if FUSE_USE_VERSION >= 30
 #include <fuse3/fuse_lowlevel.h>
 #else
 #include <fuse/fuse_lowlevel.h>
 #endif
+
 #include <vector>
 #include <tuple>
 #include <unordered_map>

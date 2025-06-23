@@ -15,12 +15,6 @@ limitations under the License.
 */
 #include "fuse_adaptor_sync.h"
 
-#if FUSE_USE_VERSION >= 30
-#include <fuse3/fuse_lowlevel.h>
-#else
-#include <fuse/fuse_lowlevel.h>
-#endif
-
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -221,10 +215,17 @@ int FuseSessionLoopSync::set_custom_io(struct fuse_session *se) {
 	.read = photon::fs::custom_read,
 	.splice_receive = NULL,
 	.splice_send = NULL,
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
 	.clone_fd = NULL,
+#endif
     };
-
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
+    return fuse_session_custom_io(se, &custom_io,
+                                  sizeof(struct fuse_custom_io),
+                                  fuse_session_fd(se));
+#else
     return fuse_session_custom_io(se, &custom_io, fuse_session_fd(se));
+#endif
 }
 
 }  // namespace fs

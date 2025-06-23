@@ -224,13 +224,18 @@ else ()
         list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
     endif ()
 endif ()
+
 if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTON_ENABLE_FUSE STREQUAL "3")
     list(APPEND PHOTON_SRC
          fs/fuse_adaptor/fuse_adaptor.cpp
          fs/fuse_adaptor/fuse_hl_ops.cpp
-         fs/fuse_adaptor/fuse_adaptor_epoll.cpp
-         fs/fuse_adaptor/fuse_adaptor_sync.cpp)
+         fs/fuse_adaptor/fuse_adaptor_epoll.cpp)
+    if (PHOTON_ENABLE_FUSE STREQUAL "3")
+        list(APPEND PHOTON_SRC
+             fs/fuse_adaptor/fuse_adaptor_sync.cpp)
+    endif ()
 endif ()
+
 if (PHOTON_ENABLE_SASL)
     list(APPEND PHOTON_SRC net/security-context/sasl-stream.cpp)
 endif ()
@@ -269,7 +274,7 @@ if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
     target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
     target_include_directories(photon_obj PRIVATE ${FUSE_INCLUDE_DIRS})
 elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=35)
+    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=317)
     target_include_directories(photon_obj PRIVATE ${FUSE3_INCLUDE_DIRS})
 endif ()
 if (PHOTON_GLOBAL_INIT_OPENSSL)

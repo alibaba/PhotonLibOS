@@ -21,7 +21,7 @@ limitations under the License.
 #endif
 
 #ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 35
+#define FUSE_USE_VERSION 317
 #endif
 
 #if FUSE_USE_VERSION >= 30

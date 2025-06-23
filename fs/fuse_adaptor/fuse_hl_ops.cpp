@@ -15,6 +15,10 @@ limitations under the License.
 */
 // #include "fuse_adaptor.h"
 
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
+
 #if FUSE_USE_VERSION >= 30
 #include <fuse3/fuse.h>
 #include <fuse3/fuse_lowlevel.h>
@@ -72,7 +76,7 @@ static IFileSystem* fs = nullptr;
 
 #define CHECK_FS() if (!fs) return -EFAULT;
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static void* xmp_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
 {
     REPORT_PERF(xmp_init, 1)
@@ -97,7 +101,7 @@ static void xmp_destroy(void *handle)
     REPORT_PERF(xmp_destroy, 1)
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 #else
 static int xmp_getattr(const char *path, struct stat *stbuf)
@@ -174,7 +178,7 @@ static inline fs::IFile* get_file(struct fuse_file_info *fi)
     return file;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags)
 #else
@@ -196,7 +200,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         st.st_ino = dirp.d_ino;
         st.st_mode = dirp.d_type << 12;
         LOG_DEBUG("dirp.d_name: `", dirp.d_name);
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
         if (filler(buf, dirp.d_name, &st, 0, FUSE_FILL_DIR_PLUS))
 #else
         if (filler(buf, dirp.d_name, &st, 0))
@@ -266,7 +270,7 @@ static int xmp_symlink(const char *from, const char *to)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_rename(const char *from, const char *to, unsigned int flags)
 #else
 static int xmp_rename(const char *from, const char *to)
@@ -290,7 +294,7 @@ static int xmp_link(const char *from, const char *to)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 #else
 static int xmp_chmod(const char *path, mode_t mode)
@@ -304,7 +308,7 @@ static int xmp_chmod(const char *path, mode_t mode)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
 #else
 static int xmp_chown(const char *path, uid_t uid, gid_t gid)
@@ -318,7 +322,7 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 #else
 static int xmp_truncate(const char *path, off_t size)
@@ -332,7 +336,7 @@ static int xmp_truncate(const char *path, off_t size)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_utimens(const char *path, const struct timespec ts[2], struct fuse_file_info *fi)
 #else
 static int xmp_utimens(const char *path, const struct timespec ts[2])
@@ -560,7 +564,7 @@ static int xmp_flock(const char *path, struct fuse_file_info *fi, int op)
     return -ENOSYS;
 }
 
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
 static int xmp_getdir(const char* path, fuse_dirh_t dir, fuse_dirfil_t dirf)
 {
     LOG_DEBUG(VALUE(path));
@@ -609,7 +613,7 @@ static int xmp_bmap(const char *path, size_t blocksize, uint64_t *idx)
     return -ENOSYS;
 }
 
-#if FUSE_USE_VERSION < 35
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 5)
 static int xmp_ioctl(const char *path, int cmd, void *arg,
                       struct fuse_file_info *fi, unsigned int flags, void *data)
 #else
@@ -632,7 +636,7 @@ static int xmp_poll(const char *path, struct fuse_file_info *fi,
 static struct fuse_operations xmp_oper = {
     .getattr     = xmp_getattr,
     .readlink    = xmp_readlink,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .getdir      = xmp_getdir,
 #endif
     .mknod       = xmp_mknod,
@@ -645,7 +649,7 @@ static struct fuse_operations xmp_oper = {
     .chmod       = xmp_chmod,
     .chown       = xmp_chown,
     .truncate    = xmp_truncate,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .utime       = xmp_utime,
 #endif
     .open        = xmp_open,
@@ -667,14 +671,14 @@ static struct fuse_operations xmp_oper = {
     .destroy     = xmp_destroy,
     .access      = xmp_access,
     .create      = xmp_create,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .ftruncate   = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
     .fgetattr    = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
 #endif
     .lock        = xmp_lock,
     .utimens     = xmp_utimens,
     .bmap        = xmp_bmap,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     flag_nullpath_ok:1,
     flag_nopath:1,
     flag_utime_omit_ok:1,
