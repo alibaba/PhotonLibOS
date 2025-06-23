@@ -58,14 +58,12 @@ struct MsgCtx {
 // spdk_bdev_io_completion_cb
 template <typename... Args>
 void cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
-    // std::cout << "get into cb_fn" << std::endl;
     spdk_bdev_free_io(bdev_io);
-    // std::cout << "after spdk_bdev_free_io" << std::endl;
     auto ctx = reinterpret_cast<MsgCtx<Args...>*>(cb_arg);
     *ctx->success = success;
-    // std::cout << "before resume" << std::endl;
+    LOG_DEBUG("bdev_io_completion_cb: before resume");
     ctx->awaiter->resume();
-    // std::cout << "after resume" << std::endl;
+    LOG_DEBUG("bdev_io_completion_cb: after resume");
 }
 
 
