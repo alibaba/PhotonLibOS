@@ -36,6 +36,6 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif ()
 
 if (PHOTON_ENABLE_SPDK_BDEV)
-    add_executable(bdev-example bdev/read_write.cpp)
+    add_executable(bdev-example spdk-bdev/read_write.cpp)
     target_link_libraries(bdev-example PRIVATE ${SPDK_LIBRARIES} photon_static)
 endif ()

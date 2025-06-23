@@ -13,6 +13,7 @@
 #endif
 
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/tuple-assistance.h>
 
 #include <photon/photon.h>
 #include <photon/thread/awaiter.h>
@@ -38,103 +39,84 @@ void bdev_put_io_channel(struct spdk_io_channel* ch);
 
 void bdev_close(struct spdk_bdev_desc* desc);
 
-
 extern spdk_thread* g_app_thread;
 
-template <typename... Args>
+template <typename F, typename... Args>
 struct MsgCtx {
+    F func;
     struct spdk_bdev_desc* desc;
     struct spdk_io_channel* ch;
     bool* success;
     int* rc;
-    Awaiter<PhotonContext>* awaiter;
+    Awaiter<PhotonContext> awaiter;
     std::tuple<Args...> args;
 
-    template <typename... Ts>
-    MsgCtx(struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, bool* success, int* rc, Awaiter<PhotonContext>* awaiter, Ts... args)
-        : desc(desc), ch(ch), success(success), rc(rc), awaiter(awaiter), args(std::forward<Ts>(args)...) {}
+    template <typename FuncType, typename... ArgsType>
+    MsgCtx(FuncType func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, bool* success, int* rc, ArgsType... args)
+        : func(func), desc(desc), ch(ch), success(success), rc(rc), args(std::forward<ArgsType>(args)...) {}
 };
 
-// spdk_bdev_io_completion_cb
-template <typename... Args>
+template<typename F, typename... Args>
 void cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     spdk_bdev_free_io(bdev_io);
-    auto ctx = reinterpret_cast<MsgCtx<Args...>*>(cb_arg);
+    auto ctx = reinterpret_cast<MsgCtx<F, Args...>*>(cb_arg);
     *ctx->success = success;
     LOG_DEBUG("bdev_io_completion_cb: before resume");
-    ctx->awaiter->resume();
+    ctx->awaiter.resume();
     LOG_DEBUG("bdev_io_completion_cb: after resume");
 }
 
+/* spdk_msg_fn */
+template <typename F, typename... Args>
+void msg_fn(void* msg_ctx) {
+    auto ctx = reinterpret_cast<MsgCtx<F, Args...>*>(msg_ctx);
+    int rc = tuple_assistance::apply([&](Args... args){
+        return ctx->func(ctx->desc, ctx->ch, args..., cb_fn<F, Args...>, msg_ctx);
+    }, ctx->args);
 
-template <typename F, typename Tup, size_t... I>
-int call(F f, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, void* cb_arg, Tup tup, std::index_sequence<I...>) {
-    return f(desc, ch, cb_arg, std::get<I>(std::forward<Tup>(tup))...);
+    *ctx->rc = rc;
+    if (rc != 0) {
+        ctx->awaiter.resume();
+    }
 }
 
-#define DEFINE_BDEV_IO_FUNC(name) \
-/* spdk_msg_fn */  \
-template <typename... Args> \
-void msg_##name(void* arg) { \
-    auto ctx = reinterpret_cast<MsgCtx<Args...>*>(arg); \
-    int rc = call([](struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, void* cb_arg, Args... args) {  \
-        return spdk_bdev_##name(desc, ch, args..., cb_fn, cb_arg); \
-    }, ctx->desc, ctx->ch, arg, ctx->args, std::make_index_sequence<sizeof...(Args)>{}); \
-    *ctx->rc = rc; \
-    if (rc != 0) { \
-        ctx->awaiter->resume(); \
-    } \
-}\
-template <typename... Args> \
-int bdev_##name(struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args) { \
-    bool success = false; \
-    int rc = 0; \
-    Awaiter<PhotonContext> awaiter; \
-    MsgCtx<Args...> ctx(desc, ch, &success, &rc, &awaiter, args...); \
-    spdk_thread_send_msg(g_app_thread, msg_##name<Args...>, &ctx); \
-    awaiter.suspend(); \
-    return rc; \
+template <typename F, typename... Args>
+int bdev_call(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args) {
+    bool success = false;
+    int rc = 0;
+    MsgCtx<F, Args...> ctx(func, desc, ch, &success, &rc, args...);
+    spdk_thread_send_msg(g_app_thread, msg_fn<F, Args...>, &ctx);
+    ctx.awaiter.suspend();
+    return rc;
 }
 
+int bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+		   void *buf, uint64_t offset, uint64_t nbytes);
 
-DEFINE_BDEV_IO_FUNC(read);
-DEFINE_BDEV_IO_FUNC(read_blocks);
-DEFINE_BDEV_IO_FUNC(read_blocks_with_md);
-DEFINE_BDEV_IO_FUNC(readv);
-DEFINE_BDEV_IO_FUNC(readv_blocks);
-DEFINE_BDEV_IO_FUNC(readv_blocks_with_md);
+int bdev_read_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			  void *buf, uint64_t offset_blocks, uint64_t num_blocks);
 
-DEFINE_BDEV_IO_FUNC(write);
-DEFINE_BDEV_IO_FUNC(write_blocks);
-DEFINE_BDEV_IO_FUNC(write_blocks_with_md);
-DEFINE_BDEV_IO_FUNC(writev);
-DEFINE_BDEV_IO_FUNC(writev_blocks);
-DEFINE_BDEV_IO_FUNC(writev_blocks_with_md);
+int bdev_readv(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+		    struct iovec *iov, int iovcnt,
+		    uint64_t offset, uint64_t nbytes);
 
-DEFINE_BDEV_IO_FUNC(compare_blocks);
-DEFINE_BDEV_IO_FUNC(compare_blocks_with_md);
-DEFINE_BDEV_IO_FUNC(comparev_blocks);
-DEFINE_BDEV_IO_FUNC(comparev_blocks_with_md);
-DEFINE_BDEV_IO_FUNC(comparev_and_writev_blocks);
+int bdev_readv_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			   struct iovec *iov, int iovcnt,
+			   uint64_t offset_blocks, uint64_t num_blocks);
 
-DEFINE_BDEV_IO_FUNC(zcopy_start);
-DEFINE_BDEV_IO_FUNC(zcopy_end);
+int bdev_write(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+		    void *buf, uint64_t offset, uint64_t nbytes);
 
-DEFINE_BDEV_IO_FUNC(write_zeroes);
-DEFINE_BDEV_IO_FUNC(write_zeroes_blocks);
+int bdev_write_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			   void *buf, uint64_t offset_blocks, uint64_t num_blocks);
+            
+int bdev_writev(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+		     struct iovec *iov, int iovcnt,
+		     uint64_t offset, uint64_t len);
 
-DEFINE_BDEV_IO_FUNC(unmap);
-DEFINE_BDEV_IO_FUNC(unmap_blocks);
-
-DEFINE_BDEV_IO_FUNC(flush);
-DEFINE_BDEV_IO_FUNC(flush_blocks);
-
-DEFINE_BDEV_IO_FUNC(reset);
-DEFINE_BDEV_IO_FUNC(abort);
-
-DEFINE_BDEV_IO_FUNC(nvme_admin_passthru);
-DEFINE_BDEV_IO_FUNC(nvme_io_passthru);
-DEFINE_BDEV_IO_FUNC(nvme_io_passthru_md);
+int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			    struct iovec *iov, int iovcnt,
+			    uint64_t offset_blocks, uint64_t num_blocks);
 
     
 }   // namespace spdk

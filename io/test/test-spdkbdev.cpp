@@ -30,7 +30,7 @@ public:
     struct spdk_io_channel* ch;
 };
 
-const char* SPDKBDev::json_cfg_path = "./examples/bdev/bdev.json";
+const char* SPDKBDev::json_cfg_path = "./examples/spdk-bdev/bdev.json";
 
 class SPDKBDevTestEnv : public ::testing::Environment {
 public:

@@ -21,7 +21,7 @@
 
 /* how to run:
  * example:
- * sudo ./build/examples-output/bdev-example --json ./examples/bdev/bdev.json
+ * sudo ./build/examples-output/bdev-example --json ./examples/spdk-bdev/bdev.json
  * some simple tests:
  * sudo ./build/output/test-spdkbdev
 */
