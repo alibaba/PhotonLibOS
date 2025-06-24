@@ -67,7 +67,7 @@ public:
     std::tuple<Args...> args;
 };
 
-class FuseSessionLoopSync : public FuseSessionLoop {
+class SyncSessionLoop : public FuseSessionLoop {
 public:
     int init() {
         uint32_t masterfd = fuse_session_fd(se_);
@@ -110,7 +110,7 @@ public:
         return 0;
     }
 
-    explicit FuseSessionLoopSync(struct fuse_session *se)
+    explicit SyncSessionLoop(struct fuse_session *se)
         : error_(0),
           se_(se),
           num_worker_(0) {
@@ -122,7 +122,7 @@ public:
             WorkerArgs<void *, int> *wrkargs = new WorkerArgs<void *, int>();
             wrkargs->args = std::make_tuple(reinterpret_cast<void *>(this), i);
             auto th = photon::thread_create(
-                &FuseSessionLoopSync::fuse_do_work,
+                &SyncSessionLoop::fuse_do_work,
                 reinterpret_cast<void *>(wrkargs));
 
             photon::thread_enable_join(th);
@@ -146,7 +146,7 @@ public:
         assert(num_worker_ = 0); 
     }
 
-    ~FuseSessionLoopSync() {
+    ~SyncSessionLoop() {
         if (se_) fuse_session_exit(se_);
 
         for (int i = 0; i < (int)(workers_.size()); ++i) {
@@ -190,7 +190,7 @@ private:
 
     static void *fuse_do_work(void *data) {
         auto wrkargs = (WorkerArgs<void *, int> *)data;
-        auto loop = (FuseSessionLoopSync *)(std::get<0>(wrkargs->args));
+        auto loop = (SyncSessionLoop *)(std::get<0>(wrkargs->args));
         auto idx = std::get<1>(wrkargs->args);
         struct fuse_session *se = loop->se_;
         struct fuse_buf fbuf = {
@@ -260,11 +260,11 @@ private:
 };
 
 FuseSessionLoop *new_sync_session_loop(struct fuse_session *se) {
-    return NewObj<FuseSessionLoopSync>(se)->init();
+    return NewObj<SyncSessionLoop>(se)->init();
 }
 
 int set_sync_custom_io(struct fuse_session *se) {
-    return FuseSessionLoopSync::set_custom_io(se);
+    return SyncSessionLoop::set_custom_io(se);
 }
 
 

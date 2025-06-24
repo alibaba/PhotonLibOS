@@ -38,7 +38,7 @@ limitations under the License.
 namespace photon {
 namespace fs {
 
-class FuseSessionLoopEPoll : public FuseSessionLoop {
+class EPollSessionLoop : public FuseSessionLoop {
 private:
     struct fuse_session *se;
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
@@ -70,7 +70,7 @@ private:
     }
 
     static void *fuse_do_work(void *args) {
-        auto obj = (FuseSessionLoopEPoll *)args;
+        auto obj = (EPollSessionLoop *)args;
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
         struct fuse_buf fbuf;
         memset(&fbuf, 0, sizeof(fbuf));
@@ -107,7 +107,7 @@ private:
 
     int on_accept(EventLoop *) {
         ++ref;
-        auto th = threadpool.thread_create(&FuseSessionLoopEPoll::fuse_do_work, (void *)this);
+        auto th = threadpool.thread_create(&EPollSessionLoop::fuse_do_work, (void *)this);
         thread_yield_to(th);
         return 0;
    }
@@ -143,17 +143,17 @@ private:
 #endif
 
 public:
-   explicit FuseSessionLoopEPoll(struct fuse_session *session)
+   explicit EPollSessionLoop(struct fuse_session *session)
         : se(session),
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
           ch(fuse_session_next_chan(se, NULL)),
           bufsize(fuse_chan_bufsize(ch)),
 #endif
-          bufpool({this, &FuseSessionLoopEPoll::bufctor},
-                  {this, &FuseSessionLoopEPoll::bufdtor}),
+          bufpool({this, &EPollSessionLoop::bufctor},
+                  {this, &EPollSessionLoop::bufdtor}),
           threadpool(),
-          loop(new_event_loop({this, &FuseSessionLoopEPoll::wait_for_readable},
-                              {this, &FuseSessionLoopEPoll::on_accept})) {}
+          loop(new_event_loop({this, &EPollSessionLoop::wait_for_readable},
+                              {this, &EPollSessionLoop::on_accept})) {}
 
     int init() {
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
@@ -168,7 +168,7 @@ public:
         return 0;
     }
 
-    ~FuseSessionLoopEPoll() {
+    ~EPollSessionLoop() {
         loop->stop();
         --ref;
         while (ref != 0) {
@@ -182,7 +182,7 @@ public:
 };
 
 FuseSessionLoop* new_epoll_session_loop(struct fuse_session *se) {
-    return NewObj<FuseSessionLoopEPoll>(se)->init();
+    return NewObj<EPollSessionLoop>(se)->init();
 }
 
 }  // namespace fs
