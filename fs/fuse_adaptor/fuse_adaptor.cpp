@@ -15,10 +15,9 @@ limitations under the License.
 */
 #include "fuse_adaptor.h"
 #include "fuse_session_loop.h"
-#include "fuse_adaptor_epoll.h"
-//  The API function `fuse_session_custom_io` was introduced in version 3.13.0
-#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
-#include "fuse_adaptor_sync.h"
+
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
 #endif
 
 #include <thread>
@@ -87,19 +86,9 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
     return 0;
 }
 
-static int fuse_session_loop_mpt(struct fuse_session *se, uint64_t looptype = FUSE_SESSION_LOOP_EPOLL) {
-    FuseSessionLoop *loop;
-    switch (looptype) {
-#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
-        case FUSE_SESSION_LOOP_SYNC:
-            loop = new FuseSessionLoopSync(se);
-            break;
-#endif
-        case FUSE_SESSION_LOOP_EPOLL:
-        default:
-            loop = new FuseSessionLoopEPoll(se);
-            break;
-    }
+static int fuse_session_loop_mpt(struct fuse_session *se,
+                                 uint64_t looptype = FUSE_SESSION_LOOP_EPOLL) {
+    auto loop = new_session_loop(se, looptype);
     loop->run();
     delete loop;
     return 0;
@@ -227,7 +216,7 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 
 #if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
     if (looptype == FUSE_SESSION_LOOP_SYNC) {
-        FuseSessionLoopSync::set_custom_io(se);
+        set_sync_custom_io(se);
     }
 #endif
 

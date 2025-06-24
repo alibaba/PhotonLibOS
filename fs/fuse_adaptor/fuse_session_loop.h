@@ -16,8 +16,32 @@ limitations under the License.
 
 #pragma once
 
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
+
+#if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse.h>
+#else
+#include <fuse.h>
+#endif
+
 namespace photon {
 namespace fs {
+
+#define SHIFT(n) (1 << n)
+const uint64_t FUSE_SESSION_LOOP_NONE = 0;
+const uint64_t FUSE_SESSION_LOOP_EPOLL = SHIFT(0);
+const uint64_t FUSE_SESSION_LOOP_SYNC = SHIFT(1);
+const uint64_t FUSE_SESSION_LOOP_IOURING_CASCADING = SHIFT(2);
+const uint64_t FUSE_SESSION_LOOP_IOURING = SHIFT(3);
+
+const uint64_t FUSE_SESSION_LOOP_DEFAULT = FUSE_SESSION_LOOP_EPOLL |
+                                           FUSE_SESSION_LOOP_SYNC  |
+                                           FUSE_SESSION_LOOP_IOURING_CASCADING |
+                                           FUSE_SESSION_LOOP_IOURING;
+#undef SHIFT
+
 
 class FuseSessionLoop {
 public:
@@ -25,6 +49,28 @@ public:
 
     virtual void run() = 0;
 };
+
+int set_sync_custom_io(struct fuse_session *);
+
+#define DECLARE_SESSION_LOOP(name)  \
+FuseSessionLoop *new_##name##_session_loop(struct fuse_session *)
+
+DECLARE_SESSION_LOOP(epoll);
+DECLARE_SESSION_LOOP(sync);
+
+inline FuseSessionLoop *
+new_session_loop(struct fuse_session *se, uint64_t loop_type) {
+    switch (loop_type) {
+// The API function `fuse_session_custom_io` was introduced in version 3.13.0
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
+       case FUSE_SESSION_LOOP_SYNC:
+           return new_sync_session_loop(se);
+#endif
+       case FUSE_SESSION_LOOP_EPOLL:
+       default:
+           return new_epoll_session_loop(se);
+    }
+}
 
 }  // namespace fs
 }  // namespace photon
