@@ -75,6 +75,7 @@ void bdev_env_fini() {
 
 int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
     struct MsgCtx : public _MsgCtxBase {
+        int rc = 0;
         std::string_view bdev_name;
         bool write;
         struct spdk_bdev_desc** desc;
@@ -213,9 +214,9 @@ int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
     return bdev_call(&spdk_bdev_writev_blocks, desc, ch, iov, iovcnt, offset_blocks, num_blocks);
 }
 
-void _MsgCtxBase::cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+void _MsgCtxIOBase::cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     spdk_bdev_free_io(bdev_io);
-    auto ctx = reinterpret_cast<_MsgCtxBase*>(cb_arg);
+    auto ctx = reinterpret_cast<_MsgCtxIOBase*>(cb_arg);
     ctx->success = success;
     LOG_DEBUG("bdev_io_completion_cb: before resume");
     ctx->awaiter.resume();

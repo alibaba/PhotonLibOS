@@ -76,27 +76,33 @@ extern spdk_thread* g_app_thread;
 
 struct _MsgCtxBase {
     Awaiter<PhotonContext> awaiter;
+};
+
+struct _MsgCtxIOBase : public _MsgCtxBase {
     bool success = false;
     int rc = 0;
+
+    struct spdk_bdev_desc* desc;
+    struct spdk_io_channel* ch;
+
+    _MsgCtxIOBase(struct spdk_bdev_desc* desc, struct spdk_io_channel* ch) : desc(desc), ch(ch) {}
 
     static void cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);    // spdk_bdev_io_completion_cb
 };
 
 template <typename F, typename... Args>
 int bdev_call(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args) {
-    struct MsgCtx : public _MsgCtxBase {
+    struct MsgCtx : public _MsgCtxIOBase {
         F func;
-        struct spdk_bdev_desc* desc;
-        struct spdk_io_channel* ch;
         std::tuple<Args...> args;
         MsgCtx(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args)
-            : func(func), desc(desc), ch(ch), args(std::forward<Args>(args)...) {}
+            : _MsgCtxIOBase(desc, ch), func(func), args(std::forward<Args>(args)...) {}
     };
 
     auto msg_fn = [](void* msg_ctx) {                   // spdk_msg_fn
         auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
         int rc = tuple_assistance::apply([&](Args... args){
-            return ctx->func(ctx->desc, ctx->ch, args..., _MsgCtxBase::cb_fn, msg_ctx);
+            return ctx->func(ctx->desc, ctx->ch, args..., _MsgCtxIOBase::cb_fn, msg_ctx);
         }, ctx->args);
 
         ctx->rc = rc;
