@@ -5,35 +5,39 @@ namespace spdk {
 
 spdk_thread* g_app_thread;
 std::thread* bg_thread;
-spdk_app_opts opts;
 
-void start_fn(void* arg) {
-    auto sem = (sem_t*)arg;
-    g_app_thread = spdk_get_thread();
-    sem_post(sem);
-}
+void bdev_env_init_impl(struct spdk_app_opts* opts) {
+    struct MsgCtx : public _MsgCtxBase {
+        struct spdk_app_opts* opts;
+        MsgCtx(struct spdk_app_opts* opts) : opts(opts) {}
+    };
 
-void bdev_env_init_impl(spdk_app_opts* opts) {
-    sem_t sem;
-    sem_init(&sem, 0, 0);
+    MsgCtx ctx(opts);
 
-    bg_thread = new std::thread([](spdk_app_opts* opts, sem_t* sem){
-        int rc = spdk_app_start(opts, start_fn, sem);
+    bg_thread = new std::thread([](MsgCtx* ctx) {
+        auto start_fn = [](void* arg) {
+            auto ctx = reinterpret_cast<MsgCtx*>(arg);
+            g_app_thread = spdk_get_thread();
+            ctx->awaiter.resume();
+        };
+
+        int rc = spdk_app_start(ctx->opts, start_fn, ctx);
         LOG_DEBUG("spdk app start ", VALUE(rc));
         if (rc != 0) {
-            sem_post(sem);
+            ctx->awaiter.resume();
         }
         else {
             spdk_app_fini();
         }
-    }, opts, &sem);
+    }, &ctx);
 
     LOG_DEBUG("bdev env init before wait");
-    sem_wait(&sem);
+    ctx.awaiter.suspend();
     LOG_DEBUG("bdev env init after wait");
 }
 
 void bdev_env_init(int argc, char** argv) {
+    struct spdk_app_opts opts;
     spdk_app_opts_init(&opts, sizeof(opts));
     opts.name = "photon_spdk_bdev";
 
@@ -45,6 +49,7 @@ void bdev_env_init(int argc, char** argv) {
 }
 
 void bdev_env_init(const char* json_cfg_path) {
+    struct spdk_app_opts opts;
     spdk_app_opts_init(&opts, sizeof(opts));
     opts.name = "photon_spdk_bdev";
     opts.json_config_file = json_cfg_path;
@@ -69,99 +74,88 @@ void bdev_env_fini() {
 
 
 int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
-    int rc = 0;
-    
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-    struct Tmp {
+    struct MsgCtx : public _MsgCtxBase {
         std::string_view bdev_name;
         bool write;
-        sem_t* sem;
-        int* rc;
         struct spdk_bdev_desc** desc;
+        MsgCtx(const char* bdev_name, bool write, struct spdk_bdev_desc** desc)
+            : bdev_name(bdev_name), write(write), desc(desc) {}
     };
-    Tmp tmp = {bdev_name, write, &sem, &rc, desc};
-    spdk_thread_send_msg(g_app_thread, [](void* arg){
-        Tmp* tmp = (Tmp*)arg;
-        *tmp->rc = spdk_bdev_open_ext(tmp->bdev_name.data(), tmp->write, 
-        [](enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx){}, 
-        nullptr, tmp->desc);
 
-        sem_post(tmp->sem);
-    }, &tmp);
+    MsgCtx ctx(bdev_name, write, desc);
+
+    spdk_thread_send_msg(g_app_thread, [](void* arg){
+        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+        ctx->rc = spdk_bdev_open_ext(ctx->bdev_name.data(), ctx->write, 
+                                    [](enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx){}, 
+                                    nullptr, ctx->desc);
+        ctx->awaiter.resume();
+    }, &ctx);
 
     LOG_DEBUG("bdev open ext wait");
-    sem_wait(&sem);
+    ctx.awaiter.suspend();
     LOG_DEBUG("bdev open ext success");
 
-    return rc;
+    return ctx.rc;
 }
 
 struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-
-    struct spdk_io_channel* ch = nullptr;
-    
-    struct Tmp {
+    struct MsgCtx : public _MsgCtxBase {
         struct spdk_bdev_desc* desc;
-        struct spdk_io_channel** ch;
-        sem_t* sem;
+        struct spdk_io_channel* ch;
+        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc), ch(nullptr) {}
     };
-    Tmp tmp = {desc, &ch, &sem};
+
+    MsgCtx ctx(desc);
 
     spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        Tmp* tmp = (Tmp*)arg;
-        *tmp->ch = spdk_bdev_get_io_channel(tmp->desc);
-        sem_post(tmp->sem);
-    }, &tmp);
+        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+        ctx->ch = spdk_bdev_get_io_channel(ctx->desc);
+        ctx->awaiter.resume();
+    }, &ctx);
 
     LOG_DEBUG("get io channel wait");
-    sem_wait(&sem);
+    ctx.awaiter.suspend();
     LOG_DEBUG("get io channel success");
 
-    return ch;
+    return ctx.ch;
 }
 
 void bdev_put_io_channel(struct spdk_io_channel* ch) {
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-    
-    struct Tmp {
+    struct MsgCtx : public _MsgCtxBase {
         struct spdk_io_channel* ch;
-        sem_t* sem;
+        MsgCtx(struct spdk_io_channel* ch) : ch(ch) {}
     };
-    Tmp tmp = {ch, &sem};
+
+    MsgCtx ctx(ch);
 
     spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        Tmp* tmp = (Tmp*)arg;
-        spdk_put_io_channel(tmp->ch);
-        sem_post(tmp->sem);
-    }, &tmp);
+        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+        spdk_put_io_channel(ctx->ch);
+        ctx->awaiter.resume();
+    }, &ctx);
 
     LOG_DEBUG("put io channel wait");
-    sem_wait(&sem);
+    ctx.awaiter.suspend();
     LOG_DEBUG("put io channel success");
 }
 
 void bdev_close(struct spdk_bdev_desc* desc) {
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-    
-    struct Tmp {
+    struct MsgCtx : public _MsgCtxBase {
         struct spdk_bdev_desc* desc;
-        sem_t* sem;
+        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc) {}
     };
-    Tmp tmp = {desc, &sem};
+
+    MsgCtx ctx(desc);
 
     spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        Tmp* tmp = (Tmp*)arg;
-        spdk_bdev_close(tmp->desc);
-        sem_post(tmp->sem);
-    }, &tmp);
+        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+        spdk_bdev_close(ctx->desc);
+        ctx->awaiter.resume();
+    }, &ctx);
 
     LOG_DEBUG("bdev close wait");
-    sem_wait(&sem);
+    ctx.awaiter.suspend();
     LOG_DEBUG("bdev close success");
 }
 

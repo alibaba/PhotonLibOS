@@ -9,20 +9,19 @@
 class SPDKBDev {
 public:
     void init() {
+        ASSERT_EQ(photon::init(), 0);
         photon::spdk::bdev_env_init(json_cfg_path);
         photon::spdk::bdev_open_ext("Malloc0", true, &desc);
         ASSERT_NE(desc, nullptr);
         ch = photon::spdk::bdev_get_io_channel(desc);
         ASSERT_NE(ch, nullptr);
-        ASSERT_EQ(photon::init(), 0);
-        
     }
 
     void fini() {
-        photon::fini();
         photon::spdk::bdev_put_io_channel(ch);
         photon::spdk::bdev_close(desc);
         photon::spdk::bdev_env_fini();
+        photon::fini();
     }
 
     static const char* json_cfg_path;
@@ -70,6 +69,8 @@ TEST_F(SPDKBDevTest, rw_blocks) {
     void* bufread = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     EXPECT_NE(bufwrite, nullptr);
     EXPECT_NE(bufread, nullptr);
+    DEFER(spdk_free(bufwrite));
+    DEFER(spdk_free(bufread));
 
     std::vector<photon::join_handle*> ths_write;
     for (uint64_t i = 0; i < nblocks; i++) {
@@ -97,9 +98,6 @@ TEST_F(SPDKBDevTest, rw_blocks) {
     }
 
     EXPECT_EQ(memcmp(bufwrite, bufread, bufsz), 0);
-
-    spdk_free(bufwrite);
-    spdk_free(bufread);
 }
 
 TEST_F(SPDKBDevTest, rwv) {
@@ -114,6 +112,8 @@ TEST_F(SPDKBDevTest, rwv) {
     void* bufread = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     EXPECT_NE(bufwrite, nullptr);
     EXPECT_NE(bufread, nullptr);
+    DEFER(spdk_free(bufwrite));
+    DEFER(spdk_free(bufread));
 
     photon::WorkPool wp(1, 0, 0, 0);
 
@@ -155,9 +155,6 @@ TEST_F(SPDKBDevTest, rwv) {
     sem.wait(1);
 
     EXPECT_EQ(memcmp(bufwrite, bufread, bufsz), 0);
-
-    spdk_free(bufwrite);
-    spdk_free(bufread);
 }
 
 TEST_F(SPDKBDevTest, rwv_blocks) {
@@ -170,6 +167,8 @@ TEST_F(SPDKBDevTest, rwv_blocks) {
     void* bufread = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     EXPECT_NE(bufwrite, nullptr);
     EXPECT_NE(bufread, nullptr);
+    DEFER(spdk_free(bufwrite));
+    DEFER(spdk_free(bufread));
 
     memset(bufwrite, 0x42, bufsz);
 
@@ -181,9 +180,6 @@ TEST_F(SPDKBDevTest, rwv_blocks) {
     EXPECT_EQ(photon::spdk::bdev_readv_blocks(desc, ch, iov_read.iovec(), iov_read.iovcnt(), 0, 1), 0);
 
     EXPECT_EQ(memcmp(bufwrite, bufread, bufsz), 0);
-
-    spdk_free(bufwrite);
-    spdk_free(bufread);
 }
 
 int main(int argc, char** argv) {
