@@ -76,8 +76,8 @@ extern spdk_thread* g_app_thread;
 
 struct _MsgCtxBase {
     Awaiter<PhotonContext> awaiter;
-    bool success;
-    int rc;
+    bool success = false;
+    int rc = 0;
 
     static void cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);    // spdk_bdev_io_completion_cb
 };
