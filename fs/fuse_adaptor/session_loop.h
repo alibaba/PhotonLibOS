@@ -56,7 +56,9 @@ int set_sync_custom_io(struct fuse_session *);
 FuseSessionLoop *new_##name##_session_loop(struct fuse_session *)
 
 DECLARE_SESSION_LOOP(epoll);
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
 DECLARE_SESSION_LOOP(sync);
+#endif
 
 inline FuseSessionLoop *
 new_session_loop(struct fuse_session *se, uint64_t loop_type) {

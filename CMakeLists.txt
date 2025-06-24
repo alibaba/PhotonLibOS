@@ -229,11 +229,7 @@ if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTO
     list(APPEND PHOTON_SRC
          fs/fuse_adaptor/fuse_adaptor.cpp
          fs/fuse_adaptor/fuse_hl_ops.cpp
-         fs/fuse_adaptor/fuse_adaptor_epoll.cpp)
-    if (PHOTON_ENABLE_FUSE STREQUAL "3")
-        list(APPEND PHOTON_SRC
-             fs/fuse_adaptor/fuse_adaptor_sync.cpp)
-    endif ()
+         fs/fuse_adaptor/session_loop_impl.cpp)
 endif ()
 
 if (PHOTON_ENABLE_SASL)

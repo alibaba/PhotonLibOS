@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "fuse_adaptor.h"
-#include "fuse_session_loop.h"
+#include "session_loop.h"
 
 #ifndef FUSE_USE_VERSION
 #define FUSE_USE_VERSION 317

@@ -28,7 +28,7 @@ limitations under the License.
 #include <fuse3/fuse.h>
 #include <fuse3/fuse_lowlevel.h>
 #else
-#include <fuse.h>
+#include <fuse/fuse.h>
 #include <fuse/fuse_lowlevel.h>
 #endif
 
