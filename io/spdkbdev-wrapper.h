@@ -74,51 +74,41 @@ int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 extern spdk_thread* g_app_thread;
 
-template <typename F, typename... Args>
-struct MsgCtx {
-    F func;
-    struct spdk_bdev_desc* desc;
-    struct spdk_io_channel* ch;
-    bool* success;
-    int* rc;
+struct _MsgCtxBase {
     Awaiter<PhotonContext> awaiter;
-    std::tuple<Args...> args;
+    bool success;
+    int rc;
 
-    template <typename FuncType, typename... ArgsType>
-    MsgCtx(FuncType func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, bool* success, int* rc, ArgsType... args)
-        : func(func), desc(desc), ch(ch), success(success), rc(rc), args(std::forward<ArgsType>(args)...) {}
+    static void cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg);    // spdk_bdev_io_completion_cb
 };
 
 template <typename F, typename... Args>
 int bdev_call(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args) {
+    struct MsgCtx : public _MsgCtxBase {
+        F func;
+        struct spdk_bdev_desc* desc;
+        struct spdk_io_channel* ch;
+        std::tuple<Args...> args;
+        MsgCtx(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, Args... args)
+            : func(func), desc(desc), ch(ch), args(std::forward<Args>(args)...) {}
+    };
 
-    auto msg_fn = [](void* msg_ctx) {                                                       // spdk_msg_fn
-        auto cb_fn = [](struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {         // spdk_bdev_io_completion_cb
-            spdk_bdev_free_io(bdev_io);
-            auto ctx = reinterpret_cast<MsgCtx<F, Args...>*>(cb_arg);
-            *ctx->success = success;
-            LOG_DEBUG("bdev_io_completion_cb: before resume");
-            ctx->awaiter.resume();
-            LOG_DEBUG("bdev_io_completion_cb: after resume");
-        };
-
-        auto ctx = reinterpret_cast<MsgCtx<F, Args...>*>(msg_ctx);
+    auto msg_fn = [](void* msg_ctx) {                   // spdk_msg_fn
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
         int rc = tuple_assistance::apply([&](Args... args){
-            return ctx->func(ctx->desc, ctx->ch, args..., cb_fn, msg_ctx);
+            return ctx->func(ctx->desc, ctx->ch, args..., _MsgCtxBase::cb_fn, msg_ctx);
         }, ctx->args);
 
-        *ctx->rc = rc;
+        ctx->rc = rc;
         if (rc != 0) {
             ctx->awaiter.resume();
         }
     };
 
-    bool success = false;
-    int rc = 0;
-    MsgCtx<F, Args...> ctx(func, desc, ch, &success, &rc, args...);
+    MsgCtx ctx(func, desc, ch, args...);
     spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
     ctx.awaiter.suspend();
-    return rc;
+    return ctx.rc;
 }
 
     

@@ -219,6 +219,15 @@ int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
     return bdev_call(&spdk_bdev_writev_blocks, desc, ch, iov, iovcnt, offset_blocks, num_blocks);
 }
 
+void _MsgCtxBase::cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
+    spdk_bdev_free_io(bdev_io);
+    auto ctx = reinterpret_cast<_MsgCtxBase*>(cb_arg);
+    ctx->success = success;
+    LOG_DEBUG("bdev_io_completion_cb: before resume");
+    ctx->awaiter.resume();
+    LOG_DEBUG("bdev_io_completion_cb: after resume");
+}
+
 
 }   // namespace spdk
 }   // namespace photon
