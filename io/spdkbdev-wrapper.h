@@ -3,6 +3,7 @@
 #include <spdk/bdev.h>
 #include <spdk/env.h>
 #include <spdk/event.h>
+
 // dpdk include syslog.h lead to macro defination conflict with alog
 // so undefine the macro in syslog.h temporarily here
 #ifdef LOG_INFO
@@ -12,14 +13,9 @@
 #undef LOG_DEBUG
 #endif
 
-#include <photon/common/alog-stdstring.h>
-#include <photon/common/tuple-assistance.h>
-
 #include <photon/photon.h>
 #include <photon/thread/awaiter.h>
-
-#include <string>
-#include <tuple>
+#include <photon/common/tuple-assistance.h>
 
 
 namespace photon {
@@ -33,11 +29,11 @@ void bdev_env_fini();
 
 int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc);
 
+void bdev_close(struct spdk_bdev_desc* desc);
+
 struct spdk_io_channel* bdev_get_io_channel(struct spdk_bdev_desc* desc);
 
 void bdev_put_io_channel(struct spdk_io_channel* ch);
-
-void bdev_close(struct spdk_bdev_desc* desc);
 
 
 int bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,

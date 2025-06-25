@@ -29,6 +29,7 @@ public:
     struct spdk_io_channel* ch;
 };
 
+// path of bdev config json
 const char* SPDKBDev::json_cfg_path = "./examples/spdk-bdev/bdev.json";
 
 class SPDKBDevTestEnv : public ::testing::Environment {
@@ -56,6 +57,69 @@ class SPDKBDevTest : public ::testing::Test {
 public:
     SPDKBDev* bdev_info = SPDKBDevTestEnv::bdev_info;
 };
+
+TEST_F(SPDKBDevTest, rw) {
+    struct spdk_bdev_desc* desc = bdev_info->desc;
+    struct spdk_io_channel* ch = bdev_info->ch;
+
+    uint64_t bufsz = 4096;
+    uint64_t blocksz = 512;
+    uint64_t nblocks = bufsz / blocksz;
+
+    void* bufwrite = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
+    void* bufread = spdk_zmalloc(bufsz, 4096, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
+    EXPECT_NE(bufwrite, nullptr);
+    EXPECT_NE(bufread, nullptr);
+    DEFER(spdk_free(bufwrite));
+    DEFER(spdk_free(bufread));
+
+    // prepare datas to write
+    char test_data[] = "hello world";   
+    for (uint64_t i=0; i<nblocks; i++) {
+        strncpy((char*)bufwrite + i * blocksz, test_data, 12);
+    }
+
+    // writes in parallel
+    std::vector<photon::join_handle*> ths_write;
+    for (uint64_t i=0; i<nblocks; i++) {
+        void* buf = (void*)((char*)bufwrite + i * blocksz);
+        uint64_t off = i * blocksz, cnt = blocksz;
+        ths_write.emplace_back(
+            photon::thread_enable_join(
+                photon::thread_create11(
+                [](int idx, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, void* buffer, uint64_t offset, uint64_t nbytes) {
+                    int rc = photon::spdk::bdev_write(desc, ch, buffer, offset, nbytes);
+                    EXPECT_EQ(rc, 0);
+                }, i, desc, ch, buf, off, cnt)
+            )
+        );
+    }
+    for (auto th : ths_write) { // wait all writes complete
+        photon::thread_join(th);
+    }
+
+    // reads in parallel
+    std::vector<photon::join_handle*> ths_read;
+    for (uint64_t i=0; i<nblocks; i++) {
+        void* buf = (void*)((char*)bufread + i * blocksz);
+        uint64_t off = i * blocksz, cnt = blocksz;
+        ths_read.emplace_back(
+            photon::thread_enable_join(
+                photon::thread_create11(
+                [](int idx, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, void* buffer, uint64_t offset, uint64_t nbytes) {
+                    int rc = photon::spdk::bdev_read(desc, ch, buffer, offset, nbytes);
+                    EXPECT_EQ(rc, 0);
+                }, i, desc, ch, buf, off, cnt)
+            )
+        );
+    }
+    for (auto th: ths_read) {   // wait all reads complete
+        photon::thread_join(th);
+    }
+
+    // checking
+    EXPECT_EQ(memcmp(bufwrite, bufread, bufsz), 0);
+}
 
 TEST_F(SPDKBDevTest, rw_blocks) {
     struct spdk_bdev_desc* desc = bdev_info->desc;

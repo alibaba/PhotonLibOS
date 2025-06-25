@@ -1,4 +1,5 @@
 #include "spdkbdev-wrapper.h"
+#include <photon/common/alog-stdstring.h>
 
 namespace photon {
 namespace spdk {
@@ -6,7 +7,7 @@ namespace spdk {
 spdk_thread* g_app_thread;
 std::thread* bg_thread;
 
-void bdev_env_init_impl(struct spdk_app_opts* opts) {
+static void bdev_env_init_impl(struct spdk_app_opts* opts) {
     struct MsgCtx : public _MsgCtxBase {
         struct spdk_app_opts* opts;
         MsgCtx(struct spdk_app_opts* opts) : opts(opts) {}
@@ -76,7 +77,7 @@ void bdev_env_fini() {
 int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
     struct MsgCtx : public _MsgCtxBase {
         int rc = 0;
-        std::string_view bdev_name;
+        const char* bdev_name;
         bool write;
         struct spdk_bdev_desc** desc;
         MsgCtx(const char* bdev_name, bool write, struct spdk_bdev_desc** desc)
@@ -85,19 +86,41 @@ int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** des
 
     MsgCtx ctx(bdev_name, write, desc);
 
-    spdk_thread_send_msg(g_app_thread, [](void* arg){
-        auto ctx = reinterpret_cast<MsgCtx*>(arg);
-        ctx->rc = spdk_bdev_open_ext(ctx->bdev_name.data(), ctx->write, 
-                                    [](enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx){}, 
+    auto msg_fn = [](void* msg_ctx) {
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
+        ctx->rc = spdk_bdev_open_ext(ctx->bdev_name, ctx->write, 
+                                    [](enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx){},
                                     nullptr, ctx->desc);
         ctx->awaiter.resume();
-    }, &ctx);
+    };
+
+    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
 
     LOG_DEBUG("bdev open ext wait");
     ctx.awaiter.suspend();
     LOG_DEBUG("bdev open ext success");
 
     return ctx.rc;
+}
+
+void bdev_close(struct spdk_bdev_desc* desc) {
+    struct MsgCtx : public _MsgCtxBase {
+        struct spdk_bdev_desc* desc;
+        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc) {}
+    };
+
+    MsgCtx ctx(desc);
+    auto msg_fn = [](void* msg_ctx) {
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
+        spdk_bdev_close(ctx->desc);
+        ctx->awaiter.resume();
+    };
+
+    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
+
+    LOG_DEBUG("bdev close wait");
+    ctx.awaiter.suspend();
+    LOG_DEBUG("bdev close success");
 }
 
 struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
@@ -109,11 +132,13 @@ struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
 
     MsgCtx ctx(desc);
 
-    spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+    auto msg_fn = [](void* msg_ctx) {
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
         ctx->ch = spdk_bdev_get_io_channel(ctx->desc);
         ctx->awaiter.resume();
-    }, &ctx);
+    };
+
+    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
 
     LOG_DEBUG("get io channel wait");
     ctx.awaiter.suspend();
@@ -130,34 +155,17 @@ void bdev_put_io_channel(struct spdk_io_channel* ch) {
 
     MsgCtx ctx(ch);
 
-    spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        auto ctx = reinterpret_cast<MsgCtx*>(arg);
+    auto msg_fn = [](void* msg_ctx) {
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
         spdk_put_io_channel(ctx->ch);
         ctx->awaiter.resume();
-    }, &ctx);
+    };
+
+    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
 
     LOG_DEBUG("put io channel wait");
     ctx.awaiter.suspend();
     LOG_DEBUG("put io channel success");
-}
-
-void bdev_close(struct spdk_bdev_desc* desc) {
-    struct MsgCtx : public _MsgCtxBase {
-        struct spdk_bdev_desc* desc;
-        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc) {}
-    };
-
-    MsgCtx ctx(desc);
-
-    spdk_thread_send_msg(g_app_thread, [](void* arg) {
-        auto ctx = reinterpret_cast<MsgCtx*>(arg);
-        spdk_bdev_close(ctx->desc);
-        ctx->awaiter.resume();
-    }, &ctx);
-
-    LOG_DEBUG("bdev close wait");
-    ctx.awaiter.suspend();
-    LOG_DEBUG("bdev close success");
 }
 
 
