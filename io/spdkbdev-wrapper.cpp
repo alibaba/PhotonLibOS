@@ -74,7 +74,8 @@ void bdev_env_fini() {
 }
 
 
-int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
+
+static int bdev_call_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
     struct MsgCtx : public _MsgCtxBase {
         int rc = 0;
         const char* bdev_name;
@@ -103,27 +104,7 @@ int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** des
     return ctx.rc;
 }
 
-void bdev_close(struct spdk_bdev_desc* desc) {
-    struct MsgCtx : public _MsgCtxBase {
-        struct spdk_bdev_desc* desc;
-        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc) {}
-    };
-
-    MsgCtx ctx(desc);
-    auto msg_fn = [](void* msg_ctx) {
-        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
-        spdk_bdev_close(ctx->desc);
-        ctx->awaiter.resume();
-    };
-
-    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
-
-    LOG_DEBUG("bdev close wait");
-    ctx.awaiter.suspend();
-    LOG_DEBUG("bdev close success");
-}
-
-struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
+static struct spdk_io_channel* bdev_call_get_io_channel(struct spdk_bdev_desc* desc) {
     struct MsgCtx : public _MsgCtxBase {
         struct spdk_bdev_desc* desc;
         struct spdk_io_channel* ch;
@@ -147,25 +128,23 @@ struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
     return ctx.ch;
 }
 
+
+
+
+int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
+    return bdev_call_open_ext(bdev_name, write, desc);
+}
+
+struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
+    return bdev_call_get_io_channel(desc);
+}
+
+void bdev_close(struct spdk_bdev_desc* desc) {
+    bdev_call(&spdk_bdev_close, desc);
+}
+
 void bdev_put_io_channel(struct spdk_io_channel* ch) {
-    struct MsgCtx : public _MsgCtxBase {
-        struct spdk_io_channel* ch;
-        MsgCtx(struct spdk_io_channel* ch) : ch(ch) {}
-    };
-
-    MsgCtx ctx(ch);
-
-    auto msg_fn = [](void* msg_ctx) {
-        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
-        spdk_put_io_channel(ctx->ch);
-        ctx->awaiter.resume();
-    };
-
-    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
-
-    LOG_DEBUG("put io channel wait");
-    ctx.awaiter.suspend();
-    LOG_DEBUG("put io channel success");
+    bdev_call(&spdk_put_io_channel, ch);
 }
 
 

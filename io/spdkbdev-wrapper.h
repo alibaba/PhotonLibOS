@@ -113,6 +113,25 @@ int bdev_call(F func, struct spdk_bdev_desc* desc, struct spdk_io_channel* ch, A
     return ctx.rc;
 }
 
+template <typename F, typename Ptr>
+void bdev_call(F func, Ptr ptr) {
+    struct MsgCtx : public _MsgCtxBase {
+        F func;
+        Ptr ptr;
+        MsgCtx(F func, Ptr ptr) : func(func), ptr(ptr) {}
+    };
+
+    auto msg_fn = [](void* msg_ctx) {
+        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);;
+        ctx->func(ctx->ptr);
+        ctx->awaiter.resume();
+    };
+
+    MsgCtx ctx(func, ptr);
+    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
+    ctx.awaiter.suspend();
+}
+
     
 }   // namespace spdk
 }   // namespace photon
