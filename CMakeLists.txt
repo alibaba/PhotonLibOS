@@ -226,10 +226,8 @@ else ()
 endif ()
 
 if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTON_ENABLE_FUSE STREQUAL "3")
-    list(APPEND PHOTON_SRC
-         fs/fuse_adaptor/fuse_adaptor.cpp
-         fs/fuse_adaptor/fuse_hl_ops.cpp
-         fs/fuse_adaptor/session_loop_impl.cpp)
+    file(GLOB FUSE_ADAPTOR_SRC fs/fuse_adaptor/*.cpp)
+    list(APPEND PHOTON_SRC ${FUSE_ADAPTOR_SRC})
 endif ()
 
 if (PHOTON_ENABLE_SASL)

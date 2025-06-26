@@ -240,6 +240,8 @@ public:
     explicit SyncSessionLoop(struct fuse_session *se)
         : error_(0),
           se_(se),
+          blk_fd_(-1),
+          nonblk_fd_(-1),
           max_workers_(32),
           waitting_(false) {}
 
@@ -251,6 +253,10 @@ public:
     ~SyncSessionLoop() {
         if (se_) fuse_session_exit(se_);
         wait_all_fini();
+        if (blk_fd_ != -1)
+          close(blk_fd_);
+        if (nonblk_fd_ != -1)
+          close(nonblk_fd_);
     }
 
     static int set_custom_io(struct fuse_session *se) {
@@ -387,10 +393,8 @@ private:
             }
         }
 
-        if (!idlers_.empty()) {
-            for (const auto& wrk : idlers_) {
-                photon::thread_interrupt(workers_[wrk]);
-            }
+        for (const auto& wrk : idlers_) {
+            photon::thread_interrupt(workers_[wrk]);
         }
         return nullptr;
     }
