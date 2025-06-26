@@ -222,6 +222,78 @@ public:
 class SyncSessionLoop : public FuseSessionLoop {
 public:
     int init() {
+        set_fd();
+        for (int i = 0; i < max_workers_; ++i) {
+            WorkerArgs<void *, int> *wrkargs = new WorkerArgs<void *, int>();
+            wrkargs->args = std::make_tuple(reinterpret_cast<void *>(this), i);
+            auto th = photon::thread_create(
+                &SyncSessionLoop::fuse_do_work,
+                reinterpret_cast<void *>(wrkargs));
+
+            photon::thread_enable_join(th);
+            workers_.emplace_back(th);
+            idlers_.emplace(i);
+            photon::thread_yield_to(th);
+        }
+
+        return 0;
+    }
+
+    explicit SyncSessionLoop(struct fuse_session *se)
+        : error_(0),
+          se_(se),
+          max_workers_(32),
+          waitting_(false) {}
+
+    void run() {
+        sem_.signal(workers_.size());
+        wait_all_fini();
+    }
+
+    ~SyncSessionLoop() {
+        if (se_) fuse_session_exit(se_);
+        wait_all_fini();
+    }
+
+    static int set_custom_io(struct fuse_session *se) {
+        const struct fuse_custom_io custom_io = {
+            .writev = photon::fs::custom_writev,
+	        .read = photon::fs::custom_read,
+	        .splice_receive = NULL,
+	        .splice_send = NULL,
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
+        	.clone_fd = NULL,
+#endif
+        };
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
+        return fuse_session_custom_io(se, &custom_io,
+                                      sizeof(struct fuse_custom_io),
+                                      fuse_session_fd(se));
+#else
+        return fuse_session_custom_io(se, &custom_io, fuse_session_fd(se));
+#endif
+    }
+
+private:
+    int error_;
+    struct fuse_session *se_;
+    int blk_fd_;
+    int nonblk_fd_;
+    int max_workers_;
+    bool waitting_;
+    std::vector<photon::thread *> workers_;
+    std::unordered_set<int>idlers_;
+    photon::semaphore sem_;
+
+    void wait_all_fini() {
+        while (!workers_.empty()) {
+            auto th = workers_.back();
+            photon::thread_join((photon::join_handle *)th);
+            workers_.pop_back();
+        }
+    }
+
+    int set_fd() {
         uint32_t masterfd = fuse_session_fd(se_);
         const char *devname = "/dev/fuse";
 #ifndef O_CLOEXEC
@@ -262,81 +334,6 @@ public:
         return 0;
     }
 
-    explicit SyncSessionLoop(struct fuse_session *se)
-        : error_(0),
-          se_(se),
-          num_worker_(0) {
-          max_workers_ = 32;
-          waitting_ = false;
-
-        for (int i = 0; i < max_workers_; ++i) {
-            WorkerArgs<void *, int> *wrkargs = new WorkerArgs<void *, int>();
-            wrkargs->args = std::make_tuple(reinterpret_cast<void *>(this), i);
-            auto th = photon::thread_create(
-                &SyncSessionLoop::fuse_do_work,
-                reinterpret_cast<void *>(wrkargs));
-
-            photon::thread_enable_join(th);
-            workers_.emplace_back(th);
-            num_worker_++;
-            idlers_.emplace(i);
-            photon::thread_yield_to(th);
-        }
-        assert(num_worker_ = max_workers_);
-    }
-
-    void run() {
-        sem_.signal(num_worker_);
-        while (!workers_.empty()) {
-            auto th = workers_.back();
-            photon::thread_join((photon::join_handle *)th);
-            workers_.pop_back();
-            num_worker_--;
-        }
-        assert(num_worker_ = 0); 
-    }
-
-    ~SyncSessionLoop() {
-        if (se_) fuse_session_exit(se_);
-
-        for (int i = 0; i < (int)(workers_.size()); ++i) {
-            auto th = workers_.back();
-            photon::thread_join((photon::join_handle *)th);
-            workers_.pop_back();
-        }
-    }
-
-    static int set_custom_io(struct fuse_session *se) {
-        const struct fuse_custom_io custom_io = {
-            .writev = photon::fs::custom_writev,
-	        .read = photon::fs::custom_read,
-	        .splice_receive = NULL,
-	        .splice_send = NULL,
-#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
-        	.clone_fd = NULL,
-#endif
-        };
-#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
-        return fuse_session_custom_io(se, &custom_io,
-                                      sizeof(struct fuse_custom_io),
-                                      fuse_session_fd(se));
-#else
-        return fuse_session_custom_io(se, &custom_io, fuse_session_fd(se));
-#endif
-    }
-
-private:
-    int error_;
-    struct fuse_session *se_;
-    int blk_fd_;
-    int nonblk_fd_;
-    int num_worker_;
-    int max_workers_;
-    bool waitting_;
-    std::vector<photon::thread *> workers_;
-    std::unordered_set<int>idlers_;
-    photon::semaphore sem_;
-
     static void *fuse_do_work(void *data) {
         auto wrkargs = (WorkerArgs<void *, int> *)data;
         auto loop = (SyncSessionLoop *)(std::get<0>(wrkargs->args));
@@ -349,14 +346,14 @@ private:
         loop->sem_.wait(1);
         loop->idlers_.erase(wrk_id);
         while(!fuse_session_exited(se)) {
-            if ((int)(loop->idlers_.size()) == loop->num_worker_ -1) {
+            if (loop->idlers_.size() == (loop->workers_.size() - 1)) {
                 *iofd = loop->blk_fd_;
                 int res = fuse_session_receive_buf(se, &fbuf);
                 if (res <= 0) {
                     break;
                 }
 
-                if (loop->idlers_.empty()) {
+                if (!loop->idlers_.empty()) {
                     photon::thread_interrupt(loop->workers_[*(loop->idlers_.begin())]);
                 }
 
@@ -395,7 +392,6 @@ private:
             }
         }
 
-        --(loop->num_worker_);
         if (!loop->idlers_.empty()) {
             for (const auto& wrk : loop->idlers_) {
                 photon::thread_interrupt(loop->workers_[wrk]);
