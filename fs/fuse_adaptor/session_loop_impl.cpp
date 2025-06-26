@@ -27,7 +27,7 @@ limitations under the License.
 
 #include <vector>
 #include <tuple>
-#include <unordered_map>
+#include <unordered_set>
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -280,7 +280,7 @@ public:
             photon::thread_enable_join(th);
             workers_.emplace_back(th);
             num_worker_++;
-            idlers_.emplace(i, 1);
+            idlers_.emplace(i);
             numavail_++;
             photon::thread_yield_to(th);
         }
@@ -337,13 +337,13 @@ private:
     int max_workers_;
     bool waitting_;
     std::vector<photon::thread *> workers_;
-    std::unordered_map<int, int>idlers_;
+    std::unordered_set<int>idlers_;
     photon::semaphore sem_;
 
     static void *fuse_do_work(void *data) {
         auto wrkargs = (WorkerArgs<void *, int> *)data;
         auto loop = (SyncSessionLoop *)(std::get<0>(wrkargs->args));
-        auto idx = std::get<1>(wrkargs->args);
+        auto wrk_id = std::get<1>(wrkargs->args);
         struct fuse_session *se = loop->se_;
         struct fuse_buf fbuf = {
             .mem = NULL,
@@ -351,7 +351,7 @@ private:
 
         loop->sem_.wait(1);
         --loop->numavail_;
-        loop->idlers_.erase(idx);
+        loop->idlers_.erase(wrk_id);
         while(!fuse_session_exited(se)) {
             if (loop->numavail_ == loop->num_worker_ -1) {
                 *iofd = loop->blk_fd_;
@@ -361,7 +361,7 @@ private:
                 }
 
                 if (loop->idlers_.empty()) {
-                    photon::thread_interrupt(loop->workers_[loop->idlers_.begin()->first]);
+                    photon::thread_interrupt(loop->workers_[*(loop->idlers_.begin())]);
                 }
 
                 fuse_session_process_buf(se, &fbuf);
@@ -377,7 +377,7 @@ private:
 
                 if (res == 0) {
                     ++loop->numavail_;
-                    loop->idlers_.emplace(idx, 1);
+                    loop->idlers_.emplace(wrk_id);
                     if (loop->waitting_)
                         photon::thread_usleep(-1);
                     else {
@@ -391,10 +391,10 @@ private:
                         }
                     }
                     --(loop->numavail_);
-                    loop->idlers_.erase(idx);
+                    loop->idlers_.erase(wrk_id);
                 } else {
                     if (!loop->idlers_.empty()) {
-                        photon::thread_interrupt(loop->workers_[loop->idlers_.begin()->first]);
+                        photon::thread_interrupt(loop->workers_[*(loop->idlers_.begin())]);
                     }   
                     fuse_session_process_buf(se, &fbuf);
                 }
@@ -403,8 +403,8 @@ private:
 
         --(loop->num_worker_);
         if (!loop->idlers_.empty()) {
-            for (const auto& pair : loop->idlers_) {
-                photon::thread_interrupt(loop->workers_[pair.first]);
+            for (const auto& wrk : loop->idlers_) {
+                photon::thread_interrupt(loop->workers_[wrk]);
             }
         }
         return nullptr;
