@@ -38,6 +38,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 #include <photon/thread/thread-local.h>
 #include <photon/thread/thread-pool.h>
 #include <photon/common/event-loop.h>
@@ -224,11 +225,8 @@ public:
     int init() {
         set_fd();
         for (int i = 0; i < max_workers_; ++i) {
-            WorkerArgs<void *, int> *wrkargs = new WorkerArgs<void *, int>();
-            wrkargs->args = std::make_tuple(reinterpret_cast<void *>(this), i);
-            auto th = photon::thread_create(
-                &SyncSessionLoop::fuse_do_work,
-                reinterpret_cast<void *>(wrkargs));
+            auto th = photon::thread_create11(
+                &SyncSessionLoop::fuse_do_work, this, i);
 
             photon::thread_enable_join(th);
             workers_.emplace_back(th);
@@ -334,33 +332,30 @@ private:
         return 0;
     }
 
-    static void *fuse_do_work(void *data) {
-        auto wrkargs = (WorkerArgs<void *, int> *)data;
-        auto loop = (SyncSessionLoop *)(std::get<0>(wrkargs->args));
-        auto wrk_id = std::get<1>(wrkargs->args);
-        struct fuse_session *se = loop->se_;
+    void *fuse_do_work(int id) {
+        auto wrk_id = id;
         struct fuse_buf fbuf = {
             .mem = NULL,
         };
 
-        loop->sem_.wait(1);
-        loop->idlers_.erase(wrk_id);
-        while(!fuse_session_exited(se)) {
-            if (loop->idlers_.size() == (loop->workers_.size() - 1)) {
-                *iofd = loop->blk_fd_;
-                int res = fuse_session_receive_buf(se, &fbuf);
+        sem_.wait(1);
+        idlers_.erase(wrk_id);
+        while(!fuse_session_exited(se_)) {
+            if (idlers_.size() == (workers_.size() - 1)) {
+                *iofd = blk_fd_;
+                int res = fuse_session_receive_buf(se_, &fbuf);
                 if (res <= 0) {
                     break;
                 }
 
-                if (!loop->idlers_.empty()) {
-                    photon::thread_interrupt(loop->workers_[*(loop->idlers_.begin())]);
+                if (!idlers_.empty()) {
+                    photon::thread_interrupt(workers_[*idlers_.begin()]);
                 }
 
-                fuse_session_process_buf(se, &fbuf);
+                fuse_session_process_buf(se_, &fbuf);
             } else {
-                *iofd = loop->nonblk_fd_;
-                int res = fuse_session_receive_buf(se, &fbuf);
+                *iofd = nonblk_fd_;
+                int res = fuse_session_receive_buf(se_, &fbuf);
                 if (res < 0) {
                     if (res != -EWOULDBLOCK || res != -EAGAIN) {
                         break;
@@ -369,32 +364,32 @@ private:
                 }
 
                 if (res == 0) {
-                    loop->idlers_.emplace(wrk_id);
-                    if (loop->waitting_)
+                    idlers_.emplace(wrk_id);
+                    if (waitting_)
                         photon::thread_usleep(-1);
                     else {
-                        loop->waitting_ = true;
-                        auto ret = photon::wait_for_fd_readable(loop->nonblk_fd_);
-                        loop->waitting_ = false;
+                        waitting_ = true;
+                        auto ret = photon::wait_for_fd_readable(nonblk_fd_);
+                        waitting_ = false;
                         if (ret < 0) {
                             if (errno == EALREADY) {
                                 photon::thread_usleep(-1);                        
                             }
                         }
                     }
-                    loop->idlers_.erase(wrk_id);
+                    idlers_.erase(wrk_id);
                 } else {
-                    if (!loop->idlers_.empty()) {
-                        photon::thread_interrupt(loop->workers_[*(loop->idlers_.begin())]);
+                    if (!idlers_.empty()) {
+                        photon::thread_interrupt(workers_[*idlers_.begin()]);
                     }   
-                    fuse_session_process_buf(se, &fbuf);
+                    fuse_session_process_buf(se_, &fbuf);
                 }
             }
         }
 
-        if (!loop->idlers_.empty()) {
-            for (const auto& wrk : loop->idlers_) {
-                photon::thread_interrupt(loop->workers_[wrk]);
+        if (!idlers_.empty()) {
+            for (const auto& wrk : idlers_) {
+                photon::thread_interrupt(workers_[wrk]);
             }
         }
         return nullptr;
