@@ -17,7 +17,7 @@ static void bdev_env_init_impl(struct spdk_app_opts* opts) {
 
     bg_thread = new std::thread([](MsgCtx* ctx) {
         auto start_fn = [](void* arg) {
-            auto ctx = reinterpret_cast<MsgCtx*>(arg);
+            auto ctx = static_cast<MsgCtx*>(arg);
             g_app_thread = spdk_get_thread();
             ctx->awaiter.resume();
         };
@@ -73,66 +73,10 @@ void bdev_env_fini() {
     LOG_DEBUG("bdev env fini exit");
 }
 
-
-/*
-static int bdev_call_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** desc) {
-
-    struct MsgCtx : public _MsgCtxBase {
-        const char* bdev_name;
-        bool write;
-        struct spdk_bdev_desc** desc;
-        MsgCtx(const char* bdev_name, bool write, struct spdk_bdev_desc** desc)
-            : bdev_name(bdev_name), write(write), desc(desc) {}
-    };
-
-    MsgCtx ctx(bdev_name, write, desc);
-
-    auto msg_fn = [](void* msg_ctx) {
-        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
-        ctx->rc = spdk_bdev_open_ext(ctx->bdev_name, ctx->write,
-                                    [](enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *ctx){},
-                                    nullptr, ctx->desc);
-        ctx->awaiter.resume();
-    };
-
-    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
-
-    LOG_DEBUG("bdev open ext wait");
-    ctx.awaiter.suspend();
-    LOG_DEBUG("bdev open ext success");
-
-    return ctx.rc;
-}
-
-static struct spdk_io_channel* bdev_call_get_io_channel(struct spdk_bdev_desc* desc) {
-    struct MsgCtx : public _MsgCtxBase {
-        struct spdk_bdev_desc* desc;
-        struct spdk_io_channel* ch;
-        MsgCtx(struct spdk_bdev_desc* desc) : desc(desc), ch(nullptr) {}
-    };
-
-    MsgCtx ctx(desc);
-
-    auto msg_fn = [](void* msg_ctx) {
-        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
-        ctx->ch = spdk_bdev_get_io_channel(ctx->desc);
-        ctx->awaiter.resume();
-    };
-
-    spdk_thread_send_msg(g_app_thread, msg_fn, &ctx);
-
-    LOG_DEBUG("get io channel wait");
-    ctx.awaiter.suspend();
-    LOG_DEBUG("get io channel success");
-
-    return ctx.ch;
-}
-*/
-
 static int _open_ext(const char* bdev_name, bool write,
         struct spdk_bdev_desc** desc, spdk_bdev_io_completion_cb, void* ctx) {
     auto cb = [](enum spdk_bdev_event_type, struct spdk_bdev*, void*) { };
-    int ret = spdk_bdev_open_ext(bdev_name, write, cb, desc);
+    int ret = spdk_bdev_open_ext(bdev_name, write, cb, nullptr, desc);
     static_cast<_MsgCtxBase*>(ctx)->awaiter.resume();
     return ret;
 }
@@ -143,7 +87,7 @@ int bdev_open_ext(const char* bdev_name, bool write, struct spdk_bdev_desc** des
 
 static int _get_io_channel(struct spdk_bdev_desc* desc, struct spdk_io_channel** ch,
                     spdk_bdev_io_completion_cb, void* ctx) {
-    *ch = bdev_call_get_io_channel(desc);
+    *ch = spdk_bdev_get_io_channel(desc);
     static_cast<_MsgCtxBase*>(ctx)->awaiter.resume();
     return 0;
 }
@@ -154,12 +98,24 @@ struct spdk_io_channel* bdev_get_io_channel(spdk_bdev_desc* desc) {
     return ch;
 }
 
+static int _close(struct spdk_bdev_desc* desc, spdk_bdev_io_completion_cb, void* ctx) {
+    spdk_bdev_close(desc);
+    static_cast<_MsgCtxBase*>(ctx)->awaiter.resume();
+    return 0;
+}
+
 void bdev_close(struct spdk_bdev_desc* desc) {
-    bdev_call(&spdk_bdev_close, desc);
+    bdev_call(&_close, desc);
+}
+
+static int _put_io_channel(struct spdk_io_channel* ch, spdk_bdev_io_completion_cb, void* ctx) {
+    spdk_put_io_channel(ch);
+    static_cast<_MsgCtxBase*>(ctx)->awaiter.resume();
+    return 0;
 }
 
 void bdev_put_io_channel(struct spdk_io_channel* ch) {
-    bdev_call(&spdk_put_io_channel, ch);
+    bdev_call(&_put_io_channel, ch);
 }
 
 int bdev_read(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
@@ -217,7 +173,7 @@ int bdev_writev_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
 
 void _MsgCtxBase::cb_fn(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg) {
     spdk_bdev_free_io(bdev_io);
-    auto ctx = reinterpret_cast<_MsgCtxIOBase*>(cb_arg);
+    auto ctx = static_cast<_MsgCtxBase*>(cb_arg);
     ctx->success = success;
     LOG_DEBUG("bdev_io_completion_cb: before resume");
     ctx->awaiter.resume();

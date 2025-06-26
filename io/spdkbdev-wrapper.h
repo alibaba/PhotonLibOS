@@ -86,7 +86,7 @@ int bdev_call(F func, Args... args) {
     };
 
     auto msg_fn = [](void* msg_ctx) {                   // spdk_msg_fn
-        auto ctx = reinterpret_cast<MsgCtx*>(msg_ctx);
+        auto ctx = static_cast<MsgCtx*>(msg_ctx);
         int rc = tuple_assistance::apply([&](Args... args){
             return ctx->func(args..., ctx->cb_fn, ctx);
         }, ctx->args);
