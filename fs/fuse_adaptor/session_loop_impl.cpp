@@ -267,7 +267,6 @@ public:
           se_(se),
           num_worker_(0) {
           max_workers_ = 32;
-          numavail_ = 0;
           waitting_ = false;
 
         for (int i = 0; i < max_workers_; ++i) {
@@ -281,7 +280,6 @@ public:
             workers_.emplace_back(th);
             num_worker_++;
             idlers_.emplace(i);
-            numavail_++;
             photon::thread_yield_to(th);
         }
         assert(num_worker_ = max_workers_);
@@ -333,7 +331,6 @@ private:
     int blk_fd_;
     int nonblk_fd_;
     int num_worker_;
-    int numavail_;
     int max_workers_;
     bool waitting_;
     std::vector<photon::thread *> workers_;
@@ -350,10 +347,9 @@ private:
         };
 
         loop->sem_.wait(1);
-        --loop->numavail_;
         loop->idlers_.erase(wrk_id);
         while(!fuse_session_exited(se)) {
-            if (loop->numavail_ == loop->num_worker_ -1) {
+            if ((int)(loop->idlers_.size()) == loop->num_worker_ -1) {
                 *iofd = loop->blk_fd_;
                 int res = fuse_session_receive_buf(se, &fbuf);
                 if (res <= 0) {
@@ -376,7 +372,6 @@ private:
                 }
 
                 if (res == 0) {
-                    ++loop->numavail_;
                     loop->idlers_.emplace(wrk_id);
                     if (loop->waitting_)
                         photon::thread_usleep(-1);
@@ -390,7 +385,6 @@ private:
                             }
                         }
                     }
-                    --(loop->numavail_);
                     loop->idlers_.erase(wrk_id);
                 } else {
                     if (!loop->idlers_.empty()) {
