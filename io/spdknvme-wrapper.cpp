@@ -14,6 +14,57 @@ struct nvme_qpair {
 };
 thread_local struct nvme_qpair* local_nvme_qpair = nullptr;
 
+struct CBContextForRW{
+    int rc = 0;
+    Awaiter<PhotonContext> awaiter;
+    static void cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl);
+};
+
+struct CBContextForRWV : public CBContextForRW {
+    iovector_view iov_view;
+    size_t idx = 0;
+    size_t off = 0;
+    static void reset_sgl_fn(void *cb_ctx, uint32_t offset);
+    static int next_sge_fn(void *cb_ctx, void **address, uint32_t *length);
+};
+
+void CBContextForRW::cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl) {
+    auto ctx = static_cast<CBContextForRW*>(cb_ctx);
+    if (spdk_nvme_cpl_is_error(cpl)) {
+        LOG_ERROR("error: `", spdk_nvme_cpl_get_status_string(&cpl->status));
+        ctx->rc = -1;
+    }
+    ctx->awaiter.resume();
+}
+
+void CBContextForRWV::reset_sgl_fn(void *cb_ctx, uint32_t offset) {
+    auto ctx = static_cast<CBContextForRWV*>(cb_ctx);
+    assert(offset < ctx->iov_view.sum());
+    ctx->idx = 0;
+    size_t remain = offset;
+    while (remain) {
+        size_t provide = ctx->iov_view[ctx->idx].iov_len;
+        if (provide <= remain) {
+            ctx->idx++;
+            remain -= provide;
+        }
+        else {
+            break;
+        }
+    }
+    ctx->off = remain;
+}
+
+int CBContextForRWV::next_sge_fn(void *cb_ctx, void **address, uint32_t *length) {
+    auto ctx = static_cast<CBContextForRWV*>(cb_ctx);
+    *address = (char*)(ctx->iov_view[ctx->idx].iov_base) + ctx->off;
+    *length = ctx->iov_view[ctx->idx].iov_len - ctx->off;
+    ctx->off = 0;
+    ctx->idx++;
+    if (ctx->idx < ctx->iov_view.elements_count()) return 0;
+    else return -1;
+}
+
 int nvme_env_init() {
     struct spdk_env_opts opts;
     spdk_env_opts_init(&opts);
@@ -89,155 +140,46 @@ int nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair* qpair) {
     LOG_ERROR_RETURN(0, -1, "local_nvme_qpair is nullptr");
 }
 
-int nvme_ns_cmd_read(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
-    struct MyCtx {
-        int rc = 0;
-        Awaiter<PhotonContext> awaiter;
-    };
 
-    auto cb_fn = [](void *cb_ctx, const struct spdk_nvme_cpl *cpl) {   // spdk_nvme_cmd_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        if (spdk_nvme_cpl_is_error(cpl)) {
-            LOG_ERROR("error: `", spdk_nvme_cpl_get_status_string(&cpl->status));
-            ctx->rc = -1;
-        }
-        ctx->awaiter.resume();
-    };
-
-    MyCtx ctx;
-    spdk_nvme_ns_cmd_read(ns, qpair, buffer, lba, lba_count, cb_fn, &ctx, io_flags);
+int nvme_ns_cmd_write(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
+    CBContextForRW ctx;
+    int rc = spdk_nvme_ns_cmd_write(ns, qpair, buffer, lba, lba_count, CBContextForRW::cb_fn, &ctx, io_flags);
+    if (rc != 0) {
+        LOG_ERROR_RETURN(0, rc, "early failed and return");
+    }
     ctx.awaiter.suspend();
-
     return ctx.rc;
 }
 
-int nvme_ns_cmd_write(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
-    struct MyCtx {
-        int rc = 0;
-        Awaiter<PhotonContext> awaiter;
-    };
-
-    auto cb_fn = [](void *cb_ctx, const struct spdk_nvme_cpl *cpl) {   // spdk_nvme_cmd_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        if (spdk_nvme_cpl_is_error(cpl)) {
-            LOG_ERROR("error: `", spdk_nvme_cpl_get_status_string(&cpl->status));
-            ctx->rc = -1;
-        }
-        ctx->awaiter.resume();
-    };
-
-    MyCtx ctx;
-    spdk_nvme_ns_cmd_write(ns, qpair, buffer, lba, lba_count, cb_fn, &ctx, io_flags);
+int nvme_ns_cmd_read(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
+    CBContextForRW ctx;
+    int rc = spdk_nvme_ns_cmd_read(ns, qpair, buffer, lba, lba_count, CBContextForRW::cb_fn, &ctx, io_flags);
+    if (rc != 0) {
+        LOG_ERROR_RETURN(0, rc, "early failed and return");
+    }
     ctx.awaiter.suspend();
-
     return ctx.rc;
 }
 
 int nvme_ns_cmd_writev(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
-    struct MyCtx {
-        int rc = 0;
-        Awaiter<PhotonContext> awaiter;
-        iovector_view iov_view;
-        size_t idx = 0;
-        size_t off = 0;
-    };
-
-    auto reset_sgl_fn = [](void *cb_ctx, uint32_t offset) {                     // spdk_nvme_req_reset_sgl_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        assert(offset < ctx->iov_view.sum());
-        ctx->idx = 0;
-        size_t remain = offset;
-        while (remain) {
-            size_t provide = ctx->iov_view[ctx->idx].iov_len;
-            if (provide <= remain) {
-                ctx->idx++;
-                remain -= provide;
-            }
-            else {
-                break;
-            }
-        }
-        ctx->off = remain;
-    };
-
-    auto next_sge_fn = [](void *cb_ctx, void **address, uint32_t *length) -> int {     // spdk_nvme_req_next_sge_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        *address = (char*)(ctx->iov_view[ctx->idx].iov_base) + ctx->off;
-        *length = ctx->iov_view[ctx->idx].iov_len - ctx->off;
-        ctx->off = 0;
-        ctx->idx++;
-        if (ctx->idx < ctx->iov_view.elements_count()) return 0;
-        else return -1;
-    };
-
-    auto cb_fn = [](void *cb_ctx, const struct spdk_nvme_cpl *cpl) {   // spdk_nvme_cmd_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        if (spdk_nvme_cpl_is_error(cpl)) {
-            LOG_ERROR("error: `", spdk_nvme_cpl_get_status_string(&cpl->status));
-            ctx->rc = -1;
-        }
-        ctx->awaiter.resume();
-    };
-
-    MyCtx ctx;
+    CBContextForRWV ctx;
     ctx.iov_view.assign(iov, iovcnt);
-    spdk_nvme_ns_cmd_writev(ns, qpair, lba, lba_count, cb_fn, &ctx, io_flags, reset_sgl_fn, next_sge_fn);
+    int rc = spdk_nvme_ns_cmd_writev(ns, qpair, lba, lba_count, CBContextForRW::cb_fn, &ctx, io_flags, CBContextForRWV::reset_sgl_fn, CBContextForRWV::next_sge_fn);
+    if (rc != 0) {
+        LOG_ERROR_RETURN(0, rc, "early failed and return");
+    }
     ctx.awaiter.suspend();
-
     return ctx.rc;
 }
 
 int nvme_ns_cmd_readv(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
-    struct MyCtx {
-        int rc = 0;
-        Awaiter<PhotonContext> awaiter;
-        iovector_view iov_view;
-        size_t idx = 0;
-        size_t off = 0;
-    };
-
-    auto reset_sgl_fn = [](void *cb_ctx, uint32_t offset) {                     // spdk_nvme_req_reset_sgl_cb
-       auto ctx = static_cast<MyCtx*>(cb_ctx);
-        assert(offset < ctx->iov_view.sum());
-        ctx->idx = 0;
-        size_t remain = offset;
-        while (remain) {
-            size_t provide = ctx->iov_view[ctx->idx].iov_len;
-            if (provide <= remain) {
-                ctx->idx++;
-                remain -= provide;
-            }
-            else {
-                break;
-            }
-        }
-        ctx->off = remain;
-    };
-
-    auto next_sge_fn = [](void *cb_ctx, void **address, uint32_t *length) -> int {     // spdk_nvme_req_next_sge_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        *address = (char*)(ctx->iov_view[ctx->idx].iov_base) + ctx->off;
-        *length = ctx->iov_view[ctx->idx].iov_len - ctx->off;
-        ctx->off = 0;
-        ctx->idx++;
-        if (ctx->idx < ctx->iov_view.elements_count()) return 0;
-        else return -1;
-    };
-
-    auto cb_fn = [](void *cb_ctx, const struct spdk_nvme_cpl *cpl) {   // spdk_nvme_cmd_cb
-        auto ctx = static_cast<MyCtx*>(cb_ctx);
-        if (spdk_nvme_cpl_is_error(cpl)) {
-            LOG_ERROR("error: `", spdk_nvme_cpl_get_status_string(&cpl->status));
-            ctx->rc = -1;
-        }
-        ctx->awaiter.resume();
-    };
-
-    MyCtx ctx;
+    CBContextForRWV ctx;
     ctx.iov_view.assign(iov, iovcnt);
-    spdk_nvme_ns_cmd_readv(ns, qpair, lba, lba_count, cb_fn, &ctx, io_flags, reset_sgl_fn, next_sge_fn);
+    int rc = spdk_nvme_ns_cmd_readv(ns, qpair, lba, lba_count, CBContextForRW::cb_fn, &ctx, io_flags, CBContextForRWV::reset_sgl_fn, CBContextForRWV::next_sge_fn);
+    if (rc != 0) {
+        LOG_ERROR_RETURN(0, rc, "early failed and return");
+    }
     ctx.awaiter.suspend();
-
     return ctx.rc;
 }
 

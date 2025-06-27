@@ -46,8 +46,12 @@ int main() {
     char test_data[] = "hello world";
     strncpy((char*)buf_write, test_data, 12);
 
-    photon::spdk::nvme_ns_cmd_write(ns, qpair, buf_write, 0, 1, 0);
-    photon::spdk::nvme_ns_cmd_read(ns, qpair, buf_read, 0, 1, 0);
+    if (photon::spdk::nvme_ns_cmd_write(ns, qpair, buf_write, 0, 1, 0) != 0) {
+        LOG_ERROR_RETURN(0, -1, "nvme_ns_cmd_write failed");
+    }
+    if (photon::spdk::nvme_ns_cmd_read(ns, qpair, buf_read, 0, 1, 0) != 0) {
+        LOG_ERROR_RETURN(0, -1, "nvme_ns_cmd_read failed");
+    }
 
     // print
     LOG_INFO("burwrite=`, bufread=`", (char*)buf_write, (char*)buf_read);
@@ -69,12 +73,16 @@ int main() {
     iovs_read.push_back((char*)buf_read+100, 200);
     iovs_read.push_back((char*)buf_read+300, 212);
 
-    photon::spdk::nvme_ns_cmd_writev(ns, qpair, iovs_write.iovec(), iovs_write.iovcnt(), 1, 1, 0);
-    photon::spdk::nvme_ns_cmd_readv(ns, qpair, iovs_read.iovec(), iovs_read.iovcnt(), 1, 1, 0);
+    if (photon::spdk::nvme_ns_cmd_writev(ns, qpair, iovs_write.iovec(), iovs_write.iovcnt(), 1, 1, 0) != 0) {
+        LOG_ERRNO_RETURN(0, -1, "nvme_ns_cmd_writev");
+    }
+    if (photon::spdk::nvme_ns_cmd_readv(ns, qpair, iovs_read.iovec(), iovs_read.iovcnt(), 1, 1, 0) != 0) {
+        LOG_ERRNO_RETURN(0, -1, "nvme_ns_cmd_readv");
+    }
 
     // checking
     if (memcmp(buf_write, buf_read, 512) != 0) {
-        LOG_ERROR("checking failed");
+        LOG_ERROR_RETURN(0, -1, "checking failed");
     }
     else {
         LOG_INFO("checking success");
