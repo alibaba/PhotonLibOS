@@ -14,6 +14,7 @@
 
 #include <photon/photon.h>
 #include <photon/thread/awaiter.h>
+#include <photon/common/iovector.h>
 
 namespace photon {
 namespace spdk {
@@ -43,9 +44,26 @@ int nvme_ns_cmd_readv(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, st
 
 // internal
 
+struct CBContextBase{
+    int rc = 0;
+    Awaiter<PhotonContext> awaiter;
+    static void cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl);
+
+    // for vector io
+    iovector_view iov_view;
+    size_t idx = 0;
+    size_t off = 0;
+    static void reset_sgl_fn(void *cb_ctx, uint32_t offset);
+    static int next_sge_fn(void *cb_ctx, void **address, uint32_t *length);
+};
+
 template <typename F, typename... Args>
 int nvme_call(F func, Args... args) {
-    return func(args...);
+    CBContextBase ctx;
+    int rc = func(args..., &ctx);
+    if (rc != 0) return rc;
+    ctx.awaiter.suspend();
+    return ctx.rc;
 }
 
 
