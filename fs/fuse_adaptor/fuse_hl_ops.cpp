@@ -13,26 +13,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#include "fuse_adaptor.h"
+// #include "fuse_adaptor.h"
+
+#ifndef FUSE_USE_VERSION
+#define FUSE_USE_VERSION 317
+#endif
 
 #if FUSE_USE_VERSION >= 30
+#include <fuse3/fuse.h>
 #include <fuse3/fuse_lowlevel.h>
 #else
+#include <fuse.h>
 #include <fuse/fuse_lowlevel.h>
-#endif
-#include <thread>
-#include <vector>
-
-#ifdef HAVE_CONFIG_H
-#include <config.h>
 #endif
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
-#endif
-
-#ifdef HAVE_LIBULOCKMGR
-#include <ulockmgr.h>
 #endif
 
 #ifdef HAVE_SETXATTR
@@ -54,13 +50,7 @@ limitations under the License.
 #include <sys/file.h> /* flock(2) */
 
 #include <photon/common/alog.h>
-#include <photon/common/event-loop.h>
-#include <photon/common/utility.h>
-#include <photon/io/fd-events.h>
-#include <photon/fs/exportfs.h>
 #include <photon/fs/filesystem.h>
-#include <photon/thread/thread.h>
-#include <photon/thread/thread-pool.h>
 #include <photon/common/perf_counter.h>
 
 REGISTER_PERF(xmp_getattr, TOTAL)
@@ -80,13 +70,13 @@ REGISTER_PERF(xmp_access, TOTAL)
 REGISTER_PERF(xmp_create, TOTAL)
 
 namespace photon {
-namespace fs{
+namespace fs {
 
 static IFileSystem* fs = nullptr;
 
 #define CHECK_FS() if (!fs) return -EFAULT;
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static void* xmp_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
 {
     REPORT_PERF(xmp_init, 1)
@@ -111,7 +101,7 @@ static void xmp_destroy(void *handle)
     REPORT_PERF(xmp_destroy, 1)
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 #else
 static int xmp_getattr(const char *path, struct stat *stbuf)
@@ -188,7 +178,7 @@ static inline fs::IFile* get_file(struct fuse_file_info *fi)
     return file;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                        off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags)
 #else
@@ -210,7 +200,7 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
         st.st_ino = dirp.d_ino;
         st.st_mode = dirp.d_type << 12;
         LOG_DEBUG("dirp.d_name: `", dirp.d_name);
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
         if (filler(buf, dirp.d_name, &st, 0, FUSE_FILL_DIR_PLUS))
 #else
         if (filler(buf, dirp.d_name, &st, 0))
@@ -280,7 +270,7 @@ static int xmp_symlink(const char *from, const char *to)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_rename(const char *from, const char *to, unsigned int flags)
 #else
 static int xmp_rename(const char *from, const char *to)
@@ -304,7 +294,7 @@ static int xmp_link(const char *from, const char *to)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 #else
 static int xmp_chmod(const char *path, mode_t mode)
@@ -318,7 +308,7 @@ static int xmp_chmod(const char *path, mode_t mode)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info *fi)
 #else
 static int xmp_chown(const char *path, uid_t uid, gid_t gid)
@@ -332,7 +322,7 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_truncate(const char *path, off_t size, struct fuse_file_info *fi)
 #else
 static int xmp_truncate(const char *path, off_t size)
@@ -346,7 +336,7 @@ static int xmp_truncate(const char *path, off_t size)
     return 0;
 }
 
-#if FUSE_USE_VERSION >= 30
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 0)
 static int xmp_utimens(const char *path, const struct timespec ts[2], struct fuse_file_info *fi)
 #else
 static int xmp_utimens(const char *path, const struct timespec ts[2])
@@ -574,7 +564,7 @@ static int xmp_flock(const char *path, struct fuse_file_info *fi, int op)
     return -ENOSYS;
 }
 
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
 static int xmp_getdir(const char* path, fuse_dirh_t dir, fuse_dirfil_t dirf)
 {
     LOG_DEBUG(VALUE(path));
@@ -623,7 +613,7 @@ static int xmp_bmap(const char *path, size_t blocksize, uint64_t *idx)
     return -ENOSYS;
 }
 
-#if FUSE_USE_VERSION < 35
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 5)
 static int xmp_ioctl(const char *path, int cmd, void *arg,
                       struct fuse_file_info *fi, unsigned int flags, void *data)
 #else
@@ -646,7 +636,7 @@ static int xmp_poll(const char *path, struct fuse_file_info *fi,
 static struct fuse_operations xmp_oper = {
     .getattr     = xmp_getattr,
     .readlink    = xmp_readlink,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .getdir      = xmp_getdir,
 #endif
     .mknod       = xmp_mknod,
@@ -659,7 +649,7 @@ static struct fuse_operations xmp_oper = {
     .chmod       = xmp_chmod,
     .chown       = xmp_chown,
     .truncate    = xmp_truncate,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .utime       = xmp_utime,
 #endif
     .open        = xmp_open,
@@ -681,14 +671,14 @@ static struct fuse_operations xmp_oper = {
     .destroy     = xmp_destroy,
     .access      = xmp_access,
     .create      = xmp_create,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     .ftruncate   = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
     .fgetattr    = nullptr,  /* The fgetattr and ftruncate handlers have become obsolete and have been removed */
 #endif
     .lock        = xmp_lock,
     .utimens     = xmp_utimens,
     .bmap        = xmp_bmap,
-#if FUSE_USE_VERSION < 30
+#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
     flag_nullpath_ok:1,
     flag_nopath:1,
     flag_utime_omit_ok:1,
@@ -701,320 +691,10 @@ static struct fuse_operations xmp_oper = {
     .flock       = xmp_flock,
     .fallocate   = xmp_fallocate,
 };
-/*
-static void fuse_logger(enum fuse_log_level level, const char *fmt, va_list ap)
-{
-    const int LEN = 4096;
-    char buf[LEN + 1];
-    int ret = vsnprintf(buf, LEN, fmt, ap);
-    if (ret < 0) return;
-    if (ret > LEN) ret = LEN;
-
-    buf[LEN] = '\n';
-    log_output(buf, buf + LEN + 1);
-}
-*/
-int fuser_go(IFileSystem* fs_, int argc, char* argv[])
-{
-    if (!fs_)
-        return 0;
-
-    // fuse_set_log_func(&fuse_logger);
-
-    umask(0);
-    fs = fs_;
-    return run_fuse(argc, argv, &xmp_oper, NULL);
-}
-
-int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
-    if (!fs_) return 0;
-    if (photon::init(INIT_EVENT_DEFAULT, INIT_IO_DEFAULT | INIT_IO_EXPORTFS))
-        return -1;
-    DEFER(photon::fini());
-
-    auto efs = export_as_sync_fs(fs_);
-
-    // fuse_set_log_func(&fuse_logger);
-
-    umask(0);
-    fs = efs;
-    photon::semaphore exit_sem(0);
-    std::thread([&] {
-        fuse_main(argc, argv, &xmp_oper, NULL);
-        exit_sem.signal(1);
-    }).detach();
-    exit_sem.wait(1);
-    return 0;
-}
-
-void set_fuse_fs(fs::IFileSystem *fs_) { fs = fs_; }
 
 fuse_operations *get_fuse_xmp_oper() { return &xmp_oper; }
 
-class FuseSessionLoop {
-protected:
-    struct fuse_session *se;
-#if FUSE_USE_VERSION < 30
-    struct fuse_chan *ch;
-    size_t bufsize = 0;
-    IdentityPool<void, 32> bufpool;
-#else
-    IdentityPool<struct fuse_buf, 32> bufpool;
-#endif
-    ThreadPool<32> threadpool;
-    EventLoop *loop;
-    int ref = 1;
-    condition_variable cond;
+void set_fuse_fs(fs::IFileSystem *fs_) { fs = fs_; }
 
-    int wait_for_readable(EventLoop *) {
-        if (fuse_session_exited(se)) return -1;
-#if FUSE_USE_VERSION < 30
-        auto ret = wait_for_fd_readable(fuse_chan_fd(ch));
-#else
-        auto ret = wait_for_fd_readable(fuse_session_fd(se));
-#endif
-        if (ret < 0) {
-            if (errno == ETIMEDOUT) {
-                return 0;
-            }
-            return -1;
-        }
-        return 1;
-    }
-
-    static void *worker(void *args) {
-        auto obj = (FuseSessionLoop *)args;
-#if FUSE_USE_VERSION < 30
-        struct fuse_buf fbuf;
-        memset(&fbuf, 0, sizeof(fbuf));
-        struct fuse_chan *tmpch = obj->ch;
-        fbuf.mem = obj->bufpool.get();
-        fbuf.size = obj->bufsize;
-        DEFER({
-            obj->bufpool.put(fbuf.mem);
-        });
-        auto res = fuse_session_receive_buf(obj->se, &fbuf, &tmpch);
-#else
-        struct fuse_buf *pfbuf = obj->bufpool.get();
-        DEFER({
-            obj->bufpool.put(pfbuf);
-        });
-        auto res = fuse_session_receive_buf(obj->se, pfbuf);
-#endif
-        DEFER({
-            if (--obj->ref == 0) obj->cond.notify_all();
-        });
-        if (res == -EINTR || res == -EAGAIN) return nullptr;
-        if (res <= 0) {
-            obj->loop->stop();
-            return nullptr;
-        }
-#if FUSE_USE_VERSION < 30
-        fuse_session_process_buf(obj->se, &fbuf, tmpch);
-#else
-        fuse_session_process_buf(obj->se, pfbuf);
-#endif
-        return nullptr;
-    }
-
-    int on_accept(EventLoop *) {
-        ++ref;
-        auto th = threadpool.thread_create(&FuseSessionLoop::worker, (void *)this);
-        thread_yield_to(th);
-        return 0;
-    }
-
-#if FUSE_USE_VERSION < 30
-    int bufctor(void **buf) {
-        *buf = malloc(bufsize);
-        if (*buf == nullptr) return -1;
-        return 0;
-    }
-
-    int bufdtor(void *buf) {
-        free(buf);
-        return 0;
-    }
-#else
-    int bufctor(struct fuse_buf **pbuf) {
-        *pbuf = reinterpret_cast<struct fuse_buf *>(malloc(sizeof(struct fuse_buf)));
-        if (*pbuf == nullptr) return -1;
-
-        memset((*pbuf), 0, sizeof(struct fuse_buf));
-        return 0;
-    }
-
-    int bufdtor(struct fuse_buf *fbuf) {
-        if (fbuf->mem)
-            free(fbuf->mem);
-        fbuf->mem = NULL;
-
-        free(fbuf);
-        return 0;
-    }
-#endif
-
-public:
-    explicit FuseSessionLoop(struct fuse_session *session)
-        : se(session),
-#if FUSE_USE_VERSION < 30
-          ch(fuse_session_next_chan(se, NULL)),
-          bufsize(fuse_chan_bufsize(ch)),
-#endif
-          bufpool({this, &FuseSessionLoop::bufctor},
-                  {this, &FuseSessionLoop::bufdtor}),
-          threadpool(),
-          loop(new_event_loop({this, &FuseSessionLoop::wait_for_readable},
-                              {this, &FuseSessionLoop::on_accept})) {}
-
-    ~FuseSessionLoop() {
-        loop->stop();
-        --ref;
-        while (ref != 0) {
-            cond.wait_no_lock();
-        }
-
-        delete loop;
-    }
-
-    void run() { loop->run(); }
-};
-
-static int fuse_session_loop_mpt(struct fuse_session *se) {
-    FuseSessionLoop loop(se);
-    loop.run();
-    return 0;
-}
-
-#if FUSE_USE_VERSION >= 30
-fuse* fuse3_setup(int argc, char *argv[], const struct ::fuse_operations *op,
-           size_t op_size, char **mountpoint, int *multithreaded, void *user_data)
-{
-    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct fuse *fuse;
-    struct fuse_cmdline_opts opts;
-    struct fuse_session * se;
-
-    if (fuse_parse_cmdline(&args, &opts) != 0)
-        return NULL;
-
-    *mountpoint = opts.mountpoint;
-    *multithreaded = !opts.singlethread;
-    if (opts.show_version) {
-        fuse_lowlevel_version();
-        goto out1;
-    }
-
-    if (opts.show_help) {
-        if(args.argv[0][0] != '\0')
-            printf("usage: %s [options] <mountpoint>\n\n",
-                   args.argv[0]);
-        printf("FUSE options:\n");
-        fuse_cmdline_help();
-        fuse_lib_help(&args);
-        goto out1;
-    }
-
-    if (!opts.show_help &&
-        !opts.mountpoint) {
-        fprintf(stderr, "error: no mountpoint specified\n");
-        goto out1;
-    }
-
-    fuse = fuse_new(&args, op, op_size, user_data);
-    fuse_opt_free_args(&args);
-    if (fuse == NULL) {
-        goto out1;
-    }
-
-    if (fuse_mount(fuse,opts.mountpoint) != 0) {
-        goto out2;
-    }
-
-    if (fuse_daemonize(opts.foreground) != 0) {
-        goto out3;
-    }
-
-    se = fuse_get_session(fuse);
-    if (fuse_set_signal_handlers(se) != 0) {
-        goto out3;
-    }
-    return fuse;
-
-out3:
-    fuse_unmount(fuse);
-out2:
-    fuse_destroy(fuse);
-out1:
-    free(opts.mountpoint);
-    return NULL;
-}
-#endif
-
-struct user_config {
-    int threads;
-};
-
-#define USER_OPT(t, p, v) { t, offsetof(struct user_config, p), v }
-struct fuse_opt user_opts[] = { USER_OPT("threads=%d", threads, 0), FUSE_OPT_END };
-
-int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
-             void *user_data) {
-    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-    struct user_config cfg{ .threads = 4, };
-    fuse_opt_parse(&args, &cfg, user_opts, NULL);
-    struct fuse *fuse;
-    struct fuse_session* se;
-    char *mountpoint;
-    int multithreaded;
-    int res;
-    size_t op_size = sizeof(*(op));
-#if FUSE_USE_VERSION < 30
-    fuse = fuse_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
-#else
-    fuse = fuse3_setup(args.argc, args.argv, op, op_size, &mountpoint, &multithreaded, user_data);
-#endif
-    if (fuse == NULL) return 1;
-    if (multithreaded) {
-        if (cfg.threads < 1) cfg.threads = 1;
-        if (cfg.threads > 64) cfg.threads = 64;
-        se = fuse_get_session(fuse);
-#if FUSE_USE_VERSION < 30
-        auto ch = fuse_session_next_chan(se, NULL);
-        auto fd = fuse_chan_fd(ch);
-#else
-        auto fd = fuse_session_fd(se);
-#endif
-        int flags = fcntl(fd, F_GETFL, 0);
-        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-        std::vector<std::thread> ths;
-        for (int i = 0; i < cfg.threads; ++i) {
-          ths.emplace_back(std::thread([&]() {
-              init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
-              DEFER(fini());
-              if (fuse_session_loop_mpt(se) != 0) res = -1;
-          }));
-        }
-        for (auto& th : ths) th.join();
-        fuse_session_reset(se);
-    } else {
-        se = fuse_get_session(fuse);
-        res = fuse_session_loop_mpt(se);
-        fuse_session_reset(se);
-    }
-    fuse_remove_signal_handlers(fuse_get_session(fuse));
-#if FUSE_USE_VERSION < 30
-    fuse_unmount(mountpoint, fuse_session_next_chan(se, NULL));
-#else
-    fuse_unmount(fuse);
-#endif
-    fuse_destroy(fuse);
-    free(mountpoint);
-    fuse_opt_free_args(&args);
-    if (res == -1) return 1;
-
-    return 0;
-}
-
-}
-}
+}  // namespace fs
+}  // namespace photon
