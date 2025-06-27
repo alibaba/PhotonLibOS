@@ -23,7 +23,7 @@ target_link_libraries(test-iouring PRIVATE photon_shared)
 add_test(NAME test-iouring COMMAND $<TARGET_FILE:test-iouring>)
 endif ()
 
-if (PHOTON_ENABLE_SPDK_BDEV)
+if (PHOTON_ENABLE_SPDK)
     add_executable(test-spdkbdev test-spdkbdev.cpp)
     target_link_libraries(test-spdkbdev PRIVATE photon_shared)
     add_test(NAME test-spdkbdev COMMAND $<TARGET_FILE:test-spdkbdev>)
