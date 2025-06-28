@@ -148,6 +148,7 @@ int fini() {
     for (auto h : get_hook_vector()) {
         h.fire();
     }
+    get_hook_vector().clear();
 #ifdef __linux__
     FINI_IO(LIBAIO, libaio_wrapper)
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
