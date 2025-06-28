@@ -36,6 +36,7 @@ int main() {
     uint32_t sectorsz = spdk_nvme_ns_get_sector_size(ns);
     uint32_t nsec = 4;
     uint64_t bufsz = sectorsz * nsec;
+
     void* buf_write = spdk_zmalloc(bufsz, 0, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     void* buf_read = spdk_zmalloc(bufsz, 0, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     if (buf_write == nullptr || buf_read == nullptr) {
@@ -57,40 +58,4 @@ int main() {
 
     // print
     LOG_INFO("burwrite=`, bufread=`", (char*)buf_write, (char*)buf_read);
-
-    // prepare datas to write
-    memset(buf_write, 0, bufsz);
-    memset(buf_read, 0, bufsz);
-
-    char* buf_write_a = (char*)buf_write;
-    char* buf_write_b = (char*)buf_write + sectorsz;
-    char* buf_write_c = (char*)buf_write + 3 * sectorsz;
-    memset(buf_write_a, 'a', sectorsz);
-    memset(buf_write_b, 'b', 2 * sectorsz);
-    memset(buf_write_c, 'c', sectorsz);
-
-    IOVector iovs_write;
-    iovs_write.push_back(buf_write_a, sectorsz);
-    iovs_write.push_back(buf_write_b, 2 * sectorsz);
-    iovs_write.push_back(buf_write_c, sectorsz);
-
-    IOVector iovs_read;
-    iovs_read.push_back(buf_read, sectorsz);
-    iovs_read.push_back((char*)buf_read + sectorsz, sectorsz);
-    iovs_read.push_back((char*)buf_read + 2 * sectorsz, 2 * sectorsz);
-
-    if (photon::spdk::nvme_ns_cmd_writev(ns, qpair, iovs_write.iovec(), iovs_write.iovcnt(), nsec, nsec, 0) != 0) {
-        LOG_ERRNO_RETURN(0, -1, "nvme_ns_cmd_writev");
-    }
-    if (photon::spdk::nvme_ns_cmd_readv(ns, qpair, iovs_read.iovec(), iovs_read.iovcnt(), nsec, nsec, 0) != 0) {
-        LOG_ERRNO_RETURN(0, -1, "nvme_ns_cmd_readv");
-    }
-
-    // checking
-    if (memcmp(buf_write, buf_read, bufsz) != 0) {
-        LOG_ERROR_RETURN(0, -1, "checking failed");
-    }
-    else {
-        LOG_INFO("checking success");
-    }
 }

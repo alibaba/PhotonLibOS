@@ -7,11 +7,21 @@ namespace photon {
 namespace spdk {
 
 struct nvme_qpair {
+    bool is_init = false;
+    bool is_complete = false;
+    int num_using = 0;
     struct spdk_nvme_qpair* qpair = nullptr;
-    int is_complete = 0;
     photon::join_handle* jh = nullptr;
+
+    nvme_qpair() {
+        LOG_DEBUG("local nvme qpair get into constructor");
+    }
+
+    ~nvme_qpair() {
+        LOG_DEBUG("local nvme qpair get into destroy");
+    }
 };
-thread_local struct nvme_qpair* local_nvme_qpair = nullptr;
+thread_local struct nvme_qpair local_nvme_qpair;
 
 void CBContextBase::cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl) {
     auto ctx = static_cast<CBContextBase*>(cb_ctx);
@@ -96,32 +106,40 @@ struct spdk_nvme_ns* nvme_get_namespace(struct spdk_nvme_ctrlr* ctrlr, uint32_t 
 }
 
 struct spdk_nvme_qpair* nvme_ctrlr_alloc_io_qpair(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_io_qpair_opts* opts, size_t opts_size) {
-    if (!local_nvme_qpair) {
-        struct spdk_nvme_qpair* qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, opts, opts_size);
-        local_nvme_qpair = new struct nvme_qpair;
-        local_nvme_qpair->qpair = qpair;
-        local_nvme_qpair->is_complete = 0;
+    if (!local_nvme_qpair.is_init) {
+        LOG_DEBUG("first init local_nvme_qpair");
+        local_nvme_qpair.qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, opts, opts_size);
+        local_nvme_qpair.is_complete = false;
 
-        local_nvme_qpair->jh = photon::thread_enable_join(photon::thread_create11([]{
-            while (!local_nvme_qpair->is_complete) {
-                spdk_nvme_qpair_process_completions(local_nvme_qpair->qpair, 0);
+        local_nvme_qpair.jh = photon::thread_enable_join(photon::thread_create11([]{
+            while (!local_nvme_qpair.is_complete || local_nvme_qpair.num_using > 0) {
+                spdk_nvme_qpair_process_completions(local_nvme_qpair.qpair, 0);
                 thread_yield();
             }
         }));
+
+        local_nvme_qpair.is_init = true;
     }
-    return local_nvme_qpair->qpair;
+    local_nvme_qpair.num_using++;
+    return local_nvme_qpair.qpair;
 }
 
 int nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair* qpair) {
-    if (local_nvme_qpair) {
-        local_nvme_qpair->is_complete = 1;
-        thread_join(local_nvme_qpair->jh);
-        spdk_nvme_ctrlr_free_io_qpair(local_nvme_qpair->qpair);
-        delete local_nvme_qpair;
-        local_nvme_qpair = nullptr;
+    LOG_DEBUG("get into free io qpair");
+    if (local_nvme_qpair.is_init && local_nvme_qpair.num_using > 0) {
+        LOG_DEBUG("decrease ref count");
+        local_nvme_qpair.num_using--;
+        if (local_nvme_qpair.num_using == 0) {
+            LOG_DEBUG("real free io qpair, because of ref is 0");
+            spdk_nvme_ctrlr_free_io_qpair(local_nvme_qpair.qpair);
+            local_nvme_qpair.is_complete = true;
+            photon::thread_join(local_nvme_qpair.jh);
+            local_nvme_qpair.is_init = false;
+            LOG_DEBUG("real free io qpair done");
+        }
         return 0;
     }
-    LOG_ERROR_RETURN(0, -1, "local_nvme_qpair is nullptr");
+    LOG_ERROR_RETURN(0, -1, "local_nvme_qpair is not init or no one use");
 }
 
 
