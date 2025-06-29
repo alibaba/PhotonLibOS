@@ -27,11 +27,12 @@ int main() {
         LOG_ERROR_RETURN(0, -1, "nvme_get_namespace failed");
     }
 
+    LOG_INFO("alloc io qpair");
     struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
     if (qpair == nullptr) {
         LOG_ERROR_RETURN(0, -1, "nvme_ctrlr_alloc_io_qpair failed");
     }
-    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
+    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(ctrlr, qpair));
 
     uint32_t sectorsz = spdk_nvme_ns_get_sector_size(ns);
     uint32_t nsec = 4;
@@ -49,9 +50,11 @@ int main() {
     char test_data[] = "hello world";
     strncpy((char*)buf_write, test_data, 12);
 
+    LOG_INFO("write");
     if (photon::spdk::nvme_ns_cmd_write(ns, qpair, buf_write, 0, nsec, 0) != 0) {
         LOG_ERROR_RETURN(0, -1, "nvme_ns_cmd_write failed");
     }
+    LOG_INFO("read");
     if (photon::spdk::nvme_ns_cmd_read(ns, qpair, buf_read, 0, nsec, 0) != 0) {
         LOG_ERROR_RETURN(0, -1, "nvme_ns_cmd_read failed");
     }

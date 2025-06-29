@@ -18,9 +18,13 @@ public:
     }
 
     void fini() {
+        GTEST_LOG_(INFO) << "SPDK NVMe fini";
         photon::spdk::nvme_detach(ctrlr);
+        GTEST_LOG_(INFO) << "after detach";
         photon::spdk::nvme_env_fini();
+        GTEST_LOG_(INFO) << "after nvme_env_fini";
         photon::fini();
+        GTEST_LOG_(INFO) << "after photon::fini";
     }
 
     static const char* trid_str;
@@ -65,7 +69,7 @@ TEST_F(SPDKNVMeTest, rw) {
 
     struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
     EXPECT_NE(qpair, nullptr);
-    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
+    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(ctrlr, qpair));
 
     uint32_t sectorsz = spdk_nvme_ns_get_sector_size(ns);
     uint32_t nsec = 8;
@@ -115,7 +119,7 @@ TEST_F(SPDKNVMeTest, rwv) {
 
     struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
     EXPECT_NE(qpair, nullptr);
-    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
+    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(ctrlr, qpair));
 
     uint32_t sectorsz = spdk_nvme_ns_get_sector_size(ns);
     uint32_t nsec = 4;
@@ -171,7 +175,7 @@ TEST_F(SPDKNVMeTest, multi_thread) {
             GTEST_LOG_(INFO) << "write " << idx;
             struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
             EXPECT_NE(qpair, nullptr);
-            DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
+            DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(ctrlr, qpair));
 
             void* buffer = spdk_zmalloc(sectorsz, 0, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
             EXPECT_NE(buffer, nullptr);
@@ -190,7 +194,7 @@ TEST_F(SPDKNVMeTest, multi_thread) {
     GTEST_LOG_(INFO) << "read";
     struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
     EXPECT_NE(qpair, nullptr);
-    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
+    DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(ctrlr, qpair));
 
     void* buffer = spdk_zmalloc(sectorsz * ntest, 0, nullptr, SPDK_ENV_SOCKET_ID_ANY, 1);
     EXPECT_NE(buffer, nullptr);

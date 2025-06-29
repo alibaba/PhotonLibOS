@@ -31,7 +31,7 @@ struct spdk_nvme_ns* nvme_get_namespace(struct spdk_nvme_ctrlr* ctrlr, uint32_t 
 
 struct spdk_nvme_qpair* nvme_ctrlr_alloc_io_qpair(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_io_qpair_opts* opts, size_t opts_size);
 
-int nvme_ctrlr_free_io_qpair(struct spdk_nvme_qpair* qpair);
+int nvme_ctrlr_free_io_qpair(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpair* qpair);
 
 int nvme_ns_cmd_write(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags);
 
