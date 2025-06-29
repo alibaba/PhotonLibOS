@@ -160,30 +160,15 @@ TEST_F(SPDKNVMeTest, multi_thread) {
     int nvcpu = 4;
     photon::WorkPool wp(nvcpu, 0, 0, 0);
 
-    int ntest = 8;
+    int ntest = 64;
     uint32_t sectorsz = spdk_nvme_ns_get_sector_size(ns);
-
-    struct {
-        photon::spinlock lock;
-        int idx;
-    } tmp;
-
-    auto get_idx = [&]()->int{
-        tmp.lock.lock();
-        int res = tmp.idx++;
-        tmp.lock.unlock();
-        return res;
-    };
 
     // writes
     GTEST_LOG_(INFO) << "writes";
     photon::semaphore sem;
     for (int i=0; i<ntest; i++) {
-        wp.async_call(new auto([&]{
-            int idx = get_idx();
-
+        wp.thread_migrate(photon::thread_create11([&](int idx){
             GTEST_LOG_(INFO) << "write " << idx;
-
             struct spdk_nvme_qpair* qpair = photon::spdk::nvme_ctrlr_alloc_io_qpair(ctrlr, nullptr, 0);
             EXPECT_NE(qpair, nullptr);
             DEFER(photon::spdk::nvme_ctrlr_free_io_qpair(qpair));
@@ -193,12 +178,11 @@ TEST_F(SPDKNVMeTest, multi_thread) {
             DEFER(spdk_free(buffer));
 
             memset(buffer, idx, sectorsz);
-
             GTEST_LOG_(INFO) << "write before " << idx;
             EXPECT_EQ(photon::spdk::nvme_ns_cmd_write(ns, qpair, buffer, idx, 1, 0), 0);
             GTEST_LOG_(INFO) << "write after " << idx;
             sem.signal(1);
-        }));
+        }, i));
     }
     sem.wait(ntest);
 
