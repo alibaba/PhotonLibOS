@@ -51,6 +51,7 @@ public:
 };
 
 int set_sync_custom_io(struct fuse_session *);
+int set_iouring_custom_io(struct fuse_session *);
 
 #define DECLARE_SESSION_LOOP(name)  \
 FuseSessionLoop *new_##name##_session_loop(struct fuse_session *)
@@ -58,6 +59,7 @@ FuseSessionLoop *new_##name##_session_loop(struct fuse_session *)
 DECLARE_SESSION_LOOP(epoll);
 #if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
 DECLARE_SESSION_LOOP(sync);
+DECLARE_SESSION_LOOP(iouring);
 #endif
 
 inline FuseSessionLoop *
@@ -65,12 +67,14 @@ new_session_loop(struct fuse_session *se, uint64_t loop_type) {
     switch (loop_type) {
 // The API function `fuse_session_custom_io` was introduced in version 3.13.0
 #if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
-       case FUSE_SESSION_LOOP_SYNC:
-           return new_sync_session_loop(se);
+        case FUSE_SESSION_LOOP_SYNC:
+            return new_sync_session_loop(se);
+        case FUSE_SESSION_LOOP_IOURING_CASCADING:
+            return new_iouring_session_loop(se);
 #endif
-       case FUSE_SESSION_LOOP_EPOLL:
-       default:
-           return new_epoll_session_loop(se);
+        case FUSE_SESSION_LOOP_EPOLL:
+        default:
+            return new_epoll_session_loop(se);
     }
 }
 
