@@ -9,6 +9,7 @@
 #include <photon/net/socket.h>
 #include <photon/thread/thread11.h>
 #include <rdma/rsocket.h>
+#include <netinet/tcp.h>
 
 #include <vector>
 
@@ -38,6 +39,14 @@ struct RSockFD {
         if (fd >= 0) {
             rfcntl(fd, F_SETFL, O_NONBLOCK, 1);
         }
+        int optval;
+        socklen_t optlen = sizeof(optlen);
+
+        optval = 64;
+        rsetsockopt(fd, SOL_RDMA, RDMA_INLINE, &optval, sizeof(optval));
+        optval = 1;
+        rsetsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &optval, optlen);
+        rsetsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &optval, optlen);
     }
     ~RSockFD() {
         if (fd >= 0) {
@@ -122,18 +131,16 @@ struct RSockFD {
     ssize_t do_io_action(uint64_t t, FUNC f, ARGS... args) {
         Timeout tmo(t);
         do {
-            auto ret = do_poll(EVENT | POLLERR | POLLHUP, tmo.timeout());
-            if (ret < 0) return ret;
-            if (ret & EVENT) {
-                auto x = f(fd, args...);
-                if (x < 0) {
-                    ERRNO err;
-                    if (err.no == EAGAIN || err.no == EWOULDBLOCK) {
-                        continue;
-                    }
+            auto x = f(fd, args...);
+            if (x < 0) {
+                ERRNO err;
+                if (err.no == EAGAIN || err.no == EWOULDBLOCK) {
+                    auto ret = do_poll(EVENT | POLLERR | POLLHUP, tmo.timeout());
+                    if (ret < 0) return ret;
+                    continue;
                 }
-                return x;
             }
+            return x;
         } while (tmo.timeout());
         return 0;
     }
