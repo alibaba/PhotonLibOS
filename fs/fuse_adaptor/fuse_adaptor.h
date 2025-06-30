@@ -21,17 +21,20 @@ limitations under the License.
 #endif
 
 #ifndef FUSE_USE_VERSION
-#define FUSE_USE_VERSION 35
+#define FUSE_USE_VERSION 317
 #endif
 
 #if FUSE_USE_VERSION >= 30
 #include <fuse3/fuse.h>
+#include <fuse3/fuse_lowlevel.h>
 #else
-#include <fuse.h>
+#include <fuse/fuse.h>
+#include <fuse/fuse_lowlevel.h>
 #endif
 
 namespace photon {
 namespace fs {
+
 class IFileSystem;
 
 int fuser_go(IFileSystem* fs, int argc, char* argv[]);
