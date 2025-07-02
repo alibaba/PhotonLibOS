@@ -42,23 +42,17 @@ struct nvme_qpair {
 
 using qpm = ObjectCache<struct spdk_nvme_ctrlr*, struct nvme_qpair*>;
 static qpm* get_qpair_manager() {
-    LOG_DEBUG("into get_qpair_manager");
-    thread_local static std::unique_ptr<qpm> qpair_manager;
-    auto destroy_qpair_manager = []{
-        LOG_DEBUG("into destroy_qpair_manager");
-        if (qpair_manager != nullptr) {
-            LOG_DEBUG("destroy");
-            qpair_manager.reset();
-        }
-        LOG_DEBUG("out destroy_qpair_manager");
-    };
+    thread_local qpm* qpair_manager = nullptr;
     if (qpair_manager == nullptr) {
-        LOG_DEBUG("create and add destroy hook");
-        qpair_manager = std::make_unique<qpm>(3000000);
+        qpair_manager = new qpm(3000000);
+        auto destroy_qpair_manager = []{
+            if (qpair_manager) {
+                delete qpair_manager;
+            }
+        };
         photon::fini_hook(destroy_qpair_manager);
     }
-    LOG_DEBUG("out get_qpair_manager");
-    return qpair_manager.get();
+    return qpair_manager;
 }
 
 
@@ -86,23 +80,20 @@ void CBContextBase::cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl) {
 void CBContextBase::reset_sgl_fn(void *cb_ctx, uint32_t offset) {
     LOG_DEBUG("get into reset_sgl_fn", VALUE(offset));
     auto ctx = static_cast<CBContextBase*>(cb_ctx);
-    ctx->iovec.clear();
-    for (int i=0; i<ctx->iovcnt; i++) ctx->iovec.push_back(ctx->iov[i]);
+    ctx->iovec.assign(ctx->iov, ctx->iovcnt);
     ctx->iovec.extract_front(offset);
 }
 
 int CBContextBase::next_sge_fn(void *cb_ctx, void **address, uint32_t *length) {
     auto ctx = static_cast<CBContextBase*>(cb_ctx);
-    if (ctx->iovec.sum() > 0) {
-        *address = ctx->iovec.front().iov_base;
-        *length = ctx->iovec.front().iov_len;
-        LOG_DEBUG("get into next_sge_fn", VALUE(*length));
-        ctx->iovec.pop_front();
-        return 0;
-    }
-    else {
+    if (ctx->iovec.empty()) {
         LOG_ERROR_RETURN(0, -1, "ctx->iov_view is empty");
     }
+    *address = ctx->iovec.front().iov_base;
+    *length = ctx->iovec.front().iov_len;
+    LOG_DEBUG("get into next_sge_fn", VALUE(*length));
+    ctx->iovec.pop_front();
+    return 0;
 }
 
 int nvme_env_init() {
@@ -176,17 +167,9 @@ int nvme_ctrlr_free_io_qpair(struct spdk_nvme_ctrlr* ctrlr, struct spdk_nvme_qpa
     return 0;
 }
 
-typedef int (*spdk_nvme_ns_cmd_rw) (struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair, void *payload,
-			                    uint64_t lba, uint32_t lba_count,
-                                spdk_nvme_cmd_cb cb_fn, void *cb_arg,
-                                uint32_t io_flags);
+typedef int (*spdk_nvme_ns_cmd_rw) (struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair, void *payload, uint64_t lba, uint32_t lba_count, spdk_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags);
 
-typedef int (*spdk_nvme_ns_cmd_rwv) (struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair,
-                                uint64_t lba, uint32_t lba_count,
-                                spdk_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags,
-                                spdk_nvme_req_reset_sgl_cb reset_sgl_fn,
-                                spdk_nvme_req_next_sge_cb next_sge_fn);
-
+typedef int (*spdk_nvme_ns_cmd_rwv) (struct spdk_nvme_ns *ns, struct spdk_nvme_qpair *qpair, uint64_t lba, uint32_t lba_count, spdk_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags, spdk_nvme_req_reset_sgl_cb reset_sgl_fn, spdk_nvme_req_next_sge_cb next_sge_fn);
 
 static int io_helper(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, void* buffer, uint64_t lba, uint32_t lba_count, uint32_t io_flags, spdk_nvme_ns_cmd_rw rw_fn) {
     CBContextBase ctx;
