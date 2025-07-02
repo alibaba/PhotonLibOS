@@ -400,10 +400,11 @@ public:
     }
 
     void assign(struct iovec* iovs, uint16_t iovcnt) {
+        assert(iovcnt >= 0);
+        assert(iovcnt + iov_begin < capacity);
         clear();
-        for (int i=0; i<iovcnt; i++) {
-            push_back(iovs[i]);
-        }
+        memcpy(begin(), iovs, iovcnt * sizeof(*iovs));
+        iov_end += iovcnt;
     }
 
     // pop an struct iovec element, and
