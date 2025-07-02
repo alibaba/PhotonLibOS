@@ -145,6 +145,7 @@ struct iouring_args {
     bool setup_sqpoll = false;
     bool setup_sq_aff = false;
     bool setup_iopoll = false;
+    bool eager_submit = false;
     uint32_t sq_thread_cpu;
     uint32_t sq_thread_idle_ms = 1000;     // by default polls for 1s
 };
