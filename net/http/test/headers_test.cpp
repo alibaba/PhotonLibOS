@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <gtest/gtest.h>
 #define protected public
 #define private public
 #include "../client.cpp"
@@ -232,6 +233,79 @@ TEST(debug, debug) {
     req.headers.insert("test_key", "test_value");
     req.redirect(Verb::GET, "https://domain.com:442/target2?param2=x2", true);
 }
+
+TEST(status, status) {
+    EXPECT_STREQ(photon::net::http::obsolete_reason(100).data(), "Continue");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(101).data(), "Switching Protocols");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(102).data(), "Processing");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(103).data(), "Early Hints");
+
+    EXPECT_STREQ(photon::net::http::obsolete_reason(200).data(), "OK");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(201).data(), "Created");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(202).data(), "Accepted");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(203).data(), "Non-Authoritative Information");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(204).data(), "No Content");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(205).data(), "Reset Content");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(206).data(), "Partial Content");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(207).data(), "Multi-Status");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(208).data(), "Already Reported");
+
+    EXPECT_STREQ(photon::net::http::obsolete_reason(300).data(), "Multiple Choices");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(301).data(), "Moved Permanently");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(302).data(), "Found");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(303).data(), "See Other");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(304).data(), "Not Modified");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(305).data(), "Use Proxy");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(306).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(307).data(), "Temporary Redirect");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(308).data(), "Permanent Redirect");
+
+    EXPECT_STREQ(photon::net::http::obsolete_reason(400).data(), "Bad Request");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(401).data(), "Unauthorized");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(402).data(), "Payment Required");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(403).data(), "Forbidden");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(404).data(), "Not Found");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(405).data(), "Method Not Allowed");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(406).data(), "Not Acceptable");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(407).data(), "Proxy Authentication Required");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(408).data(), "Request Timeout");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(409).data(), "Conflict");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(410).data(), "Gone");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(411).data(), "Length Required");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(412).data(), "Precondition Failed");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(413).data(), "Content Too Large");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(414).data(), "URI Too Long");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(415).data(), "Unsupported Media Type");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(416).data(), "Range Not Satisfiable");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(417).data(), "Expectation Failed");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(418).data(), "I'm a teapot");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(419).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(420).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(421).data(), "Misdirected Request");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(422).data(), "Unprocessable Content");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(423).data(), "Locked");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(424).data(), "Failed Dependency");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(425).data(), "Too Early");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(426).data(), "Upgrade Required");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(427).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(428).data(), "Precondition Required");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(429).data(), "Too Many Requests");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(430).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(431).data(), "Request Header Fields Too Large");
+
+    EXPECT_STREQ(photon::net::http::obsolete_reason(500).data(), "Internal Server Error");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(501).data(), "Not Implemented");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(502).data(), "Bad Gateway");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(503).data(), "Service Unavailable");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(504).data(), "Gateway Timeout");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(505).data(), "HTTP Version Not Supported");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(506).data(), "Variant Also Negotiates");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(507).data(), "Insufficient Storage");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(508).data(), "Loop Detected");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(509).data(), "");
+    EXPECT_STREQ(photon::net::http::obsolete_reason(510).data(), "Not Extended");
+}
+
 
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
