@@ -16,10 +16,11 @@ limitations under the License.
 
 #pragma once
 
+#include <photon/common/string_view.h>
+
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
-
-#include "string_view.h"
 
 namespace ConstString {
 
@@ -151,6 +152,7 @@ struct Accumulate {
     using Prepend = Accumulate<T, 0, (xs + x)...>;
 
     constexpr static T arr[sizeof...(xs)] = {xs...};
+    constexpr static T size() { return sizeof...(xs); }
 };
 
 template <typename T, T... xs>
@@ -214,7 +216,7 @@ constexpr std::string_view TStrArray<Tss...>::views[];
 template <typename... Tss>
 constexpr size_t TStrArray<Tss...>::size;
 
-template<typename... Tss>
+template <typename... Tss>
 constexpr static decltype(auto) make_tstring_array(Tss...) {
     return TStrArray<Tss...>{};
 }
@@ -298,5 +300,33 @@ struct EnumStr : public Split {
         using sp = typename ConstString::TSpliter<',', ' ', decltype(x)>; \
         return ConstString::EnumStr<enum_name, sp>();                     \
     }()
+
+template <typename Accum, typename Whole>
+struct CompactStringArray {
+    constexpr static decltype(auto) whole() { return Whole(); }
+
+    constexpr static std::string_view at(size_t i) {
+        return {&Whole::chars[Accum::arr[i] + i],
+                (size_t)Accum::arr[i + 1] - (size_t)Accum::arr[i]};
+    }
+
+    template <typename TS>
+    constexpr static decltype(auto) prepend(TS t) {
+        return CompactStringArray<typename Accum::template Prepend<t.len>,
+                                  decltype(t.template append<'\0'>().concat(
+                                      Whole()))>();
+    }
+};
+
+template <typename SizeType>
+inline decltype(auto) make_compact_str_array() {
+    return CompactStringArray<Accumulate<SizeType, 0>, TString<>>();
+}
+
+template <typename SizeType, char... Chs, typename... Ts>
+inline decltype(auto) make_compact_str_array(TString<Chs...> first,
+                                             Ts&&... tail) {
+    return make_compact_str_array<SizeType>(tail...).prepend(first);
+}
 
 }  // namespace ConstString
