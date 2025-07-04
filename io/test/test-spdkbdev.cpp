@@ -30,7 +30,7 @@ public:
 };
 
 // path of bdev config json
-const char* SPDKBDev::json_cfg_path = "./examples/spdk-bdev/bdev.json";
+const char* SPDKBDev::json_cfg_path = "./examples/spdk/bdev.json";
 
 class SPDKBDevTestEnv : public ::testing::Environment {
 public:
@@ -74,7 +74,7 @@ TEST_F(SPDKBDevTest, rw) {
     DEFER(spdk_free(bufread));
 
     // prepare datas to write
-    char test_data[] = "hello world";   
+    char test_data[] = "hello world";
     for (uint64_t i=0; i<nblocks; i++) {
         strncpy((char*)bufwrite + i * blocksz, test_data, 12);
     }
@@ -201,7 +201,7 @@ TEST_F(SPDKBDevTest, rwv) {
     }));
     sem.wait(2);
 
-    
+
     IOVector iov2;
     for (uint64_t i = 0; i < nblocks; i+=2) {
         void* bufbegin = (void*)((char*)bufread + i * blocksz);

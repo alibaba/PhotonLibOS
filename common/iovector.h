@@ -399,6 +399,14 @@ public:
         return v.iov_len + push_back_more(bytes - v.iov_len);
     }
 
+    void assign(struct iovec* iovs, uint16_t iovcnt) {
+        assert(iovcnt >= 0);
+        assert(iovcnt + iov_begin < capacity);
+        clear();
+        memcpy(begin(), iovs, iovcnt * sizeof(*iovs));
+        iov_end += iovcnt;
+    }
+
     // pop an struct iovec element, and
     // return the # of bytes actually popped
     size_t pop_front()
