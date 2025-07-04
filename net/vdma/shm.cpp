@@ -56,11 +56,11 @@ public:
     ~SharedMemoryBuffer() {}
 
     bool is_registered() const override {
-        return true; 
+        return true;
     }
 
-    bool is_valid() const override { 
-        return true; 
+    bool is_valid() const override {
+        return true;
     }
 
     std::string_view id() const override {
@@ -110,7 +110,7 @@ public:
         }
         LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(shm_fd_), VALUE(shm_size_), VALUE(unit_));
 
-        ftruncate(shm_fd_, shm_size_);
+        int ret = ftruncate(shm_fd_, shm_size_); (void)ret;
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
         if (!shm_begin_ptr_) {
             close(shm_fd_);
@@ -121,7 +121,7 @@ public:
         used_mark_.resize(nbuffer_);
         LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(shm_begin_ptr_), VALUE(nbuffer_));
         LOG_DEBUG("SharedMemoryBufferAllocator: ", VALUE(used_mark_.size()), VALUE(buffers_.size()));
-        
+
         for (size_t i=0; i<nbuffer_; i++) {
             buffers_.emplace_back(i, shm_begin_ptr_ + i * unit_, unit_, vDMABufferType::kSharedMem);
         }
@@ -162,13 +162,13 @@ public:
     }
 
     size_t unit() const { return unit_; }
-    
+
 private:
     std::string shm_name_;
     int shm_fd_;
     size_t shm_size_;
     char* shm_begin_ptr_;
-    
+
     size_t unit_;
     size_t nbuffer_;
 
@@ -228,7 +228,7 @@ class SharedMemoryInitiator : public vDMAInitiator {
 public:
     SharedMemoryInitiator(const char* shm_name, size_t shm_size)
     :
-    shm_name_(shm_name), shm_size_(shm_size) 
+    shm_name_(shm_name), shm_size_(shm_size)
     {
         shm_fd_ = shm_open(shm_name, O_RDWR, 0666);
         if (shm_fd_ < 0) {
@@ -236,7 +236,7 @@ public:
         }
         LOG_DEBUG("SharedMemoryInitiator: ", VALUE(shm_fd_), VALUE(shm_size_));
 
-        ftruncate(shm_fd_, shm_size_);
+        int ret = ftruncate(shm_fd_, shm_size_); (void)ret;
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
         if (!shm_begin_ptr_) {
             LOG_ERROR("SharedMemoryInitiator, mmap failed");

@@ -241,6 +241,8 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
+        if (try_submit() < 0) return -1;
+
         SCOPED_PAUSE_WORK_STEALING;
         photon::thread_sleep(-1);
 
@@ -268,6 +270,15 @@ public:
         }
     }
 
+    int try_submit() {
+        if (m_args.eager_submit) {
+            int ret = io_uring_submit(m_ring);
+            if (ret < 0)
+                LOG_ERROR_RETURN(-ret, -1, "iouring: failed to io_uring_submit(), ", ERRNO(-ret));
+        }
+        return 0;
+    }
+
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         if (unlikely(interests == 0))
             return 0;
@@ -289,9 +300,8 @@ public:
 
         bool one_shot = e.interests & ONE_SHOT;
         fdInterest fd_interest{e.fd, (uint32_t)evmap.translate_bitwisely(e.interests)};
-        ioCtx io_ctx(false, true);
-        eventCtx event_ctx{e, one_shot, io_ctx};
-        auto pair = m_event_contexts.insert({fd_interest, event_ctx});
+        eventCtx event_ctx{e, one_shot, {false, true}};
+        auto pair = m_event_contexts.emplace(fd_interest, event_ctx);
         if (!pair.second) {
             LOG_ERROR_RETURN(0, -1, "iouring: event has already been added");
         }
@@ -302,10 +312,7 @@ public:
             io_uring_prep_poll_multishot(sqe, fd_interest.fd, fd_interest.interest);
         }
         io_uring_sqe_set_data(sqe, &pair.first->second.io_ctx);
-        int ret = io_uring_submit(m_ring);
-        if (ret < 0)
-            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when adding interest, ", ERRNO(-ret));
-        return 0;
+        return try_submit();
     }
 
     int rm_interest(Event e) override {
@@ -321,13 +328,14 @@ public:
 
         io_uring_prep_poll_remove(sqe, (__u64) &iter->second.io_ctx);
         io_uring_sqe_set_data(sqe, nullptr);
-        int ret = io_uring_submit(m_ring);
-        if (ret < 0)
-            LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when removing interest, ", ERRNO(-ret));
-        return 0;
+        return try_submit();
     }
 
     ssize_t wait_for_events(void** data, size_t count, Timeout timeout) override {
+        if (!(m_ring->flags & IORING_SETUP_SQPOLL) &&
+            m_ring->sq.sqe_tail != *m_ring->sq.khead)
+                io_uring_submit(m_ring);
+
         // Use master engine to wait for self event fd
         int ret = ::photon::wait_for_fd_readable(m_eventfd, timeout);
         if (ret < 0) {
@@ -335,60 +343,14 @@ public:
         }
         uint64_t value;
         eventfd_read(m_eventfd, &value);
-
-        // Reap events
-        size_t num = 0;
-        io_uring_cqe* cqe = nullptr;
-        uint32_t head = 0;
-        unsigned i = 0;
-        io_uring_for_each_cqe(m_ring, head, cqe) {
-            ++i;
-            auto ctx = (ioCtx*) io_uring_cqe_get_data(cqe);
-            if (!ctx) {
-                // rm_interest didn't set user data
-                continue;
-            }
-            ctx->res = cqe->res;
-            if (cqe->flags & IORING_CQE_F_MORE && cqe->res & POLLERR) {
-                LOG_ERROR_RETURN(0, -1, "iouring: multi-shot poll got POLLERR");
-            }
-            if (!ctx->is_event) {
-                LOG_ERROR_RETURN(0, -1, "iouring: cascading engine only needs to handle event. Must be a bug...")
-            }
-            eventCtx* event_ctx = container_of(ctx, eventCtx, io_ctx);
-            fdInterest fd_interest{event_ctx->event.fd, (uint32_t)evmap.translate_bitwisely(event_ctx->event.interests)};
-            if (ctx->res == -ECANCELED) {
-                m_event_contexts.erase(fd_interest);
-            } else if (event_ctx->one_shot) {
-                data[num++] = event_ctx->event.data;
-                m_event_contexts.erase(fd_interest);
-            } else {
-                data[num++] = event_ctx->event.data;
-            }
-            if (num >= count) {
-                break;
-            }
-        }
-        io_uring_cq_advance(m_ring, i);
-        return num;
+        return reap_events(data, count);
     }
-
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
-        // Prepare own timeout
-        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
-            timeout = std::numeric_limits<int64_t>::max();
-        }
-
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
-            return -1;
-        }
-
-        uint32_t head = 0;
-        unsigned i = 0;
+    ssize_t reap_events(void** data = 0, size_t count = 0) {
         io_uring_cqe* cqe;
+        uint32_t head = 0, num = 0, n = 0;
+        DEFER( io_uring_cq_advance(m_ring, n) );
         io_uring_for_each_cqe(m_ring, head, cqe) {
-            i++;
+            n++;
             auto ctx = (ioCtx*) io_uring_cqe_get_data(cqe);
             if (!ctx) {
                 // Own timeout doesn't have user data
@@ -406,31 +368,65 @@ public:
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
                     LOG_WARN("iouring: send_zc fall back to copying");
+                assert(!ctx->is_event);
                 photon::thread_interrupt(ctx->th_id, EOK);
                 continue;
             }
 
             ctx->res = cqe->res;
-            if (!ctx->is_canceller && ctx->res == -ECANCELED) {
-                // An I/O was canceled because of:
-                // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
-                // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
-                // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
-                ctx->res = -ETIMEDOUT;
-                continue;
-            } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
-                // The linked timer itself is also a canceller. The reasons it got cancelled could be:
-                // 1. I/O finished in time
-                // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                continue;
-            } else if (cqe->flags & IORING_CQE_F_MORE) {
-                continue;
+            if (cqe->flags & IORING_CQE_F_MORE) {
+                if (cqe->res & POLLERR) {
+                    assert(ctx->is_event);
+                    assert(num == 0);
+                    LOG_ERROR_RETURN(0, -1, "iouring: multi-shot poll got POLLERR");
+                } else { continue; }
             }
+            if (!ctx->is_event) {
+                if (!ctx->is_canceller && ctx->res == -ECANCELED) {
+                    // An I/O was canceled because of:
+                    // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
+                    // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
+                    // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
+                    ctx->res = -ETIMEDOUT;
+                    continue;
+                } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
+                    // The linked timer itself is also a canceller. The reasons it got cancelled could be:
+                    // 1. I/O finished in time
+                    // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
+                    continue;
+                }
+                photon::thread_interrupt(ctx->th_id, EOK);
 
-            photon::thread_interrupt(ctx->th_id, EOK);
+            } else /* if (ctx->is_event) */ {
+
+                if (num >= count) { --n; break; }
+                eventCtx* event_ctx = container_of(ctx, eventCtx, io_ctx);
+                fdInterest fd_interest{event_ctx->event.fd, (uint32_t)evmap.translate_bitwisely(event_ctx->event.interests)};
+                if (ctx->res == -ECANCELED) {
+                    m_event_contexts.erase(fd_interest);
+                } else if (event_ctx->one_shot) {
+                    data[num++] = event_ctx->event.data;
+                    m_event_contexts.erase(fd_interest);
+                } else {
+                    data[num++] = event_ctx->event.data;
+                }
+            }
+        }
+        return num;
+    }
+
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
+        // Prepare own timeout
+        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
+            timeout = std::numeric_limits<int64_t>::max();
         }
 
-        io_uring_cq_advance(m_ring, i);
+        auto ts = usec_to_timespec(timeout);
+        if (m_submit_wait_func(m_ring, &ts) != 0) {
+            return -1;
+        }
+
+        reap_events();
         return 0;
     }
 
@@ -594,108 +590,105 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
-template<typename...Ts>
-inline size_t do_async_io(Ts...xs) {
-    auto mee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return mee->async_io(xs...);
+inline iouringEngine* get_ring(CascadingEventEngine* cee) {
+    return cee ? static_cast<iouringEngine*>(cee) :
+                 static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
 }
 
-ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
+    return get_ring(cee)->async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
+    return get_ring(cee)->async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
 }
 
-ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
+    return get_ring(cee)->async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout) {
+ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
+    return get_ring(cee)->async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
-ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
+    return get_ring(cee)->async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
+    return get_ring(cee)->async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
-ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
+    return get_ring(cee)->async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
+    return get_ring(cee)->async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
 }
 
-ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, Timeout timeout) {
+ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
+    return get_ring(cee)->async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
-ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, Timeout timeout) {
+ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return do_async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
+    return get_ring(cee)->async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
-int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, Timeout timeout) {
-    return do_async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
+int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
 }
 
-int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, Timeout timeout) {
-    return do_async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
+int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
 }
 
-int iouring_fsync(int fd) {
-    return do_async_io(&io_uring_prep_fsync, -1, 0, fd, 0);
+int iouring_fsync(int fd, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_fsync, timeout, 0, fd, 0);
 }
 
-int iouring_fdatasync(int fd) {
-    return do_async_io(&io_uring_prep_fsync, -1, 0, fd, IORING_FSYNC_DATASYNC);
+int iouring_fdatasync(int fd, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_fsync, timeout, 0, fd, IORING_FSYNC_DATASYNC);
 }
 
-int iouring_open(const char* path, int flags, mode_t mode) {
-    return do_async_io(&io_uring_prep_openat, -1, 0, AT_FDCWD, path, flags, mode);
+int iouring_open(const char* path, int flags, mode_t mode, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_openat, timeout, 0, AT_FDCWD, path, flags, mode);
 }
 
-int iouring_mkdir(const char* path, mode_t mode) {
-    return do_async_io(&io_uring_prep_mkdirat, -1, 0, AT_FDCWD, path, mode);
+int iouring_mkdir(const char* path, mode_t mode, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_mkdirat, timeout, 0, AT_FDCWD, path, mode);
 }
 
-int iouring_close(int fd) {
-    return do_async_io(&io_uring_prep_close, -1, 0, fd);
+int iouring_close(int fd, Timeout timeout, CascadingEventEngine* cee) {
+    return get_ring(cee)->async_io(&io_uring_prep_close, timeout, 0, fd);
 }
 
 bool iouring_register_files_enabled() {
     return iouringEngine::register_files_enabled();
 }
 
-int iouring_register_files(int fd) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->register_unregister_files(fd, true);
+int iouring_register_files(int fd, CascadingEventEngine* cee) {
+    return get_ring(cee)->register_unregister_files(fd, true);
 }
 
-int iouring_unregister_files(int fd) {
-    auto ee = (iouringEngine*) get_vcpu()->master_event_engine;
-    return ee->register_unregister_files(fd, false);
+int iouring_unregister_files(int fd, CascadingEventEngine* cee) {
+    return get_ring(cee)->register_unregister_files(fd, false);
 }
 
 void* new_iouring_event_engine(iouring_args args) {
