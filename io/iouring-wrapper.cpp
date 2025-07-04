@@ -241,6 +241,12 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
+        if (!m_args.is_master) {
+            int ret = io_uring_submit(m_ring);
+            if (ret < 0)
+              LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when do async_io, ", ERRNO(-ret));
+        }
+
         SCOPED_PAUSE_WORK_STEALING;
         photon::thread_sleep(-1);
 
@@ -282,6 +288,14 @@ public:
         }
         return 0;
     }
+
+    ssize_t pread(int fd, void* buf, size_t count, off_t offset,
+                  uint64_t flags, Timeout timeout) override {
+        uint32_t ring_flags = flags >> 32;
+        ring_flags |= IOSQE_ASYNC;
+        return async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
+    }
+
     int add_interest(Event e) override {
         auto* sqe = _get_sqe();
         if (sqe == nullptr)
@@ -326,6 +340,34 @@ public:
             LOG_ERROR_RETURN(-ret, -1, "iouring: fail to submit when removing interest, ", ERRNO(-ret));
         return 0;
     }
+
+    ssize_t wait_for_io_complete() {
+        int ret = photon::wait_for_fd_readable(m_eventfd);
+        if (ret < 0) {
+            return errno = ETIMEDOUT ? 0 : -1;
+        }
+
+        uint64_t value;
+        eventfd_read(m_eventfd, &value);
+
+        io_uring_cqe* cqe = nullptr;
+        uint32_t head = 0;
+        unsigned i = 0;
+        io_uring_for_each_cqe(m_ring, head, cqe) {
+            ++i;
+            auto ctx = (ioCtx*) io_uring_cqe_get_data(cqe);
+            if (!ctx) {
+                continue;
+            }
+
+            ctx->res = cqe->res;
+            photon::thread_interrupt(ctx->th_id, EOK);
+        }
+
+        io_uring_cq_advance(m_ring, i);
+        return 0;
+    }
+
 
     ssize_t wait_for_events(void** data, size_t count, Timeout timeout) override {
         // Use master engine to wait for self event fd

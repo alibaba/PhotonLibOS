@@ -20,6 +20,13 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/timeout.h>
 
+#define EE_UNIMPLEMENTED(func)  \
+    virtual func                \
+    {                           \
+        errno = ENOSYS;         \
+        return -1;              \
+    }
+
 namespace photon {
 
 const static uint32_t EVENT_READ = 1;
@@ -119,6 +126,10 @@ public:
      * @warning Do NOT block vcpu
      */
     virtual ssize_t wait_for_events(void** data, size_t count, Timeout timeout = {}) = 0;
+
+    EE_UNIMPLEMENTED(ssize_t pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags = 0, Timeout timeout = {}));
+    EE_UNIMPLEMENTED(ssize_t writev(int fd, struct iovec *iov, int count, uint64_t flags = 0, Timeout timeout = {}));
+    EE_UNIMPLEMENTED(ssize_t wait_for_io_complete());
 };
 
 template<typename Ctor> inline

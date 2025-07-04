@@ -217,6 +217,8 @@ int run_fuse(int argc, char *argv[], const struct ::fuse_operations *op,
 #if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 13)
     if (looptype == FUSE_SESSION_LOOP_SYNC) {
         set_sync_custom_io(se);
+    } else if (looptype == FUSE_SESSION_LOOP_IOURING_CASCADING) {
+        set_iouring_custom_io(se);
     }
 #endif
 
