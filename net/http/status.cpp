@@ -104,7 +104,7 @@ std::string_view obsolete_reason(int code) {
     if (unlikely(major >= entries.size())) return {};
     auto i = entries.arr[major] + minor;
     if (unlikely(i >= entries.arr[major + 1])) return {};
-    return code_str.at(i);
+    return code_str[i];
 }
 
 }  // namespace http
