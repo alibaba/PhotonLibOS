@@ -1,18 +1,7 @@
 find_package(PkgConfig REQUIRED)
 
-set(SPDK_ROOT ~/spdk/spdk_v21.04.x)
-
-set(DPDK_INCLUDE_DIRS ${SPDK_ROOT}/dpdk/build/include/)
-set(SPDK_INCLUDE_DIRS ${SPDK_ROOT}/build/include/)
-
-set(ISAL_LIBRARIES_PATH ${SPDK_ROOT}/isa-l/.libs/)
-set(DPDK_LIBRARIES_PATH ${SPDK_ROOT}/dpdk/build/lib/)
-set(SPDK_LIBRARIES_PATH ${SPDK_ROOT}/build/lib/)
-
-find_library(ISAL_LIBRARY NAMES isal PATHS ${ISAL_LIBRARIES_PATH} NO_DEFAULT_PATH)
-if(NOT ISAL_LIBRARY)
-    message(WARNING "isal library not found")
-endif()
+set(DPDK_INCLUDE_DIRS ${DPDK_ROOT}/include)
+set(SPDK_INCLUDE_DIRS ${SPDK_ROOT}/include)
 
 set(DPDK_LIBRARIES)
 set(DPDK_LIBRARY_NAMES
@@ -41,7 +30,7 @@ rte_timer
 rte_vhost
 )
 foreach(LIB_NAME IN LISTS DPDK_LIBRARY_NAMES)
-    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${DPDK_LIBRARIES_PATH} NO_DEFAULT_PATH)
+    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${DPDK_ROOT}/lib NO_DEFAULT_PATH)
     if(FOUND_${LIB_NAME})
         list(APPEND DPDK_LIBRARIES ${FOUND_${LIB_NAME}})
     else()
@@ -110,7 +99,7 @@ spdk_virtio
 spdk_vmd
 )
 foreach(LIB_NAME IN LISTS SPDK_LIBRARY_NAMES)
-    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${SPDK_LIBRARIES_PATH} NO_DEFAULT_PATH)
+    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${SPDK_ROOT}/lib NO_DEFAULT_PATH)
     if(FOUND_${LIB_NAME})
         list(APPEND SPDK_LIBRARIES ${FOUND_${LIB_NAME}})
     else()
