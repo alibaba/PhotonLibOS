@@ -34,6 +34,7 @@ limitations under the License.
 #endif
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <liburing.h>
 
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
@@ -42,6 +43,7 @@ limitations under the License.
 #include <photon/thread/thread-local.h>
 #include <photon/thread/thread-pool.h>
 #include <photon/common/event-loop.h>
+#include <photon/io/iouring-wrapper.h>
 
 namespace photon {
 namespace fs {
@@ -238,8 +240,7 @@ public:
     }
 
     explicit SyncSessionLoop(struct fuse_session *se)
-        : error_(0),
-          se_(se),
+        : se_(se),
           blk_fd_(-1),
           nonblk_fd_(-1),
           max_workers_(32),
@@ -279,7 +280,6 @@ public:
     }
 
 private:
-    int error_;
     struct fuse_session *se_;
     int blk_fd_;
     int nonblk_fd_;
@@ -406,6 +406,180 @@ FuseSessionLoop *new_sync_session_loop(struct fuse_session *se) {
 
 int set_sync_custom_io(struct fuse_session *se) {
     return SyncSessionLoop::set_custom_io(se);
+}
+
+static thread_local CascadingEventEngine *IOengine = nullptr;
+static ssize_t custom_iou_writev(int fd, struct iovec *iov, int count, void *userdata);
+static ssize_t custom_iou_read(int fd, void *buf, size_t len, void *userdata);
+
+class IouringSessionLoop : public FuseSessionLoop {
+public:
+    explicit IouringSessionLoop(struct fuse_session *se)
+        : se_(se),
+          max_workers_(32),
+          poller_(nullptr) {
+
+        iouring_args args;
+        args.eager_submit = true;
+        io_engine_ = new_iouring_cascading_engine(args);
+        IOengine = io_engine_;
+        io_fd = -1;
+    }
+
+    ~IouringSessionLoop() {
+        if (se_) fuse_session_exit(se_);
+        wait_all_fini();
+
+        if (io_fd != -1)
+            close(io_fd);
+
+        delete io_engine_;
+    }
+
+    int init() {
+        set_fd();
+        for (int i = 0; i < max_workers_; ++i) {
+            auto th = photon::thread_create11(
+                &IouringSessionLoop::fuse_do_work, this);
+            photon::thread_enable_join(th);
+            workers_.emplace_back(th);
+            photon::thread_yield_to(th);
+        }
+
+        return 0;
+    }
+
+    void run() {
+        sem_.signal(max_workers_);
+        poller_ = photon::thread_create11(&IouringSessionLoop::fuse_do_poll, this);
+        photon::thread_enable_join(poller_);
+        wait_all_fini();
+    }
+
+    static int set_custom_io(struct fuse_session *se) {
+        const struct fuse_custom_io custom_io = {
+            .writev = photon::fs::custom_iou_writev,
+            .read = photon::fs::custom_iou_read,
+            .splice_receive = NULL,
+            .splice_send = NULL,
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
+            .clone_fd = NULL,
+#endif
+        };
+#if FUSE_USE_VERSION >= FUSE_MAKE_VERSION(3, 17)
+        return fuse_session_custom_io(se, &custom_io,
+                                      sizeof(struct fuse_custom_io),
+                                      fuse_session_fd(se));
+#else
+        return fuse_session_custom_io(se, &custom_io, fuse_session_fd(se));
+#endif
+    }
+
+    static thread_local int io_fd;
+
+private:
+    struct fuse_session *se_;
+    int max_workers_;
+    std::vector<photon::thread *> workers_;
+    photon::thread * poller_;
+    photon::semaphore sem_;
+    CascadingEventEngine *io_engine_;
+
+    void wait_all_fini() {
+        while (!workers_.empty()) {
+            auto th = workers_.back();
+            photon::thread_join((photon::join_handle *)th);
+            workers_.pop_back();
+        }
+
+        if (poller_) {
+            photon::thread_interrupt(poller_);
+            photon::thread_join((photon::join_handle *)poller_);
+            poller_ = nullptr;
+        }
+    }
+
+    int set_fd() {
+        uint32_t masterfd = fuse_session_fd(se_);
+        const char *devname = "/dev/fuse";
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+        int clonefd = open(devname, O_RDWR | O_CLOEXEC);
+        if (clonefd == -1) {
+            return -1;
+        }
+#ifndef O_CLOEXEC
+        fcntl(clonefd, F_SETFD, FD_CLOEXEC);
+#endif
+
+        int res = ioctl(clonefd, FUSE_DEV_IOC_CLONE, &masterfd);
+        if (res == -1) {
+            close(clonefd);
+            return -1;
+        }
+        io_fd = clonefd;
+        return 0;
+    }
+
+    void *fuse_do_work() {
+        struct fuse_buf fbuf = {
+            .mem = NULL,
+        };
+
+        sem_.wait(1);
+        while (!fuse_session_exited(se_)) {
+            int res;
+            {
+                res = fuse_session_receive_buf(se_, &fbuf);
+            }
+            if (res == -EINTR)
+                continue;
+            if (res <= 0)  {// Returned 0 indeicate that session has exited
+                if (res < 0) {
+                    fuse_session_exit(se_);
+                }
+                break;
+            }
+            fuse_session_process_buf(se_, &fbuf);
+       }
+       return NULL;
+    }
+
+    void *fuse_do_poll() {
+        while (!fuse_session_exited(se_)) {
+            ssize_t ret = io_engine_->wait_for_events(nullptr, 0, -1);
+            (void) ret;
+        }
+        return nullptr;
+    }
+};
+
+thread_local int IouringSessionLoop::io_fd = -1;
+
+ssize_t custom_iou_writev(int fd, struct iovec *iov, int count, void *userdata)
+{
+    (void)userdata;
+
+    return writev(IouringSessionLoop::io_fd, iov, count);
+}
+
+ssize_t custom_iou_read(int fd, void *buf, size_t len, void *userdata)
+{
+    (void)userdata;
+
+    off_t nonoff = -1;
+    uint64_t flags = ((uint64_t)IOSQE_ASYNC) << 32;
+    ssize_t ret =iouring_pread(IouringSessionLoop::io_fd, buf, len, nonoff, flags, -1, IOengine);
+    return ret;
+}
+
+FuseSessionLoop *new_iouring_session_loop(struct fuse_session *se) {
+    return NewObj<IouringSessionLoop>(se)->init();
+}
+
+int set_iouring_custom_io(struct fuse_session *se) {
+    return IouringSessionLoop::set_custom_io(se);
 }
 
 #endif
