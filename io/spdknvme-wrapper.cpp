@@ -205,5 +205,12 @@ int nvme_ns_cmd_readv(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, st
     return vec_io_helper(ns, qpair, iov, iovcnt, lba, lba_count, io_flags, &spdk_nvme_ns_cmd_readv);
 }
 
+int nvme_ns_get_info(struct spdk_nvme_ns* ns, uint32_t* sector_size, uint64_t* num_sectors) {
+    if (ns == nullptr || sector_size == nullptr || num_sectors == nullptr) return -1;
+    *sector_size = spdk_nvme_ns_get_sector_size(ns);
+    *num_sectors = spdk_nvme_ns_get_num_sectors(ns);
+    return 0;
+}
+
 }   // namespace spdk
 }   // namespace photon

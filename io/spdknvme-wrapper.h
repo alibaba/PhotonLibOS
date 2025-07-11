@@ -41,5 +41,7 @@ int nvme_ns_cmd_writev(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, s
 
 int nvme_ns_cmd_readv(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count, uint32_t io_flags);
 
+int nvme_ns_get_info(struct spdk_nvme_ns* ns, uint32_t* sector_size, uint64_t* num_sectors);
+
 }   // namespace spdk
 }   // namespace photon

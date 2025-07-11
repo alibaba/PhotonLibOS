@@ -1,46 +1,7 @@
 find_package(PkgConfig REQUIRED)
 
-set(DPDK_INCLUDE_DIRS ${DPDK_ROOT}/include)
-set(SPDK_INCLUDE_DIRS ${SPDK_ROOT}/include)
-
-set(DPDK_LIBRARIES)
-set(DPDK_LIBRARY_NAMES
-rte_bus_pci
-rte_bus_vdev
-rte_cmdline
-rte_compressdev
-rte_cryptodev
-rte_eal
-rte_ethdev
-rte_hash
-rte_kvargs
-rte_mbuf
-rte_mempool
-rte_mempool_ring
-rte_meter
-rte_net
-rte_pci
-rte_power
-rte_rcu
-rte_reorder
-rte_ring
-rte_security
-rte_telemetry
-rte_timer
-rte_vhost
-)
-foreach(LIB_NAME IN LISTS DPDK_LIBRARY_NAMES)
-    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${DPDK_ROOT}/lib NO_DEFAULT_PATH)
-    if(FOUND_${LIB_NAME})
-        list(APPEND DPDK_LIBRARIES ${FOUND_${LIB_NAME}})
-    else()
-        message(WARNING "Could not find DPDK library ${LIB_NAME}")
-    endif()
-endforeach()
-
-
 set(SPDK_LIBRARIES)
-set(SPDK_LIBRARY_NAMES 
+set(SPDK_LIBRARY_NAMES
 spdk_accel_ioat
 spdk_accel
 spdk_bdev_aio
@@ -99,7 +60,7 @@ spdk_virtio
 spdk_vmd
 )
 foreach(LIB_NAME IN LISTS SPDK_LIBRARY_NAMES)
-    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${SPDK_ROOT}/lib NO_DEFAULT_PATH)
+    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS /usr/local/lib NO_DEFAULT_PATH)
     if(FOUND_${LIB_NAME})
         list(APPEND SPDK_LIBRARIES ${FOUND_${LIB_NAME}})
     else()
@@ -107,11 +68,13 @@ foreach(LIB_NAME IN LISTS SPDK_LIBRARY_NAMES)
     endif()
 endforeach()
 
+find_path(SPDK_INCLUDE_DIRS NAMES spdk/env.h PATHS /usr/local/include NO_DEFAULT_PATH)
 
-set(SPDK_INCLUDE_DIRS ${SPDK_INCLUDE_DIRS} ${DPDK_INCLUDE_DIRS})
 
-set(SPDK_LIBRARIES ${SPDK_LIBRARIES} ${DPDK_LIBRARIES} ${ISAL_LIBRARY})
+pkg_check_modules(ISAL REQUIRED libisal)
 
-find_package_handle_standard_args(spdk DEFAULT_MSG SPDK_LIBRARIES SPDK_INCLUDE_DIRS)
+set(SPDK_LIBRARIES ${SPDK_LIBRARIES} ${ISAL_STATIC_LDFLAGS})
+
+find_package_handle_standard_args(spdk DEFAULT_MSG SPDK_INCLUDE_DIRS SPDK_LIBRARIES)
 
 mark_as_advanced(SPDK_INCLUDE_DIRS SPDK_LIBRARIES)
