@@ -260,7 +260,7 @@ protected:
         IPAddr addr;
         IPAddrNode(IPAddr addr) : addr(addr) {}
     };
-    struct IPAddrList : public intrusive_list<IPAddrNode>, rwlock {
+    struct IPAddrList : public intrusive_list<IPAddrNode>, spinlock {
         ~IPAddrList() { delete_all(); }
     };
 public:
@@ -290,7 +290,7 @@ public:
         };
         auto ips = dnscache_.borrow(host, ctr);
         if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for ` failed", host);
-        scoped_rwlock _(*ips, RLOCK);
+        SCOPED_LOCK(*ips);
         auto ret = ips->front();
         ips->node = ret->next();  // access in round robin order
         return ret->addr;
@@ -303,10 +303,12 @@ public:
         if (ip.undefined() || ipaddr->empty()) {
             ipaddr.recycle(true);
         } else {
-            scoped_rwlock _(*ipaddr, WLOCK);
+            IPAddrNode* node = nullptr;
+            DEFER(delete node);
+            SCOPED_LOCK(*ipaddr);
             for (auto itr = ipaddr->rbegin(); itr != ipaddr->rend(); itr++) {
                 if ((*itr)->addr == ip) {
-                    ipaddr->erase(*itr);
+                    ipaddr->erase(node = *itr);
                     break;
                 }
             }
