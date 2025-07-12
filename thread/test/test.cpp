@@ -23,7 +23,7 @@ limitations under the License.
 #include <algorithm>
 #include <sys/time.h>
 #include <gflags/gflags.h>
-#include <gtest/gtest.h>
+#include "../../test/gtest.h"
 #include <photon/common/alog-audit.h>
 
 #define private public
@@ -140,7 +140,7 @@ void sleepq_perf(SleepQueue& sleepq, const vector<photon::thread*>& items)
     check(sleepq);
 
     auto pops = items;
-    random_shuffle(pops.begin(), pops.end());
+    shuffle(pops.begin(), pops.end());
     pops.resize(pops.size()/2);
     {
         update_now();

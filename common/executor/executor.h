@@ -33,7 +33,11 @@ public:
 
     template <
         typename Context = AutoContext, typename Func,
+#if __cplusplus < 201703L
         typename R = typename std::result_of<Func()>::type,
+#else
+        typename R = typename std::invoke_result<Func>::type,
+#endif
         typename _ = typename std::enable_if<!std::is_void<R>::value, R>::type>
     R perform(Func &&act) {
         R result;
@@ -52,7 +56,11 @@ public:
 
     template <
         typename Context = AutoContext, typename Func,
+#if __cplusplus < 201703L
         typename R = typename std::result_of<Func()>::type,
+#else
+        typename R = typename std::invoke_result<Func>::type,
+#endif
         typename _ = typename std::enable_if<std::is_void<R>::value, R>::type>
     void perform(Func &&act) {
         Awaiter<Context> aop;
