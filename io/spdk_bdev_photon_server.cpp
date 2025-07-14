@@ -45,11 +45,36 @@ public:
 
     int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count)
     {
-        return nvme_ns_cmd_writev(ns_, qpair_, iov, iovcnt, lba, lba_count, 0);
+        IOVector iovec;
+        for (int i=0; i<iovcnt; i++) {
+            uint64_t len = iov[i].iov_len;
+            void* buf = spdk_zmalloc(len, 512, NULL, SPDK_ENV_SOCKET_ID_ANY, 1);
+            memcpy(buf, iov[i].iov_base, len);
+            iovec.push_back(buf, len);
+        }
+        int rc = nvme_ns_cmd_writev(ns_, qpair_, iovec.iovec(), iovec.iovcnt(), lba, lba_count, 0);
+        for (int i=0; i<iovcnt; i++){
+            spdk_free(iovec[i].iov_base);
+        }
+        return rc;
     }
 
     int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
-        return nvme_ns_cmd_readv(ns_, qpair_, iov, iovcnt, lba, lba_count, 0);
+        LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
+        IOVector iovec;
+        for (int i=0; i<iovcnt; i++) {
+            uint64_t len = iov[i].iov_len;
+            void* buf = spdk_zmalloc(len, 512, NULL, SPDK_ENV_SOCKET_ID_ANY, 1);
+            iovec.push_back(buf, len);
+        }
+        int rc = nvme_ns_cmd_readv(ns_, qpair_, iovec.iovec(), iovec.iovcnt(), lba, lba_count, 0);
+        for (int i=0; i<iovcnt; i++) {
+            void* buf = iovec[i].iov_base;
+            uint64_t len = iovec[i].iov_len;
+            memcpy(iov[i].iov_base, buf, len);
+            spdk_free(buf);
+        }
+        return rc;
     }
 
 private:
@@ -83,9 +108,12 @@ public:
         return 0;
     }
 
-    int do_rpc_service(ReadvBlocks::Request* req, ReadvBlocks::Response* resp, IOVector*, IStream*) {
+    int do_rpc_service(ReadvBlocks::Request* req, ReadvBlocks::Response* resp, IOVector* iov, IStream*) {
         LOG_DEBUG("recieve readvblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
-        resp->rc = device_.Readv(resp->buf.begin(), resp->buf.size(), req->offset_blocks, req->num_blocks);
+        iov->push_back(req->num_blocks * 512);
+        resp->rc = device_.Readv(iov->iovec(), iov->iovcnt(), req->offset_blocks, req->num_blocks);
+        if (resp->rc < 0) iov->shrink_to(0);
+        resp->buf.assign(iov->iovec(), iov->iovcnt());
         return 0;
     }
 
