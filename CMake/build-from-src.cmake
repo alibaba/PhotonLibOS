@@ -119,13 +119,22 @@ function(build_from_src [dep])
         set(CURL_LIBRARIES ${_curl_lib_path} PARENT_SCOPE)
 
     elseif (dep STREQUAL "rdmacore")
-    set(BINARY_DIR ${PROJECT_BINARY_DIR}/rdmacore-build)
-    ExternalProject_Add(
-            rdmacore
-            URL ${PHOTON_RDMACORE_SOURCE}
-            URL_MD5 96758c5cd34cf13584ebc59d4621fdad
-            CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${BINARY_DIR}
-    )
+        set(BINARY_DIR ${PROJECT_BINARY_DIR}/rdmacore-build)
+        ExternalProject_Add(
+                rdmacore
+                URL ${PHOTON_RDMACORE_SOURCE}
+                URL_HASH SHA256=88d67897b793f42d2004eec2629ab8464e425e058f22afabd29faac0a2f54ce4
+                CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_BUILD_TYPE=RelWithDebInfo
+                    -DENABLE_VALGRIND=0 -DENABLE_STATIC=1 -DNO_MAN_PAGES=1
+        )
+
+        set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:${BINARY_DIR}/lib/pkgconfig")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(rdmacore REQUIRED IMPORTED_TARGET
+                "librdmacm"
+                "libibverbs"
+        )
+        # Next, use rdmacore_STATIC_LIBRARIES, rdmacore_LIBRARY_DIRS, rdmacore_INCLUDE_DIRS accordingly
 
     endif ()
 

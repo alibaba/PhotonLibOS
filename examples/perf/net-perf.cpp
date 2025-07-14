@@ -25,19 +25,26 @@ limitations under the License.
 #include <photon/thread/workerpool.h>
 #include <photon/common/alog.h>
 #include <photon/net/socket.h>
+#ifdef PHOTON_ENABLE_RSOCKET
+#include <photon/net/rsocket/rsocket.h>
+#endif
 
 DEFINE_uint64(show_statistics_interval, 1, "interval seconds to show statistics");
 DEFINE_bool(client, false, "client or server? default is server");
-DEFINE_string(client_mode, "streaming", "client mode. Choose between streaming or ping-pong");
-DEFINE_uint64(client_connection_num, 100, "number of the connections of the client, only available in ping-pong mode");
+DEFINE_string(client_mode, "pingpong", "client mode. Choose between streaming or pingpong");
+DEFINE_uint64(client_connection_num, 100, "number of the connections of the client (shared by all vCPUs), only available in pingpong mode");
 DEFINE_string(ip, "127.0.0.1", "ip");
 DEFINE_uint64(port, 9527, "port");
 DEFINE_uint64(buf_size, 512, "buffer size");
-DEFINE_uint64(vcpu_num, 1, "server vcpu num. Increase this value to enable multi-vcpu scheduling");
+DEFINE_uint64(vcpu_num, 1, "vCPU number for both client and server");
+DEFINE_string(socket_type, "tcp", "Support tcp/rsocket/io_uring");
 
 static bool stop_test = false;
 static uint64_t qps = 0;
 static uint64_t time_cost = 0;
+
+// Create WorkPool is enabling multi vCPU
+static photon::WorkPool* work_pool = nullptr;
 
 static void handle_signal(int sig) {
     LOG_INFO("Try to gracefully stop test ...");
@@ -61,17 +68,35 @@ static void run_latency_loop() {
     }
 }
 
-// Create coroutines for each of the connections, doing ping-pong send/recv
+// Create coroutines for each of the connections, doing pingpong send/recv
 static int ping_pong_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
-    auto cli = photon::net::new_tcp_socket_client();
-    // auto cli = photon::net::new_iouring_tcp_client();
+    photon::net::ISocketClient* cli;
+    if (FLAGS_socket_type == "rsocket") {
+#ifdef PHOTON_ENABLE_RSOCKET
+        cli = photon::net::new_rsocket_client();
+#else
+        cli = nullptr;
+#endif
+    } else if (FLAGS_socket_type == "io_uring") {
+#ifdef PHOTON_URING
+        cli = photon::net::new_iouring_tcp_client();
+#else
+        cli = nullptr;
+#endif
+    } else {
+        cli = photon::net::new_tcp_socket_client();
+    }
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
     DEFER(delete cli);
 
     auto run_ping_pong_worker = [&]() -> int {
+        // Round-robin dispatch threads in WorkPool
+        work_pool->thread_migrate();
+        // After the above call, this function begins to run in another vCPU
+
         auto buf = malloc(FLAGS_buf_size);
         DEFER(free(buf));
 
@@ -114,8 +139,22 @@ static int ping_pong_client() {
 // Create two coroutines, one for sending and the other for receiving
 static int streaming_client() {
     photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
-    auto cli = photon::net::new_tcp_socket_client();
-    // auto cli = photon::net::new_iouring_tcp_client();
+    photon::net::ISocketClient* cli;
+    if (FLAGS_socket_type == "rsocket") {
+#ifdef PHOTON_ENABLE_RSOCKET
+        cli = photon::net::new_rsocket_client();
+#else
+        cli = nullptr;
+#endif
+    } else if (FLAGS_socket_type == "io_uring") {
+#ifdef PHOTON_URING
+        cli = photon::net::new_iouring_tcp_client();
+#else
+        cli = nullptr;
+#endif
+    } else {
+        cli = photon::net::new_tcp_socket_client();
+    }
     if (cli == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create client");
     }
@@ -163,16 +202,23 @@ static int echo_server() {
     photon::sync_signal(SIGTERM, &handle_signal);
     photon::sync_signal(SIGINT, &handle_signal);
 
-    // Create a work pool if enabling multi-vcpu scheduling
-    photon::WorkPool* work_pool = nullptr;
-    if (FLAGS_vcpu_num > 1) {
-        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
-    }
-    DEFER(delete work_pool);
-
     // Create socket server
-    auto server = photon::net::new_tcp_socket_server();
-    // auto server = photon::net::new_iouring_tcp_server();
+    photon::net::ISocketServer* server;
+    if (FLAGS_socket_type == "rsocket") {
+#ifdef PHOTON_ENABLE_RSOCKET
+        server = photon::net::new_rsocket_server();
+#else
+        server = nullptr;
+#endif
+    } else if (FLAGS_socket_type == "io_uring") {
+#ifdef PHOTON_URING
+        server = photon::net::new_iouring_tcp_server();
+#else
+        server = nullptr;
+#endif
+    } else {
+        server = photon::net::new_tcp_socket_server();
+    }
     if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "fail to create server")
     }
@@ -189,9 +235,12 @@ static int echo_server() {
         }
     };
 
-    // Define handler for new connections (SocketStream)
+    // Define handler for new connections.
+    // Every connection will be running in a new thread after it is accepted.
     auto handler = [&](photon::net::ISocketStream* sock) -> int {
         if (FLAGS_vcpu_num > 1) {
+            // Migrate current thread (connection) to another vCPU in WorkPool.
+            // The default policy is round-robin.
             work_pool->thread_migrate();
         }
         auto buf = malloc(FLAGS_buf_size);
@@ -232,7 +281,7 @@ int main(int argc, char** arg) {
     gflags::ParseCommandLineFlags(&argc, &arg, true);
     set_log_output_level(ALOG_INFO);
 
-    // Note Photon's default event engine will first try io_uring, then choose epoll if io_uring failed.
+    // Note Photon's default event engine in Linux is epoll.
     // Running an io_uring program would need the kernel version to be greater than 5.8.
     // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
     int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
@@ -241,10 +290,15 @@ int main(int argc, char** arg) {
     }
     DEFER(photon::fini());
 
+    if (FLAGS_vcpu_num > 1) {
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    }
+    DEFER(delete work_pool);
+
     if (FLAGS_client) {
         if (FLAGS_client_mode == "streaming") {
             streaming_client();
-        } else if (FLAGS_client_mode == "ping-pong") {
+        } else if (FLAGS_client_mode == "pingpong") {
             ping_pong_client();
         } else {
             LOG_ERROR_RETURN(0, -1, "unknown client mode");
