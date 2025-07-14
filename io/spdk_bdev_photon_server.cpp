@@ -4,6 +4,7 @@
 
 #include <photon/net/socket.h>
 #include <photon/common/alog-stdstring.h>
+#include <photon/fs/localfs.h>
 
 namespace photon {
 namespace spdk {
@@ -86,6 +87,76 @@ private:
     uint64_t num_sectors_ = 0;
 };
 
+class LocalFSDevice {
+public:
+    ~LocalFSDevice() {
+        if (fs_ != nullptr) {
+            delete fs_;
+        }
+        if (mock_disk_ != nullptr) {
+            delete mock_disk_;
+        }
+    }
+
+    int Init(const char* trid_str, uint32_t nsid, uint32_t* sector_size, uint64_t* num_sectors) {
+        LOG_DEBUG("Initialize LocalFSDevice");
+        if (fs_ != nullptr || mock_disk_ != nullptr) {
+            LOG_ERROR_RETURN(0, -1, "already initialized");
+        }
+        if (sector_size == nullptr || num_sectors == nullptr) {
+            LOG_ERROR_RETURN(0, -1, "invalid parameter");
+        }
+
+        fs_ = photon::fs::new_localfs_adaptor("/tmp/bdev_photon_test", photon::fs::ioengine_psync);
+        if (fs_ == nullptr) {
+            LOG_ERROR_RETURN(0, -1, "failed to create localfs adaptor");
+        }
+
+        mock_disk_ = fs_->open("disk0", O_RDWR | O_CREAT | O_TRUNC, 0644);
+        if (mock_disk_ == nullptr) {
+            LOG_ERROR_RETURN(0, -1, "failed to create file for mock disk");
+        }
+
+        sector_size_ = 512;
+        num_sectors_ = 1024;
+
+        if (mock_disk_->ftruncate(sector_size_ * num_sectors_) != 0) {
+            LOG_ERROR_RETURN(0, -1, "failed to truncate file for mock disk");
+        }
+
+        *sector_size = sector_size_;
+        *num_sectors = num_sectors_;
+        return 0;
+    }
+
+    int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
+        LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
+        uint64_t offset_in_bytes = lba * sector_size_;
+        uint64_t count_in_bytes = lba_count * sector_size_;
+        if (offset_in_bytes + count_in_bytes > num_sectors_ * sector_size_) {
+            LOG_ERROR_RETURN(0, -1, "invalid lba range");
+        }
+        return mock_disk_->pwritev(iov, iovcnt, offset_in_bytes);
+    }
+
+    int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
+        LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
+        uint64_t offset_in_bytes = lba * sector_size_;
+        uint64_t count_in_bytes = lba_count * sector_size_;
+        if (offset_in_bytes + count_in_bytes > num_sectors_ * sector_size_) {
+            LOG_ERROR_RETURN(0, -1, "invalid lba range");
+        }
+        return mock_disk_->preadv(iov, iovcnt, offset_in_bytes);
+    }
+
+private:
+    photon::fs::IFileSystem* fs_ = nullptr;
+    photon::fs::IFile* mock_disk_ = nullptr;
+
+    uint32_t sector_size_ = 0;
+    uint64_t num_sectors_ = 0;
+};
+
 class RPCServer : public SPDKBDevPhotonServer {
 public:
     RPCServer(std::string ip="127.0.0.1", uint16_t port=43548)
@@ -136,7 +207,8 @@ private:
     photon::net::EndPoint ep_;
     std::unique_ptr<photon::net::ISocketServer> socket_server_;
     std::unique_ptr<photon::rpc::Skeleton> skeleton_;
-    LocalNvmeDevice device_;
+    // LocalNvmeDevice device_;
+    LocalFSDevice device_;
 };
 
 SPDKBDevPhotonServer* new_server() {
