@@ -6,6 +6,12 @@ target_link_libraries(simple-example PRIVATE photon_static)
 
 add_executable(net-perf perf/net-perf.cpp)
 target_link_libraries(net-perf PRIVATE photon_static)
+if (PHOTON_ENABLE_RSOCKET)
+    target_compile_definitions(net-perf PRIVATE PHOTON_ENABLE_RSOCKET=1)
+endif ()
+if (PHOTON_ENABLE_URING)
+    target_compile_definitions(net-perf PRIVATE PHOTON_URING=1)
+endif()
 
 add_executable(workpool-perf perf/workpool-perf.cpp)
 target_link_libraries(workpool-perf PRIVATE photon_static)
