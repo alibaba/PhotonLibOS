@@ -1,4 +1,4 @@
-This is a new custom spdk bdev module using photon.
+photon folder is a new custom spdk bdev module using photon.
 
 Please integarate this module into spdk codes according to https://spdk.io/doc/bdev_module.html "Creating Bdevs in an External Repository".
 This module is depend on photon. You can compile photon with "cmake -B build" and "make -C build -j 8", then install it with "make -C build install".

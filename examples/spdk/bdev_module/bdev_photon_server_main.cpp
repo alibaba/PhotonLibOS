@@ -1,6 +1,8 @@
+#include "bdev_photon_server.h"
+
 #include <photon/photon.h>
-#include <photon/io/spdk_bdev_photon_server.h>
 #include <photon/common/alog-stdstring.h>
+
 
 int main(int argc, char** argv) {
     if (argc != 2) {

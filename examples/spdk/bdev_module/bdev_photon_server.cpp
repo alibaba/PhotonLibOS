@@ -1,10 +1,13 @@
-#include "spdk_bdev_photon_protocol.h"
-#include "spdk_bdev_photon_server.h"
-#include "spdknvme-wrapper.h"
+#include "bdev_photon_protocol.h"
+#include "bdev_photon_server.h"
 
+#include <spdk/nvme.h>
+
+#include <photon/io/spdknvme-wrapper.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/fs/localfs.h>
+
 
 namespace photon {
 namespace spdk {
@@ -23,6 +26,7 @@ public:
         nvme_env_fini();
     }
     int Init(const char* trid_str, uint32_t nsid, uint64_t num_blocks, uint32_t* sector_size, uint64_t* num_sectors) override {
+        LOG_DEBUG("Initialize LocalNvmeDevice, ", VALUE(trid_str), VALUE(nsid), VALUE(num_blocks));
         if (ctrlr_ != nullptr || ns_ != nullptr || qpair_ != nullptr) {
             LOG_ERROR_RETURN(0, -1, "already initialized");
         }
@@ -32,11 +36,13 @@ public:
         if (sector_size == nullptr || num_sectors == nullptr) {
             LOG_ERROR_RETURN(0, -1, "invalid parameter");
         }
+
         ctrlr_ = nvme_probe_attach(trid_str);
         ns_ = nvme_get_namespace(ctrlr_, nsid);
-        if (nvme_ns_get_info(ns_, &sector_size_, &num_sectors_) != 0) {
-            LOG_ERROR_RETURN(0, -1, "failed to get namespace info");
-        }
+
+        sector_size_ = spdk_nvme_ns_get_sector_size(ns_);
+        num_sectors_ = spdk_nvme_ns_get_num_sectors(ns_);
+        LOG_DEBUG("Init, ", VALUE(sector_size_), VALUE(num_sectors_));
 
         if (num_blocks > num_sectors_) {
             LOG_ERROR_RETURN(0, -1, "invalid num_blocks, only `", num_sectors_);
@@ -101,7 +107,7 @@ public:
     }
 
     int Init(const char* trid_str, uint32_t nsid, uint64_t num_blocks, uint32_t* sector_size, uint64_t* num_sectors) override {
-        LOG_DEBUG("Initialize LocalFSDevice");
+        LOG_DEBUG("Initialize LocalFSDevice, ", VALUE(trid_str), VALUE(nsid), VALUE(num_blocks));
         if (fs_ != nullptr || mock_disk_ != nullptr) {
             LOG_ERROR_RETURN(0, -1, "already initialized");
         }
@@ -114,7 +120,8 @@ public:
             LOG_ERROR_RETURN(0, -1, "failed to create localfs adaptor");
         }
 
-        mock_disk_ = fs_->open("disk0", O_RDWR | O_CREAT | O_TRUNC, 0644);
+        std::string fname = trid_str + std::to_string(nsid);
+        mock_disk_ = fs_->open(fname.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (mock_disk_ == nullptr) {
             LOG_ERROR_RETURN(0, -1, "failed to create file for mock disk");
         }

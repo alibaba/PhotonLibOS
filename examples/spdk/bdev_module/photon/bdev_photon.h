@@ -10,7 +10,7 @@ extern "C" {
 #include "spdk/bdev_module.h"
 #include "spdk/env.h"
 
-int bdev_photon_create(struct spdk_bdev **bdev, uint64_t num_blocks);
+int bdev_photon_create(struct spdk_bdev **bdev, const char* trid, uint32_t nsid, uint64_t num_blocks);
 
 void bdev_photon_delete(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void *cb_arg);
 
