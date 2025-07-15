@@ -46,14 +46,14 @@ struct charset : std::bitset<256>
     // charset(const char (&s) [N]) :
     //     charset(std::string_view(s, N - 1)) { }
 
-    // bool test(char ch) const
-    // {
-    //     return std::bitset<256>::test((unsigned char)ch);
-    // }
-    // bitset& set(char ch, bool value = true)
-    // {
-    //     return std::bitset<256>::set((unsigned char)ch, value);
-    // }
+    bool test(char ch) const
+    {
+        return std::bitset<256>::test((unsigned char)ch);
+    }
+    bitset& set(char ch, bool value = true)
+    {
+        return std::bitset<256>::set((unsigned char)ch, value);
+    }
 };
 
 class estring;

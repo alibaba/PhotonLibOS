@@ -874,9 +874,9 @@ TEST(estring, test)
     auto ps = estring::snprintf("%d%d%d", 2, 3, 4);
     EXPECT_EQ(ps, "234");
 
-    estring as = "   \tasdf  \t\r\n";
+    estring as = "   \tasdf中文  \t\r\n";
     auto trimmed = as.trim();
-    EXPECT_EQ(trimmed, "asdf");
+    EXPECT_EQ(trimmed, "asdf中文");
 
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
