@@ -2,9 +2,15 @@
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
 
-int main() {
-    char trid_str[] = "trtype:pcie traddr:0000:86:00.0";
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        LOG_ERROR_RETURN(0, -1, "Usage: ` <trid>", argv[0]);
+    }
+
+    char* trid_str = argv[1];
     uint32_t nsid = 1;
+
+    LOG_INFO(VALUE(trid_str));
 
     if (photon::spdk::nvme_env_init() != 0) {
         LOG_ERROR_RETURN(0, -1, "nvme_env_init failed");

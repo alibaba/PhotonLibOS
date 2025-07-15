@@ -9,9 +9,9 @@
 namespace photon {
 namespace spdk {
 
-class LocalNvmeDevice {
+class LocalNvmeDevice : public BlockDevice {
 public:
-    ~LocalNvmeDevice() {
+    ~LocalNvmeDevice() override {
         if (qpair_ != nullptr) {
             nvme_ctrlr_free_io_qpair(ctrlr_, qpair_);
             qpair_ = nullptr;
@@ -22,7 +22,7 @@ public:
         }
         nvme_env_fini();
     }
-    int Init(const char* trid_str, uint32_t nsid, uint32_t* sector_size, uint64_t* num_sectors) {
+    int Init(const char* trid_str, uint32_t nsid, uint64_t num_blocks, uint32_t* sector_size, uint64_t* num_sectors) override {
         if (ctrlr_ != nullptr || ns_ != nullptr || qpair_ != nullptr) {
             LOG_ERROR_RETURN(0, -1, "already initialized");
         }
@@ -37,6 +37,12 @@ public:
         if (nvme_ns_get_info(ns_, &sector_size_, &num_sectors_) != 0) {
             LOG_ERROR_RETURN(0, -1, "failed to get namespace info");
         }
+
+        if (num_blocks > num_sectors_) {
+            LOG_ERROR_RETURN(0, -1, "invalid num_blocks, only `", num_sectors_);
+        }
+        num_blocks_ = num_blocks;
+
         qpair_ = nvme_ctrlr_alloc_io_qpair(ctrlr_, nullptr, 0);
 
         *sector_size = sector_size_;
@@ -44,8 +50,7 @@ public:
         return 0;
     }
 
-    int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count)
-    {
+    int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) override {
         IOVector iovec;
         for (int i=0; i<iovcnt; i++) {
             uint64_t len = iov[i].iov_len;
@@ -60,7 +65,7 @@ public:
         return rc;
     }
 
-    int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
+    int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) override {
         LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
         IOVector iovec;
         for (int i=0; i<iovcnt; i++) {
@@ -82,14 +87,11 @@ private:
     struct spdk_nvme_ctrlr* ctrlr_ = nullptr;
     struct spdk_nvme_ns* ns_ = nullptr;
     struct spdk_nvme_qpair* qpair_ = nullptr;
-
-    uint32_t sector_size_ = 0;
-    uint64_t num_sectors_ = 0;
 };
 
-class LocalFSDevice {
+class LocalFSDevice : public BlockDevice {
 public:
-    ~LocalFSDevice() {
+    ~LocalFSDevice() override {
         if (fs_ != nullptr) {
             delete fs_;
         }
@@ -98,7 +100,7 @@ public:
         }
     }
 
-    int Init(const char* trid_str, uint32_t nsid, uint32_t* sector_size, uint64_t* num_sectors) {
+    int Init(const char* trid_str, uint32_t nsid, uint64_t num_blocks, uint32_t* sector_size, uint64_t* num_sectors) override {
         LOG_DEBUG("Initialize LocalFSDevice");
         if (fs_ != nullptr || mock_disk_ != nullptr) {
             LOG_ERROR_RETURN(0, -1, "already initialized");
@@ -119,6 +121,11 @@ public:
 
         sector_size_ = 512;
         num_sectors_ = 1024;
+        if (num_blocks > num_sectors_) {
+            LOG_ERROR_RETURN(0, -1, "invalid num_blocks, only `", num_sectors_);
+        }
+        num_blocks_ = num_blocks;
+
 
         if (mock_disk_->ftruncate(sector_size_ * num_sectors_) != 0) {
             LOG_ERROR_RETURN(0, -1, "failed to truncate file for mock disk");
@@ -129,21 +136,21 @@ public:
         return 0;
     }
 
-    int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
+    int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) override {
         LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
         uint64_t offset_in_bytes = lba * sector_size_;
         uint64_t count_in_bytes = lba_count * sector_size_;
-        if (offset_in_bytes + count_in_bytes > num_sectors_ * sector_size_) {
+        if (offset_in_bytes + count_in_bytes > num_blocks_ * sector_size_) {
             LOG_ERROR_RETURN(0, -1, "invalid lba range");
         }
         return mock_disk_->pwritev(iov, iovcnt, offset_in_bytes);
     }
 
-    int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) {
+    int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) override {
         LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
         uint64_t offset_in_bytes = lba * sector_size_;
         uint64_t count_in_bytes = lba_count * sector_size_;
-        if (offset_in_bytes + count_in_bytes > num_sectors_ * sector_size_) {
+        if (offset_in_bytes + count_in_bytes > num_blocks_ * sector_size_) {
             LOG_ERROR_RETURN(0, -1, "invalid lba range");
         }
         return mock_disk_->preadv(iov, iovcnt, offset_in_bytes);
@@ -152,15 +159,13 @@ public:
 private:
     photon::fs::IFileSystem* fs_ = nullptr;
     photon::fs::IFile* mock_disk_ = nullptr;
-
-    uint32_t sector_size_ = 0;
-    uint64_t num_sectors_ = 0;
 };
 
 class RPCServer : public SPDKBDevPhotonServer {
 public:
-    RPCServer(std::string ip="127.0.0.1", uint16_t port=43548)
+    RPCServer(BlockDevice* device, std::string ip, uint16_t port)
     :
+    SPDKBDevPhotonServer(device),
     ep_(ip.c_str(), port),
     socket_server_(photon::net::new_tcp_socket_server()),
     skeleton_(photon::rpc::new_skeleton()) {
@@ -169,20 +174,20 @@ public:
 
     int do_rpc_service(InitDevice::Request* req, InitDevice::Response* resp, IOVector*, IStream*) {
         LOG_DEBUG("recieve initdevice request: ", VALUE(req->trid.c_str()), VALUE(req->nsid));
-        resp->rc = device_.Init(req->trid.c_str(), req->nsid, &resp->sector_size, &resp->num_sectors);
+        resp->rc = device_->Init(req->trid.c_str(), req->nsid, req->num_blocks, &resp->sector_size, &resp->num_sectors);
         return 0;
     }
 
     int do_rpc_service(WritevBlocks::Request* req, WritevBlocks::Response* resp, IOVector*, IStream*) {
         LOG_DEBUG("recieve writevblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
-        resp->rc = device_.Writev(req->buf.begin(), req->buf.size(), req->offset_blocks, req->num_blocks);
+        resp->rc = device_->Writev(req->buf.begin(), req->buf.size(), req->offset_blocks, req->num_blocks);
         return 0;
     }
 
     int do_rpc_service(ReadvBlocks::Request* req, ReadvBlocks::Response* resp, IOVector* iov, IStream*) {
         LOG_DEBUG("recieve readvblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
         iov->push_back(req->num_blocks * 512);
-        resp->rc = device_.Readv(iov->iovec(), iov->iovcnt(), req->offset_blocks, req->num_blocks);
+        resp->rc = device_->Readv(iov->iovec(), iov->iovcnt(), req->offset_blocks, req->num_blocks);
         if (resp->rc < 0) iov->shrink_to(0);
         resp->buf.assign(iov->iovec(), iov->iovcnt());
         return 0;
@@ -207,12 +212,19 @@ private:
     photon::net::EndPoint ep_;
     std::unique_ptr<photon::net::ISocketServer> socket_server_;
     std::unique_ptr<photon::rpc::Skeleton> skeleton_;
-    // LocalNvmeDevice device_;
-    LocalFSDevice device_;
 };
 
-SPDKBDevPhotonServer* new_server() {
-    return new RPCServer();
+
+BlockDevice* new_blkdev_local_nvme_ssd() {
+    return new LocalNvmeDevice();
+}
+
+BlockDevice* new_blkdev_localfs() {
+    return new LocalFSDevice();
+}
+
+SPDKBDevPhotonServer* new_server(BlockDevice* device, std::string ip, uint16_t port) {
+    return new RPCServer(device, ip, port);
 }
 
 }   // namespace spdk

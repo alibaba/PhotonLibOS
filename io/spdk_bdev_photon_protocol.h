@@ -15,7 +15,8 @@ struct InitDevice: public Operation {
     struct Request : public photon::rpc::Message {
         photon::rpc::string trid;
         uint32_t nsid;
-        PROCESS_FIELDS(trid, nsid);
+        uint64_t num_blocks;
+        PROCESS_FIELDS(trid, nsid, num_blocks);
     };
 
     struct Response : public photon::rpc::Message {
