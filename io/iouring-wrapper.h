@@ -30,6 +30,9 @@ class CascadingEventEngine;
 
 static const uint64_t IouringFixedFileFlag = 1UL << 32;
 
+ssize_t iouring_splice(int fd_in, int64_t off_in, int fd_out, int64_t off_out,
+                       unsigned int nbytes, uint64_t flags = 0, Timeout timeout = {}, CascadingEventEngine* ce = nullptr);
+
 ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags = 0, Timeout timeout = {}, CascadingEventEngine* ce = nullptr);
 
 ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags = 0, Timeout timeout = {}, CascadingEventEngine* ce = nullptr);

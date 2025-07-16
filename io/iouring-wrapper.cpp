@@ -595,6 +595,12 @@ inline iouringEngine* get_ring(CascadingEventEngine* cee) {
                  static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
 }
 
+ssize_t iouring_splice(int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int nbytes, uint64_t flags, Timeout timeout, CascadingEventEngine *cee) {
+    uint32_t splice_flags = flags & 0xffffffff;
+    uint32_t ring_flags = flags >> 32;
+    return get_ring(cee)->async_io(&io_uring_prep_splice, timeout, ring_flags, fd_in, off_in, fd_out, off_out, nbytes, splice_flags);
+}
+
 ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
     return get_ring(cee)->async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);

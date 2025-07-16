@@ -86,16 +86,9 @@ int fuser_go_exportfs(IFileSystem *fs_, int argc, char *argv[]) {
     return 0;
 }
 
-static int fuse_session_loop_mpt(struct fuse_session *se,
-                                 uint64_t looptype = FUSE_SESSION_LOOP_EPOLL) {
-    auto loop = new_session_loop(se, looptype);
-    loop->run();
-    delete loop;
-    return 0;
-}
-
 struct user_config {
     int threads;
+    int force_splice_read;
     char *looptype;
 };
 
@@ -117,6 +110,7 @@ uint64_t find_looptype(const char *name) {
 
 #define USER_OPT(t, p, v) { t, offsetof(struct user_config, p), v }
 struct fuse_opt user_opts[] = { USER_OPT("threads=%d",  threads, 0),
+                                USER_OPT("force_splice_read=%d", force_splice_read, 0),
                                 USER_OPT("looptype=%s", looptype, 0),
                                 FUSE_OPT_END };
 struct fuse_handle {
@@ -126,6 +120,7 @@ struct fuse_handle {
     char *mountpoint = NULL;
     int multithreaded = 1;
     int threads = 4;
+    int force_splice_read = 0;
     void *userdata = NULL;
 
     int setup(
@@ -136,7 +131,7 @@ struct fuse_handle {
         struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
         DEFER(fuse_opt_free_args(&args));
 
-        struct user_config cfg{ .threads = 4, .looptype = NULL};
+        struct user_config cfg{ .threads = 4, .force_splice_read = 0, .looptype = NULL};
         fuse_opt_parse(&args, &cfg, user_opts, NULL);
         threads = cfg.threads;
         if (cfg.looptype)
@@ -144,8 +139,10 @@ struct fuse_handle {
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 13)
         looptype = FUSE_SESSION_LOOP_EPOLL;
 #endif
+        force_splice_read = cfg.force_splice_read;
         LOG_INFO("session cfg loop type: `", VALUE(cfg.looptype),
-                 " loop type: `", VALUE(looptype));
+                 " loop type: `", VALUE(looptype),
+                 " splice_read: `", VALUE(cfg.force_splice_read));
 
 #if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 0)
         if (!ops) {
@@ -238,6 +235,17 @@ struct fuse_handle {
     }
 };
 
+static int fuse_session_loop_mpt(struct fuse_session *se,
+                                 const struct fuse_handle &fh) {
+    loop_args args;
+    args.looptype = fh.looptype;
+    args.force_splice_read = fh.force_splice_read;
+    auto loop = new_session_loop(se, args);
+    loop->run();
+    delete loop;
+    return 0;
+}
+
 static int _run_fuse(int argc, char *argv[],
                      const struct ::fuse_operations *op,
                      const struct ::fuse_lowlevel_ops *llops,
@@ -265,13 +273,13 @@ static int _run_fuse(int argc, char *argv[],
           ths.emplace_back(std::thread([&]() {
               init(INIT_EVENT_EPOLL, INIT_IO_LIBAIO);
               DEFER(fini());
-              if (fuse_session_loop_mpt(se, fh.looptype) != 0) ret = -1;
+              if (fuse_session_loop_mpt(se, fh) != 0) ret = -1;
           }));
         }
         for (auto& th : ths) th.join();
         fuse_session_reset(se);
     } else {
-        ret = fuse_session_loop_mpt(se);
+        ret = fuse_session_loop_mpt(se, fh);
         fuse_session_reset(se);
     }
 
