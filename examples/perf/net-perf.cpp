@@ -94,7 +94,9 @@ static int ping_pong_client() {
 
     auto run_ping_pong_worker = [&]() -> int {
         // Round-robin dispatch threads in WorkPool
-        work_pool->thread_migrate();
+        if (work_pool) {
+            work_pool->thread_migrate();
+        }
         // After the above call, this function begins to run in another vCPU
 
         auto buf = malloc(FLAGS_buf_size);
@@ -238,7 +240,7 @@ static int echo_server() {
     // Define handler for new connections.
     // Every connection will be running in a new thread after it is accepted.
     auto handler = [&](photon::net::ISocketStream* sock) -> int {
-        if (FLAGS_vcpu_num > 1) {
+        if (work_pool) {
             // Migrate current thread (connection) to another vCPU in WorkPool.
             // The default policy is round-robin.
             work_pool->thread_migrate();
