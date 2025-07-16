@@ -10,6 +10,7 @@ class BlockDevice {
 public:
     virtual ~BlockDevice() = default;
     virtual int Init(const char* trid_str, uint32_t nsid, uint64_t num_blocks, uint32_t* sector_size, uint64_t* num_sectors) = 0;
+    virtual int Fini() = 0;
     virtual int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) = 0;
     virtual int Readv(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) = 0;
 protected:

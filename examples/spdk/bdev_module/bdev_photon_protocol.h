@@ -27,6 +27,20 @@ struct InitDevice: public Operation {
     };
 };
 
+struct FiniDevice: public Operation {
+    const static uint32_t FID = 0x999;
+
+    struct Request : public photon::rpc::Message {
+        int foo;
+        PROCESS_FIELDS(foo);
+    };
+
+    struct Response : public photon::rpc::Message {
+        int rc;
+        PROCESS_FIELDS(rc);
+    };
+};
+
 struct WritevBlocks: public Operation {
     const static uint32_t FID = 0x333;
 

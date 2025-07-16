@@ -15,6 +15,7 @@ namespace spdk {
 class LocalNvmeDevice : public BlockDevice {
 public:
     ~LocalNvmeDevice() override {
+        ns_ = nullptr;
         if (qpair_ != nullptr) {
             nvme_ctrlr_free_io_qpair(ctrlr_, qpair_);
             qpair_ = nullptr;
@@ -30,11 +31,12 @@ public:
         if (ctrlr_ != nullptr || ns_ != nullptr || qpair_ != nullptr) {
             LOG_ERROR_RETURN(0, -1, "already initialized");
         }
-        if (nvme_env_init() != 0) {
-            LOG_ERROR_RETURN(0, -1, "failed to init nvme env");
-        }
         if (sector_size == nullptr || num_sectors == nullptr) {
             LOG_ERROR_RETURN(0, -1, "invalid parameter");
+        }
+        if (!is_nvme_env_inited) {
+            if (nvme_env_init() != 0) LOG_ERROR_RETURN(0, -1, "failed to init nvme env");
+            is_nvme_env_inited = true;
         }
 
         ctrlr_ = nvme_probe_attach(trid_str);
@@ -53,6 +55,19 @@ public:
 
         *sector_size = sector_size_;
         *num_sectors = num_sectors_;
+        return 0;
+    }
+
+    int Fini() override {
+        ns_ = nullptr;
+        if (qpair_ != nullptr) {
+            nvme_ctrlr_free_io_qpair(ctrlr_, qpair_);
+            qpair_ = nullptr;
+        }
+        if (ctrlr_ != nullptr) {
+            nvme_detach(ctrlr_);
+            ctrlr_ = nullptr;
+        }
         return 0;
     }
 
@@ -90,6 +105,7 @@ public:
     }
 
 private:
+    bool is_nvme_env_inited = false;
     struct spdk_nvme_ctrlr* ctrlr_ = nullptr;
     struct spdk_nvme_ns* ns_ = nullptr;
     struct spdk_nvme_qpair* qpair_ = nullptr;
@@ -98,11 +114,13 @@ private:
 class LocalFSDevice : public BlockDevice {
 public:
     ~LocalFSDevice() override {
-        if (fs_ != nullptr) {
-            delete fs_;
-        }
         if (mock_disk_ != nullptr) {
             delete mock_disk_;
+            mock_disk_ = nullptr;
+        }
+        if (fs_ != nullptr) {
+            delete fs_;
+            fs_ = nullptr;
         }
     }
 
@@ -143,6 +161,18 @@ public:
         return 0;
     }
 
+    int Fini() override {
+        if (mock_disk_ != nullptr) {
+            delete mock_disk_;
+            mock_disk_ = nullptr;
+        }
+        if (fs_ != nullptr) {
+            delete fs_;
+            fs_ = nullptr;
+        }
+        return 0;
+    }
+
     int Writev(struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count) override {
         LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
         uint64_t offset_in_bytes = lba * sector_size_;
@@ -176,19 +206,25 @@ public:
     ep_(ip.c_str(), port),
     socket_server_(photon::net::new_tcp_socket_server()),
     skeleton_(photon::rpc::new_skeleton()) {
-        skeleton_->register_service<InitDevice, WritevBlocks, ReadvBlocks>(this);
+        skeleton_->register_service<InitDevice, FiniDevice, WritevBlocks, ReadvBlocks>(this);
     }
 
     int do_rpc_service(InitDevice::Request* req, InitDevice::Response* resp, IOVector*, IStream*) {
         LOG_DEBUG("recieve initdevice request: ", VALUE(req->trid.c_str()), VALUE(req->nsid));
         resp->rc = device_->Init(req->trid.c_str(), req->nsid, req->num_blocks, &resp->sector_size, &resp->num_sectors);
-        return 0;
+        return resp->rc;
+    }
+
+    int do_rpc_service(FiniDevice::Request* req, FiniDevice::Response* resp, IOVector*, IStream*) {
+        LOG_DEBUG("recieve finidevice request");
+        resp->rc = device_->Fini();
+        return resp->rc;
     }
 
     int do_rpc_service(WritevBlocks::Request* req, WritevBlocks::Response* resp, IOVector*, IStream*) {
         LOG_DEBUG("recieve writevblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
         resp->rc = device_->Writev(req->buf.begin(), req->buf.size(), req->offset_blocks, req->num_blocks);
-        return 0;
+        return resp->rc;
     }
 
     int do_rpc_service(ReadvBlocks::Request* req, ReadvBlocks::Response* resp, IOVector* iov, IStream*) {
@@ -197,7 +233,7 @@ public:
         resp->rc = device_->Readv(iov->iovec(), iov->iovcnt(), req->offset_blocks, req->num_blocks);
         if (resp->rc < 0) iov->shrink_to(0);
         resp->buf.assign(iov->iovec(), iov->iovcnt());
-        return 0;
+        return resp->rc;
     }
 
     int run() override {
