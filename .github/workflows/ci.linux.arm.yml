@@ -1,8 +1,6 @@
 name: Linux ARM
 
 on:
-  push:
-    branches: [ "main", "release/*" ]
   pull_request:
     branches: [ "main", "release/*" ]
 
