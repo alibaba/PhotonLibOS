@@ -1,9 +1,7 @@
-#pragma once
+#ifndef SPDK_BDEV_PHOTON_PROTOCOL_H
+#define SPDK_BDEV_PHOTON_PROTOCOL_H
 
 #include <photon/rpc/rpc.h>
-
-namespace photon {
-namespace spdk {
 
 struct Operation {
     const static uint32_t IID = 0x111;
@@ -73,5 +71,4 @@ struct ReadvBlocks: public Operation {
     };
 };
 
-}   // namespace spdk
-}   // namespace photon
+#endif  /* SPDK_BDEV_PHOTON_PROTOCOL_H */

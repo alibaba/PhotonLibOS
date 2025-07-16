@@ -33,8 +33,7 @@ public:
     struct spdk_nvme_ns* ns;
 };
 
-// const char* SPDKNVMe::trid_str = "trtype:pcie traddr:0000:86:00.0";
-const char* SPDKNVMe::trid_str = "trtype:tcp adrfam:ipv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1";
+const char* SPDKNVMe::trid_str = "trtype:pcie traddr:0000:86:00.0";
 const int SPDKNVMe::nsid = 1;
 
 class SPDKNVMeTestEnv : public ::testing::Environment {

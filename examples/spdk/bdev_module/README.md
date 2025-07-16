@@ -6,5 +6,5 @@ This module is depend on photon. You can compile photon with "cmake -B build" an
 And add compile flag "-lphoton" to this module's Makefile.
 
 Photon provide an example server with two kind of storage backend (nvme ssd / local fs).
-Start the server with "sudo ./build/examples-output/bdev_photon_server ssd" or "sudo ./build/examples-output/bdev_photon_server fs".
+Start the server with "sudo ./build/examples-output/bdev_photon_server", more option see bdev_photon_server_main.cpp
 Then you can try this new bdev with spdk's hello_bdev, hello_world, nvmf_tgt, etc.

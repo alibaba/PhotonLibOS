@@ -1,4 +1,4 @@
-#include "bdev_photon_protocol.h"
+#include "photon/protocol.h"
 #include "bdev_photon_server.h"
 
 #include <spdk/nvme.h>
