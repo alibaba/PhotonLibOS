@@ -513,10 +513,7 @@ namespace photon
         }
     };
 
-    static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
-    static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
-    static vcpu_t* pvcpu = nullptr;
-    struct vcpu_t : public vcpu_base {
+    struct vcpu_t0 : public vcpu_base {
 // offset 16B
         SleepQueue sleepq;  // sizeof(sleepq) should be 24: ptr, size and capcity
 // offset 40B
@@ -529,9 +526,10 @@ namespace photon
         // threads scheduled by other vCPUs are added to standbyq by those vCPUs,
         // then moved to runq later by this vCPU at some proper occasion.
         thread_list standbyq;
+    };
+    struct vcpu_t : public vcpu_t0, intrusive_list_node<vcpu_t> {
 // offset 64B
-        vcpu_t *prev, *next;
-
+        // vcpu_t *prev, *next;  // embedded in intrusive_list_node
         template<typename T>
         void move_to_standbyq_atomic(T x)
         {
@@ -559,42 +557,34 @@ namespace photon
         }
 
         NullEventEngine _default_event_engine;
-
-        vcpu_t(uint8_t flags_) {
-            flags = flags_;
-            master_event_engine = &_default_event_engine;
-            SCOPED_LOCK(vcpu_list_lock);
-            if (!pvcpu) {
-                pvcpu = prev = next = this;
-            } else {
-                next = pvcpu;
-                prev = pvcpu->prev;
-                prev->next = this;
-                pvcpu->prev = this;
-            }
-        }
-        void remove_from_list() {
-            scoped_rwlock _(vcpu_list_rwlock, WLOCK);
-            SCOPED_LOCK(vcpu_list_lock);
-            auto pr = prev;
-            auto nx = next;
-            pr->next = nx;
-            nx->prev = pr;
-            if (pvcpu == this)
-                pvcpu = (nx != this) ? nx : nullptr;
-        }
-
         bool is_master_event_engine_default() {
             return &_default_event_engine == master_event_engine;
         }
-
         void reset_master_event_engine_default() {
             auto& mee = master_event_engine;
             if (&_default_event_engine == mee) return;
             delete mee;
             mee = &_default_event_engine;
         }
+
+        static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
+        static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
+        static intrusive_list<vcpu_t, false> pvcpu;
+        vcpu_t(uint8_t flags_) {
+            flags = flags_;
+            master_event_engine = &_default_event_engine;
+            SCOPED_LOCK(vcpu_list_lock);
+            pvcpu.push_back(this);
+        }
+        void go_offline() { // by removing this from list
+            scoped_rwlock _(vcpu_list_rwlock, WLOCK);
+            SCOPED_LOCK(vcpu_list_lock);
+            pvcpu.erase(this);
+        }
     };
+    spinlock vcpu_t::vcpu_list_lock;
+    rwlock vcpu_t::vcpu_list_rwlock;
+    intrusive_list<vcpu_t, false> vcpu_t::pvcpu;
 
     class RunQ {
     public:
@@ -1971,8 +1961,8 @@ insert_list:
         assert(CURRENT == vcpu->idle_worker);
         if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
             return false;
-        scoped_rwlock _(vcpu_list_rwlock, RLOCK);
-        auto u = vcpu->next;
+        scoped_rwlock _(vcpu_t::vcpu_list_rwlock, RLOCK);
+        auto u = vcpu->next();
         while (u != vcpu) {
             if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING))
                 continue;
@@ -1981,8 +1971,8 @@ insert_list:
                 vcpu->idle_worker->insert_list_tail(th);
                 return true;
             }
-            SCOPED_LOCK(vcpu_list_lock);
-            u = u->next;
+            SCOPED_LOCK(vcpu_t::vcpu_list_lock);
+            u = u->next();
         }
         return false;
     }
@@ -2124,7 +2114,7 @@ insert_list:
         assert(!AtomicRunQ(rq).single());
         assert(vcpu->nthreads == 2); // idler & current alive
         deallocate_tls(&rq.current->tls);
-        vcpu->remove_from_list();
+        vcpu->go_offline();
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;

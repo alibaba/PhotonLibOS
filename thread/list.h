@@ -266,7 +266,7 @@ public:
 };
 
 
-template<typename NodeType>
+template<typename NodeType, bool AssertAtDestruction = true>
 class intrusive_list
 {
 public:
@@ -277,7 +277,7 @@ public:
     {   // node (NodeType*) MUST be intrusive_list_node<T>, which
         // should be implicitly convertible to __intrusive_list_node*
         __intrusive_list_node* __node = node;
-        assert(__node == nullptr);
+        if (AssertAtDestruction) assert(__node == nullptr);
         _unused(__node);
     }
     void push_back(NodeType* ptr)
@@ -435,6 +435,16 @@ public:
             } while (ptr != node);
         }
         node = nullptr;
+    }
+    NodeType* round_robin_next() {
+        auto x = node;
+        node = node->next();
+        return x;
+    }
+    NodeType* round_robin_prev() {
+        auto x = node;
+        node = node->prev();
+        return x;
     }
 };
 
