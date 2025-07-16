@@ -1,8 +1,6 @@
 name: Linux x86_64
 
 on:
-  push:
-    branches: [ "main", "release/*" ]
   pull_request:
     branches: [ "main", "release/*" ]
 
