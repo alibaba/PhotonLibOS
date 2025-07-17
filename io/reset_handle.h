@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 #pragma once
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 
 namespace photon {
 

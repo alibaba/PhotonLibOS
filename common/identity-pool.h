@@ -20,7 +20,7 @@ limitations under the License.
 #include <new>
 #include <photon/common/callback.h>
 #include <photon/thread/thread.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"

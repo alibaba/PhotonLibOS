@@ -17,7 +17,7 @@ limitations under the License.
 #define protected public
 #include <photon/thread/thread.h>
 #include <photon/thread/timer.h>
-#include "list.h"
+#include <photon/common/intrusive_list.h>
 #undef protected
 
 #include <memory.h>

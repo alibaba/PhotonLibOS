@@ -35,7 +35,7 @@ limitations under the License.
 #include <photon/common/iovector.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 #include <photon/thread/timer.h>
 #include <photon/common/estring.h>
 #include <photon/common/utility.h>

@@ -3,7 +3,7 @@
 #include <photon/common/alog.h>
 #include <photon/common/lockfree_queue.h>
 #include <photon/photon.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/timer.h>
 #include <photon/thread/workerpool.h>

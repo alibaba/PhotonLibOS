@@ -19,7 +19,7 @@ limitations under the License.
 #include <photon/common/string_view.h>
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/timer.h>
 
