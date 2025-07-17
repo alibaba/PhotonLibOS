@@ -1,6 +1,6 @@
 #include <assert.h>
 #include <photon/common/callback.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 #include <photon/thread/thread-local.h>
 #include <photon/thread/thread11.h>
 

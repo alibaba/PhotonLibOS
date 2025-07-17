@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/fs/filesystem.h>
 #include <photon/fs/httpfs/httpfs.h>
 #include <photon/fs/range-split.h>
-#include <photon/thread/list.h>
+#include <photon/common/intrusive_list.h>
 #include <photon/thread/thread11.h>
 #include "url.h"
 #include "client.h"
