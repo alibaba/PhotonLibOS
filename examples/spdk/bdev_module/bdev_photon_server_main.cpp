@@ -19,22 +19,18 @@ int main(int argc, char** argv) {
     photon::init();
     DEFER(photon::fini());
 
-    photon::spdk::BlockDevice* blkdev = nullptr;
+    auto type = photon::spdk::DeviceType::kUnknown;
     if (device_type == "ssd") {
-        blkdev = photon::spdk::new_blkdev_local_nvme_ssd();
+        type = photon::spdk::DeviceType::kNVMeSSD;
     }
     else if (device_type == "fs") {
-        blkdev = photon::spdk::new_blkdev_localfs();
+        type = photon::spdk::DeviceType::kLocalFile;
     }
     else {
-        LOG_ERROR_RETURN(0, -1, "unknown device type: `", FLAGS_device_type.c_str());
+        LOG_ERROR_RETURN(0, -1, "unknown device type: `", device_type.c_str());
     }
-    if (blkdev == nullptr) {
-        LOG_ERRNO_RETURN(0, -1, "device create failed");
-    }
-    DEFER(delete blkdev);
 
-    auto server = photon::spdk::new_server(blkdev, ip, port);
+    auto server = photon::spdk::new_server(type, ip, port);
     if (server == nullptr) {
         LOG_ERRNO_RETURN(0, -1, "server create failed");
     }

@@ -43,10 +43,9 @@ struct WritevBlocks: public Operation {
     const static uint32_t FID = 0x333;
 
     struct Request : public photon::rpc::Message {
-        uint64_t offset_blocks;
-        uint64_t num_blocks;
+        uint64_t offset;
         photon::rpc::aligned_iovec_array buf;
-        PROCESS_FIELDS(offset_blocks, num_blocks, buf);
+        PROCESS_FIELDS(offset, buf);
     };
 
     struct Response : public photon::rpc::Message {
@@ -59,9 +58,9 @@ struct ReadvBlocks: public Operation {
     const static uint32_t FID = 0x555;
 
     struct Request : public photon::rpc::Message {
-        uint64_t offset_blocks;
-        uint64_t num_blocks;
-        PROCESS_FIELDS(offset_blocks, num_blocks);
+        uint64_t offset;
+        uint64_t length;
+        PROCESS_FIELDS(offset);
     };
 
     struct Response : public photon::rpc::Message {
