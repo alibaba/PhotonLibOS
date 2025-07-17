@@ -1,6 +1,10 @@
 find_package(PkgConfig REQUIRED)
 
-set(DPDK_LIBRARIES)
+pkg_check_modules(DPDK REQUIRED libdpdk)
+message(STATUS ${DPDK_LIBRARY_DIRS})
+message(STATUS ${DPDK_INCLUDE_DIRS})
+
+set(DPDK_FOUND_LIBRARIES)
 set(DPDK_LIBRARY_NAMES
 rte_bus_pci
 rte_bus_vdev
@@ -29,15 +33,17 @@ rte_kni
 rte_net_bond
 )
 foreach(LIB_NAME IN LISTS DPDK_LIBRARY_NAMES)
-    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS /usr/local/lib NO_DEFAULT_PATH)
+    find_library(FOUND_${LIB_NAME} NAMES ${LIB_NAME} PATHS ${DPDK_LIBRARY_DIRS} NO_DEFAULT_PATH)
     if(FOUND_${LIB_NAME})
-        list(APPEND DPDK_LIBRARIES ${FOUND_${LIB_NAME}})
+        list(APPEND DPDK_FOUND_LIBRARIES ${FOUND_${LIB_NAME}})
     else()
         message(WARNING "Could not find DPDK library ${LIB_NAME}")
     endif()
 endforeach()
 
-find_path(DPDK_INCLUDE_DIRS NAMES rte_config.h PATHS /usr/local/include NO_DEFAULT_PATH)
+# find_path(DPDK_INCLUDE_DIRS NAMES rte_config.h PATHS /usr/local/include NO_DEFAULT_PATH)
+
+set(DPDK_LIBRARIES ${DPDK_FOUND_LIBRARIES})
 
 find_package_handle_standard_args(dpdk DEFAULT_MSG DPDK_LIBRARIES DPDK_INCLUDE_DIRS)
 
