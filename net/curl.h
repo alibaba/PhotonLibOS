@@ -242,6 +242,7 @@ public:
         setopt(CURLOPT_ERRORBUFFER, m_errmsg);
         setopt(CURLOPT_NOSIGNAL, 1L);
         setopt(CURLOPT_TCP_NODELAY, 1L);
+        setopt(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
         m_errmsg[0] = '\0';
     }
     ~cURL() { curl_easy_cleanup(m_curl); }
