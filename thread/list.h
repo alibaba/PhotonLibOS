@@ -372,6 +372,12 @@ public:
     {
         return {nullptr, nullptr};
     }
+    bool contains(NodeType* x)
+    {
+        for (auto y: *this)
+            if (x == y) return true;
+        return false;
+    }
     reverse_iterator rbegin()
     {
         return node ? node->rbegin() : rend();

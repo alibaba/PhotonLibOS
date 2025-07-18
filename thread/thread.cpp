@@ -1259,14 +1259,13 @@ R"(
             sleepq.pop_front();
             if (likely(th->state == states::SLEEPING)) {
                 th->dequeue_ready_atomic();
-            } else {
-                // interrupted between standbyq.eject_whole_atomic()
-                // and SCOPED_LOCK(th->lock).
-                assert(th->state == states::STANDBY);
-                th->state = states::READY;
-            }
-            list.push_back(th);
-            count++;
+                list.push_back(th);
+                count++;
+            } else assert(({ // th got interrupted just after standbyq.eject_whole_atomic()
+                SCOPED_LOCK(standbyq.lock);      // we should leave it in standbyq
+                th->state == states::STANDBY &&  // and process it in batch next time
+                standbyq.contains(th);
+            }));
         } while(!sleepq.empty());
         if (count) {
 insert_list:
