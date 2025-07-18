@@ -1163,9 +1163,16 @@ R"(
             sleepq.pop_front();
             if (th->state == states::SLEEPING) {
                 th->dequeue_ready_atomic();
-                AtomicRunQ().insert_tail(th);
-                count++;
+            } else {
+                // interrupted between standbyq.eject_whole_atomic()
+                // and SCOPED_LOCK(th->lock).
+                assert(th->state == states::STANDBY);
+                assert(standbyq.contains(th));
+                th->state = states::READY;
+                standbyq.erase(th);
             }
+            AtomicRunQ().insert_tail(th);
+            count++;
         }
         return count;
     }
