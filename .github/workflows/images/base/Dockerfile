@@ -1,6 +1,6 @@
-FROM almalinux:8
+FROM almalinux:8.10-20240923
 
-RUN dnf install -y git cmake gcc-c++ openssl-devel-1.1.1k libcurl-devel-7.61.1 libaio-devel sudo zstd wget && \
+RUN dnf install -y git cmake gcc-c++ openssl-devel-1.1.1k libcurl-devel-7.61.1-34.el8_10.2 libaio-devel sudo zstd wget && \
     dnf install -y epel-release 'dnf-command(config-manager)' && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y gtest-devel gmock-devel fuse-devel fuse3-devel libgsasl-devel e2fsprogs-devel && \
