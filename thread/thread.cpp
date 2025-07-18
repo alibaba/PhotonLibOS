@@ -1260,10 +1260,12 @@ R"(
             if (likely(th->state == states::SLEEPING)) {
                 th->dequeue_ready_atomic();
             } else {
-                // interrupted between standbyq.eject_whole_atomic()
-                // and SCOPED_LOCK(th->lock).
+                // th got interrupted just after standbyq.eject_whole_atomic()
                 assert(th->state == states::STANDBY);
+                SCOPED_LOCK(standbyq.lock);
+                assert(standbyq.contains(th));
                 th->state = states::READY;
+                standbyq.erase(th);
             }
             list.push_back(th);
             count++;
