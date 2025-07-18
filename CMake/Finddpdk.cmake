@@ -1,8 +1,6 @@
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(DPDK REQUIRED libdpdk)
-message(STATUS ${DPDK_LIBRARY_DIRS})
-message(STATUS ${DPDK_INCLUDE_DIRS})
 
 set(DPDK_FOUND_LIBRARIES)
 set(DPDK_LIBRARY_NAMES
@@ -40,8 +38,6 @@ foreach(LIB_NAME IN LISTS DPDK_LIBRARY_NAMES)
         message(WARNING "Could not find DPDK library ${LIB_NAME}")
     endif()
 endforeach()
-
-# find_path(DPDK_INCLUDE_DIRS NAMES rte_config.h PATHS /usr/local/include NO_DEFAULT_PATH)
 
 set(DPDK_LIBRARIES ${DPDK_FOUND_LIBRARIES})
 
