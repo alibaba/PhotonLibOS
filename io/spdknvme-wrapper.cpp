@@ -78,8 +78,9 @@ void CBContextBase::cb_fn(void *cb_ctx, const struct spdk_nvme_cpl *cpl) {
 }
 
 void CBContextBase::reset_sgl_fn(void *cb_ctx, uint32_t offset) {
-    LOG_DEBUG("get into reset_sgl_fn", VALUE(offset));
+    LOG_DEBUG("get into reset_sgl_fn ", VALUE(offset));
     auto ctx = static_cast<CBContextBase*>(cb_ctx);
+    LOG_DEBUG("reset_sgl_fn ", VALUE(ctx->iovcnt));
     ctx->iovec.assign(ctx->iov, ctx->iovcnt);
     ctx->iovec.extract_front(offset);
 }
@@ -192,7 +193,10 @@ static int vec_io_helper(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair,
     ctx.iov = iov;
     ctx.iovcnt = iovcnt;
     int rc = rwv_fn(ns, qpair, lba, lba_count, CBContextBase::cb_fn, &ctx, io_flags, CBContextBase::reset_sgl_fn, CBContextBase::next_sge_fn);
-    if (rc != 0) return rc;
+    if (rc != 0) {
+        LOG_DEBUG("early failed, ", VALUE(rc));
+        return rc;
+    }
     ctx.awaiter.suspend();
     return ctx.rc;
 }
@@ -202,6 +206,7 @@ int nvme_ns_cmd_writev(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, s
 }
 
 int nvme_ns_cmd_readv(struct spdk_nvme_ns* ns, struct spdk_nvme_qpair* qpair, struct iovec *iov, int iovcnt, uint64_t lba, uint32_t lba_count, uint32_t io_flags) {
+    LOG_DEBUG(VALUE(iovcnt), VALUE(lba), VALUE(lba_count));
     return vec_io_helper(ns, qpair, iov, iovcnt, lba, lba_count, io_flags, &spdk_nvme_ns_cmd_readv);
 }
 
