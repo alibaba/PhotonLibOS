@@ -1900,6 +1900,10 @@ insert_list:
         }
         return 0;
     }
+    void disposable_semaphore::defer(void* arg) {
+        auto _this = (disposable_semaphore*)arg;
+        _this->signal();
+    }
     bool is_master_event_engine_default() {
         return CURRENT->get_vcpu()->is_master_event_engine_default();
     }
