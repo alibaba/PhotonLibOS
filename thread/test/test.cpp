@@ -32,6 +32,7 @@ limitations under the License.
 #include "../../test/ci-tools.h"
 #include "../future.h"
 
+#include <photon/common/lockfree_queue.h>
 
 using namespace std;
 using namespace photon;
@@ -696,6 +697,40 @@ TEST(Semaphore, heavy) {
     EXPECT_EQ(0, ret);
     EXPECT_EQ(0UL, sem.m_count);
     wait_for_completion();
+}
+
+using Ring = photon::common::RingChannel<
+    LockfreeSPSCRingQueue<Delegate<void>, 16>>;
+
+void test_disposable_semaphore(Ring* ring, uint64_t count, uint64_t slat, uint64_t oplat) {
+    while (count--) {
+        disposable_semaphore sem;
+        auto op = [oplat, &sem]() {
+            if (oplat) ::usleep(oplat); // operation latency
+            sem.signal();               // completion signal
+        };
+        ring->send(op);
+        if (slat) ::usleep(slat);       // submission latency
+        int ret = sem.wait(1000*1000);  // wait for completion
+        EXPECT_EQ(0, ret);
+        if (ret) return;
+    }
+}
+
+TEST(disposable_semaphore, basic) {
+    Ring ring;
+    std::thread worker([&]() {
+        vcpu_init();
+        while(auto cb = ring.recv(0, 0)) cb();
+        vcpu_fini();
+    });
+
+    test_disposable_semaphore(&ring, 10000, 0, 100);
+    test_disposable_semaphore(&ring, 10000, 100, 0);
+    test_disposable_semaphore(&ring, 10000, 00, 00);
+
+    ring.send({});
+    worker.join();
 }
 
 TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
