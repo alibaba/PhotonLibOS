@@ -461,6 +461,26 @@ namespace photon
         void try_resume(uint64_t count);
     };
 
+    // one-shot semaphore
+    class disposable_semaphore {
+    public:
+        int wait(Timeout timeout) {
+            int ret = thread_usleep_defer(timeout, &defer, this);
+            if (likely(ret < 0)) { assert(errno == -1); return 0; }
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        void signal() {
+            if (_signaled.test_and_set(std::memory_order_acquire))
+                thread_interrupt(_waiter, -1); // wake up the waiter when signled twice
+        }
+
+    protected:
+        thread* _waiter = CURRENT;
+        std::atomic_flag _signaled = ATOMIC_FLAG_INIT;
+        static void defer(void* arg);
+    };
+
     // to be different to timer flags
     // mark flag should be larger than 999, and not touch lower bits
     // here we selected
