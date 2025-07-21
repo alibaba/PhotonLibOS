@@ -35,7 +35,7 @@ public:
     static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
     static constexpr uint64_t QUEUE_YIELD_US = 1024;
 
-    photon::mutex worker_mtx;
+    photon::spinlock worker_lock;
     std::vector<std::thread> owned_std_threads;
     std::vector<photon::vcpu_base *> vcpus;
     std::atomic<uint64_t> vcpu_index{0};
@@ -54,7 +54,7 @@ public:
     }
 
     ~impl() { // avoid depending on photon to make it destructible wihout photon
-        for (auto num = vcpus.size(); num; --num) enqueue({});
+        for (auto num = vcpus.size(); num; --num) enqueue({}, PhotonContext());
         for (auto &worker : owned_std_threads) worker.join();
         while (vcpus.size()) std::this_thread::yield();
     }
@@ -81,7 +81,6 @@ public:
     }
 
     int get_vcpu_num() {
-        photon::scoped_lock _(worker_mtx);
         return vcpus.size();
     }
 
@@ -92,12 +91,12 @@ public:
     }
 
     void add_vcpu() {
-        photon::scoped_lock _(worker_mtx);
+        SCOPED_LOCK(worker_lock);
         vcpus.push_back(photon::get_vcpu());
     }
 
     void remove_vcpu() {
-        photon::scoped_lock _(worker_mtx);
+        SCOPED_LOCK(worker_lock);
         auto v = photon::get_vcpu();
         auto it = std::find(vcpus.begin(), vcpus.end(), v);
         vcpus.erase(it);
@@ -149,6 +148,10 @@ public:
             index = vcpu_index++ % size;
         }
         return vcpus[index];
+    }
+
+    int thread_migrate(photon::thread* th, size_t index) {
+        return photon::thread_migrate(th, get_vcpu_in_pool(index));
     }
 
     int join_current_vcpu_into_workpool() {
@@ -205,8 +208,8 @@ void WorkPool::do_call<PhotonContext>(Delegate<void> call) {
 }
 
 void WorkPool::enqueue(Delegate<void> call) { pImpl->enqueue(call); }
-photon::vcpu_base *WorkPool::get_vcpu_in_pool(size_t index) {
-    return pImpl->get_vcpu_in_pool(index);
+int WorkPool::thread_migrate(photon::thread* th, size_t index) {
+    return pImpl->thread_migrate(th, index);
 }
 int WorkPool::join_current_vcpu_into_workpool() {
     return pImpl->join_current_vcpu_into_workpool();
