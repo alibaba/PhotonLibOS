@@ -295,7 +295,7 @@ public:
 
     size_t push_batch(const T *x, size_t n) {
         size_t rh, wt;
-        wt = tail.load(std::memory_order_relaxed);
+        wt = tail.load(std::memory_order_acquire);
         for (;;) {
             rh = head.load(std::memory_order_acquire);
             auto wn = std::min(n, Base::capacity - (wt - rh));
@@ -325,7 +325,7 @@ public:
 
     size_t pop_batch(T *x, size_t n) {
         size_t rt, wh;
-        rt = read_tail.load(std::memory_order_relaxed);
+        rt = read_tail.load(std::memory_order_acquire);
         for (;;) {
             wh = write_head.load(std::memory_order_acquire);
             auto rn = std::min(n, wh - rt);
