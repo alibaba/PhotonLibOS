@@ -29,7 +29,7 @@ namespace photon {
 class WorkPool {
 public:
     /**
-     * @brief Construct a new Work Pool object
+     * @brief Construct a new Work Pool object; available in non-photon environment
      *
      * @param vcpu_num how many VCPU (std threads) create for this workpool
      * @param ev_engine how to initial event engine as preset VCPUs
@@ -44,11 +44,12 @@ public:
     WorkPool(const WorkPool& other) = delete;
     WorkPool& operator=(const WorkPool& rhs) = delete;
 
+    // available in non-photon environment
     ~WorkPool();
 
     /**
      * @brief `hold_as_worker` makes blocks current std thread join workpool, as
-     * a woker member. Noticed that worker should initial environment by self,
+     * a woker member. Note that workers should initialize photon environment by themselves,
      * workpool will not do photon environment for it. When workpool destructed,
      * the function call will be finished, and return 0.
      * @return int 0 for success, and -1 for failure
@@ -56,9 +57,9 @@ public:
     int join_current_vcpu_into_workpool();
 
     /**
-     * @brief Get the vcpu num
-     * 
-     * @return int 
+     * @brief Get the vcpu num; available in non-photon environment
+     *
+     * @return int
      */
     int get_vcpu_num();
 
@@ -83,6 +84,7 @@ public:
 
     /**
      * @brief `async_call` just like `call`, but do not wait for task done.
+     *        available in non-photon environment.
      *
      * @param task Pointer to async task callable object. Call by lamda could
      * using `workpool.async_call(new auto ([&](){ // some lambda; }));` The
@@ -103,9 +105,7 @@ public:
      * [0, vcpu_num), it will choose the next one in pool (round-robin).
      * @return int 0 for success, and <0 means failed to migrate.
      */
-    int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL) {
-        return photon::thread_migrate(th, get_vcpu_in_pool(index));
-    }
+    int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL);
 
 protected:
     class impl;  // does not depend on T
@@ -115,7 +115,6 @@ protected:
     template<typename Context>
     void do_call(Delegate<void> call);
     void enqueue(Delegate<void> call);
-    photon::vcpu_base* get_vcpu_in_pool(size_t index);
 
     template<typename Task>
     static void __async_call_helper(void* task) {
