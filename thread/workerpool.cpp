@@ -54,7 +54,7 @@ public:
     }
 
     ~impl() { // avoid depending on photon to make it destructible wihout photon
-        for (auto num = vcpus.size(); num; --num) enqueue({}, PhotonContext());
+        for (auto num = vcpus.size(); num; --num) enqueue({});
         for (auto &worker : owned_std_threads) worker.join();
         while (vcpus.size()) std::this_thread::yield();
     }
