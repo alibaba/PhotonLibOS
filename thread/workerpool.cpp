@@ -39,15 +39,12 @@ public:
     std::vector<std::thread> owned_std_threads;
     std::vector<photon::vcpu_base *> vcpus;
     std::atomic<uint64_t> vcpu_index{0};
-    photon::semaphore queue_sem;
-    photon::condition_variable exit_cv;
     photon::common::RingChannel<
         LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE>>
         ring;
     int mode;
 
-    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-        : queue_sem(0), mode(mode), ready_vcpu(0) {
+    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode) : mode(mode) {
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
@@ -56,14 +53,10 @@ public:
         ready_vcpu.wait(vcpu_num);
     }
 
-    ~impl() {
-        auto num = vcpus.size();
-        for (size_t i = 0; i < num; i++) {
-            enqueue({});
-        }
+    ~impl() { // avoid depending on photon to make it destructible wihout photon
+        for (auto num = vcpus.size(); num; --num) enqueue({});
         for (auto &worker : owned_std_threads) worker.join();
-        photon::scoped_lock lock(worker_mtx);
-        while (vcpus.size()) exit_cv.wait(lock, 1UL * 1000);
+        while (vcpus.size()) std::this_thread::yield();
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
@@ -108,41 +101,37 @@ public:
         auto v = photon::get_vcpu();
         auto it = std::find(vcpus.begin(), vcpus.end(), v);
         vcpus.erase(it);
-        exit_cv.notify_all();
     }
 
     struct TaskLB {
         Delegate<void> task;
-        std::atomic<uint64_t> *count;
+        volatile uint64_t* count;
     };
 
     void main_loop() {
         add_vcpu();
         DEFER(remove_vcpu());
-        std::atomic<uint64_t> running_tasks{0};
+        volatile uint64_t running_tasks = 0;
         photon::ThreadPoolBase *pool = nullptr;
         if (mode > 0) pool = photon::new_thread_pool(mode);
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
         for (;;) {
-            auto task = ring.recv(running_tasks.load() ? 0 : QUEUE_YIELD_COUNT,
-                                  QUEUE_YIELD_US);
+            auto yc = running_tasks ? 0 : QUEUE_YIELD_COUNT;
+            auto task = ring.recv(yc, QUEUE_YIELD_US);
             if (!task) break;
-            running_tasks.fetch_add(1, std::memory_order_acq_rel);
+            running_tasks = running_tasks + 1; // ++ -- are deprecated for volatile in C++20
             TaskLB tasklb{task, &running_tasks};
             if (mode < 0) {
                 delegate_helper(&tasklb);
-            } else if (mode == 0) {
-                auto th = photon::thread_create(
-                    &WorkPool::impl::delegate_helper, &tasklb);
-                photon::thread_yield_to(th);
             } else {
-                auto th = pool->thread_create(&WorkPool::impl::delegate_helper,
-                                              &tasklb);
+                auto th = !pool ? thread_create(&delegate_helper, &tasklb) :
+                           pool-> thread_create(&delegate_helper, &tasklb) ;
+                // yield to th so as to copy tasklb to th's stack
                 photon::thread_yield_to(th);
             }
         }
-        while (running_tasks.load(std::memory_order_acquire))
+        while (running_tasks)
             photon::thread_yield();
     }
 
@@ -150,7 +139,7 @@ public:
         // must copy to keep tasklb alive
         TaskLB tasklb = *(TaskLB*)arg;
         tasklb.task();
-        tasklb.count->fetch_sub(1, std::memory_order_acq_rel);
+        *tasklb.count = *tasklb.count - 1; // ++ -- are deprecated for volatile in C++20
         return nullptr;
     }
 
@@ -200,7 +189,7 @@ private:
 WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode)
     : pImpl(new impl(vcpu_num, ev_engine, io_engine, mode)) {}
 
-WorkPool::~WorkPool() {}
+WorkPool::~WorkPool() { /* implicitly delete pImpl */}
 
 template <>
 void WorkPool::do_call<AutoContext>(Delegate<void> call) {
