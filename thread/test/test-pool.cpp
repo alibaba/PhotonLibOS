@@ -247,6 +247,21 @@ TEST(workpool, async_work_lambda_threadpool) {
     LOG_INFO("DONE");
 }
 
+TEST(workpool, std_context) {
+    std::thread test([]{
+        WorkPool pool(8);
+        EXPECT_EQ(pool.get_vcpu_num(), 8);
+        photon::spinlock lock;
+        auto func = new auto([&]{ lock.lock(); });
+        pool.call<StdContext>(*func);
+        EXPECT_TRUE(lock.locked());
+        lock.unlock();
+        pool.async_call(func);
+        while(!lock.locked());
+    });
+    test.join();
+}
+
 TEST(workpool, async_work_lambda_threadpool_append) {
     std::unique_ptr<WorkPool> pool(new WorkPool(0, 0, 0, 0));
 
