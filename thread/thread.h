@@ -219,6 +219,9 @@ namespace photon
             return (likely(!load()) &&
                     likely(!xchg())) ? 0 : -1;
         }
+        bool locked() const {
+            return _lock;
+        }
         void unlock() {
             _lock.store(false, std::memory_order_release);
         }
