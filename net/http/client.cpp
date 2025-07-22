@@ -48,16 +48,13 @@ public:
     // multiple times, even for a thread_local instance. Therefore, ensure that there is no photon
     // thread switch inside the constructor. Place the initialization work in init() and ensure it
     // is initialized only once.
-    PooledDialer() {
-        photon::fini_hook({this, &PooledDialer::at_photon_fini});
-    }
-
     int init(TLSContext *_tls_ctx, std::vector<IPAddr> &src_ips) {
         if (initialized)
             return 0;
         SCOPED_LOCK(init_mtx);
         if (initialized)
             return 0;
+        photon::fini_hook({this, &PooledDialer::at_photon_fini});
         tls_ctx = _tls_ctx;
         if (!tls_ctx) {
             tls_ctx_ownership = true;
