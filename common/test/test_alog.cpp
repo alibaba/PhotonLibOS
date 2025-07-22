@@ -376,6 +376,25 @@ TEST(ALog, ALog)
     puts(_log_buf);
 }
 
+using photon::get_vcpu;
+#define ALWAYS_LOGGED std::make_tuple(VALUE(get_vcpu()), ' ', ALogStringL( \
+         "{this is an always logged item "), 7, ALogStringL("wahaha}"), ' ')
+
+TEST(ALog, always_log) {
+    log_output = &log_output_test;
+    LOG_DEBUG(32, "   ",
+              DEC(2345678).comma(true).width(10),
+              DEC(678).comma(true).width(10),
+              DEC(8).comma(true).width(10),
+              DEC(5678).comma(true).width(10));
+    puts(_log_buf);
+    memset((char*)log_output_test.log_start() + 12, 'x', 16);
+    EXPECT_EQ(log_output_test.log_start(), string(
+        "[get_vcpu()=xxxxxxxxxxxxxxxx] {this is an always logged item 7wahaha} 32    2,345,678       678         8     5,678"));
+}
+
+#undef ALWAYS_LOGGED
+
 #define test_type(x, T, len) {          \
     auto xx = alog_forwarding(x);       \
     static_assert(std::is_same<decltype(xx), T>::value, "..."); \

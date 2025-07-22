@@ -23,6 +23,7 @@ limitations under the License.
 #include <ctime>
 #include <utility>
 #include <type_traits>
+#include <tuple>
 
 #include <photon/common/utility.h>
 #include <photon/common/conststr.h>
@@ -365,6 +366,16 @@ public:
         log_formatter.put(*this, alog_forwarding(x));
         return *this;
     }
+    template<typename...Ts>
+    LogBuffer& operator << (const std::tuple<Ts...>& x)
+    {
+        return printf_tuple(x, std::make_index_sequence<sizeof...(Ts)>{});
+    }
+    template<typename Tuple, std::size_t...I>
+    LogBuffer& printf_tuple(const Tuple& x, std::index_sequence<I...>)
+    {
+        return printf(std::get<I>(x)...);
+    }
     LogBuffer& printf()
     {
         return *this;
@@ -456,11 +467,11 @@ struct STFMTLogBuffer : public LogBuffer
     }
 };
 
-template<typename FMT, typename...Ts> inline
-STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog, FMT fmt, Ts&&...xs)
-{
+template<typename...Ps, typename FMT, typename...Ts> inline
+STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog,
+                       const std::tuple<Ps...>& alt, FMT fmt, Ts&&...xs) {
     STFMTLogBuffer log(output);
-    log << prolog;
+    log << prolog << alt;
     log.print_fmt(fmt, std::forward<Ts>(xs)..., '\n');
     log.level = level;
     return log;
@@ -504,15 +515,19 @@ struct LogBuilder {
 #define _IS_LITERAL_STRING(x) \
     (sizeof(#x) > 2 && (#x[0] == '"') && (#x[sizeof(#x) - 2] == '"'))
 
+#ifndef ALWAYS_LOGGED
+constexpr static std::tuple<> ALWAYS_LOGGED{};
+#endif
+
 #define __LOG__(attr, logger, level, first, ...)    ({                 \
         DEFINE_PROLOGUE(level);                                        \
         auto L = [&](ILogOutput* out) __attribute__(attr) {            \
             if (_IS_LITERAL_STRING(first)) {                           \
-                return __log__(level, out, prolog,                     \
+                return __log__(level, out, prolog, ALWAYS_LOGGED,      \
                                TSTRING(#first).template strip<'\"'>(), \
                                ##__VA_ARGS__);                         \
             } else {                                                   \
-                return __log__(level, out, prolog,                     \
+                return __log__(level, out, prolog, ALWAYS_LOGGED,      \
                                ConstString::TString<>(), first,        \
                                ##__VA_ARGS__);                         \
             }                                                          \
@@ -522,17 +537,14 @@ struct LogBuilder {
 
 
 #define LOG_DEBUG(...)  (__LOG__((noinline, cold), default_logger, ALOG_DEBUG, __VA_ARGS__))
-#define LOG_INFO(...)   (__LOG__((noinline, cold), default_logger, ALOG_INFO, __VA_ARGS__))
-#define LOG_WARN(...)   (__LOG__((noinline, cold), default_logger, ALOG_WARN, __VA_ARGS__))
+#define LOG_INFO(...)   (__LOG__((noinline, cold), default_logger, ALOG_INFO,  __VA_ARGS__))
+#define LOG_WARN(...)   (__LOG__((noinline, cold), default_logger, ALOG_WARN,  __VA_ARGS__))
 #define LOG_ERROR(...)  (__LOG__((noinline, cold), default_logger, ALOG_ERROR, __VA_ARGS__))
 #define LOG_FATAL(...)  (__LOG__((noinline, cold), default_logger, ALOG_FATAL, __VA_ARGS__))
-#define LOG_TEMP(...)                                    \
-    {                                                    \
-        auto _err_bak = errno;                           \
-        __LOG__((noinline, cold), default_logger,        \
-                                ALOG_TEMP, __VA_ARGS__); \
-        errno = _err_bak;                                \
-    }
+#define LOG_TEMP(...)   {auto _err_bak = errno;                                              \
+                         __LOG__((noinline, cold), default_logger, ALOG_TEMP,  __VA_ARGS__); \
+                         errno = _err_bak;                                                   \
+                        }
 #ifndef DISABLE_AUDIT
 #define LOG_AUDIT(...) (__LOG__((), default_audit_logger, ALOG_AUDIT, __VA_ARGS__))
 #else
