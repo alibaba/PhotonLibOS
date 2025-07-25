@@ -48,23 +48,30 @@ protected:
     const static size_t  MAX_VALUE_OFFSET   = 4095;
     const static size_t  MAX_VALUE_LENGTH   = MAX_KEY_OFFSET;
 
+    enum TYPE : uint8_t {STRING,  NUMBER, null, BOOLEAN, OBJECT, ARRAY};
+
+union {
+    const char* _text_begin;    // addr of the text (only for root node)
+    const NodeImpl* _root;      // root node (only for non-root nodes)
+};
 union { struct  { // for non-root nodes
-    struct {
-        uint8_t _flags;
-        uint16_t _k_len : 12;       // key length (12 bits)
-        uint16_t _v_off : 12;       // value offset (12 bits) to key end
-    }__attribute__((packed));
-    const NodeImpl* _root;          // root node
-};                                  // packed as 20 bytes
+    uint8_t _flags;
+    uint16_t _k_len : 12;       // key length (12 bits)
+    uint16_t _v_off : 12;       // value offset (12 bits) to key end
+}__attribute__((packed));
 struct {         // for the root node
     uint8_t _flags_;                // the same as _flags
     uint8_t _node_size;             // sizeof(the node implementation)
     mutable uint16_t _refcnt;       // reference counter of the document
-    const char* _text_begin;
 }; };
     uint32_t _k_off;                // key offset to _text_begin
     uint32_t _v_len;                // value length
     uint32_t _nchildren;            // for all nodes
+
+    void set_type(uint8_t type) {
+        _flags &= (1 << 5) - 1;
+        _flags |= (type & 0x7) << 5;
+    }
 
     using AT16 = std::atomic<uint16_t>;
     static_assert(sizeof(AT16) == sizeof(_refcnt), "...");
@@ -101,6 +108,9 @@ public:
 
     bool is_root() const {
         return _flags & FLAG_IS_ROOT;
+    }
+    uint8_t get_type() const {
+        return _flags >> 5;
     }
     const NodeImpl* get_root() const {
         return is_root() ? this : _root;
@@ -139,6 +149,7 @@ public:
     int init_non_root(str key, str value, const NodeImpl* root, uint32_t flags);
 };
 
+static_assert(sizeof(NodeImpl) == 32, "");
 
 }
 }
