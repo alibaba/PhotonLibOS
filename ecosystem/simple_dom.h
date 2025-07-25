@@ -80,6 +80,8 @@ public:
     const char* text_begin() const  { IF_RET(_impl->get_root()->_text_begin); }
     str key(const char* b) const    { IF_RET(_impl->get_key(b)); }
     str value(const char* b) const  { IF_RET(_impl->get_value(b)); }
+    uint8_t type() const            { IF_RET(_impl->get_type()); }
+    uint8_t get_type() const        { IF_RET(_impl->get_type()); }
     bool valid() const              { return _impl; }
     operator bool() const           { return _impl; }
     size_t num_children() const     { IF_RET(_impl->num_children()); }
@@ -97,6 +99,7 @@ public:
     double to_double(double def_val = NAN) const {
         return value().to_double(def_val);
     }
+    using TYPE = NodeImpl::TYPE;
 
     bool operator==(str rhs) const { return value() == rhs; }
     bool operator!=(str rhs) const { return value() != rhs; }
