@@ -169,8 +169,12 @@ protected:
     using Base::idx;
     using Base::tail;
 
-    std::atomic<uint64_t> marks[Base::capacity]{};
-    T slots[Base::capacity];
+    struct alignas(Base::CACHELINE_SIZE) packedslot {
+        T data;
+        std::atomic<uint64_t> mark{0};
+    };
+    
+    packedslot slots[Base::capacity];
 
     uint64_t this_turn_write(const uint64_t x) const {
         return (Base::turn(x) << 1) + 1;
@@ -191,8 +195,9 @@ public:
     bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
         for (;;) {
-            auto& slot = slots[idx(t)];
-            auto& mark = marks[idx(t)];
+            auto& ps = slots[idx(t)];
+            auto& slot = ps.data;
+            auto& mark = ps.mark;
             if (mark.load(std::memory_order_acquire) == last_turn_read(t)) {
                 if (tail.compare_exchange_strong(t, t + 1)) {
                     slot = x;
@@ -213,8 +218,9 @@ public:
     bool pop(T& x) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
-            auto& slot = slots[idx(h)];
-            auto& mark = marks[idx(h)];
+            auto& ps = slots[idx(h)];
+            auto& slot = ps.data;
+            auto& mark = ps.mark;
             if (mark.load(std::memory_order_acquire) == this_turn_write(h)) {
                 if (head.compare_exchange_strong(h, h + 1)) {
                     x = slot;
@@ -237,8 +243,9 @@ public:
         static_assert(std::is_base_of<PauseBase, Pause>::value,
                       "Pause should be derived by PauseBase");
         auto const t = tail.fetch_add(1);
-        auto& slot = slots[idx(t)];
-        auto& mark = marks[idx(t)];
+        auto& ps = slots[idx(t)];
+        auto& slot = ps.data;
+        auto& mark = ps.mark;
         while (mark.load(std::memory_order_acquire) != last_turn_read(t))
             Pause::pause();
         slot = x;
@@ -250,8 +257,9 @@ public:
         static_assert(std::is_base_of<PauseBase, Pause>::value,
                       "Pause should be derived by PauseBase");
         auto const h = head.fetch_add(1);
-        auto& slot = slots[idx(h)];
-        auto& mark = marks[idx(h)];
+        auto& ps = slots[idx(h)];
+        auto& slot = ps.data;
+        auto& mark = ps.mark;
         while (mark.load(std::memory_order_acquire) != this_turn_write(h))
             Pause::pause();
         T ret = slot;
