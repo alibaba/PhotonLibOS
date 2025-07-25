@@ -177,6 +177,18 @@ void expect_eq_vals(Node node, const char * const (&truth)[N]) {
      expect_eq_vals(node, truth, N);
 }
 
+void expect_types(Node node, const std::pair<const char*, uint8_t>* truth, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        auto val = node[truth[i].first];
+        EXPECT_EQ(val.type(), truth[i].second);
+    }
+}
+
+template<size_t N> inline
+void expect_types(Node node, const std::pair<const char*, uint8_t> (&truth)[N]) {
+    return expect_types(node, truth, N);
+}
+
 TEST(simple_dom, json) {
     const static char json0[] = R"({
         "hello": "world",
@@ -196,6 +208,11 @@ TEST(simple_dom, json) {
         {"i",       "-123"},
         {"pi",      "3.1416"},
     });
+    using TYPE = Node::TYPE;
+    expect_types(doc, {{"hello", TYPE::STRING}, {"t", TYPE::BOOLEAN},
+                       {"f", TYPE::BOOLEAN},    {"n", TYPE::null},
+                       {"i", TYPE::NUMBER},     {"pi", TYPE::NUMBER},
+                       {"a", TYPE::ARRAY}});
     EXPECT_EQ(doc["i"].to_int64_t(), -123);
     EXPECT_NEAR(doc["pi"].to_double(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
