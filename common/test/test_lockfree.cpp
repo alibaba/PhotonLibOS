@@ -34,6 +34,8 @@ limitations under the License.
 #include <thread>
 #include <vector>
 #include <photon/common/alog.h>
+#include <gtest/gtest.h>
+#include <gflags/gflags.h>
 #include "../../test/ci-tools.h"
 
 static constexpr size_t sender_num = 4;
@@ -86,7 +88,7 @@ int test_queue(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            photon::set_cpu_affinity(i);
+            photon::set_cpu_affinity(i * 2);
             std::chrono::nanoseconds rspent(std::chrono::nanoseconds(0));
             for (size_t x = 0; x < items_num / receiver_num; x++) {
                 int t;
@@ -109,7 +111,7 @@ int test_queue(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            photon::set_cpu_affinity(i);
+            photon::set_cpu_affinity(i * 2 + 1);
             std::chrono::nanoseconds wspent{std::chrono::nanoseconds(0)};
             for (size_t x = 0; x < items_num / sender_num; x++) {
                 auto tm = std::chrono::high_resolution_clock::now();
@@ -135,9 +137,8 @@ int test_queue(const char *name, QType &queue) {
     LOG_DEBUG("` ` p ` c, ` items, Spent ` us", name, sender_num, receiver_num, items_num,
            std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     for (size_t i = 0; i < items_num / sender_num; i++) {
-        if (sc[i] != rc[i] || sc[i] != sender_num) {
-            LOG_DEBUG("MISMATCH ` ` `", i, sc[i].load(), rc[i].load());
-        }
+        EXPECT_EQ(sc[i], rc[i]);
+        EXPECT_EQ(sc[i].load(), (int)sender_num);
         sc[i] = 0;
         rc[i] = 0;
     }
@@ -153,7 +154,7 @@ int test_queue_batch(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
-            photon::set_cpu_affinity(i);
+            photon::set_cpu_affinity(i * 2);
             int buffer[32];
             size_t size;
             int amount = items_num / receiver_num;
@@ -181,7 +182,7 @@ int test_queue_batch(const char *name, QType &queue) {
     }
     for (size_t i = 0; i < sender_num; i++) {
         senders.emplace_back([i, &queue] {
-            photon::set_cpu_affinity(i);
+            photon::set_cpu_affinity(i * 2 + 1);
             std::vector<int> vec;
             vec.resize(items_num / sender_num);
             for (size_t x = 0; x < items_num / sender_num; x++) {
@@ -215,9 +216,8 @@ int test_queue_batch(const char *name, QType &queue) {
     LOG_DEBUG("` ` p ` c, ` items, Spent ` us", name, sender_num, receiver_num, items_num,
            std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count());
     for (size_t i = 0; i < items_num / sender_num; i++) {
-        if (sc[i] != rc[i] || sc[i] != sender_num) {
-            LOG_DEBUG("MISMATCH ` ` `", i, sc[i].load(), rc[i].load());
-        }
+        EXPECT_EQ(sc[i], rc[i]);
+        EXPECT_EQ(sc[i].load(), (int)sender_num);
         sc[i] = 0;
         rc[i] = 0;
     }
@@ -225,16 +225,24 @@ int test_queue_batch(const char *name, QType &queue) {
     return 0;
 }
 
-int main() {
+TEST(lockfree_queue, test_queue) {
 #ifdef TESTING_ENABLE_BOOST
     test_queue<NoLock, NoLock>("BoostQueue", bqueue);
 #endif
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
-    test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch", lbqueue);
+    test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch",
+                                     lbqueue);
 #ifdef TESTING_ENABLE_BOOST
     test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
 #endif
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
+}
+
+int main(int argc, char **arg) {
+    if (!photon::is_using_default_engine()) return 0;
+    ::testing::InitGoogleTest(&argc, arg);
+    gflags::ParseCommandLineFlags(&argc, &arg, true);
+    return RUN_ALL_TESTS();
 }
