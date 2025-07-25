@@ -160,7 +160,7 @@ protected:
 // This queue may block if one of processes crashed during push / pop
 // Do not use as IPC base. Use it to collect data and send by
 // LockfreeSPSCRingQueue
-template <typename T, size_t N>
+template <typename T, size_t N, typename MarkType = uint64_t>
 class LockfreeMPMCRingQueue : public LockfreeRingQueueBase<T, N> {
 protected:
     using Base = LockfreeRingQueueBase<T, N>;
@@ -171,20 +171,20 @@ protected:
 
     struct alignas(Base::CACHELINE_SIZE) packedslot {
         T data;
-        std::atomic<uint64_t> mark{0};
+        std::atomic<MarkType> mark{0};
     };
     
     packedslot slots[Base::capacity];
 
-    uint64_t this_turn_write(const uint64_t x) const {
+    MarkType this_turn_write(const uint64_t x) const {
         return (Base::turn(x) << 1) + 1;
     }
 
-    uint64_t this_turn_read(const uint64_t x) const {
+    MarkType this_turn_read(const uint64_t x) const {
         return (Base::turn(x) << 1) + 2;
     }
 
-    uint64_t last_turn_read(const uint64_t x) const {
+    MarkType last_turn_read(const uint64_t x) const {
         return Base::turn(x) << 1;
     }
 
