@@ -188,14 +188,15 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     JNode* get_root() {
         return _root;
     }
-    void emplace_back(const char* s, size_t length) {
+    void emplace_back(const char* s, size_t length, uint8_t type) {
         str val{s, length};     // _key may be empty()
         _nodes.back().emplace_back(_key, val, _root);
+        _nodes.back().back().set_type(type);
         // LOG_DEBUG(_key, ": ", val);
         _key = {};
     }
     bool Null() {
-        emplace_back(0, 0);
+        emplace_back(0, 0, JNode::null);
         return true;
     }
     bool Key(const char* s, SizeType len, bool copy) {
@@ -205,22 +206,22 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     }
     bool String(const char* s, SizeType len, bool copy) {
         assert(!copy);
-        emplace_back(s, len);
+        emplace_back(s, len, JNode::STRING);
         return true;
     }
     bool RawNumber(const Ch* s, SizeType len, bool copy) {
         assert(!copy);
         // LOG_DEBUG(ALogString(s, len));
-        emplace_back(s, len);
+        emplace_back(s, len, JNode::NUMBER);
         return true;
     }
     bool RawBool(const Ch* s, SizeType len, bool copy) {
         assert(!copy);
-        emplace_back(s, len);
+        emplace_back(s, len, JNode::BOOLEAN);
         return true;
     }
     bool StartObject() {
-        emplace_back(0, 0);
+        emplace_back(0, 0, JNode::OBJECT);
         _nodes.emplace_back();
         return true;
     }
@@ -237,7 +238,7 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         _nodes.back().back().set_children(std::move(temp), _indexing);
     }
     bool StartArray() {
-        emplace_back(0, 0);
+        emplace_back(0, 0, JNode::ARRAY);
         _nodes.emplace_back();
         return true;
     }
