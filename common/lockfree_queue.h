@@ -19,9 +19,11 @@ limitations under the License.
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #ifndef __aarch64__
 #include <immintrin.h>
@@ -30,38 +32,6 @@ limitations under the License.
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
 #include <photon/thread/thread.h>
-
-#define size_t uint64_t
-
-template <size_t x>
-struct Capacity_2expN {
-    constexpr static size_t capacity = Capacity_2expN<(x >> 1)>::capacity << 1;
-    constexpr static size_t mask = capacity - 1;
-    constexpr static size_t shift = Capacity_2expN<(x >> 1)>::shift + 1;
-    constexpr static size_t lshift = Capacity_2expN<(x >> 1)>::lshift - 1;
-
-    static_assert(shift + lshift == sizeof(size_t) * 8, "...");
-};
-
-template <size_t x>
-constexpr size_t Capacity_2expN<x>::capacity;
-
-template <size_t x>
-constexpr size_t Capacity_2expN<x>::mask;
-
-template <>
-struct Capacity_2expN<0> {
-    constexpr static size_t capacity = 2;
-    constexpr static size_t mask = 1;
-    constexpr static size_t shift = 1;
-    constexpr static size_t lshift = 8 * sizeof(size_t) - shift;
-};
-
-template <>
-struct Capacity_2expN<1> : public Capacity_2expN<0> {};
-
-template <>
-struct Capacity_2expN<2> : public Capacity_2expN<0> {};
 
 struct PauseBase {};
 
@@ -90,6 +60,15 @@ struct PhotonPause : PauseBase {
     }
 };
 
+struct CPUCacheLine {
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+    // ARM64 cache line size is 128 bytes on Apple Silicon
+    constexpr static size_t SIZE = 128;
+#else
+    constexpr static size_t SIZE = 64;
+#endif
+};
+
 template <typename T>
 struct is_shared_ptr : std::false_type {};
 template <typename T>
@@ -110,16 +89,32 @@ public:
                   "T should be trivially copyable");
 #endif
 
-    constexpr static size_t CACHELINE_SIZE = 64;
+    constexpr static size_t SLOTS_NUM =
+        N ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(N - 1)) : 0;
 
-    constexpr static size_t capacity = Capacity_2expN<N>::capacity;
-    constexpr static size_t mask = Capacity_2expN<N>::mask;
-    constexpr static size_t shift = Capacity_2expN<N>::shift;
-    constexpr static size_t lshift = Capacity_2expN<N>::lshift;
+    const size_t capacity;
+    const size_t mask;
+    const size_t shift;
+    const size_t lshift;
 
-    alignas(CACHELINE_SIZE) std::atomic<size_t> tail{0};
-    alignas(CACHELINE_SIZE) std::atomic<size_t> head{0};
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> tail{0};
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> head{0};
 
+    // For only flexible queue
+    explicit LockfreeRingQueueBase(size_t c)
+        : capacity(c > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(c - 1))
+                         : 2),
+          mask(capacity - 1),
+          shift(__builtin_ctzll(capacity)),
+          lshift(8 * sizeof(size_t) - shift) {}
+
+    // For only deterministic queue
+    LockfreeRingQueueBase()
+        : capacity(N > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(N - 1))
+                         : 2),
+          mask(capacity - 1),
+          shift(__builtin_ctzll(capacity)),
+          lshift(8 * sizeof(size_t) - shift) {}
     bool empty() {
         return check_empty(head.load(std::memory_order_relaxed),
                            tail.load(std::memory_order_relaxed));
@@ -156,6 +151,44 @@ protected:
     size_t turn(size_t x) const { return x >> shift; }
 };
 
+template <typename T, typename Q>
+class FlexQueue : public Q {
+protected:
+    FlexQueue(size_t c) : Q(c) {}
+    ~FlexQueue() {}
+
+public:
+    static FlexQueue* create(size_t c) {
+        size_t space = required_space(c);
+        void* ptr = nullptr;
+        posix_memalign(&ptr, CPUCacheLine::SIZE, required_space(c));
+        if (!ptr) return nullptr;
+        memset(ptr, 0, space);
+        return new (ptr) FlexQueue(c);
+    }
+
+    static size_t required_space(size_t c) {
+        size_t capacity =
+            c > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(c - 1)) : 2;
+        return sizeof(Q) + capacity * sizeof(T);
+    }
+
+    static FlexQueue* init_on(void* ptr, size_t c) {
+        if (!ptr) return nullptr;
+        return new (ptr) FlexQueue(c);
+    }
+
+    static void deinit(FlexQueue* q) {
+        if (!q) return;
+        q->~FlexQueue();
+    }
+
+    static void destroy(FlexQueue* q) {
+        deinit(q);
+        free(q);
+    }
+};
+
 // !!NOTICE: DO NOT USE LockfreeMPMCRingQueue in IPC
 // This queue may block if one of processes crashed during push / pop
 // Do not use as IPC base. Use it to collect data and send by
@@ -169,12 +202,14 @@ protected:
     using Base::idx;
     using Base::tail;
 
-    struct alignas(Base::CACHELINE_SIZE) packedslot {
+public:
+    struct alignas(CPUCacheLine::SIZE) packedslot {
         T data;
         std::atomic<MarkType> mark{0};
     };
-    
-    packedslot slots[Base::capacity];
+
+protected:
+    packedslot slots[Base::SLOTS_NUM];
 
     MarkType this_turn_write(const uint64_t x) const {
         return (Base::turn(x) << 1) + 1;
@@ -188,9 +223,13 @@ protected:
         return Base::turn(x) << 1;
     }
 
+    explicit LockfreeMPMCRingQueue(size_t c) : Base(c) {}
+
 public:
     using Base::empty;
     using Base::full;
+
+    explicit LockfreeMPMCRingQueue() : Base() {}
 
     bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
@@ -268,6 +307,11 @@ public:
     }
 };
 
+template <typename T>
+using FlexLockfreeMPMCRingQueue =
+    FlexQueue<typename LockfreeMPMCRingQueue<T, 0>::packedslot,
+              LockfreeMPMCRingQueue<T, 0>>;
+
 template <typename T, size_t N>
 class LockfreeBatchMPMCRingQueue : public LockfreeRingQueueBase<T, N> {
 protected:
@@ -280,36 +324,27 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head;
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail;
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head;
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail;
 
-    T slots[Base::capacity];
-
-    uint64_t this_turn_write(const uint64_t x) const {
-        return (Base::turn(x) << 1) + 1;
-    }
-
-    uint64_t this_turn_read(const uint64_t x) const {
-        return (Base::turn(x) << 1) + 2;
-    }
-
-    uint64_t last_turn_read(const uint64_t x) const {
-        return Base::turn(x) << 1;
-    }
+    T slots[Base::SLOTS_NUM];
+    explicit LockfreeBatchMPMCRingQueue(size_t c) : Base(c) {}
 
 public:
     using Base::empty;
     using Base::full;
 
-    size_t push_batch(const T *x, size_t n) {
+    explicit LockfreeBatchMPMCRingQueue() : Base() {}
+
+    size_t push_batch(const T* x, size_t n) {
         size_t rh, wt;
         wt = tail.load(std::memory_order_acquire);
         for (;;) {
             rh = head.load(std::memory_order_acquire);
             auto wn = std::min(n, Base::capacity - (wt - rh));
-            if (wn == 0)
-                return 0;
-            if (!tail.compare_exchange_strong(wt, wt + wn, std::memory_order_acq_rel))
+            if (wn == 0) return 0;
+            if (!tail.compare_exchange_strong(wt, wt + wn,
+                                              std::memory_order_acq_rel))
                 continue;
             auto first_idx = idx(wt);
             auto part_length = Base::capacity - first_idx;
@@ -318,28 +353,28 @@ public:
             } else {
                 if (likely(part_length))
                     memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
-                memcpy(&slots[0], x + part_length, sizeof(T) * (wn - part_length));
+                memcpy(&slots[0], x + part_length,
+                       sizeof(T) * (wn - part_length));
             }
             auto wh = wt;
-            while (!write_head.compare_exchange_strong(wh, wt + wn, std::memory_order_acq_rel))
+            while (!write_head.compare_exchange_strong(
+                wh, wt + wn, std::memory_order_acq_rel))
                 wh = wt;
             return wn;
         }
     }
 
-    bool push(const T &x) {
-        return push_batch(&x, 1) == 1;
-    }
+    bool push(const T& x) { return push_batch(&x, 1) == 1; }
 
-    size_t pop_batch(T *x, size_t n) {
+    size_t pop_batch(T* x, size_t n) {
         size_t rt, wh;
         rt = read_tail.load(std::memory_order_acquire);
         for (;;) {
             wh = write_head.load(std::memory_order_acquire);
             auto rn = std::min(n, wh - rt);
-            if (rn == 0)
-                return 0;
-            if (!read_tail.compare_exchange_strong(rt, rt + rn, std::memory_order_acq_rel))
+            if (rn == 0) return 0;
+            if (!read_tail.compare_exchange_strong(rt, rt + rn,
+                                                   std::memory_order_acq_rel))
                 continue;
             auto first_idx = idx(rt);
             auto part_length = Base::capacity - first_idx;
@@ -348,10 +383,12 @@ public:
             } else {
                 if (likely(part_length))
                     memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
-                memcpy(x + part_length, &slots[0], sizeof(T) * (rn - part_length));
+                memcpy(x + part_length, &slots[0],
+                       sizeof(T) * (rn - part_length));
             }
             auto rh = rt;
-            while (!head.compare_exchange_strong(rh, rt + rn, std::memory_order_acq_rel))
+            while (!head.compare_exchange_strong(rh, rt + rn,
+                                                 std::memory_order_acq_rel))
                 rh = rt;
             return rn;
         }
@@ -417,6 +454,10 @@ public:
     }
 };
 
+template <typename T>
+using FlexLockfreeBatchMPMCRingQueue =
+    FlexQueue<T, LockfreeBatchMPMCRingQueue<T, 0>>;
+
 template <typename T, size_t N>
 class LockfreeSPSCRingQueue : public LockfreeRingQueueBase<T, N> {
 protected:
@@ -425,11 +466,15 @@ protected:
     using Base::idx;
     using Base::tail;
 
-    T slots[Base::capacity];
+    T slots[Base::SLOTS_NUM];
+
+    explicit LockfreeSPSCRingQueue(size_t c) : Base(c) {}
 
 public:
     using Base::empty;
     using Base::full;
+
+    explicit LockfreeSPSCRingQueue() : Base() {}
 
     bool push(const T& x) {
         auto t = tail.load(std::memory_order_acquire);
@@ -520,6 +565,9 @@ public:
     }
 };
 
+template <typename T>
+using FlexLockfreeSPSCRingQueue = FlexQueue<T, LockfreeSPSCRingQueue<T, 0>>;
+
 namespace photon {
 namespace common {
 
@@ -599,6 +647,3 @@ public:
 
 }  // namespace common
 }  // namespace photon
-
-#undef size_t
-
