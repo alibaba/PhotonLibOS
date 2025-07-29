@@ -122,12 +122,18 @@ uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc);
 uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc);
 uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
 uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
+uint32_t (*crc32c_combine_auto)(uint32_t crc1, uint32_t crc2, uint32_t len2);
+uint32_t (*crc32c_combine_series_auto)(uint32_t* crc, uint32_t part_size, uint32_t n_parts);
+void (*crc32c_series_auto)(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts);
 
 __attribute__((constructor))
 static void crc_init() {
+    auto tie32 = std::tie(crc32c_auto, crc32c_series_auto, crc32c_combine_auto, crc32c_combine_series_auto);
+    auto hw32 = std::make_tuple(crc32c_hw, crc32c_series_hw, crc32c_combine_hw, crc32c_combine_series_hw); (void)hw32;
+    auto sw32 = std::make_tuple(crc32c_sw, crc32c_series_sw, crc32c_combine_sw, crc32c_combine_series_sw); (void)sw32;
 #if defined(__x86_64__)
     __builtin_cpu_init();
-    crc32c_auto = __builtin_cpu_supports("sse4.2") ? crc32c_hw : crc32c_sw;
+    tie32       = __builtin_cpu_supports("sse4.2") ? hw32 : sw32;
     auto avx512 = __builtin_cpu_supports("avx512f")  &&
                   __builtin_cpu_supports("avx512dq") &&
                   __builtin_cpu_supports("avx512vl") &&
@@ -138,18 +144,18 @@ static void crc_init() {
                         crc64ecma_hw_sse128 : crc64ecma_sw;
 #elif defined(__aarch64__)
 #ifdef __APPLE__  // apple silicon has hw for both crc
-    crc32c_auto = crc32c_hw;
+    tie32 = hw32;
     crc64ecma_auto = crc64ecma_hw_sse128;
 #elif defined(__linux__)  // linux on arm: runtime detection
     long hwcaps= getauxval(AT_HWCAP);
-    crc32c_auto = (hwcaps & HWCAP_CRC32) ? crc32c_hw : crc32c_sw;
+    tie32 = (hwcaps & HWCAP_CRC32) ? hw32 : sw32;
     crc64ecma_auto = (hwcaps & HWCAP_PMULL) ? crc64ecma_hw_sse128 : crc64ecma_sw;
 #else
-    crc32c_auto = crc32c_sw;
+    tie32 = sw32;
     crc64ecma_auto = crc64ecma_sw;
 #endif
 #else // not __aarch64__, not __x86_64__
-    crc32c_auto = crc32c_sw;
+    tie32 = sw32;
     crc64ecma_auto = crc64ecma_sw;
 #endif
 }
@@ -458,6 +464,7 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     crc1 = crc32c(crc1, ptr[blksz_8 * 2 - 1]);
     // crc2 = crc32c(crc2, ptr[blksz_8 * 3 - 1]);
 
+    static_assert((blksz/8 - 1)*2 + 1< LEN(crc32_merge_table_pclmulqdq), "...");
     auto k = &crc32_merge_table_pclmulqdq[(blksz/8 - 1)*2];
     __m128i c0 = {(long)crc}, c1 = {(long)crc1};
     auto t = SSE::pclmulqdq<0x00>(c0, k) ^
@@ -498,6 +505,207 @@ uint32_t crc32c_hw_simple(const uint8_t *data, size_t nbytes, uint32_t crc) {
 uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
     return crc32c_hw_portable(data, nbytes, crc);
 }
+
+// for 2nd size of 16, 32, ..., 2G bytes
+const static uint32_t crc32c_combine_table[] = {
+    0x493c7d27, 0xba4fc28e, 0x9e4addf8, 0x0d3b6092,
+    0xb9e02b86, 0xdd7e3b0c, 0x170076fa, 0xa51b6135,
+    0x82f89c77, 0x54a86326, 0x1dc403cc, 0x5ae703ab,
+    0xc5013a36, 0xac2ac6dd, 0x9b4615a9, 0x688d1c61,
+    0xf6af14e6, 0xb6ffe386, 0xb717425b, 0x478b0d30,
+    0x54cc62e5, 0x7b2102ee, 0x8a99adef, 0xa7568c8f,
+    0xd610d67e, 0x6b086b3f, 0xd94f3c0b, 0xbf818109,
+};
+
+static uint32_t crc32c_shift(uint32_t crc1, uint32_t len2,
+           uint32_t (*shift)(uint32_t crc1, uint32_t x)) {
+    for (len2 >>= 4; len2; len2 &= len2 - 1) {
+        auto x = crc32c_combine_table[__builtin_ctz(len2)];
+        crc1 = shift(crc1, x);
+    }
+    return crc1;
+}
+
+static uint32_t crc32c_shift_hw(uint32_t crc1, uint32_t x) {
+    uint64_t dat64;
+    __m128i crc1x, cnstx;
+    crc1x = _mm_setr_epi32(crc1, 0, 0, 0);
+    cnstx = _mm_setr_epi32(x, 0, 0, 0);
+    crc1x = _mm_clmulepi64_si128(crc1x, cnstx, 0);
+    dat64 = _mm_cvtsi128_si64(crc1x);
+    return crc32c((uint32_t)0, dat64);
+}
+
+uint32_t crc32c_combine_hw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
+    crc1 = crc32c_shift(crc1, len2, crc32c_shift_hw);
+    if (unlikely(len2 &= 16 - 1)) {
+        // I don't know why this doesn't work, while it works for crc32c_combine_sw()
+        LOG_ERROR_RETURN(EINVAL, -1, "len2 must be a multiple of 16");
+        if (unlikely(len2 & 8)) crc1 = crc32c(crc1, (uint64_t)0);
+        if (unlikely(len2 & 4)) crc1 = crc32c(crc1, (uint32_t)0);
+        if (unlikely(len2 & 2)) crc1 = crc32c(crc1, (uint16_t)0);
+        if (unlikely(len2 & 1)) crc1 = crc32c(crc1, (uint8_t)0);
+    }
+    return crc1 ^ crc2;
+}
+
+uint32_t crc32c_combine_series_hw(uint32_t* crc, uint32_t part_size, uint32_t n_parts) {
+    if (unlikely(!n_parts)) return 0;
+    auto res = crc[0];
+    for (uint32_t i = 1; i < n_parts; ++i)
+        res = crc32c_combine_hw(res, crc[i], part_size);
+    return res;
+}
+
+static uint64_t bit_reverse32_64(uint32_t x) {
+        x = (((x & 0xaaaaaaaa) >> 1) | ((x & 0x55555555) << 1));
+        x = (((x & 0xcccccccc) >> 2) | ((x & 0x33333333) << 2));
+        x = (((x & 0xf0f0f0f0) >> 4) | ((x & 0x0f0f0f0f) << 4));
+        x = (((x & 0xff00ff00) >> 8) | ((x & 0x00ff00ff) << 8));
+        uint64_t x64 = (x >> 16) | (x << 16);
+        return x64 << 32;
+}
+
+static uint32_t crc32c_shift_sw(uint32_t crc1, uint32_t x) {
+    uint64_t q = 0, xrev = bit_reverse32_64(x);
+    for (int i = 0; i < 64; i++, xrev >>= 1)
+        q = (q << 1) | __builtin_parity(crc1 & xrev);
+    return crc32c_sw((uint8_t*)&q, 8, 0);
+}
+
+uint32_t crc32c_combine_sw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
+    crc1 = crc32c_shift(crc1, len2, crc32c_shift_sw);
+    if (unlikely(len2 &= 16 - 1)) {
+        const static unsigned char zero[8] = {0};
+        if (unlikely(len2 & 8)) crc1 = crc32c_sw(zero, 8, crc1);
+        if (unlikely(len2 & 4)) crc1 = crc32c_sw(zero, 4, crc1);
+        if (unlikely(len2 & 2)) crc1 = crc32c_sw(zero, 2, crc1);
+        if (unlikely(len2 & 1)) crc1 = crc32c_sw(zero, 1, crc1);
+    }
+    return crc1 ^ crc2;
+}
+
+static uint32_t crc32_remove0(uint32_t crc1, size_t len2) {
+    // remove the effect of the zeros added to crc1
+    // If crc1 = crcA * x^len2 mod p(x), then crcA = crc1 * (x^len2)^(-1) mod p(x)
+    // Based on crc32_combine_return_crcA0, but uses inverse matrix to remove zeros.
+    // The matrix for removing one zero bit (M^-1) is the inverse of the matrix for appending one zero bit.
+
+    // degenerated case
+    if (len2 == 0)
+        return crc1;
+
+    /// CRC32 => 32 bits
+    const uint32_t CrcBits = 32;
+
+    uint32_t odd[CrcBits];  // operator for removing 2^k zeros, k is odd
+    uint32_t even[CrcBits]; // operator for removing 2^k zeros, k is even
+
+    // put operator for removing one zero bit in odd
+    // The columns of this inverse matrix are:
+    // Column j (for j from 0 to 30) is 1 << (j+1)
+    // Column 31 is 0x05EC76F1
+    for (int i = 0; i < (int)CrcBits - 1; i++)
+        odd[i] = 1U << (i + 1);
+    odd[CrcBits - 1] = 0x05EC76F1;
+
+    // put operator for removing two zero bits in even
+    // by squaring the odd matrix: even = odd * odd
+    for (int i = 0; i < (int)CrcBits; i++)
+    {
+        uint32_t vec = odd[i];
+        even[i] = 0;
+        for (int j = 0; vec != 0; j++, vec >>= 1)
+            if (vec & 1)
+                even[i] ^= odd[j];
+    }
+
+    // put operator for removing four zero bits in odd
+    // by squaring the even matrix: odd = even * even
+    for (int i = 0; i < (int)CrcBits; i++)
+    {
+        uint32_t vec = even[i];
+        odd[i] = 0;
+        for (int j = 0; vec != 0; j++, vec >>= 1)
+            if (vec & 1)
+                odd[i] ^= even[j];
+    }
+
+    // apply len2 zeros removal to crc1
+    uint32_t* a = even;
+    uint32_t* b = odd;
+    for (; len2 > 0; len2 >>= 1)
+    {
+        // square the matrix, from b to a
+        for (int i = 0; i < (int)CrcBits; i++)
+        {
+            uint32_t vec = b[i];
+            a[i] = 0;
+            for (int j = 0; vec != 0; j++, vec >>= 1)
+                if (vec & 1)
+                    a[i] ^= b[j];
+        }
+
+        // apply operator for this bit
+        if (len2 & 1)
+        {
+            // multiply crc1 by matrix a
+            uint32_t sum = 0;
+            uint32_t crc_copy = crc1;
+            for (int i = 0; crc_copy != 0; i++, crc_copy >>= 1)
+                if (crc_copy & 1)
+                    sum ^= a[i];
+            crc1 = sum;
+        }
+
+        // switch even and odd
+        uint32_t* t = a; a = b; b = t;
+    }
+
+    return crc1;
+}
+
+uint32_t crc32c_trim_sw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix) {
+    if (all.size < prefix.size + suffix.size)
+        LOG_ERRNO_RETURN(EINVAL, 0, "total size (`) is shorter than summed sizes of prefix (`) + suffix (`)", all.size, prefix.size, suffix.size);
+    auto crc = all.crc;
+    if (prefix.size)
+        crc ^= crc32c_shift(prefix.crc, all.size - prefix.size, crc32c_shift_hw);
+    if (suffix.size)
+        crc = crc32_remove0(crc ^ suffix.crc, suffix.size);
+    return crc;
+}
+
+uint32_t crc32c_combine_series_sw(uint32_t* crc, uint32_t part_size, uint32_t n_parts) {
+    if (unlikely(!n_parts)) return 0;
+    auto res = crc[0];
+    for (uint32_t i = 1; i < n_parts; ++i)
+        res = crc32c_combine_sw(res, crc[i], part_size);
+    return res;
+}
+
+void crc32c_series_sw(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts) {
+    for (uint32_t i = 0; i < n_parts; ++i)
+        crc_parts[i] = crc32c_sw(buffer + i * part_size, part_size, 0);
+}
+
+void crc32c_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts) {
+    memset(crc_parts, 0, n_parts * sizeof(uint32_t));
+    uint64_t i = 0;
+    auto perf = [&](auto type) {
+        using T = decltype(type);
+        for (; i < part_size; i += sizeof(T)) {
+            #pragma GCC unroll 8
+            for (uint64_t j = 0; j < n_parts; ++j) {
+                auto ptr = buffer + i + j * part_size;
+                crc_parts[j] = crc32c(crc_parts[j], *(T*)ptr);
+            }
+        }
+    };
+    perf(i);
+    perf(buffer[0]);
+}
+
 
 // rk1 ~ rk20
 __attribute__((aligned(16), used))
