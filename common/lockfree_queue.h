@@ -60,6 +60,15 @@ struct PhotonPause : PauseBase {
     }
 };
 
+struct CPUCacheLine {
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+    // ARM64 cache line size is 128 bytes on Apple Silicon
+    constexpr static size_t SIZE = 128;
+#else
+    constexpr static size_t SIZE = 64;
+#endif
+};
+
 template <typename T>
 struct is_shared_ptr : std::false_type {};
 template <typename T>
@@ -80,7 +89,6 @@ public:
                   "T should be trivially copyable");
 #endif
 
-    constexpr static size_t CACHELINE_SIZE = 64;
     constexpr static size_t SLOTS_NUM =
         N ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(N - 1)) : 0;
 
@@ -89,8 +97,8 @@ public:
     const size_t shift;
     const size_t lshift;
 
-    alignas(CACHELINE_SIZE) std::atomic<size_t> tail{0};
-    alignas(CACHELINE_SIZE) std::atomic<size_t> head{0};
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> tail{0};
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> head{0};
 
     // For only flexible queue
     explicit LockfreeRingQueueBase(size_t c)
@@ -146,7 +154,6 @@ protected:
 template <typename T, typename Q>
 class FlexQueue : public Q {
 protected:
-    constexpr static size_t CACHELINE_SIZE = 64;
     FlexQueue(size_t c) : Q(c) {}
     ~FlexQueue() {}
 
@@ -154,7 +161,7 @@ public:
     static FlexQueue* create(size_t c) {
         size_t space = required_space(c);
         void* ptr = nullptr;
-        posix_memalign(&ptr, CACHELINE_SIZE, required_space(c));
+        posix_memalign(&ptr, CPUCacheLine::SIZE, required_space(c));
         if (!ptr) return nullptr;
         memset(ptr, 0, space);
         return new (ptr) FlexQueue(c);
@@ -196,7 +203,7 @@ protected:
     using Base::tail;
 
 public:
-    struct alignas(Base::CACHELINE_SIZE) packedslot {
+    struct alignas(CPUCacheLine::SIZE) packedslot {
         T data;
         std::atomic<MarkType> mark{0};
     };
@@ -317,8 +324,8 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
-    alignas(Base::CACHELINE_SIZE) std::atomic<size_t> write_head;
-    alignas(Base::CACHELINE_SIZE) std::atomic<size_t> read_tail;
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head;
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail;
 
     T slots[Base::SLOTS_NUM];
     explicit LockfreeBatchMPMCRingQueue(size_t c) : Base(c) {}
