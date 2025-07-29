@@ -226,6 +226,32 @@ TEST(TestChecksum, crc64ecma_hw_asm) {
     do_test64(crc64ecma_hw_asm_name, crc64ecma_hw_asm);
 }
 
+TEST(TestChecksum, crc32_combine) {
+    const uint32_t N = 10, M = 512;
+    uint32_t crc[N] = {0};
+    unsigned char buf[M * N];
+    for (auto& c: buf) c = rand();
+    crc32c_series_sw(buf, M, N, crc);
+    auto x = crc[0];
+    for (uint32_t i = 1; i < N; ++i)
+        x = crc32c_combine_sw(x, crc[i], M);
+    EXPECT_EQ(x, crc32c_sw(buf, M * N, 0));
+    EXPECT_EQ(x, crc32c_combine_series_sw(crc, M, N));
+
+    memset(crc, 0, sizeof(crc));
+    crc32c_series_hw(buf, M, N, crc);
+    /*auto*/ x = crc[0];
+    for (uint32_t i = 1; i < N; ++i)
+        x = crc32c_combine_hw(x, crc[i], M);
+    EXPECT_EQ(x, crc32c_hw(buf, M * N, 0));
+    EXPECT_EQ(x, crc32c_combine_series_hw(crc, M, N));
+
+    auto crc1 = crc32c_hw(buf, 128, 0);
+    auto crc2 = crc32c_hw(buf + 128, sizeof(buf) - 128*2, 0);
+    auto crc3 = crc32c_hw(buf + sizeof(buf) - 128, 128, 0);
+    EXPECT_EQ(crc32c_trim({x, sizeof(buf)}, {crc1, 128}, {crc3, 128}), crc2);
+}
+
 int main(int argc, char **argv)
 {
     if (!photon::is_using_default_engine()) return 0;
