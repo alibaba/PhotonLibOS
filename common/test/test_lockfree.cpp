@@ -53,8 +53,20 @@ std::array<int, sender_num> scnt;
 std::array<std::atomic<int>, items_num / sender_num> sc, rc;
 
 LockfreeMPMCRingQueue<int, capacity> lqueue;
+FlexLockfreeMPMCRingQueue<int> &luqueue = [] {
+    static auto q = FlexLockfreeMPMCRingQueue<int>::create(capacity);
+    return std::ref(*q);
+}();
 LockfreeBatchMPMCRingQueue<int, capacity> lbqueue;
+FlexLockfreeBatchMPMCRingQueue<int> &lubqueue = [] {
+    static auto q = FlexLockfreeBatchMPMCRingQueue<int>::create(capacity);
+    return std::ref(*q);
+}();
 LockfreeSPSCRingQueue<int, capacity> cqueue;
+FlexLockfreeSPSCRingQueue<int> &cuqueue = [] {
+    static auto q = FlexLockfreeSPSCRingQueue<int>::create(capacity);
+    return std::ref(*q);
+}();
 std::mutex rlock, wlock;
 
 #ifdef TESTING_ENABLE_BOOST
@@ -230,19 +242,28 @@ TEST(lockfree_queue, test_queue) {
     test_queue<NoLock, NoLock>("BoostQueue", bqueue);
 #endif
     test_queue<NoLock, NoLock>("PhotonLockfreeMPMCQueue", lqueue);
+    test_queue<NoLock, NoLock>("FlexPhotonLockfreeMPMCQueue", luqueue);
     test_queue<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue", lbqueue);
     test_queue_batch<NoLock, NoLock>("PhotonLockfreeBatchMPMCQueue+Batch",
                                      lbqueue);
+    test_queue<NoLock, NoLock>("FlexPhotonLockfreeBatchMPMCQueue", lubqueue);
+    test_queue_batch<NoLock, NoLock>("FlexPhotonLockfreeBatchMPMCQueue+Batch",
+                                     lubqueue);
 #ifdef TESTING_ENABLE_BOOST
     test_queue<WithLock, WithLock>("BoostSPSCQueue", squeue);
 #endif
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
+    test_queue<WithLock, WithLock>("FlexPhotonSPSCQueue", cuqueue);
+    test_queue_batch<WithLock, WithLock>("FlexPhotonSPSCQueue+Batch", cuqueue);
 }
 
 int main(int argc, char **arg) {
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
     gflags::ParseCommandLineFlags(&argc, &arg, true);
+    DEFER(luqueue.destroy(&luqueue));
+    DEFER(lubqueue.destroy(&lubqueue));
+    DEFER(cuqueue.destroy(&cuqueue));
     return RUN_ALL_TESTS();
 }
