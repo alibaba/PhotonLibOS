@@ -40,64 +40,70 @@ DEFINE_uint64(vcpu_num, 1, "vCPU number for both client and server");
 DEFINE_string(socket_type, "tcp", "Support tcp/rsocket/io_uring");
 
 static bool stop_test = false;
-static uint64_t qps = 0;
-static uint64_t time_cost = 0;
+static std::atomic<uint64_t> qps = {};
+static std::atomic<uint64_t> time_cost = {};
 
-// Create WorkPool is enabling multi vCPU
+// Use WorkPool to enable multi vCPU for client
 static photon::WorkPool* work_pool = nullptr;
+static int event_engine = photon::INIT_EVENT_DEFAULT;
 
 static void handle_signal(int sig) {
     LOG_INFO("Try to gracefully stop test ...");
     stop_test = true;
 }
 
-static void run_qps_loop() {
+static void run_statistics_loop(bool show_latency) {
     while (!stop_test) {
         photon::thread_sleep(FLAGS_show_statistics_interval);
-        LOG_INFO("qps: `", qps / FLAGS_show_statistics_interval);
+        uint64_t qps_val = qps.load();
+        if (show_latency) {
+            uint64_t lat = (qps_val != 0) ? (time_cost.load() / qps_val) : 0;
+            LOG_INFO("qps: `, bw: ` MB/s, latency: ` us", qps_val / FLAGS_show_statistics_interval,
+                     ((qps_val * FLAGS_buf_size) >> 20UL) / FLAGS_show_statistics_interval, lat);
+        } else {
+            LOG_INFO("qps: `, bw: ` MB/s", qps_val / FLAGS_show_statistics_interval,
+                     ((qps_val * FLAGS_buf_size) >> 20UL) / FLAGS_show_statistics_interval);
+        }
         qps = 0;
-    }
-}
-
-static void run_latency_loop() {
-    while (!stop_test) {
-        photon::thread_sleep(FLAGS_show_statistics_interval);
-        uint64_t lat = (qps != 0) ? (time_cost / qps) : 0;
-        LOG_INFO("latency: ` us", lat);
-        qps = time_cost = 0;
+        time_cost = 0;
     }
 }
 
 // Create coroutines for each of the connections, doing pingpong send/recv
 static int ping_pong_client() {
-    photon::net::EndPoint ep{photon::net::IPAddr(FLAGS_ip.c_str()), (uint16_t) FLAGS_port};
-    photon::net::ISocketClient* cli;
-    if (FLAGS_socket_type == "rsocket") {
-#ifdef PHOTON_ENABLE_RSOCKET
-        cli = photon::net::new_rsocket_client();
-#else
-        cli = nullptr;
-#endif
-    } else if (FLAGS_socket_type == "io_uring") {
-#ifdef PHOTON_URING
-        cli = photon::net::new_iouring_tcp_client();
-#else
-        cli = nullptr;
-#endif
-    } else {
-        cli = photon::net::new_tcp_socket_client();
+    if (FLAGS_vcpu_num > 1) {
+        work_pool = new photon::WorkPool(FLAGS_vcpu_num, event_engine, photon::INIT_IO_NONE);
     }
-    if (cli == nullptr) {
-        LOG_ERRNO_RETURN(0, -1, "fail to create client");
-    }
-    DEFER(delete cli);
+    DEFER(delete work_pool);
 
-    auto run_ping_pong_worker = [&]() -> int {
-        // Round-robin dispatch threads in WorkPool
+    auto run_ping_pong_worker = [&](size_t conn_index) -> int {
+        size_t vcpu_index = conn_index % FLAGS_vcpu_num;
         if (work_pool) {
-            work_pool->thread_migrate();
+            work_pool->thread_migrate(photon::CURRENT, vcpu_index);
         }
-        // After the above call, this function begins to run in another vCPU
+        // After the above call, this function begins to run in the specific vCPU
+
+        photon::net::EndPoint ep(FLAGS_ip.c_str(), uint16_t(FLAGS_port + vcpu_index));
+        photon::net::ISocketClient* cli;
+        if (FLAGS_socket_type == "rsocket") {
+#ifdef PHOTON_ENABLE_RSOCKET
+            cli = photon::net::new_rsocket_client();
+#else
+            cli = nullptr;
+#endif
+        } else if (FLAGS_socket_type == "io_uring") {
+#ifdef PHOTON_URING
+            cli = photon::net::new_iouring_tcp_client();
+#else
+            cli = nullptr;
+#endif
+        } else {
+            cli = photon::net::new_tcp_socket_client();
+        }
+        if (cli == nullptr) {
+            LOG_ERRNO_RETURN(0, -1, "fail to create client");
+        }
+        DEFER(delete cli);
 
         auto buf = malloc(FLAGS_buf_size);
         DEFER(free(buf));
@@ -127,10 +133,10 @@ static int ping_pong_client() {
         return 0;
     };
 
-    photon::thread_create11(run_latency_loop);
+    photon::thread_create11(run_statistics_loop, true);
 
     for (size_t i = 0; i < FLAGS_client_connection_num; i++) {
-        photon::thread_create11(run_ping_pong_worker);
+        photon::thread_create11(run_ping_pong_worker, i);
     }
 
     // Forever sleep until Ctrl + C
@@ -204,52 +210,13 @@ static int echo_server() {
     photon::sync_signal(SIGTERM, &handle_signal);
     photon::sync_signal(SIGINT, &handle_signal);
 
-    // Create socket server
-    photon::net::ISocketServer* server;
-    if (FLAGS_socket_type == "rsocket") {
-#ifdef PHOTON_ENABLE_RSOCKET
-        server = photon::net::new_rsocket_server();
-#else
-        server = nullptr;
-#endif
-    } else if (FLAGS_socket_type == "io_uring") {
-#ifdef PHOTON_URING
-        server = photon::net::new_iouring_tcp_server();
-#else
-        server = nullptr;
-#endif
-    } else {
-        server = photon::net::new_tcp_socket_server();
-    }
-    if (server == nullptr) {
-        LOG_ERRNO_RETURN(0, -1, "fail to create server")
-    }
-    DEFER(delete server);
-
-    auto stop_watcher = [&] {
-        while (true) {
-            photon::thread_sleep(1);
-            if (stop_test) {
-                LOG_INFO("terminate server");
-                server->terminate();
-                break;
-            }
-        }
-    };
-
     // Define handler for new connections.
-    // Every connection will be running in a new thread after it is accepted.
     auto handler = [&](photon::net::ISocketStream* sock) -> int {
-        if (work_pool) {
-            // Migrate current thread (connection) to another vCPU in WorkPool.
-            // The default policy is round-robin.
-            work_pool->thread_migrate();
-        }
         auto buf = malloc(FLAGS_buf_size);
         DEFER(free(buf));
-        while (true) {
+        while (!stop_test) {
             ssize_t ret1, ret2;
-            ret1 = sock->recv(buf, FLAGS_buf_size);
+            ret1 = sock->read(buf, FLAGS_buf_size);
             if (ret1 <= 0) {
                 LOG_ERRNO_RETURN(0, -1, "read fail", VALUE(ret1));
             }
@@ -263,19 +230,72 @@ static int echo_server() {
         return 0;
     };
 
-    auto qps_th = photon::thread_create11(run_qps_loop);
-    photon::thread_enable_join(qps_th);
+    std::vector<std::thread> vcpu_arr(FLAGS_vcpu_num);
+    std::vector<photon::net::ISocketServer*> socket_server_arr(FLAGS_vcpu_num);
+
+    // Create multiple vCPUs for server. Each of them listens to an individual port
+    for (size_t i = 0; i < FLAGS_vcpu_num; ++i) {
+        vcpu_arr[i] = std::thread([&, i]{
+            photon::init(event_engine, photon::INIT_IO_NONE);
+            DEFER(photon::fini());
+
+            // Create socket server
+            photon::net::ISocketServer* server;
+            if (FLAGS_socket_type == "rsocket") {
+#ifdef PHOTON_ENABLE_RSOCKET
+                server = photon::net::new_rsocket_server();
+#else
+                server = nullptr;
+#endif
+            } else if (FLAGS_socket_type == "io_uring") {
+#ifdef PHOTON_URING
+                server = photon::net::new_iouring_tcp_server();
+#else
+                server = nullptr;
+#endif
+            } else {
+                server = photon::net::new_tcp_socket_server();
+            }
+            if (server == nullptr) {
+                LOG_ERRNO_RETURN(0, -1, "fail to create server")
+            }
+            DEFER(delete server);
+            socket_server_arr[i] = server;
+
+            server->set_handler(handler);
+            server->setsockopt<int>(SOL_SOCKET, SO_REUSEPORT, 1);
+            server->bind_v4any(uint16_t(FLAGS_port + i));
+            server->listen();
+            server->start_loop(true);
+            return 0;
+        });
+    }
+
+    auto stop_watcher = [&] {
+        while (true) {
+            photon::thread_sleep(1);
+            if (stop_test) {
+                LOG_INFO("terminate server");
+                for (auto server : socket_server_arr) {
+                    server->terminate();
+                }
+                break;
+            }
+        }
+    };
+
+    auto statistics_th = photon::thread_create11(run_statistics_loop, false);
+    photon::thread_enable_join(statistics_th);
 
     auto stop_th = photon::thread_create11(stop_watcher);
     photon::thread_enable_join(stop_th);
 
-    server->set_handler(handler);
-    server->bind_v4any(FLAGS_port);
-    server->listen();
-    server->start_loop(true);
-
-    photon::thread_join((photon::join_handle*) qps_th);
+    photon::thread_join((photon::join_handle*) statistics_th);
     photon::thread_join((photon::join_handle*) stop_th);
+
+    for (auto& vcpu_th : vcpu_arr) {
+        vcpu_th.join();
+    }
     return 0;
 }
 
@@ -286,16 +306,14 @@ int main(int argc, char** arg) {
     // Note Photon's default event engine in Linux is epoll.
     // Running an io_uring program would need the kernel version to be greater than 5.8.
     // We encourage you to upgrade to the latest kernel so that you could enjoy the extraordinary performance.
-    int ret = photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    if (FLAGS_socket_type == "iouring") {
+        event_engine = photon::INIT_EVENT_IOURING;
+    }
+    int ret = photon::init(event_engine, photon::INIT_IO_NONE);
     if (ret < 0) {
         LOG_ERROR_RETURN(0, -1, "failed to init photon environment");
     }
     DEFER(photon::fini());
-
-    if (FLAGS_vcpu_num > 1) {
-        work_pool = new photon::WorkPool(FLAGS_vcpu_num, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
-    }
-    DEFER(delete work_pool);
 
     if (FLAGS_client) {
         if (FLAGS_client_mode == "streaming") {
