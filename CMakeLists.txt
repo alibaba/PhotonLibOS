@@ -60,10 +60,8 @@ set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/downl
 # The release version we use is https://github.com/linux-rdma/rdma-core/releases/download/v58.0/rdma-core-58.0.tar.gz
 set(PHOTON_RDMACORE_SOURCE "" CACHE STRING "")
 
-# Get CPU arch
-execute_process(COMMAND uname -m OUTPUT_VARIABLE ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
-if (NOT (${ARCH} STREQUAL x86_64) AND NOT (${ARCH} STREQUAL aarch64) AND NOT (${ARCH} STREQUAL arm64))
-    message(FATAL_ERROR "Unknown CPU architecture ${ARCH}")
+if (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
+    message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
 endif ()
 
 # Global compile options, only effective within this project
@@ -101,13 +99,21 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat")
 endif()
 
-if (${ARCH} STREQUAL x86_64)
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
     check_cxx_compiler_flag(-mcrc32 COMPILER_HAS_MCRC32_FLAG)
     if (COMPILER_HAS_MCRC32_FLAG)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
     endif ()
-elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+elseif ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    if (NOT CMAKE_CXX_FLAGS MATCHES "-march=|-mcpu=")
+        check_cxx_compiler_flag(-mcpu=native COMPILER_HAS_NATIVE_FLAG)
+        if (COMPILER_HAS_NATIVE_FLAG)
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native")
+        else ()
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc")
+        endif ()
+    endif ()
 endif ()
 
 # Default build type is Release
