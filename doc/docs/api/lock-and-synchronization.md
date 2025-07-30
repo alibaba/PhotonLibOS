@@ -29,15 +29,21 @@ other coroutines, if the lock owner might have a chance to yield its CPU.
 ```cpp
 class mutex {
 public:
-    int lock(uint64_t timeout = -1);	// threads are guaranteed to get the lock
-    int try_lock();                    	// in FIFO order, when there's contention
+    int lock(Timeout timeout = {});
+    int try_lock();
     void unlock();
 }
 ```
 
 :::note
-The timeout type is `uint64_t`. -1UL means forever.
+The default value of Timeout is -1UL (microseconds), which means forever.
 :::
+
+```cpp
+// For seq_mutex, threads are guaranteed to get the lock in FIFO order, when there's contention
+class seq_mutex : public mutex {
+};
+```
 
 #### spinlock
 
@@ -61,14 +67,14 @@ using scoped_lock = locker<mutex>;
 ```cpp
 class condition_variable {
 public:
-    int wait(mutex* m, uint64_t timeout = -1);
-    int wait(mutex& m, uint64_t timeout = -1);
+    int wait(mutex* m, Timeout timeout = {});
+    int wait(mutex& m, Timeout timeout = {});
 
-    int wait(spinlock* m, uint64_t timeout = -1);
-    int wait(spinlock& m, uint64_t timeout = -1);
+    int wait(spinlock* m, Timeout timeout = {});
+    int wait(spinlock& m, Timeout timeout = {});
 
-    int wait(scoped_lock& lock, uint64_t timeout = -1);
-    int wait_no_lock(uint64_t timeout = -1);
+    int wait(scoped_lock& lock, Timeout timeout = {});
+    int wait_no_lock(Timeout timeout = {});
     
     thread* notify_one();
     int notify_all();
@@ -81,7 +87,20 @@ public:
 class semaphore {
 public:
     explicit semaphore(uint64_t count = 0);
-    int wait(uint64_t count, uint64_t timeout = -1);
+    /**
+     * @brief A wrapper of wait that cannot be interrupted
+     */
+    int wait(uint64_t count, Timeout timeout = {});
+    /**
+     * @brief Subtract count.
+     * @return 1) Count is successfully subtracted (might have been waited). Returns 0.
+     *         2) Count is not enough until timeout. Returns -1, errno is set to ETIMEDOUT.
+     *         3) Interrupted by another thread before timeout. Returns -1, errno is decided by the interrupter.
+     */
+    int wait_interruptible(uint64_t count, Timeout timeout = {});
+    /**
+     * @brief Add count. Does not require Photon environment, can be invoked in any std thread.
+     */
     int signal(uint64_t count);
     uint64_t count() const;
 };
@@ -92,7 +111,7 @@ public:
 ```cpp
 class rwlock {
 public:
-    int lock(int mode, uint64_t timeout = -1);	// mode: RLOCK / WLOCK
+    int lock(int mode, Timeout timeout = {});	// mode: RLOCK / WLOCK
     int unlock();
 };
 ```

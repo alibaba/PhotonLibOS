@@ -437,6 +437,10 @@ namespace photon
     public:
         explicit semaphore(uint64_t count = 0, bool in_order_resume = true)
             : m_count(count), m_ooo_resume(!in_order_resume) { }
+
+        /**
+         * @brief A wrapper of wait that cannot be interrupted
+         */
         int wait(uint64_t count, Timeout timeout = {}) {
             int ret = 0;
             do {
@@ -444,7 +448,17 @@ namespace photon
             } while (ret < 0 && (errno != ESHUTDOWN && errno != ETIMEDOUT));
             return ret;
         }
+
+        /**
+         * @return 1) Count is successfully subtracted (might have been waited). Returns 0.
+         *         2) Count is not enough until timeout. Returns -1, errno is set to ETIMEDOUT.
+         *         3) Interrupted by another thread before timeout. Returns -1, errno is decided by the interrupter.
+         */
         int wait_interruptible(uint64_t count, Timeout timeout = {});
+
+        /**
+         * @brief Add count. Does not require Photon environment, can be invoked in any std thread.
+         */
         int signal(uint64_t count) {
             if (count == 0) return 0;
             SCOPED_LOCK(splock);
@@ -452,6 +466,7 @@ namespace photon
             try_resume(cnt);
             return 0;
         }
+
         uint64_t count() const {
             return m_count.load(std::memory_order_relaxed);
         }

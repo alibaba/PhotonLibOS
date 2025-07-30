@@ -24,15 +24,21 @@ toc_max_heading_level: 4
 ```cpp
 class mutex {
 public:
-    int lock(uint64_t timeout = -1);	// threads are guaranteed to get the lock
-    int try_lock();                    	// in FIFO order, when there's contention
+    int lock(Timeout timeout = {});
+    int try_lock();
     void unlock();
 }
 ```
 
 :::note
-The timeout type is `uint64_t`. -1UL means forever.
+`photon::Timeout`的默认值是-1UL (microseconds)，即永不超时
 :::
+
+```cpp
+// 对于seq_mutex, 协程抢锁时如果有竞争，会按照FIFO顺序拿到锁
+class seq_mutex : public mutex {
+};
+```
 
 #### spinlock
 
@@ -56,15 +62,15 @@ using scoped_lock = locker<mutex>;
 ```cpp
 class condition_variable {
 public:
-    int wait(mutex* m, uint64_t timeout = -1);
-    int wait(mutex& m, uint64_t timeout = -1);
+    int wait(mutex* m, Timeout timeout = {});
+    int wait(mutex& m, Timeout timeout = {});
 
-    int wait(spinlock* m, uint64_t timeout = -1);
-    int wait(spinlock& m, uint64_t timeout = -1);
+    int wait(spinlock* m, Timeout timeout = {});
+    int wait(spinlock& m, Timeout timeout = {});
 
-    int wait(scoped_lock& lock, uint64_t timeout = -1);
+    int wait(scoped_lock& lock, Timeout timeout = {});
     // 针对不需要跨vCPU使用的场景，不加锁可以提升性能
-    int wait_no_lock(uint64_t timeout = -1);
+    int wait_no_lock(Timeout timeout = {});
     
     thread* notify_one();
     int notify_all();
@@ -77,7 +83,20 @@ public:
 class semaphore {
 public:
     explicit semaphore(uint64_t count = 0);
-    int wait(uint64_t count, uint64_t timeout = -1);
+    /**
+     * @brief 不会被打断的wait
+     */
+    int wait(uint64_t count, Timeout timeout = {});
+    /**
+     * @brief 减去count
+     * @return 1) count被成功减去（可能经过了等待）。返回0
+     *         2) count不足，直到超时。返回-1，errno被设置成`ETIMEDOUT`
+     *         3) 在超时前被其他协程唤醒。返回-1，errno由负责唤醒的协程决定
+     */
+    int wait_interruptible(uint64_t count, Timeout timeout = {});
+    /**
+     * @brief 增加count。不依赖Photon环境，可以在任何std::thread里面调用
+     */
     int signal(uint64_t count);
     uint64_t count() const;
 };
@@ -88,7 +107,7 @@ public:
 ```cpp
 class rwlock {
 public:
-    int lock(int mode, uint64_t timeout = -1);	// mode: RLOCK / WLOCK
+    int lock(int mode, Timeout timeout = {});	// mode: RLOCK / WLOCK
     int unlock();
 };
 ```
