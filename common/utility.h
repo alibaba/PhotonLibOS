@@ -312,8 +312,13 @@ public:
 	}
 */
 
+#ifndef likely
 constexpr bool likely(bool expr) { return __builtin_expect(expr, true); }
+#endif /* likely */
+
+#ifndef unlikely
 constexpr bool unlikely(bool expr) { return __builtin_expect(expr, false); }
+#endif /* unlikely */
 
 int version_compare(std::string_view a, std::string_view b, int& result);
 int kernel_version_compare(std::string_view dst, int& result);
