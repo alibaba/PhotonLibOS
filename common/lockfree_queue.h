@@ -37,11 +37,7 @@ struct PauseBase {};
 
 struct CPUPause : PauseBase {
     inline static __attribute__((always_inline)) void pause() {
-#ifdef __aarch64__
-        asm volatile("isb" : : : "memory");
-#else
-        _mm_pause();
-#endif
+        photon::spin_wait();
     }
 };
 
@@ -51,9 +47,6 @@ struct ThreadPause : PauseBase {
     }
 };
 
-namespace photon {
-int thread_yield();
-}
 struct PhotonPause : PauseBase {
     inline static __attribute__((always_inline)) void pause() {
         photon::thread_yield();
@@ -493,6 +486,16 @@ public:
     }
 
     size_t push_batch(const T* x, size_t n) {
+        return produce_push_batch(n, [&](T* p1, size_t n1, T* p2, size_t n2) {
+            memcpy(p1, x, n1 * sizeof(T)); x += n1;
+            if (n2) { memcpy(p2, x, n2 * sizeof(T)); }
+        });
+    }
+
+    // Producer must be callable as produce(T* offset1, size_t n, T* offset2, size_t n),
+    // and produce (write) data directly to the provided buffer.
+    template<typename Producer>
+    size_t produce_push_batch(size_t n, Producer&& produce) {
         auto t = tail.load(std::memory_order_relaxed);
         n = std::min(
             n, Base::capacity - (t - head.load(std::memory_order_acquire)));
@@ -500,28 +503,53 @@ public:
         auto first_idx = idx(t);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
-            memcpy(&slots[first_idx], x, sizeof(T) * n);
+            produce(&slots[first_idx], n, nullptr, 0);
         } else {
-            if (likely(part_length))
-                memcpy(&slots[first_idx], x, sizeof(T) * (part_length));
-            memcpy(&slots[0], x + part_length, sizeof(T) * (n - part_length));
+            produce(&slots[first_idx], part_length,
+                    &slots[0], n - part_length);
+        }
+        tail.store(t + n, std::memory_order_release);
+        return n;
+    }
+
+    template<typename Producer>
+    size_t produce_push_batch_fully(size_t n, Producer&& produce) {
+        auto t = tail.load(std::memory_order_relaxed);
+        if (n > Base::capacity - (t - head.load(std::memory_order_acquire))) return 0;
+        auto first_idx = idx(t);
+        auto part_length = Base::capacity - first_idx;
+        if (likely(part_length >= n)) {
+            produce(&slots[first_idx], n, nullptr, 0);
+        } else {
+            produce(&slots[first_idx], part_length,
+                    &slots[0], n - part_length);
         }
         tail.store(t + n, std::memory_order_release);
         return n;
     }
 
     size_t pop_batch(T* x, size_t n) {
+        return consume_pop_batch(n, [&](const T* p1, size_t n1, const T* p2, size_t n2) {
+            memcpy(x, p1, sizeof(T) * n1); x += n1;
+            if (n2) { memcpy(x, p2, sizeof(T) * n2); }
+        });
+    }
+
+    // Consumer must be callable as consume(const T* offset1, size_t length,
+    //                                      const T* offset2, size_t length)
+    // and consume (read) data directly from the provided buffer.
+    template<typename Consumer>
+    size_t consume_pop_batch(size_t n, Consumer&& consume) {
         auto h = head.load(std::memory_order_relaxed);
         n = std::min(n, tail.load(std::memory_order_acquire) - h);
         if (n == 0) return 0;
         auto first_idx = idx(h);
         auto part_length = Base::capacity - first_idx;
         if (likely(part_length >= n)) {
-            memcpy(x, &slots[first_idx], sizeof(T) * n);
+            consume(&slots[first_idx], n, nullptr, 0);
         } else {
-            if (likely(part_length))
-                memcpy(x, &slots[first_idx], sizeof(T) * (part_length));
-            memcpy(x + part_length, &slots[0], sizeof(T) * (n - part_length));
+            consume(&slots[first_idx], part_length,
+                    &slots[0], n - part_length);
         }
         head.store(h + n, std::memory_order_release);
         return n;

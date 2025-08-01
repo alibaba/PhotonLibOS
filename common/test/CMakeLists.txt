@@ -35,3 +35,6 @@ add_test(NAME test-alog COMMAND $<TARGET_FILE:test-alog>)
 
 add_executable(perf-rcuptr perf_rcuptr.cpp)
 target_link_libraries(perf-rcuptr PRIVATE photon_shared)
+
+add_executable(perf-alog perf_alog.cpp)
+target_link_libraries(perf-alog PRIVATE photon_shared)
