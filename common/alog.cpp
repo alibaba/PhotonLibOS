@@ -37,76 +37,76 @@ limitations under the License.
 #include <vector>
 using namespace std;
 
+static uint32_t now0;
 static struct tm alog_time = {0};
-
-struct iovec_str : iovec {
-    template <size_t N>
-    constexpr iovec_str(const char (&s)[N])
-        : iovec{const_cast<char*>(s), N - 1} {}
-    constexpr iovec_str(const char* s, size_t n)
-        : iovec{const_cast<char*>(s), n} {}
-};
-
-constexpr static iovec_str alog_color_reset("\033[0m");
 
 class BaseLogOutput : public ILogOutput {
 public:
     uint64_t throttle = -1UL;
     uint64_t count = 0;
-    time_t ts = 0;
+    uint32_t ts = 0;
     int log_file_fd;
-    iovec_str level_prefix[ALOG_AUDIT + 1];
-
-    constexpr BaseLogOutput(int fd = 0)
-        : log_file_fd(fd),
-          level_prefix{ALOG_COLOR_DARKGRAY, ALOG_COLOR_LIGHTGRAY,
-                       ALOG_COLOR_YELLOW,   ALOG_COLOR_RED,
-                       ALOG_COLOR_MAGENTA,  ALOG_COLOR_CYAN,
-                       ALOG_COLOR_GREEN} {}
-
-    void set_level_color(int level, const char* color, size_t len) override {
-        if (level < 0 || level > ALOG_AUDIT) return;
-        level_prefix[level] = {color, len};
+    constexpr BaseLogOutput(int fd = 0) : log_file_fd(fd) { }
+    unsigned char level_color[ALOG_AUDIT + 1] = { ALOG_COLOR_DARKGRAY,
+           ALOG_COLOR_NOTHING, ALOG_COLOR_YELLOW, ALOG_COLOR_RED,
+           ALOG_COLOR_MAGENTA, ALOG_COLOR_CYAN,   ALOG_COLOR_GREEN};
+    void clear_color() { memset(level_color, 0, sizeof(level_color)); }
+    uint16_t decode(uint16_t c) {
+        c = ((c & 0xf) << 8) | (c >> 4);
+        return c + *(uint16_t*)"00";
+    }
+    uint16_t get_color(unsigned int level) {
+        if (level < LEN(level_color))
+            if (auto c = level_color[level])
+                return decode(c);
+        return 0;
+    }
+    int set_level_color(int level, unsigned char code) override {
+        if ((uint32_t)level > ALOG_AUDIT)
+            LOG_ERROR_RETURN(EINVAL, -1, "invalid level ", level);
+        auto dx = decode(code);
+        if ((dx < decode(ALOG_COLOR_RED) &&
+            (dx > ALOG_COLOR_NOTHING)) ||
+            (dx > decode(ALOG_COLOR_LIGHTWHITE)) ||
+            (dx > decode(ALOG_COLOR_LIGHTGRAY) &&
+            (dx < decode(ALOG_COLOR_DARKGRAY)))) {
+                LOG_ERROR_RETURN(EINVAL, -1, "invalid color code ", code);
+        }
+        level_color[level] = code;
+        return 0;
     }
 
     struct LineIOV {
         struct iovec iov[3];
         size_t total_length;
         uint8_t iovst, iovcnt;
+        char color_prefix[6] = "\033[00m";
+        LineIOV(uint16_t color, const char* begin, const char* end) {
+            total_length = end - begin;
+            iov[1] = {(void*)begin, total_length};
+            if (!color) {
+                iovst = iovcnt = 1;
+            } else {
+                *(uint16_t*)&color_prefix[2] = color;
+                iov[0] = {color_prefix, LEN(color_prefix) - 1};
+                constexpr static char color_suffix[] = "\033[0m";
+                iov[2] = {(void*)color_suffix, LEN(color_suffix) - 1};
+                total_length += iov[0].iov_len + iov[2].iov_len;
+                iovst = 0; iovcnt = 3;
+            }
+        }
         iovec* start() { return iov + iovst; }
         int count() { return iovcnt; }
     };
-    LineIOV prepare_line_iov(int level_, const char* begin, const char* end) {
-        LineIOV iov;
-        unsigned int level = level_;
-        iov.total_length = end - begin;
-        iov.iov[1] = {(void*)begin, iov.total_length};
-        if (level >= LEN(level_prefix) || 0 == level_prefix[level].iov_len) {
-            iov.iovst = iov.iovcnt = 1;
-        } else {
-            iov.iov[0] = level_prefix[level];
-            iov.iov[2] = alog_color_reset;
-            iov.total_length += iov.iov[0].iov_len +
-                                iov.iov[2].iov_len ;
-            iov.iovst = 0; iov.iovcnt = 3;
-        }
-        return iov;
-    }
     void write(int level, const char* begin, const char* end) override {
-        auto iov = prepare_line_iov(level, begin, end);
+        LineIOV iov(get_color(level), begin, end);
         std::ignore = ::writev(log_file_fd, iov.start(), iov.count());
         throttle_block();
     }
     void throttle_block() {
         if (throttle == -1UL) return;
-        time_t t = mktime(&alog_time);
-        if (t > ts) {
-            ts = t;
-            count = 0;
-        }
-        if (++count > throttle) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        if (ts != now0) { ts = now0; count = 0; }
+        if (++count > throttle) { ::sleep(1); }
     }
     virtual int get_log_file_fd() override { return log_file_fd; }
     virtual uint64_t set_throttle(uint64_t t = -1) override { return throttle = t; }
@@ -257,8 +257,11 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
 }
 
 __attribute__((constructor)) static void __initial_timezone() { tzset(); }
-static time_t dayid = 0, minuteid = 0, tsdelta = 0;
-static struct tm* alog_update_time(time_t now0) {
+static struct tm* alog_update_time(uint32_t now0) {
+    static uint32_t dayid = 0, minuteid = 0;
+    static time_t tsdelta = 0;
+    ::now0 = now0;
+
     auto now = now0 + tsdelta;
     int sec = now % 60;    now /= 60;
     if (unlikely(now != minuteid)) {    // calibrate wall time every minute
@@ -481,8 +484,7 @@ public:
         static thread_local uint64_t index = 0;
         auto current = (++index) & (queue_num - 1);
         size_t ra;
-        auto iov = prepare_line_iov(level, begin, end);
-        {
+        LineIOV iov(get_color(level), begin, end); {
             SCOPED_LOCK(lock[current].get());
             ra = buf[current]->read_available();
             (void)buf[current]->produce_push_batch_fully(iov.total_length,
