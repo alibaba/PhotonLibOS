@@ -154,8 +154,8 @@ public:
     static FlexQueue* create(size_t c) {
         size_t space = required_space(c);
         void* ptr = nullptr;
-        posix_memalign(&ptr, CPUCacheLine::SIZE, required_space(c));
-        if (!ptr) return nullptr;
+        auto err = posix_memalign(&ptr, CPUCacheLine::SIZE, required_space(c));
+        if (err) return nullptr;
         memset(ptr, 0, space);
         return new (ptr) FlexQueue(c);
     }
