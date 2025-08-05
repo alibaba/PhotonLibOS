@@ -763,6 +763,7 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        call    _asan_start
         mov     0x40(%rbp), %rdi
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
