@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// #pragma GCC diagnostic push
-// #pragma GCC diagnostic ignored "-Wpacked-bitfield-compat"
 #include "oss.h"
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -32,7 +30,7 @@ limitations under the License.
 #include <photon/ecosystem/simple_dom.h>
 #include <photon/net/http/client.h>
 
-#include <map>
+#include <algorithm>
 #include <unordered_set>
 #include <string>
 #include <unistd.h>
@@ -1082,9 +1080,8 @@ int OssClient::check_prefix(std::string_view prefix) {
 struct oss_multipart_context {
   estring obj_path;
   std::string upload_id;
-
+  std::vector<std::pair<int, std::string>> part_list;
   photon::spinlock lock;
-  std::unordered_map<int, std::string> part_list;
 };
 
 int OssClient::init_multipart_upload(std::string_view object,
@@ -1146,10 +1143,8 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
 
   VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
 
-  ctx->lock.lock();
-  ctx->part_list.emplace(part_number, std::string(etag));
-  ctx->lock.unlock();
-
+  SCOPED_LOCK(ctx->lock);
+  ctx->part_list.emplace_back(part_number, etag);
   return cnt;
 }
 
@@ -1187,10 +1182,8 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   auto etag = child.to_string_view();
   if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag", op);
 
-  ctx->lock.lock();
-  ctx->part_list.emplace(part_number, std::string(etag));
-  ctx->lock.unlock();
-
+  SCOPED_LOCK(ctx->lock);
+  ctx->part_list.emplace_back(part_number, etag);
   return 0;
 }
 
@@ -1204,15 +1197,12 @@ int OssClient::complete_multipart_upload(void *context,
   estring req_body;
   req_body.appends("<CompleteMultipartUpload>");
 
+  std::sort(ctx->part_list.begin(), ctx->part_list.end(),
+    [](auto &a, auto &b) { return a.first < b.first; });
   for (auto &part : ctx->part_list) {
-    req_body.appends(
-        "<Part>"
-        "<PartNumber>",
-        part.first,
-        "</PartNumber>"
-        "<ETag>",
-        part.second,
-        "</ETag>"
+    req_body.appends("<Part>"
+        "<PartNumber>", part.first, "</PartNumber>"
+        "<ETag>", part.second, "</ETag>"
         "</Part>");
   }
   req_body.appends("</CompleteMultipartUpload>");
@@ -1280,5 +1270,3 @@ OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp) {
 
 }
 }
-
-// #pragma GCC diagnostic pop
