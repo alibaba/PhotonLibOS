@@ -16,6 +16,7 @@ limitations under the License.
 
 // #pragma GCC diagnostic push
 // #pragma GCC diagnostic ignored "-Wpacked-bitfield-compat"
+#include "oss.h"
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <openssl/hmac.h>
@@ -29,6 +30,7 @@ limitations under the License.
 #include <photon/thread/timer.h>
 #include <time.h>
 #include <photon/ecosystem/simple_dom.h>
+#include <photon/net/http/client.h>
 
 #include <map>
 #include <unordered_set>
@@ -37,7 +39,6 @@ limitations under the License.
 
 // #include "common/faultinjector.h"
 // #include "common/logger.h"
-#include "oss.h"
 #include "photon/common/iovector.h"
 #include "photon/fs/path.h"
 #include "photon/net/http/url.h"
@@ -577,9 +578,15 @@ class OssClientImpl : public OssClient {
             CredentialsProvider *credentialsProvider);
   ~OssClientImpl();
 
-  int list_objects(std::string_view prefix, ListObjectsCallback cb,
-                   bool delimiter, std::string *context = nullptr,
-                   int max_keys = 0);
+  int list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
+            bool delimiter, int max_keys = 0,
+            std::string *next_continuation_token = nullptr);
+
+  int list_objects_v1(std::string_view prefix, ListObjectsCallback cb,
+            bool delimiter, int max_keys = 0, std::string *marker = nullptr) {
+    // todo: implement a true v1
+    return list_objects_v2(prefix, cb, delimiter, max_keys, marker);
+  }
 
   int head_object(std::string_view object, ObjectHeaderMeta &meta);
 
@@ -884,18 +891,17 @@ int OssClient::delete_objects(std::string_view obj_prefix,
   return do_delete_objects(m_bucket, obj_prefix, objects);
 }
 
-int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
-                            bool delimiter, std::string *context, int max_keys) {
+int OssClient::list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
+                               bool delimiter, int max_keys, std::string *nct) {
   std::string marker;
-  if (context) marker = *context;
+  if (nct) marker = *nct;
   if (max_keys == 0) max_keys = m_oss_options.max_list_ret_cnt;
   do {
     int r =
         do_list_objects(m_bucket, prefix, cb, delimiter, max_keys, &marker);
     if (r < 0) return r;
-
-  } while (!context && !marker.empty());
-  if (context) *context = marker;
+  } while (!nct && !marker.empty());
+  if (nct) *nct = marker;
   return 0;
 }
 

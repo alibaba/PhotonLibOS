@@ -15,9 +15,12 @@ limitations under the License.
 */
 
 #pragma once
+#include <inttypes.h>
+#include <string>
+#include <vector>
+#include <sys/uio.h>
 #include <photon/common/object.h>
 #include <photon/common/callback.h>
-#include <photon/net/http/client.h>
 #include <photon/common/string_view.h>
 
 namespace photon {
@@ -72,10 +75,17 @@ using ListObjectsCallback = Delegate<int, const ListObjectsCBParams&>;
 class OssClient : public Object {
  public:
 
-  virtual
+  virtual int list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
+              bool delimiter, int max_keys = 0,
+              std::string *next_continuation_token = nullptr) = 0;
+
+  virtual int list_objects_v1(std::string_view prefix, ListObjectsCallback cb,
+              bool delimiter, int max_keys = 0, std::string *marker = nullptr) = 0;
+
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
-                   bool delimiter, std::string *context = nullptr,
-                   int max_keys = 0) = 0;
+        bool delimiter, int max_keys = 0, std::string *marker = nullptr) {
+    return list_objects_v2(prefix, cb, delimiter, max_keys, marker);
+  }
 
   virtual
   int head_object(std::string_view object, ObjectHeaderMeta &meta) = 0;
