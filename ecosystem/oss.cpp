@@ -699,8 +699,11 @@ class OssClientImpl : public OssClient {
 
   int head_object(std::string_view object, ObjectHeaderMeta &meta);
 
+  int fill_meta(HTTP_OP& op, ObjectMeta &meta);
+  int fill_meta(HTTP_OP& op, ObjectHeaderMeta &meta);
+
   ssize_t get_object(std::string_view object, const struct iovec *iov,
-                     int iovcnt, off_t offset);
+          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr);
 
   ssize_t put_object(std::string_view object, const struct iovec *iov,
                      int iovcnt, uint64_t *expected_crc64 = nullptr);
@@ -968,10 +971,10 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       OssSignedUrl m_oss_url(m_endpoint, bucket, "/", m_is_http);
       auto md5 = content_md5(body_view);
 
-      std::map<estring_view, estring_view> params = {
+      static const std::map<estring_view, estring_view> params = {
           {OSS_PARAM_KEY_DELETE, ""}
       };
-      std::map<estring_view, estring_view> headers = {
+      static const std::map<estring_view, estring_view> headers = {
           {OSS_HEADER_KEY_CONTENT_MD5, md5}
       };
       auto op = make_http_operation(Verb::POST, m_oss_url, params, headers);
@@ -1018,17 +1021,15 @@ int OssClient::head_object(std::string_view object, ObjectHeaderMeta &meta) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   auto op = make_http_operation(Verb::HEAD, oss_url);
   DO_CALL(op, -1, oss_url)
-  auto len = op->resp.resource_size();
-  if (len == -1) LOG_ERROR_RETURN(0, -1, "Unexpected http response header");
+  return fill_meta(op, meta);
+}
 
-  meta.size = static_cast<size_t>(len);
-  auto mtime = op->resp.headers["Last-Modified"];
-  if (!mtime.empty()) {
-    meta.mtime = get_lastmodified(mtime.data());
-  }
+int OssClient::fill_meta(HTTP_OP& op, ObjectHeaderMeta &meta) {
+  int ret = fill_meta(op, (ObjectMeta&)meta);
+  if (ret < 0) return ret;
 
-  meta.type = estring_view(op->resp.headers["x-oss-object-type"]);
-  meta.storage_class = estring_view(op->resp.headers["x-oss-storage-class"]);
+  meta.type = op->resp.headers["x-oss-object-type"];
+  meta.storage_class = op->resp.headers["x-oss-storage-class"];
 
   auto it = op->resp.headers.find("x-oss-hash-crc64ecma");
   meta.crc64.first = it != op->resp.headers.end();
@@ -1037,19 +1038,33 @@ int OssClient::head_object(std::string_view object, ObjectHeaderMeta &meta) {
   return 0;
 }
 
+int OssClient::fill_meta(HTTP_OP& op, ObjectMeta &meta) {
+  auto len = op->resp.resource_size();
+  if (len == -1)
+    LOG_ERROR_RETURN(0, -1, "Unexpected http response header");
+
+  meta.size = static_cast<size_t>(len);
+  auto mtime = op->resp.headers["Last-Modified"];
+  meta.mtime = mtime.empty() ? 0 : get_lastmodified(mtime.data());
+  auto etag = op->resp.headers["ETag"];
+  if (!etag.empty()) meta.etag = etag;
+  else meta.etag.clear();
+  return 0;
+}
+
 ssize_t OssClient::get_object(std::string_view obj_path, const struct iovec *iov,
-                              int iovcnt, off_t offset) {
+                              int iovcnt, off_t offset, ObjectHeaderMeta* meta) {
   int retry_times = OSS_REQUEST_RETRY_TIMES;
   auto retry_interval = OSS_REQUEST_RETRY_INTERVAL_US;
 
-retry:
   iovector_view view((struct iovec *)iov, iovcnt);
   auto cnt = view.sum();
   if (cnt == 0) return 0;
-  OssSignedUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
-
-  std::map<estring_view, estring_view> headers = {
+  static const std::map<estring_view, estring_view> headers = {
       {OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard"}};
+
+retry:
+  OssSignedUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
   auto op = make_http_operation(Verb::GET, oss_url, {}, headers);
   op->req.headers.range(offset, offset + cnt - 1);
   DO_CALL(op, -1, oss_url)
@@ -1084,6 +1099,9 @@ retry:
     errno = EIO;
   }
 
+  if (meta)
+    fill_meta(op, *meta);
+
   return ret;
 }
 
@@ -1095,7 +1113,7 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec *iov,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   auto content_type = lookup_mime_type(object);
 
-  std::map<estring_view, estring_view> headers = {
+  static const std::map<estring_view, estring_view> headers = {
       {OSS_HEADER_KEY_CONTENT_TYPE, content_type}};
   auto op = make_http_operation(Verb::PUT, oss_url, {}, headers);
   op->req.headers.content_length(cnt);
@@ -1114,7 +1132,7 @@ ssize_t OssClient::append_object(std::string_view object,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
   estring position_str = std::to_string(position);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
       {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}};
 
   std::map<estring_view, estring_view> headers;
@@ -1185,7 +1203,8 @@ int OssClient::init_multipart_upload(std::string_view object,
                                      void **context) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
-  std::map<estring_view, estring_view> params = {{OSS_PARAM_KEY_UPLOADS, ""}};
+  static const std::map<estring_view, estring_view> params = {
+    {OSS_PARAM_KEY_UPLOADS, ""}};
   auto content_type = lookup_mime_type(object);
   std::map<estring_view, estring_view> headers;
   if (!content_type.empty())
@@ -1220,7 +1239,7 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   assert(!ctx->upload_id.empty());
 
   estring part_nums_str = std::to_string(part_number);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
     {OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
@@ -1256,7 +1275,7 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
                          m_is_http);
 
   estring part_num_str = std::to_string(part_number);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
       {OSS_PARAM_KEY_PART_NUMBER, part_num_str},
       {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}};
 
@@ -1265,7 +1284,7 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   std::string range = "bytes=" + std::to_string(offset) + "-" +
                       std::to_string(offset + count - 1);
 
-  std::map<estring_view, estring_view> headers = {
+  static const std::map<estring_view, estring_view> headers = {
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source},
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range}};
 
@@ -1320,7 +1339,7 @@ int OssClient::complete_multipart_upload(void *context,
 
 
   DEFER(delete ctx);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 
@@ -1342,7 +1361,7 @@ int OssClient::abort_multipart_upload(void *context) {
                          m_is_http);
 
   DEFER(delete ctx);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 
@@ -1353,23 +1372,11 @@ int OssClient::abort_multipart_upload(void *context) {
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
-  std::map<estring_view, estring_view> params = {
+  static const std::map<estring_view, estring_view> params = {
       {OSS_PARAM_KEY_OBJECT_META, ""}};
   auto op = make_http_operation(Verb::HEAD, oss_url, params);
   DO_CALL(op, -1, oss_url)
-  auto len = op->resp.resource_size();
-  if (len == -1) LOG_ERROR_RETURN(0, -1, "Unexpected http response header");
-  meta.size = static_cast<size_t>(len);
-  auto mtime = op->resp.headers["Last-Modified"];
-  if (!mtime.empty()) {
-    meta.mtime = get_lastmodified(mtime.data());
-  }
-
-  auto obj_etag = op->resp.headers["ETag"];
-  if (!obj_etag.empty()) {
-    meta.etag.assign(obj_etag.data(), obj_etag.size());
-  }
-  return 0;
+  return fill_meta(op, meta);
 }
 
 int OssClient::delete_object(std::string_view obj_path) {

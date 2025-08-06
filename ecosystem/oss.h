@@ -87,7 +87,7 @@ class OssClient : public Object {
 
   virtual
   ssize_t get_object(std::string_view object, const struct iovec *iov,
-                     int iovcnt, off_t offset) = 0;
+          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr) = 0;
 
   virtual
   ssize_t put_object(std::string_view object, const struct iovec *iov,
