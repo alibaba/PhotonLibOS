@@ -16,15 +16,16 @@ limitations under the License.
 
 // #pragma GCC diagnostic push
 // #pragma GCC diagnostic ignored "-Wpacked-bitfield-compat"
-
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
+#include <openssl/evp.h>
 #include <photon/common/estring.h>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/string-keyed.h>
 #include <photon/thread/timer.h>
 #include <time.h>
 #include <photon/ecosystem/simple_dom.h>
@@ -46,25 +47,26 @@ limitations under the License.
 namespace photon {
 namespace objstore {
 
+using StringKV = unordered_map_string_kv;
 
-using Verb = photon::net::http::Verb;
-struct OpDeleter {
-  void operator()(photon::net::http::Client::Operation *x) { x->destroy(); }
-};
-using HTTP_OP =
-    std::unique_ptr<photon::net::http::Client::Operation, OpDeleter>;
+// unused constants will trigger compile error in photon,
+// unless they are defined in a header file
+#include "oss_constants.h"
 
-static constexpr int XML_LIMIT = 16 * 1024 * 1024;
-static photon::SimpleDOM::Node get_xml_node(const HTTP_OP &op) {
+using Verb = net::http::Verb;
+using Operation = net::http::Client::Operation;
+struct OpDeleter { void operator()(Operation *x) { x->destroy(); } };
+using HTTP_OP = std::unique_ptr<Operation, OpDeleter>;
+
+static SimpleDOM::Node get_xml_node(const HTTP_OP &op) {
   auto length = op->resp.headers.content_length();
   if (length > XML_LIMIT) LOG_ERROR_RETURN(EINVAL, {}, "xml length limit excceed `", length);
-  std::string body_buf;
-  body_buf.resize(length);
-  auto rc = op->resp.read(&body_buf[0], length);
-  if (rc != (ssize_t)length) LOG_ERROR_RETURN(0, {}, "body read error ` `", rc, length);
-  try {
-    auto doc = photon::SimpleDOM::parse_copy(body_buf.data(), body_buf.size(),
-                                             photon::SimpleDOM::DOC_XML);
+  auto body_buf = (char*) malloc(length);
+  auto rc = op->resp.read(body_buf, length);
+  if (rc != (ssize_t)length) LOG_ERRNO_RETURN(0, {}, "body read error ` `", rc, length);
+  try { // todo try catch inside simple_dom
+    auto doc = SimpleDOM::parse(body_buf, length,
+               SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
     if (!doc) LOG_ERROR_RETURN(0, {}, "failed to parse resp_body");
     return doc;
   } catch (std::exception const &e) {
@@ -104,114 +106,6 @@ static time_t get_list_lastmodified(std::string_view sv) {
   }
   return timegm(&tm);  // GMT
 }
-
-// not exposed in header file
-// use extern declaration in unit test like this:
-// extern const std::map<std::string, std::string> MIME_TYPE_MAP;
-
-// replace this later when photon is updated and has
-// unordered_map_string_key_case_insensitive.
-const std::map<std::string, std::string> MIME_TYPE_MAP = {
-  {"html", "text/html"},
-  {"htm", "text/html"},
-  {"shtml", "text/html"},
-  {"css", "text/css"},
-  {"xml", "text/xml"},
-  {"gif", "image/gif"},
-  {"jpeg", "image/jpeg"},
-  {"jpg", "image/jpeg"},
-  {"js", "application/x-javascript"},
-  {"atom", "application/atom+xml"},
-  {"rss", "application/rss+xml"},
-  {"mml", "text/mathml"},
-  {"txt", "text/plain"},
-  {"jad", "text/vnd.sun.j2me.app-descriptor"},
-  {"wml", "text/vnd.wap.wml"},
-  {"htc", "text/x-component"},
-  {"png", "image/png"},
-  {"tif", "image/tiff"},
-  {"tiff", "image/tiff"},
-  {"wbmp", "image/vnd.wap.wbmp"},
-  {"ico", "image/x-icon"},
-  {"jng", "image/x-jng"},
-  {"bmp", "image/x-ms-bmp"},
-  {"svg", "image/svg+xml"},
-  {"svgz", "image/svg+xml"},
-  {"webp", "image/webp"},
-  {"jar", "application/java-archive"},
-  {"war", "application/java-archive"},
-  {"ear", "application/java-archive"},
-  {"hqx", "application/mac-binhex40"},
-  {"doc ", "application/msword"},
-  {"pdf", "application/pdf"},
-  {"ps", "application/postscript"},
-  {"eps", "application/postscript"},
-  {"ai", "application/postscript"},
-  {"rtf", "application/rtf"},
-  {"xls", "application/vnd.ms-excel"},
-  {"ppt", "application/vnd.ms-powerpoint"},
-  {"wmlc", "application/vnd.wap.wmlc"},
-  {"kml", "application/vnd.google-earth.kml+xml"},
-  {"kmz", "application/vnd.google-earth.kmz"},
-  {"7z", "application/x-7z-compressed"},
-  {"cco", "application/x-cocoa"},
-  {"jardiff", "application/x-java-archive-diff"},
-  {"jnlp", "application/x-java-jnlp-file"},
-  {"run", "application/x-makeself"},
-  {"pl", "application/x-perl"},
-  {"pm", "application/x-perl"},
-  {"prc", "application/x-pilot"},
-  {"pdb", "application/x-pilot"},
-  {"rar", "application/x-rar-compressed"},
-  {"rpm", "application/x-redhat-package-manager"},
-  {"sea", "application/x-sea"},
-  {"swf", "application/x-shockwave-flash"},
-  {"sit", "application/x-stuffit"},
-  {"tcl", "application/x-tcl"},
-  {"tk", "application/x-tcl"},
-  {"der", "application/x-x509-ca-cert"},
-  {"pem", "application/x-x509-ca-cert"},
-  {"crt", "application/x-x509-ca-cert"},
-  {"xpi", "application/x-xpinstall"},
-  {"xhtml", "application/xhtml+xml"},
-  {"zip", "application/zip"},
-  {"wgz", "application/x-nokia-widget"},
-  {"bin", "application/octet-stream"},
-  {"exe", "application/octet-stream"},
-  {"dll", "application/octet-stream"},
-  {"deb", "application/octet-stream"},
-  {"dmg", "application/octet-stream"},
-  {"eot", "application/octet-stream"},
-  {"iso", "application/octet-stream"},
-  {"img", "application/octet-stream"},
-  {"msi", "application/octet-stream"},
-  {"msp", "application/octet-stream"},
-  {"msm", "application/octet-stream"},
-  {"mid", "audio/midi"},
-  {"midi", "audio/midi"},
-  {"kar", "audio/midi"},
-  {"mp3", "audio/mpeg"},
-  {"ogg", "audio/ogg"},
-  {"m4a", "audio/x-m4a"},
-  {"ra", "audio/x-realaudio"},
-  {"3gpp", "video/3gpp"},
-  {"3gp", "video/3gpp"},
-  {"mp4", "video/mp4"},
-  {"mpeg", "video/mpeg"},
-  {"mpg", "video/mpeg"},
-  {"mov", "video/quicktime"},
-  {"webm", "video/webm"},
-  {"flv", "video/x-flv"},
-  {"m4v", "video/x-m4v"},
-  {"mng", "video/x-mng"},
-  {"asx", "video/x-ms-asf"},
-  {"asf", "video/x-ms-asf"},
-  {"wmv", "video/x-ms-wmv"},
-  {"avi", "video/x-msvideo"},
-  {"ts", "video/MP2T"},
-  {"m3u8", "application/x-mpegURL"},
-  {"apk", "application/vnd.android.package-archive"},
-};
 
 static std::string_view lookup_mime_type(std::string_view name) {
   auto last_pos = name.find_last_of('.');
@@ -370,32 +264,6 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
     }                                                                       \
   }
 
-// all the defined header keys should be in lower case
-static const std::string OSS_HEADER_KEY_CONTENT_TYPE = "content-type";
-static const std::string OSS_HEADER_KEY_CONTENT_MD5 = "content-md5";
-static const std::string OSS_HEADER_KEY_X_OSS_COPY_SOURCE = "x-oss-copy-source";
-static const std::string OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE = "x-oss-copy-source-range";
-static const std::string OSS_HEADER_KEY_X_OSS_METADATA_DIRECTIVE = "x-oss-metadata-directive";
-static const std::string OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR = "x-oss-range-behavior";
-static const std::string OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE = "x-oss-forbid-overwrite";
-
-static const std::string OSS_PARAM_KEY_OBJECT_META = "objectMeta";
-static const std::string OSS_PARAM_KEY_LIST_TYPE = "list-type";
-static const std::string OSS_PARAM_KEY_MAX_KEYS = "max-keys";
-static const std::string OSS_PARAM_KEY_DELIMITER = "delimiter";
-static const std::string OSS_PARAM_KEY_PREFIX = "prefix";
-static const std::string OSS_PARAM_KEY_MARKER = "marker";
-static const std::string OSS_PARAM_KEY_CONTINUATION_TOKEN = "continuation-token";
-static const std::string OSS_PARAM_KEY_DELETE = "delete";
-static const std::string OSS_PARAM_KEY_UPLOADS = "uploads";
-static const std::string OSS_PARAM_KEY_PART_NUMBER = "partNumber";
-static const std::string OSS_PARAM_KEY_UPLOAD_ID = "uploadId";
-static const std::string OSS_PARAM_KEY_APPEND = "append";
-static const std::string OSS_PARAM_KEY_POSITION = "position";
-
-static constexpr int GMT_DATE_LIMIT = 64;
-static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds
-
 class OssSignedUrl {
  public:
   estring m_url, m_raw_object;
@@ -436,9 +304,7 @@ class OssSignedUrl {
     return m_raw_object;
   }
 
-  void append_params(estring &s,
-                     const std::map<estring_view, estring_view> &params,
-                     bool need_question_mark = true) {
+  void append_params(estring &s, const StringKV &params, bool need_question_mark = true) {
     if (!params.empty()) {
       auto it = params.begin();
       s.appends(make_ccl(need_question_mark, "?"), it->first,
@@ -450,9 +316,7 @@ class OssSignedUrl {
     }
   }
 
-  void append_headers(estring &s,
-                      const std::map<estring_view, estring_view> &header_map,
-                      bool v4_signature) {
+  void append_headers(estring &s,const StringKV &header_map, bool v4_signature) {
     for (auto &kv : header_map) {
       if (kv.second.empty()) continue;
       if (kv.first.substr(0, 5) != "x-oss" &&
@@ -465,12 +329,11 @@ class OssSignedUrl {
 
   std::string update_v1(std::string_view key, std::string_view key_secret,
                         std::string_view token, std::string_view method,
-                        const std::map<estring_view, estring_view> &params,
-                        const std::map<estring_view, estring_view> &headers) {
+                        const StringKV &params, const StringKV &headers) {
     m_url.resize(m_url_size);
     append_params(m_url, params);
 
-    estring ret, signature, data2sign;
+    estring ret, data2sign;
     update_gmt_date();
 
     estring_view content_md5, content_type;
@@ -496,7 +359,7 @@ class OssSignedUrl {
         OSS_PARAM_KEY_UPLOADS,     OSS_PARAM_KEY_UPLOAD_ID,
         OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_DELETE};
 
-    std::map<estring_view, estring_view> sub_params;
+    StringKV sub_params;
     for (auto &it : params) {
       if (sub_resources.count(it.first)) {
         sub_params.emplace(it.first, it.second);
@@ -504,7 +367,7 @@ class OssSignedUrl {
     }
     append_params(data2sign, sub_params);
 
-    photon::net::Base64Encode(hmac_sha1(key_secret, data2sign), signature);
+    auto signature = hmac_sha1_base64(key_secret, data2sign);
     ret.appends("OSS ", key, ":", signature);
     return ret;
   }
@@ -512,8 +375,7 @@ class OssSignedUrl {
   std::string update_v4(std::string_view region, std::string_view key,
                         std::string_view key_secret, std::string_view token,
                         std::string_view method,
-                        const std::map<estring_view, estring_view> &params,
-                        const std::map<estring_view, estring_view> &headers) {
+                        const StringKV &params, const StringKV &headers) {
     m_url.resize(m_url_size);
     append_params(m_url, params);
 
@@ -529,7 +391,7 @@ class OssSignedUrl {
     // headers are aloso sorted in lexicographical order
     // header1:value1\n
     // header2:value2\n
-    std::map<estring_view, estring_view> header_map = headers;
+    StringKV header_map = headers;
     header_map["x-oss-content-sha256"] = "UNSIGNED-PAYLOAD";
     header_map["x-oss-date"] = m_gmt_date_iso8601;
     if (!token.empty()) {
@@ -565,6 +427,11 @@ class OssSignedUrl {
     return ret;
   }
 
+  estring hmac_shax(estring_view key, estring_view data, const EVP_MD *evp_md) {
+    estring output;
+    unsigned int output_length;
+    output.resize(EVP_MAX_MD_SIZE);
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     struct hmac {
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
       HMAC_CTX ctx_, *ctx = &ctx_;
@@ -577,21 +444,23 @@ class OssSignedUrl {
 #endif
       operator HMAC_CTX*() { return ctx; }
     };
-
-  estring hmac_shax(estring_view key, estring_view data, const EVP_MD *evp_md) {
     hmac ctx;
-    estring output;
-    unsigned int output_length;
-    output.resize(EVP_MAX_MD_SIZE);
     HMAC_Init_ex(ctx, (const unsigned char *)key.data(), key.length(), evp_md, nullptr);
     HMAC_Update(ctx, (const unsigned char *)data.data(), data.length());
     HMAC_Final(ctx, (unsigned char *)&output[0], &output_length);
+#else  // #if OPENSSL_API_COMPAT < 0x30000000L
+    HMAC(evp_md, &key[0], key.length(),
+      (unsigned char *)data.data(), data.length(),
+      (unsigned char *)output.data(), &output_length);
+#endif // #if OPENSSL_API_COMPAT < 0x30000000L
     output.resize(output_length);
     return output;
   }
 
-  estring hmac_sha1(estring_view key, estring_view data) {
-    return hmac_shax(key, data, EVP_sha1());
+  estring hmac_sha1_base64(estring_view key, estring_view data) {
+    estring output;
+    net::Base64Encode(hmac_shax(key, data, EVP_sha1()), output);
+    return output;
   }
 
   estring hmac_sha256(estring_view key, estring_view data) {
@@ -602,21 +471,25 @@ class OssSignedUrl {
     static const std::string hex_map = "0123456789abcdef";
     std::string hex_data;
     hex_data.reserve(bytes.size() * 2);
-    for (size_t i = 0; i < bytes.size(); ++i) {
-      hex_data += hex_map[((unsigned char)bytes[i]) >> 4];
-      hex_data += hex_map[((unsigned char)bytes[i]) & 0xf];
+    for (unsigned char c: bytes) {
+      hex_data += hex_map[c >> 4];
+      hex_data += hex_map[c & 0xf];
     }
     return hex_data;
   }
 
   std::string sha256_hash(std::string_view data) {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
     unsigned char hash[SHA256_DIGEST_LENGTH];
     SHA256_CTX sha256;
     SHA256_Init(&sha256);
     SHA256_Update(&sha256, data.data(), data.size());
     SHA256_Final(hash, &sha256);
-
-    return hex(std::string_view((char *)hash, SHA256_DIGEST_LENGTH));
+#else
+    unsigned char hash[SHA256_DIGEST_LENGTH] = {0};
+    SHA256((unsigned char *)data.data(), data.size(), hash);
+#endif
+    return hex({(char *)hash, SHA256_DIGEST_LENGTH});
   }
 
   void update_gmt_date() {  // avoid updating GMT Time every time
@@ -674,16 +547,27 @@ static ssize_t body_writer_cb(void *iov_view, photon::net::http::Request *req) {
   return 0;
 }
 
-static std::string content_md5(iovector_view view) {
+static std::string md5_base64(iovector_view view) {
   std::string ret;
   char md[MD5_DIGEST_LENGTH];
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
   MD5_CTX ctx;
   MD5_Init(&ctx);
   for (const auto &iov : view) {
     MD5_Update(&ctx, iov.iov_base, iov.iov_len);
   }
   MD5_Final((unsigned char *)md, &ctx);
-  photon::net::Base64Encode(std::string_view(md, MD5_DIGEST_LENGTH), ret);
+#else
+  EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
+  EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
+  for (const auto &iov : view) {
+    EVP_DigestUpdate(mdctx, iov.iov_base, iov.iov_len);
+  }
+  unsigned int md5_digest_len = MD5_DIGEST_LENGTH;
+  EVP_DigestFinal_ex(mdctx, (unsigned char*)md, &md5_digest_len);
+  EVP_MD_CTX_free(mdctx);
+#endif
+  photon::net::Base64Encode({md, MD5_DIGEST_LENGTH}, ret);
   return ret;
 }
 
@@ -742,8 +626,7 @@ class OssClientImpl : public OssClient {
  private:
   HTTP_OP make_http_operation(
       photon::net::http::Verb v, OssSignedUrl &oss_url,
-      const std::map<estring_view, estring_view> &params = {},
-      const std::map<estring_view, estring_view> &headers = {});
+      const StringKV &params = {}, const StringKV &headers = {});
 
   int do_list_objects(std::string_view bucket, std::string_view prefix,
                       ListObjectsCallback cb, bool delimiters, int maxKeys,
@@ -819,8 +702,7 @@ OssClient::~OssClient() {
 
 
 HTTP_OP OssClient::make_http_operation(Verb v, OssSignedUrl &oss_url,
-                                       const std::map<estring_view, estring_view> &params,
-                                       const std::map <estring_view, estring_view> &headers) {
+                    const StringKV &params, const StringKV &headers) {
   const auto& creds = m_credentialsProvider->getCredentials();
   const auto& token = creds.m_sessionToken;
   std::string signature;
@@ -858,7 +740,7 @@ int OssClient::do_list_objects(std::string_view bucket, std::string_view prefix,
   estring escaped_delimiter = photon::net::http::url_escape("/");
   estring escaped_marker = photon::net::http::url_escape(_mark);
   estring max_key_str = std::to_string(maxKeys);
-  std::map<estring_view, estring_view> params = {
+  StringKV params = {
       {OSS_PARAM_KEY_LIST_TYPE, "2"},
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
       {OSS_PARAM_KEY_MAX_KEYS, max_key_str}
@@ -905,7 +787,7 @@ int OssClient::do_copy_object(OssSignedUrl &src_oss_url,
   estring oss_header;
   estring oss_copy_source = estring("/").appends(src_oss_url.bucket(), "/",
                                                  src_oss_url.object(true));
-  std::map <estring_view, estring_view> headers = {
+  StringKV headers = {
     {OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source}
   };
 
@@ -969,12 +851,12 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
                              {(void *)req_tail.data(), req_tail.size()}};
       iovector_view body_view(iov, 3);
       OssSignedUrl m_oss_url(m_endpoint, bucket, "/", m_is_http);
-      auto md5 = content_md5(body_view);
+      auto md5 = md5_base64(body_view);
 
-      static const std::map<estring_view, estring_view> params = {
+      static const StringKV params = {
           {OSS_PARAM_KEY_DELETE, ""}
       };
-      static const std::map<estring_view, estring_view> headers = {
+      static const StringKV headers = {
           {OSS_HEADER_KEY_CONTENT_MD5, md5}
       };
       auto op = make_http_operation(Verb::POST, m_oss_url, params, headers);
@@ -1060,7 +942,7 @@ ssize_t OssClient::get_object(std::string_view obj_path, const struct iovec *iov
   iovector_view view((struct iovec *)iov, iovcnt);
   auto cnt = view.sum();
   if (cnt == 0) return 0;
-  static const std::map<estring_view, estring_view> headers = {
+  static const StringKV headers = {
       {OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard"}};
 
 retry:
@@ -1113,7 +995,7 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec *iov,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   auto content_type = lookup_mime_type(object);
 
-  static const std::map<estring_view, estring_view> headers = {
+  static const StringKV headers = {
       {OSS_HEADER_KEY_CONTENT_TYPE, content_type}};
   auto op = make_http_operation(Verb::PUT, oss_url, {}, headers);
   op->req.headers.content_length(cnt);
@@ -1132,10 +1014,10 @@ ssize_t OssClient::append_object(std::string_view object,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
   estring position_str = std::to_string(position);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
       {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}};
 
-  std::map<estring_view, estring_view> headers;
+  StringKV headers;
   auto content_type = lookup_mime_type(object);
   if (!content_type.empty()) {
     headers.emplace(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
@@ -1157,7 +1039,7 @@ int OssClient::copy_object(std::string_view src_object,
 
   estring oss_copy_source =
       estring("/").appends(src_oss_url.bucket(), "/", src_oss_url.object(true));
-  std::map<estring_view, estring_view> headers = {
+  StringKV headers = {
     {OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source}
   };
   if (!overwrite) {
@@ -1196,17 +1078,17 @@ struct oss_multipart_context {
   std::string upload_id;
 
   photon::spinlock lock;
-  std::map<int, std::string> part_list;
+  std::unordered_map<int, std::string> part_list;
 };
 
 int OssClient::init_multipart_upload(std::string_view object,
                                      void **context) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
     {OSS_PARAM_KEY_UPLOADS, ""}};
   auto content_type = lookup_mime_type(object);
-  std::map<estring_view, estring_view> headers;
+  StringKV headers;
   if (!content_type.empty())
     headers.emplace(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
 
@@ -1239,7 +1121,7 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   assert(!ctx->upload_id.empty());
 
   estring part_nums_str = std::to_string(part_number);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
     {OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
@@ -1275,7 +1157,7 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
                          m_is_http);
 
   estring part_num_str = std::to_string(part_number);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
       {OSS_PARAM_KEY_PART_NUMBER, part_num_str},
       {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}};
 
@@ -1284,7 +1166,7 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   std::string range = "bytes=" + std::to_string(offset) + "-" +
                       std::to_string(offset + count - 1);
 
-  static const std::map<estring_view, estring_view> headers = {
+  static const StringKV headers = {
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source},
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range}};
 
@@ -1339,7 +1221,7 @@ int OssClient::complete_multipart_upload(void *context,
 
 
   DEFER(delete ctx);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 
@@ -1361,7 +1243,7 @@ int OssClient::abort_multipart_upload(void *context) {
                          m_is_http);
 
   DEFER(delete ctx);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 
@@ -1372,7 +1254,7 @@ int OssClient::abort_multipart_upload(void *context) {
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
-  static const std::map<estring_view, estring_view> params = {
+  static const StringKV params = {
       {OSS_PARAM_KEY_OBJECT_META, ""}};
   auto op = make_http_operation(Verb::HEAD, oss_url, params);
   DO_CALL(op, -1, oss_url)

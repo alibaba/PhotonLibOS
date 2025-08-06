@@ -224,6 +224,10 @@ public:
 
     using value_type = std::pair<const key_type, mapped_type>;
 
+    constexpr basic_map_string_kv(std::initializer_list<value_type> init) {
+        for (auto& p : init) insert(p);
+    }
+
     struct MutableValue : public std::string_view {
         basic_map_string_kv* _map = nullptr;
         using pair = std::pair<const skvm, size_t>;

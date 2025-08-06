@@ -23,11 +23,6 @@ limitations under the License.
 namespace photon {
 namespace objstore {
 
-constexpr int OSS_REQUEST_RETRY_TIMES = 2;
-constexpr int OSS_MAX_PATH_LEN = 1023;
-constexpr uint64_t OSS_REQUEST_RETRY_INTERVAL_US = 20000ULL;
-constexpr uint64_t OSS_REQUEST_MAX_RETRY_INTERVAL_US = 1000000ULL;
-
 struct OssOptions {
   std::string endpoint;
   std::string bucket;
