@@ -1,3 +1,19 @@
+/*
+Copyright 2022 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // #pragma GCC diagnostic push
 // #pragma GCC diagnostic ignored "-Wpacked-bitfield-compat"
 
@@ -7,6 +23,8 @@
 #include <openssl/md5.h>
 #include <openssl/sha.h>
 #include <photon/common/estring.h>
+#include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/thread/timer.h>
 #include <time.h>
 #include <photon/ecosystem/simple_dom.h>
@@ -16,17 +34,25 @@
 #include <string>
 #include <unistd.h>
 
-#include "common/faultinjector.h"
-#include "common/logger.h"
-#include "ossfs.h"
+// #include "common/faultinjector.h"
+// #include "common/logger.h"
+#include "oss.h"
 #include "photon/common/iovector.h"
 #include "photon/fs/path.h"
 #include "photon/net/http/url.h"
 #include "photon/net/utils.h"
-#include "metric/metrics.h"
+// #include "metric/metrics.h"
+
+namespace photon {
+namespace objstore {
+
 
 using Verb = photon::net::http::Verb;
-using FileSystemExt::OssMiniSdk::HTTP_OP;
+struct OpDeleter {
+  void operator()(photon::net::http::Client::Operation *x) { x->destroy(); }
+};
+using HTTP_OP =
+    std::unique_ptr<photon::net::http::Client::Operation, OpDeleter>;
 
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
 static photon::SimpleDOM::Node get_xml_node(const HTTP_OP &op) {
@@ -50,8 +76,9 @@ static photon::SimpleDOM::Node get_xml_node(const HTTP_OP &op) {
 LogBuffer &operator<<(LogBuffer &log, const HTTP_OP &op) {
   auto reader = get_xml_node(op);
   auto err = reader["Error"];
-  return log.printf(" OSSError: Code[", err["Code"].to_string_view(), "], Message[",
-                    err["Message"].to_string_view(), "]");
+  auto Code = err["Code"].to_string_view();
+  auto Message = err["Message"].to_string_view();
+  return log.printf(" OSSError: ", VALUE(Code), VALUE(Message));
 }
 
 // convert oss last modified time, e.g. "Fri, 04 Mar 2022 02:46:25 GMT"
@@ -78,8 +105,9 @@ static time_t get_list_lastmodified(std::string_view sv) {
   return timegm(&tm);  // GMT
 }
 
-namespace FileSystemExt {
-namespace OssMiniSdk {
+// not exposed in header file
+// use extern declaration in unit test like this:
+// extern const std::map<std::string, std::string> MIME_TYPE_MAP;
 
 // replace this later when photon is updated and has
 // unordered_map_string_key_case_insensitive.
@@ -212,6 +240,10 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
 }();
 
 #define make_ccl estring::make_conditional_cat_list
+#define IS_FAULT_INJECTION_ENABLED(x) false
+#define FAULT_INJECTION(x, y)
+#define DECLARE_METRIC_VALUE_WITH_NAMEVAR(a, b, c, d)
+
 #define DO_CALL_WITH_RESP_CODE(op, ret, ossurl, code)                          \
   if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {      \
     LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");              \
@@ -533,18 +565,37 @@ class OssSignedUrl {
     return ret;
   }
 
-  std::string hmac_sha1(std::string_view key, std::string_view data) {
-    HMAC_CTX ctx;
-    unsigned char output[EVP_MAX_MD_SIZE];
-    auto evp_md = EVP_sha1();
+    struct hmac {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+      HMAC_CTX ctx_, *ctx = &ctx_;
+      hmac() { HMAC_CTX_init(&ctx_);}
+      ~hmac() { HMAC_CTX_cleanup(&ctx_);}
+#else
+      HMAC_CTX *ctx;
+      hmac() { ctx = HMAC_CTX_new(); }
+      ~hmac() { HMAC_CTX_free(ctx); }
+#endif
+      operator HMAC_CTX*() { return ctx; }
+    };
+
+  estring hmac_shax(estring_view key, estring_view data, const EVP_MD *evp_md) {
+    hmac ctx;
+    estring output;
     unsigned int output_length;
-    HMAC_CTX_init(&ctx);
-    HMAC_Init_ex(&ctx, (const unsigned char *)key.data(), key.length(), evp_md,
-                 nullptr);
-    HMAC_Update(&ctx, (const unsigned char *)data.data(), data.length());
-    HMAC_Final(&ctx, (unsigned char *)output, &output_length);
-    HMAC_CTX_cleanup(&ctx);
-    return std::string((const char *)output, output_length);
+    output.resize(EVP_MAX_MD_SIZE);
+    HMAC_Init_ex(ctx, (const unsigned char *)key.data(), key.length(), evp_md, nullptr);
+    HMAC_Update(ctx, (const unsigned char *)data.data(), data.length());
+    HMAC_Final(ctx, (unsigned char *)&output[0], &output_length);
+    output.resize(output_length);
+    return output;
+  }
+
+  estring hmac_sha1(estring_view key, estring_view data) {
+    return hmac_shax(key, data, EVP_sha1());
+  }
+
+  estring hmac_sha256(estring_view key, estring_view data) {
+    return hmac_shax(key, data, EVP_sha256());
   }
 
   std::string hex(std::string_view bytes) {
@@ -568,20 +619,6 @@ class OssSignedUrl {
     return hex(std::string_view((char *)hash, SHA256_DIGEST_LENGTH));
   }
 
-  std::string hmac_sha256(std::string_view key, std::string_view data) {
-    HMAC_CTX ctx;
-    unsigned char output[EVP_MAX_MD_SIZE];
-    auto evp_md = EVP_sha256();
-    unsigned int output_length;
-    HMAC_CTX_init(&ctx);
-    HMAC_Init_ex(&ctx, (const unsigned char *)key.data(), key.length(), evp_md,
-                 nullptr);
-    HMAC_Update(&ctx, (const unsigned char *)data.data(), data.length());
-    HMAC_Final(&ctx, (unsigned char *)output, &output_length);
-    HMAC_CTX_cleanup(&ctx);
-    return std::string((const char *)output, output_length);
-  }
-
   void update_gmt_date() {  // avoid updating GMT Time every time
     time_t t = photon::now / 1000 / 1000;
     if (t - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
@@ -593,6 +630,40 @@ class OssSignedUrl {
     }
   }
 };
+
+/*
+static int do_call_with_resp_code(HTTP_OP& op, int ret, OssSignedUrl& ossurl,
+                                                 std::string* code) {
+    DO_CALL_WITH_RESP_CODE(op, ret, ossurl, code);
+    return 0;
+}
+
+inline int do_call(HTTP_OP& op, int ret, OssSignedUrl& ossurl) {
+    return do_call_with_resp_code(op, ret, ossurl, nullptr);
+}
+
+#define DO_CALL(op, ret, ossurl) do_call(op, ret, ossurl);
+
+static int verify_crc64_if_needed(HTTP_OP& op, OssSignedUrl& oss_url, uint64_t* expected_crc64) {
+  if (!expected_crc64) return 0;
+  auto it = op->resp.headers.find("x-oss-hash-crc64ecma");
+  if ( it == op->resp.headers.end()) {
+    LOG_WARN("crc64 not found in object ", oss_url.object());
+    return 0;
+  }
+  uint64_t crc64;
+  if (!estring_view(it.second()).to_uint64_check(&crc64) ||
+                              *expected_crc64 != crc64) {
+    LOG_ERROR_RETURN(EIO, -1,
+        "crc64 mismatch of object: `, expected: `, actual: `",
+        oss_url.object(), *expected_crc64, crc64);
+  }
+  return 0;
+}
+
+#define VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)  \
+  if (verify_crc64_if_needed(op, oss_url, expected_crc64) < 0) return -1;
+*/
 
 static ssize_t body_writer_cb(void *iov_view, photon::net::http::Request *req) {
   auto view = static_cast<iovector_view *>(iov_view);
@@ -616,6 +687,82 @@ static std::string content_md5(iovector_view view) {
   return ret;
 }
 
+class OssClientImpl : public OssClient {
+ public:
+  OssClientImpl(const OssOptions &options,
+            CredentialsProvider *credentialsProvider);
+  ~OssClientImpl();
+
+  int list_objects(std::string_view prefix, ListObjectsCallback cb,
+                   bool delimiter, std::string *context = nullptr,
+                   int max_keys = 0);
+
+  int head_object(std::string_view object, ObjectHeaderMeta &meta);
+
+  ssize_t get_object(std::string_view object, const struct iovec *iov,
+                     int iovcnt, off_t offset);
+
+  ssize_t put_object(std::string_view object, const struct iovec *iov,
+                     int iovcnt, uint64_t *expected_crc64 = nullptr);
+
+  ssize_t append_object(std::string_view object, const struct iovec *iov,
+                        int iovcnt, off_t position,
+                        uint64_t *expected_crc64 = nullptr);
+
+  int copy_object(std::string_view src_object, std::string_view dst_object,
+                  bool overwrite = false, bool set_mime = false);
+
+  int init_multipart_upload(std::string_view object, void **context);
+
+  ssize_t upload_part(void *context, const struct iovec *iov, int iovcnt,
+                      int part_number, uint64_t *expected_crc64 = nullptr);
+
+  int upload_part_copy(void *context, off_t offset, size_t count,
+                       int part_number);
+
+  int complete_multipart_upload(void *context, uint64_t *expected_crc64);
+
+  int abort_multipart_upload(void *context);
+
+  int delete_objects(std::string_view prefix,
+                     const std::vector<std::string> &objects);
+
+  int delete_object(std::string_view obj);
+
+  int rename_object(std::string_view src_path, std::string_view dst_path,
+                    bool set_mime = false);
+
+  int check_prefix(std::string_view prefix);
+
+  int get_object_meta(std::string_view obj, ObjectMeta &meta);
+
+ private:
+  HTTP_OP make_http_operation(
+      photon::net::http::Verb v, OssSignedUrl &oss_url,
+      const std::map<estring_view, estring_view> &params = {},
+      const std::map<estring_view, estring_view> &headers = {});
+
+  int do_list_objects(std::string_view bucket, std::string_view prefix,
+                      ListObjectsCallback cb, bool delimiters, int maxKeys,
+                      std::string *marker, std::string *resp_code = nullptr);
+
+  int do_copy_object(OssSignedUrl &src_oss_url, OssSignedUrl &dst_oss_url,
+                     bool set_mime = false);
+  int do_delete_object(OssSignedUrl &oss_url);
+
+  int do_delete_objects(estring_view bucket, estring_view prefix,
+                        const std::vector<std::string> &objects);
+
+  std::string m_endpoint, m_bucket;
+  bool m_is_http = false;
+
+  OssOptions m_oss_options;
+  photon::net::http::Client *m_client = nullptr;
+  CredentialsProvider *m_credentialsProvider = nullptr;
+};
+
+#define OssClient OssClientImpl
+
 OssClient::OssClient(const OssOptions &options,
                      CredentialsProvider *credentialsProvider)
     : m_bucket(options.bucket),
@@ -634,7 +781,9 @@ OssClient::OssClient(const OssOptions &options,
 
   m_client = photon::net::http::new_http_client();
   m_client->timeout(m_oss_options.request_timeout_us);
-  m_client->set_user_agent(m_oss_options.user_agent);
+  m_client->set_user_agent(m_oss_options.user_agent.size() ?
+    std::string_view(m_oss_options.user_agent) :
+    std::string_view("Photon-OSS-Client"));
 
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;
@@ -661,6 +810,10 @@ OssClient::OssClient(const OssOptions &options,
 OssClient::~OssClient() {
   delete m_client;
 }
+
+#undef  OssClient
+#define OssClient inline OssClientImpl
+
 
 HTTP_OP OssClient::make_http_operation(Verb v, OssSignedUrl &oss_url,
                                        const std::map<estring_view, estring_view> &params,
@@ -1223,7 +1376,14 @@ int OssClient::delete_object(std::string_view obj_path) {
   OssSignedUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
   return do_delete_object(oss_url);
 }
+
+#undef OssClient
+
+OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp) {
+  return new OssClientImpl(opt, cp);
 }
-}  // namespace FileSystemExt
+
+}
+}
 
 // #pragma GCC diagnostic pop

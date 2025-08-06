@@ -1,14 +1,27 @@
+/*
+Copyright 2022 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 #pragma once
-
+#include <photon/common/object.h>
+#include <photon/common/callback.h>
 #include <photon/net/http/client.h>
+#include <photon/common/string_view.h>
 
-#include <functional>
-#include <map>
-
-namespace FileSystemExt {
-namespace OssMiniSdk {
-
-extern const std::map<std::string, std::string> MIME_TYPE_MAP;
+namespace photon {
+namespace objstore {
 
 constexpr int OSS_REQUEST_RETRY_TIMES = 2;
 constexpr int OSS_MAX_PATH_LEN = 1023;
@@ -21,7 +34,7 @@ struct OssOptions {
   std::string region;
   bool use_list_obj_v2 = true;
   int max_list_ret_cnt = 1000;
-  std::string user_agent{"ossfs2-0.0.1"};
+  std::string user_agent;       // "Photon-OSS-Client" by default
   std::string bind_ips;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
 };
@@ -32,10 +45,8 @@ struct OSSCredentials {
   std::string m_sessionToken;
 };
 
-class CredentialsProvider {
+class CredentialsProvider : Object {
  public:
-  CredentialsProvider() = default;
-  virtual ~CredentialsProvider() = default;
   virtual OSSCredentials getCredentials() = 0;
   virtual void setCredentials(const OSSCredentials &cred) {}
 };
@@ -46,10 +57,7 @@ struct ObjectMeta {
   std::string etag;
 };
 
-struct ObjectHeaderMeta {
-  size_t size = 0;
-  time_t mtime = 0;
-  std::string etag;
+struct ObjectHeaderMeta : public ObjectMeta {
   std::string type;  // Appendable/Normal/...
   std::string storage_class;
   std::pair<bool, uint64_t> crc64{false,
@@ -62,96 +70,107 @@ struct ListObjectsCBParams {
   size_t size = 0;
   time_t mtime = 0;
   bool is_com_prefix;
-  ListObjectsCBParams(std::string_view key_, std::string_view etag_,
-                      size_t size_, time_t mtime_, bool is_com_prefix_)
-      : key(key_),
-        etag(etag_),
-        size(size_),
-        mtime(mtime_),
-        is_com_prefix(is_com_prefix_) {}
 };
-using ListObjectsCallback =
-    std::function<int(const ListObjectsCBParams &params)>;
 
-struct OpDeleter {
-  void operator()(photon::net::http::Client::Operation *x) { x->destroy(); }
-};
-using HTTP_OP =
-    std::unique_ptr<photon::net::http::Client::Operation, OpDeleter>;
+using ListObjectsCallback = Delegate<int, const ListObjectsCBParams&>;
 
-class OssSignedUrl;
-class OssClient {
+class OssClient : public Object {
  public:
-  OssClient(const OssOptions &options,
-            CredentialsProvider *credentialsProvider);
-  ~OssClient();
 
+  virtual
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
                    bool delimiter, std::string *context = nullptr,
-                   int max_keys = 0);
+                   int max_keys = 0) = 0;
 
-  int head_object(std::string_view object, ObjectHeaderMeta &meta);
+  virtual
+  int head_object(std::string_view object, ObjectHeaderMeta &meta) = 0;
 
+  virtual
   ssize_t get_object(std::string_view object, const struct iovec *iov,
-                     int iovcnt, off_t offset);
+                     int iovcnt, off_t offset) = 0;
 
+  virtual
   ssize_t put_object(std::string_view object, const struct iovec *iov,
-                     int iovcnt, uint64_t *expected_crc64 = nullptr);
+                     int iovcnt, uint64_t *expected_crc64 = nullptr) = 0;
 
+  virtual
   ssize_t append_object(std::string_view object, const struct iovec *iov,
                         int iovcnt, off_t position,
-                        uint64_t *expected_crc64 = nullptr);
+                        uint64_t *expected_crc64 = nullptr) = 0;
 
+  virtual
   int copy_object(std::string_view src_object, std::string_view dst_object,
-                  bool overwrite = false, bool set_mime = false);
+                  bool overwrite = false, bool set_mime = false) = 0;
 
-  int init_multipart_upload(std::string_view object, void **context);
+  virtual
+  int init_multipart_upload(std::string_view object, void **context) = 0;
 
+  virtual
   ssize_t upload_part(void *context, const struct iovec *iov, int iovcnt,
-                      int part_number, uint64_t *expected_crc64 = nullptr);
+                      int part_number, uint64_t *expected_crc64 = nullptr) = 0;
 
+  virtual
   int upload_part_copy(void *context, off_t offset, size_t count,
-                       int part_number);
+                       int part_number) = 0;
 
-  int complete_multipart_upload(void *context, uint64_t *expected_crc64);
+  virtual
+  int complete_multipart_upload(void *context, uint64_t *expected_crc64) = 0;
 
-  int abort_multipart_upload(void *context);
+  virtual
+  int abort_multipart_upload(void *context) = 0;
 
+  class MultipartUploadContext {
+    OssClient* _client;
+    void* _ctx;
+   public:
+    MultipartUploadContext(OssClient* client, void* ctx) :
+      _client(client), _ctx(ctx) { }
+
+    ssize_t upload(const struct iovec *iov, int iovcnt, int part_number,
+                                  uint64_t *expected_crc64 = nullptr) {
+      return _client->upload_part(_ctx, iov, iovcnt, part_number, expected_crc64);
+    }
+
+    int copy(off_t offset, size_t count, int part_number) {
+      return _client->upload_part_copy(_ctx, offset, count, part_number);
+    }
+
+    int complete(uint64_t *expected_crc64) {
+      return _client->complete_multipart_upload(_ctx, expected_crc64);
+    }
+
+    int abort() {
+      return _client->abort_multipart_upload(_ctx);
+    }
+
+    operator bool() { return _ctx; }
+  };
+
+  MultipartUploadContext init_multipart_upload(std::string_view object) {
+    void* ctx = nullptr;
+    init_multipart_upload(object, &ctx);
+    return {this, ctx};
+  }
+
+  virtual
   int delete_objects(std::string_view prefix,
-                     const std::vector<std::string> &objects);
+                     const std::vector<std::string> &objects) = 0;
 
-  int delete_object(std::string_view obj);
+  virtual
+  int delete_object(std::string_view obj) = 0;
 
+  virtual
   int rename_object(std::string_view src_path, std::string_view dst_path,
-                    bool set_mime = false);
+                    bool set_mime = false) = 0;
 
-  int check_prefix(std::string_view prefix);
+  virtual
+  int check_prefix(std::string_view prefix) = 0;
 
-  int get_object_meta(std::string_view obj, ObjectMeta &meta);
-
- private:
-  HTTP_OP make_http_operation(
-      photon::net::http::Verb v, OssSignedUrl &oss_url,
-      const std::map<estring_view, estring_view> &params = {},
-      const std::map<estring_view, estring_view> &headers = {});
-
-  int do_list_objects(std::string_view bucket, std::string_view prefix,
-                      ListObjectsCallback cb, bool delimiters, int maxKeys,
-                      std::string *marker, std::string *resp_code = nullptr);
-
-  int do_copy_object(OssSignedUrl &src_oss_url, OssSignedUrl &dst_oss_url,
-                     bool set_mime = false);
-  int do_delete_object(OssSignedUrl &oss_url);
-
-  int do_delete_objects(estring_view bucket, estring_view prefix,
-                        const std::vector<std::string> &objects);
-
-  std::string m_endpoint, m_bucket;
-  bool m_is_http = false;
-
-  OssOptions m_oss_options;
-  photon::net::http::Client *m_client = nullptr;
-  CredentialsProvider *m_credentialsProvider = nullptr;
+  virtual
+  int get_object_meta(std::string_view obj, ObjectMeta &meta) = 0;
 };
+
+OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp);
+
 }  // namespace OssMiniSdk
 }  // namespace FileSystemExt
