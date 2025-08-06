@@ -508,7 +508,7 @@ public:
 };
 
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
-                                int max_log_files, uint64_t throttle) {
+                                int max_log_files, uint64_t throttle, bool rotate_on_start) {
     auto ret = new LogOutputFile();
     if (ret->log_output_file_setting(fn, rotate_limit, max_log_files) < 0) {
         delete ret;
@@ -516,13 +516,26 @@ ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
         return nullptr;
     }
     ret->set_throttle(throttle);
+
+    // when init the new log output file, rotate the log files that last program created
+    if (rotate_on_start) {
+        ret->log_file_rotate();
+        ret->reopen_log_output_file();
+    }
+
     return ret;
 }
 
-ILogOutput* new_log_output_file(int fd, uint64_t throttle) {
+ILogOutput* new_log_output_file(int fd, uint64_t throttle, bool rotate_on_start) {
     auto ret = new LogOutputFile();
     ret->log_output_file_setting(fd);
     ret->set_throttle(throttle);
+
+    // when init the new log output file, rotate the log files that last program created
+    if (rotate_on_start) {
+        ret->log_file_rotate();
+        ret->reopen_log_output_file();
+    }
     return ret;
 }
 
