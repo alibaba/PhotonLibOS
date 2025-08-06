@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "oss.h"
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
@@ -1264,8 +1265,139 @@ int OssClient::delete_object(std::string_view obj_path) {
 
 #undef OssClient
 
+class SimpleCredentialsProvider : public CredentialsProvider {
+ public:
+  SimpleCredentialsProvider(std::string_view accessKeyId,
+      std::string_view accessKeySecret, std::string_view sessionToken = {}) {
+    m_credentials.m_accessKeyId = accessKeyId;
+    m_credentials.m_accessKeySecret = accessKeySecret;
+    m_credentials.m_sessionToken = sessionToken;
+  }
+  OSSCredentials getCredentials() override {
+    SCOPED_LOCK(m_lock);
+    return m_credentials;
+  }
+
+  void setCredentials(const OSSCredentials &cred) override {
+    SCOPED_LOCK(m_lock);
+    m_credentials = cred;
+  }
+
+ private:
+  photon::spinlock m_lock;
+  OSSCredentials m_credentials;
+};
+
+// Only used for k8s fluid
+class StsMultiFileRefresherCredentialsProvider : public CredentialsProvider {
+ public:
+  StsMultiFileRefresherCredentialsProvider(std::string_view ak_file,
+      std::string_view sk_file, std::string_view token_file,
+      const uint64_t default_expiration_seconds) :
+      m_default_expire(default_expiration_seconds * 1000000) {
+    m_conf.m_ak_file = ak_file;
+    m_conf.m_sk_file = sk_file;
+    m_conf.m_token_file = token_file;
+    auto expire = refreshCredentials();
+    m_timer = new photon::Timer(
+        expire,
+        {this, &StsMultiFileRefresherCredentialsProvider::refreshCredentials},
+        true);
+  }
+  ~StsMultiFileRefresherCredentialsProvider() { delete m_timer; }
+
+  OSSCredentials getCredentials() override {
+    photon::scoped_rwlock _(m_lock, photon::RLOCK);
+    return m_credentials;
+  }
+
+ private:
+  uint64_t refreshCredentials() {
+    int64_t expiration = m_default_expire;
+    std::string ak, sk, token;
+
+    if (!m_conf.m_ak_file.empty()) {
+      ak = read_data_from_file(m_conf.m_ak_file);
+    }
+
+    // k8s fluid will refresh secret atomically(implemented by symlink and
+    // rename). So if we find the different ak, sk and token will be refreshed
+    // too.
+    if (ak == m_credentials.m_accessKeyId) {
+      return expiration;
+    }
+
+    if (!m_conf.m_sk_file.empty()) {
+      sk = read_data_from_file(m_conf.m_sk_file);
+    }
+
+    if (!m_conf.m_token_file.empty()) {
+      token = read_data_from_file(m_conf.m_token_file);
+    }
+
+    if (ak.empty() || sk.empty()) {
+      LOG_ERROR_RETURN(0, 0, "failed to read file", m_conf.m_ak_file.c_str(),
+                       m_conf.m_sk_file.c_str());
+    }
+
+    photon::scoped_rwlock _(m_lock, photon::WLOCK);
+    m_credentials = {ak, sk, token};
+    return expiration;
+  }
+
+  std::string read_data_from_file(const std::string &filePath) {
+    struct stat st_buf;
+    memset(&st_buf, 0, sizeof(struct stat));
+
+    int r = stat(filePath.c_str(), &st_buf);
+    if (r < 0) return std::string();
+    if (st_buf.st_size == 0) return std::string();
+
+    FILE *fp = fopen(filePath.c_str(), "r");
+    if (!fp) LOG_ERROR_RETURN(0, "", "failed to open file", filePath.c_str());
+    DEFER(fclose(fp));
+
+    char *buf = nullptr;
+    DEFER(if (buf)free(buf));
+    size_t size = 0;
+    if (getline(&buf, &size, fp) == -1) {
+      LOG_ERROR_RETURN(0, "", "failed to read file", filePath.c_str());
+    }
+
+    estring_view ret(buf);
+    if (ret.size() && ret.back() == '\n') ret.remove_suffix(1);
+    return ret;
+  }
+
+  struct OSSStsMultiConfFileMap {
+    std::string m_ak_file;
+    std::string m_sk_file;
+    std::string m_token_file;
+
+    bool empty() const { return m_ak_file.empty() || m_sk_file.empty(); }
+  };
+
+  OSSStsMultiConfFileMap m_conf;
+  uint64_t m_default_expire;
+  photon::Timer *m_timer;
+  photon::rwlock m_lock;
+  OSSCredentials m_credentials;
+};
+
 OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp) {
   return new OssClientImpl(opt, cp);
+}
+
+CredentialsProvider* new_sts_multifile_credentials_provider(
+    std::string_view ak_file, std::string_view sk_file,
+    std::string_view token_file, const uint64_t default_expiration_seconds) {
+  return new StsMultiFileRefresherCredentialsProvider(
+    ak_file, sk_file, token_file, default_expiration_seconds);
+}
+
+CredentialsProvider* new_simple_credentials_provider(std::string_view accessKeyId,
+        std::string_view accessKeySecret, std::string_view sessionToken) {
+  return new SimpleCredentialsProvider(accessKeyId, accessKeySecret, sessionToken);
 }
 
 }

@@ -177,5 +177,12 @@ class OssClient : public Object {
 
 OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp);
 
+CredentialsProvider* new_sts_multifile_credentials_provider(
+    std::string_view ak_file, std::string_view sk_file,
+    std::string_view token_file, const uint64_t default_expiration_seconds);
+
+CredentialsProvider* new_simple_credentials_provider(std::string_view accessKeyId,
+        std::string_view accessKeySecret, std::string_view sessionToken = {});
+
 }  // namespace OssMiniSdk
 }  // namespace FileSystemExt
