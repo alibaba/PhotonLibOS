@@ -184,5 +184,45 @@ CredentialsProvider* new_sts_multifile_credentials_provider(
 CredentialsProvider* new_simple_credentials_provider(std::string_view accessKeyId,
         std::string_view accessKeySecret, std::string_view sessionToken = {});
 
+
+
+
+class Authenticator;
+
+OssClient* new_oss_client(const OssOptions& opt, Authenticator* cp);
+
+class Authenticator : Object {
+ public:
+  virtual void sign(photon::net::http::Headers& headers,
+                    const SignParameters& params) = 0;
+
+  struct SignParameters {
+    std::string_view region, endpoint, bucket;
+    std::string_view object, canonical_query;
+    photon::net::http::Verb verb;
+  };
+
+  // may return nullptr for some implementations
+  virtual const CredentialParameters* get_credentials() = 0;
+
+  // may be ignored for some implementations
+  virtual void set_credentials(CredentialParameters&& credentials) = 0;
+
+  struct CredentialParameters {
+    std::string accessKey;
+    std::string accessKeySecret;
+    std::string sessionToken;
+  };
+};
+
+Authenticator* new_basic_authenticator(
+    Authenticator::CredentialParameters&& credentials,
+    bool v4_signature = true);
+
+Authenticator* new_sts_multifile_authenticator(
+    Authenticator::CredentialParameters&& credential_filepaths,
+    uint64_t default_expiration_seconds,
+    bool v4_signature = true);
+
 }  // namespace OssMiniSdk
 }  // namespace FileSystemExt
