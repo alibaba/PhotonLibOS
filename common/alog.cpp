@@ -516,6 +516,13 @@ ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
         return nullptr;
     }
     ret->set_throttle(throttle);
+
+    // when init the new log output file, rotate the log files that last program created
+    if (rotate_on_start && ret->log_file_size != 0) {
+        ret->log_file_rotate();
+        ret->reopen_log_output_file();
+    }
+
     return ret;
 }
 

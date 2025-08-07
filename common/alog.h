@@ -73,12 +73,8 @@ extern ILogOutput * const log_output_null;
 extern ILogOutput * const log_output_stderr;
 extern ILogOutput * const log_output_stdout;
 
-<<<<<<< HEAD
-ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10, uint64_t throttle = -1UL);
-=======
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10,
                                 uint64_t throttle = -1UL, bool rotate_on_start = false);
->>>>>>> f0840d4 (rotate_on_start set to false)
 ILogOutput* new_log_output_file(int fd, uint64_t throttle = -1UL);
 ILogOutput* new_async_log_output(ILogOutput* output, int queue_num = 1);
 
