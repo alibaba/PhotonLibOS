@@ -508,7 +508,7 @@ public:
 };
 
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit,
-                                int max_log_files, uint64_t throttle) {
+                                int max_log_files, uint64_t throttle, bool rotate_on_start) {
     auto ret = new LogOutputFile();
     if (ret->log_output_file_setting(fn, rotate_limit, max_log_files) < 0) {
         delete ret;
