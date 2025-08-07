@@ -57,7 +57,7 @@ jobs:
         set -x
         git checkout ${{steps.branch_info.outputs.NEXT_BRANCH}}
         git checkout -b ${{steps.create_branch.outputs.PRBRANCH}}
-        echo "TITLE<<__AUTOPR_EOF"
+        echo "TITLE<<__AUTOPR_EOF" >> $GITHUB_OUTPUT
         git log --format="| %s" ${{ github.event.commits[0].id }}~..${{ github.event.after }} | tr '\n' ' ' >> $GITHUB_OUTPUT
         echo "__AUTOPR_EOF" >> $GITHUB_OUTPUT
         echo "MESSAGE<<__AUTOPR_EOF" >> $GITHUB_OUTPUT
