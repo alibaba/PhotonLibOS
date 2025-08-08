@@ -29,23 +29,27 @@ limitations under the License.
 #include <photon/common/conststr.h>
 #include <photon/common/retval.h>
 
-#define ALOG_COLOR_BLACK "\033[30m"
-#define ALOG_COLOR_RED "\033[31m"
-#define ALOG_COLOR_GREEN "\033[32m"
-#define ALOG_COLOR_YELLOW "\033[33m"
-#define ALOG_COLOR_BLUE "\033[34m"
-#define ALOG_COLOR_MAGENTA "\033[35m"
-#define ALOG_COLOR_CYAN "\033[36m"
-#define ALOG_COLOR_LIGHTGRAY "\033[37m"
-#define ALOG_COLOR_DARKGRAY "\033[90m"
-#define ALOG_COLOR_LIGHTRED "\033[91m"
-#define ALOG_COLOR_LIGHTGREEN "\033[92m"
-#define ALOG_COLOR_LIGHTYELLOW "\033[93m"
-#define ALOG_COLOR_LIGHTBLUE "\033[94m"
-#define ALOG_COLOR_LIGHTMAGENTA "\033[95m"
-#define ALOG_COLOR_LIGHTCYAN "\033[96m"
-#define ALOG_COLOR_LIGHTWHITE "\033[97m"
-#define ALOG_COLOR_NOTHING ""
+#define DEFINE_ALOG_COLOR(code, symbol) \
+const unsigned char symbol = 0x##code;
+DEFINE_ALOG_COLOR(30, ALOG_COLOR_BLACK);
+DEFINE_ALOG_COLOR(31, ALOG_COLOR_RED);
+DEFINE_ALOG_COLOR(32, ALOG_COLOR_GREEN);
+DEFINE_ALOG_COLOR(33, ALOG_COLOR_YELLOW);
+DEFINE_ALOG_COLOR(34, ALOG_COLOR_BLUE);
+DEFINE_ALOG_COLOR(35, ALOG_COLOR_MAGENTA);
+DEFINE_ALOG_COLOR(36, ALOG_COLOR_CYAN);
+DEFINE_ALOG_COLOR(37, ALOG_COLOR_LIGHTGRAY);
+DEFINE_ALOG_COLOR(90, ALOG_COLOR_DARKGRAY);
+DEFINE_ALOG_COLOR(91, ALOG_COLOR_LIGHTRED);
+DEFINE_ALOG_COLOR(92, ALOG_COLOR_LIGHTGREEN);
+DEFINE_ALOG_COLOR(93, ALOG_COLOR_LIGHTYELLOW);
+DEFINE_ALOG_COLOR(94, ALOG_COLOR_LIGHTBLUE);
+DEFINE_ALOG_COLOR(95, ALOG_COLOR_LIGHTMAGENTA);
+DEFINE_ALOG_COLOR(96, ALOG_COLOR_LIGHTCYAN);
+DEFINE_ALOG_COLOR(97, ALOG_COLOR_LIGHTWHITE);
+DEFINE_ALOG_COLOR(00, ALOG_COLOR_NOTHING);
+#undef DEFINE_ALOG_COLOR
+
 
 class ILogOutput {
 protected:
@@ -59,12 +63,7 @@ public:
     virtual uint64_t set_throttle(uint64_t t = -1UL) = 0;
     virtual uint64_t get_throttle() = 0;
     virtual void destruct() = 0;
-    template <size_t N>
-    void set_level_color(int level, const char (&color)[N]) {
-        set_level_color(level, color, N - 1);
-    }
-    virtual void set_level_color(int level, const char* color,
-                                 size_t length) { /* ignored by default */ }
+    virtual int set_level_color(int level, unsigned char code) { return 0; /* ignored by default */ }
     void preset_color();
     void clear_color();
 };
