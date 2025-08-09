@@ -35,6 +35,9 @@ struct OssOptions {
   std::string user_agent;       // "Photon-OSS-Client" by default
   std::string bind_ips;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
+  int retry_times = 2;
+  uint64_t retry_interval_us = 20000ULL;
+  uint64_t max_retry_interval_us = 1000000ULL;
 };
 
 struct OSSCredentials {
@@ -67,7 +70,7 @@ struct ListObjectsCBParams {
   std::string_view etag;
   size_t size = 0;
   time_t mtime = 0;
-  bool is_com_prefix;
+  bool is_com_prefix = false;
 };
 
 using ListObjectsCallback = Delegate<int, const ListObjectsCBParams&>;
@@ -90,14 +93,17 @@ class OssClient : public Object {
   virtual
   int head_object(std::string_view object, ObjectHeaderMeta &meta) = 0;
 
+  // return value is the real size if the operation successfully, otherwise return -1
   virtual
-  ssize_t get_object(std::string_view object, const struct iovec *iov,
-          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr) = 0;
+  ssize_t get_object_range(std::string_view object, const struct iovec *iov,
+          int iovcnt, off_t offset) = 0;
 
+  // return value is the object size if the operation successfully, otherwise return -1
   virtual
   ssize_t put_object(std::string_view object, const struct iovec *iov,
                      int iovcnt, uint64_t *expected_crc64 = nullptr) = 0;
 
+  // return value is the newly appended size if the operation successfully, otherwise return -1
   virtual
   ssize_t append_object(std::string_view object, const struct iovec *iov,
                         int iovcnt, off_t position,
@@ -110,13 +116,14 @@ class OssClient : public Object {
   virtual
   int init_multipart_upload(std::string_view object, void **context) = 0;
 
+  // return value is the part size if the operation successfully, otherwise return -1
   virtual
   ssize_t upload_part(void *context, const struct iovec *iov, int iovcnt,
                       int part_number, uint64_t *expected_crc64 = nullptr) = 0;
 
   virtual
   int upload_part_copy(void *context, off_t offset, size_t count,
-                       int part_number) = 0;
+                       int part_number, std::string_view from = "") = 0;
 
   virtual
   int complete_multipart_upload(void *context, uint64_t *expected_crc64) = 0;
@@ -136,8 +143,8 @@ class OssClient : public Object {
       return _client->upload_part(_ctx, iov, iovcnt, part_number, expected_crc64);
     }
 
-    int copy(off_t offset, size_t count, int part_number) {
-      return _client->upload_part_copy(_ctx, offset, count, part_number);
+    int copy(off_t offset, size_t count, int part_number, std::string_view from = "") {
+      return _client->upload_part_copy(_ctx, offset, count, part_number, from);
     }
 
     int complete(uint64_t *expected_crc64) {
@@ -157,6 +164,8 @@ class OssClient : public Object {
     return {this, ctx};
   }
 
+  // prefix + objects are to be deleted
+  // no slash will be added after the prefix
   virtual
   int delete_objects(std::string_view prefix,
                      const std::vector<std::string> &objects) = 0;
@@ -169,7 +178,7 @@ class OssClient : public Object {
                     bool set_mime = false) = 0;
 
   virtual
-  int check_prefix(std::string_view prefix) = 0;
+  int check_prefix_with_list_objects(std::string_view prefix, bool list_objects_v2 = true) = 0;
 
   virtual
   int get_object_meta(std::string_view obj, ObjectMeta &meta) = 0;

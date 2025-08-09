@@ -47,7 +47,7 @@ limitations under the License.
 namespace photon {
 namespace objstore {
 
-using StringKV = unordered_map_string_kv;
+using StringKV = map_string_kv;
 
 // unused constants will trigger compile error in photon,
 // unless they are defined in a header file
@@ -61,12 +61,17 @@ using HTTP_OP = std::unique_ptr<Operation, OpDeleter>;
 static SimpleDOM::Node get_xml_node(const HTTP_OP &op) {
   auto length = op->resp.headers.content_length();
   if (length > XML_LIMIT) LOG_ERROR_RETURN(EINVAL, {}, "xml length limit excceed `", length);
-  auto body_buf = (char*) malloc(length);
-  auto rc = op->resp.read(body_buf, length);
+  // auto body_buf = (char*) malloc(length);
+  // auto rc = op->resp.read(body_buf, length);
+  std::string body_buf;
+  body_buf.resize(length);
+  auto rc = op->resp.read(&body_buf[0], length);
   if (rc != (ssize_t)length) LOG_ERRNO_RETURN(0, {}, "body read error ` `", rc, length);
   try { // todo try catch inside simple_dom
-    auto doc = SimpleDOM::parse(body_buf, length,
-               SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
+    // auto doc = SimpleDOM::parse(body_buf, length,
+    //           SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
+    auto doc = photon::SimpleDOM::parse_copy(body_buf.data(), body_buf.size(),
+                                             photon::SimpleDOM::DOC_XML);
     if (!doc) LOG_ERROR_RETURN(0, {}, "failed to parse resp_body");
     return doc;
   } catch (std::exception const &e) {
@@ -142,8 +147,8 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
   if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {      \
     LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");              \
   }                                                                            \
-  int __retry_times = OSS_REQUEST_RETRY_TIMES;                                 \
-  auto __retry_interval = OSS_REQUEST_RETRY_INTERVAL_US;                       \
+  int __retry_times = m_oss_options.retry_times;                               \
+  auto __retry_interval = m_oss_options.retry_interval_us;                     \
   __retry:                                                                     \
                                                                                \
   int __saved_errno = errno;                                                   \
@@ -178,7 +183,7 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
       if (__retry_times-- > 0) {                                               \
         photon::thread_usleep(__retry_interval);                               \
         __retry_interval =                                                     \
-            std::min(__retry_interval * 2, OSS_REQUEST_MAX_RETRY_INTERVAL_US); \
+          std::min(__retry_interval * 2, m_oss_options.max_retry_interval_us); \
         LOG_ERROR("Retrying oss request ` `", verbstr[op->req.verb()],         \
                   op->req.target());                                           \
         goto __retry;                                                          \
@@ -212,7 +217,7 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
       if (__retry_times-- > 0) {                                               \
         photon::thread_usleep(__retry_interval);                               \
         __retry_interval =                                                     \
-            std::min(__retry_interval * 2, OSS_REQUEST_MAX_RETRY_INTERVAL_US); \
+          std::min(__retry_interval * 2, m_oss_options.max_retry_interval_us); \
         LOG_ERROR("Retrying oss request ` `", verbstr[op->req.verb()],         \
                   op->req.target());                                           \
         goto __retry;                                                          \
@@ -580,20 +585,17 @@ class OssClientImpl : public OssClient {
   int list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
             bool delimiter, int max_keys = 0,
             std::string *next_continuation_token = nullptr);
-
   int list_objects_v1(std::string_view prefix, ListObjectsCallback cb,
-            bool delimiter, int max_keys = 0, std::string *marker = nullptr) {
-    // todo: implement a true v1
-    return list_objects_v2(prefix, cb, delimiter, max_keys, marker);
-  }
+            bool delimiter, int max_keys = 0,
+            std::string *next_marker = nullptr);
 
   int head_object(std::string_view object, ObjectHeaderMeta &meta);
 
   int fill_meta(HTTP_OP& op, ObjectMeta &meta);
   int fill_meta(HTTP_OP& op, ObjectHeaderMeta &meta);
 
-  ssize_t get_object(std::string_view object, const struct iovec *iov,
-          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr);
+  ssize_t get_object_range(std::string_view object, const struct iovec *iov,
+          int iovcnt, off_t offset);
 
   ssize_t put_object(std::string_view object, const struct iovec *iov,
                      int iovcnt, uint64_t *expected_crc64 = nullptr);
@@ -611,7 +613,7 @@ class OssClientImpl : public OssClient {
                       int part_number, uint64_t *expected_crc64 = nullptr);
 
   int upload_part_copy(void *context, off_t offset, size_t count,
-                       int part_number);
+                       int part_number, std::string_view from = "");
 
   int complete_multipart_upload(void *context, uint64_t *expected_crc64);
 
@@ -625,7 +627,7 @@ class OssClientImpl : public OssClient {
   int rename_object(std::string_view src_path, std::string_view dst_path,
                     bool set_mime = false);
 
-  int check_prefix(std::string_view prefix);
+  int check_prefix_with_list_objects(std::string_view prefix, bool use_list_objects_v2 = true);
 
   int get_object_meta(std::string_view obj, ObjectMeta &meta);
 
@@ -634,9 +636,13 @@ class OssClientImpl : public OssClient {
       photon::net::http::Verb v, OssSignedUrl &oss_url,
       const StringKV &params = {}, const StringKV &headers = {});
 
-  int do_list_objects(std::string_view bucket, std::string_view prefix,
-                      ListObjectsCallback cb, bool delimiters, int maxKeys,
-                      std::string *marker, std::string *resp_code = nullptr);
+  int walk_list_results(const SimpleDOM::Node &node, ListObjectsCallback cb); 
+  int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
+                         ListObjectsCallback cb, bool delimiters, int maxKeys,
+                         std::string *marker, std::string *resp_code = nullptr);
+  int do_list_objects_v1(std::string_view bucket, std::string_view prefix,
+                         ListObjectsCallback cb, bool delimiters, int maxKeys,
+                         std::string *marker, std::string *resp_code = nullptr);
 
   int do_copy_object(OssSignedUrl &src_oss_url, OssSignedUrl &dst_oss_url,
                      bool set_mime = false);
@@ -735,9 +741,33 @@ HTTP_OP OssClient::make_http_operation(Verb v, OssSignedUrl &oss_url,
   return HTTP_OP(op);
 }
 
-int OssClient::do_list_objects(std::string_view bucket, std::string_view prefix,
-                               ListObjectsCallback cb, bool delimiters,
-                               int maxKeys, std::string *marker, std::string *resp_code) {
+int OssClient::walk_list_results(const SimpleDOM::Node &list_bucket_result, ListObjectsCallback cb) {
+  for (auto child: list_bucket_result.enumerable_children("Contents")) {
+    auto key = child["Key"];
+    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
+    auto size = child["Size"];
+    if (!size) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
+    auto mtime = child["LastModified"];
+    auto mtim = get_list_lastmodified(mtime.to_string_view());
+    auto obj_key = key.to_string_view();
+    auto dsize = size.to_int64_t();
+    auto etag = child["ETag"].to_string_view();
+    auto r = cb({obj_key, etag, (size_t)dsize, mtim, false/*not comm prefix*/});
+    if (r < 0) return r;
+  }
+  for (auto child: list_bucket_result.enumerable_children("CommonPrefixes")) {
+    auto key = child["Prefix"];
+    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
+    auto com_prefix = key.to_string_view();
+    auto r = cb({com_prefix, "", 0, 0, true/*comm prefix*/});
+    if (r < 0) return r;
+  }
+  return 0;
+}
+
+int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view prefix,
+                                  ListObjectsCallback cb, bool delimiters,
+                                  int maxKeys, std::string *marker, std::string *resp_code) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -761,28 +791,44 @@ int OssClient::do_list_objects(std::string_view bucket, std::string_view prefix,
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
-  for (auto child: list_bucket_result.enumerable_children("Contents")) {
-    auto key = child["Key"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto size = child["Size"];
-    if (!size) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto mtime = child["LastModified"];
-    auto mtim = get_list_lastmodified(mtime.to_string_view());
-    auto obj_key = key.to_string_view();
-    auto dsize = size.to_int64_t();
-    auto etag = child["ETag"].to_string_view();
-    auto r = cb({obj_key, etag, (size_t)dsize, mtim, false/*not comm prefix*/});
-    if (r < 0) return r;
-  }
-  for (auto child: list_bucket_result.enumerable_children("CommonPrefixes")) {
-    auto key = child["Prefix"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto com_prefix = key.to_string_view();
-    auto r = cb({com_prefix, "", 0, 0, true/*comm prefix*/});
-    if (r < 0) return r;
-  }
+  auto r = walk_list_results(list_bucket_result, cb);
+  if (r < 0) return r;
   if (marker) {
     auto next_marker = list_bucket_result["NextContinuationToken"];
+    *marker = next_marker ? next_marker.to_string_view() : "";
+  }
+  return 0;
+}
+
+int OssClient::do_list_objects_v1(std::string_view bucket, std::string_view prefix,
+                                  ListObjectsCallback cb, bool delimiters,
+                                  int maxKeys, std::string *marker, std::string *resp_code) {
+  if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
+  estring_view _mark;
+  if (marker) _mark = *marker;
+
+  estring escaped_prefix = photon::net::http::url_escape(prefix);
+  estring escaped_delimiter = photon::net::http::url_escape("/");
+  estring escaped_marker = photon::net::http::url_escape(_mark);
+  estring max_key_str = std::to_string(maxKeys);
+  StringKV params = {
+      {OSS_PARAM_KEY_PREFIX, escaped_prefix},
+      {OSS_PARAM_KEY_MAX_KEYS, max_key_str}
+  };
+  if (delimiters) params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
+  if (!_mark.empty()) params.emplace(OSS_PARAM_KEY_MARKER, escaped_marker);
+
+  OssSignedUrl target(m_endpoint, bucket, "", m_is_http);
+  auto op = make_http_operation(Verb::GET, target, params);
+  DO_CALL_WITH_RESP_CODE(op, -1, target, resp_code)
+
+  auto reader = get_xml_node(op);
+  if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
+  auto list_bucket_result = reader["ListBucketResult"];
+  auto r = walk_list_results(list_bucket_result, cb);
+  if (r < 0) return r;
+  if (marker) {
+    auto next_marker = list_bucket_result["NextMarker"];
     *marker = next_marker ? next_marker.to_string_view() : "";
   }
   return 0;
@@ -842,12 +888,11 @@ static std::string xml_escape(std::string_view object) {
 
 int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
                                  const std::vector<std::string> &objects) {
-  bool need_slash = (prefix.size() && prefix.back() != '/');
   std::string_view req_head = "<Delete><Quiet>true</Quiet>";
   std::string_view req_tail = "</Delete>";
   estring req_list;
   for (size_t i = 1; i <= objects.size(); ++i) {
-    req_list.appends("<Object><Key>", xml_escape(prefix), make_ccl(need_slash, "/"),
+    req_list.appends("<Object><Key>", xml_escape(prefix),
                      xml_escape(objects[i - 1]), "</Key></Object>");
 
     // a single request can at most hold 1000 objects
@@ -862,7 +907,7 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       static const StringKV params = {
           {OSS_PARAM_KEY_DELETE, ""}
       };
-      static const StringKV headers = {
+      StringKV headers = {
           {OSS_HEADER_KEY_CONTENT_MD5, md5}
       };
       auto op = make_http_operation(Verb::POST, m_oss_url, params, headers);
@@ -897,10 +942,24 @@ int OssClient::list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
   if (max_keys == 0) max_keys = m_oss_options.max_list_ret_cnt;
   do {
     int r =
-        do_list_objects(m_bucket, prefix, cb, delimiter, max_keys, &marker);
+        do_list_objects_v2(m_bucket, prefix, cb, delimiter, max_keys, &marker);
     if (r < 0) return r;
   } while (!nct && !marker.empty());
   if (nct) *nct = marker;
+  return 0;
+}
+
+int OssClient::list_objects_v1(std::string_view prefix, ListObjectsCallback cb,
+                               bool delimiter, int max_keys, std::string *nm) {
+  std::string marker;
+  if (nm) marker = *nm;
+  if (max_keys == 0) max_keys = m_oss_options.max_list_ret_cnt;
+  do {
+    int r =
+        do_list_objects_v1(m_bucket, prefix, cb, delimiter, max_keys, &marker);
+    if (r < 0) return r;
+  } while (!nm && !marker.empty());
+  if (nm) *nm = marker;
   return 0;
 }
 
@@ -939,10 +998,10 @@ int OssClient::fill_meta(HTTP_OP& op, ObjectMeta &meta) {
   return 0;
 }
 
-ssize_t OssClient::get_object(std::string_view obj_path, const struct iovec *iov,
-                              int iovcnt, off_t offset, ObjectHeaderMeta* meta) {
-  int retry_times = OSS_REQUEST_RETRY_TIMES;
-  auto retry_interval = OSS_REQUEST_RETRY_INTERVAL_US;
+ssize_t OssClient::get_object_range(std::string_view obj_path, const struct iovec *iov,
+                              int iovcnt, off_t offset) {
+  int retry_times = m_oss_options.retry_times;
+  auto retry_interval = m_oss_options.retry_interval_us;
 
   iovector_view view((struct iovec *)iov, iovcnt);
   auto cnt = view.sum();
@@ -976,7 +1035,7 @@ retry:
     if (retry_times-- > 0) {
       photon::thread_usleep(retry_interval);
       retry_interval =
-          std::min(retry_interval * 2, OSS_REQUEST_MAX_RETRY_INTERVAL_US);
+          std::min(retry_interval * 2, m_oss_options.max_retry_interval_us);
       LOG_ERROR("Retrying oss request ` `", verbstr[op->req.verb()],
                 op->req.target());
       op.reset(nullptr);
@@ -985,9 +1044,6 @@ retry:
     ret = -1;
     errno = EIO;
   }
-
-  if (meta)
-    fill_meta(op, *meta);
 
   return ret;
 }
@@ -1000,7 +1056,7 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec *iov,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   auto content_type = lookup_mime_type(object);
 
-  static const StringKV headers = {
+  StringKV headers = {
       {OSS_HEADER_KEY_CONTENT_TYPE, content_type}};
   auto op = make_http_operation(Verb::PUT, oss_url, {}, headers);
   op->req.headers.content_length(cnt);
@@ -1019,7 +1075,7 @@ ssize_t OssClient::append_object(std::string_view object,
   OssSignedUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
   estring position_str = std::to_string(position);
-  static const StringKV params = {
+  StringKV params = {
       {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}};
 
   StringKV headers;
@@ -1067,13 +1123,17 @@ int OssClient::copy_object(std::string_view src_object,
   return 0;
 }
 
-int OssClient::check_prefix(std::string_view prefix) {
+int OssClient::check_prefix_with_list_objects(std::string_view prefix, bool use_list_objects_v2) {
   std::string res_code;
 
   auto noop = [](const ListObjectsCBParams &) { return 0; };
 
-  int r =
-      do_list_objects(m_bucket, prefix, noop, false, 1, nullptr, &res_code);
+  int r = 0;
+  if (use_list_objects_v2) {
+    r = do_list_objects_v2(m_bucket, prefix, noop, false, 1, nullptr, &res_code);
+  }  else {
+    r = do_list_objects_v1(m_bucket, prefix, noop, false, 1, nullptr, &res_code);
+  }
   if (r != 0) LOG_ERROR("Check bucket prefix failed with err: `", res_code);
   return r;
 }
@@ -1125,7 +1185,7 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   assert(!ctx->upload_id.empty());
 
   estring part_nums_str = std::to_string(part_number);
-  static const StringKV params = {
+  StringKV params = {
     {OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
@@ -1150,7 +1210,7 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
 }
 
 int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
-                                int part_number) {
+                                int part_number, std::string_view from) {
   assert(context);
   oss_multipart_context *ctx = (oss_multipart_context *)context;
   assert(!ctx->upload_id.empty());
@@ -1159,16 +1219,20 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
                          m_is_http);
 
   estring part_num_str = std::to_string(part_number);
-  static const StringKV params = {
+  StringKV params = {
       {OSS_PARAM_KEY_PART_NUMBER, part_num_str},
       {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}};
 
-  estring oss_copy_source =
-      estring("/").appends(oss_url.bucket(), "/", oss_url.object(true));
+  estring oss_copy_source;
+  if (from.empty()) { // just copy myself
+    oss_copy_source.appends("/", oss_url.bucket(), "/", oss_url.object(true));
+  } else {
+    oss_copy_source.appends("/", oss_url.bucket(), "/", photon::net::http::url_escape(from));
+  }
   std::string range = "bytes=" + std::to_string(offset) + "-" +
                       std::to_string(offset + count - 1);
 
-  static const StringKV headers = {
+  StringKV headers = {
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source},
       {OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range}};
 
@@ -1218,7 +1282,7 @@ int OssClient::complete_multipart_upload(void *context,
 
 
   DEFER(delete ctx);
-  static const StringKV params = {
+  StringKV params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 
@@ -1240,7 +1304,7 @@ int OssClient::abort_multipart_upload(void *context) {
                          m_is_http);
 
   DEFER(delete ctx);
-  static const StringKV params = {
+  StringKV params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
 

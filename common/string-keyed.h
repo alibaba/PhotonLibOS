@@ -227,6 +227,20 @@ public:
     constexpr basic_map_string_kv(std::initializer_list<value_type> init) {
         for (auto& p : init) insert(p);
     }
+    basic_map_string_kv(const basic_map_string_kv& other) {
+      insert(other.begin(), other.end());
+    }
+    basic_map_string_kv& operator=(const basic_map_string_kv& other) {
+      if (this != &other) insert(other.begin(), other.end());
+      return *this;
+    }
+    basic_map_string_kv(basic_map_string_kv&& other) noexcept {
+      other.swap(*this);
+    }
+    basic_map_string_kv& operator=(basic_map_string_kv&& other) noexcept {
+      other.swap(*this);
+      return *this;
+    }
 
     struct MutableValue : public std::string_view {
         basic_map_string_kv* _map = nullptr;

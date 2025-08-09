@@ -24,10 +24,7 @@ static const char OSS_PARAM_KEY_POSITION[]        = "position";
 static constexpr int GMT_DATE_LIMIT = 64;
 static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds
 
-static constexpr int OSS_REQUEST_RETRY_TIMES = 2;
 static constexpr int OSS_MAX_PATH_LEN = 1023;
-static constexpr uint64_t OSS_REQUEST_RETRY_INTERVAL_US = 20000ULL;
-static constexpr uint64_t OSS_REQUEST_MAX_RETRY_INTERVAL_US = 1000000ULL;
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
 
 
