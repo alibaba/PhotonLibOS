@@ -17,22 +17,6 @@ DEFINE_string(region, "", "OSS Region");
 
 using namespace photon::objstore;
 
-class SimpleCredentialsProvider : public CredentialsProvider {
- public:
-  SimpleCredentialsProvider(const std::string &accessKeyId,
-                            const std::string &accessKeySecret,
-                            const std::string &sessionToken = "")
-      : m_credentials{accessKeyId, accessKeySecret, sessionToken} {}
-  OSSCredentials getCredentials() override { return m_credentials; }
-
-  void setCredentials(const OSSCredentials &cred) override {
-    m_credentials = cred;
-  }
-
- private:
-  OSSCredentials m_credentials;
-};
-
 class OssTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -50,8 +34,9 @@ class OssTest : public ::testing::Test {
     // v4 signature with non-empty region, otherwise v1 signature.
     opts_.region = FLAGS_region;
 
-    cp_ = new_simple_credentials_provider(FLAGS_ak, FLAGS_sk);
-    client = new_oss_client(opts_, cp_);
+    auth_ = new_basic_authenticator(
+        {FLAGS_ak, FLAGS_sk, ""});
+    client = new_oss_client(opts_, auth_);
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
 
@@ -81,7 +66,7 @@ class OssTest : public ::testing::Test {
       }
     }
     if (client) delete client;
-    if (cp_) delete cp_;
+    if (auth_) delete auth_;
   }
 
   estring get_real_test_path(std::string_view suffix) {
@@ -94,7 +79,7 @@ class OssTest : public ::testing::Test {
   OssClient *client = nullptr;
 
  private:
-  CredentialsProvider *cp_ = nullptr;
+  Authenticator *auth_ = nullptr;
   std::string bucket_prefix_;
 };
 

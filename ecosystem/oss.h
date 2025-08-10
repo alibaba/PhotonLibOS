@@ -22,15 +22,19 @@ limitations under the License.
 #include <photon/common/object.h>
 #include <photon/common/callback.h>
 #include <photon/common/string_view.h>
+#include <photon/net/http/headers.h>
+#include <photon/net/http/verb.h>
+#include <photon/common/string-keyed.h>
 
 namespace photon {
 namespace objstore {
+
+using StringKV = map_string_kv;
 
 struct OssOptions {
   std::string endpoint;
   std::string bucket;
   std::string region;
-  bool use_list_obj_v2 = true;
   int max_list_ret_cnt = 1000;
   std::string user_agent;       // "Photon-OSS-Client" by default
   std::string bind_ips;
@@ -184,54 +188,54 @@ class OssClient : public Object {
   int get_object_meta(std::string_view obj, ObjectMeta &meta) = 0;
 };
 
-OssClient* new_oss_client(const OssOptions& opt, CredentialsProvider* cp);
-
-CredentialsProvider* new_sts_multifile_credentials_provider(
-    std::string_view ak_file, std::string_view sk_file,
-    std::string_view token_file, const uint64_t default_expiration_seconds);
-
-CredentialsProvider* new_simple_credentials_provider(std::string_view accessKeyId,
-        std::string_view accessKeySecret, std::string_view sessionToken = {});
-
-
-
-
 class Authenticator;
 
 OssClient* new_oss_client(const OssOptions& opt, Authenticator* cp);
 
 class Authenticator : Object {
  public:
-  virtual void sign(photon::net::http::Headers& headers,
-                    const SignParameters& params) = 0;
-
   struct SignParameters {
-    std::string_view region, endpoint, bucket;
-    std::string_view object, canonical_query;
+    std::string_view region, endpoint, bucket, object;
+    const StringKV *query_params = nullptr;
     photon::net::http::Verb verb;
   };
 
-  // may return nullptr for some implementations
-  virtual const CredentialParameters* get_credentials() = 0;
-
-  // may be ignored for some implementations
-  virtual void set_credentials(CredentialParameters&& credentials) = 0;
+  virtual void sign(photon::net::http::Headers& headers,
+                    const SignParameters& params) = 0;
 
   struct CredentialParameters {
     std::string accessKey;
     std::string accessKeySecret;
     std::string sessionToken;
   };
+
+  virtual const CredentialParameters get_credentials() = 0;
+
+  // may be ignored for some implementations
+  virtual void set_credentials(CredentialParameters&& credentials) = 0;
+};
+
+class BasicAuthenticatorImpl;
+class BasicAuthenticator : public Authenticator {
+  CredentialParameters m_credentials_;
+  BasicAuthenticatorImpl *impl_ = nullptr;
+
+ public:
+  BasicAuthenticator(Authenticator::CredentialParameters &&credentials);
+  ~BasicAuthenticator();
+
+  void sign(photon::net::http::Headers &headers,
+            const SignParameters &params) override;
+
+  const CredentialParameters get_credentials() override;
+  void set_credentials(
+      CredentialParameters &&credentials) override {  // do nothing
+  }
 };
 
 Authenticator* new_basic_authenticator(
-    Authenticator::CredentialParameters&& credentials,
-    bool v4_signature = true);
+    Authenticator::CredentialParameters&& credentials);
 
-Authenticator* new_sts_multifile_authenticator(
-    Authenticator::CredentialParameters&& credential_filepaths,
-    uint64_t default_expiration_seconds,
-    bool v4_signature = true);
-
-}  // namespace OssMiniSdk
-}  // namespace FileSystemExt
+// CustomAutheticator can be derived from BasicAuthenticator
+} 
+} 
