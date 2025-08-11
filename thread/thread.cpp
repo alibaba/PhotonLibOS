@@ -753,12 +753,14 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        mov     %rbp, %rbx
+        mov     $0, %rbp
         call    _asan_start
-        mov     0x40(%rbp), %rdi
-        movq    $0, 0x40(%rbp)
-        call    *0x48(%rbp)
-        mov     %rax, 0x48(%rbp)
-        mov     %rbp, %rdi
+        mov     0x40(%rbx), %rdi
+        movq    $0, 0x40(%rbx)
+        call    *0x48(%rbx)
+        mov     %rax, 0x48(%rbx)
+        mov     %rbx, %rdi
         call    _photon_thread_die
 )"
     );
@@ -1284,7 +1286,8 @@ insert_list:
         return rq.current->error_number;
     }
 
-    inline void thread_yield_fast() {
+    __attribute__((noinline))
+    void thread_yield_fast() {
         auto sw = AtomicRunQ().goto_next();
         switch_context(sw.from, sw.to);
     }
