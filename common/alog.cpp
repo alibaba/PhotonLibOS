@@ -65,12 +65,12 @@ public:
         if ((uint32_t)level > ALOG_AUDIT)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid level ", level);
         auto dx = decode(code);
-        if ((dx < decode(ALOG_COLOR_RED) &&
-            (dx > ALOG_COLOR_NOTHING)) ||
-            (dx > decode(ALOG_COLOR_LIGHTWHITE)) ||
-            (dx > decode(ALOG_COLOR_LIGHTGRAY) &&
-            (dx < decode(ALOG_COLOR_DARKGRAY)))) {
-                LOG_ERROR_RETURN(EINVAL, -1, "invalid color code ", code);
+        if ((dx < decode(ALOG_COLOR_BLACK) &&
+             dx > decode(ALOG_COLOR_LIGHTGRAY)) /* not in 3x range */
+            && (dx < decode(ALOG_COLOR_DARKGRAY) &&
+                dx > decode(ALOG_COLOR_LIGHTWHITE)) /* not in 9x range */
+            && (dx != decode(ALOG_COLOR_NOTHING))) {
+            LOG_ERROR_RETURN(EINVAL, -1, "invalid color code ", HEX(code));
         }
         level_color[level] = code;
         return 0;

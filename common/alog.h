@@ -230,7 +230,7 @@ struct ALogBuffer
 
 inline void ILogOutput::preset_color() {
     set_level_color(ALOG_DEBUG, ALOG_COLOR_DARKGRAY);
-    set_level_color(ALOG_INFO, ALOG_COLOR_LIGHTGRAY);
+    set_level_color(ALOG_INFO, ALOG_COLOR_NOTHING);
     set_level_color(ALOG_WARN, ALOG_COLOR_YELLOW);
     set_level_color(ALOG_ERROR, ALOG_COLOR_RED);
     set_level_color(ALOG_FATAL, ALOG_COLOR_MAGENTA);
