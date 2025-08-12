@@ -169,51 +169,6 @@ namespace photon
         void* _ptr;
     };
 
-    #if defined(__has_feature)
-    #   if __has_feature(address_sanitizer) // for clang
-    #       define __SANITIZE_ADDRESS__ // GCC already sets this
-    #   endif
-    #endif
-
-    #ifdef __SANITIZE_ADDRESS__
-    extern "C" {
-    // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
-    void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom,
-                                        size_t size);
-    void __sanitizer_finish_switch_fiber(void* fake_stack_save,
-                                         const void** bottom_old, size_t* size_old);
-    }
-
-    static void asan_start(void** save, thread* to) {
-        void* bottom = to->buf ? to->buf : to->stackful_alloc_top;
-        __sanitizer_start_switch_fiber(save, bottom,
-                                       to->stack_size);
-    }
-
-    static void asan_finish(void* save) {
-        __sanitizer_finish_switch_fiber(save, nullptr, nullptr);
-    }
-
-#define ASAN_START() asan_finish((void*)nullptr);
-
-#define ASAN_SWITCH(to)      \
-        void* __save;                  \
-        asan_start(&__save, to);       \
-        DEFER({ asan_finish(__save); });
-
-#define ASAN_DIE_SWITCH(to)  \
-        asan_start(nullptr, to);
-
-#else
-#define ASAN_START(ptr)
-#define ASAN_SWITCH(to)
-#define ASAN_DIE_SWITCH(to)
-#endif
-
-    static void _asan_start() asm("_asan_start");
-
-    __attribute__((used)) static void _asan_start() { ASAN_START(); }
-
     struct thread_list;
     struct thread : public intrusive_list_node<thread> {
         volatile vcpu_t* vcpu;
@@ -337,6 +292,51 @@ namespace photon
             photon_thread_dealloc(buf, stack_size);
         }
     };
+
+#if defined(__has_feature)
+#   if __has_feature(address_sanitizer) // for clang
+#       define __SANITIZE_ADDRESS__ // GCC already sets this
+#   endif
+#endif
+
+#ifdef __SANITIZE_ADDRESS__
+    extern "C" {
+    // Check out sanitizer/asan-interface.h in compiler-rt for documentation.
+    void __sanitizer_start_switch_fiber(void** fake_stack_save, const void* bottom,
+                                        size_t size);
+    void __sanitizer_finish_switch_fiber(void* fake_stack_save,
+                                         const void** bottom_old, size_t* size_old);
+    }
+
+    static void asan_start(void** save, thread* to) {
+        void* bottom = to->buf ? to->buf : to->stackful_alloc_top;
+        __sanitizer_start_switch_fiber(save, bottom,
+                                       to->stack_size);
+    }
+
+    static void asan_finish(void* save) {
+        __sanitizer_finish_switch_fiber(save, nullptr, nullptr);
+    }
+
+#define ASAN_START() asan_finish((void*)nullptr);
+
+#define ASAN_SWITCH(to)      \
+        void* __save;                  \
+        asan_start(&__save, to);       \
+        DEFER({ asan_finish(__save); });
+
+#define ASAN_DIE_SWITCH(to)  \
+        asan_start(nullptr, to);
+
+#else
+#define ASAN_START(ptr)
+#define ASAN_SWITCH(to)
+#define ASAN_DIE_SWITCH(to)
+#endif
+
+    static void _asan_start() asm("_asan_start");
+
+    __attribute__((used)) static void _asan_start() { ASAN_START(); }
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"

@@ -77,6 +77,7 @@ if (PHOTON_BUILD_WITH_ASAN)
     if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
         message(FATAL_ERROR "Wrong environment")
     endif ()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -static-libasan")
     add_link_options(-fsanitize=address -static-libasan)
 endif ()
 
