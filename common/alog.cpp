@@ -421,12 +421,17 @@ public:
     }
 };
 
+static const uint64_t SPSC_CAPACITY     = 1024 * 1024UL;
+static const int      MIN_NUM_OF_QUEUES = 1;
+static const int      MAX_NUM_OF_QUEUES = 128;
+static const uint32_t MAX_YIELD_TURNS   = 1024;
+
 class AsyncLogOutput final : public BaseLogOutput {
 public:
     ILogOutput* log_output;
     photon::semaphore sem;
     std::thread background;
-    typedef LockfreeSPSCRingQueue<char, 1024 * 1024> spsc;
+    typedef LockfreeSPSCRingQueue<char, SPSC_CAPACITY> spsc;
     std::vector<std::unique_ptr<spsc>> buf;
     std::vector<std::unique_ptr<photon::spinlock>> lock;
     int num_of_queues;
@@ -435,8 +440,8 @@ public:
     AsyncLogOutput(ILogOutput* output, int num) : log_output(output), num_of_queues(num) {
         // no colors by default when log into files
         BaseLogOutput::clear_color();
-        if (num_of_queues <= 0) num_of_queues = 1;                 // MIN
-        if (num_of_queues > 128) num_of_queues = 128;              // MAX
+        if (num_of_queues < MIN_NUM_OF_QUEUES) num_of_queues = MIN_NUM_OF_QUEUES;
+        if (num_of_queues > MAX_NUM_OF_QUEUES) num_of_queues = MAX_NUM_OF_QUEUES;
         num_of_queues = 1 << (31 - __builtin_clz(num_of_queues));  // Aligned to 2^n
         buf.reserve(num_of_queues);
         lock.reserve(num_of_queues);
@@ -453,7 +458,7 @@ public:
         uint32_t yield_turn = 0;
         while (!stopped) {
             if (writeback() == 0) {
-                if (yield_turn < 1024) {
+                if (yield_turn < MAX_YIELD_TURNS) {
                     photon::thread_yield();
                     ++yield_turn;
                 } else {
