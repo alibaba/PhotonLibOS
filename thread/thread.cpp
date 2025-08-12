@@ -754,10 +754,16 @@ R"(
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
         mov     %rbp, %rbx
-        mov     $0, %rbp
-        call    _asan_start
+        xor     %rbp, %rbp
+)"
+#ifdef __SANITIZE_ADDRESS__
+R"(
+        call _asan_start
+)"
+#endif
+R"(
         mov     0x40(%rbx), %rdi
-        movq    $0, 0x40(%rbx)
+        movq    %rbp, 0x40(%rbx)
         call    *0x48(%rbx)
         mov     %rax, 0x48(%rbx)
         mov     %rbx, %rdi
@@ -820,7 +826,6 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
-        call    _asan_start
         mov     0x40(%rbp), %rcx
         movq    $0, 0x40(%rbp)
         call    *0x48(%rbp)
@@ -896,12 +901,20 @@ R"(
 
 DEF_ASM_FUNC(_photon_thread_stub)
 R"(
+        mov x28, x29
+        mov x29, xzr
+)"
+#ifdef __ADDRESS_SANITIZER__
+R"(
         bl _asan_start           //; asan_start()
-        ldp x0, x1, [x29, #0x40] //; load arg, start into x0, x1
-        str xzr, [x29, #0x40]    //; set arg as 0
+)"
+#endif
+R"(
+        ldp x0, x1, [x28, #0x40] //; load arg, start into x0, x1
+        str xzr, [x28, #0x40]    //; set arg as 0
         blr x1                   //; start(x0)
-        str x0, [x29, #0x48]     //; retval = result
-        mov x0, x29              //; move th to x0
+        str x0, [x28, #0x48]     //; retval = result
+        mov x0, x28              //; move th to x0
         b _photon_thread_die     //; _photon_thread_die(th)
 )"
     );
