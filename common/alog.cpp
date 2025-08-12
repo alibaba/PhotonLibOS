@@ -20,7 +20,7 @@ limitations under the License.
 #include "alog.h"
 #include "lockfree_queue.h"
 #include "photon/thread/thread.h"
-#include "photon/photon.h"
+#include "photon/io/fd-events.h"
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
@@ -429,18 +429,18 @@ public:
     typedef LockfreeSPSCRingQueue<char, 1024 * 1024> spsc;
     std::vector<std::unique_ptr<spsc>> buf;
     std::vector<std::unique_ptr<photon::spinlock>> lock;
-    int queue_num;
+    int num_of_queues;
     bool stopped = false;
 
-    AsyncLogOutput(ILogOutput* output, int num) : log_output(output), queue_num(num) {
+    AsyncLogOutput(ILogOutput* output, int num) : log_output(output), num_of_queues(num) {
         // no colors by default when log into files
         BaseLogOutput::clear_color();
-        if (queue_num <= 0) queue_num = 1;                 // MIN
-        if (queue_num > 128) queue_num = 128;              // MAX
-        queue_num = 1 << (31 - __builtin_clz(queue_num));  // Aligned to 2^n
-        buf.reserve(queue_num);
-        lock.reserve(queue_num);
-        for (int i = 0; i < queue_num; ++i) {
+        if (num_of_queues <= 0) num_of_queues = 1;                 // MIN
+        if (num_of_queues > 128) num_of_queues = 128;              // MAX
+        num_of_queues = 1 << (31 - __builtin_clz(num_of_queues));  // Aligned to 2^n
+        buf.reserve(num_of_queues);
+        lock.reserve(num_of_queues);
+        for (int i = 0; i < num_of_queues; ++i) {
             buf.emplace_back(new spsc());
             lock.emplace_back(new photon::spinlock());
         }
@@ -448,7 +448,8 @@ public:
     }
 
     void worker() {
-        photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE);
+        photon::vcpu_init();
+        photon::fd_events_init(photon::INIT_EVENT_EPOLL);
         uint32_t yield_turn = 0;
         while (!stopped) {
             if (writeback() == 0) {
@@ -463,13 +464,14 @@ public:
                 yield_turn = 0;
             }
         }
-        photon::fini();
+        photon::fd_events_fini();
+        photon::vcpu_fini();
         (void)writeback();
     }
 
     uint64_t writeback() {
         uint64_t cc = 0;
-        for (int i = 0; i < queue_num; ++i) {
+        for (int i = 0; i < num_of_queues; ++i) {
             cc += buf[i]->consume_pop_batch(UINT32_MAX, [&](const char* p1, size_t n1,
                                                             const char* p2, size_t n2) {
                 // no level and coloring again, by passing -1
@@ -482,7 +484,7 @@ public:
 
     void write(int level, const char* begin, const char* end) override {
         static thread_local uint64_t index = 0;
-        auto current = (++index) & (queue_num - 1);
+        auto current = (++index) & (num_of_queues - 1);
         size_t ra;
         LineIOV iov(get_color(level), begin, end); {
             SCOPED_LOCK(lock[current].get());
@@ -535,8 +537,8 @@ ILogOutput* new_log_output_file(int fd, uint64_t throttle) {
     return ret;
 }
 
-ILogOutput* new_async_log_output(ILogOutput* output, int queue_num) {
-    return output ? new AsyncLogOutput(output, queue_num) : nullptr;
+ILogOutput* new_async_log_output(ILogOutput* output, int num_of_queues) {
+    return output ? new AsyncLogOutput(output, num_of_queues) : nullptr;
 }
 
 // default_log_file is not defined in header
