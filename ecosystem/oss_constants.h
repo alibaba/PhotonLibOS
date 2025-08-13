@@ -24,14 +24,12 @@ static const char OSS_PARAM_KEY_POSITION[]        = "position";
 static constexpr int GMT_DATE_LIMIT = 64;
 static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds
 
-static constexpr int OSS_MAX_PATH_LEN = 1023;
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
-
 
 // using StringKV = unordered_map_string_kv;
 // replace this later when photon is updated and has
 // unordered_map_string_key_case_insensitive.
-const static StringKV MIME_TYPE_MAP = {
+const StringKV MIME_TYPE_MAP = {
   {"html", "text/html"},
   {"htm", "text/html"},
   {"shtml", "text/html"},

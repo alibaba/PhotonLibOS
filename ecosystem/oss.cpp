@@ -449,9 +449,9 @@ class OssClientImpl : public OssClient {
   int get_object_meta(std::string_view obj, ObjectMeta &meta);
 
  private:
-  void append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
-                           photon::net::http::Headers &headers,
-                           const StringKV &query_params = {});
+  int append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
+                          photon::net::http::Headers &headers,
+                          const StringKV &query_params = {});
 
   int walk_list_results(const SimpleDOM::Node &node, ListObjectsCallback cb); 
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
@@ -529,8 +529,8 @@ OssClient::~OssClient() {
 #undef  OssClient
 #define OssClient inline OssClientImpl
 
-void OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
-                                    photon::net::http::Headers &headers,  const StringKV &query_params) {
+int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
+                                   photon::net::http::Headers &headers,  const StringKV &query_params) {
   Authenticator::SignParameters params;
   params.verb = v;
   params.query_params = &query_params;
@@ -539,7 +539,7 @@ void OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
   params.bucket = m_oss_options.bucket;
   params.object = oss_url.object();
 
-  m_authenticator->sign(headers, params);
+  return m_authenticator->sign(headers, params);
 }
 
 int OssClient::walk_list_results(const SimpleDOM::Node &list_bucket_result, ListObjectsCallback cb) {
@@ -587,13 +587,14 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
 
   OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL_WITH_RESP_CODE(op, -1, oss_url, resp_code)
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
-  auto r = walk_list_results(list_bucket_result, cb);
+  r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
     auto next_marker = list_bucket_result["NextContinuationToken"];
@@ -622,13 +623,14 @@ int OssClient::do_list_objects_v1(std::string_view bucket, std::string_view pref
 
   OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL_WITH_RESP_CODE(op, -1, oss_url, resp_code)
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
-  auto r = walk_list_results(list_bucket_result, cb);
+  r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
     auto next_marker = list_bucket_result["NextMarker"];
@@ -659,14 +661,16 @@ int OssClient::do_copy_object(OssUrl &src_oss_url,
     }
   }
 
-  append_auth_headers(Verb::PUT, dst_oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::PUT, dst_oss_url, op.req.headers);
+  if (r < 0) return r;
   DO_CALL(op, -1, dst_oss_url)
   return 0;
 }
 
 int OssClient::do_delete_object(OssUrl &oss_url) {
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.url());
-  append_auth_headers(Verb::DELETE, oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   return 0;
 }
@@ -717,7 +721,8 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
       op.req.headers.content_length(body_view.sum());
       op.body_writer = {&body_view, &body_writer_cb};
-      append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+      int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+      if (r < 0) return r;
       DO_CALL(op, -1, oss_url)
       req_list.clear();
     }
@@ -770,7 +775,8 @@ int OssClient::list_objects_v1(std::string_view prefix, ListObjectsCallback cb,
 int OssClient::head_object(std::string_view object, ObjectHeaderMeta &meta) {
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.url());
-  append_auth_headers(Verb::HEAD, oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   return fill_meta(op, meta);
 }
@@ -818,7 +824,8 @@ retry:
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
-  append_auth_headers(Verb::GET, oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
 
   uint64_t content_length = op.resp.headers.content_length();
@@ -863,10 +870,13 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec *iov,
   auto content_type = lookup_mime_type(object);
 
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.url());
-  op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
+  if (!content_type.empty()) {
+    op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
+  }
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  append_auth_headers(Verb::PUT, oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
   return cnt;
@@ -891,7 +901,8 @@ ssize_t OssClient::append_object(std::string_view object,
   }
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
   return cnt;
@@ -939,7 +950,8 @@ int OssClient::init_multipart_upload(std::string_view object,
   auto content_type = lookup_mime_type(object);
   if (!content_type.empty())
     op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
-  append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
 
   auto reader = get_xml_node(op);
@@ -980,7 +992,8 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
 
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url);
 
   auto etag = op.resp.headers["ETag"];
@@ -1019,7 +1032,8 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range);
-  append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
 
   auto reader = get_xml_node(op);
@@ -1072,7 +1086,8 @@ int OssClient::complete_multipart_upload(void *context,
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
   op.req.headers.content_length(req_body.size());
   op.body_writer = {&view, &body_writer_cb};
-  append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
   return 0;
@@ -1093,7 +1108,8 @@ int OssClient::abort_multipart_upload(void *context) {
   };
 
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.append_params(query_params));
-  append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   return 0;
 }
@@ -1103,7 +1119,8 @@ int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
   static const StringKV query_params = {
       {OSS_PARAM_KEY_OBJECT_META, ""}};
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
-  append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
+  int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
   DO_CALL(op, -1, oss_url)
   return fill_meta(op, meta);
 }
@@ -1115,10 +1132,11 @@ int OssClient::delete_object(std::string_view obj_path) {
 
 #undef OssClient
 
-class BasicAuthenticatorImpl {
+class BasicAuthenticator : public Authenticator {
   char m_gmt_date[GMT_DATE_LIMIT];
   char m_gmt_date_iso8601[GMT_DATE_LIMIT];
   time_t m_last_tim = 0;
+  CredentialParameters m_credentials;
   void append_query_params(estring &s, const StringKV &params, bool need_question_mark = true) {
     if (!params.empty()) {
       auto it = params.begin();
@@ -1133,7 +1151,6 @@ class BasicAuthenticatorImpl {
 
   void append_headers(estring &s, const photon::net::http::Headers& header_map, bool v4_signature) {
     for (auto kv : header_map) {
-      if (kv.second.empty()) continue;
       if (kv.first.substr(0, 5) != "x-oss" &&
           (!v4_signature || (kv.first != OSS_HEADER_KEY_CONTENT_MD5 &&
                              kv.first != OSS_HEADER_KEY_CONTENT_TYPE)))
@@ -1174,13 +1191,15 @@ class BasicAuthenticatorImpl {
         OSS_PARAM_KEY_UPLOADS,     OSS_PARAM_KEY_UPLOAD_ID,
         OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_DELETE};
 
-    StringKV sub_params;
-    for (auto &it : *params.query_params) {
-      if (sub_resources.count(it.first)) {
-        sub_params.emplace(it.first, it.second);
+    if (params.query_params) {
+      StringKV sub_params;
+      for (auto &it : *params.query_params) {
+        if (sub_resources.count(it.first)) {
+          sub_params.emplace(it.first, it.second);
+        }
       }
+      append_query_params(data2sign, sub_params);
     }
-    append_query_params(data2sign, sub_params);
     // LOG_INFO("data2sign is `", data2sign);
 
     auto signature = hmac_sha1_base64(sk, data2sign);
@@ -1201,7 +1220,9 @@ class BasicAuthenticatorImpl {
     std::string_view method = photon::net::http::verbstr[params.verb];
     canonical_request.appends(method, "\n", "/", params.bucket, "/",
                               photon::net::http::url_escape(params.object, false), "\n");
-    append_query_params(canonical_request, *params.query_params, false);
+    if (params.query_params) {
+      append_query_params(canonical_request, *params.query_params, false);
+    }
 
     canonical_request.appends("\n");
 
@@ -1244,6 +1265,7 @@ class BasicAuthenticatorImpl {
                 estring_view(m_gmt_date_iso8601, 8), "/", params.region,
                 "/oss/aliyun_v4_request,", "Signature=", signature);
     headers.insert("Authorization", auth);
+    headers.insert("Date", m_gmt_date);
   }
 
   estring hmac_shax(estring_view key, estring_view data, const EVP_MD *evp_md) {
@@ -1323,35 +1345,25 @@ class BasicAuthenticatorImpl {
   }
 
  public:
-  BasicAuthenticatorImpl() = default;
-  void sign(photon::net::http::Headers &headers,
-            const Authenticator::SignParameters &params,
-            const Authenticator::CredentialParameters &cred) {
+  BasicAuthenticator(CredentialParameters &&credentials)
+      : m_credentials(std::move(credentials)) {}
+
+  const CredentialParameters get_credentials() { return m_credentials; }
+
+  void set_credentials(CredentialParameters &&credentials) {
+    m_credentials = credentials;
+  }
+
+  int sign(photon::net::http::Headers &headers,
+            const Authenticator::SignParameters &params) {
     if (params.region.empty()) {
-      sign_v1(headers, params, cred);
+      sign_v1(headers, params, m_credentials);
     } else {
-      sign_v4(headers, params, cred);
+      sign_v4(headers, params, m_credentials);
     }
+    return 0;
   }
 };
-
-BasicAuthenticator::BasicAuthenticator(CredentialParameters &&credentials)
-    : m_credentials_(std::move(credentials)) {
-  impl_ = new BasicAuthenticatorImpl;
-}
-
-BasicAuthenticator::~BasicAuthenticator() { delete impl_; }
-
-const BasicAuthenticator::CredentialParameters
-BasicAuthenticator::get_credentials() {
-  return m_credentials_;
-}
-
-void BasicAuthenticator::sign(photon::net::http::Headers &headers,
-                              const SignParameters &params) {
-  auto cred = get_credentials();
-  impl_->sign(headers, params, cred);
-}
 
 OssClient *new_oss_client(const OssOptions &opt, Authenticator *auth) {
   return new OssClientImpl(opt, auth);

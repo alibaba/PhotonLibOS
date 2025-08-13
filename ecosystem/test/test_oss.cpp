@@ -200,7 +200,7 @@ TEST_F(OssTest, list_objects) {
 }
 
 TEST_F(OssTest, put_and_get_meta) {
-  auto path = get_real_test_path("object_meta/testfile.html");
+  auto path = get_real_test_path("object_meta/testfile.unknown_suffix");
   size_t file_size = 1025;
   char buf[file_size] = {3};
   iovec iov{buf, file_size};

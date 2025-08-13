@@ -31,6 +31,9 @@ namespace objstore {
 
 using StringKV = map_string_kv;
 
+static constexpr int OSS_MAX_PATH_LEN = 1023;
+extern const StringKV MIME_TYPE_MAP;
+
 struct OssOptions {
   std::string endpoint;
   std::string bucket;
@@ -42,18 +45,6 @@ struct OssOptions {
   int retry_times = 2;
   uint64_t retry_interval_us = 20000ULL;
   uint64_t max_retry_interval_us = 1000000ULL;
-};
-
-struct OSSCredentials {
-  std::string m_accessKeyId;
-  std::string m_accessKeySecret;
-  std::string m_sessionToken;
-};
-
-class CredentialsProvider : Object {
- public:
-  virtual OSSCredentials getCredentials() = 0;
-  virtual void setCredentials(const OSSCredentials &cred) {}
 };
 
 struct ObjectMeta {
@@ -200,8 +191,8 @@ class Authenticator : Object {
     photon::net::http::Verb verb;
   };
 
-  virtual void sign(photon::net::http::Headers& headers,
-                    const SignParameters& params) = 0;
+  virtual int sign(photon::net::http::Headers &headers,
+                   const SignParameters &params) = 0;
 
   struct CredentialParameters {
     std::string accessKey;
@@ -212,30 +203,32 @@ class Authenticator : Object {
   virtual const CredentialParameters get_credentials() = 0;
 
   // may be ignored for some implementations
-  virtual void set_credentials(CredentialParameters&& credentials) = 0;
-};
-
-class BasicAuthenticatorImpl;
-class BasicAuthenticator : public Authenticator {
-  CredentialParameters m_credentials_;
-  BasicAuthenticatorImpl *impl_ = nullptr;
-
- public:
-  BasicAuthenticator(Authenticator::CredentialParameters &&credentials);
-  ~BasicAuthenticator();
-
-  void sign(photon::net::http::Headers &headers,
-            const SignParameters &params) override;
-
-  const CredentialParameters get_credentials() override;
-  void set_credentials(
-      CredentialParameters &&credentials) override {  // do nothing
-  }
+  virtual void set_credentials(CredentialParameters &&credentials) = 0;
 };
 
 Authenticator* new_basic_authenticator(
     Authenticator::CredentialParameters&& credentials);
 
-// CustomAutheticator can be derived from BasicAuthenticator
+//add one typical CustomAutheticator example
+/*
+class CustomAuthenticator : public Authenticator {
+  Authenticator* auth_ = nullptr;
+ public:
+  CustomAuthenticator(Authenticator* auth) : auth_(auth) {}
+  virtual int sign(photon::net::http::Headers& headers,
+                   const SignParameters& params) override {
+    // add your own logic here
+    return auth_->sign(headers, params);
+  }
+
+  virtual const CredentialParameters get_credentials() override {
+    // add your own logic here
+    return auth_->get_credentials();
+  }
+
+  virtual void set_credentials(CredentialParameters&& credentials) override {
+    auth_->set_credentials(std::move(credentials));
+  }
+};*/
 } 
 } 
