@@ -48,16 +48,38 @@ struct OssOptions {
 };
 
 struct ObjectMeta {
-  size_t size = 0;
-  time_t mtime = 0;
-  std::string etag;
+  uint8_t flags = 0;
+
+  void reset() { flags = 0; }
+
+#define DEFINE_OPTIONAL_FIELD(type, name, flag)                   \
+  static_assert((flag) > 0 && ((flag) & ((flag) - 1)) == 0,       \
+                "Flag must be a power of two");                   \
+  static_assert(((flag) & ~((uint8_t)0xFF)) == 0,                 \
+                "Flag must fit within uint16_t bit range (0-7)"); \
+  type name{};                                                    \
+  bool has_##name() const { return flags & (flag); }              \
+  void set_##name() { flags |= (flag); }                          \
+  void set_##name(const type &value) {                            \
+    name = value;                                                 \
+    flags |= (flag);                                              \
+  }                                                               \
+  void reset_##name() {                                           \
+    name = {};                                                    \
+    flags &= ~(flag);                                             \
+  }
+
+  DEFINE_OPTIONAL_FIELD(size_t, size, 1)
+  DEFINE_OPTIONAL_FIELD(time_t, mtime, 1 << 1)
+  DEFINE_OPTIONAL_FIELD(std::string, etag, 1 << 2)
 };
 
 struct ObjectHeaderMeta : public ObjectMeta {
-  std::string type;  // Appendable/Normal/...
-  std::string storage_class;
-  std::pair<bool, uint64_t> crc64{false,
-                                  0};  // crc64.first is true if crc64 is valid.
+  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
+  DEFINE_OPTIONAL_FIELD(std::string, storage_class, 1 << 4)
+  DEFINE_OPTIONAL_FIELD(uint64_t, crc64, 1 << 5)
+
+#undef DEFINE_OPTIONAL_FIELD
 };
 
 struct ListObjectsCBParams {
@@ -91,7 +113,7 @@ class OssClient : public Object {
   // return value is the real size if the operation successfully, otherwise return -1
   virtual
   ssize_t get_object_range(std::string_view object, const struct iovec *iov,
-          int iovcnt, off_t offset) = 0;
+          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr) = 0;
 
   // return value is the object size if the operation successfully, otherwise return -1
   virtual
@@ -200,7 +222,9 @@ class Authenticator : Object {
     std::string sessionToken;
   };
 
-  virtual const CredentialParameters get_credentials() = 0;
+  virtual const CredentialParameters* get_credentials() {
+    return nullptr;
+  }
 
   // may be ignored for some implementations
   virtual void set_credentials(CredentialParameters &&credentials) = 0;
@@ -210,8 +234,7 @@ Authenticator* new_basic_authenticator(
     Authenticator::CredentialParameters&& credentials);
 
 //add one typical CustomAutheticator example
-/*
-class CustomAuthenticator : public Authenticator {
+/*class CustomAuthenticator : public Authenticator {
   Authenticator* auth_ = nullptr;
  public:
   CustomAuthenticator(Authenticator* auth) : auth_(auth) {}
@@ -221,7 +244,7 @@ class CustomAuthenticator : public Authenticator {
     return auth_->sign(headers, params);
   }
 
-  virtual const CredentialParameters get_credentials() override {
+  virtual const CredentialParameters* get_credentials() override {
     // add your own logic here
     return auth_->get_credentials();
   }

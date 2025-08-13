@@ -211,19 +211,41 @@ TEST_F(OssTest, put_and_get_meta) {
   ObjectHeaderMeta hmeta;
   ret = client->head_object(path, hmeta);
   ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(hmeta.has_etag());
+  EXPECT_TRUE(hmeta.has_size());
+  EXPECT_TRUE(hmeta.has_mtime());
+  EXPECT_TRUE(hmeta.has_crc64());
+  EXPECT_TRUE(hmeta.has_storage_class());
+  EXPECT_TRUE(hmeta.has_type());
   EXPECT_EQ(hmeta.size, file_size);
   EXPECT_TRUE(!hmeta.etag.empty());
   EXPECT_NE(hmeta.mtime, 0);
-  EXPECT_TRUE(hmeta.crc64.first);
+  EXPECT_TRUE(hmeta.has_crc64());
   EXPECT_TRUE(!hmeta.storage_class.empty());
   EXPECT_TRUE(!hmeta.type.empty());
 
   ObjectMeta meta;
   ret = client->get_object_meta(path, meta);
   ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(meta.has_etag());
+  EXPECT_TRUE(meta.has_size());
+  EXPECT_TRUE(meta.has_mtime());
   EXPECT_EQ(meta.size, file_size);
   EXPECT_TRUE(!meta.etag.empty());
   EXPECT_EQ(meta.mtime, hmeta.mtime);
+
+  ObjectHeaderMeta hmeta2;
+  iovec iov2{buf, 1};
+  ret = client->get_object_range(path, &iov2, 1, 0, &hmeta2);
+  ASSERT_EQ(ret, 1);
+  /// From testing, get obj range will return all the following fileds.
+  EXPECT_EQ(hmeta2.flags, hmeta.flags);
+  EXPECT_EQ(hmeta2.size, hmeta.size);
+  EXPECT_EQ(hmeta2.crc64, hmeta.crc64);
+  EXPECT_EQ(hmeta2.mtime, hmeta.mtime);
+  EXPECT_EQ(hmeta2.storage_class, hmeta.storage_class);
+  EXPECT_EQ(hmeta2.crc64, hmeta.crc64);
+  EXPECT_EQ(hmeta2.etag, hmeta.etag);
 }
 
 TEST_F(OssTest, copy_and_rename) {

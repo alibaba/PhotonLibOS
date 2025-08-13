@@ -15,32 +15,31 @@ limitations under the License.
 */
 
 #include "oss.h"
-#include <fcntl.h>
-#include <sys/stat.h>
+
 #include <netinet/in.h>
+#include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
-#include <openssl/evp.h>
-#include <photon/common/estring.h>
-#include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
-#include <photon/thread/timer.h>
-#include <time.h>
+#include <photon/common/alog.h>
+#include <photon/common/estring.h>
+#include <photon/common/iovector.h>
 #include <photon/ecosystem/simple_dom.h>
 #include <photon/net/http/client.h>
+#include <photon/net/http/url.h>
+#include <photon/net/utils.h>
+#include <photon/thread/timer.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
-#include <unordered_set>
 #include <string>
-#include <unistd.h>
+#include <unordered_set>
 
 // #include "common/faultinjector.h"
 // #include "common/logger.h"
-#include "photon/common/iovector.h"
-#include "photon/fs/path.h"
-#include "photon/net/http/url.h"
-#include "photon/net/utils.h"
 // #include "metric/metrics.h"
 
 namespace photon {
@@ -56,7 +55,6 @@ using Verb = net::http::Verb;
 //using HTTP_OP = std::unique_ptr<Operation, OpDeleter>;
 
 using HTTP_STACK_OP = photon::net::http::Client::OperationOnStack<16 * 1024 - 1>;
-// 两个DEFER因命名冲突不能在同一行，第二个用更原始的实现
 #define DEFINE_ONSTACK_OP(client, verb, url)                                \
     int _CONCAT(__eno__, __LINE__) = 0;                                     \
     DEFER(errno = _CONCAT(__eno__, __LINE__));                              \
@@ -66,21 +64,23 @@ using HTTP_STACK_OP = photon::net::http::Client::OperationOnStack<16 * 1024 - 1>
 
 static SimpleDOM::Node get_xml_node(HTTP_STACK_OP &op) {
   auto length = op.resp.headers.content_length();
-  if (length > XML_LIMIT) LOG_ERROR_RETURN(EINVAL, {}, "xml length limit excceed `", length);
-  // auto body_buf = (char*) malloc(length);
-  // auto rc = op.resp.read(body_buf, length);
-  std::string body_buf;
-  body_buf.resize(length);
-  auto rc = op.resp.read(&body_buf[0], length);
-  if (rc != (ssize_t)length) LOG_ERRNO_RETURN(0, {}, "body read error ` `", rc, length);
-  try { // todo try catch inside simple_dom
-    // auto doc = SimpleDOM::parse(body_buf, length,
-    //           SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
-    auto doc = photon::SimpleDOM::parse_copy(body_buf.data(), body_buf.size(),
-                                             photon::SimpleDOM::DOC_XML);
+  if (length > XML_LIMIT)
+    LOG_ERROR_RETURN(EINVAL, {}, "xml length limit excceed `", length);
+  auto body_buf = (char *)malloc(length + 1);
+  auto rc = op.resp.read(body_buf, length);
+  body_buf[length] = '\0';
+  if (rc != (ssize_t)length) {
+    free(body_buf);
+    LOG_ERRNO_RETURN(0, {}, "body read error ` `", rc, length);
+  }
+
+  try {  // todo try catch inside simple_dom
+    auto doc = SimpleDOM::parse(body_buf, length,
+                                SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
     if (!doc) LOG_ERROR_RETURN(0, {}, "failed to parse resp_body");
     return doc;
   } catch (std::exception const &e) {
+    free(body_buf);
     LOG_ERROR("got exception when try to parse resp_body `", e.what());
   }
   LOG_ERROR_RETURN(0, {}, "");
@@ -412,7 +412,7 @@ class OssClientImpl : public OssClient {
   int fill_meta(HTTP_STACK_OP &op, ObjectHeaderMeta &meta);
 
   ssize_t get_object_range(std::string_view object, const struct iovec *iov,
-          int iovcnt, off_t offset);
+          int iovcnt, off_t offset, ObjectHeaderMeta* meta = nullptr);
 
   ssize_t put_object(std::string_view object, const struct iovec *iov,
                      int iovcnt, uint64_t *expected_crc64 = nullptr);
@@ -785,13 +785,23 @@ int OssClient::fill_meta(HTTP_STACK_OP &op, ObjectHeaderMeta &meta) {
   int ret = fill_meta(op, (ObjectMeta &)meta);
   if (ret < 0) return ret;
 
-  meta.type = op.resp.headers["x-oss-object-type"];
-  meta.storage_class = op.resp.headers["x-oss-storage-class"];
+  auto it = op.resp.headers.find("x-oss-object-type");
+  if (it != op.resp.headers.end()) {
+    meta.set_type();
+    meta.type.assign(it.second().data(), it.second().size());
+  }
 
-  auto it = op.resp.headers.find("x-oss-hash-crc64ecma");
-  meta.crc64.first = it != op.resp.headers.end();
-  if (meta.crc64.first)
-    meta.crc64.second = estring_view(it.second()).to_uint64();
+  it = op.resp.headers.find("x-oss-storage-class");
+  if (it != op.resp.headers.end()) {
+    meta.set_storage_class();
+    meta.storage_class.assign(it.second().data(), it.second().size());
+  }
+
+
+  it = op.resp.headers.find("x-oss-hash-crc64ecma");
+  if (it != op.resp.headers.end()) {
+    meta.set_crc64(estring_view(it.second()).to_uint64());
+  }
   return 0;
 }
 
@@ -799,19 +809,23 @@ int OssClient::fill_meta(HTTP_STACK_OP &op, ObjectMeta &meta) {
   auto len = op.resp.resource_size();
   if (len == -1) LOG_ERROR_RETURN(0, -1, "Unexpected http response header");
 
-  meta.size = static_cast<size_t>(len);
-  auto mtime = op.resp.headers["Last-Modified"];
-  meta.mtime = mtime.empty() ? 0 : get_lastmodified(mtime.data());
-  auto etag = op.resp.headers["ETag"];
-  if (!etag.empty())
-    meta.etag = etag;
-  else
-    meta.etag.clear();
+  meta.set_size(len);
+  auto it = op.resp.headers.find("Last-Modified");
+  if (it != op.resp.headers.end()) {
+    if (it.second().empty()) meta.set_mtime(0);
+    else meta.set_mtime(get_lastmodified(it.second().data()));
+  }
+
+  it = op.resp.headers.find("ETag");
+  if (it != op.resp.headers.end()) {
+    meta.set_etag();
+    meta.etag.assign(it.second().data(), it.second().size());
+  }
   return 0;
 }
 
 ssize_t OssClient::get_object_range(std::string_view obj_path, const struct iovec *iov,
-                              int iovcnt, off_t offset) {
+                              int iovcnt, off_t offset, ObjectHeaderMeta* meta) {
   int retry_times = m_oss_options.retry_times;
   auto retry_interval = m_oss_options.retry_interval_us;
 
@@ -856,6 +870,8 @@ retry:
     }
     ret = -1;
     errno = EIO;
+  } else {
+    if (meta) fill_meta(op, *meta);
   }
 
   return ret;
@@ -1347,8 +1363,6 @@ class BasicAuthenticator : public Authenticator {
  public:
   BasicAuthenticator(CredentialParameters &&credentials)
       : m_credentials(std::move(credentials)) {}
-
-  const CredentialParameters get_credentials() { return m_credentials; }
 
   void set_credentials(CredentialParameters &&credentials) {
     m_credentials = credentials;
