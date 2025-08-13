@@ -165,7 +165,7 @@ int main(int argc, char** argv) {
         return -1;
     DEFER(photon::fini());
     int ret;
-    result res_curl, res_client;
+    result res_client;
 #ifdef __linux__
     ret = net::et_poller_init();
     if (ret < 0) return -1;

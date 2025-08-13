@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/estring.h>
 #include <photon/common/iovector.h>
+#include <photon/common/objectcachev2.h>
 #include <photon/ecosystem/simple_dom.h>
 #include <photon/net/http/client.h>
 #include <photon/net/http/url.h>
@@ -37,6 +38,8 @@ limitations under the License.
 #include <algorithm>
 #include <string>
 #include <unordered_set>
+
+#include "../common/checksum/digest.h"
 
 // #include "common/faultinjector.h"
 // #include "common/logger.h"
@@ -149,128 +152,6 @@ const std::vector<std::string> OSS_METRIC_NAME = []() {
 #define FAULT_INJECTION(x, y)
 #define DECLARE_METRIC_VALUE_WITH_NAMEVAR(a, b, c, d)
 
-#define DO_CALL_WITH_RESP_CODE(op, ret, ossurl, code)                          \
-  if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {      \
-    LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");              \
-  }                                                                            \
-  int __retry_times = m_oss_options.retry_times;                               \
-  auto __retry_interval = m_oss_options.retry_interval_us;                     \
-  __retry:                                                                     \
-                                                                               \
-  int __saved_errno = errno;                                                   \
-  {                                                                            \
-    int r = 0;                                                                 \
-    FAULT_INJECTION(FileSystem::FI_OssError_Failed_Without_Call, [&]() {       \
-      r = -1;                                                                  \
-      op.status_code = -1;                                                     \
-      __saved_errno = EIO;                                                     \
-    });                                                                        \
-    auto start_time = std::chrono::steady_clock::now();                        \
-    LOG_DEBUG("Sending oss request ` ` Range[`]", verbstr[op.req.verb()],      \
-              op.req.target(), op.req.headers["Range"]);                       \
-    if (r == 0) {                                                              \
-      r = op.call();                                                           \
-      __saved_errno = errno;                                                   \
-    }                                                                          \
-    auto latency = std::chrono::duration_cast<std::chrono::microseconds>(      \
-        std::chrono::steady_clock::now() - start_time).count();                \
-    DECLARE_METRIC_VALUE_WITH_NAMEVAR(                                         \
-        OSS_METRIC_NAME[static_cast<int>(op.req.verb())], latency, 0, 1);      \
-    LOG_DEBUG(                                                                 \
-        "Got oss response ` ` Range[`], code=` content_length=` latency_us=`", \
-        verbstr[op.req.verb()], op.req.target(), op.req.headers["Range"],      \
-        op.resp.status_code(), op.resp.headers.content_length(), latency);     \
-    FAULT_INJECTION(FileSystem::FI_OssError_Call_Failed, [&]() {               \
-      r = -1;                                                                  \
-      op.status_code = -1;                                                     \
-      __saved_errno = EIO;                                                     \
-    });                                                                        \
-    if (r < 0) {                                                               \
-      if (__retry_times-- > 0) {                                               \
-        photon::thread_usleep(__retry_interval);                               \
-        __retry_interval =                                                     \
-          std::min(__retry_interval * 2, m_oss_options.max_retry_interval_us); \
-        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],          \
-                  op.req.target());                                            \
-        goto __retry;                                                          \
-      }                                                                        \
-    }                                                                          \
-    FAULT_INJECTION(FileSystem::FI_OssError_5xx, [&]() {                       \
-      r = -1;                                                                  \
-      op.status_code = 503;                                                    \
-      __saved_errno = EIO;                                                     \
-    });                                                                        \
-  }                                                                            \
-  if (op.status_code != 200 && op.status_code != 206 &&                        \
-      op.status_code != 204) {                                                 \
-    auto reader = get_xml_node(op);                                            \
-    std::string ec;                                                            \
-    if (reader) {                                                              \
-      auto error_res = reader["Error"];                                        \
-      if (error_res) {                                                         \
-        if (code) {                                                            \
-          *code =error_res["Code"].to_string_view();                           \
-        }                                                                      \
-        ec = error_res["EC"].to_string_view();                                 \
-      }                                                                        \
-    }                                                                          \
-    if (op.status_code != -1 && op.status_code != 404) {                       \
-      LOG_ERROR("operation on [`] failed! `, RequestId[`], EC[`]",             \
-                ossurl.object(), &op, op.resp.headers["x-oss-request-id"],     \
-                ec);                                                           \
-    }                                                                          \
-    if (op.status_code / 100 == 5) {                                           \
-      if (__retry_times-- > 0) {                                               \
-        photon::thread_usleep(__retry_interval);                               \
-        __retry_interval =                                                     \
-          std::min(__retry_interval * 2, m_oss_options.max_retry_interval_us); \
-        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],          \
-                  op.req.target());                                            \
-        goto __retry;                                                          \
-      }                                                                        \
-    }                                                                          \
-    switch (op.status_code) {                                                  \
-      case -1:                                                                 \
-        LOG_ERROR("operation on [`] failed!, http connection error",           \
-                  ossurl.object());                                            \
-        errno = __saved_errno;                                                 \
-        return ret;                                                            \
-      case 400:                                                                \
-      case 409:                                                                \
-        errno = ENOTSUP;                                                       \
-        break;                                                                 \
-      case 403:                                                                \
-        errno = EACCES;                                                        \
-        break;                                                                 \
-      case 404:                                                                \
-        errno = ENOENT;                                                        \
-        break;                                                                 \
-      case 416:                                                                \
-        errno = EINVAL;                                                        \
-        break;                                                                 \
-    }                                                                          \
-    return ret;                                                                \
-  }
-
-#define DO_CALL(op, ret, ossurl)                                            \
-  std::string *do_call_resp_code_ptr = nullptr;                             \
-  DO_CALL_WITH_RESP_CODE(op, ret, ossurl, do_call_resp_code_ptr)
-
-#define VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)                     \
-  if (expected_crc64) {                                                     \
-    if (op.resp.headers.find("x-oss-hash-crc64ecma") !=                     \
-        op.resp.headers.end()) {                                            \
-      auto upload_crc64 = op.resp.headers["x-oss-hash-crc64ecma"];          \
-      if (std::to_string(*expected_crc64) != upload_crc64) {                \
-        LOG_ERROR_RETURN(                                                   \
-            EIO, -1, "crc64 mismatch of object: `, expected: `, actual: `", \
-            oss_url.object(), *expected_crc64, upload_crc64);               \
-      }                                                                     \
-    } else {                                                                \
-      LOG_WARN("crc64 not found of object: `", oss_url.object());           \
-    }                                                                       \
-  }
-
 class OssUrl {
  public:
   estring m_url, m_raw_object;
@@ -326,24 +207,116 @@ class OssUrl {
   }
 };
 
-/*
-static int do_call_with_resp_code(HTTP_OP& op, int ret, OssUrl& ossurl,
-                                                 std::string* code) {
-    DO_CALL_WITH_RESP_CODE(op, ret, ossurl, code);
-    return 0;
+static int do_http_call(HTTP_STACK_OP &op, const OssOptions &options,
+                        std::string_view object, std::string *code = nullptr) {
+  int ret = -1;
+  if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {
+    LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");
+  }
+  int retry_times = options.retry_times;
+  auto retry_interval = options.retry_interval_us;
+__retry:
+
+  int __saved_errno = errno;
+  {
+    int r = 0;
+    FAULT_INJECTION(FileSystem::FI_OssError_Failed_Without_Call, [&]() {
+      r = -1;
+      op.status_code = -1;
+      __saved_errno = EIO;
+    });
+    auto start_time = std::chrono::steady_clock::now();
+    LOG_DEBUG("Sending oss request ` ` Range[`]", verbstr[op.req.verb()],
+              op.req.target(), op.req.headers["Range"]);
+    if (r == 0) {
+      r = op.call();
+      __saved_errno = errno;
+    }
+    auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::steady_clock::now() - start_time)
+                       .count();
+    DECLARE_METRIC_VALUE_WITH_NAMEVAR(
+        OSS_METRIC_NAME[static_cast<int>(op.req.verb())], latency, 0, 1);
+    LOG_DEBUG(
+        "Got oss response ` ` Range[`], code=` content_length=` latency_us=`",
+        verbstr[op.req.verb()], op.req.target(), op.req.headers["Range"],
+        op.resp.status_code(), op.resp.headers.content_length(), latency);
+    FAULT_INJECTION(FileSystem::FI_OssError_Call_Failed, [&]() {
+      r = -1;
+      op.status_code = -1;
+      __saved_errno = EIO;
+    });
+    if (r < 0) {
+      if (retry_times-- > 0) {
+        photon::thread_usleep(retry_interval);
+        retry_interval =
+            std::min(retry_interval * 2, options.max_retry_interval_us);
+        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
+                  op.req.target());
+        goto __retry;
+      }
+    }
+    FAULT_INJECTION(FileSystem::FI_OssError_5xx, [&]() {
+      r = -1;
+      op.status_code = 503;
+      __saved_errno = EIO;
+    });
+  }
+  if (op.status_code != 200 && op.status_code != 206 && op.status_code != 204) {
+    auto reader = get_xml_node(op);
+    std::string ec;
+    if (reader) {
+      auto error_res = reader["Error"];
+      if (error_res) {
+        if (code) {
+          *code = error_res["Code"].to_string_view();
+        }
+        ec = error_res["EC"].to_string_view();
+      }
+    }
+    if (op.status_code != -1 && op.status_code != 404) {
+      LOG_ERROR("operation on [`] failed! `, RequestId[`], EC[`]", object, &op,
+                op.resp.headers["x-oss-request-id"], ec);
+    }
+    if (op.status_code / 100 == 5) {
+      if (retry_times-- > 0) {
+        photon::thread_usleep(retry_interval);
+        retry_interval =
+            std::min(retry_interval * 2, options.max_retry_interval_us);
+        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
+                  op.req.target());
+        goto __retry;
+      }
+    }
+    switch (op.status_code) {
+      case -1:
+        LOG_ERROR("operation on [`] failed!, http connection error", object);
+        errno = __saved_errno;
+        return ret;
+      case 400:
+      case 409:
+        errno = ENOTSUP;
+        break;
+      case 403:
+        errno = EACCES;
+        break;
+      case 404:
+        errno = ENOENT;
+        break;
+      case 416:
+        errno = EINVAL;
+        break;
+    }
+    return ret;
+  }
+  return 0;
 }
 
-inline int do_call(HTTP_OP& op, int ret, OssUrl& ossurl) {
-    return do_call_with_resp_code(op, ret, ossurl, nullptr);
-}
-
-#define DO_CALL(op, ret, ossurl) do_call(op, ret, ossurl);
-
-static int verify_crc64_if_needed(HTTP_OP& op, OssUrl& oss_url, uint64_t* expected_crc64) {
+static int verify_crc64_if_needed(HTTP_STACK_OP& op, std::string_view object, uint64_t* expected_crc64) {
   if (!expected_crc64) return 0;
   auto it = op.resp.headers.find("x-oss-hash-crc64ecma");
-  if ( it == op.resp.headers.end()) {
-    LOG_WARN("crc64 not found in object ", oss_url.object());
+  if (it == op.resp.headers.end()) {
+    LOG_WARN("crc64 not found in object ", object);
     return 0;
   }
   uint64_t crc64;
@@ -351,14 +324,11 @@ static int verify_crc64_if_needed(HTTP_OP& op, OssUrl& oss_url, uint64_t* expect
                               *expected_crc64 != crc64) {
     LOG_ERROR_RETURN(EIO, -1,
         "crc64 mismatch of object: `, expected: `, actual: `",
-        oss_url.object(), *expected_crc64, crc64);
+        object, *expected_crc64, it.second());
   }
   return 0;
 }
 
-#define VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)  \
-  if (verify_crc64_if_needed(op, oss_url, expected_crc64) < 0) return -1;
-*/
 
 static ssize_t body_writer_cb(void *iov_view, photon::net::http::Request *req) {
   auto view = static_cast<iovector_view *>(iov_view);
@@ -448,10 +418,13 @@ class OssClientImpl : public OssClient {
 
   int get_object_meta(std::string_view obj, ObjectMeta &meta);
 
+  void set_credentials(Authenticator::CredentialParameters &&credentials);
+
  private:
   int append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
                           photon::net::http::Headers &headers,
-                          const StringKV &query_params = {});
+                          const StringKV &query_params = {},
+                          bool invalidate_cache = false);
 
   int walk_list_results(const SimpleDOM::Node &node, ListObjectsCallback cb); 
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
@@ -524,13 +497,14 @@ OssClient::OssClient(const OssOptions &options,
 
 OssClient::~OssClient() {
   delete m_client;
+  delete m_authenticator;
 }
 
 #undef  OssClient
 #define OssClient inline OssClientImpl
 
 int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
-                                   photon::net::http::Headers &headers,  const StringKV &query_params) {
+                                   photon::net::http::Headers &headers,  const StringKV &query_params, bool invalidate_cache) {
   Authenticator::SignParameters params;
   params.verb = v;
   params.query_params = &query_params;
@@ -538,6 +512,7 @@ int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
   params.endpoint = m_oss_options.endpoint;
   params.bucket = m_oss_options.bucket;
   params.object = oss_url.object();
+  params.invalidate_cache = invalidate_cache;
 
   return m_authenticator->sign(headers, params);
 }
@@ -589,7 +564,8 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL_WITH_RESP_CODE(op, -1, oss_url, resp_code)
+  r = do_http_call(op, m_oss_options, "", resp_code);
+  if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
@@ -625,7 +601,8 @@ int OssClient::do_list_objects_v1(std::string_view bucket, std::string_view pref
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL_WITH_RESP_CODE(op, -1, oss_url, resp_code)
+  r = do_http_call(op, m_oss_options, "", resp_code);
+  if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
@@ -663,7 +640,8 @@ int OssClient::do_copy_object(OssUrl &src_oss_url,
 
   int r = append_auth_headers(Verb::PUT, dst_oss_url, op.req.headers);
   if (r < 0) return r;
-  DO_CALL(op, -1, dst_oss_url)
+  r = do_http_call(op, m_oss_options, dst_oss_url.object());
+  if (r < 0) return r;
   return 0;
 }
 
@@ -671,7 +649,8 @@ int OssClient::do_delete_object(OssUrl &oss_url) {
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.url());
   int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
   return 0;
 }
 
@@ -723,7 +702,8 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       op.body_writer = {&body_view, &body_writer_cb};
       int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
       if (r < 0) return r;
-      DO_CALL(op, -1, oss_url)
+      r = do_http_call(op, m_oss_options, oss_url.object());
+      if (r < 0) return r;
       req_list.clear();
     }
   }
@@ -777,7 +757,8 @@ int OssClient::head_object(std::string_view object, ObjectHeaderMeta &meta) {
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.url());
   int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
   return fill_meta(op, meta);
 }
 
@@ -833,24 +814,25 @@ ssize_t OssClient::get_object_range(std::string_view obj_path, const struct iove
   auto cnt = view.sum();
   if (cnt == 0) return 0;
 
+  bool invalidate_cache = false;
 retry:
   OssUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
-  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers);
+  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, {}, invalidate_cache);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
-
-  uint64_t content_length = op.resp.headers.content_length();
-  // TODO: meta cache is expired, perhaps we should refresh automatically
-  if (content_length != cnt) {
-    //op.reset(nullptr);
-    LOG_ERROR_RETURN(EINVAL, -1,
-                     "Got unexpected content length of `, expected: `, got: `",
-                     obj_path, cnt, content_length);
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) {
+    if (errno == EACCES && !invalidate_cache) {
+      invalidate_cache = true;
+      errno = 0;
+      goto retry;
+    }
+    return r;
   }
 
+  uint64_t content_length = op.resp.headers.content_length();
   auto ret = op.resp.readv(iov, iovcnt);
   FAULT_INJECTION(FileSystem::FI_OssError_Read_Partial, [&]() { ret--; });
 
@@ -893,8 +875,10 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec *iov,
   op.body_writer = {&view, &body_writer_cb};
   int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
-  VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  if (r < 0) return r;
   return cnt;
 }
 
@@ -919,8 +903,10 @@ ssize_t OssClient::append_object(std::string_view object,
   op.body_writer = {&view, &body_writer_cb};
   int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
-  VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  if (r < 0) return r;
   return cnt;
 }
 
@@ -968,7 +954,8 @@ int OssClient::init_multipart_upload(std::string_view object,
     op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
   int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
@@ -1010,12 +997,14 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   op.body_writer = {&view, &body_writer_cb};
   int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url);
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
 
   auto etag = op.resp.headers["ETag"];
   if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response", &op);
 
-  VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
+  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  if (r < 0) return r;
 
   SCOPED_LOCK(ctx->lock);
   ctx->part_list.emplace_back(part_number, etag);
@@ -1050,7 +1039,8 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range);
   int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
@@ -1104,9 +1094,9 @@ int OssClient::complete_multipart_upload(void *context,
   op.body_writer = {&view, &body_writer_cb};
   int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
-  VERIFY_CRC64_IF_NEEDED(oss_url, expected_crc64)
-  return 0;
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+  return verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
 }
 
 int OssClient::abort_multipart_upload(void *context) {
@@ -1126,7 +1116,8 @@ int OssClient::abort_multipart_upload(void *context) {
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
   return 0;
 }
 
@@ -1137,13 +1128,21 @@ int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  DO_CALL(op, -1, oss_url)
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
   return fill_meta(op, meta);
 }
 
 int OssClient::delete_object(std::string_view obj_path) {
   OssUrl oss_url(m_endpoint, m_bucket, obj_path, m_is_http);
   return do_delete_object(oss_url);
+}
+
+void OssClient::set_credentials(
+    Authenticator::CredentialParameters &&credentials) {
+  if (m_authenticator) {
+    m_authenticator->set_credentials(std::move(credentials));
+  }
 }
 
 #undef OssClient
@@ -1218,7 +1217,9 @@ class BasicAuthenticator : public Authenticator {
     }
     // LOG_INFO("data2sign is `", data2sign);
 
-    auto signature = hmac_sha1_base64(sk, data2sign);
+    estring signature;
+    net::Base64Encode(HMAC_SHA1(sk, data2sign), signature);
+
     auth.appends("OSS ", ak, ":", signature);
     headers.insert("Authorization", auth);
     headers.insert("Date", m_gmt_date);
@@ -1261,15 +1262,15 @@ class BasicAuthenticator : public Authenticator {
                         "/oss/aliyun_v4_request\n",
                         sha256_hash(canonical_request));
 
-    signing_key = hmac_sha256(
-        hmac_sha256(
-            hmac_sha256(hmac_sha256(estring("aliyun_v4").appends(sk),
-                                    estring_view(m_gmt_date_iso8601, 8)),
-                        params.region),
-            "oss"),
-        "aliyun_v4_request");
-
-    auto signature = hex(hmac_sha256(signing_key, string2sign));
+    auto signature = hex(HMAC_SHA256(
+        HMAC_SHA256(
+            HMAC_SHA256(
+                HMAC_SHA256(HMAC_SHA256(estring("aliyun_v4").appends(sk),
+                                        estring_view(m_gmt_date_iso8601, 8)),
+                            params.region),
+                "oss"),
+            "aliyun_v4_request"),
+        string2sign));
 
     // LOG_INFO("string2sing ` canonical request `", string2sign, canonical_request);
 
@@ -1281,47 +1282,6 @@ class BasicAuthenticator : public Authenticator {
                 estring_view(m_gmt_date_iso8601, 8), "/", params.region,
                 "/oss/aliyun_v4_request,", "Signature=", signature);
     headers.insert("Authorization", auth);
-    headers.insert("Date", m_gmt_date);
-  }
-
-  estring hmac_shax(estring_view key, estring_view data, const EVP_MD *evp_md) {
-    estring output;
-    unsigned int output_length;
-    output.resize(EVP_MAX_MD_SIZE);
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-    struct hmac {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-      HMAC_CTX ctx_, *ctx = &ctx_;
-      hmac() { HMAC_CTX_init(&ctx_);}
-      ~hmac() { HMAC_CTX_cleanup(&ctx_);}
-#else
-      HMAC_CTX *ctx;
-      hmac() { ctx = HMAC_CTX_new(); }
-      ~hmac() { HMAC_CTX_free(ctx); }
-#endif
-      operator HMAC_CTX*() { return ctx; }
-    };
-    hmac ctx;
-    HMAC_Init_ex(ctx, (const unsigned char *)key.data(), key.length(), evp_md, nullptr);
-    HMAC_Update(ctx, (const unsigned char *)data.data(), data.length());
-    HMAC_Final(ctx, (unsigned char *)&output[0], &output_length);
-#else  // #if OPENSSL_API_COMPAT < 0x30000000L
-    HMAC(evp_md, &key[0], key.length(),
-      (unsigned char *)data.data(), data.length(),
-      (unsigned char *)output.data(), &output_length);
-#endif // #if OPENSSL_API_COMPAT < 0x30000000L
-    output.resize(output_length);
-    return output;
-  }
-
-  estring hmac_sha1_base64(estring_view key, estring_view data) {
-    estring output;
-    net::Base64Encode(hmac_shax(key, data, EVP_sha1()), output);
-    return output;
-  }
-
-  estring hmac_sha256(estring_view key, estring_view data) {
-    return hmac_shax(key, data, EVP_sha256());
   }
 
   std::string hex(std::string_view bytes) {
@@ -1369,13 +1329,76 @@ class BasicAuthenticator : public Authenticator {
   }
 
   int sign(photon::net::http::Headers &headers,
-            const Authenticator::SignParameters &params) {
+           const Authenticator::SignParameters &params) {
     if (params.region.empty()) {
       sign_v1(headers, params, m_credentials);
     } else {
       sign_v4(headers, params, m_credentials);
     }
     return 0;
+  }
+};
+
+class CachedAuthenticator : public Authenticator {
+  Authenticator* m_auth = nullptr;
+  int m_cached_ttl_secs = 300;
+  using CachedObjHeader = std::vector<std::pair<std::string, std::string>>;
+  std::shared_ptr<ObjectCacheV2<std::string, CachedObjHeader *>> m_cached_headers;
+
+ public:
+  CachedAuthenticator(Authenticator *auth, int cache_ttl_secs)
+      : m_auth(auth),
+        m_cached_ttl_secs(cache_ttl_secs),
+        m_cached_headers(
+            std::make_shared<ObjectCacheV2<std::string, CachedObjHeader *>>(
+                1000ll * 1000 * cache_ttl_secs)) {}
+  ~CachedAuthenticator() { delete m_auth; }
+  int sign(photon::net::http::Headers &headers,
+           const Authenticator::SignParameters &params) override {
+    // only get obj range request among our supported interfaces will fall into
+    // this catagory currently
+    bool can_use_cache = params.verb == Verb::GET &&
+                         (!params.query_params || params.query_params->empty());
+    if (!can_use_cache) return m_auth->sign(headers, params);
+
+    std::string cached_key = estring().appends(
+        params.bucket, "/", params.object, " ", params.region);
+    if (!params.invalidate_cache) {
+      auto cached = m_cached_headers->borrow(
+          cached_key);
+      if (cached && (*cached).size() > 0) {
+        for (auto &kv : *cached) {
+          headers.insert(kv.first, kv.second);
+        }
+        // LOG_INFO("reusing cached headers for key `", cached_key);
+        return 0;
+      }
+    }
+
+    static const std::unordered_set<std::string_view> to_cache_keys = {
+        "Authorization", "x-oss-security-token", "x-oss-date",
+        "x-oss-content-sha256", "Date"/*v1 signature needed*/};
+
+    int r = m_auth->sign(headers, params);
+    if (r == 0) {
+      auto *cached = new CachedObjHeader();
+      for (auto kv : headers) {
+        if (to_cache_keys.find(kv.first) != to_cache_keys.end()) {
+          cached->emplace_back(kv.first, kv.second);
+        }
+      }
+      m_cached_headers->update(cached_key, [&]() { return cached; });
+      // LOG_INFO("cached headers for key `", cached_key);
+    }
+    return r;
+  }
+
+  void set_credentials(CredentialParameters &&credentials) override {
+    // create one new cache instance to discard all the old entries
+    m_cached_headers =
+        std::make_shared<ObjectCacheV2<std::string, CachedObjHeader *>>(
+                               1000ll * 1000 * m_cached_ttl_secs);
+    m_auth->set_credentials(std::move(credentials));
   }
 };
 
@@ -1386,6 +1409,10 @@ OssClient *new_oss_client(const OssOptions &opt, Authenticator *auth) {
 Authenticator* new_basic_authenticator(
     Authenticator::CredentialParameters&& credentials) {
   return new BasicAuthenticator(std::move(credentials));
+}
+
+Authenticator *new_cached_authenticator(Authenticator *auth, int cache_ttl_secs) {
+  return new CachedAuthenticator(auth, cache_ttl_secs);
 }
 
 }

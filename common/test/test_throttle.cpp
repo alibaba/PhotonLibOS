@@ -370,7 +370,8 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
         auto conn = cli->connect(server_ep);
         if (!conn) exit(1);
         DEFER(delete conn);
-        char buf[buf_size] = {};
+        char buf[buf_size];
+        memset(buf, 0, buf_size);
         while (running) {
             src.consume(p.io1.bs);
             ssize_t ret = conn->send(buf, p.io1.bs);
@@ -386,7 +387,8 @@ static void run_real_socket(const std::atomic<bool>& running, const PriorityTest
         auto conn = cli->connect(server_ep);
         if (!conn) exit(1);
         DEFER(delete conn);
-        char buf[buf_size] = {};
+        char buf[buf_size];
+        memset(buf, 0, buf_size);
         while (running) {
             src.consume(p.io2.bs);
             ssize_t ret = conn->send(buf, p.io2.bs);

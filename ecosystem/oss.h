@@ -56,7 +56,7 @@ struct ObjectMeta {
   static_assert((flag) > 0 && ((flag) & ((flag) - 1)) == 0,       \
                 "Flag must be a power of two");                   \
   static_assert(((flag) & ~((uint8_t)0xFF)) == 0,                 \
-                "Flag must fit within uint16_t bit range (0-7)"); \
+                "Flag must fit within uint8_t bit range (0-7)");  \
   type name{};                                                    \
   bool has_##name() const { return flags & (flag); }              \
   void set_##name() { flags |= (flag); }                          \
@@ -91,6 +91,32 @@ struct ListObjectsCBParams {
 };
 
 using ListObjectsCallback = Delegate<int, const ListObjectsCBParams&>;
+
+class Authenticator : Object {
+ public:
+  struct SignParameters {
+    std::string_view region, endpoint, bucket, object;
+    const StringKV *query_params = nullptr;
+    photon::net::http::Verb verb;
+    bool invalidate_cache = false;
+  };
+
+  virtual int sign(photon::net::http::Headers &headers,
+                   const SignParameters &params) = 0;
+
+  struct CredentialParameters {
+    std::string accessKey;
+    std::string accessKeySecret;
+    std::string sessionToken;
+  };
+
+  virtual const CredentialParameters* get_credentials() {
+    return nullptr;
+  }
+
+  // may be ignored for some implementations
+  virtual void set_credentials(CredentialParameters &&credentials) = 0;
+};
 
 class OssClient : public Object {
  public:
@@ -199,39 +225,18 @@ class OssClient : public Object {
 
   virtual
   int get_object_meta(std::string_view obj, ObjectMeta &meta) = 0;
-};
 
-class Authenticator;
+  virtual void set_credentials(
+      Authenticator::CredentialParameters &&credentials) = 0;
+};
 
 OssClient* new_oss_client(const OssOptions& opt, Authenticator* cp);
 
-class Authenticator : Object {
- public:
-  struct SignParameters {
-    std::string_view region, endpoint, bucket, object;
-    const StringKV *query_params = nullptr;
-    photon::net::http::Verb verb;
-  };
+Authenticator *new_basic_authenticator(
+    Authenticator::CredentialParameters &&credentials);
 
-  virtual int sign(photon::net::http::Headers &headers,
-                   const SignParameters &params) = 0;
-
-  struct CredentialParameters {
-    std::string accessKey;
-    std::string accessKeySecret;
-    std::string sessionToken;
-  };
-
-  virtual const CredentialParameters* get_credentials() {
-    return nullptr;
-  }
-
-  // may be ignored for some implementations
-  virtual void set_credentials(CredentialParameters &&credentials) = 0;
-};
-
-Authenticator* new_basic_authenticator(
-    Authenticator::CredentialParameters&& credentials);
+Authenticator *new_cached_authenticator(Authenticator *auth,
+                                        int cache_ttl_secs = 60);
 
 //add one typical CustomAutheticator example
 /*class CustomAuthenticator : public Authenticator {

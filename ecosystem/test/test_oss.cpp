@@ -2,6 +2,8 @@
 #include <gtest/gtest.h>
 #include <photon/common/estring.h>
 #include <photon/photon.h>
+#include <photon/common/alog.h>
+#include <photon/thread/thread.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -17,8 +19,15 @@ DEFINE_string(region, "", "OSS Region");
 
 using namespace photon::objstore;
 
-class OssTest : public ::testing::Test {
+class BasicAuthOssTest : public ::testing::Test {
  protected:
+  OssClient *client = nullptr;
+  virtual void CreateOssClient(const OssOptions& opts) {
+    auto auth = new_basic_authenticator(
+        {FLAGS_ak, FLAGS_sk, ""});
+    client = new_oss_client(opts, auth);
+    ASSERT_NE(client, nullptr) << "Failed to create OSS client";
+  }
   void SetUp() override {
     auto random_suffix =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -34,10 +43,7 @@ class OssTest : public ::testing::Test {
     // v4 signature with non-empty region, otherwise v1 signature.
     opts_.region = FLAGS_region;
 
-    auth_ = new_basic_authenticator(
-        {FLAGS_ak, FLAGS_sk, ""});
-    client = new_oss_client(opts_, auth_);
-    ASSERT_NE(client, nullptr) << "Failed to create OSS client";
+    CreateOssClient(opts_);
   }
 
   void TearDown() override {
@@ -66,7 +72,6 @@ class OssTest : public ::testing::Test {
       }
     }
     if (client) delete client;
-    if (auth_) delete auth_;
   }
 
   estring get_real_test_path(std::string_view suffix) {
@@ -76,14 +81,30 @@ class OssTest : public ::testing::Test {
     return path;
   }
 
-  OssClient *client = nullptr;
+  void list_objects();
+  void put_and_get_meta();
+  void copy_and_rename();
+  void append_and_get();
+  void multipart();
 
  private:
-  Authenticator *auth_ = nullptr;
   std::string bucket_prefix_;
 };
 
-TEST_F(OssTest, list_objects) {
+class CachedAutheOssTest : public BasicAuthOssTest {
+ protected:
+  void CreateOssClient(const OssOptions& opts) override {
+    auto auth = new_basic_authenticator(
+        {FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_authenticator(auth, 3/*ttl*/);
+    client = new_oss_client(opts, auth);
+    ASSERT_NE(client, nullptr) << "Failed to create OSS client";
+  }
+
+  void repeatedly_get();
+};
+
+void BasicAuthOssTest::list_objects() {
   std::vector<std::string> test_objects = {
       // there are in lexicographic order
       get_real_test_path("list-test/obj1.txt"),
@@ -199,9 +220,9 @@ TEST_F(OssTest, list_objects) {
   EXPECT_EQ(ret, 0);
 }
 
-TEST_F(OssTest, put_and_get_meta) {
+void BasicAuthOssTest::put_and_get_meta() {
   auto path = get_real_test_path("object_meta/testfile.unknown_suffix");
-  size_t file_size = 1025;
+  const size_t file_size = 1025;
   char buf[file_size] = {3};
   iovec iov{buf, file_size};
   int ret = client->put_object(path, &iov, 1);
@@ -235,8 +256,9 @@ TEST_F(OssTest, put_and_get_meta) {
   EXPECT_EQ(meta.mtime, hmeta.mtime);
 
   ObjectHeaderMeta hmeta2;
-  iovec iov2{buf, 1};
-  ret = client->get_object_range(path, &iov2, 1, 0, &hmeta2);
+  char buf2[2];
+  iovec iov2{buf2, 2};
+  ret = client->get_object_range(path, &iov2, 1, file_size-1, &hmeta2);
   ASSERT_EQ(ret, 1);
   /// From testing, get obj range will return all the following fileds.
   EXPECT_EQ(hmeta2.flags, hmeta.flags);
@@ -246,9 +268,16 @@ TEST_F(OssTest, put_and_get_meta) {
   EXPECT_EQ(hmeta2.storage_class, hmeta.storage_class);
   EXPECT_EQ(hmeta2.crc64, hmeta.crc64);
   EXPECT_EQ(hmeta2.etag, hmeta.etag);
+
+  auto expected_crc64 = hmeta2.crc64;
+  ret = client->put_object(path, &iov, 1, &expected_crc64);
+  ASSERT_EQ(ret, file_size);
+  expected_crc64 = hmeta2.crc64 + 1;
+  ret = client->put_object(path, &iov, 1, &expected_crc64);
+  ASSERT_EQ(ret, -1);
 }
 
-TEST_F(OssTest, copy_and_rename) {
+void BasicAuthOssTest::copy_and_rename() {
   auto src = get_real_test_path("copy_and_rename_object/src.mp3");
   auto dst = get_real_test_path("copy_and_rename_object/dst.mp4");
 
@@ -263,7 +292,7 @@ TEST_F(OssTest, copy_and_rename) {
   ASSERT_EQ(ret, 0);
 }
 
-TEST_F(OssTest, append_and_get) {
+void BasicAuthOssTest::append_and_get() {
   auto path = get_real_test_path("append_and_get/testfile");
 
   char buf[2] = {'1', '2'};
@@ -280,13 +309,13 @@ TEST_F(OssTest, append_and_get) {
   ASSERT_EQ(std::string(buf2, 4), "1212");
 }
 
-TEST_F(OssTest, multipart) {
+void BasicAuthOssTest::multipart() {
   auto path = get_real_test_path("multipart_upload/testfile");
 
   void *context = nullptr;
   int ret = client->init_multipart_upload(path, &context);
   ASSERT_EQ(ret, 0);
-  size_t buf_size = 1048577;
+  const size_t buf_size = 1048577;
   for (int i = 0; i < 5; i++) {
     char buf[buf_size] = {(char)i};
     iovec iov{buf, buf_size};
@@ -331,6 +360,48 @@ TEST_F(OssTest, multipart) {
   ret = ctx.abort();
   ASSERT_EQ(ret, 0);
 }
+
+void CachedAutheOssTest::repeatedly_get() {
+  std::vector<std::string> paths;
+  const size_t file_size = 1025;
+  char buf[file_size] = {0};
+  iovec iov{buf, file_size};
+  for (int i = 0; i < 10; i++) {
+    auto path = get_real_test_path("rput_and_get/testfile.suffix"+std::to_string(i));
+    int ret = client->put_object(path, &iov, 1);
+    ASSERT_EQ(ret, file_size) << "Failed to upload object for metadata test";
+    paths.push_back(path);
+  }
+
+  for (size_t i = 0; i < 10; i++) {
+    for (size_t j = 0; j < paths.size(); j++) {
+      iov.iov_len = i + 1;
+      auto ret = client->get_object_range(paths[j], &iov, 1, i, nullptr);
+      EXPECT_EQ(ret, i + 1);
+    }
+  }
+
+  client->set_credentials({"invalid creds"});
+  LOG_INFO("creds invalidated");
+  iov.iov_len = 1;
+  auto ret = client->get_object_range(paths[0], &iov, 1, 0, nullptr);
+  EXPECT_EQ(ret, -1);
+  client->set_credentials({FLAGS_ak, FLAGS_sk});
+  ret = client->get_object_range(paths[0], &iov, 1, 0, nullptr);
+  EXPECT_EQ(ret, 1);
+}
+
+TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
+TEST_F(BasicAuthOssTest, multipart) { multipart(); }
+TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
+TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
+TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
+TEST_F(CachedAutheOssTest, listobjects) { list_objects(); }
+TEST_F(CachedAutheOssTest, multipart) { multipart(); }
+TEST_F(CachedAutheOssTest, append_and_get) { append_and_get(); }
+TEST_F(CachedAutheOssTest, put_and_get_meta) { put_and_get_meta(); }
+TEST_F(CachedAutheOssTest, copy_and_rename) { copy_and_rename(); }
+TEST_F(CachedAutheOssTest, repeatedly_get) { repeatedly_get(); }
 
 int main(int argc, char *argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
