@@ -29,6 +29,7 @@ FetchContent_Declare(
     URL ${PHOTON_RAPIDXML_SOURCE}
     URL_HASH
         SHA256=c3f0b886374981bb20fabcf323d755db4be6dba42064599481da64a85f5b3571
+    PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidxml.patch
     UPDATE_DISCONNECTED 1)
 FetchContent_MakeAvailable(rapidxml)
 message(STATUS "Rapidxml source dir: ${rapidxml_SOURCE_DIR}")

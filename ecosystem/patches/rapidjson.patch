@@ -9,7 +9,7 @@ index 19f8849b..618492a4 100644
 +    kParseBoolsAsStringFlag = 512,  //!< Parse all booleans (true/false) as strings.
      kParseDefaultFlags = RAPIDJSON_PARSE_DEFAULT_FLAGS  //!< Default parse flags. Can be customized by defining RAPIDJSON_PARSE_DEFAULT_FLAGS
  };
- 
+
 @@ -201,6 +202,8 @@ struct BaseReaderHandler {
      bool Default() { return true; }
      bool Null() { return static_cast<Override&>(*this).Default(); }
@@ -22,7 +22,7 @@ index 19f8849b..618492a4 100644
 @@ -714,13 +717,22 @@ private:
              RAPIDJSON_PARSE_ERROR(kParseErrorValueInvalid, is.Tell());
      }
- 
+
 +    template<unsigned parseFlags, typename InputStream, typename Handler>
 +    void ParseRawBools(InputStream& is, Handler& handler) {
 +
@@ -33,7 +33,7 @@ index 19f8849b..618492a4 100644
          RAPIDJSON_ASSERT(is.Peek() == 't');
 +        auto begin = is.PutBegin();
          is.Take();
- 
+
          if (RAPIDJSON_LIKELY(Consume(is, 'r') && Consume(is, 'u') && Consume(is, 'e'))) {
 -            if (RAPIDJSON_UNLIKELY(!handler.Bool(true)))
 +            auto copy = !(parseFlags & kParseInsituFlag);
@@ -49,7 +49,7 @@ index 19f8849b..618492a4 100644
          RAPIDJSON_ASSERT(is.Peek() == 'f');
 +        auto begin = is.PutBegin();
          is.Take();
- 
+
          if (RAPIDJSON_LIKELY(Consume(is, 'a') && Consume(is, 'l') && Consume(is, 's') && Consume(is, 'e'))) {
 -            if (RAPIDJSON_UNLIKELY(!handler.Bool(false)))
 +            auto copy = !(parseFlags & kParseInsituFlag);
@@ -59,3 +59,18 @@ index 19f8849b..618492a4 100644
                  RAPIDJSON_PARSE_ERROR(kParseErrorTermination, is.Tell());
          }
          else
+diff --git a/include/rapidjson/stream.h b/include/rapidjson/stream.h
+index fef82c25..cd51ccd3 100644
+--- a/include/rapidjson/stream.h
++++ b/include/rapidjson/stream.h
+@@ -147,8 +147,8 @@ struct GenericInsituStringStream {
+     GenericInsituStringStream(Ch *src) : src_(src), dst_(0), head_(src) {}
+
+     // Read
+-    Ch Peek() { return *src_; }
+-    Ch Take() { return *src_++; }
++    Ch Peek() { return *src_ ? *src_ : '}'; }
++    Ch Take() { return *src_ ? *src_++ : '}'; }
+     size_t Tell() { return static_cast<size_t>(src_ - head_); }
+
+     // Write

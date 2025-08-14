@@ -1,0 +1,11 @@
+--- rapidxml.hpp
++++ rapidxml.hpp
+@@ -2205,6 +2205,8 @@
+                         }
+                         // Skip remaining whitespace after node name
+                         skip<whitespace_pred, Flags>(text);
++                        if (*text == Ch('\0'))
++                            return; // treat it as '>' without increament of text
+                         if (*text != Ch('>'))
+                             RAPIDXML_PARSE_ERROR("expected >", text);
+                         ++text;     // Skip '>'
