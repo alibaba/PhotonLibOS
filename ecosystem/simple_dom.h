@@ -99,6 +99,11 @@ public:
     double to_double(double def_val = NAN) const {
         return value().to_double(def_val);
     }
+    bool to_bool() const {
+        assert(type() == TYPE::BOOLEAN);
+        auto v = value();
+        return v.size() && (v[0] == 't' || v[0] == 'T');
+    }
     using TYPE = NodeImpl::TYPE;
 
     bool operator==(str rhs) const { return value() == rhs; }

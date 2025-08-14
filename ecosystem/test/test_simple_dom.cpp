@@ -30,7 +30,7 @@ using namespace std;
 using namespace photon::SimpleDOM;
 
 // OSS list response
-const static char xml[] = R"(
+static char xml[] = R"(
 <?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult category = "flowers">
   <Name>examplebucket</Name>
@@ -89,7 +89,7 @@ void print_all2(Node node) {
 
 static __attribute__((noinline))
 int do_list_object(string_view prefix, ObjectList& result, string* marker) {
-    auto doc = parse_copy(xml, sizeof(xml), DOC_XML);
+    auto doc = parse(xml, sizeof(xml)-1, DOC_XML);
     EXPECT_TRUE(doc);
     auto list_bucket_result = doc["ListBucketResult"];
     auto attr = list_bucket_result.get_attributes();
@@ -190,7 +190,7 @@ void expect_types(Node node, const std::pair<const char*, uint8_t> (&truth)[N]) 
 }
 
 TEST(simple_dom, json) {
-    const static char json0[] = R"({
+    static char json0[] = R"({
         "hello": "world",
         "t": true ,
         "f": false,
@@ -199,7 +199,7 @@ TEST(simple_dom, json) {
         "pi": 3.1416,
         "a": [1, 2, 3, 4],
     })";
-    auto doc = parse_copy(json0, sizeof(json0), DOC_JSON);
+    auto doc = parse(json0, sizeof(json0)-1, DOC_JSON);
     EXPECT_TRUE(doc);
     expect_eq_kvs(doc, {
         {"hello",   "world"},
@@ -220,7 +220,7 @@ TEST(simple_dom, json) {
 
 TEST(simple_dom, yaml0) {
     static char yaml0[] = "{foo: 1, bar: [2, 3], john: doe}";
-    auto doc = parse(yaml0, sizeof(yaml0), DOC_YAML);
+    auto doc = parse(yaml0, sizeof(yaml0)-1, DOC_YAML);
     EXPECT_TRUE(doc);
     expect_eq_kvs(doc, {{"foo", "1"}, {"john", "doe"}});
     expect_eq_vals(doc["bar"], {"2", "3"});
@@ -245,7 +245,7 @@ newmap: {}
 newmap (serialized): {}
 I am something: indeed
 )";
-    auto doc = parse(yaml1, sizeof(yaml1), DOC_YAML);
+    auto doc = parse(yaml1, sizeof(yaml1)-1, DOC_YAML);
     EXPECT_TRUE(doc);
     expect_eq_kvs(doc, {
         {"foo",         "says who"},
@@ -259,7 +259,7 @@ I am something: indeed
         "oh so nice", "oh so nice (serialized)"});
 }
 
-const static char example_ini[] = R"(
+static char example_ini[] = R"(
 [protocol]               ; Protocol configuration
 version=6                ; IPv6
 
@@ -306,7 +306,7 @@ funny4 : two : colons
 )";
 
 TEST(simple_dom, ini) {
-    auto doc = parse_copy(example_ini, sizeof(example_ini) - 1, DOC_INI);
+    auto doc = parse(example_ini, sizeof(example_ini)-1, DOC_INI);
     EXPECT_TRUE(doc);
     EXPECT_EQ(doc.num_children(), 6);
     expect_eq_kvs(doc["protocol"], {
