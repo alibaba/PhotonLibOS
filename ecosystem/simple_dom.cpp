@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <vector>
 #include <algorithm>
+#include <memory>
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/utility.h>
@@ -181,11 +182,13 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
         _root = new JNode(text, text_ownership);
     }
     ~JHandler() {
+        delete _root;
+    }
+    JNode* get_root() {
         assert(_nodes.size() == 1);
         assert(_nodes.front().size() == 1);
         _root->set_children(std::move(_nodes.front().front()._children));
-    }
-    JNode* get_root() {
+        DEFER(_root = nullptr);
         return _root;
     }
     void emplace_back(const char* s, size_t length, uint8_t type) {
@@ -248,9 +251,18 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     }
 };
 
+// As some parsers don't support text length, they only support null
+// terminated strings, so we have to convert the last trailer to '\0',
+// while making the parser to treat it as the trailer.
+inline void fix_trail(char* text, size_t size, char trailer) {
+    auto i = estring_view(text, size).rfind(trailer);
+    if (i != estring_view::npos) text[i] = '\0';
+}
+
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
              kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
+    fix_trail(text, size, '}');
     JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
@@ -299,12 +311,13 @@ public:
 };
 
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
+    fix_trail(text, size, '>');
     xml_document<char> doc;
     doc.parse<0>(text);
-    auto root = new XMLNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    auto root = make_unique<XMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     assert(root);
     root->build(&doc);
-    return root;
+    return root.release();
 }
 
 class YAMLNode : public DocNode<YAMLNode> {
@@ -330,10 +343,10 @@ public:
 
 static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
     auto yaml = ryml::parse_in_place({text, size});
-    auto root = new YAMLNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    auto root = make_unique<YAMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     assert(root);
     root->build(yaml.rootref());
-    return root;
+    return root.release();
 }
 
 class IniNode : public DocNode<IniNode> {
@@ -394,7 +407,7 @@ static NodeImpl* parse_ini(char* text, size_t size, int flags) {
     sort(ctx.begin(), ctx.end());
     vector<IniNode> sections, nodes;
     estring_view prev_sect;
-    auto root = new IniNode(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    auto root = make_unique<IniNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     for (auto& x : ctx) {
         if (prev_sect != x.section) {
             prev_sect  = x.section;
@@ -402,16 +415,16 @@ static NodeImpl* parse_ini(char* text, size_t size, int flags) {
                 sections.back().set_children(std::move(nodes));
                 assert(nodes.empty());
             }
-            sections.emplace_back(x.section, str{}, root);
+            sections.emplace_back(x.section, str{}, root.get());
         }
-        nodes.emplace_back(x.key, x.val, root);
+        nodes.emplace_back(x.key, x.val, root.get());
     }
     if (!sections.empty()) {
         if (!nodes.empty())
             sections.back().set_children(std::move(nodes));
         root->set_children(std::move(sections));
     }
-    return root;
+    return root.release();
 }
 
 Node parse(char* text, size_t size, int flags) {
@@ -425,7 +438,9 @@ Node parse(char* text, size_t size, int flags) {
         if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }
-    auto r = parsers[i](text, size, flags);
+    NodeImpl* r = nullptr;
+    try { r = parsers[i](text, size, flags); }
+    catch(...) { LOG_ERROR("parsing failed and exception caught"); }
     if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) free(text);
     return r;
 }
