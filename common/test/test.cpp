@@ -31,6 +31,7 @@ limitations under the License.
 #include "../range-lock.h"
 #include "../expirecontainer.h"
 #include "../retval.h"
+#include "../strbuilder.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -1232,6 +1233,20 @@ TEST(RangeLock, Basic) {
   m.lock(12288, 4096);
   m.unlock(4096, 8192);
   m.unlock(12288, 4096);
+}
+
+TEST(strBuilder, test) {
+    strBuider<64*1024> sb("asdf", "qwer"), sb250;
+    EXPECT_EQ(sb, "asdfqwer");
+    EXPECT_EQ(sb250, "");
+    sb += "hahaha";
+    EXPECT_EQ(sb, "asdfqwerhahaha");
+    sb + "123" + "!@#$" + "PWD";
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD");
+    sb.appends("(234)", "\n");
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n");
+    sb.append('\t');
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n\t");
 }
 
 TEST(PooledAllocator, allocFailed) {

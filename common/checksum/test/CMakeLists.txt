@@ -4,3 +4,7 @@ add_definitions(-DDATA_DIR=${TEST_WORKING_DIR})
 add_executable(test-checksum test_checksum.cpp)
 target_link_libraries(test-checksum PRIVATE photon_shared)
 add_test(NAME test-checksum COMMAND $<TARGET_FILE:test-checksum>)
+
+add_executable(test-digest test_digest.cpp)
+target_link_libraries(test-digest PRIVATE photon_shared)
+add_test(NAME test-digest COMMAND $<TARGET_FILE:test-digest>)
