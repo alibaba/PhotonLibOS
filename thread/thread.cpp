@@ -199,7 +199,7 @@ namespace photon
             uint64_t rwlock_mark;
             void* retval;
         };
-        char* buf;
+        char* buf = nullptr;
         char* stackful_alloc_top;
         size_t stack_size;
 // offset 96B
@@ -295,7 +295,9 @@ namespace photon
 
 #if defined(__has_feature)
 #   if __has_feature(address_sanitizer) // for clang
-#       define __SANITIZE_ADDRESS__ // GCC already sets this
+#       ifndef __SANITIZE_ADDRESS__
+#           define __SANITIZE_ADDRESS__ // GCC already sets this
+#       endif
 #   endif
 #endif
 
@@ -988,9 +990,9 @@ R"(
             func = (uint64_t)&spinlock_unlock;
             arg = &lock;
         }
+        auto ref = sw.to->stack.pointer_ref();
         ASAN_DIE_SWITCH(sw.to);
-        _photon_switch_context_defer_die(
-            arg, func, sw.to->stack.pointer_ref());
+        _photon_switch_context_defer_die(arg, func, ref);
         __builtin_unreachable();
     }
 
