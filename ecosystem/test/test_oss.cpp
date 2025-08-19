@@ -91,7 +91,7 @@ class BasicAuthOssTest : public ::testing::Test {
   std::string bucket_prefix_;
 };
 
-class CachedAutheOssTest : public BasicAuthOssTest {
+class CachedAuthOssTest : public BasicAuthOssTest {
  protected:
   void CreateOssClient(const OssOptions& opts) override {
     auto auth = new_basic_authenticator(
@@ -102,6 +102,35 @@ class CachedAutheOssTest : public BasicAuthOssTest {
   }
 
   void repeatedly_get();
+};
+
+class RandInvalidateCacheAuthenticator : public Authenticator {
+  Authenticator *auth_ = nullptr;
+
+ public:
+  RandInvalidateCacheAuthenticator(Authenticator *auth) : auth_(auth) {}
+  ~RandInvalidateCacheAuthenticator() { delete auth_; }
+  virtual int sign(photon::net::http::Headers &headers,
+                   const SignParameters &params) override {
+    auto new_params = params;
+    new_params.invalidate_cache = rand() % 2;
+    return auth_->sign(headers, new_params);
+  }
+
+  virtual void set_credentials(CredentialParameters &&credentials) override {
+    auth_->set_credentials(std::move(credentials));
+  }
+};
+
+class CustomCachedAuthOssTest : public CachedAuthOssTest {
+ protected:
+  void CreateOssClient(const OssOptions& opts) override {
+    auto auth = new_basic_authenticator(
+        {FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_authenticator(auth, 3/*ttl*/);
+    client = new_oss_client(opts, new RandInvalidateCacheAuthenticator(auth));
+    ASSERT_NE(client, nullptr) << "Failed to create OSS client";
+  }
 };
 
 void BasicAuthOssTest::list_objects() {
@@ -361,7 +390,7 @@ void BasicAuthOssTest::multipart() {
   ASSERT_EQ(ret, 0);
 }
 
-void CachedAutheOssTest::repeatedly_get() {
+void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
   char buf[file_size] = {0};
@@ -396,12 +425,13 @@ TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
-TEST_F(CachedAutheOssTest, listobjects) { list_objects(); }
-TEST_F(CachedAutheOssTest, multipart) { multipart(); }
-TEST_F(CachedAutheOssTest, append_and_get) { append_and_get(); }
-TEST_F(CachedAutheOssTest, put_and_get_meta) { put_and_get_meta(); }
-TEST_F(CachedAutheOssTest, copy_and_rename) { copy_and_rename(); }
-TEST_F(CachedAutheOssTest, repeatedly_get) { repeatedly_get(); }
+TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
+TEST_F(CachedAuthOssTest, multipart) { multipart(); }
+TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
+TEST_F(CachedAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
+TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
+TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
+TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 
 int main(int argc, char *argv[]) {
   ::testing::InitGoogleTest(&argc, argv);

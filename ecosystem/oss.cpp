@@ -25,7 +25,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/estring.h>
 #include <photon/common/iovector.h>
-#include <photon/common/objectcachev2.h>
+#include <photon/common/expirecontainer.h>
 #include <photon/ecosystem/simple_dom.h>
 #include <photon/net/http/client.h>
 #include <photon/net/http/url.h>
@@ -38,6 +38,7 @@ limitations under the License.
 #include <algorithm>
 #include <string>
 #include <unordered_set>
+#include <unordered_map>
 
 #include "../common/checksum/digest.h"
 
@@ -53,9 +54,6 @@ namespace objstore {
 #include "oss_constants.h"
 
 using Verb = net::http::Verb;
-//using Operation = net::http::Client::Operation;
-//struct OpDeleter { void operator()(Operation *x) { x->destroy(); } };
-//using HTTP_OP = std::unique_ptr<Operation, OpDeleter>;
 
 using HTTP_STACK_OP = photon::net::http::Client::OperationOnStack<16 * 1024 - 1>;
 #define DEFINE_ONSTACK_OP(client, verb, url)                                \
@@ -675,8 +673,7 @@ int OssClient::do_copy_object(OssUrl &src_oss_url,
   int r = append_auth_headers(Verb::PUT, dst_oss_url, op.req.headers);
   if (r < 0) return r;
   r = do_http_call(op, m_oss_options, dst_oss_url.object());
-  if (r < 0) return r;
-  return 0;
+  return r;
 }
 
 int OssClient::do_delete_object(OssUrl &oss_url) {
@@ -684,8 +681,7 @@ int OssClient::do_delete_object(OssUrl &oss_url) {
   int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers);
   if (r < 0) return r;
   r = do_http_call(op, m_oss_options, oss_url.object());
-  if (r < 0) return r;
-  return 0;
+  return r;
 }
 
 static std::string xml_escape(std::string_view object) {
@@ -1162,8 +1158,7 @@ int OssClient::abort_multipart_upload(void *context) {
   int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
   r = do_http_call(op, m_oss_options, oss_url.object());
-  if (r < 0) return r;
-  return 0;
+  return r;
 }
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
@@ -1260,7 +1255,7 @@ class BasicAuthenticator : public Authenticator {
       for (auto x: sub_resources) { // x is ordered
         auto it = params.query_params.find(x);
         if (it != params.query_params.end())
-          sub_params.append(*it);
+          sub_params.emplace(it->first, it->second);
       }
       append_query_params(data2sign, sub_params);
     }
@@ -1392,14 +1387,14 @@ class CachedAuthenticator : public Authenticator {
   Authenticator* m_auth = nullptr;
   int m_cached_ttl_secs = 300;
   using CachedObjHeader = std::vector<std::pair<std::string, std::string>>;
-  std::shared_ptr<ObjectCacheV2<std::string, CachedObjHeader *>> m_cached_headers;
+  std::shared_ptr<ObjectCache<std::string, CachedObjHeader *>> m_cached_headers;
 
  public:
   CachedAuthenticator(Authenticator *auth, int cache_ttl_secs)
       : m_auth(auth),
         m_cached_ttl_secs(cache_ttl_secs),
         m_cached_headers(
-            std::make_shared<ObjectCacheV2<std::string, CachedObjHeader *>>(
+            std::make_shared<ObjectCache<std::string, CachedObjHeader *>>(
                 1000ll * 1000 * cache_ttl_secs)) {}
   ~CachedAuthenticator() { delete m_auth; }
   int sign(photon::net::http::Headers &headers,
@@ -1410,42 +1405,60 @@ class CachedAuthenticator : public Authenticator {
                          params.query_params.empty();
     if (!can_use_cache) return m_auth->sign(headers, params);
 
-    std::string cached_key = estring().appends(
-        params.bucket, "/", params.object, " ", params.region);
-    if (!params.invalidate_cache) {
-      auto cached = m_cached_headers->borrow(
-          cached_key);
-      if (cached && (*cached).size() > 0) {
-        for (auto &kv : *cached) {
-          headers.insert(kv.first, kv.second);
-        }
-        // LOG_INFO("reusing cached headers for key `", cached_key);
-        return 0;
-      }
-    }
+    std::string cached_key =
+        estring().appends(params.bucket, "/", params.object);
 
-    static const std::unordered_set<std::string_view> to_cache_keys = {
+    static const std::vector<std::string_view> to_cache_keys = {
         "Authorization", "x-oss-security-token", "x-oss-date",
         "x-oss-content-sha256", "Date"/*v1 signature needed*/};
 
-    int r = m_auth->sign(headers, params);
-    if (r == 0) {
+    bool evict_cache = params.invalidate_cache;
+    int r = 0;
+
+    auto ctor = [&]() -> CachedObjHeader * {
+      if (evict_cache) evict_cache = false;
+      r = m_auth->sign(headers, params);
+      if (r != 0) return nullptr;
       auto *cached = new CachedObjHeader();
-      for (auto kv : headers) {
-        if (to_cache_keys.find(kv.first) != to_cache_keys.end()) {
-          cached->emplace_back(kv.first, kv.second);
+      for (const auto &k : to_cache_keys) {
+        auto it = headers.find(k);
+        if (it != headers.end()) {
+          cached->emplace_back(k, it.second());
         }
       }
-      m_cached_headers->update(cached_key, [&]() { return cached; });
-      // LOG_INFO("cached headers for key `", cached_key);
-    }
+      // LOG_INFO("cached headers for key ` `", cached_key,  cached);
+      return cached;
+    };
+
+    bool should_retry = false;
+    do {
+      should_retry = false;
+      auto cached = m_cached_headers->borrow(cached_key, ctor);
+      if (cached) {
+        if (evict_cache) {
+          // LOG_INFO("recycling cached headers for key `", cached_key);
+          cached.recycle(true);
+          evict_cache = false;
+          should_retry = true;
+          continue;
+        }
+
+        if (!cached->empty()) {
+          for (const auto &kv : *cached) {
+            headers.insert(kv.first, kv.second);
+          }
+          // LOG_INFO("using cached headers for key `", cached_key);
+          return 0;
+        }
+      }
+    } while (should_retry);
     return r;
   }
 
   void set_credentials(CredentialParameters &&credentials) override {
     // create one new cache instance to discard all the old entries
     m_cached_headers =
-        std::make_shared<ObjectCacheV2<std::string, CachedObjHeader *>>(
+        std::make_shared<ObjectCache<std::string, CachedObjHeader *>>(
                                1000ll * 1000 * m_cached_ttl_secs);
     m_auth->set_credentials(std::move(credentials));
   }
