@@ -24,15 +24,16 @@ limitations under the License.
 #include <photon/common/string_view.h>
 #include <photon/net/http/headers.h>
 #include <photon/net/http/verb.h>
-#include <photon/common/string-keyed.h>
+#include <photon/common/ordered_span.h>
 
 namespace photon {
 namespace objstore {
 
-using StringKV = map_string_kv;
+using StringKV = ordered_string_kv;
+
+std::string_view lookup_mime_type(std::string_view name);
 
 static constexpr int OSS_MAX_PATH_LEN = 1023;
-extern const StringKV MIME_TYPE_MAP;
 
 struct OssOptions {
   std::string endpoint;
@@ -96,7 +97,7 @@ class Authenticator : Object {
  public:
   struct SignParameters {
     std::string_view region, endpoint, bucket, object;
-    const StringKV *query_params = nullptr;
+    StringKV query_params;
     photon::net::http::Verb verb;
     bool invalidate_cache = false;
   };
@@ -258,5 +259,5 @@ Authenticator *new_cached_authenticator(Authenticator *auth,
     auth_->set_credentials(std::move(credentials));
   }
 };*/
-} 
-} 
+}
+}

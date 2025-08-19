@@ -32,6 +32,7 @@ limitations under the License.
 #include "../expirecontainer.h"
 #include "../retval.h"
 #include "../strbuilder.h"
+#include "../ordered_span.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -1247,6 +1248,17 @@ TEST(strBuilder, test) {
     EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n");
     sb.append('\t');
     EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n\t");
+}
+
+TEST(ordered_span, strings) {
+    const static ordered_strings os = {"asdf", "qwer", "xzyh"};
+    EXPECT_EQ(os.count("asdf"), 1);
+    EXPECT_EQ(os.count("qwer"), 1);
+    EXPECT_EQ(os.count("xzyh"), 1);
+    ordered_string_kv oskv = {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}};
+    for (auto s: os) {
+        EXPECT_NE(oskv[s], "");
+    }
 }
 
 TEST(PooledAllocator, allocFailed) {

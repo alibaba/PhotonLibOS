@@ -121,20 +121,18 @@ static time_t get_list_lastmodified(std::string_view sv) {
   return timegm(&tm);  // GMT
 }
 
-static std::string_view lookup_mime_type(std::string_view name) {
+std::string_view lookup_mime_type(std::string_view name) {
   auto last_pos = name.find_last_of('.');
-  if (last_pos == std::string_view::npos || last_pos == name.size() - 1) {
-    return "";
-  }
+  if (last_pos != std::string_view::npos)
+    name = name.substr(last_pos + 1);
 
   // extract the last extension
-  auto ext = std::string(name.substr(last_pos + 1));
-  std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-  auto iter = MIME_TYPE_MAP.find(ext);
-  if (iter != MIME_TYPE_MAP.end()) {
-    return (*iter).second;
-  }
-  return "";
+  const size_t MAX_EXT_LENGTH = 8;
+  if (name.size() > MAX_EXT_LENGTH)
+    name = name.substr(0, MAX_EXT_LENGTH);
+  char ext[MAX_EXT_LENGTH];
+  std::transform(name.begin(), name.end(), ext, ::tolower);
+  return MIME_TYPE_MAP[ext];
 }
 
 using photon::net::http::verbstr;
@@ -426,7 +424,7 @@ class OssClientImpl : public OssClient {
                           const StringKV &query_params = {},
                           bool invalidate_cache = false);
 
-  int walk_list_results(const SimpleDOM::Node &node, ListObjectsCallback cb); 
+  int walk_list_results(const SimpleDOM::Node &node, ListObjectsCallback cb);
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
                          std::string *marker, std::string *resp_code = nullptr);
@@ -507,7 +505,7 @@ int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl &oss_url,
                                    photon::net::http::Headers &headers,  const StringKV &query_params, bool invalidate_cache) {
   Authenticator::SignParameters params;
   params.verb = v;
-  params.query_params = &query_params;
+  params.query_params = query_params;
   params.region = m_oss_options.region;
   params.endpoint = m_oss_options.endpoint;
   params.bucket = m_oss_options.bucket;
@@ -541,6 +539,38 @@ int OssClient::walk_list_results(const SimpleDOM::Node &list_bucket_result, List
   return 0;
 }
 
+class AppendableStringKV : public StringKV {
+  size_t _capacity;
+public:
+  using StringKV::StringKV;
+  using StringKV::operator=;
+  constexpr AppendableStringKV(std::initializer_list<SKV> l) :
+            StringKV(l), _capacity(l.size()) {
+    if (empty()) return;
+    size_t n = l.size();
+    while (n > 0 && (*this)[n-1].first.empty()) n--;
+    *this = subspan(0, n);
+  }
+  void push_back(SKV kv) {
+    assert(size() < _capacity);
+    if (size() >= _capacity) return;
+    *this = AppendableStringKV(this->data(), size()+1);
+    (*this)[size()-1] = kv;
+  }
+  void emplace(std::string_view key, std::string_view val) {
+    assert(size() < _capacity);
+    if (size() >= _capacity) return;
+    *this = AppendableStringKV(this->data(), size()+1);
+    auto& arr = *this;
+    size_t i = size() - 1;
+    for (; i > 0; i--) {
+      if (key >= arr[i-1].first) break;
+      else arr[i] = arr[i-1];
+    }
+    arr[i] = {key, val};
+  }
+};
+
 int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters,
                                   int maxKeys, std::string *marker, std::string *resp_code) {
@@ -552,10 +582,12 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
   estring escaped_delimiter = photon::net::http::url_escape("/");
   estring escaped_marker = photon::net::http::url_escape(_mark);
   estring max_key_str = std::to_string(maxKeys);
-  StringKV query_params = {
+  // must appear in dictionary order!
+  AppendableStringKV query_params = {
       {OSS_PARAM_KEY_LIST_TYPE, "2"},
+      {OSS_PARAM_KEY_MAX_KEYS, max_key_str},
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
-      {OSS_PARAM_KEY_MAX_KEYS, max_key_str}
+      {{},{}}, {{},{}},   // reserve space for later emplace()
   };
   if (delimiters) query_params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
   if (!_mark.empty()) query_params.emplace(OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker);
@@ -590,9 +622,11 @@ int OssClient::do_list_objects_v1(std::string_view bucket, std::string_view pref
   estring escaped_delimiter = photon::net::http::url_escape("/");
   estring escaped_marker = photon::net::http::url_escape(_mark);
   estring max_key_str = std::to_string(maxKeys);
-  StringKV query_params = {
+  // must appear in dictionary order!
+  AppendableStringKV query_params = {
+      {OSS_PARAM_KEY_MAX_KEYS, max_key_str},
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
-      {OSS_PARAM_KEY_MAX_KEYS, max_key_str}
+      {{},{}}, {{},{}}, // reserve space for later emplace()
   };
   if (delimiters) query_params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
   if (!_mark.empty()) query_params.emplace(OSS_PARAM_KEY_MARKER, escaped_marker);
@@ -693,6 +727,7 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       OssUrl oss_url(m_endpoint, bucket, "/", m_is_http);
       auto md5 = md5_base64(body_view);
 
+      // must appear in dictionary order!
       static const StringKV query_params = {
           {OSS_PARAM_KEY_DELETE, ""}
       };
@@ -891,6 +926,8 @@ ssize_t OssClient::append_object(std::string_view object,
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
   estring position_str = std::to_string(position);
+
+  // must appear in dictionary order!
   StringKV query_params = {
       {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}};
 
@@ -915,7 +952,7 @@ int OssClient::copy_object(std::string_view src_object,
                            bool set_mime) {
   OssUrl src_oss_url(m_endpoint, m_bucket, src_object, m_is_http);
   OssUrl dst_oss_url(m_endpoint, m_bucket, dst_object, m_is_http);
-  
+
   return do_copy_object(src_oss_url, dst_oss_url, overwrite, set_mime);
 }
 
@@ -945,6 +982,7 @@ int OssClient::init_multipart_upload(std::string_view object,
                                      void **context) {
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
+  // must appear in dictionary order!
   static const StringKV query_params = {
     {OSS_PARAM_KEY_UPLOADS, ""}};
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
@@ -983,6 +1021,8 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   assert(!ctx->upload_id.empty());
 
   estring part_nums_str = std::to_string(part_number);
+
+  // must appear in dictionary order!
   StringKV query_params = {
     {OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
@@ -1021,6 +1061,8 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
                          m_is_http);
 
   estring part_num_str = std::to_string(part_number);
+
+  // must appear in dictionary order!
   StringKV query_params = {
       {OSS_PARAM_KEY_PART_NUMBER, part_num_str},
       {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}};
@@ -1083,8 +1125,9 @@ int OssClient::complete_multipart_upload(void *context,
   OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(),
                          m_is_http);
 
-
   DEFER(delete ctx);
+
+  // must appear in dictionary order!
   StringKV query_params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
@@ -1109,6 +1152,8 @@ int OssClient::abort_multipart_upload(void *context) {
                          m_is_http);
 
   DEFER(delete ctx);
+
+  // must appear in dictionary order!
   StringKV query_params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
@@ -1122,9 +1167,10 @@ int OssClient::abort_multipart_upload(void *context) {
 }
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
-  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
+  // must appear in dictionary order!
   static const StringKV query_params = {
       {OSS_PARAM_KEY_OBJECT_META, ""}};
+  OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
@@ -1200,18 +1246,21 @@ class BasicAuthenticator : public Authenticator {
     }
 
     // complete this list if needed. currently it's for ossfs use only.
-    static const std::unordered_set<estring_view> sub_resources = {
-        OSS_PARAM_KEY_OBJECT_META, OSS_PARAM_KEY_CONTINUATION_TOKEN,
-        OSS_PARAM_KEY_APPEND,      OSS_PARAM_KEY_POSITION,
-        OSS_PARAM_KEY_UPLOADS,     OSS_PARAM_KEY_UPLOAD_ID,
-        OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_DELETE};
+    // must appear in dictionary order!
+    const static std::string_view sub_resources[] = {
+        OSS_PARAM_KEY_APPEND,       OSS_PARAM_KEY_CONTINUATION_TOKEN,
+        OSS_PARAM_KEY_DELETE,       OSS_PARAM_KEY_OBJECT_META,
+        OSS_PARAM_KEY_PART_NUMBER,  OSS_PARAM_KEY_POSITION,
+        OSS_PARAM_KEY_UPLOADS,      OSS_PARAM_KEY_UPLOAD_ID,
+    };
 
-    if (params.query_params) {
-      StringKV sub_params;
-      for (auto &it : *params.query_params) {
-        if (sub_resources.count(it.first)) {
-          sub_params.emplace(it.first, it.second);
-        }
+    if (params.query_params.size()) {
+      SKV _skv[LEN(sub_resources)];
+      AppendableStringKV sub_params(_skv, LEN(_skv));
+      for (auto x: sub_resources) { // x is ordered
+        auto it = params.query_params.find(x);
+        if (it != params.query_params.end())
+          sub_params.append(*it);
       }
       append_query_params(data2sign, sub_params);
     }
@@ -1237,8 +1286,8 @@ class BasicAuthenticator : public Authenticator {
     std::string_view method = photon::net::http::verbstr[params.verb];
     canonical_request.appends(method, "\n", "/", params.bucket, "/",
                               photon::net::http::url_escape(params.object, false), "\n");
-    if (params.query_params) {
-      append_query_params(canonical_request, *params.query_params, false);
+    if (params.query_params.size()) {
+      append_query_params(canonical_request, params.query_params, false);
     }
 
     canonical_request.appends("\n");
@@ -1358,7 +1407,7 @@ class CachedAuthenticator : public Authenticator {
     // only get obj range request among our supported interfaces will fall into
     // this catagory currently
     bool can_use_cache = params.verb == Verb::GET &&
-                         (!params.query_params || params.query_params->empty());
+                         params.query_params.empty();
     if (!can_use_cache) return m_auth->sign(headers, params);
 
     std::string cached_key = estring().appends(
