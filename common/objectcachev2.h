@@ -38,7 +38,7 @@ protected:
         const K key;
         std::shared_ptr<V> ref;
         // prevent create multiple time when borrow
-        photon::spinlock createlock;
+        photon::mutex createlock{0};
         // create timestamp, for cool-down of borrow
         uint64_t lastcreate = 0;
         // reclaim timestamp
@@ -83,7 +83,7 @@ protected:
     };
 
     // protect object cache map
-    photon::spinlock maplock;
+    photon::mutex maplock{0};
     // protect lru list
     std::unordered_set<Box, BoxHash, BoxEqual> map;
     intrusive_list<Box> lru_list;
