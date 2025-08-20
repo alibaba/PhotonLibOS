@@ -45,6 +45,18 @@ Message::~Message() {
         free(m_buf);
 }
 
+void Message::reset() {
+    if (m_stream && m_stream_ownership) {
+        delete m_stream;
+    }
+    headers.reset();
+    m_buf_size = 0;
+    m_body_stream.reset();
+    m_stream = nullptr;
+    m_stream_ownership = false;
+    reset_status();
+}
+
 int Message::receive_header(uint64_t timeout) {
     auto tmo = Timeout(timeout);
     int ret = 0;
