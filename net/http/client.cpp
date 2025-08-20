@@ -260,8 +260,10 @@ public:
             auto buf = malloc(kMinimalHeadersSize);
             resp.reset((char *)buf, kMinimalHeadersSize, true, sock.release(), true, req.verb());
         }
-        if (op->resp.receive_header(tmo.timeout()) != 0) {
+        resp.reset_status(HEADER_SENT);
+        if (resp.receive_header(tmo.timeout()) != 0) {
             req.reset_status();
+            resp.reset(nullptr, false);
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "read response header failed");
         }
 
