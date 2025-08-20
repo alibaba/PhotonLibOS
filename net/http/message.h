@@ -69,15 +69,9 @@ public:
         m_stream = s;
         m_stream_ownership = stream_ownership;
     }
-    void reset() {
-        headers.reset();
-        m_buf_size = 0;
-        m_body_stream.reset();
-        m_stream_ownership = false;
-        reset_status();
-    }
-    void reset_status() {
-        message_status = INIT;
+    void reset();
+    void reset_status(int status = INIT) {
+        message_status = status;
     }
     bool keep_alive() const {
         return m_keep_alive;
