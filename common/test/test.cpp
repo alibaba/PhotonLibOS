@@ -1250,8 +1250,9 @@ TEST(strBuilder, test) {
     EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n\t");
 }
 
+DEFINE_CONST_STATIC_ORDERED_STRINGS(os, {"asdf", "qwer", "xzyh"});
+
 TEST(ordered_span, strings) {
-    const static ordered_strings os = {"asdf", "qwer", "xzyh"};
     EXPECT_EQ(os.count("asdf"), 1);
     EXPECT_EQ(os.count("qwer"), 1);
     EXPECT_EQ(os.count("xzyh"), 1);

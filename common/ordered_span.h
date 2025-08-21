@@ -21,6 +21,7 @@ limitations under the License.
 #include <initializer_list>
 #include <photon/common/string_view.h>
 #include <photon/common/span.h>
+#include <photon/common/utility.h>
 
 namespace photon {
 
@@ -91,6 +92,12 @@ public:
     }
 };
 
+#define DEFINE_CONST_STATIC_ORDERED_STRINGS(name, ...)    \
+    const static std::string_view _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;  \
+    const static ordered_strings name(_CONCAT(__a__,__LINE__));
 
+#define DEFINE_CONST_STATIC_ORDERED_STRING_KV(name, ...)  \
+    const static SKV _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;   \
+    const static ordered_string_kv name(_CONCAT(__a__,__LINE__));
 
 }

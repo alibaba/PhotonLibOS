@@ -549,15 +549,9 @@ public:
     while (n > 0 && (*this)[n - 1].first.empty()) n--;
     *this = subspan(0, n);
   }
-
   template <size_t N>
-  AppendableStringKV(SKV (&arr)[N]) : StringKV(arr), _capacity(N) {
-    if (empty()) return;
-    size_t n = N;
-    while (n > 0 && (*this)[n - 1].first.empty()) n--;
-    *this = subspan(0, n);
-  }
-
+  constexpr AppendableStringKV(SKV (&arr)[N])
+    : AppendableStringKV({arr, N}) { }
   void push_back(SKV kv) {
     assert(size() < _capacity);
     if (size() >= _capacity) return;
@@ -733,10 +727,10 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       OssUrl oss_url(m_endpoint, bucket, "/", m_is_http);
       auto md5 = md5_base64(body_view);
 
-      // must appear in dictionary order!
-      const StringKV query_params = {
-          {OSS_PARAM_KEY_DELETE, ""}
-      };
+      DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params, {
+        // must appear in dictionary order!
+        {OSS_PARAM_KEY_DELETE, ""}
+      });
 
       DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
       op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
@@ -989,9 +983,10 @@ int OssClient::init_multipart_upload(std::string_view object,
                                      void **context) {
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
-  // must appear in dictionary order!
-  const StringKV query_params = {
-    {OSS_PARAM_KEY_UPLOADS, ""}};
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params, {
+    // must appear in dictionary order!
+    {OSS_PARAM_KEY_UPLOADS, ""}
+  });
 
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
 
@@ -1174,9 +1169,10 @@ int OssClient::abort_multipart_upload(void *context) {
 }
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
-  // must appear in dictionary order!
-  const StringKV query_params = {
-      {OSS_PARAM_KEY_OBJECT_META, ""}};
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params, {
+    // must appear in dictionary order!
+    {OSS_PARAM_KEY_OBJECT_META, ""},
+  });
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
@@ -1264,11 +1260,10 @@ class BasicAuthenticator : public Authenticator {
     if (params.query_params.size()) {
       SKV _skv[LEN(sub_resources)] = {};
       AppendableStringKV sub_params(_skv);
-
       for (auto x: sub_resources) { // x is ordered
         auto it = params.query_params.find(x);
         if (it != params.query_params.end()) {
-          sub_params.emplace(it->first, it->second);
+          sub_params.push_back(*it);
         }
       }
       append_query_params(data2sign, sub_params);

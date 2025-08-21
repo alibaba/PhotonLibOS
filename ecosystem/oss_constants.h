@@ -44,8 +44,8 @@ static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 secon
 
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
 
-// must appear in dictionary order!
-const StringKV MIME_TYPE_MAP = {
+DEFINE_CONST_STATIC_ORDERED_STRING_KV ( MIME_TYPE_MAP, {
+  // must appear in dictionary order!
   {"3gp", "video/3gpp"},
   {"3gpp", "video/3gpp"},
   {"7z", "application/x-7z-compressed"},
@@ -145,5 +145,5 @@ const StringKV MIME_TYPE_MAP = {
   {"xml", "text/xml"},
   {"xpi", "application/x-xpinstall"},
   {"zip", "application/zip"},
-};
+});
 
