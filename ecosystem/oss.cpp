@@ -542,13 +542,22 @@ class AppendableStringKV : public StringKV {
 public:
   using StringKV::StringKV;
   using StringKV::operator=;
-  constexpr AppendableStringKV(std::initializer_list<SKV> l) :
-            StringKV(l), _capacity(l.size()) {
+  constexpr AppendableStringKV(std::initializer_list<SKV> l)
+      : StringKV(l), _capacity(l.size()) {
     if (empty()) return;
     size_t n = l.size();
-    while (n > 0 && (*this)[n-1].first.empty()) n--;
+    while (n > 0 && (*this)[n - 1].first.empty()) n--;
     *this = subspan(0, n);
   }
+
+  template <size_t N>
+  AppendableStringKV(SKV (&arr)[N]) : StringKV(arr), _capacity(N) {
+    if (empty()) return;
+    size_t n = N;
+    while (n > 0 && (*this)[n - 1].first.empty()) n--;
+    *this = subspan(0, n);
+  }
+
   void push_back(SKV kv) {
     assert(size() < _capacity);
     if (size() >= _capacity) return;
@@ -587,6 +596,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
       {{},{}}, {{},{}},   // reserve space for later emplace()
   };
+
   if (delimiters) query_params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
   if (!_mark.empty()) query_params.emplace(OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker);
 
@@ -724,9 +734,10 @@ int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
       auto md5 = md5_base64(body_view);
 
       // must appear in dictionary order!
-      static const StringKV query_params = {
+      const StringKV query_params = {
           {OSS_PARAM_KEY_DELETE, ""}
       };
+
       DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
       op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
       op.req.headers.content_length(body_view.sum());
@@ -979,13 +990,15 @@ int OssClient::init_multipart_upload(std::string_view object,
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
 
   // must appear in dictionary order!
-  static const StringKV query_params = {
+  const StringKV query_params = {
     {OSS_PARAM_KEY_UPLOADS, ""}};
+
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
 
   auto content_type = lookup_mime_type(object);
   if (!content_type.empty())
     op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
+
   int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
   r = do_http_call(op, m_oss_options, oss_url.object());
@@ -1127,7 +1140,6 @@ int OssClient::complete_multipart_upload(void *context,
   StringKV query_params = {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
   };
-
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
   op.req.headers.content_length(req_body.size());
   op.body_writer = {&view, &body_writer_cb};
@@ -1163,7 +1175,7 @@ int OssClient::abort_multipart_upload(void *context) {
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta &meta) {
   // must appear in dictionary order!
-  static const StringKV query_params = {
+  const StringKV query_params = {
       {OSS_PARAM_KEY_OBJECT_META, ""}};
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
@@ -1243,19 +1255,21 @@ class BasicAuthenticator : public Authenticator {
     // complete this list if needed. currently it's for ossfs use only.
     // must appear in dictionary order!
     const static std::string_view sub_resources[] = {
-        OSS_PARAM_KEY_APPEND,       OSS_PARAM_KEY_CONTINUATION_TOKEN,
-        OSS_PARAM_KEY_DELETE,       OSS_PARAM_KEY_OBJECT_META,
-        OSS_PARAM_KEY_PART_NUMBER,  OSS_PARAM_KEY_POSITION,
-        OSS_PARAM_KEY_UPLOADS,      OSS_PARAM_KEY_UPLOAD_ID,
+        OSS_PARAM_KEY_APPEND,      OSS_PARAM_KEY_CONTINUATION_TOKEN,
+        OSS_PARAM_KEY_DELETE,      OSS_PARAM_KEY_OBJECT_META,
+        OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_POSITION,
+        OSS_PARAM_KEY_UPLOAD_ID,   OSS_PARAM_KEY_UPLOADS,
     };
 
     if (params.query_params.size()) {
-      SKV _skv[LEN(sub_resources)];
-      AppendableStringKV sub_params(_skv, LEN(_skv));
+      SKV _skv[LEN(sub_resources)] = {};
+      AppendableStringKV sub_params(_skv);
+
       for (auto x: sub_resources) { // x is ordered
         auto it = params.query_params.find(x);
-        if (it != params.query_params.end())
+        if (it != params.query_params.end()) {
           sub_params.emplace(it->first, it->second);
+        }
       }
       append_query_params(data2sign, sub_params);
     }

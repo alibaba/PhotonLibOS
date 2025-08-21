@@ -54,7 +54,7 @@ public:
     const iterator find (const P& s) const {
         Less less;
         auto it = std::lower_bound(this->begin(), this->end(), s, less);
-        return (it != this->end() && !less(*it, s)) ? it : this->end();
+        return (it != this->end() && !less(s, *it)) ? it : this->end();
     }
 
     template<typename P>

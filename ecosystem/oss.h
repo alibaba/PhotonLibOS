@@ -239,11 +239,14 @@ Authenticator *new_basic_authenticator(
 Authenticator *new_cached_authenticator(Authenticator *auth,
                                         int cache_ttl_secs = 60);
 
-//add one typical CustomAutheticator example
+// one typical CustomAutheticator example
 /*class CustomAuthenticator : public Authenticator {
   Authenticator* auth_ = nullptr;
  public:
   CustomAuthenticator(Authenticator* auth) : auth_(auth) {}
+
+  ~CustomAuthenticator() { delete auth_; }
+
   virtual int sign(photon::net::http::Headers& headers,
                    const SignParameters& params) override {
     // add your own logic here
