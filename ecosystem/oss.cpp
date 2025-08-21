@@ -539,29 +539,39 @@ int OssClient::walk_list_results(const SimpleDOM::Node &list_bucket_result, List
 
 class AppendableStringKV : public StringKV {
   size_t _capacity;
+  void trim() {
+    if (empty()) return;
+    size_t n = _capacity;
+    while (n > 0 && (*this)[n - 1].first.empty()) n--;
+    *this = subspan(0, n);
+  }
 public:
   using StringKV::StringKV;
   using StringKV::operator=;
   constexpr AppendableStringKV(std::initializer_list<SKV> l)
       : StringKV(l), _capacity(l.size()) {
-    if (empty()) return;
-    size_t n = l.size();
-    while (n > 0 && (*this)[n - 1].first.empty()) n--;
-    *this = subspan(0, n);
+    trim();
   }
+
   template <size_t N>
   constexpr AppendableStringKV(SKV (&arr)[N])
-    : AppendableStringKV({arr, N}) { }
+    : StringKV(arr), _capacity(N) {
+    trim();
+  }
+
+  AppendableStringKV(const AppendableStringKV& other) = delete;
+  AppendableStringKV& operator=(const AppendableStringKV& other) = delete;
+
   void push_back(SKV kv) {
     assert(size() < _capacity);
     if (size() >= _capacity) return;
-    *this = AppendableStringKV(this->data(), size()+1);
+    *this = StringKV(this->data(), size()+1);
     (*this)[size()-1] = kv;
   }
   void emplace(std::string_view key, std::string_view val) {
     assert(size() < _capacity);
     if (size() >= _capacity) return;
-    *this = AppendableStringKV(this->data(), size()+1);
+    *this = StringKV(this->data(), size()+1);
     auto& arr = *this;
     size_t i = size() - 1;
     for (; i > 0; i--) {

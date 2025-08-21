@@ -25,6 +25,14 @@ limitations under the License.
 
 namespace photon {
 
+using SKV = std::pair<std::string_view, std::string_view>;
+inline bool is_placeholder(const SKV& skv) {
+    return skv.first.empty() && skv.second.empty();
+}
+inline bool is_placeholder(std::string_view s) {
+    return s.empty();
+}
+
 // must be initialized with an initializer_list of ORDERED string_views
 template<typename T, typename Less = std::less<T>>
 class ordered_span : public ::tcb::span<T> {
@@ -44,9 +52,11 @@ public:
         if (this->empty())
             return true;
         Less less;
-        for (uint32_t i = 0; i < this->size() - 1; ++i)
+        for (uint32_t i = 0; i < this->size() - 1; ++i) {
+            if (is_placeholder((*this)[i + 1])) break;
             if (!less((*this)[i], (*this)[i + 1]))
                 return false;
+        }
         return true;
     }
 
@@ -65,8 +75,6 @@ public:
 };
 
 using ordered_strings = ordered_span<std::string_view>;
-
-using SKV = std::pair<std::string_view, std::string_view>;
 
 struct SKVLess {
     bool operator()(const SKV& a, const SKV& b) const {
