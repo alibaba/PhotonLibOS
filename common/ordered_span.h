@@ -104,9 +104,15 @@ struct SKVLess {
 
 class ordered_string_kv : public ordered_span<SKV, SKVLess> {
 public:
-    using ordered_span::ordered_span;
-    using ordered_span::operator[];
-    using ordered_span::operator=;
+    using base = ordered_span<SKV, SKVLess>;
+    using base::base;
+    using base::operator[];
+    using base::operator=;
+
+    // gcc seems to have a bug regard inherited constructor, so we have to
+    template<size_t N>  // repeat the constructor definition here
+    constexpr ordered_string_kv(const SKV (&arr)[N], size_t free = 0)
+        : base(arr, N, free) { }
 
     std::string_view operator[](std::string_view s) const {
         auto it = this->find(s);
