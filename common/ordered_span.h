@@ -25,39 +25,51 @@ limitations under the License.
 
 namespace photon {
 
-using SKV = std::pair<std::string_view, std::string_view>;
-inline bool is_placeholder(const SKV& skv) {
-    return skv.first.empty() && skv.second.empty();
-}
-inline bool is_placeholder(std::string_view s) {
-    return s.empty();
-}
-
-// must be initialized with an initializer_list of ORDERED string_views
+// must be initialized with an T[] what is ORDERED
 template<typename T, typename Less = std::less<T>>
 class ordered_span : public ::tcb::span<T> {
+    size_t m_free = 0;  // number of free slots at tail
 public:
     using base = ::tcb::span<T>;
-    using base::base;
     using base::operator=;
 
-    constexpr ordered_span(std::initializer_list<T> l)
-        : base(l) { assert(ordered()); }
+    ordered_span() = default;
 
     template<size_t N>
-    constexpr ordered_span(const T (&arr)[N])
-        : base((T*)arr, N) { assert(ordered()); }
+    constexpr ordered_span(const T (&arr)[N], size_t free = 0)
+        : ordered_span(arr, N, free) { }
 
-    bool ordered() const {
-        if (this->empty())
-            return true;
-        Less less;
-        for (uint32_t i = 0; i < this->size() - 1; ++i) {
-            if (is_placeholder((*this)[i + 1])) break;
-            if (!less((*this)[i], (*this)[i + 1]))
-                return false;
+    constexpr ordered_span(const T* arr, size_t n, size_t free = 0)
+        : base((T*)arr, n - free), m_free(free) { assert(ordered(arr, n - free)); }
+
+    constexpr ordered_span(const T* begin, const T* end, size_t free = 0)
+        : ordered_span(begin, end - begin, free) { }
+
+    constexpr bool ordered(const T* p, size_t n) const {
+        return (n <= 1) || (!Less()(p[1], p[0]) && ordered(p + 1, n - 1));
+    }
+
+    int append(const T& val) {
+        assert(m_free);
+        if (!m_free) return -1; else m_free--;
+        if (!this->empty()) assert(!Less()(val, this->back()));
+        (base&)*this = base(this->data(), this->size() + 1);
+        this->back() = val;
+        return 0;
+    }
+
+    int insert(const T& val) {
+        assert(m_free);
+        if (!m_free) return -1; else m_free--;
+        (base&)*this = base(this->data(), this->size() + 1);
+        auto& arr = *this;
+        size_t i = this->size() - 1;
+        for (; i; --i) {
+            if (!Less()(val, arr[i-1])) break;
+            else arr[i] = std::move(arr[i - 1]);
         }
-        return true;
+        arr[i] = val;
+        return 0;
     }
 
     using typename base::iterator;
@@ -75,6 +87,8 @@ public:
 };
 
 using ordered_strings = ordered_span<std::string_view>;
+
+using SKV = std::pair<std::string_view, std::string_view>;
 
 struct SKVLess {
     bool operator()(const SKV& a, const SKV& b) const {
@@ -100,9 +114,27 @@ public:
     }
 };
 
+#define DEFINE_ORDERED_STRINGS(name, ...)    \
+    std::string_view _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;  \
+    ordered_strings name(_CONCAT(__a__,__LINE__));
+
+#define DEFINE_APPENDABLE_ORDERED_STRINGS(name, free, ...)    \
+    std::string_view _CONCAT(_a_,__LINE__)[] = __VA_ARGS__;  \
+    std::string_view _CONCAT(__a__,__LINE__)[LEN(_CONCAT(_a_,__LINE__)) + free] = __VA_ARGS__;  \
+    ordered_strings name(_CONCAT(__a__,__LINE__), free);
+
 #define DEFINE_CONST_STATIC_ORDERED_STRINGS(name, ...)    \
     const static std::string_view _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;  \
     const static ordered_strings name(_CONCAT(__a__,__LINE__));
+
+#define DEFINE_ORDERED_STRING_KV(name, ...)  \
+    SKV _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;   \
+    ordered_string_kv name(_CONCAT(__a__,__LINE__));
+
+#define DEFINE_APPENDABLE_ORDERED_STRING_KV(name, free, ...)    \
+    SKV _CONCAT(_a_,__LINE__)[] = __VA_ARGS__;  \
+    SKV _CONCAT(__a__,__LINE__)[LEN(_CONCAT(_a_,__LINE__)) + free] = __VA_ARGS__;  \
+    ordered_string_kv name(_CONCAT(__a__,__LINE__), free);
 
 #define DEFINE_CONST_STATIC_ORDERED_STRING_KV(name, ...)  \
     const static SKV _CONCAT(__a__,__LINE__)[] = __VA_ARGS__;   \

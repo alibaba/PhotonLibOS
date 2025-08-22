@@ -537,51 +537,6 @@ int OssClient::walk_list_results(const SimpleDOM::Node &list_bucket_result, List
   return 0;
 }
 
-class AppendableStringKV : public StringKV {
-  size_t _capacity;
-  void trim() {
-    if (empty()) return;
-    size_t n = _capacity;
-    while (n > 0 && (*this)[n - 1].first.empty()) n--;
-    *this = subspan(0, n);
-  }
-public:
-  using StringKV::StringKV;
-  using StringKV::operator=;
-  constexpr AppendableStringKV(std::initializer_list<SKV> l)
-      : StringKV(l), _capacity(l.size()) {
-    trim();
-  }
-
-  template <size_t N>
-  constexpr AppendableStringKV(SKV (&arr)[N])
-    : StringKV(arr), _capacity(N) {
-    trim();
-  }
-
-  AppendableStringKV(const AppendableStringKV& other) = delete;
-  AppendableStringKV& operator=(const AppendableStringKV& other) = delete;
-
-  void push_back(SKV kv) {
-    assert(size() < _capacity);
-    if (size() >= _capacity) return;
-    *this = StringKV(this->data(), size()+1);
-    (*this)[size()-1] = kv;
-  }
-  void emplace(std::string_view key, std::string_view val) {
-    assert(size() < _capacity);
-    if (size() >= _capacity) return;
-    *this = StringKV(this->data(), size()+1);
-    auto& arr = *this;
-    size_t i = size() - 1;
-    for (; i > 0; i--) {
-      if (key >= arr[i-1].first) break;
-      else arr[i] = arr[i-1];
-    }
-    arr[i] = {key, val};
-  }
-};
-
 int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters,
                                   int maxKeys, std::string *marker, std::string *resp_code) {
@@ -594,15 +549,14 @@ int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view pref
   estring escaped_marker = photon::net::http::url_escape(_mark);
   estring max_key_str = std::to_string(maxKeys);
   // must appear in dictionary order!
-  AppendableStringKV query_params = {
+  DEFINE_APPENDABLE_ORDERED_STRING_KV(query_params, 2, {
       {OSS_PARAM_KEY_LIST_TYPE, "2"},
       {OSS_PARAM_KEY_MAX_KEYS, max_key_str},
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
-      {{},{}}, {{},{}},   // reserve space for later emplace()
-  };
+  });
 
-  if (delimiters) query_params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
-  if (!_mark.empty()) query_params.emplace(OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker);
+  if (delimiters) query_params.insert({OSS_PARAM_KEY_DELIMITER, escaped_delimiter});
+  if (!_mark.empty()) query_params.insert({OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker});
 
   OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
@@ -635,13 +589,12 @@ int OssClient::do_list_objects_v1(std::string_view bucket, std::string_view pref
   estring escaped_marker = photon::net::http::url_escape(_mark);
   estring max_key_str = std::to_string(maxKeys);
   // must appear in dictionary order!
-  AppendableStringKV query_params = {
+  DEFINE_APPENDABLE_ORDERED_STRING_KV(query_params, 2, {
       {OSS_PARAM_KEY_MAX_KEYS, max_key_str},
       {OSS_PARAM_KEY_PREFIX, escaped_prefix},
-      {{},{}}, {{},{}}, // reserve space for later emplace()
-  };
-  if (delimiters) query_params.emplace(OSS_PARAM_KEY_DELIMITER, escaped_delimiter);
-  if (!_mark.empty()) query_params.emplace(OSS_PARAM_KEY_MARKER, escaped_marker);
+  });
+  if (delimiters) query_params.insert({OSS_PARAM_KEY_DELIMITER, escaped_delimiter});
+  if (!_mark.empty()) query_params.insert({OSS_PARAM_KEY_MARKER, escaped_marker});
 
   OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
@@ -939,8 +892,8 @@ ssize_t OssClient::append_object(std::string_view object,
   estring position_str = std::to_string(position);
 
   // must appear in dictionary order!
-  StringKV query_params = {
-      {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}};
+  DEFINE_ORDERED_STRING_KV(query_params, {
+      {OSS_PARAM_KEY_APPEND, ""}, {OSS_PARAM_KEY_POSITION, position_str}});
 
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
   auto content_type = lookup_mime_type(object);
@@ -1037,10 +990,10 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   estring part_nums_str = std::to_string(part_number);
 
   // must appear in dictionary order!
-  StringKV query_params = {
+  DEFINE_ORDERED_STRING_KV(query_params, {
     {OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
-  };
+  });
 
   OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(),
                          m_is_http);
@@ -1077,9 +1030,9 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   estring part_num_str = std::to_string(part_number);
 
   // must appear in dictionary order!
-  StringKV query_params = {
+  DEFINE_ORDERED_STRING_KV(query_params, {
       {OSS_PARAM_KEY_PART_NUMBER, part_num_str},
-      {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}};
+      {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}});
 
   estring oss_copy_source;
   if (from.empty()) { // just copy myself
@@ -1142,9 +1095,9 @@ int OssClient::complete_multipart_upload(void *context,
   DEFER(delete ctx);
 
   // must appear in dictionary order!
-  StringKV query_params = {
+  DEFINE_ORDERED_STRING_KV(query_params, {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
-  };
+  });
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
   op.req.headers.content_length(req_body.size());
   op.body_writer = {&view, &body_writer_cb};
@@ -1167,9 +1120,9 @@ int OssClient::abort_multipart_upload(void *context) {
   DEFER(delete ctx);
 
   // must appear in dictionary order!
-  StringKV query_params = {
+  DEFINE_ORDERED_STRING_KV(query_params, {
     {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}
-  };
+  });
 
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
@@ -1268,12 +1221,11 @@ class BasicAuthenticator : public Authenticator {
     };
 
     if (params.query_params.size()) {
-      SKV _skv[LEN(sub_resources)] = {};
-      AppendableStringKV sub_params(_skv);
+      DEFINE_APPENDABLE_ORDERED_STRING_KV(sub_params, LEN(sub_resources), {{}});
       for (auto x: sub_resources) { // x is ordered
         auto it = params.query_params.find(x);
         if (it != params.query_params.end()) {
-          sub_params.push_back(*it);
+          sub_params.append(*it);
         }
       }
       append_query_params(data2sign, sub_params);

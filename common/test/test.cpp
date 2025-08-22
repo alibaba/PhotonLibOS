@@ -1254,12 +1254,29 @@ DEFINE_CONST_STATIC_ORDERED_STRINGS(os, {"asdf", "qwer", "xzyh"});
 
 TEST(ordered_span, strings) {
     EXPECT_EQ(os.count("asdf"), 1);
+    EXPECT_EQ(os.count("bbq"), 0);
     EXPECT_EQ(os.count("qwer"), 1);
     EXPECT_EQ(os.count("xzyh"), 1);
-    ordered_string_kv oskv = {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}};
+    DEFINE_ORDERED_STRING_KV(oskv, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
     for (auto s: os) {
         EXPECT_NE(oskv[s], "");
     }
+
+    DEFINE_APPENDABLE_ORDERED_STRING_KV(aoskv, 5, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
+    EXPECT_EQ(aoskv.size(), oskv.size());
+
+    auto it1 = oskv.begin(), it2 = aoskv.begin();
+    for (;it1 != oskv.end(); ++it1, ++it2) {
+        EXPECT_EQ(*it1, *it2);
+    }
+    EXPECT_EQ(it2, aoskv.end());
+
+    aoskv.insert({"bbq", "14ygrhe"});
+    aoskv.append({"zzz", "..."});
+    EXPECT_EQ(aoskv.size(), oskv.size() + 2);
+    std::vector<SKV> res(aoskv.begin(), aoskv.end()), truth ={
+        {"asdf", "1"}, {"bbq", "14ygrhe"}, {"qwer", "2"}, {"xzyh", "3"}, {"zzz", "..."}};
+    EXPECT_EQ(res, truth);
 }
 
 TEST(PooledAllocator, allocFailed) {
