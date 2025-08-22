@@ -569,6 +569,8 @@ namespace photon
             mee = &_default_event_engine;
         }
 
+        std::atomic<vcpu_base*> _qspin_next { nullptr };
+        std::atomic<bool> _qspin_got_lock { false };
         static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
         static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
         static intrusive_list<vcpu_t, false> pvcpu;
@@ -1625,6 +1627,38 @@ insert_list:
     void ticket_spinlock::unlock() {
         const auto successor = serv.load(std::memory_order_relaxed) + 1;
         serv.store(successor, std::memory_order_release);
+    }
+
+    int qspinlock::lock() {
+        auto vcpu = (vcpu_t*)get_vcpu();
+        assert(vcpu->_qspin_next == nullptr);
+        auto old_tail = (vcpu_t*)_owner_tail.exchange(vcpu, std::memory_order_acq_rel);
+        if (!old_tail) return 0;
+
+        vcpu->_qspin_got_lock.store(false, std::memory_order_relaxed);
+        assert(old_tail->_qspin_next.load(std::memory_order_acquire) == nullptr);
+        old_tail->_qspin_next.store(vcpu, std::memory_order_release);
+        do { spin_wait(); }
+        while (vcpu->_qspin_got_lock.load(std::memory_order_acquire) == false);
+        return 0;
+    }
+
+    void qspinlock::unlock() {
+        auto vcpu = (vcpu_t*)get_vcpu();
+        while(true) {
+            auto next = (vcpu_t*) vcpu->_qspin_next.load(std::memory_order_acquire);
+            if (next) { // resume the next waiter, if there is one
+                vcpu->_qspin_next.store(nullptr, std::memory_order_release);
+                next->_qspin_got_lock.store(true, std::memory_order_release);
+                return;
+            } else {    // do unlock if there is no waiter
+                vcpu_base* expected = vcpu;
+                bool ok = _owner_tail.compare_exchange_strong(expected,
+                                    nullptr, std::memory_order_acq_rel);
+                if (ok) return;
+                spin_wait();    // unlock failed, wait and try again
+            }
+        }
     }
 
     inline int waitq_translate_errno(int ret)
