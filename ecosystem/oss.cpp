@@ -1228,7 +1228,8 @@ class BasicAuthenticator : public Authenticator {
           sub_params.append(*it);
         }
       }
-      append_query_params(data2sign, sub_params);
+      // skip the 1st empty key
+      append_query_params(data2sign, StringKV(sub_params.begin()+1, sub_params.end()));
     }
     // LOG_INFO("data2sign is `", data2sign);
 
