@@ -32,7 +32,7 @@ struct Digest {
     EVP_MD_CTX* _ctx = EVP_MD_CTX_new();
     ~Digest() { EVP_MD_CTX_free(_ctx); }
 #else
-    EVP_MD_CTX ctx, *_ctx = &ctx;
+    EVP_MD_CTX ctx{}, *_ctx = &ctx;
 #endif
     Digest()  { EVP_DigestInit_ex(_ctx, MD(), NULL); }
     Digest(std::string_view data) : Digest() { update(data); }
@@ -86,7 +86,4 @@ struct HMAC {
 using HMAC_SHA1   = HMAC<SHA_DIGEST_LENGTH,    EVP_sha1>;
 using HMAC_SHA256 = HMAC<SHA256_DIGEST_LENGTH, EVP_sha256>;
 using HMAC_SHA512 = HMAC<SHA512_DIGEST_LENGTH, EVP_sha512>;
-
-
-
 }

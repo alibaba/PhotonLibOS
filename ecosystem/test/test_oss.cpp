@@ -1,6 +1,7 @@
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
 #include <photon/common/estring.h>
+#include <photon/common/checksum/crc64ecma.h>
 #include <photon/photon.h>
 #include <photon/common/alog.h>
 #include <photon/thread/thread.h>
@@ -146,8 +147,9 @@ void BasicAuthOssTest::list_objects() {
 
   char buf[3] = {3};
   iovec iov{buf, 3};
+  auto crc64 = crc64ecma(buf, 3, 0);
   for (const auto &key : test_objects) {
-    int ret = client->put_object(key, &iov, 1);
+    int ret = client->put_object(key, &iov, 1, &crc64);
     ASSERT_EQ(ret, 3);
   }
 
@@ -253,9 +255,13 @@ void BasicAuthOssTest::put_and_get_meta() {
   auto path = get_real_test_path("object_meta/testfile.unknown_suffix");
   const size_t file_size = 1025;
   char buf[file_size] = {3};
+  auto crc64 = crc64ecma(buf, file_size, 0);
   iovec iov{buf, file_size};
-  int ret = client->put_object(path, &iov, 1);
+  int ret = client->put_object(path, &iov, 1, &crc64);
   ASSERT_EQ(ret, file_size) << "Failed to upload object for metadata test";
+  crc64 += 1;
+  ret = client->put_object(path, &iov, 1, &crc64);
+  ASSERT_EQ(ret, -1) << "crc64 check did not work";
 
   // todo: add crc64 comparison
   ObjectHeaderMeta hmeta;
@@ -345,13 +351,17 @@ void BasicAuthOssTest::multipart() {
   int ret = client->init_multipart_upload(path, &context);
   ASSERT_EQ(ret, 0);
   const size_t buf_size = 1048577;
+  uint64_t crc64 = 0;
   for (int i = 0; i < 5; i++) {
     char buf[buf_size] = {(char)i};
+    crc64 = crc64ecma(buf, buf_size, crc64);
     iovec iov{buf, buf_size};
-    ret = client->upload_part(context, &iov, 1, i + 1);
+
+    auto part_crc64 = crc64ecma(buf, buf_size, 0);
+    ret = client->upload_part(context, &iov, 1, i + 1, &part_crc64);
     ASSERT_EQ(ret, buf_size);
   }
-  ret = client->complete_multipart_upload(context, nullptr);
+  ret = client->complete_multipart_upload(context, &crc64);
   ASSERT_EQ(ret, 0);
 
   ObjectMeta meta;
@@ -393,11 +403,12 @@ void BasicAuthOssTest::multipart() {
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
-  char buf[file_size] = {0};
+  char buf[file_size] = {2};
   iovec iov{buf, file_size};
+  auto crc64 = crc64ecma(buf, file_size, 0);
   for (int i = 0; i < 10; i++) {
     auto path = get_real_test_path("rput_and_get/testfile.suffix"+std::to_string(i));
-    int ret = client->put_object(path, &iov, 1);
+    int ret = client->put_object(path, &iov, 1, &crc64);
     ASSERT_EQ(ret, file_size) << "Failed to upload object for metadata test";
     paths.push_back(path);
   }

@@ -17,30 +17,22 @@ limitations under the License.
 #include "oss.h"
 
 #include <netinet/in.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#include <openssl/md5.h>
-#include <openssl/sha.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/alog.h>
+#include <photon/common/checksum/digest.h>
 #include <photon/common/estring.h>
-#include <photon/common/iovector.h>
 #include <photon/common/expirecontainer.h>
+#include <photon/common/iovector.h>
 #include <photon/ecosystem/simple_dom.h>
 #include <photon/net/http/client.h>
 #include <photon/net/http/url.h>
 #include <photon/net/utils.h>
-#include <photon/thread/timer.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <string>
-#include <unordered_set>
 #include <unordered_map>
-
-#include "../common/checksum/digest.h"
 
 // #include "common/faultinjector.h"
 // #include "common/logger.h"
@@ -337,25 +329,13 @@ static ssize_t body_writer_cb(void *iov_view, photon::net::http::Request *req) {
 
 static std::string md5_base64(iovector_view view) {
   std::string ret;
-  char md[MD5_DIGEST_LENGTH];
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-  MD5_CTX ctx;
-  MD5_Init(&ctx);
+  unsigned char hash[MD5_DIGEST_LENGTH];
+  md5 md5sum;
   for (const auto &iov : view) {
-    MD5_Update(&ctx, iov.iov_base, iov.iov_len);
+    md5sum.update(iov.iov_base, iov.iov_len);
   }
-  MD5_Final((unsigned char *)md, &ctx);
-#else
-  EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-  EVP_DigestInit_ex(mdctx, EVP_md5(), NULL);
-  for (const auto &iov : view) {
-    EVP_DigestUpdate(mdctx, iov.iov_base, iov.iov_len);
-  }
-  unsigned int md5_digest_len = MD5_DIGEST_LENGTH;
-  EVP_DigestFinal_ex(mdctx, (unsigned char*)md, &md5_digest_len);
-  EVP_MD_CTX_free(mdctx);
-#endif
-  photon::net::Base64Encode({md, MD5_DIGEST_LENGTH}, ret);
+  md5sum.finalize(hash);
+  photon::net::Base64Encode({(char*)hash, MD5_DIGEST_LENGTH}, ret);
   return ret;
 }
 
@@ -1312,16 +1292,9 @@ class BasicAuthenticator : public Authenticator {
   }
 
   std::string sha256_hash(std::string_view data) {
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
     unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256_CTX sha256;
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, data.data(), data.size());
-    SHA256_Final(hash, &sha256);
-#else
-    unsigned char hash[SHA256_DIGEST_LENGTH] = {0};
-    SHA256((unsigned char *)data.data(), data.size(), hash);
-#endif
+    sha256 shax(data);
+    shax.finalize(hash);
     return hex({(char *)hash, SHA256_DIGEST_LENGTH});
   }
 
