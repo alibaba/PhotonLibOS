@@ -15,7 +15,11 @@ limitations under the License.
 */
 #pragma once
 #include <cstdint>
-#include <string>
+#include <photon/common/string_view.h>
+
+uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc);
+
+uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc);
 
 /**
  * @brief We recommand using of crc32c() and crc32c_extend(), which can exploit hardware
@@ -23,20 +27,24 @@ limitations under the License.
  * is_crc32c_hw_available() to detect whether hardware acceleartion is available at first;
  *
  */
-uint32_t crc32c(const void *data, size_t nbytes);
-
-uint32_t crc32c_extend(const void *data, size_t nbytes, uint32_t crc);
-
-inline uint32_t crc32c(const std::string &text) {
-  return crc32c_extend(text.data(), text.size(), 0);
+inline uint32_t crc32c_extend(const void *data, size_t nbytes, uint32_t crc) {
+    extern uint32_t (*crc32c_auto)(const uint8_t *data, size_t nbytes, uint32_t crc);
+    return crc32c_auto((uint8_t*)data, nbytes, crc);
 }
 
-inline uint32_t crc32c_extend(const std::string &text, uint32_t crc) {
-  return crc32c_extend(text.data(), text.size(), crc);
+inline uint32_t crc32c(const void *data, size_t nbytes) {
+    return crc32c_extend((uint8_t*)data, nbytes, 0);
 }
 
-uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc);
+inline uint32_t crc32c_extend(std::string_view text, uint32_t crc) {
+    return crc32c_extend(text.data(), text.size(), crc);
+}
 
-uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc);
+inline uint32_t crc32c(std::string_view text) {
+    return crc32c_extend(text, 0);
+}
 
-bool is_crc32c_hw_available();
+inline bool is_crc32c_hw_available() {
+    extern uint32_t (*crc32c_auto)(const uint8_t *data, size_t nbytes, uint32_t crc);
+    return crc32c_auto != crc32c_sw;
+}
