@@ -8,6 +8,7 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Photon has been included in [awesome-cpp](https://github.com/fffaraz/awesome-cpp).
 * Version 0.9 has been released in April 2025.
 * We present an article to illustrate the theory of Photon's coroutine.
 [Stackful Coroutine Made Fast](https://photonlibos.github.io/blog/stackful-coroutine-made-fast)
