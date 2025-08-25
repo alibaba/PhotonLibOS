@@ -128,7 +128,7 @@ std::string_view lookup_mime_type(std::string_view name) {
   const size_t MAX_EXT_LENGTH = 8;
   if (name.size() > MAX_EXT_LENGTH)
     name = name.substr(0, MAX_EXT_LENGTH);
-  char ext[MAX_EXT_LENGTH];
+  char ext[MAX_EXT_LENGTH] = {};
   std::transform(name.begin(), name.end(), ext, ::tolower);
   return MIME_TYPE_MAP[ext];
 }
