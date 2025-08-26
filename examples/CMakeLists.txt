@@ -13,6 +13,9 @@ if (PHOTON_ENABLE_URING)
     target_compile_definitions(net-perf PRIVATE PHOTON_URING=1)
 endif()
 
+add_executable(lock-perf perf/lock-perf.cpp)
+target_link_libraries(lock-perf PRIVATE photon_static)
+
 add_executable(workpool-perf perf/workpool-perf.cpp)
 target_link_libraries(workpool-perf PRIVATE photon_static)
 
