@@ -115,7 +115,7 @@ struct is_function_pointer
         std::is_function<typename std::remove_pointer<T>::type>::value;
 };
 
-#define ENABLE_IF(COND) typename _CONCAT(__x__, __LINE__) = typename std::enable_if<COND>::type
+#define ENABLE_IF(COND) typename = typename std::enable_if<COND>::type
 #define IS_SAME(T, P)  (std::is_same<typename std::remove_cv<T>::type, P>::value)
 #define ENABLE_IF_SAME(T, P)        ENABLE_IF(IS_SAME(T, P))
 #define ENABLE_IF_NOT_SAME(T, P)    ENABLE_IF(!IS_SAME(T, P))

@@ -266,6 +266,59 @@ TEST(Callback, virtual_function)
     }
 }
 
+DEFINE_DELEGATE_FUNCTION(malloc);
+DEFINE_DELEGATE_FUNCTION(free);
+using DS = BuildDelegates<
+    Feature<DelegateOP_malloc, void*, size_t>,
+    Feature<DelegateOP_free, void, void*>,
+    Feature<DelegateOP_EQ, bool, uint64_t>,
+    Feature<DelegateOP_Dtor_Del>,
+    Feature<DelegateOP_LSH, void, uint64_t>>;
+
+void foobar(DS delegates) {
+    EXPECT_EQ(sizeof(delegates), 48);
+    auto ptr = delegates.malloc(100);
+    delegates.free(ptr);
+    delegates << 1234;
+    delegates << 5678;
+    EXPECT_EQ(delegates, 1234 * 5678);
+}
+
+DEFINE_DELEGATE_DTOR_FUNC(release)
+
+TEST(Callback, Delegates) {
+    class target {
+    public:
+        void* malloc(size_t size) {
+            LOG_DEBUG(VALUE(size));
+            return nullptr;
+        }
+        void free(void* ptr) {
+            LOG_DEBUG(VALUE(ptr));
+            EXPECT_EQ(ptr, nullptr);
+        }
+        uint64_t _x = 1;
+        void operator<<(uint64_t x) {
+            _x *= x;
+            LOG_DEBUG(VALUE(x));
+        }
+        bool operator==(uint64_t x) {
+            LOG_DEBUG(VALUE(x), VALUE(_x));
+            return _x == x;
+        }
+        ~target() {
+            LOG_DEBUG(VALUE(this));
+        }
+        void release() {
+            LOG_DEBUG(VALUE(this));
+        }
+    };
+    foobar(new target);
+    using DS2 = BuildDelegates<Feature<DelegateOP_Dtor_release>>;
+    target t2;
+    DS2 ds2(t2);
+}
+
 TEST(iovector_view, test1)
 {
     const int N = 99;
@@ -886,7 +939,7 @@ TEST(estring, test)
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
-    
+
     estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
     estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";
     EXPECT_EQ(true, s1.istarts_with(s2));

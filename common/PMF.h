@@ -22,6 +22,12 @@ struct pmf_map
 {
     PF f;
     T* obj; // may be adjusted for virtual function call
+    template<typename P> P cast_f() const {
+        static_assert(sizeof(P) == sizeof(f), "...");
+        union { PF f; P casted; } u;
+        u.f = this->f;
+        return u.casted;
+    }
 };
 
 #pragma GCC diagnostic push
