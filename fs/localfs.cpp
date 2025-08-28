@@ -250,6 +250,7 @@ namespace fs
     };
 
 #ifdef __linux__
+#ifdef ENABLE_AIO
     template<typename AIOEngine>
     class AioFileAdaptor final : public BaseFileAdaptor
     {
@@ -287,6 +288,7 @@ namespace fs
             return ret;
         }
     };
+#endif
 #endif
     class LocalDIR : public DIR
     {
@@ -353,8 +355,12 @@ namespace fs
     {
 #ifdef __APPLE__
         return new BaseFileAdaptor(fd, fs);
-#else
+#else 
+#ifdef ENABLE_AIO
         return new AioFileAdaptor<T>(fd, fs);
+#else
+        return new BaseFileAdaptor(fd, fs);
+#endif
 #endif
     }
     template<> // static (explicit specialization cannot have a storage class)
@@ -375,9 +381,11 @@ namespace fs
                 case ioengine_posixaio:
                     _ctor = &file_ctor<posixaio>;
                     break;
+#ifdef ENABLE_AIO
                 case ioengine_libaio:
                     _ctor = &file_ctor<libaio>;
                     break;
+#endif
 #ifdef PHOTON_URING
                 case ioengine_iouring:
                     _ctor = &file_ctor<iouring>;
@@ -406,8 +414,10 @@ namespace fs
         virtual IFile* open(const char *pathname, int flags) override
         {
 #ifdef __linux__
+#ifdef ENABLE_AIO
             if (_file_ctor.is_libaio())
                 flags |= O_DIRECT;
+#endif
 #endif
             int fd = UISysCall(::open(pathname, flags));
             return new_local_file(fd, pathname);
@@ -415,8 +425,10 @@ namespace fs
         virtual IFile* open(const char *pathname, int flags, mode_t mode) override
         {
 #ifdef __linux__
+#ifdef ENABLE_AIO
             if (_file_ctor.is_libaio())
                 flags |= O_DIRECT;
+#endif
 #endif
             int fd = UISysCall(::open(pathname, flags, mode));
             return new_local_file(fd, pathname);
@@ -638,9 +650,11 @@ namespace fs
                                   mode_t mode, int io_engine_type)
     {
 #ifdef __linux__
+#ifdef ENABLE_AIO
         if (io_engine_type == ioengine_libaio) {
             flags |= O_DIRECT;
         }
+#endif
 #endif
         int fd = UISysCall(::open(filename, flags, mode));
         if (fd < 0)

@@ -101,7 +101,9 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     INIT_IO(LIBCURL, libcurl)
 #endif
 #ifdef __linux__
+#ifdef ENABLE_AIO
     INIT_IO(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
+#endif
     INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
     g_event_engine = event_engine;
@@ -133,7 +135,9 @@ int fini() {
     }
     get_hook_vector().clear();
 #ifdef __linux__
+#ifdef ENABLE_AIO
     FINI_IO(LIBAIO, libaio_wrapper)
+#endif
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
 #ifdef ENABLE_CURL
