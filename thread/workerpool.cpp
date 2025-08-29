@@ -53,10 +53,14 @@ public:
         ready_vcpu.wait(vcpu_num);
     }
 
-    ~impl() { // avoid depending on photon to make it destructible wihout photon
+    ~impl() {
         for (auto num = vcpus.size(); num; --num) enqueue({});
         for (auto &worker : owned_std_threads) worker.join();
-        while (vcpus.size()) std::this_thread::yield();
+        if (likely(CURRENT)) {
+            while (vcpus.size()) thread_yield();
+        } else {
+            while (vcpus.size()) std::this_thread::yield();
+        }
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
