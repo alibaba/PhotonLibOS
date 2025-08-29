@@ -237,19 +237,15 @@ namespace photon
 
     class qspinlock {
     public:
-        int try_lock() {
-            vcpu_base* expected = nullptr;
-            bool ok = _owner_tail.compare_exchange_strong(expected,
-                            get_vcpu(), std::memory_order_acq_rel);
-            return int(ok) - 1;
-        }
+        int try_lock();
         int lock();
         bool locked() const {
             return _owner_tail.load(std::memory_order_acquire);
         }
         void unlock();
     protected:
-        std::atomic<vcpu_base*> _owner_tail { nullptr };
+        struct holder;
+        std::atomic<holder*> _owner_tail { nullptr };
     };
 
     class ticket_spinlock {
