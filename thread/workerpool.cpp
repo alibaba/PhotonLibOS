@@ -112,7 +112,6 @@ public:
         DEFER(remove_vcpu());
         volatile uint64_t running_tasks = 0;
         photon::ThreadPoolBase *pool = nullptr;
-        TaskLB tasklb{Delegate<void>(), &running_tasks};
         if (mode > 0) pool = photon::new_thread_pool(mode);
         DEFER(if (pool) delete_thread_pool(pool));
         ready_vcpu.signal(1);
@@ -121,12 +120,13 @@ public:
             auto task = ring.recv(yc, QUEUE_YIELD_US);
             if (!task) break;
             running_tasks = running_tasks + 1; // ++ -- are deprecated for volatile in C++20
-            tasklb.task = task;
+            TaskLB tasklb{task, &running_tasks};
             if (mode < 0) {
                 delegate_helper(&tasklb);
             } else {
-                !pool ? thread_create(&delegate_helper, &tasklb) :
-                        pool->thread_create(&delegate_helper, &tasklb);
+                auto th = !pool ? thread_create(&delegate_helper, &tasklb) :
+                           pool->thread_create(&delegate_helper, &tasklb);
+                (void)th;
                 // Once yield the current coroutine, the newly created coroutine will always
                 // be scheduled before the current coroutine. tasklb will not be overwritten.
                 photon::thread_yield();
