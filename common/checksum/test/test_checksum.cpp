@@ -143,6 +143,7 @@ inline void do_perf_crc(const char* name, CRC64ECMA crc64ecma, unsigned long siz
 }
 
 const size_t _128KB = 128 * 1024;
+const size_t _1MB = 1024 * 1024;
 const size_t _1GB = 1024 * 1024 * 1024;
 
 TEST(Perf, crc32c_hw_simple) {
@@ -250,6 +251,27 @@ TEST(TestChecksum, crc32_combine) {
     auto crc2 = crc32c_hw(buf + 128, sizeof(buf) - 128*2, 0);
     auto crc3 = crc32c_hw(buf + sizeof(buf) - 128, 128, 0);
     EXPECT_EQ(crc32c_trim({x, sizeof(buf)}, {crc1, 128}, {crc3, 128}), crc2);
+}
+
+void crc32c_series_hw_old(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts);
+
+TEST(Perf, crc32c_hw_series) {
+    const uint32_t PART_SIZE = 4096;
+    static uint32_t crc[1024*1024];
+    auto f = [](const uint8_t *buffer, size_t nbytes, uint32_t) -> uint32_t {
+        crc32c_series_hw(buffer, PART_SIZE, nbytes / PART_SIZE, crc);
+        return 0;
+    };
+    do_perf_crc("crc32c_hw_series", f, _128KB);
+    do_perf_crc("crc32c_hw_series", f, _1MB);
+
+    auto f_naive = [](const uint8_t *buffer, size_t nbytes, uint32_t) -> uint32_t {
+        for (size_t i = 0; i < nbytes / PART_SIZE; ++i)
+            crc[i] = crc32c_hw(buffer + i * PART_SIZE, PART_SIZE, 0);
+        return 0;
+    };
+    do_perf_crc("crc32c_hw_series_naive", f_naive, _128KB);
+    do_perf_crc("crc32c_hw_series_naive", f_naive, _1MB);
 }
 
 int main(int argc, char **argv)

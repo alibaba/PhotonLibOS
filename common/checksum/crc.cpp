@@ -690,22 +690,36 @@ void crc32c_series_sw(const uint8_t *buffer, uint32_t part_size, uint32_t n_part
 }
 
 void crc32c_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts) {
-    memset(crc_parts, 0, n_parts * sizeof(uint32_t));
-    uint64_t i = 0;
-    auto perf = [&](auto type) {
-        using T = decltype(type);
-        for (; i < part_size; i += sizeof(T)) {
-            #pragma GCC unroll 8
-            for (uint64_t j = 0; j < n_parts; ++j) {
-                auto ptr = buffer + i + j * part_size;
-                crc_parts[j] = crc32c(crc_parts[j], *(T*)ptr);
-            }
+    const size_t BATCH = 4;
+    auto part_main = part_size / 8 * 8;
+    auto part_remain = part_size % 8;
+    auto batch_crc = [&](auto ptr, size_t batch) __attribute__((always_inline)) {
+        #pragma GCC unroll 4
+        for (size_t k = 0; k < batch; ++k) {
+            crc_parts[k] = crc32c(crc_parts[k], *ptr);
+            ptr = decltype(ptr)((char*)ptr + part_size);
         }
     };
-    perf(i);
-    perf(buffer[0]);
+    auto batch_blocks_crc = [&](const uint8_t* ptr, auto batch) __attribute__((always_inline)) {
+        for (size_t j = 0; j < batch; ++j)
+            crc_parts[j] = 0;
+        for (; ptr < buffer + part_main; ptr += 8) {
+            batch_crc((uint64_t*)ptr, batch);
+        }
+        if (unlikely(part_main)) {
+            if (part_remain & 4) { batch_crc((uint32_t*)ptr, batch); ptr += 4; }
+            if (part_remain & 2) { batch_crc((uint16_t*)ptr, batch); ptr += 2; }
+            if (part_remain & 1) { batch_crc((uint8_t*)ptr, batch); ptr += 1; }
+        }
+    };
+    for (; n_parts >= BATCH; n_parts -= BATCH) {
+        batch_blocks_crc(buffer, BATCH);
+        buffer += part_size * BATCH;
+        crc_parts += BATCH;
+    }
+    if (unlikely(n_parts))
+        batch_blocks_crc(buffer, n_parts);
 }
-
 
 // rk1 ~ rk20
 __attribute__((aligned(16), used))
