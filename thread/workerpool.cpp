@@ -125,7 +125,7 @@ public:
                 delegate_helper(&tasklb);
             } else {
                 auto th = !pool ? thread_create(&delegate_helper, &tasklb) :
-                           pool->thread_create(&delegate_helper, &tasklb);
+                           pool-> thread_create(&delegate_helper, &tasklb) ;
                 (void)th;
                 // Once yield the current coroutine, the newly created coroutine will always
                 // be scheduled before the current coroutine. tasklb will not be overwritten.
