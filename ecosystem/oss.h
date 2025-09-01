@@ -106,9 +106,9 @@ class Authenticator : Object {
                    const SignParameters &params) = 0;
 
   struct CredentialParameters {
-    std::string accessKey;
+    std::string accessKeyId;
     std::string accessKeySecret;
-    std::string sessionToken;
+    std::string securityToken;
   };
 
   virtual const CredentialParameters* get_credentials() {

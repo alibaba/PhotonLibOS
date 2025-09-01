@@ -126,19 +126,10 @@ std::string_view lookup_mime_type(std::string_view name) {
 }
 
 using photon::net::http::verbstr;
-const std::vector<std::string> OSS_METRIC_NAME = []() {
-  int sz = verbstr.size();
-  std::vector<std::string> ret(sz);
-  for (int i = 0; i < sz; i++) {
-    ret[i] = "oss" + std::string(verbstr[static_cast<Verb>(i)]) + "Req";
-  }
-  return ret;
-}();
 
 #define make_ccl estring::make_conditional_cat_list
 #define IS_FAULT_INJECTION_ENABLED(x) false
 #define FAULT_INJECTION(x, y)
-#define DECLARE_METRIC_VALUE_WITH_NAMEVAR(a, b, c, d)
 
 class OssUrl {
  public:
@@ -223,8 +214,6 @@ __retry:
     auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
                        std::chrono::steady_clock::now() - start_time)
                        .count();
-    DECLARE_METRIC_VALUE_WITH_NAMEVAR(
-        OSS_METRIC_NAME[static_cast<int>(op.req.verb())], latency, 0, 1);
     LOG_DEBUG(
         "Got oss response ` ` Range[`], code=` content_length=` latency_us=`",
         verbstr[op.req.verb()], op.req.target(), op.req.headers["Range"],
@@ -1169,9 +1158,9 @@ class BasicAuthenticator : public Authenticator {
   void sign_v1(photon::net::http::Headers& headers,
                const Authenticator::SignParameters& params, const Authenticator::CredentialParameters& cred) {
     estring auth, data2sign;
-    std::string_view ak = cred.accessKey;
+    std::string_view ak = cred.accessKeyId;
     std::string_view sk = cred.accessKeySecret;
-    std::string_view token = cred.sessionToken;
+    std::string_view token = cred.securityToken;
 
     update_gmt_date();
 
@@ -1224,9 +1213,9 @@ class BasicAuthenticator : public Authenticator {
   void sign_v4(photon::net::http::Headers& headers,
                const Authenticator::SignParameters& params, const Authenticator::CredentialParameters& cred) {
     estring auth, canonical_request, string2sign, signing_key;
-    std::string_view ak = cred.accessKey;
+    std::string_view ak = cred.accessKeyId;
     std::string_view sk = cred.accessKeySecret;
-    std::string_view token = cred.sessionToken;
+    std::string_view token = cred.securityToken;
 
     update_gmt_date();
 
