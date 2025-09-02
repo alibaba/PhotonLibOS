@@ -131,8 +131,10 @@ public:
             } else {
                 auto th = !pool ? thread_create(&delegate_helper, &tasklb) :
                            pool-> thread_create(&delegate_helper, &tasklb) ;
-                // yield to th so as to copy tasklb to th's stack
-                photon::thread_yield_to(th);
+                (void)th;
+                // Once yield the current coroutine, the newly created coroutine will always
+                // be scheduled before the current coroutine. tasklb will not be overwritten.
+                photon::thread_yield();
             }
         }
         while (running_tasks)
