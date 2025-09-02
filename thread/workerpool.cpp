@@ -45,6 +45,7 @@ public:
     int mode;
 
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode) : mode(mode) {
+        vcpus.reserve(vcpu_num);
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
@@ -53,10 +54,14 @@ public:
         ready_vcpu.wait(vcpu_num);
     }
 
-    ~impl() { // avoid depending on photon to make it destructible wihout photon
+    ~impl() {
         for (auto num = vcpus.size(); num; --num) enqueue({});
         for (auto &worker : owned_std_threads) worker.join();
-        while (vcpus.size()) std::this_thread::yield();
+        if (likely(CURRENT)) {
+            while (vcpus.size()) thread_yield();
+        } else {
+            while (vcpus.size()) std::this_thread::yield();
+        }
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
