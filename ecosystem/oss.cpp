@@ -36,7 +36,6 @@ limitations under the License.
 
 // #include "common/faultinjector.h"
 // #include "common/logger.h"
-// #include "metric/metrics.h"
 
 namespace photon {
 namespace objstore {
@@ -77,14 +76,6 @@ static SimpleDOM::Node get_xml_node(HTTP_STACK_OP &op) {
     LOG_ERROR("got exception when try to parse resp_body `", e.what());
   }
   LOG_ERROR_RETURN(0, {}, "");
-}
-
-LogBuffer &operator<<(LogBuffer &log, HTTP_STACK_OP *op) {
-  auto reader = get_xml_node(*op);
-  auto err = reader["Error"];
-  auto Code = err["Code"].to_string_view();
-  auto Message = err["Message"].to_string_view();
-  return log.printf(" OSSError: ", VALUE(Code), VALUE(Message));
 }
 
 // convert oss last modified time, e.g. "Fri, 04 Mar 2022 02:46:25 GMT"
@@ -192,10 +183,14 @@ static int do_http_call(HTTP_STACK_OP &op, const OssOptions &options,
   if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {
     LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");
   }
-  int retry_times = options.retry_times;
-  auto retry_interval = options.retry_interval_us;
-__retry:
+  auto retry_times = options.retry_times;
+  auto retry_interval = options.retry_base_interval_us;
 
+  uint64_t qps_limit_retry_interval = 1000'000;
+  auto qps_limit_total_retry_time =
+      std::max(options.request_timeout_us, qps_limit_retry_interval);
+
+__retry:
   int __saved_errno = errno;
   {
     int r = 0;
@@ -226,8 +221,7 @@ __retry:
     if (r < 0) {
       if (retry_times-- > 0) {
         photon::thread_usleep(retry_interval);
-        retry_interval =
-            std::min(retry_interval * 2, options.max_retry_interval_us);
+        retry_interval *= 2;
         LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
                   op.req.target());
         goto __retry;
@@ -240,26 +234,45 @@ __retry:
     });
   }
   if (op.status_code != 200 && op.status_code != 206 && op.status_code != 204) {
-    auto reader = get_xml_node(op);
-    std::string ec;
-    if (reader) {
+    if (op.status_code != -1 && op.status_code != 404) {
+      auto reader = get_xml_node(op);
       auto error_res = reader["Error"];
       if (error_res) {
         if (code) {
           *code = error_res["Code"].to_string_view();
         }
-        ec = error_res["EC"].to_string_view();
+      }
+      std::string_view code_view = error_res["Code"].to_string_view();
+      // clang-format off
+      LOG_ERROR(
+          "Operation on [`] failed! RequestId[`], OSSError: Code[`], Message[`], EC[`]",
+          object, op.resp.headers["x-oss-request-id"], code_view,
+          error_res["Message"].to_string_view(),
+          error_res["EC"].to_string_view());
+      // clang-format on
+
+      FAULT_INJECTION(FileSystem::FI_OssError_Qps_Limited,
+                      [&]() { code_view = "TotalQpsLimitExceeded"; });
+
+      if (code_view.find("QpsLimitExceeded") != std::string::npos) {
+        if (qps_limit_retry_interval > 0) {
+          photon::thread_usleep(qps_limit_retry_interval);
+          qps_limit_total_retry_time -= qps_limit_retry_interval;
+          qps_limit_retry_interval = std::min(qps_limit_retry_interval * 2,
+                                              qps_limit_total_retry_time);
+          LOG_ERROR("Retrying oss request ` `, ` us more to retry",
+                    verbstr[op.req.verb()], op.req.target(),
+                    qps_limit_total_retry_time);
+          goto __retry;
+        }
+        retry_times = 0;  // no more tryings in qps limit case
       }
     }
-    if (op.status_code != -1 && op.status_code != 404) {
-      LOG_ERROR("operation on [`] failed! `, RequestId[`], EC[`]", object, &op,
-                op.resp.headers["x-oss-request-id"], ec);
-    }
+
     if (op.status_code / 100 == 5) {
       if (retry_times-- > 0) {
         photon::thread_usleep(retry_interval);
-        retry_interval =
-            std::min(retry_interval * 2, options.max_retry_interval_us);
+        retry_interval *= 2;
         LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
                   op.req.target());
         goto __retry;
@@ -776,7 +789,7 @@ int OssClient::fill_meta(HTTP_STACK_OP &op, ObjectMeta &meta) {
 ssize_t OssClient::get_object_range(std::string_view obj_path, const struct iovec *iov,
                               int iovcnt, off_t offset, ObjectHeaderMeta* meta) {
   int retry_times = m_oss_options.retry_times;
-  auto retry_interval = m_oss_options.retry_interval_us;
+  auto retry_interval = m_oss_options.retry_base_interval_us;
 
   iovector_view view((struct iovec *)iov, iovcnt);
   auto cnt = view.sum();
@@ -811,8 +824,7 @@ retry:
               obj_path, offset, cnt, ret);
     if (retry_times-- > 0) {
       photon::thread_usleep(retry_interval);
-      retry_interval =
-          std::min(retry_interval * 2, m_oss_options.max_retry_interval_us);
+      retry_interval *= 2;
       LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
                 op.req.target());
       //op.reset(nullptr);
@@ -977,7 +989,7 @@ ssize_t OssClient::upload_part(void *context, const struct iovec *iov,
   if (r < 0) return r;
 
   auto etag = op.resp.headers["ETag"];
-  if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response", &op);
+  if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
@@ -1026,7 +1038,7 @@ int OssClient::upload_part_copy(void *context, off_t offset, size_t count,
   if (!child) LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no etag provided");
 
   auto etag = child.to_string_view();
-  if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag", &op);
+  if (etag.empty()) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
   SCOPED_LOCK(ctx->lock);
   ctx->part_list.emplace_back(part_number, etag);

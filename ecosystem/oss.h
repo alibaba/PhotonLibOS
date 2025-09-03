@@ -40,12 +40,16 @@ struct OssOptions {
   std::string bucket;
   std::string region;
   int max_list_ret_cnt = 1000;
-  std::string user_agent;       // "Photon-OSS-Client" by default
+  std::string user_agent;  // "Photon-OSS-Client" by default
   std::string bind_ips;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
   int retry_times = 2;
-  uint64_t retry_interval_us = 20000ULL;
-  uint64_t max_retry_interval_us = 1000000ULL;
+
+  // When OSS request timeouts or encounters 5xx error, OSS SDK will
+  // retry the request with times of the base interval.
+  // For QPSLimit case, the policy is different. We will retry more
+  // times until we have waited the "request time out" period.
+  uint64_t retry_base_interval_us = 100'000;
 };
 
 struct ObjectMeta {
