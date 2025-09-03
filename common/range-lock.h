@@ -18,6 +18,7 @@ limitations under the License.
 #include <cinttypes>
 #include <set>
 #include <photon/thread/thread.h>
+#include <photon/common/utility.h>
 
 class RangeLock
 {
@@ -118,7 +119,7 @@ protected:
         }
         uint64_t end() const
         {
-            return offset + length;
+            return photon::sat_add(offset, length);
         }
         bool operator < (const range_t& rhs) const
         {
