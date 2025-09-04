@@ -174,6 +174,223 @@ struct Closure : public Delegate<int64_t, ARGS...> {
 
 using Closure0 = struct Closure<>;
 
+class DelegatesBase {
+protected:
+    void* _obj;
+    DelegatesBase() = default;
+    DelegatesBase(void* obj) : _obj(obj) { }
+    struct BBQ { };                 // a type that can NOT be implicitly converted to
+    void operator==(BBQ) const;     // other types, so as not to bother overloading
+    void operator!=(BBQ) const;
+    void operator<(BBQ) const;
+    void operator>(BBQ) const;
+    void operator<=(BBQ) const;
+    void operator>=(BBQ) const;
+
+    void operator|(BBQ) const;
+    void operator&(BBQ) const;
+    void operator^(BBQ) const;
+    void operator~() const;
+    void operator!() const;
+    void operator||(BBQ) const;
+    void operator&&(BBQ) const;
+
+    void operator+(BBQ) const;
+    void operator-(BBQ) const;
+    void operator*(BBQ) const;
+    void operator/(BBQ) const;
+    void operator%(BBQ) const;
+
+    void operator+=(BBQ) const;
+    void operator-=(BBQ) const;
+    void operator*=(BBQ) const;
+    void operator/=(BBQ) const;
+    void operator%=(BBQ) const;
+    void operator|=(BBQ) const;
+    void operator&=(BBQ) const;
+    void operator^=(BBQ) const;
+    void operator<<(BBQ) const;
+    void operator>>(BBQ) const;
+    void operator<<=(BBQ) const;
+    void operator>>=(BBQ) const;
+
+    void operator++() const;
+    void operator++(int) const;
+    void operator--() const;
+    void operator--(int) const;
+    void operator=(BBQ) const;
+    void operator()(BBQ) const;
+};
+
+#define DEFINE_DELEGATE_OP(name, OP)                                \
+template<typename Base, typename R, typename...RHS>                 \
+class _CONCAT(DelegateOP_, name) : public Base {                    \
+    using Func = R (*)(void*, RHS...);                              \
+    Func _func;                                                     \
+public:                                                             \
+    _CONCAT(DelegateOP_, name)() = default;                         \
+    template<typename T, ENABLE_IF_NOT_POINTER(T)>                  \
+    _CONCAT(DelegateOP_, name)(T& obj) :                            \
+        _CONCAT(DelegateOP_, name)(&obj){}                          \
+    template<typename T>                                            \
+    _CONCAT(DelegateOP_, name)(T* obj) : Base(obj) {                \
+        R (T::*func)(RHS...) = &T::OP;                              \
+        auto pmf = ::get_member_function_address(obj, func);        \
+        assert(this->_obj == pmf.obj);                              \
+        _func = pmf.template cast_f<Func>();                        \
+    }                                                               \
+    R OP (RHS...rhs) const {                                        \
+        return _func(this->_obj, rhs...);                           \
+    }                                                               \
+    using Base::OP;                                                 \
+}
+
+// for unary operators ~ and !
+#define DEFINE_DELEGATE_OP0(name, OP)                               \
+template<typename Base, typename R>                                 \
+class _CONCAT(DelegateOP_, name) : public Base {                    \
+    using Func = R (*)(void*);                                      \
+    Func _func;                                                     \
+public:                                                             \
+    _CONCAT(DelegateOP_, name)() = default;                         \
+    template<typename T, ENABLE_IF_NOT_POINTER(T)>                  \
+    _CONCAT(DelegateOP_, name)(T& obj) :                            \
+        _CONCAT(DelegateOP_, name)(&obj){}                          \
+    template<typename T>                                            \
+    _CONCAT(DelegateOP_, name)(T* obj) : Base(obj) {                \
+        R (T::*func)() = &T::OP;                                    \
+        auto pmf = ::get_member_function_address(obj, func);        \
+        assert(this->_obj == pmf.obj);                              \
+        _func = pmf.template cast_f<Func>();                        \
+    }                                                               \
+    R OP () const {                                                 \
+        return _func(this->_obj);                                   \
+    }                                                               \
+    using Base::OP;                                                 \
+}
+
+DEFINE_DELEGATE_OP(EQ, operator==);
+DEFINE_DELEGATE_OP(NE, operator!=);
+DEFINE_DELEGATE_OP(LT, operator<);
+DEFINE_DELEGATE_OP(LE, operator<=);
+DEFINE_DELEGATE_OP(GT, operator>);
+DEFINE_DELEGATE_OP(GE, operator>=);
+
+DEFINE_DELEGATE_OP(OR, operator|);
+DEFINE_DELEGATE_OP(AND, operator&);
+DEFINE_DELEGATE_OP(XOR, operator^);
+DEFINE_DELEGATE_OP0(NOT, operator~);
+DEFINE_DELEGATE_OP0(LNOT, operator!);
+DEFINE_DELEGATE_OP(LOR, operator||);
+DEFINE_DELEGATE_OP(LAND, operator&&);
+
+DEFINE_DELEGATE_OP(ADD, operator+);
+DEFINE_DELEGATE_OP(SUB, operator-);
+DEFINE_DELEGATE_OP(MUL, operator*);
+DEFINE_DELEGATE_OP(DIV, operator/);
+DEFINE_DELEGATE_OP(MOD, operator%);
+
+DEFINE_DELEGATE_OP(ADD_ASSIGN, operator+=);
+DEFINE_DELEGATE_OP(SUB_ASSIGN, operator-=);
+DEFINE_DELEGATE_OP(MUL_ASSIGN, operator*=);
+DEFINE_DELEGATE_OP(DIV_ASSIGN, operator/=);
+DEFINE_DELEGATE_OP(MOD_ASSIGN, operator%=);
+DEFINE_DELEGATE_OP(OR_ASSIGN, operator|=);
+DEFINE_DELEGATE_OP(AND_ASSIGN, operator&=);
+DEFINE_DELEGATE_OP(XOR_ASSIGN, operator^=);
+DEFINE_DELEGATE_OP(LSH, operator<<);
+DEFINE_DELEGATE_OP(RSH, operator>>);
+DEFINE_DELEGATE_OP(LSH_ASSIGN, operator<<=);
+DEFINE_DELEGATE_OP(RSH_ASSIGN, operator>>=);
+
+DEFINE_DELEGATE_OP(ASSIGN, operator=);
+DEFINE_DELEGATE_OP(INVOKE, operator());
+DEFINE_DELEGATE_OP(INC, operator++);
+DEFINE_DELEGATE_OP(DEC, operator--);
+
+template<typename Base>
+class DelegateOP_Dtor_Del : public Base {
+    using Func = void (*)(void*);
+    Func _func;
+public:
+    DelegateOP_Dtor_Del() = default;
+    template<typename T, ENABLE_IF_NOT_POINTER(T)>
+    DelegateOP_Dtor_Del(T& obj) : DelegateOP_Dtor_Del(&obj) { }
+    template<typename T>
+    DelegateOP_Dtor_Del(T* obj) : Base(obj) {
+        _func = [](void* obj) -> void { delete (T*)obj; };
+    }
+    ~DelegateOP_Dtor_Del() { _func(this->_obj); }
+};
+
+#define DEFINE_DELEGATE_DTOR_FUNC(name)                             \
+template<typename Base>                                             \
+class _CONCAT(DelegateOP_Dtor_, name) : public Base {               \
+    using Func = void (*)(void*);                                   \
+    Func _func;                                                     \
+public:                                                             \
+    _CONCAT(DelegateOP_Dtor_, name)() = default;                    \
+    template<typename T, ENABLE_IF_NOT_POINTER(T)>                  \
+    _CONCAT(DelegateOP_Dtor_, name)(T& obj) :                       \
+        _CONCAT(DelegateOP_Dtor_, name)(&obj) { }                   \
+    template<typename T>                                            \
+    _CONCAT(DelegateOP_Dtor_, name)(T* obj) : Base(obj) {           \
+        void (T::*func)() = &T::name;                               \
+        auto pmf = ::get_member_function_address(obj, func);        \
+        assert(this->_obj == pmf.obj);                              \
+        _func = pmf.template cast_f<Func>();                        \
+    }                                                               \
+   ~_CONCAT(DelegateOP_Dtor_, name)() { _func(this->_obj); }        \
+};
+
+// the primary difference with DEFINE_DELEGATE_OP
+// is that it doesn't using base's overloading
+#define DEFINE_DELEGATE_FUNCTION(name)                              \
+template<typename Base, typename R, typename...RHS>                 \
+class _CONCAT(DelegateOP_, name) : public Base {                    \
+    using Func = R (*)(void*, RHS...);                              \
+    Func _func;                                                     \
+public:                                                             \
+    _CONCAT(DelegateOP_, name)() = default;                         \
+    template<typename T, ENABLE_IF_NOT_POINTER(T)>                  \
+    _CONCAT(DelegateOP_, name)(T& obj) :                            \
+        _CONCAT(DelegateOP_, name)(&obj){}                          \
+    template<typename T>                                            \
+    _CONCAT(DelegateOP_, name)(T* obj) : Base(obj) {                \
+        R (T::*func)(RHS...) = &T::name;                            \
+        auto pmf = ::get_member_function_address(obj, func);        \
+        assert(this->_obj == pmf.obj);                              \
+        _func = pmf.template cast_f<Func>();                        \
+    }                                                               \
+    R name (RHS...rhs) const {                                      \
+        return _func(this->_obj, rhs...);                           \
+    }                                                               \
+}
+
+template<template<class...> class T, class...Args>
+struct Feature {
+    template<typename Base>
+    using Type = T<Base, Args...>;
+};
+
+template<typename ...Types>
+struct _BuildDelegates;
+
+template<typename A, typename B, typename ...Types>
+struct _BuildDelegates<A, B, Types...> {
+    using Type = typename B::template Type<
+                 typename _BuildDelegates<A, Types...>::Type>;
+};
+
+template<typename A>
+struct _BuildDelegates<A> {
+    using Type = typename A::template Type<DelegatesBase>;
+};
+
+template<typename ...Types>
+using BuildDelegates = typename _BuildDelegates<Types...>::Type;
+
+
 } // namespace photon
 
 /*
