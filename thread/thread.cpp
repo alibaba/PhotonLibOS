@@ -607,6 +607,8 @@ namespace photon
         }
         Switch try_goto(thread* th) const {
             assert(th->vcpu == vcpu);
+            th->remove_from_list();
+            current->insert_after(th);
             return _do_goto(th);
         }
         bool single() const {
@@ -1205,6 +1207,8 @@ R"(
             assert(th->state == states::READY);
         } else if (unlikely(th->state != states::READY)) {
             LOG_ERROR_RETURN(EINVAL, , "target thread ` must be READY!", th);
+        } else if (unlikely(rq.current->next() == th)) {
+            return thread_yield();
         }
 
         auto sw = AtomicRunQ(rq).try_goto(th);
