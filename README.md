@@ -37,6 +37,85 @@
 
 </p></details>
 
+## Introduction
+Photon is a C++ library designed to augment the operating system in terms of
+high-performance concurrent I/O programming. Photon is collected from Alibaba
+Cloud Storage team's internal code base. It has been extensively tested and
+used in production, and is the same code they depend on in their daily lives.
+
+Photon features a highly efficient user-space threading model, implemented as
+coroutines with multi-core CPU support, driven by a variety of asynchronous
+event engines such as ```epoll```, ```io_uring```, and ```kqueue```, etc.
+These event engines are abstracted behind a lightweight, unified interface.
+
+Built on this foundation, Photon provides a comprehensive set of high-level
+abstractions for networking and file I/O operations, leveraging both kernel-based
+system calls and high-performance user-space frameworks like DPDK and SPDK.
+
+Furthermore, Photon includes entirely new, ground-up implementations of key
+distributed system components, including RPC, HTTP client and server, and
+Redis client, etc., delivering significantly higher performance and efficiency
+compared to existing solutions. The architecture of Photon is illustrated below:
+
+<img src="doc/static/img/photon.png" alt="Photon Architecture" width="100%"/>
+
+Photon is well-suited for developing any I/O-intensive applications,
+including those involving disk I/O and/or network I/O.
+
+* **Performance** Photon can switch to a thread in just a few nanoseconds;
+  this action corresponds to callback in a typical asynchronous framework.
+  The cost of creating a new thread is primarily a simple malloc(),
+  and the allocation can be pooled for even greater efficiency.
+  Performance benchmarks on I/O workloads are available
+  [here](https://photonlibos.github.io/docs/category/performance).
+
+* **Production** Photon is the foundation of many production systems in
+  (listing in alphabetical order)
+  [Alibaba Group](https://www.alibabagroup.com/en-US),
+  [Ant Group](https://www.antgroup.com/en),
+  [ByteDance](https://www.bytedance.com/en/),
+  [Xiaomi](https://www.mi.com/global/),
+  [XSKY](https://www.xsky.com/en/),
+  etc., and many open source projects in public domain.
+
+  * [overlaybd](https://github.com/containerd/overlaybd),
+  a sub-project of [containerd](https://containerd.io/), which is deployed
+  at scale in Alibaba's own infrastructure as well as the public cloud platform.
+
+  * [OSSFSv2](https://www.alibabacloud.com/help/en/oss/developer-reference/ossfs-2-0/),
+  a high-performance client for Alibaba Cloud's object storage service (OSS)
+  that provides a POSIX-compliant file system interface to the users.
+
+  * [Connector for AI/ML](https://github.com/aliyun/oss-connector-for-ai-ml),
+  a high-performance storage driver for popular AI frameworks, such as
+  Pythorch, safetensors, vllm, etc., supporting dataset reading, checkpointing,
+  model loading.
+
+  * [P2P Transport](https://www.alibabacloud.com/help/en/acr/use-the-p2p-acceleration-feature-in-ask-and-ack-clusters),
+  a key component that addresses the scalability issue of large scale data
+  serving, which is found in many scenarios like container image service, or
+  AI model loading, etc.
+
+  * Caching services, such as [OSS Accelerator](https://www.alibabacloud.com/help/en/oss/overview-77/),
+  a multi-tenant distributed caching service for high-performance object access;
+  or [EFC cache](https://www.alibabacloud.com/help/en/nas/user-guide/enable-the-distributed-caching-feature-of-the-cnfs-client),
+  a client-side caching module for elastic file client (EFC).
+
+  * [The coroutine engine in VLang](https://github.com/vlang/v/blob/bfee8248603cfbe4022de8364260133f90d1783b/vlib/coroutines/README.md)
+
+* **Agility** Photon is designed to support a wide range of applications —
+  and is already deployed in production across diverse environments. We’ve
+  gone beyond mere feasibility, engineering it to be not only highly adaptable,
+  but also intuitive, convenient, and fast to use. This is made possible
+  through a set of well-defined, modular abstractions that decouple core
+  logic from underlying system specifics, enabling both flexibility and
+  performance.
+
+* **Portability** Photon supports multiple platforms, i.e. the
+  combinations of {Linux, macOS} * {x86_64, ARM64} * {gcc, clang}.
+
+* **Inclusion** in [awesome-cpp](https://github.com/fffaraz/awesome-cpp)
+
 ## Community
 
 <img src="/doc/static/img/slack.svg" width="20"> Join Slack: [link](https://join.slack.com/t/photonlibos/shared_invite/zt-25wauq8g1-iK_oHMrXetcvWNNhIt8Nkg)
