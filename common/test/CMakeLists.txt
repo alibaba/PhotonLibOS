@@ -38,3 +38,7 @@ target_link_libraries(perf-rcuptr PRIVATE photon_shared)
 
 add_executable(perf-alog perf_alog.cpp)
 target_link_libraries(perf-alog PRIVATE photon_shared)
+
+add_executable(test-delegates test_delegates.cpp)
+target_link_libraries(test-delegates PRIVATE photon_shared)
+add_test(NAME test-delegates COMMAND $<TARGET_FILE:test-delegates>)
