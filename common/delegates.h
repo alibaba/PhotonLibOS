@@ -4,6 +4,9 @@
 #include <type_traits>
 #include <utility>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+
 namespace photon {
 
 struct DUtils;
@@ -746,3 +749,5 @@ DEFINE_DELEGATE_OP(DEC, --);
 }  // namespace DFeature
 
 }  // namespace photon
+
+#pragma GCC diagnostic pop
