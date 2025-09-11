@@ -59,7 +59,7 @@ class BasicAuthOssTest : public ::testing::Test {
 
       if (objects.size()) {
         if (rand() % 2) {
-          client->delete_objects("", objects);
+          client->delete_objects("", std::vector<std::string_view>(objects.begin(), objects.end()));
         } else {
           for (auto &obj : objects) {
             ret = client->delete_object(obj);

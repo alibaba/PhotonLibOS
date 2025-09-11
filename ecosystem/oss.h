@@ -216,7 +216,7 @@ class OssClient : public Object {
   // no slash will be added after the prefix
   virtual
   int delete_objects(std::string_view prefix,
-                     const std::vector<std::string> &objects) = 0;
+                     const std::vector<std::string_view> &objects) = 0;
 
   virtual
   int delete_object(std::string_view obj) = 0;

@@ -34,7 +34,7 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 
-// #include "common/faultinjector.h"
+// #include "common/fault_injector.h"
 // #include "common/logger.h"
 
 namespace photon {
@@ -180,7 +180,7 @@ class OssUrl {
 static int do_http_call(HTTP_STACK_OP &op, const OssOptions &options,
                         std::string_view object, std::string *code = nullptr) {
   int ret = -1;
-  if (IS_FAULT_INJECTION_ENABLED(FileSystem::FI_OssError_Call_Timeout)) {
+  if (IS_FAULT_INJECTION_ENABLED(FI_OssError_Call_Timeout)) {
     LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");
   }
   auto retry_times = options.retry_times;
@@ -194,7 +194,7 @@ __retry:
   int __saved_errno = errno;
   {
     int r = 0;
-    FAULT_INJECTION(FileSystem::FI_OssError_Failed_Without_Call, [&]() {
+    FAULT_INJECTION(FI_OssError_Failed_Without_Call, [&]() {
       r = -1;
       op.status_code = -1;
       __saved_errno = EIO;
@@ -213,7 +213,7 @@ __retry:
         "Got oss response ` ` Range[`], code=` content_length=` latency_us=`",
         verbstr[op.req.verb()], op.req.target(), op.req.headers["Range"],
         op.resp.status_code(), op.resp.headers.content_length(), latency);
-    FAULT_INJECTION(FileSystem::FI_OssError_Call_Failed, [&]() {
+    FAULT_INJECTION(FI_OssError_Call_Failed, [&]() {
       r = -1;
       op.status_code = -1;
       __saved_errno = EIO;
@@ -227,7 +227,7 @@ __retry:
         goto __retry;
       }
     }
-    FAULT_INJECTION(FileSystem::FI_OssError_5xx, [&]() {
+    FAULT_INJECTION(FI_OssError_5xx, [&]() {
       r = -1;
       op.status_code = 503;
       __saved_errno = EIO;
@@ -251,7 +251,7 @@ __retry:
           error_res["EC"].to_string_view());
       // clang-format on
 
-      FAULT_INJECTION(FileSystem::FI_OssError_Qps_Limited,
+      FAULT_INJECTION(FI_OssError_Qps_Limited,
                       [&]() { code_view = "TotalQpsLimitExceeded"; });
 
       if (code_view.find("QpsLimitExceeded") != std::string::npos) {
@@ -385,7 +385,7 @@ class OssClientImpl : public OssClient {
   int abort_multipart_upload(void *context);
 
   int delete_objects(std::string_view prefix,
-                     const std::vector<std::string> &objects);
+                     const std::vector<std::string_view> &objects);
 
   int delete_object(std::string_view obj);
 
@@ -417,7 +417,8 @@ class OssClientImpl : public OssClient {
   int do_delete_object(OssUrl &oss_url);
 
   int do_delete_objects(estring_view bucket, estring_view prefix,
-                        const std::vector<std::string> &objects);
+                        const std::vector<std::string_view> &objects,
+                        size_t start, size_t count);
 
   std::string m_endpoint, m_bucket;
   bool m_is_http = false;
@@ -655,38 +656,66 @@ static std::string xml_escape(std::string_view object) {
 }
 
 int OssClient::do_delete_objects(estring_view bucket, estring_view prefix,
-                                 const std::vector<std::string> &objects) {
-  std::string_view req_head = "<Delete><Quiet>true</Quiet>";
+                                 const std::vector<std::string_view> &objects,
+                                 size_t start, size_t to_delete_size) {
+  std::string_view req_head = "<Delete><Quiet>false</Quiet>";
   std::string_view req_tail = "</Delete>";
   estring req_list;
-  for (size_t i = 1; i <= objects.size(); ++i) {
+  for (size_t i = start; i < start + to_delete_size; ++i) {
     req_list.appends("<Object><Key>", xml_escape(prefix),
-                     xml_escape(objects[i - 1]), "</Key></Object>");
+                     xml_escape(objects[i]), "</Key></Object>");
+  }
 
-    // a single request can at most hold 1000 objects
-    if (i % 1000 == 0 || i == objects.size()) {
-      struct iovec iov[3] = {{(void *)req_head.data(), req_head.size()},
-                             {(void *)req_list.data(), req_list.size()},
-                             {(void *)req_tail.data(), req_tail.size()}};
-      iovector_view body_view(iov, 3);
-      OssUrl oss_url(m_endpoint, bucket, "/", m_is_http);
-      auto md5 = md5_base64(body_view);
+  int retry_times = m_oss_options.retry_times;
+  auto retry_interval = m_oss_options.retry_base_interval_us;
 
-      DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params, {
-        // must appear in dictionary order!
-        {OSS_PARAM_KEY_DELETE, ""}
-      });
+  struct iovec iov[3] = {{(void *)req_head.data(), req_head.size()},
+                          {(void *)req_list.data(), req_list.size()},
+                          {(void *)req_tail.data(), req_tail.size()}};
+  iovector_view body_view(iov, 3);
+  OssUrl oss_url(m_endpoint, bucket, "/", m_is_http);
+  auto md5 = md5_base64(body_view);
 
-      DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
-      op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
-      op.req.headers.content_length(body_view.sum());
-      op.body_writer = {&body_view, &body_writer_cb};
-      int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
-      if (r < 0) return r;
-      r = do_http_call(op, m_oss_options, oss_url.object());
-      if (r < 0) return r;
-      req_list.clear();
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params, {
+    // must appear in dictionary order!
+    {OSS_PARAM_KEY_DELETE, ""}
+  });
+
+  DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
+  op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
+  op.req.headers.content_length(body_view.sum());
+  op.body_writer = {&body_view, &body_writer_cb};
+  int r = append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
+
+retry:
+  size_t deleted_size = 0;
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+
+  auto reader = get_xml_node(op);
+  auto result = reader["DeleteResult"];
+  for (auto child : result.enumerable_children("Deleted")) {
+    auto key = child["Key"];
+    if (key) deleted_size++;
+  }
+
+  FAULT_INJECTION(FI_Oss_Partial_Deletion,
+                  [&]() { deleted_size--; });
+
+  if (deleted_size != to_delete_size) {
+    // Partial deletion happens when OSS server side is with pressure.
+    // If this is the case , we just have another try. It's OK if some keys
+    // have been deleted by the server in last round as OSS will treat it as
+    // successful when deleting one non-existed key. And the returned deleted
+    // result will contain the non-existed key.
+    if (retry_times-- > 0) {
+      LOG_WARN("Partial deletion. To delete ` deleted `. Retrying...",
+                to_delete_size, deleted_size);
+      photon::thread_usleep(retry_interval);
+      goto retry;
     }
+    LOG_ERROR_RETURN(EIO, -1, "Partial deletion");
   }
   return 0;
 }
@@ -701,8 +730,16 @@ int OssClient::rename_object(std::string_view src_path,
 }
 
 int OssClient::delete_objects(std::string_view obj_prefix,
-                              const std::vector<std::string> &objects) {
-  return do_delete_objects(m_bucket, obj_prefix, objects);
+                              const std::vector<std::string_view> &objects) {
+  size_t start = 0;
+  // 1000 is the largest allowed batch size.
+  while(start < objects.size()) {
+    size_t cnt = std::min(objects.size() - start, (size_t)1000);
+    int r = do_delete_objects(m_bucket, obj_prefix, objects, start, cnt);
+    if (r < 0) return r;
+    start += cnt;
+  }
+  return 0;
 }
 
 int OssClient::list_objects_v2(std::string_view prefix, ListObjectsCallback cb,
@@ -815,7 +852,7 @@ retry:
 
   uint64_t content_length = op.resp.headers.content_length();
   auto ret = op.resp.readv(iov, iovcnt);
-  FAULT_INJECTION(FileSystem::FI_OssError_Read_Partial, [&]() { ret--; });
+  FAULT_INJECTION(FI_OssError_Read_Partial, [&]() { ret--; });
 
   // we have encountered partial read issue because of the socket was
   // unexpectedly closed
