@@ -1721,7 +1721,7 @@ insert_list:
         {
             assert(h->waitq == (thread_list*)this);
             prelocked_thread_interrupt(h, error_number);
-            assert(h->waitq == nullptr);
+            // assert(h->waitq == nullptr);
             assert(this->q.th != h);
         }
         return h;
@@ -1746,6 +1746,7 @@ insert_list:
             if (unlikely(ret)) { errno = ret; return -1; }
             if (try_lock() == 0) return 0;
         }
+    again:
         splock.lock();
         if (try_lock() == 0) {
             splock.unlock();
@@ -1760,6 +1761,10 @@ insert_list:
 
         int ret = thread_usleep_defer(timeout,
             (thread_list*)&q, &spinlock_unlock, &splock);
+        if (likely(ret < 0 && errno == -1)) {
+            auto o = owner.load(std::memory_order_acquire);
+            if (unlikely(o != CURRENT)) { assert(_contending); goto again; }
+        }
         return waitq_translate_errno(ret);
     }
     int mutex::try_lock()
@@ -1773,7 +1778,7 @@ insert_list:
     {
         SCOPED_LOCK(m->splock);
         ScopedLockHead h(m);
-        m->owner.store(h);
+        m->owner.store(unlikely(m->_contending) ? nullptr : (thread*)h);
         if (h)
             prelocked_thread_interrupt(h, -1);
     }
