@@ -555,22 +555,31 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
     return log.printf('[', v.name, '=', v.value, ']');
 }
 
+inline void _alog_set_errno(int x) { errno = x; }
+
+struct DeferrdErrnoSetter {
+    int _errno = 0;
+    void operator()(int x) { _errno = x; }
+    ~DeferrdErrnoSetter() { if (_errno) errno = _errno; }
+};
+
+#define DECLARE_ERRNO_SETTER DeferrdErrnoSetter _alog_set_errno;
+
 // output a log message, set errno, then return a value
 // keep errno unchaged if new_errno == 0
 #define LOG_ERROR_RETURN(new_errno, retv, ...) {    \
     int xcode = (int)(new_errno);                   \
     if (xcode == 0) xcode = errno;                  \
     LOG_ERROR(__VA_ARGS__);                         \
-    errno = xcode;                                  \
+    _alog_set_errno(xcode);                         \
     return retv;                                    \
 }
 
 // output a log message with errno info, set errno, then return a value
 // keep errno unchaged if new_errno == 0
 #define LOG_ERRNO_RETURN(new_errno, retv, ...) {    \
-    ERRNO eno;                                      \
-    LOG_ERROR(__VA_ARGS__, ' ', eno);               \
-    if (new_errno) eno.set(new_errno);              \
+    LOG_ERROR(__VA_ARGS__, ' ', ERRNO());           \
+    if (new_errno) _alog_set_errno(new_errno);      \
     return retv;                                    \
 }
 
