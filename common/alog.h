@@ -220,7 +220,7 @@ public:
         buf.consume(s.size);
     }
 
-    void put(ALogBuffer& buf, void* p)
+    void put(ALogBuffer& buf, const void* p)
     {
         put(buf, HEX((uint64_t)p).width(16));
     }
