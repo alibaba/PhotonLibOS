@@ -874,11 +874,8 @@ TEST(range_split_power2, basic) {
 }
 
 TEST(range_split_power2, random_test) {
-    uint64_t offset, length, interval;
-    offset = rand();
-    length = rand();
-    auto interval_shift = rand()%32 + 1;
-    interval = uint64_t(1) << interval_shift;
+    uint64_t offset = rand(), length = rand();
+    uint64_t interval = 1UL << (rand()%32 + 1);
     fs::range_split_power2 split(offset, length, interval);
     EXPECT_EQ(offset, split.begin);
     EXPECT_EQ(offset + length, split.end);
