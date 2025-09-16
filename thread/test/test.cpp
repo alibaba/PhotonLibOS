@@ -622,6 +622,25 @@ TEST(thread11, test)
     }
 }
 
+TEST(thread11, dtor)
+{
+    struct Foo {
+        Foo() { LOG_DEBUG("ctor ", this); }
+        Foo(const Foo&) { LOG_DEBUG("copy ctor ", this); }
+        Foo(Foo&&) = delete;
+        ~Foo() { LOG_DEBUG("dtor ", this); }
+        int x = 100;
+    };
+    Foo foo;
+    LOG_DEBUG("thread_create11");
+    auto th = thread_create11([foo]{
+        LOG_DEBUG(&foo, ":thread");
+        LOG_DEBUG(foo.x);
+    });
+    auto jh = thread_enable_join(th);
+    thread_join(jh);
+    LOG_DEBUG("end");
+}
 
 void semaphore_test_hold(semaphore* sem, int &step) {
     int ret = 0;
