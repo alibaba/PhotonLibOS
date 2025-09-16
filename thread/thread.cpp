@@ -1206,7 +1206,6 @@ R"(
                 list.node = nullptr;
                 AtomicRunQ().insert_list_before(q);
             }
-            return count;
         }
         if (sleepq.empty() || !if_update_now()) {
             return count;
