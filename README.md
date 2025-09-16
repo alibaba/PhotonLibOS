@@ -101,6 +101,12 @@ including those involving disk I/O and/or network I/O.
   or [EFC cache](https://www.alibabacloud.com/help/en/nas/user-guide/enable-the-distributed-caching-feature-of-the-cnfs-client),
   a client-side caching module for elastic file client (EFC).
 
+  * [KTransformers](https://kvcache-ai.github.io/ktransformers/),
+  a flexible, Python-centric AI framework with advanced kernel optimizations
+  and placement/parallelism strategies, designed with extensibility at its core.
+  Photon is [used](https://github.com/alibaba/PhotonLibOS/issues/642) to
+  asynchronously load kvcache data from disk to memory, or vice versa.
+
   * [The coroutine engine in VLang](https://github.com/vlang/v/blob/bfee8248603cfbe4022de8364260133f90d1783b/vlib/coroutines/README.md)
 
 * **Agility** Photon is designed to support a wide range of applications —
