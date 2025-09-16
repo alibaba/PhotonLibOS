@@ -1208,9 +1208,12 @@ R"(
                 list.node = nullptr;
                 AtomicRunQ().insert_list_before(q);
             }
+<<<<<<< HEAD
         }
         if (sleepq.empty() || !if_update_now()) {
             return count;
+=======
+>>>>>>> 4ac3716 (avoid sleep q starvation by standby q (#977))
         }
         do {
             auto th = sleepq.front();
