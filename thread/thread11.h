@@ -29,6 +29,7 @@ namespace photon {
     static void* __stub11(void*) {
         auto p = thread_reserved_space<Pair>(CURRENT);
         tuple_assistance::apply(std::move(p->first), std::move(p->second));
+        p->~Pair();
         return nullptr;
     }
 
