@@ -220,7 +220,7 @@ public:
         buf.consume(s.size);
     }
 
-    void put(ALogBuffer& buf, void* p)
+    void put(ALogBuffer& buf, const void* p)
     {
         put(buf, HEX((uint64_t)p).width(16));
     }
@@ -561,7 +561,7 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
 }
 
 // Acts like a LogBuilder
-// but able to do operations when log builds 
+// but able to do operations when log builds
 template <typename Builder, typename Append>
 struct __LogAppender : public Builder {
     // using Builder members
