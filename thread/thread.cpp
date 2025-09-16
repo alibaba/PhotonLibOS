@@ -1254,11 +1254,10 @@ R"(
                 sleepq.pop(th);
                 count++;
             }
-            goto insert_list;
         }
         if (likely(sleepq.empty() || !if_update_now())) {
-            assert(count == 0);
-            return count;
+            if (!count) return 0;
+            else goto insert_list;
         }
         do {
             auto th = sleepq.front();
