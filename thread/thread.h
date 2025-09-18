@@ -284,7 +284,8 @@ namespace photon
     class mutex : protected waitq
     {
     public:
-        mutex(uint16_t max_retries = 100) : retries(max_retries) { }
+        mutex(uint16_t max_retries = 100, bool contending = false)
+            : retries(max_retries), _contending(contending) { }
         int lock(Timeout timeout = {});
         int try_lock();
         void unlock();
@@ -297,6 +298,7 @@ namespace photon
         std::atomic<thread*> owner{nullptr};
         uint16_t retries;
         spinlock splock;
+        bool _contending;
     };
 
     class seq_mutex : protected mutex {
