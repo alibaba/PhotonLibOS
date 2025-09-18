@@ -420,10 +420,8 @@ void crc32c_hw_block(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
 }
 
 inline __attribute__((always_inline))
-void crc32c_hw_tiny(const uint8_t*& data, size_t nbytes, uint32_t& crc) {
+void crc32c_hw_tiny(uint64_t d, size_t nbytes, uint32_t& crc) {
     assert(nbytes <= 7);
-    auto d = *(uint64_t*)data;
-    data += nbytes;
     if (nbytes & 1) { crc = crc32c(crc, (uint8_t)d); d >>= 8; }
     if (nbytes & 2) { crc = crc32c(crc, (uint16_t)d); d >>= 16; }
     if (nbytes & 4) { crc = crc32c(crc, (uint32_t)d); }
@@ -438,7 +436,13 @@ void crc32c_hw_small(const uint8_t*& data, size_t nbytes, uint32_t& crc) {
     crc32c_hw_block<32,  uint64_t>(data, nbytes, crc);
     crc32c_hw_block<16,  uint64_t>(data, nbytes, crc);
     crc32c_hw_block<8,   uint64_t>(data, nbytes, crc);
-    crc32c_hw_tiny(data, nbytes, crc);
+    if (unlikely(nbytes)) {
+        auto x = 8 - nbytes; // buffer size >= 8
+        auto d = *(uint64_t*)(data - x);
+        d >>= x * 8;
+        data += nbytes;
+        crc32c_hw_tiny(d, nbytes, crc);
+    }
 }
 
 template<uint16_t blksz> inline __attribute__((always_inline))
@@ -475,11 +479,16 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
 // crc32_iscsi_crc_ext().
 uint32_t crc32c_hw_portable(const uint8_t *data, size_t nbytes, uint32_t crc) {
     if (unlikely(!nbytes)) return crc;
+    if (unlikely(nbytes < 8)) {
+        while(nbytes--)
+            crc = crc32c(crc, *data++);
+        return crc;
+    }
     uint8_t l = (~((uint64_t)data) + 1) & 7;
     if (unlikely(l)) {
-        if (l > nbytes) l = nbytes;
-        crc32c_hw_tiny(data, l, crc);
-        nbytes -= l;
+        auto d = *(uint64_t*)data; // nbytes >= 8
+        data += l; nbytes -= l;
+        crc32c_hw_tiny(d, l, crc);
     }
     while(crc32c_3way_ILP<512>(data, nbytes, crc));
     crc32c_3way_ILP<256>(data, nbytes, crc);
