@@ -274,7 +274,7 @@ public:
 
     template<class Rep, class Period>
     cv_status wait_for(unique_lock<mutex>& lock, const ::std::chrono::duration<Rep, Period>& d) {
-        return wait_until(lock, ::std::chrono::steady_clock::now() + d);
+        return wait_until(lock, Clock::now() + d);
     }
 
     template<class Rep, class Period, class Predicate>
