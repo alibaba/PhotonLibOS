@@ -216,6 +216,16 @@ TEST(simple_dom, json) {
     EXPECT_EQ(doc["i"].to_int64_t(), -123);
     EXPECT_NEAR(doc["pi"].to_double(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
+
+    const static char empty_json[] = "{ }";
+    auto empty_doc = parse_copy(empty_json, sizeof(empty_json), DOC_JSON);
+    EXPECT_TRUE(empty_doc);
+    EXPECT_FALSE(empty_doc["iii"]);
+
+    const static char invalid_json[] = "{{invalid_json}";
+    auto invalid_doc = parse_copy(invalid_json, sizeof(invalid_json), DOC_JSON);
+    EXPECT_TRUE(invalid_doc);
+    EXPECT_FALSE(invalid_doc["jjj"]);
 }
 
 TEST(simple_dom, yaml0) {

@@ -182,8 +182,10 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     }
     ~JHandler() {
         assert(_nodes.size() == 1);
-        assert(_nodes.front().size() == 1);
-        _root->set_children(std::move(_nodes.front().front()._children));
+        if (_nodes.front().size() > 0) {
+            assert(_nodes.front().size() == 1);
+            _root->set_children(std::move(_nodes.front().front()._children));
+        }
     }
     JNode* get_root() {
         return _root;
