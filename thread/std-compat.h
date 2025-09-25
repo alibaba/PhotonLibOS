@@ -295,7 +295,7 @@ public:
 
     template<class Clock, class Duration>
     cv_status wait_until(unique_lock<mutex>& lock, const ::std::chrono::time_point<Clock, Duration>& t) {
-        auto d = t - ::std::chrono::steady_clock::now();
+        auto d = t - Clock::now();
         uint64_t timeout = __duration_to_microseconds(d);
         int ret = photon::condition_variable::wait(lock.mutex(), timeout);
         if (ret == 0)
