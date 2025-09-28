@@ -240,56 +240,70 @@ ssize_t iovector_view::extract_back(size_t bytes, iovector_view* iov)
 }
 #undef _this
 
-size_t iovector_view::memcpy_to(void* buf, size_t size)
-{
-    auto buf0 = buf;
-    for (auto x: *this)
-    {
-        auto len = x.iov_len;
-        if (len > size)
-            len = size;
-        // LOG_DEBUG("copy ` bytes into buf", len);
-        memcpy(buf, x.iov_base, len);
-        (char*&)buf += len;
-        size -= len;
-        if (size == 0)
-            break;
-    }
-    return (char*)buf - (char*)buf0;
+inline void operator+=(iovec& v, size_t nbytes) {
+    (char*&)v.iov_base += nbytes;
+    v.iov_len -= nbytes;
 }
 
-size_t iovector_view::memcpy_from(const void* buf, size_t size)
-{
-    auto buf0 = buf;
-    for (auto x: *this)
-    {
-        auto len = x.iov_len;
-        if (len > size)
-            len = size;
-        memcpy(x.iov_base, buf, len);
-        (char*&)buf += len;
-        size -= len;
-        if (size == 0)
-            break;
+class iov_iterator {
+    const iovec* _iov;
+    iovec _v;
+    int _iovcnt;
+public:
+    iov_iterator(iov_iterator&&) = default;
+    iov_iterator(const iov_iterator&) = default;
+    iov_iterator(iovector_view v) : _iov(v.iov), _v(v.iov[0]), _iovcnt(v.iovcnt) { }
+    bool empty() const { return _iovcnt == 0; }
+    iovec front() const { return _v; }
+    iov_iterator& operator += (size_t n) {
+        assert(_iovcnt);
+        assert(n <= _v.iov_len);
+        if (n < _v.iov_len) { _v += n; }
+        else { _v = *++_iov; _iovcnt--; }
+        return *this;
     }
-    return (char*)buf - (char*)buf0;
+};
+
+inline size_t min(size_t a, size_t b, size_t c) {
+    return std::min(a, std::min(b, c));
 }
 
-size_t iovector_view::memcpy_iov(iovector_view* dest, iovector_view* src, size_t size) {
-    size_t actual_size = 0;
-    while (size && !dest->empty() && !src->empty()) {
-        size_t stepsize = size;
-        if (dest->front().iov_len < stepsize)
-            stepsize = dest->front().iov_len;
-        if (src->front().iov_len < stepsize)
-            stepsize = src->front().iov_len;
-        memcpy(dest->front().iov_base, src->front().iov_base, stepsize);
+template<typename T, typename P> inline
+size_t _copy_pipe_iov(T&& dest, P&& src, size_t size) {
+    auto size0 = size;
+    while (size && !dest.empty() && !src.empty()) {
+        auto df = dest.front(), sf = src.front();
+        size_t stepsize = min(size, df.iov_len, sf.iov_len);
+        // LOG_DEBUG("memcpy(", df.iov_base, ", ", sf.iov_base, ", ", stepsize, ")");
+        memcpy(df.iov_base, sf.iov_base, stepsize);
         size -= stepsize;
-        actual_size += stepsize;
-        dest->extract_front(stepsize);
-        src->extract_front(stepsize);
+        dest += stepsize;
+        src += stepsize;
     }
-    return actual_size;
+    return size0 - size;
+}
+
+size_t iovector_view::memcpy_iov(iovector_view d, iovector_view s, size_t size) {
+    return _copy_pipe_iov(iov_iterator(d), iov_iterator(s), size);
+}
+
+template<typename T>
+struct src_extractor : public T {
+    void operator+=(size_t n) {
+        assert(!this->empty());
+        auto& v = this->front();
+        assert(n <= v.iov_len);
+        if (n < v.iov_len) { v += n; }
+        else { this->pop_front(); }
+    }
+};
+
+size_t iovector_view::pipe_iov(iovector_view d, iovector_view& src, size_t size) {
+    return _copy_pipe_iov(iov_iterator(d), (src_extractor<iovector_view>&&)src, size);
+}
+
+size_t iovector::pipe_iov(iovector_view d, iovector& s, size_t size) {
+    return _copy_pipe_iov(iov_iterator(d), (src_extractor<iovector>&&)s, size);
 }
 
 size_t iovector::push_front_more(size_t bytes)

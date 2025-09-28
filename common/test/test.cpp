@@ -754,6 +754,14 @@ TEST(iovector, slice)
 
 TEST(iovector, memcpy)
 {
+    {
+    IOVector iov1, iov2;
+    iov1.push_back(10);
+    iov2.push_back(10);
+    iov1.memcpy_to(&iov2);
+    EXPECT_EQ(10, iov1.sum());
+    EXPECT_EQ(10, iov2.sum());
+    }
     IOVector iov1, iov2;
     iov1.push_back(128);
     iov1.push_back(256);
@@ -766,8 +774,10 @@ TEST(iovector, memcpy)
     IOVector tmp1(iov1.iovec(), iov1.iovcnt()), tmp2(iov2.iovec(), iov2.iovcnt());
     auto v2 = tmp2.view();
     auto ret = tmp1.memcpy_to(&v2);
+    EXPECT_EQ(896, tmp1.sum());
     v2 = iov2.view();
     EXPECT_EQ(896, ret);
+    EXPECT_EQ(896, v2.sum());
     EXPECT_EQ(0, memcmp(v1.iov[0].iov_base, v2.iov[0].iov_base, 128));
     EXPECT_EQ(0, memcmp(v1.iov[1].iov_base, (char*)v2.iov[0].iov_base + 128, 128));
     EXPECT_EQ(0, memcmp((char*)v1.iov[1].iov_base + 128, (char*)v2.iov[0].iov_base + 256, 128));
@@ -788,6 +798,42 @@ TEST(iovector, memcpy)
     EXPECT_EQ(0, memcmp((char*)v1.iov[2].iov_base + 128, v2.iov[1].iov_base, 256));
     EXPECT_EQ(0, memcmp((char*)v1.iov[2].iov_base + 384, v2.iov[2].iov_base, 128));
     }
+}
+
+TEST(iovector, pipe) {
+    const size_t max = 16384;
+    static char data[max];
+    for (auto& c: data)
+        c = rand() % 256;
+
+    auto do_test=[](initializer_list<uint16_t> v1,
+                    initializer_list<uint16_t> v2, size_t n = -1UL) {
+        IOVector iov1, iov2;
+        auto ptr = data;
+        for (auto n: v1) {
+            iov1.push_back(ptr, n);
+            ptr += n;
+            assert(ptr < data + max);
+        }
+        size_t s1 = ptr - data, s2 = 0;
+        for (auto n: v2) {
+            iov2.push_back(n);
+            s2 += n;
+        }
+        auto ret = iov1.pipe_to(&iov2, n);
+        EXPECT_EQ(ret, min(s1, s2, n));
+        EXPECT_EQ(iov1.sum(), std::max<int>(s1 - ret, 0));
+        EXPECT_EQ(iov2.sum(), s2);
+
+        char buf[max];
+        iov2.memcpy_to(buf, ret);
+        EXPECT_EQ(memcmp(buf, data, ret), 0);
+    };
+    do_test({1024, 32}, {1024 + 32});
+    do_test({1024, 32}, {512});
+    do_test({1024, 32}, {2048});
+    do_test({64, 32, 128, 123, 83, 172},
+            {172, 83, 123, 128, 32, 64}, 321);
 }
 
 // #ifdef GIT_VERSION
@@ -886,7 +932,7 @@ TEST(estring, test)
 
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
-    
+
     estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
     estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";
     EXPECT_EQ(true, s1.istarts_with(s2));

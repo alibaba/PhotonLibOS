@@ -168,59 +168,50 @@ struct iovector_view
     // return # of bytes actually extracted, or -1 if `iov` has not enough iovs[] space
     ssize_t extract_back(size_t bytes, iovector_view* iov);
 
-    // copy data to a buffer of size `size`,
+    // copy data to a buffer of `size` bytes,
     // return # of bytes actually copied
-    size_t memcpy_to(void* buf, size_t size);
-
-    // copy data from a buffer of size `size`,
-    // return # of bytes actually copied
-    size_t memcpy_from(const void* buf, size_t size);
-
-    // copy data to a iovector_view of size `size`
-    // return # of bytes actually copied
-    size_t memcpy_to(iovector_view* iov, size_t size=SIZE_MAX) {
-        return memcpy_iov(iov, this, size);
+    size_t memcpy_to(void* buf, size_t size) const {
+        iovec v{buf, size};
+        return memcpy_iov(iovector_view{&v, 1}, *this, size);
     }
 
-    // copy data from a iovector_view of size `size`
+    // copy data from a buffer of `size` bytes,
     // return # of bytes actually copied
-    size_t memcpy_from(iovector_view* iov, size_t size=SIZE_MAX) {
-        return memcpy_iov(this, iov, size);
+    size_t memcpy_from(const void* buf, size_t size) const {
+        iovec v{(void*)buf, size};
+        return memcpy_iov(*this, iovector_view{&v, 1}, size);
     }
 
-    // copy data to a iovector_view of size `size`
-    // `iov` will not change after copy
+    // copy data to an iovector_view up to `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_from(this, size);
+    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) const {
+        return memcpy_iov(*iov, *this, size);
     }
 
-    // copy data from a iovector_view of size `size`
-    // `iov` will not change after copy
+    // copy data from an iovector_view of `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_to(this, size);
+    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) const {
+        return memcpy_iov(*this, *iov, size);
     }
 
-    // copy data to a iovector_view of size `size`
-    // the iovector_view itself will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_to(iovector_view* iov, size_t size=SIZE_MAX) const;
+    // copy data to a buffer of `size` bytes, while extracting from *this
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_to(void* buf, size_t size) {
+        iovec v{buf, size};
+        return pipe_iov(iovector_view{&v, 1}, *this, size);
+    }
 
-    // copy data from a iovector_view of size `size`
-    // the iovector_view itself will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_from(iovector_view* iov, size_t size=SIZE_MAX) const;
+    // copy data to an iovector_view up to `size` bytes, while extracting from *this
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_to(const iovector_view* iov, size_t size=SIZE_MAX) {
+        return pipe_iov(*iov, *this, size);
+    }
 
-    // copy data to a iovector_view of size `size`
-    // both source and target iovectors will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) const;
-
-    // copy data from a iovector_view of size `size`
-    // both source and target iovectors will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) const;
+    // copy data from an iovector_view up to `size` bytes, while extracting from it
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_from(iovector_view* iov, size_t size=SIZE_MAX) const {
+        return pipe_iov(*this, *iov, size);
+    }
 
     // generate iovector_view of partial data
     // generated view shares data field, but has
@@ -228,10 +219,14 @@ struct iovector_view
     ssize_t slice(size_t count, off_t offset, iovector_view* /*OUT*/ iov) const;
 
 protected:
-    // copy data from a iovector_view to another one
+    // copy data from one iovector_view to another, up to `size` bytes
     // return # of bytes actually copied
-    static size_t memcpy_iov(iovector_view* dest, iovector_view* src, size_t size);
+    static size_t memcpy_iov(iovector_view dest, iovector_view src, size_t size);
 
+    // copy data from one iovector_view to another, while extracting
+    // from the source, up to `size` bytes
+    // return # of bytes actually copied
+    static size_t pipe_iov(iovector_view dest, iovector_view& src, size_t size);
 };
 
 #define IF_ASSERT_RETURN(cond, ret) \
@@ -297,6 +292,9 @@ public:
 //    {
 //        return iovcnt();
 //    }
+    size_t elements_count() const {
+        return iovcnt();
+    }
     uint16_t front_free_iovcnt() const
     {
         do_assert();
@@ -636,148 +634,73 @@ public:
             nullptr;
     }
 
-    // copy data to a buffer of size `size`,
+    // copy data to a buffer of `size` bytes,
     // return # of bytes actually copied
-    size_t memcpy_to(void* buf, size_t size)
-    {
+    size_t memcpy_to(void* buf, size_t size) const {
         return view().memcpy_to(buf, size);
     }
 
-    // copy data from a buffer of size `size`,
+    // copy data from a buffer of `size` bytes,
     // return # of bytes actually copied
-    size_t memcpy_from(const void* buf, size_t size)
-    {
+    size_t memcpy_from(const void* buf, size_t size) const {
         return view().memcpy_from(buf, size);
     }
 
-    // copy data to a iovector_view of size `size`
+    // copy data to an iovector_view of `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_to(iovector_view* iov, size_t size=SIZE_MAX)
-    {
+    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) const {
         return view().memcpy_to(iov, size);
     }
 
-    // copy data from a iovector_view of size `size`
+    // copy data from an iovector_view of `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_from(iovector_view* iov, size_t size=SIZE_MAX)
-    {
+    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) const {
         return view().memcpy_from(iov, size);
     }
 
-    // copy data to a iovector_view of size `size`
-    // the iovector_view itself will not change after copy
+    // copy data to an iovector of `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_to(iovector_view* iov, size_t size=SIZE_MAX) const
-    {
-        const auto v = view();
-        return v.memcpy_to(iov, size);
-    }
-
-    // copy data from a iovector_view of size `size`
-    // the iovector_view itself will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_from(iovector_view* iov, size_t size=SIZE_MAX) const
-    {
-        const auto v = view();
-        return v.memcpy_from(iov, size);
-    }
-
-    // copy data to a iovector_view of size `size`
-    // `iov` will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX)
-    {
-        auto v = view();
-        return iov->memcpy_from(&v, size);
-    }
-
-    // copy data from a iovector_view of size `size`
-    // `iov` will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX)
-    {
-        auto v = view();
-        return iov->memcpy_to(&v, size);
-    }
-
-    // copy data to a iovector_view of size `size`
-    // both source and target iovectors will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_to(const iovector_view* iov, size_t size=SIZE_MAX) const
-    {
-        const auto v = view();
-        return v.memcpy_to(iov, size);
-    }
-
-    // copy data from a iovector_view of size `size`
-    // both source and target iovectors will not change after copy
-    // return # of bytes actually copied
-    size_t memcpy_from(const iovector_view* iov, size_t size=SIZE_MAX) const
-    {
-        const auto v = view();
-        return v.memcpy_from(iov, size);
-    }
-
-    // copy data to a iovector of size `size`
-    // return # of bytes actually copied
-    size_t memcpy_to(iovector* iov, size_t size=SIZE_MAX) {
+    size_t memcpy_to(const iovector* iov, size_t size=SIZE_MAX) const {
         auto v = iov->view();
         return memcpy_to(&v, size);
     }
 
-    // copy data from a iovector of size `size`
+    // copy data from an iovector of `size` bytes
     // return # of bytes actually copied
-    size_t memcpy_from(iovector* iov, size_t size=SIZE_MAX) {
+    size_t memcpy_from(const iovector* iov, size_t size=SIZE_MAX) const {
         auto v = iov->view();
         return memcpy_from(&v, size);
     }
 
-    // copy data to a iovector of size `size`
-    // iovector itself will not change
-    // return # of bytes actually copied
-    size_t memcpy_to(iovector* iov, size_t size=SIZE_MAX) const {
-        auto v = iov->view();
-        return ((const iovector*)(this))->memcpy_to(&v, size);
+    // copy data to a buffer of `size` bytes, while extracting from *this
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_to(void* buf, size_t size) {
+        ::iovec v{buf, size};
+        return pipe_iov(iovector_view{&v, 1}, *this, size);
     }
 
-    // copy data from a iovector of size `size`
-    // iovector itself will not change
-    // return # of bytes actually copied
-    size_t memcpy_from(iovector* iov, size_t size=SIZE_MAX) const {
-        auto v = iov->view();
-        return ((const iovector*)(this))->memcpy_from(&v, size);
+    // copy data to an iovector_view up to `size` bytes, while extracting from *this
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_to(const iovector_view* iov, size_t size=SIZE_MAX) {
+        return pipe_iov(*iov, *this, size);
     }
 
-    // copy data to a iovector of size `size`
-    // parameter iovector will not change
-    // return # of bytes actually copied
-    size_t memcpy_to(const iovector* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_from(this, size);
+    // copy data to an iovector up to `size` bytes, while extracting from *this
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_to(const iovector* iov, size_t size=SIZE_MAX) {
+        return pipe_iov(iov->view(), *this, size);
     }
 
-    // copy data from a iovector of size `size`
-    // parameter iovector will not change
-    // return # of bytes actually copied
-    size_t memcpy_from(const iovector* iov, size_t size=SIZE_MAX) {
-        return iov->memcpy_to(this, size);
+    // copy data from an iovector_view up to `size` bytes, while extracting from it
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_from(iovector_view* iov, size_t size=SIZE_MAX) const {
+        return view().pipe_from(iov, size);
     }
 
-    // copy data to a iovector of size `size`
-    // both iovector will not change
-    // return # of bytes actually copied
-    size_t memcpy_to(const iovector* iov, size_t size=SIZE_MAX) const {
-        auto v = iov->view();
-        const auto *p = &v;
-        return memcpy_to(p, size);
-    }
-
-    // copy data from a iovector of size `size`
-    // both iovector will not change
-    // return # of bytes actually copied
-    size_t memcpy_from(const iovector* iov, size_t size=SIZE_MAX) const {
-        auto v = iov->view();
-        const auto *p = &v;
-        return memcpy_from(p, size);
+    // copy data from an iovector_view up to `size` bytes, while extracting from it
+    // return # of bytes actually copied (and extracted)
+    size_t pipe_from(iovector* iov, size_t size=SIZE_MAX) const {
+        return pipe_iov(view(), *iov, size);
     }
 
     void operator = (const iovector& rhs) = delete;
@@ -851,6 +774,11 @@ protected:
 
     friend iovector* new_iovector(uint16_t capacity, uint16_t preserve);
     friend void delete_iovector(iovector* ptr);
+
+    // copy data from one iovector_view to another, while extracting
+    // from the source, up to `size` bytes
+    // return # of bytes actually copied
+    static size_t pipe_iov(iovector_view dest, iovector& src, size_t size);
 
     void do_assert() const
     {
@@ -1016,27 +944,6 @@ public:
     }
 };
 
-inline size_t iovector_view::memcpy_to(iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_to(iov_, size);
-}
-
-inline size_t iovector_view::memcpy_from(iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
-}
-
-inline size_t iovector_view::memcpy_to(const iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
-}
-
-inline size_t iovector_view::memcpy_from(const iovector_view* iov_, size_t size) const {
-    IOVectorEntity<32, 0> co_iov(iov, iovcnt);
-    return co_iov.view().memcpy_from(iov_, size);
-}
-
-
 // to make sure the memory layout assumption
 // in iovector::allocator() is correct
 inline void do_static_assert()
@@ -1086,8 +993,6 @@ public:
             delete [] ptr;
     }
 };
-
-
 
 #undef IF_ASSERT_RETURN
 
