@@ -948,6 +948,8 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 }
 #ifdef __clang__
 #pragma clang attribute pop
+#else // __GNUC__
+#pragma GCC pop_options
 #endif
 #endif  // __x86_64__
 
