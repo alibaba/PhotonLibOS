@@ -522,6 +522,10 @@ public:
     void* extract_front_continuous(size_t bytes)
     {
         auto va = view();
+        if (va.sum() < bytes) {
+            return nullptr;
+        }
+
         auto ptr = va.extract_front_continuous(bytes);
         if (ptr) {
             update(va);
@@ -613,6 +617,10 @@ public:
     void* extract_back_continuous(size_t bytes)
     {
         auto va = view();
+        if (va.sum() < bytes) {
+            return nullptr;
+        }
+
         auto ptr = va.extract_back_continuous(bytes);
         if (ptr) {
             update(va);
