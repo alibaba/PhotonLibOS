@@ -462,13 +462,9 @@ namespace rpc
                 "only Messages are permitted");
 
             // deserialize the main body from back
-            _iov=iov;
-            auto t = iov -> extract_back<T>();
-            if (t) {
-                if (!t->validate_checksum(iov, t, sizeof(*t))) {
-                    failed = true;
-                    return nullptr;
-                }
+            _iov = iov;
+            auto t = iov->extract_back<T>();
+            if (t && t->validate_checksum(iov, t, sizeof(*t))) {
                 // deserialize aligned fields, and non-aligned fields, from front
                 auto aligned = FilterAlignedFields(this, true);
                 t->process_fields(aligned);
@@ -477,7 +473,7 @@ namespace rpc
             } else {
                 failed = true;
             }
-            return t;
+            return failed ? nullptr : t;
         }
     };
 
