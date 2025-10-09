@@ -532,7 +532,9 @@ public:
         }
         
         auto buf = do_malloc(bytes);
-        extract_front(bytes, buf);
+        if (buf) {
+            extract_front(bytes, buf);
+        }
         return buf;
     }
 
@@ -624,7 +626,9 @@ public:
         }
 
         auto buf = do_malloc(bytes);
-        extract_back(bytes, buf);
+        if (buf) {
+            extract_back(bytes, buf);
+        }
         return buf;
     }
 
