@@ -527,12 +527,15 @@ public:
             update(va);
             return ptr;
         }
-
+        if (va.sum() < bytes) {
+            return nullptr;
+        }
+        
         auto buf = do_malloc(bytes);
-        auto ret = extract_front(bytes, buf);
-        return ret == bytes ?
-            buf :
-            nullptr;
+        if (buf) {
+            extract_front(bytes, buf);
+        }
+        return buf;
     }
 
     // try to extract `bytes` bytes from the back
@@ -618,12 +621,15 @@ public:
             update(va);
             return ptr;
         }
+        if (va.sum() < bytes) {
+            return nullptr;
+        }
 
         auto buf = do_malloc(bytes);
-        auto ret = extract_back(bytes, buf);
-        return ret == bytes ?
-            buf :
-            nullptr;
+        if (buf) {
+            extract_back(bytes, buf);
+        }
+        return buf;
     }
 
     // copy data to a buffer of size `size`,
