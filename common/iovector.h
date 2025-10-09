@@ -532,10 +532,8 @@ public:
         }
         
         auto buf = do_malloc(bytes);
-        auto ret = extract_front(bytes, buf);
-        return ret == bytes ?
-            buf :
-            nullptr;
+        extract_front(bytes, buf);
+        return buf;
     }
 
     // try to extract `bytes` bytes from the back
@@ -626,10 +624,8 @@ public:
         }
 
         auto buf = do_malloc(bytes);
-        auto ret = extract_back(bytes, buf);
-        return ret == bytes ?
-            buf :
-            nullptr;
+        extract_back(bytes, buf);
+        return buf;
     }
 
     // copy data to a buffer of size `size`,
