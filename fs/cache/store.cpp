@@ -251,6 +251,7 @@ ssize_t ICacheStore::do_refill_range(uint64_t refill_off, uint64_t refill_size, 
             auto view = input->view();
             refill_buf.extract_front(offset - refill_off);
             ret = refill_buf.memcpy_to(&view, count);
+            input->extract_front(ret);
             offset += ret;
         } else if (refill_off + refill_size >= offset + count) {
             iovector_view tail_iov;
