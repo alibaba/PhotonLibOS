@@ -436,6 +436,8 @@ namespace rpc
 
         void process_field(buffer& x)
         {
+            if (x.size() == 0)
+                return;
             x._ptr = _iov->extract_front_continuous(x.size());
             if (!x._ptr)
                 failed = true;
