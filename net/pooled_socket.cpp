@@ -158,7 +158,6 @@ protected:
         list.erase(node);
         if (list.empty()) fdmap.erase(it);
         rm_watch(node);
-        delete node;
     }
 
 public:
@@ -246,6 +245,7 @@ public:
                 // socket shutdown
                 drop_from_pool(nodes[i]);
             }
+            for (int i = 0; i < ret; i++) delete nodes[i];
         }
     }
 };
