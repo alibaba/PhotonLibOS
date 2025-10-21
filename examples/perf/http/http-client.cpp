@@ -125,10 +125,9 @@ int main(int argc, char** argv) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());
-    int ret;
     result res_client;
 #ifdef __linux__
-    ret = net::et_poller_init();
+    int ret = net::et_poller_init();
     if (ret < 0) return -1;
     DEFER(net::et_poller_fini());
 #endif
