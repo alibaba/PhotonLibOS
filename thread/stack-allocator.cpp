@@ -18,6 +18,7 @@ limitations under the License.
 #include <linux/mman.h>
 #endif
 #include <errno.h>
+#include <mutex>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/thread/arch.h>
@@ -173,8 +174,8 @@ size_t pooled_stack_trim_threshold(size_t x) {
 }
 
 void use_pooled_stack_allocator() {
+    get_pooled_stack_allocator();
     std::call_once(init_once_flag, [] {
-        get_pooled_stack_allocator();
         photon::set_thread_stack_allocator({&pooled_stack_alloc, nullptr},
                                            {&pooled_stack_dealloc, nullptr});
     });
