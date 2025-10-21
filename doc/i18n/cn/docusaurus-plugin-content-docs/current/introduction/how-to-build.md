@@ -95,7 +95,7 @@ cmake --build build -j 8
 ```
 
 :::info
-所有的库和可执行程序将被放置于 `build/output`.
+所有的库和可执行程序将被放置于 `build/output` 或者 `build/examples-output`.
 :::
 
 ### 编译样例与测试程序
@@ -109,6 +109,7 @@ cmake --build build -j 8
 
 ```bash
 # Install additional dependencies
+# 注意对于最新的RHEL系统，libgsasl-devel已经变成了cyrus-sasl-devel
 dnf install epel-release
 dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel nasm

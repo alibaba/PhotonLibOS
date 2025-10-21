@@ -91,7 +91,7 @@ cmake --build build -j 8
 ```
 
 :::info
-All the libs and executables will be saved in `build/output`.
+All the libs and executables will be saved in `build/output` or `build/examples-output`.
 :::
 
 ### Examples / Testing
@@ -105,6 +105,7 @@ The examples and test code are built together.
 
 ```bash
 # Install additional dependencies
+# Note that for the latest RHEL-like OS, libgsasl-devel has changed to cyrus-sasl-devel
 dnf install epel-release
 dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel nasm
