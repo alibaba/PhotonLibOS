@@ -21,6 +21,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/thread/arch.h>
+#include <photon/thread/thread.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -28,6 +29,8 @@ limitations under the License.
 #include <vector>
 
 namespace photon {
+
+static std::once_flag init_once_flag;
 
 template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
           size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
@@ -169,8 +172,13 @@ size_t pooled_stack_trim_threshold(size_t x) {
     return get_pooled_stack_allocator().threshold(x);
 }
 
-size_t pooled_stack_trim_current_vcpu(size_t keep_size);
-size_t pooled_stack_trim_threshold(size_t x);
+void use_pooled_stack_allocator() {
+    std::call_once(init_once_flag, [] {
+        get_pooled_stack_allocator();
+        photon::set_thread_stack_allocator({&pooled_stack_alloc, nullptr},
+                                           {&pooled_stack_dealloc, nullptr});
+    });
+}
 
 void* default_photon_thread_stack_alloc(void*, size_t stack_size) {
     char* ptr = nullptr;
@@ -191,6 +199,13 @@ void default_photon_thread_stack_dealloc(void*, void* ptr, size_t size) {
     madvise(ptr, size, MADV_DONTNEED);
 #endif
     free(ptr);
+}
+
+void use_default_stack_allocator() {
+    std::call_once(init_once_flag, [] {
+        photon::set_thread_stack_allocator({&default_photon_thread_stack_alloc, nullptr},
+                                           {&default_photon_thread_stack_dealloc, nullptr});
+    });
 }
 
 }  // namespace photon

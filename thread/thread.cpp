@@ -125,10 +125,8 @@ namespace photon
         }
     };
 
-    static Delegate<void*, size_t> photon_thread_alloc(
-        &default_photon_thread_stack_alloc, nullptr);
-    static Delegate<void, void*, size_t> photon_thread_dealloc(
-        &default_photon_thread_stack_dealloc, nullptr);
+    static Delegate<void*, size_t> photon_thread_alloc;
+    static Delegate<void, void*, size_t> photon_thread_dealloc;
 
     struct vcpu_t;
     struct thread;
@@ -2095,6 +2093,10 @@ insert_list:
     }
 
     int vcpu_init(uint64_t flags) {
+        if (unlikely(!photon_thread_alloc || !photon_thread_dealloc)) {
+            // For some test cases that don't use photon::init
+            use_default_stack_allocator();
+        }
         uint64_t FLAGS = VCPU_ENABLE_ACTIVE_WORK_STEALING |
                          VCPU_ENABLE_PASSIVE_WORK_STEALING;
         if (unlikely(flags & ~FLAGS))
@@ -2148,11 +2150,9 @@ insert_list:
         CURRENT->stackful_free(ptr);
     }
 
-    void set_photon_thread_stack_allocator(
-        Delegate<void *, size_t> _photon_thread_alloc,
-        Delegate<void, void *, size_t> _photon_thread_dealloc) {
-        photon_thread_alloc = _photon_thread_alloc;
-        photon_thread_dealloc = _photon_thread_dealloc;
+    void set_thread_stack_allocator(Delegate<void *, size_t> alloc, Delegate<void, void *, size_t> dealloc) {
+        photon_thread_alloc = alloc;
+        photon_thread_dealloc = dealloc;
     }
 
     extern "C" {

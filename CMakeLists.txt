@@ -212,9 +212,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    file(GLOB CACHE_SRC 
+    file(GLOB CACHE_SRC
         fs/cache/*.cpp
-        fs/cache/full_file_cache/*.cpp 
+        fs/cache/full_file_cache/*.cpp
         fs/cache/persistent_cache/*.cpp
     )
     list(APPEND PHOTON_SRC
