@@ -18,33 +18,25 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <stddef.h>
 
+// Set photon allocator/deallocator for photon thread stack.
+// This is a hook for thread allocation, both alloc and dealloc.
+// Helps user to do more works like mark GC while allocating
+
 namespace photon {
 
-// Set photon allocator/deallocator for photon thread stack
-// this is a hook for thread allocation, both alloc and dealloc
-// helps user to do more works like mark GC while allocating
-void* default_photon_thread_stack_alloc(void*, size_t stack_size);
-void default_photon_thread_stack_dealloc(void*, void* stack_ptr,
-                                            size_t stack_size);
+// A memory aligned allocator with stack-overflow protection.
+// This is the default option. No need to set explicitly.
+void use_default_stack_allocator();
 
-// Threadlocal Pooled stack allocator
-// better performance, and keep thread safe
-void* pooled_stack_alloc(void*, size_t stack_size);
-void pooled_stack_dealloc(void*, void* stack_ptr, size_t stack_size);
+// Thread-local Pooled stack allocator.
+// Better performance, and keep thread safe.
+void use_pooled_stack_allocator();
 
 // Free memory in pooled stack allocator till in-pool memory size less than
 // `keep_size` for current vcpu
 size_t pooled_stack_trim_current_vcpu(size_t keep_size);
+
 // Pooled stack allocator set keep-in-pool size
 size_t pooled_stack_trim_threshold(size_t threshold);
 
-void set_photon_thread_stack_allocator(
-    Delegate<void*, size_t> photon_thread_alloc = {
-        &default_photon_thread_stack_alloc, nullptr},
-    Delegate<void, void*, size_t> photon_thread_dealloc = {
-        &default_photon_thread_stack_dealloc, nullptr});
-inline void use_pooled_stack_allocator() {
-    set_photon_thread_stack_allocator({&pooled_stack_alloc, nullptr},
-                                      {&pooled_stack_dealloc, nullptr});
-}
 }  // namespace photon

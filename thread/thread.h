@@ -538,6 +538,8 @@ namespace photon
     // helps allocating when using hybrid C++20 style coroutine
     void* stackful_malloc(size_t size);
     void stackful_free(void* ptr);
+
+    void set_thread_stack_allocator(Delegate<void*, size_t> alloc, Delegate<void, void*, size_t> dealloc);
 };
 
 /*
