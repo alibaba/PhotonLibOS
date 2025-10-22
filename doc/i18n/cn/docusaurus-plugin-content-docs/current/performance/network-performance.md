@@ -111,7 +111,7 @@ Compare Photon and `Nginx` when serving static files, using Apache Bench(ab) as 
 
 ### Test program
 
-https://github.com/alibaba/PhotonLibOS/blob/main/net/http/test/server_perf.cpp
+https://github.com/alibaba/PhotonLibOS/blob/main/examples/perf/http/http-server.cpp
 
 ### Results
 

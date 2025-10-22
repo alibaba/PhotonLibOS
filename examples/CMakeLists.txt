@@ -27,6 +27,12 @@ if (NOT APPLE)
     target_link_libraries(multi-conn-perf PRIVATE photon_static)
 endif ()
 
+add_executable(http-perf-client perf/http/http-client.cpp)
+target_link_libraries(http-perf-client PRIVATE photon_static)
+
+add_executable(http-perf-server perf/http/http-server.cpp)
+target_link_libraries(http-perf-server PRIVATE photon_static)
+
 add_executable(rpc-example-client rpc/client.cpp rpc/client_main.cpp)
 target_link_libraries(rpc-example-client PRIVATE photon_static)
 
