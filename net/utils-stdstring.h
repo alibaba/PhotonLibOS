@@ -42,8 +42,8 @@ inline std::string to_string(const IPAddr& addr) {
 inline estring to_string(const photon::net::EndPoint& ep) {
     char ip4or6[INET6_ADDRSTRLEN];
     __to_string(ep.addr, ip4or6);
-    return ep.is_ipv4() ? estring().appends(ip4or6, ':', ep.port):
-                          estring().appends('[', ip4or6, "]:", ep.port);
+    return ep.is_ipv4() ? estring().appends(ip4or6, ":", ep.port):
+                          estring().appends("[", ip4or6, "]:", ep.port);
 }
 
 }
