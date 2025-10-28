@@ -254,15 +254,32 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
 // As some parsers don't support text length, they only support null
 // terminated strings, so we have to convert the last trailer to '\0',
 // while making the parser to treat it as the trailer.
-inline void fix_trail(char* text, size_t size, char trailer) {
-    auto i = estring_view(text, size).rfind(trailer);
-    if (i != estring_view::npos) text[i] = '\0';
+static bool fix_trail(estring_view text, char header, char trailer) {
+    auto i = text.rfind(trailer);
+    if (i == estring_view::npos)
+        LOG_ERROR_RETURN(EINVAL, false, "no trailer found");
+    for (char c: text.substr(i+1))
+        if (!isspace(c))
+            LOG_ERROR_RETURN(EINVAL, false, "illegal character after trailer");
+    size_t k = 0;
+    for (char c: text.substr(0, i+1)) {
+        if (!c)
+            LOG_ERROR_RETURN(EINVAL, false, "unexpected '\\0'");
+        if (c == header) ++k;
+        else if (c == trailer)
+                if (k-- == 0) goto failed;
+    }
+    if (k != 0) failed:
+        LOG_ERROR_RETURN(EINVAL, false, "unbalanced header/trailer");
+    auto c = &text[i];
+    *(char*)c = '\0';
+    return true;
 }
 
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
              kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
-    fix_trail(text, size, '}');
+    if (!fix_trail({text, size}, '{', '}')) return nullptr;
     JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
@@ -311,7 +328,7 @@ public:
 };
 
 static NodeImpl* parse_xml(char* text, size_t size, int flags) {
-    fix_trail(text, size, '>');
+    if (!fix_trail({text, size}, '<', '>')) return nullptr;
     xml_document<char> doc;
     doc.parse<0>(text);
     auto root = make_unique<XMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
