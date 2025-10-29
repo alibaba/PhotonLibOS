@@ -57,6 +57,7 @@ public:
         for (auto num = vcpus.size(); num; --num) enqueue({});
         for (auto &worker : owned_std_threads) worker.join();
         while (vcpus.size()) std::this_thread::yield();
+        worker_lock.lock();
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
