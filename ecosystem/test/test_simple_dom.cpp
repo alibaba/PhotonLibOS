@@ -218,6 +218,21 @@ TEST(simple_dom, json) {
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
 }
 
+TEST(simple_dom, fix_trail) {
+    static char s0[] = R"({"a":"b"}})";
+    static char s1[] = R"({"a":"b")";
+    static char s2[] = R"({"a":"b"} 	  )";
+    static char s3[] = "{\"a\":\0\"b\"}";
+    static std::pair<estring_view, bool> json[] = {
+        {s0, false}, {s1, false}, {s2, true},
+        {{s3, sizeof(s3) - 1}, false},
+    };
+    for (auto x: json) {
+        auto doc = parse((char*)x.first.data(), x.first.size(), DOC_JSON);
+        EXPECT_EQ(!!doc, x.second);
+    }
+}
+
 TEST(simple_dom, yaml0) {
     static char yaml0[] = "{foo: 1, bar: [2, 3], john: doe}";
     auto doc = parse(yaml0, sizeof(yaml0)-1, DOC_YAML);
