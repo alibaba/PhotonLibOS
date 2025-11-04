@@ -62,6 +62,7 @@ public:
         } else {
             while (vcpus.size()) std::this_thread::yield();
         }
+        worker_lock.lock();
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
