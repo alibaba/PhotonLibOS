@@ -16,51 +16,44 @@ limitations under the License.
 
 #pragma once
 
-// a header file to include std::string_view (of C++17) in c++11 mode,
-// in a uniform way, for both gcc and clang
-
-// in C++14, string_view is still in experimental stage
-// compilers actually using higher c++14 standard
-// can directly using
-
-// gcc    201402 is c++14 in gcc 5.1.0
-//        201300 is c++1y in gcc 4.9.2 since 4.9.2 do not support c++14
-// clang  201402 is c++14 in clang 3.5+
-
-// string_view in c++14 is experimental/string_view
-// and become standard in c++17
+// Unified inclusion of std::string_view across GCC (libstdc++) and
+// Clang 11/16 (libc++), without any polyfill.
 //
-// In gcc, std=c++14/c++1y have no string view support
-// such a marco covered whole string_view header
-// #if __cplusplus >= 201703L
+// Strategy:
+// - libc++: use <string_view> in all modes (it is available/back-deployed).
+// - libstdc++: use <string_view> in C++17+, else try <experimental/string_view>.
+// - If nothing is available, produce a compile-time error.
 //
-// for C++14 standard, experimental/string_view hase another namespace
-// std::experimental::string_view
-// which requires __cplusplus >= 201402
+// Correct __cplusplus values:
+//   C++11 = 201103L, C++14 = 201402L, C++17 = 201703L.
 
-#ifdef __clang__
-    #include <string_view>
-#elif __cplusplus >= 201700L
-    // C++ 17 supported
-    // directly include <string_view>
-    #include <string_view>
-#elif __cplusplus >= 201400L
-    // C++ 14, string_view in experimental
+#if defined(_LIBCPP_VERSION)
+// libc++ (Clang 11/16, Apple Clang): back-deployed <string_view>
+  #include <string_view>
+
+#elif __cplusplus >= 201703L
+// C++17 or newer (libstdc++ provides <string_view>)
+  #include <string_view>
+
+#elif defined(__has_include)
+// Pre-C++17: prefer experimental for libstdc++
+  #if __has_include(<experimental/string_view>)
     #include <experimental/string_view>
-    // wrapeed into std namespace
     namespace std {
-        using string_view = std::experimental::string_view;
+      using string_view     = std::experimental::string_view;
+      using wstring_view    = std::experimental::wstring_view;
+      using u16string_view  = std::experimental::u16string_view;
+      using u32string_view  = std::experimental::u32string_view;
     }
+  #elif __has_include(<string_view>)
+    // As a last try, if <string_view> exists pre-C++17 (some backports)
+    #include <string_view>
+  #else
+    #error "No string_view support found. Install libstdc++ in gcc or libc++ in clang."
+  #endif
+
 #else
-    // legacy c++ standard, still may have newer libc++
-    // temporarly markup as c++14, use experimental lib
-    #pragma push_macro("__cplusplus")
-    #undef __cplusplus
-    #define __cplusplus 201402L
-    #include <experimental/string_view>
-    #pragma pop_macro("__cplusplus")
-    namespace std
-    {
-        using string_view = std::experimental::string_view;
-    }
+  // Very old compilers without __has_include can't be probed safely.
+  #error "Compiler lacks __has_include; cannot detect string_view. Update compiler."
 #endif
+
