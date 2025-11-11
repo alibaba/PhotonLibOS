@@ -26,9 +26,9 @@ message(STATUS "Rapidjson source dir: ${rapidjson_SOURCE_DIR}")
 # RapidXml
 FetchContent_Declare(
     rapidxml
-    URL ${PHOTON_RAPIDXML_SOURCE}
-    URL_HASH
-        SHA256=c3f0b886374981bb20fabcf323d755db4be6dba42064599481da64a85f5b3571
+    GIT_SUBMODULES ""
+    GIT_REPOSITORY ${PHOTON_RAPIDXML_SOURCE}
+    GIT_TAG main
     PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidxml.patch
     UPDATE_DISCONNECTED 1)
 FetchContent_MakeAvailable(rapidxml)
