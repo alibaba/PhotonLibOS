@@ -1209,9 +1209,10 @@ R"(
                 AtomicRunQ().insert_list_before(q);
             }
         }
-        if (sleepq.empty() || !if_update_now()) {
+        if (sleepq.empty()) {
             return count;
         }
+        if_update_now();
         do {
             auto th = sleepq.front();
             if (th->ts_wakeup > now) break;
