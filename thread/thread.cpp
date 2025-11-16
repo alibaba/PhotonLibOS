@@ -1252,10 +1252,11 @@ R"(
                 count++;
             }
         }
-        if (likely(sleepq.empty() || !if_update_now())) {
+        if (likely(sleepq.empty())) {
             if (!count) return 0;
             else goto insert_list;
         }
+        if_update_now();
         do {
             auto th = sleepq.front();
             if (th->ts_wakeup > now) break;
