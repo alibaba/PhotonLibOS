@@ -490,6 +490,31 @@ TEST(Timer, Reapting)
     // timer_destroy(timer_arg.ptimer);
 }
 
+TEST(Timer, Reapting2)
+{
+    timer_count = 5;
+    t0 = now_time();
+    auto cb = [](void* arg) -> uint64_t {
+        LOG_INFO("timer callback");
+        auto t1 = now_time();
+        auto delta_t = t1 - t0;
+        EXPECT_GT(delta_t, 1 * 1000 * 1000);
+        EXPECT_LT(delta_t, 2 * 1000 * 1000);
+        t0 = t1;
+        LOG_INFO(VALUE(delta_t));
+        LOG_INFO(VALUE(timer_count));
+        auto& timer_count = *(int*)arg;
+        timer_count--;
+        return 0;
+    };
+    Timer timer(1000*1000, {cb, &timer_count});
+    while(timer_count >= 0) {
+        usleep(200000); // 200ms. Simulate the situation of cpu usage
+        std::cout << "ready to yield" << std::endl;
+        photon::thread_yield();
+    }
+}
+
 TEST(Thread, function)
 {
     photon::join_handle* th1 = photon::thread_enable_join(photon::thread_create(&asdf, (void*)0));
