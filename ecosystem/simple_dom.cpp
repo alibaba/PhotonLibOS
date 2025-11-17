@@ -277,14 +277,24 @@ static bool fix_trail(estring_view text, char header, char trailer) {
 }
 
 static NodeImpl* parse_json(char* text, size_t size, int flags) {
+    // without kParseStopWhenDoneFlag, rapidjson will expect the last character of
+    // the JSON string to be '\0'.
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
-             kParseInsituFlag | kParseCommentsFlag | kParseTrailingCommasFlag;
-    if (!fix_trail({text, size}, '{', '}')) return nullptr;
+                        kParseInsituFlag | kParseCommentsFlag |
+                        kParseTrailingCommasFlag | kParseStopWhenDoneFlag;
+    if (!fix_trail({text, size}, '{', '}')) {
+        if (flags & DOC_FREE_TEXT_ON_DESTRUCTION) free(text);
+        return nullptr;
+    }
     JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
-    reader.Parse<kFlags>(s, h);
+    auto res = reader.Parse<kFlags>(s, h);
+    if (!res) {
+        LOG_ERROR("json parsing failed with error ` at `, origin size `", res.Code(), res.Offset(), size);
+        return nullptr;
+    }
     return h.get_root();
 }
 
@@ -359,6 +369,12 @@ public:
 };
 
 static NodeImpl* parse_yaml(char* text, size_t size, int flags) {
+    ryml::s_default_callbacks.m_error = [](const char* msg, size_t msg_len,
+                                           ryml::Location location,
+                                           void* user_data) {
+        LOG_ERROR("yaml parsing failed with `", std::string_view(msg, msg_len));
+        throw std::runtime_error("yaml parsing failed");
+    };
     auto yaml = ryml::parse_in_place({text, size});
     auto root = make_unique<YAMLNode>(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
     assert(root);
@@ -451,14 +467,15 @@ Node parse(char* text, size_t size, int flags) {
     constexpr static Parser parsers[] = {&parse_json, &parse_xml,
                                          &parse_yaml, &parse_ini};
     auto i = flags & DOC_TYPE_MASK;
-    if ((size_t) i > LEN(parsers)) {
+    if ((size_t) i >= LEN(parsers)) {
         if (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) free(text);
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid document type ", HEX(i));
     }
     NodeImpl* r = nullptr;
     try { r = parsers[i](text, size, flags); }
     catch(...) { LOG_ERROR("parsing failed and exception caught"); }
-    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) free(text);
+    // parse_json will handle the memory management itself.
+    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) && i != DOC_JSON) free(text);
     return r;
 }
 

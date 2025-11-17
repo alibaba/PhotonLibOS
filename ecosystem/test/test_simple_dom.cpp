@@ -216,16 +216,34 @@ TEST(simple_dom, json) {
     EXPECT_EQ(doc["i"].to_int64_t(), -123);
     EXPECT_NEAR(doc["pi"].to_double(), 3.1416, 1e-5);
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
+}
 
-    const static char empty_json[] = "{ }";
-    auto empty_doc = parse_copy(empty_json, sizeof(empty_json), DOC_JSON);
-    EXPECT_TRUE(empty_doc);
-    EXPECT_FALSE(empty_doc["iii"]);
+TEST(simple_dom, illegal_formats) {
+    auto ck_parse_copy = [](const std::vector<string>& formats, int type) {
+        for (const auto& s : formats) {
+            auto doc = parse_copy((const char*)s.data(), s.size(), type);
+            EXPECT_FALSE(doc);
+        }
+    };
+    auto ck_parse = [](std::vector<string>& formats, int type) {
+        for (auto& s : formats) {
+            auto doc = parse((char*)s.data(), s.size(), type);
+            EXPECT_FALSE(doc);
+        }
+    };
 
-    const static char invalid_json[] = "{{invalid_json}";
-    auto invalid_doc = parse_copy(invalid_json, sizeof(invalid_json), DOC_JSON);
-    EXPECT_TRUE(invalid_doc);
-    EXPECT_FALSE(invalid_doc["jjj"]);
+    std::vector<std::string> xmls = {"xml1", "<<xml2>>", "4<xml>"};
+    ck_parse_copy(xmls, DOC_XML);
+    ck_parse(xmls, DOC_XML);
+    std::vector<std::string> jsons = {"json1", "33{{json22}}22", "{3{json}}"};
+    ck_parse_copy(jsons, DOC_JSON);
+    ck_parse(jsons, DOC_JSON);
+    std::vector<std::string> yamls = {"[1,2,3,4,5", "{{a:1,b:}", "{yaml3}}"};
+    ck_parse_copy(yamls, DOC_YAML);
+    ck_parse(yamls, DOC_YAML);
+    std::vector<std::string> inis = {"ini1:", ":ini2", "ini3"};
+    ck_parse_copy(inis, DOC_INI);
+    ck_parse(inis, DOC_INI);
 }
 
 TEST(simple_dom, fix_trail) {
