@@ -66,16 +66,10 @@ static SimpleDOM::Node get_xml_node(HTTP_STACK_OP &op) {
     LOG_ERRNO_RETURN(0, {}, "body read error ` `", rc, length);
   }
 
-  try {  // todo try catch inside simple_dom
-    auto doc = SimpleDOM::parse(body_buf, length,
-                                SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
-    if (!doc) LOG_ERROR_RETURN(0, {}, "failed to parse resp_body");
-    return doc;
-  } catch (std::exception const &e) {
-    free(body_buf);
-    LOG_ERROR("got exception when try to parse resp_body `", e.what());
-  }
-  LOG_ERROR_RETURN(0, {}, "");
+  auto doc = SimpleDOM::parse(body_buf, length,
+                              SimpleDOM::DOC_XML | SimpleDOM::DOC_OWN_TEXT);
+  if (!doc) LOG_ERROR_RETURN(0, {}, "failed to parse resp_body");
+  return doc;
 }
 
 // convert oss last modified time, e.g. "Fri, 04 Mar 2022 02:46:25 GMT"
