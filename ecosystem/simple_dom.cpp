@@ -177,9 +177,9 @@ struct JHandler : public BaseReaderHandler<UTF8<>, JHandler> {
     vector<vector<JNode>> _nodes{1};
     str _key;
     JNode* _root;
-    JHandler(const char* text, bool text_ownership) {
+    JHandler(const char* text) {
         assert(_nodes.size() == 1);
-        _root = new JNode(text, text_ownership);
+        _root = new JNode(text, false);
     }
     ~JHandler() {
         delete _root;
@@ -282,20 +282,21 @@ static NodeImpl* parse_json(char* text, size_t size, int flags) {
     const auto kFlags = kParseNumbersAsStringsFlag | kParseBoolsAsStringFlag |
                         kParseInsituFlag | kParseCommentsFlag |
                         kParseTrailingCommasFlag | kParseStopWhenDoneFlag;
-    if (!fix_trail({text, size}, '{', '}')) {
-        if (flags & DOC_FREE_TEXT_ON_DESTRUCTION) free(text);
-        return nullptr;
-    }
-    JHandler h(text, flags & DOC_FREE_TEXT_ON_DESTRUCTION);
+    if (!fix_trail({text, size}, '{', '}')) return nullptr;
+    JHandler h(text);
     using Encoding = UTF8<>;
     GenericInsituStringStream<Encoding> s(text);
     GenericReader<Encoding, Encoding> reader;
     auto res = reader.Parse<kFlags>(s, h);
     if (!res) {
-        LOG_ERROR("json parsing failed with error ` at `, origin size `", res.Code(), res.Offset(), size);
+        LOG_ERROR("json parsing failed with error ` at `, origin size `",
+                  res.Code(), res.Offset(), size);
         return nullptr;
     }
-    return h.get_root();
+    auto root = h.get_root();
+    if (flags & DOC_FREE_TEXT_ON_DESTRUCTION)
+        root->_flags |= NodeImpl::FLAG_TEXT_OWNERSHIP;
+    return root;
 }
 
 using namespace rapidxml;
@@ -474,8 +475,7 @@ Node parse(char* text, size_t size, int flags) {
     NodeImpl* r = nullptr;
     try { r = parsers[i](text, size, flags); }
     catch(...) { LOG_ERROR("parsing failed and exception caught"); }
-    // parse_json will handle the memory management itself.
-    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED) && i != DOC_JSON) free(text);
+    if (!r && (flags & DOC_FREE_TEXT_IF_PARSING_FAILED)) free(text);
     return r;
 }
 
