@@ -259,7 +259,11 @@ public:
         assert(_iovcnt);
         assert(n <= _v.iov_len);
         if (n < _v.iov_len) { _v += n; }
-        else { _v = *++_iov; _iovcnt--; }
+        else { 
+            _v = *++_iov; 
+            _iovcnt--; 
+            assert(_iovcnt == 0 || _v.iov_base);
+        }
         return *this;
     }
 };

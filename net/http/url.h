@@ -57,7 +57,7 @@ public:
     }
 
     std::string to_string() {
-        return m_url;
+        return std::string(m_url);
     }
 
     const char* c_str() {
@@ -65,7 +65,6 @@ public:
     }
 
     void from_string(std::string_view url);
-    void fix_target();
     std::string_view query() const { return m_url | m_query; }
 
     std::string_view path() const {
