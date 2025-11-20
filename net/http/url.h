@@ -57,7 +57,7 @@ public:
     }
 
     std::string to_string() {
-        return std::string(m_url);
+        return m_url;
     }
 
     const char* c_str() {

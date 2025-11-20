@@ -31,6 +31,19 @@ void URL::from_string(std::string_view url) {
     m_url = url.data();
     size_t pos = 0;
     LOG_DEBUG(VALUE(url));
+    
+    DEFER({
+        estring_view t = m_url | m_target;
+        if (t.size() == 0 || t.front() != '/') {
+            m_tmp_target = (char*)malloc(t.size() + 2);
+            m_tmp_target[0] = '/';
+            memcpy(m_tmp_target+1, t.data(), t.size());
+            m_tmp_target[t.size() + 1] = '\0';
+            m_target = rstring_view16(0, t.size()+1);
+            m_path = rstring_view16(0, m_path.size()+1);
+        }
+    });
+    
     m_secure = ((estring_view&) (url)).starts_with(https_url_scheme);
     // hashtag should be dropped, since it is pure client-side mark
     url = url.substr(0, url.find_first_of('#'));
@@ -60,7 +73,7 @@ void URL::from_string(std::string_view url) {
         if (port_len > 0) {
             uint64_t port_val = 0;
             estring_view port_str(url.data(), port_len);
-            if (port_str.to_uint64_check(&port_val)) {
+            if (port_str.to_uint64_check(&port_val) && port_val <= 65535) {
                 m_port = static_cast<uint16_t>(port_val);
             } else {
                 m_port = m_secure ? 443 : 80;
@@ -104,17 +117,6 @@ void URL::from_string(std::string_view url) {
             auto query_len = sat_sub(url.size(), p + 1);
             m_query = rstring_view16(pos, query_len);
         }
-    }
-    
-    // Fix target if needed (was previously a separate fix_target() function)
-    estring_view t = m_url | m_target;
-    if (t.size() == 0 || t.front() != '/') {
-        m_tmp_target = (char*)malloc(t.size() + 2);
-        m_tmp_target[0] = '/';
-        memcpy(m_tmp_target+1, t.data(), t.size());
-        m_tmp_target[t.size() + 1] = '\0';
-        m_target = rstring_view16(0, t.size()+1);
-        m_path = rstring_view16(0, m_path.size()+1);
     }
 }
 
