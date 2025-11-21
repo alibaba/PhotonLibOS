@@ -31,7 +31,7 @@ void URL::from_string(std::string_view url) {
     m_url = url.data();
     size_t pos = 0;
     LOG_DEBUG(VALUE(url));
-    
+
     DEFER({
         estring_view t = m_url | m_target;
         if (t.size() == 0 || t.front() != '/') {
@@ -43,8 +43,9 @@ void URL::from_string(std::string_view url) {
             m_path = rstring_view16(0, m_path.size()+1);
         }
     });
-    
+
     m_secure = ((estring_view&) (url)).starts_with(https_url_scheme);
+    m_port = m_secure ? 443 : 80;
     // hashtag should be dropped, since it is pure client-side mark
     url = url.substr(0, url.find_first_of('#'));
     auto p = url.find("://");
@@ -58,66 +59,43 @@ void URL::from_string(std::string_view url) {
     m_host_port = m_host;
     pos += p;
     url.remove_prefix(p);
-    if (url.empty()) {
-        m_port = m_secure ? 443 : 80;
-        m_path = rstring_view16(pos, 0);
-        m_query = rstring_view16(0, 0);
-        m_target = m_path;
-    } else if (url.front() == ':') {
+    if (!url.empty() && url.front() == ':') {
         url.remove_prefix(1); // Skip ':'
-        // Parse port number, find the end of digit sequence
-        size_t port_len = 0;
-        while (port_len < url.size() && url[port_len] >= '0' && url[port_len] <= '9') {
-            port_len++;
-        }
+        pos += 1; // +1 for ':'
+        // Find end of port digits
+        auto port_end = url.find_first_not_of("0123456789");
+        size_t port_len = (port_end == url.npos) ? url.size() : port_end;
+
         if (port_len > 0) {
             uint64_t port_val = 0;
             estring_view port_str(url.data(), port_len);
             if (port_str.to_uint64_check(&port_val) && port_val <= 65535) {
                 m_port = static_cast<uint16_t>(port_val);
-            } else {
-                m_port = m_secure ? 443 : 80;
             }
             if (need_optional_port(*this)) m_host_port = rstring_view16(m_host.offset(), m_host.length() + port_len + 1);
-        } else {
-            m_port = m_secure ? 443 : 80;
         }
-        pos += port_len + 1; // +1 for ':'
+        pos += port_len;
         url.remove_prefix(port_len);
-        
-        if (url.empty()) {
-            m_path = rstring_view16(pos, 0);
-            m_query = rstring_view16(0, 0);
-            m_target = m_path;
-        } else {
-            p = url.find_first_of("?");
-            if (p == url.npos) {
-                m_path = rstring_view16(pos, url.size());
-                m_query = rstring_view16(0, 0);
-                m_target = m_path;
-            } else {
-                m_path = rstring_view16(pos, p);
-                m_target = rstring_view16(pos, url.size());
-                pos += p+1;
-                auto query_len = sat_sub(url.size(), p + 1);
-                m_query = rstring_view16(pos, query_len);
-            }
-        }
-    } else {
-        m_port = m_secure ? 443 : 80;
-        p = url.find_first_of("?");
-        if (p == url.npos) {
-            m_path = rstring_view16(pos, url.size());
-            m_query = rstring_view16(0, 0);
-            m_target = m_path;
-        } else {
-            m_path = rstring_view16(pos, p);
-            m_target = rstring_view16(pos, url.size());
-            pos += p+1;
-            auto query_len = sat_sub(url.size(), p + 1);
-            m_query = rstring_view16(pos, query_len);
-        }
     }
+
+    // Parse path and query
+    if (url.empty()) {
+        m_path = rstring_view16(pos, 0);
+        m_query = rstring_view16(0, 0);
+        m_target = m_path;
+        return;
+    }
+    p = url.find_first_of("?");
+    if (p == url.npos) {
+        m_path = rstring_view16(pos, url.size());
+        m_query = rstring_view16(0, 0);
+        m_target = m_path;
+        return;
+    }
+    m_path = rstring_view16(pos, p);
+    m_target = rstring_view16(pos, url.size());
+    auto query_len = sat_sub(url.size(), p + 1);
+    m_query = rstring_view16(pos + p + 1, query_len);
 }
 
 static bool isunreserved(char c) {

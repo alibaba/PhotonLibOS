@@ -403,7 +403,7 @@ public:
         // Ensure offset and length are within bounds of the string_view
         if (s.length() < _offset + _length) {
             // Return empty view if out of bounds
-            return estring_view("", (size_t)0);
+            return {};
         }
         return to_abs(s.data());
     }
