@@ -332,7 +332,7 @@ public:
         if (this->empty()) return false;
         if (this->front() != '-') return to_uint64_check((uint64_t*)v);
         bool ret = this->substr(1).to_uint64_check((uint64_t*)v);
-        if (ret) *v = -*v;
+        if (ret && v) *v = -*v;  // Check v is not nullptr
         return ret;
     }
     int64_t to_int64(int64_t default_val = 0) const
@@ -400,7 +400,11 @@ public:
     }
     estring_view operator | (const std::string_view& s) const
     {
-        assert(s.length() >= _offset + _length);
+        // Ensure offset and length are within bounds of the string_view
+        if (s.length() < _offset + _length) {
+            // Return empty view if out of bounds
+            return {};
+        }
         return to_abs(s.data());
     }
     bool operator == (const rstring_view& rhs) const
