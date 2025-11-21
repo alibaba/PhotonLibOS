@@ -233,9 +233,6 @@ protected:
     if (cond) { assert(cond); }     \
     else { return (ret); }
 
-class iovector;
-inline iovector* new_iovector(uint16_t capacity, uint16_t preserve);
-inline void delete_iovector(iovector* ptr);
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Warray-bounds"
@@ -778,7 +775,7 @@ protected:
     uint16_t nbases;                // # of allocated pointers
     struct iovec iovs[0];
 
-    friend iovector* new_iovector(uint16_t capacity, uint16_t preserve);
+    friend iovector* new_iovector(uint16_t capacity, uint16_t reserve_front);
     friend void delete_iovector(iovector* ptr);
 
     // copy data from one iovector_view to another, while extracting
@@ -799,10 +796,10 @@ protected:
     }
 
     // not allowed to freely construct / destruct
-    iovector(uint16_t capacity, uint16_t preserve)
+    iovector(uint16_t capacity, uint16_t reserve_front)
     {
         this->capacity = capacity;
-        iov_begin = iov_end = preserve;
+        iov_begin = iov_end = reserve_front;
         nbases = 0;
     }
     ~iovector()
@@ -885,8 +882,9 @@ protected:
 
 #pragma GCC diagnostic pop
 
-// the final class for stack-allocation
-template<uint16_t CAPACITY, uint16_t DEF_PRESERVE>
+/// The final class for stack-allocation.
+/// RESERVE_FRONT is accounted into the total CAPACITY.
+template<uint16_t CAPACITY, uint16_t RESERVE_FRONT>
 class IOVectorEntity : public iovector
 {
 public:
@@ -895,31 +893,24 @@ public:
     void* bases[CAPACITY];       // same address with IOVAllocation::bases
 
     enum { capacity = CAPACITY };
-    enum { default_preserve = DEF_PRESERVE };
+    enum { default_reserve_front = RESERVE_FRONT };
 
-    explicit IOVectorEntity(uint16_t preserve = DEF_PRESERVE) :
-        iovector(CAPACITY, preserve) { }
-
-//    explicit IOVectorEntity(const void* buf, size_t size,
-//                            uint16_t preserve = DEF_PRESERVE) :
-//        iovector(CAPACITY, preserve)
-//    {
-//        push_back({(void*)buf, size});
-//    }
+    explicit IOVectorEntity(uint16_t reserve_front = RESERVE_FRONT) :
+        iovector(CAPACITY, reserve_front) { }
 
     explicit IOVectorEntity(const struct iovec* iov, int iovcnt,
-                            uint16_t preserve = DEF_PRESERVE) :
-        iovector(CAPACITY, preserve)
+                            uint16_t reserve_front = RESERVE_FRONT) :
+        iovector(CAPACITY, reserve_front)
     {
         assert(iovcnt >= 0);
-        assert(iovcnt + preserve < CAPACITY);
+        assert(iovcnt + reserve_front < CAPACITY);
         memcpy(begin(), iov, iovcnt * sizeof(*iov));
         iov_end += iovcnt;
     }
 
     explicit IOVectorEntity(IOAlloc allocator,
-                            uint16_t preserve = DEF_PRESERVE) :
-        iovector(CAPACITY, preserve), allocator(allocator)
+                            uint16_t reserve_front = RESERVE_FRONT) :
+        iovector(CAPACITY, reserve_front), allocator(allocator)
     {
     }
 
@@ -929,12 +920,12 @@ public:
     void operator=(const iovector& rhs) = delete;
 
     IOVectorEntity(IOVectorEntity&& rhs) :
-        iovector(CAPACITY, DEF_PRESERVE)
+        iovector(CAPACITY, RESERVE_FRONT)
     {
         *(iovector*)this = std::move(rhs);
     }
     IOVectorEntity(iovector&& rhs) :
-        iovector(CAPACITY, DEF_PRESERVE)
+        iovector(CAPACITY, RESERVE_FRONT)
     {
         *(iovector*)this = std::move(rhs);
     }
@@ -964,14 +955,21 @@ inline void do_static_assert()
 
 typedef IOVectorEntity<32, 4> IOVector;
 
-inline iovector* new_iovector(uint16_t capacity, uint16_t preserve)
+/**
+ * @brief Heap allocated iovector
+ * @param `reserve_front` is accounted into the total `capacity`
+ */
+inline iovector* new_iovector(uint16_t capacity, uint16_t reserve_front = 0)
 {
-    auto size = sizeof(iovector)      + sizeof(iovec) * capacity +
+    auto size = sizeof(iovector) + sizeof(iovec) * capacity +
                 sizeof(IOAlloc) + sizeof(void*) * capacity ;
     auto ptr = ::malloc(size);
-    return new (ptr) iovector(capacity, preserve);
+    return new (ptr) iovector(capacity, reserve_front);
 }
 
+/**
+ * @brief Heap allocated iovector must be destructed by using this function
+ */
 inline void delete_iovector(iovector* ptr)
 {
     ptr->dispose();
