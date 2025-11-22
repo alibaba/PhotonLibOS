@@ -218,6 +218,34 @@ TEST(simple_dom, json) {
     expect_eq_vals(doc["a"], {"1", "2", "3", "4"});
 }
 
+TEST(simple_dom, illegal_formats) {
+    auto ck_parse_copy = [](const std::vector<string>& formats, int type) {
+        for (const auto& s : formats) {
+            auto doc = parse_copy((const char*)s.data(), s.size(), type);
+            EXPECT_FALSE(doc);
+        }
+    };
+    auto ck_parse = [](std::vector<string>& formats, int type) {
+        for (auto& s : formats) {
+            auto doc = parse((char*)s.data(), s.size(), type);
+            EXPECT_FALSE(doc);
+        }
+    };
+
+    std::vector<std::string> xmls = {"xml1", "<<xml2>>", "4<xml>"};
+    ck_parse_copy(xmls, DOC_XML);
+    ck_parse(xmls, DOC_XML);
+    std::vector<std::string> jsons = {"json1", "33{{json22}}22", "{3{json}}"};
+    ck_parse_copy(jsons, DOC_JSON);
+    ck_parse(jsons, DOC_JSON);
+    std::vector<std::string> yamls = {"[1,2,3,4,5", "{{a:1,b:}", "{yaml3}}"};
+    ck_parse_copy(yamls, DOC_YAML);
+    ck_parse(yamls, DOC_YAML);
+    std::vector<std::string> inis = {"ini1:", ":ini2", "ini3"};
+    ck_parse_copy(inis, DOC_INI);
+    ck_parse(inis, DOC_INI);
+}
+
 TEST(simple_dom, fix_trail) {
     static char s0[] = R"({"a":"b"}})";
     static char s1[] = R"({"a":"b")";
