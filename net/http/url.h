@@ -65,7 +65,6 @@ public:
     }
 
     void from_string(std::string_view url);
-    void fix_target();
     std::string_view query() const { return m_url | m_query; }
 
     std::string_view path() const {

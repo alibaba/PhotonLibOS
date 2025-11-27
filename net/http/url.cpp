@@ -17,32 +17,35 @@ limitations under the License.
 #include "url.h"
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/utility.h>
 
 namespace photon {
 namespace net {
 namespace http {
 
-void URL::fix_target() {
-    auto t = (m_url | m_target);
-    if (m_target.size() == 0 || t.front() != '/') {
-        m_tmp_target = (char*)malloc(m_target.size() + 1);
-        m_tmp_target[0] = '/';
-        memcpy(m_tmp_target+1, t.data(), t.size());
-        m_target = rstring_view16(0, m_target.size()+1);
-        m_path = rstring_view16(0, m_path.size()+1);
-    }
-}
-
 void URL::from_string(std::string_view url) {
-    DEFER(fix_target(););
     if (m_tmp_target) {
         free((void*)m_tmp_target);
         m_tmp_target = nullptr;
     }
-    m_url = url.begin();
+    m_url = url.data();
     size_t pos = 0;
     LOG_DEBUG(VALUE(url));
+
+    DEFER({
+        estring_view t = m_url | m_target;
+        if (t.size() == 0 || t.front() != '/') {
+            m_tmp_target = (char*)malloc(t.size() + 2);
+            m_tmp_target[0] = '/';
+            memcpy(m_tmp_target+1, t.data(), t.size());
+            m_tmp_target[t.size() + 1] = '\0';
+            m_target = rstring_view16(0, t.size()+1);
+            m_path = rstring_view16(0, m_path.size()+1);
+        }
+    });
+
     m_secure = ((estring_view&) (url)).starts_with(https_url_scheme);
+    m_port = m_secure ? 443 : 80;
     // hashtag should be dropped, since it is pure client-side mark
     url = url.substr(0, url.find_first_of('#'));
     auto p = url.find("://");
@@ -56,26 +59,26 @@ void URL::from_string(std::string_view url) {
     m_host_port = m_host;
     pos += p;
     url.remove_prefix(p);
-    if (url.empty()) {
-        m_port = m_secure ? 443 : 80;
-        m_path = rstring_view16(pos, 0);
-        m_query = rstring_view16(0, 0);
-        m_target = m_path;
-        return;
-    }
-    if (url.front() == ':') {
-        char* endp;
-        auto port = strtol(url.begin() + 1, &endp, 10);
-        auto port_len= endp - url.begin();
-        if (endp != url.begin() + 1) {
-            m_port = port;
-            if (need_optional_port(*this)) m_host_port = rstring_view16(m_host.offset(), m_host.length() + port_len);
+    if (!url.empty() && url.front() == ':') {
+        url.remove_prefix(1); // Skip ':'
+        pos += 1; // +1 for ':'
+        // Find end of port digits
+        auto port_end = url.find_first_not_of("0123456789");
+        size_t port_len = (port_end == url.npos) ? url.size() : port_end;
+
+        if (port_len > 0) {
+            uint64_t port_val = 0;
+            estring_view port_str(url.data(), port_len);
+            if (port_str.to_uint64_check(&port_val) && port_val <= 65535) {
+                m_port = static_cast<uint16_t>(port_val);
+            }
+            if (need_optional_port(*this)) m_host_port = rstring_view16(m_host.offset(), m_host.length() + port_len + 1);
         }
         pos += port_len;
-        url.remove_prefix(endp - url.begin());
-    } else {
-        m_port = m_secure ? 443 : 80;
+        url.remove_prefix(port_len);
     }
+
+    // Parse path and query
     if (url.empty()) {
         m_path = rstring_view16(pos, 0);
         m_query = rstring_view16(0, 0);
@@ -91,8 +94,8 @@ void URL::from_string(std::string_view url) {
     }
     m_path = rstring_view16(pos, p);
     m_target = rstring_view16(pos, url.size());
-    pos += p+1;
-    m_query = rstring_view16(pos, url.size() - (p + 1));
+    auto query_len = sat_sub(url.size(), p + 1);
+    m_query = rstring_view16(pos + p + 1, query_len);
 }
 
 static bool isunreserved(char c) {
