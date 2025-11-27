@@ -61,12 +61,12 @@ TEST(headers, req_header) {
     req.headers.content_length(0);
     EXPECT_EQ(false, req.headers.empty());
     EXPECT_EQ(Verb::GET, req.verb());
-    EXPECT_EQ(true, "/targetName" == req.target());
+    EXPECT_EQ("/targetName", req.target());
     LOG_DEBUG(VALUE(req.target()));
-    EXPECT_EQ(true, req.headers["Content-Length"] == "0");
+    EXPECT_EQ(req.headers["Content-Length"], "0");
     LOG_DEBUG(req.headers["Content-Length"]);
-    EXPECT_EQ(true, req.headers["Host"] == "HostName");
-    EXPECT_EQ(true, req.headers.find("noexist") == req.headers.end());
+    EXPECT_EQ(req.headers["Host"], "HostName");
+    EXPECT_EQ(req.headers.find("noexist"), req.headers.end());
     LOG_DEBUG(req.headers["Host"]);
     string capacity_overflow;
     capacity_overflow.resize(100000);
@@ -74,7 +74,7 @@ TEST(headers, req_header) {
     EXPECT_EQ(-1, ret);
     RequestHeadersStored<> req_proxy(Verb::GET, "http://HostName:80/targetName", true);
     LOG_DEBUG(VALUE(req_proxy.target()));
-    EXPECT_EQ(true, req_proxy.target() == "http://HostName/targetName");
+    EXPECT_EQ(req_proxy.target(), "http://HostName/targetName");
 }
 
 class test_stream : public net::SocketStreamBase {
@@ -144,10 +144,10 @@ TEST(headers, resp_header) {
     EXPECT_EQ(0, ret);
     ret = of_header.append_bytes(of_stream.size());
     EXPECT_EQ(-1, ret);
-    EXPECT_EQ(true, of_header.version() == "1.1");
-    EXPECT_EQ(123, of_header.status_code());
-    EXPECT_EQ(true, of_header.status_message() == "status_message");
-    EXPECT_EQ(true, of_header.partial_body() == "0123456789");
+    EXPECT_EQ(of_header.version(), "1.1");
+    EXPECT_EQ(of_header.status_code(), 123);
+    EXPECT_EQ(of_header.status_message(), "status_message");
+    EXPECT_EQ(of_header.partial_body(), "0123456789");
     of_header.reset(of_buf, sizeof(of_buf));
     ret = of_header.append_bytes(of_stream.size());
     EXPECT_EQ(0, ret);
@@ -161,15 +161,15 @@ TEST(headers, resp_header) {
         if (stream.done()) EXPECT_EQ(0, ret); else
             EXPECT_EQ(2, ret);
     } while (!stream.done());
-    EXPECT_EQ(true, rand_header.version() == "1.1");
-    EXPECT_EQ(200, rand_header.status_code());
-    EXPECT_EQ(true, rand_header.status_message() == "ok");
-    EXPECT_EQ(true, rand_header.partial_body() == "0123456789");
+    EXPECT_EQ(rand_header.version(), "1.1");
+    EXPECT_EQ(rand_header.status_code(), 200);
+    EXPECT_EQ(rand_header.status_message(), "ok");
+    EXPECT_EQ(rand_header.partial_body(), "0123456789");
     auto kv_count = stream.get_kv_count();
     for (int i = 0; i < kv_count; i++) {
         string key = "key" + to_string(i);
         string value = "value" + to_string(i);
-        EXPECT_EQ(true, rand_header.headers[key] == value);
+        EXPECT_EQ(rand_header.headers[key], value);
     }
 
     char exceed_buf[64 * 1024 - 1];
@@ -184,12 +184,12 @@ TEST(headers, resp_header) {
 }
 TEST(headers, url) {
     RequestHeadersStored<> headers(Verb::UNKNOWN, "https://domain.com:8888/dir1/dir2/file?key1=value1&key2=value2");
-    EXPECT_EQ(true, headers.target() =="/dir1/dir2/file?key1=value1&key2=value2");
-    EXPECT_EQ(true, headers.host() == "domain.com:8888");
+    EXPECT_EQ(headers.target(), "/dir1/dir2/file?key1=value1&key2=value2");
+    EXPECT_EQ(headers.host(), "domain.com:8888");
     EXPECT_EQ(headers.port(), 8888);
-    EXPECT_EQ(true, headers.host_no_port() == "domain.com");
+    EXPECT_EQ(headers.host_no_port(), "domain.com");
     EXPECT_EQ(headers.secure(), 1);
-    EXPECT_EQ(true, headers.query() == "key1=value1&key2=value2");
+    EXPECT_EQ(headers.query(), "key1=value1&key2=value2");
     RequestHeadersStored<> new_headers(Verb::UNKNOWN, "");
     if (headers.secure())
         new_headers.headers.insert("Referer", http_url_scheme);
@@ -199,7 +199,7 @@ TEST(headers, url) {
     new_headers.headers.value_append(headers.target());
     auto Referer_value = new_headers.headers["Referer"];
     LOG_DEBUG(VALUE(Referer_value));
-    EXPECT_EQ(true, Referer_value == "http://domain.com:8888/dir1/dir2/file?key1=value1&key2=value2");
+    EXPECT_EQ(Referer_value, "http://domain.com:8888/dir1/dir2/file?key1=value1&key2=value2");
 }
 
 TEST(ReqHeaders, redirect) {
@@ -210,21 +210,21 @@ TEST(ReqHeaders, redirect) {
     LOG_DEBUG(VALUE(req.query()));
     LOG_DEBUG(VALUE(req.port()));
     EXPECT_EQ(4321, req.port());
-    EXPECT_EQ(true, req.headers["Host"] == "domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:4321");
-    EXPECT_EQ(true, req.headers["test_key"] == "test_value");
+    EXPECT_EQ(req.headers["Host"], "domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:4321");
+    EXPECT_EQ(req.headers["test_key"], "test_value");
     auto value = req.headers["Host"];
     LOG_DEBUG(VALUE(value));
     req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
-    EXPECT_EQ(true, req.target() == "https://domain.redirect1/targetName");
-    EXPECT_EQ(true, req.headers["Host"] == "domain.redirect1");
+    EXPECT_EQ(req.target(), "https://domain.redirect1/targetName");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test", true);
-    EXPECT_EQ(true, req.target() == "https://domain.redirect1/redirect_test");
-    EXPECT_EQ(true, req.headers["Host"] == "domain.redirect1");
+    EXPECT_EQ(req.target(), "https://domain.redirect1/redirect_test");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test1", false);
-    EXPECT_EQ(true, req.target() == "/redirect_test1");
-    EXPECT_EQ(true, req.headers["Host"] == "domain.redirect1");
+    EXPECT_EQ(req.target(), "/redirect_test1");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
 }
 TEST(debug, debug) {

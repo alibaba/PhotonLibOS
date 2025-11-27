@@ -321,40 +321,37 @@ public:
     {
         return split(charset("\r\n"), consecutive_merge);
     }
-    bool     to_uint64_check(uint64_t* v = nullptr) const;
+    // return # of valid digits parsed
+    size_t   to_uint64_check(uint64_t* v = nullptr) const;
     uint64_t to_uint64(uint64_t default_val = 0) const
     {
         uint64_t val;
         return to_uint64_check(&val) ? val : default_val;
     }
-    bool     to_int64_check(int64_t* v = nullptr) const
-    {
-        if (this->empty()) return false;
+    // return # of valid digits parsed
+    size_t   to_int64_check(int64_t* v = nullptr) const {
+        if (this->empty()) return 0;
         if (this->front() != '-') return to_uint64_check((uint64_t*)v);
-        bool ret = this->substr(1).to_uint64_check((uint64_t*)v);
-        if (ret && v) *v = -*v;  // Check v is not nullptr
-        return ret;
+        size_t ret = this->substr(1).to_uint64_check((uint64_t*)v);
+        if (!ret) return 0;
+        if (v) *v = -*v;  // Check v is not nullptr
+        return ret + 1;
     }
     int64_t to_int64(int64_t default_val = 0) const
     {
         int64_t val;
         return to_int64_check(&val) ? val : default_val;
     }
-    bool to_double_check(double* v = nullptr)
-    {
-        char buf[32];
-        auto len = std::min(this->size(), sizeof(buf) - 1 );
-        memcpy(buf, data(), len);
-        buf[len] = '\0';
-        return sscanf(buf, "%lf", v) == 1;
-    }
+    // return # of valid digits parsed
+    size_t to_double_check(double* v = nullptr);
     double to_double(double default_val = NAN)
     {
         double val;
         return to_double_check(&val) ? val : default_val;
     }
     // not including 0x/0X prefix
-    bool hex_to_uint64_check(uint64_t* v = nullptr) const;
+    // return # of valid digits parsed
+    size_t hex_to_uint64_check(uint64_t* v = nullptr) const;
     uint64_t hex_to_uint64(uint64_t default_val = 0) const
     {
         uint64_t val;
