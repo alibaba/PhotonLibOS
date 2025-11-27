@@ -53,18 +53,20 @@ size_t estring_view::find_last_not_of(const charset& set) const
     return npos;
 }
 
-bool estring_view::to_uint64_check(uint64_t* v) const
-{
-    if (this->empty()) return false;
-    uint64_t val = (*this)[0] - '0';
-    if (val > 9) return false;
-    for (unsigned char c : this->substr(1)) {
-        c -= '0';
-        if (c > 9) break;
-        val = val * 10 + c;
+template<size_t N, typename P> inline
+size_t _to_uint64_check(estring_view s, uint64_t* v, P parse_digit) {
+    size_t i = 0, val = 0;
+    for (; i < s.size(); i++) {
+        unsigned char c = parse_digit(s[i]);
+        if (c >= N) break;
+        val = val * N + c;
     }
-    if (v) *v = val;
-    return true;
+    if (likely(v)) *v = val;
+    return i;
+}
+
+size_t estring_view::to_uint64_check(uint64_t* v) const {
+    return _to_uint64_check<10>(*this, v, [](char c) { return c - '0'; });
 }
 
 inline char hex_char_to_digit(char c) {
@@ -77,17 +79,24 @@ inline char hex_char_to_digit(char c) {
     return (cc < 6) ? (cc + 10) : -1;
 }
 
-bool estring_view::hex_to_uint64_check(uint64_t* v) const {
-    if (this->empty()) return false;
-    uint64_t val = hex_char_to_digit((*this)[0]);
-    if (val == -1ul) return false;
-    for (unsigned char c : this->substr(1)) {
-        auto d = hex_char_to_digit(c);
-        if (d == -1) break;
-        val = val * 16 + d;
+size_t estring_view::hex_to_uint64_check(uint64_t* v) const {
+    return _to_uint64_check<16>(*this, v, hex_char_to_digit);
+}
+
+size_t estring_view::to_double_check(double* v) {
+    const int MAX = 32;
+    char buf[MAX + 1], n;
+    if (size() >= MAX) {
+        memcpy(buf, data(), n = MAX);
+    } else {
+        memcpy(buf, data(), n = size());
     }
-    if (v) *v = val;
-    return true;
+    buf[(int)n] = '\0';
+    char* endptr = nullptr;
+    double val = strtod(buf, &endptr);
+    assert(buf <= endptr && endptr <= buf + n);
+    if (likely(v)) *v = val;
+    return endptr - buf;
 }
 
 estring& estring::append(uint64_t x)
