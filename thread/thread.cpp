@@ -340,12 +340,10 @@ namespace photon
 
     __attribute__((used)) static void _asan_start() { ASAN_START(); }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+    #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
     static_assert(offsetof(thread,  tls) == offsetof(partial_thread,  tls), "...");
     static_assert(offsetof(thread,flags) == offsetof(partial_thread,flags), "...");
-#pragma GCC diagnostic pop
 
     struct thread_list : public intrusive_list<thread>
     {
@@ -529,6 +527,10 @@ namespace photon
         // then moved to runq later by this vCPU at some proper occasion.
         thread_list standbyq;
     };
+    // the should locate in a same cache line, to
+    // ensure consistent access from another vcpu
+    static_assert(offsetof(vcpu_t0, sleepq) / 64 ==
+                  offsetof(vcpu_t0, nthreads) / 64, "");
     struct vcpu_t : public vcpu_t0, intrusive_list_node<vcpu_t> {
 // offset 64B
         // vcpu_t *prev, *next;  // embedded in intrusive_list_node
@@ -723,12 +725,9 @@ namespace photon
         (*(uint64_t*)&cnt)++;   // increment of volatile variable is deprecated
     }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
     // the offsets are used in _photon_thread_stub() assembly code
     static_assert(offsetof(thread, arg)   == 0x40, "...");
     static_assert(offsetof(thread, start) == 0x48, "...");
-#pragma GCC diagnostic pop
 
 #if defined(__x86_64__)
 #if !defined(_WIN64)
@@ -2145,8 +2144,30 @@ insert_list:
     }
 
     static std::atomic<uint32_t> _n_vcpu{0};
-    uint32_t get_vcpu_num() {
-        return _n_vcpu.load(std::memory_order_relaxed);
+    uint64_t get_info(uint64_t type, vcpu_base* v) {
+        auto vcpu = (vcpu_t*)v;
+        if (!(type >> 8) && !v) {
+            if (!CURRENT)
+                LOG_ERROR_RETURN(ENOSYS, -1, "current vcpu not initialized");
+            vcpu = CURRENT->get_vcpu();
+        }
+        switch (type) {
+            case INFO_VCPU_NUM:
+                return _n_vcpu.load(std::memory_order_relaxed);
+            case INFO_THREAD_NUM:
+                return vcpu->nthreads;
+            case INFO_SLEEPING_THREAD_NUM:
+                return vcpu->sleepq.q.size();
+            case INFO_STANDBY_THREAD_NUM: {
+                SCOPED_LOCK(vcpu->standbyq.lock);
+                return vcpu->standbyq.count_by_loop(); }
+            case INFO_RUNNABLE_THREAD_NUM: {
+                int64_t n = vcpu->nthreads - vcpu->sleepq.q.size();
+                assert(n > 0);
+                return (uint64_t)n; }
+            default:
+                LOG_ERROR_RETURN(EINVAL, -1, "invalid info type ", type);
+        }
     }
 
     int vcpu_init(uint64_t flags) {

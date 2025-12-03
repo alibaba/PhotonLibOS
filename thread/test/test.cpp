@@ -1188,6 +1188,26 @@ void* test_smp_cvar(void* args_)
     return 0;
 }
 
+TEST(get, info) {
+    EXPECT_EQ(get_vcpu_num(), 1);
+    auto expect_info = [](uint64_t run, uint64_t standby, uint64_t sleep) {
+        EXPECT_EQ(get_info(INFO_RUNNABLE_THREAD_NUM), run);
+        EXPECT_EQ(get_info(INFO_STANDBY_THREAD_NUM), standby);
+        EXPECT_EQ(get_info(INFO_SLEEPING_THREAD_NUM), sleep);
+        EXPECT_EQ(get_info(INFO_THREAD_NUM), run + sleep);
+    };
+    expect_info(2, 0, 0);
+    photon::condition_variable cvar;
+    thread_create11([&]() { cvar.wait_no_lock(); });
+    expect_info(3, 0, 0);
+    thread_yield();
+    expect_info(2, 0, 1);
+    cvar.notify_one();
+    expect_info(3, 0, 0);
+    thread_yield();
+    expect_info(2, 0, 0);
+}
+
 TEST(smp, cvar)
 {
     smp_cvar_args args;
