@@ -926,12 +926,15 @@ TEST(estring, test)
 
     EXPECT_EQ(estring_view("234423").to_uint64(), 234423);
     EXPECT_EQ(estring_view("-234423").to_int64(), -234423);
+    EXPECT_EQ(estring_view("-234423").to_int64_check(), 7);
     EXPECT_EQ(estring_view("asfdsf").to_uint64(32), 32);
+    EXPECT_EQ(estring_view("1234567jkl").to_uint64_check(), 7);
     EXPECT_NEAR(estring_view("-3.14").to_double(), -3.14, 1e-5);
     EXPECT_NEAR(estring_view("1e10").to_double(), 1e10, 1e-5);
-
+    EXPECT_EQ(estring_view("-3.14e0asdf").to_double_check(), 7);
     EXPECT_EQ(estring_view("1").hex_to_uint64(), 0x1);
     EXPECT_EQ(estring_view("1a2b3d4e5f").hex_to_uint64(), 0x1a2b3d4e5f);
+    EXPECT_EQ(estring_view("1a2b3d4e5fq").hex_to_uint64_check(), 10);
 
     estring_view s1 = "sdfsf234sdfji2ljk34", s2 = "sdfsf", s3 = "SDFSF";
     estring_view s4 = "sdfsf3", s5 = "sdfsf234sdfji3";

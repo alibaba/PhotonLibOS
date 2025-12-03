@@ -64,7 +64,7 @@ public:
         return m_url;
     }
 
-    void from_string(std::string_view url);
+    bool from_string(std::string_view url);
     std::string_view query() const { return m_url | m_query; }
 
     std::string_view path() const {
@@ -90,12 +90,10 @@ class StoredURL : public URL {
 public:
     StoredURL() = default;
     StoredURL(std::string_view url) { from_string(url); }
-    void from_string(std::string_view url) {
-        if (m_url) {
-            free((void*)m_url);
-        }
+    bool from_string(std::string_view url) {
+        free((void*)m_url);
         auto u = strndup(url.data(), url.size());
-        URL::from_string({u, url.size()});
+        return URL::from_string({u, url.size()});
     }
     ~StoredURL() {
         free((void*)m_url);
@@ -103,9 +101,8 @@ public:
 };
 
 inline bool need_optional_port(const URL& u) {
-    if (u.secure() && u.port() != 443) return true;
-    if (!u.secure() && u.port() != 80) return true;
-    return false;
+    return u.secure() ? (u.port() != 443) :
+                        (u.port() != 80)  ;
 }
 
 std::string url_escape(std::string_view url, bool escape_slash = true);

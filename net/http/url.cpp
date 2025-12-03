@@ -23,16 +23,14 @@ namespace photon {
 namespace net {
 namespace http {
 
-void URL::from_string(std::string_view url) {
-    if (m_tmp_target) {
-        free((void*)m_tmp_target);
-        m_tmp_target = nullptr;
-    }
-    m_url = url.data();
-    size_t pos = 0;
-    LOG_DEBUG(VALUE(url));
+bool URL::from_string(std::string_view url_) {
+    estring_view url(url_); // [http[s]://]domain.or.ip[:port][/[path[?query]]]
+    m_url = url.data();     // target := /path?query
+    LOG_DEBUG(VALUE(url));  // target and path both start with '/
 
-    DEFER({
+    free(m_tmp_target);
+    m_tmp_target = nullptr;
+    DEFER({ // fix the problem that path and target do not start with '/'
         estring_view t = m_url | m_target;
         if (t.size() == 0 || t.front() != '/') {
             m_tmp_target = (char*)malloc(t.size() + 2);
@@ -44,58 +42,54 @@ void URL::from_string(std::string_view url) {
         }
     });
 
-    m_secure = ((estring_view&) (url)).starts_with(https_url_scheme);
-    m_port = m_secure ? 443 : 80;
+    m_port = 80;
+    m_secure = false;
+    size_t p = url.find("://");
+    if (p != url.npos) {
+        auto protocol = url.substr(0, p);
+        if (protocol.icmp("http") == 0) { }
+        else if (protocol.icmp("https") == 0) { m_port = 443; m_secure = true; }
+        else LOG_ERROR_RETURN(EINVAL, false, "invalid protocol: ", protocol);
+    }
+
+    url.remove_prefix(p + 3);
     // hashtag should be dropped, since it is pure client-side mark
     url = url.substr(0, url.find_first_of('#'));
-    auto p = url.find("://");
-    if (p != url.npos) {
-        pos += p + 3;
-        url.remove_prefix(p + 3);
-    }
-    p = url.find_first_of(":/?");
-    if (p == url.npos) p = url.size();
-    m_host = rstring_view16(pos, p);
-    m_host_port = m_host;
-    pos += p;
-    url.remove_prefix(p);
-    if (!url.empty() && url.front() == ':') {
-        url.remove_prefix(1); // Skip ':'
-        pos += 1; // +1 for ':'
-        // Find end of port digits
-        auto port_end = url.find_first_not_of("0123456789");
-        size_t port_len = (port_end == url.npos) ? url.size() : port_end;
 
-        if (port_len > 0) {
-            uint64_t port_val = 0;
-            estring_view port_str(url.data(), port_len);
-            if (port_str.to_uint64_check(&port_val) && port_val <= 65535) {
-                m_port = static_cast<uint16_t>(port_val);
-            }
-            if (need_optional_port(*this)) m_host_port = rstring_view16(m_host.offset(), m_host.length() + port_len + 1);
-        }
-        pos += port_len;
+    m_path = m_query = m_target = { };
+    p = url.find_first_of(":/?");
+    uint64_t offset = url.data() - m_url;
+    if (p == url.npos) {
+        m_host = m_host_port = {offset, url.size()};
+        return true;
+    }
+    m_host = m_host_port = {offset, p};
+    url.remove_prefix(p);
+    if (url.empty()) return true;
+    if (url.front() == ':') {
+        url.remove_prefix(1); // Skip ':'
+        uint64_t port_val = -1UL, port_len = url.to_uint64_check(&port_val);
+        if (!port_len || port_val >= 65536)
+            LOG_ERROR_RETURN(EINVAL, false, "invalid port ", url)
+        m_port = static_cast<uint16_t>(port_val);
+        if (need_optional_port(*this))
+            m_host_port.length() += 1 + port_len;
         url.remove_prefix(port_len);
     }
 
     // Parse path and query
-    if (url.empty()) {
-        m_path = rstring_view16(pos, 0);
-        m_query = rstring_view16(0, 0);
-        m_target = m_path;
-        return;
-    }
+    if (url.empty()) return true;
     p = url.find_first_of("?");
+    offset = url.data() - m_url;
+    m_target = {offset, url.size()};
     if (p == url.npos) {
-        m_path = rstring_view16(pos, url.size());
-        m_query = rstring_view16(0, 0);
-        m_target = m_path;
-        return;
+        m_path = m_target;
+        return true;
     }
-    m_path = rstring_view16(pos, p);
-    m_target = rstring_view16(pos, url.size());
+    m_path = {offset, p};
     auto query_len = sat_sub(url.size(), p + 1);
-    m_query = rstring_view16(pos + p + 1, query_len);
+    m_query = {offset + p + 1, query_len};
+    return true;
 }
 
 static bool isunreserved(char c) {
