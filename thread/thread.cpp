@@ -1043,7 +1043,7 @@ R"(
         }
         char* ptr = (char*)photon_thread_alloc(stack_size);
         if (unlikely(!ptr))
-            return nullptr;
+            LOG_ERROR_RETURN(ENOMEM, nullptr, "stack allocation failed");
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
         p = align_down(p, 64);
         auto th = new ((char*)p) thread;
