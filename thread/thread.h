@@ -175,7 +175,16 @@ namespace photon
         return (vcpu_base*)vcpu;
     }
 
-    uint32_t get_vcpu_num();
+    const static uint64_t INFO_THREAD_NUM = 0x0;  // runnable + sleeping
+    const static uint64_t INFO_RUNNABLE_THREAD_NUM = 0x1; // ready + running + standby
+    const static uint64_t INFO_STANDBY_THREAD_NUM = 0x2;
+    const static uint64_t INFO_SLEEPING_THREAD_NUM = 0x3;
+    const static uint64_t INFO_VCPU_NUM = 0x100;
+    uint64_t get_info(uint64_t type, vcpu_base* vcpu = nullptr);
+
+    inline uint32_t get_vcpu_num() {
+        return (uint32_t)get_info(INFO_VCPU_NUM);
+    }
 
     /**
      * @brief Clear unused stack.

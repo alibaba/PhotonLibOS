@@ -452,5 +452,10 @@ public:
         node = node->prev();
         return x;
     }
+    size_t count_by_loop() const {
+        size_t n = 0;
+        for (auto x: (intrusive_list&)*this) (void)x, ++n;
+        return n;
+    }
 };
 
