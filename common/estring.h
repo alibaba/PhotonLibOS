@@ -163,7 +163,7 @@ public:
                 _part = _host->find_part(_part.end() + 1);
                 return *this;
             }
-            iterator& operator++(int)
+            iterator operator++(int)
             {
                 auto ret = *this;
                 ++(*this);
@@ -171,7 +171,8 @@ public:
             }
             bool operator == (const iterator& rhs) const
             {
-                return _part == rhs._part;
+                return _part.data() == rhs._part.data() &&
+                       _part.length() == rhs._part.length();
             }
             bool operator != (const iterator& rhs) const
             {
