@@ -159,7 +159,7 @@ public:
             }
             iterator& operator++()
             {
-                _part = _host->find_part(_part.end());
+                _part = _host->find_part(_part.end() + 1);
                 return *this;
             }
             iterator& operator++(int)
