@@ -6,7 +6,7 @@ on:
 
 jobs:
   macOS13-x86:
-    runs-on: macos-13
+    runs-on: macos-15
 
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -31,7 +31,7 @@ jobs:
             -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_LIBCURL=ON \
-            -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@3
+            -D OPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@3/3.6.0
           cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 
       - name: Test
