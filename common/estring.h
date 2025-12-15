@@ -200,7 +200,7 @@ public:
                 _part = _host->find_part(_part.end() + 1);
                 return *this;
             }
-            iterator& operator++(int)
+            iterator operator++(int)
             {
                 auto ret = *this;
                 ++(*this);
