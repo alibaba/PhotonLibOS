@@ -865,6 +865,51 @@ TEST(estring, test)
     EXPECT_EQ(a[1], "q3r1234");
     EXPECT_EQ(a[2], "poiu");
 
+    sp = s.split(cs, false);
+    it = sp.begin();
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "alskdjf");
+    EXPECT_EQ(remainder, ";;,q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, ";,q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, ",q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "");
+    EXPECT_EQ(remainder, "q3r1234;poiu");
+    it ++;
+    front = *it;
+    remainder = it.remainder();
+    LOG_DEBUG(VALUE(front), VALUE(remainder));
+    EXPECT_EQ(front, "q3r1234");
+    EXPECT_EQ(remainder, "poiu");
+
+    a.clear();
+    for (auto x: sp)
+    {
+        a.push_back(x);
+        LOG_DEBUG(x);
+    }
+
+    EXPECT_EQ(a.size(), 6);
+    EXPECT_EQ(a[0], "alskdjf");
+    EXPECT_EQ(a[4], "q3r1234");
+    EXPECT_EQ(a[5], "poiu");
+
+
     auto sv = s;//.view();
     EXPECT_TRUE(sv.starts_with("alskdjf"));
     EXPECT_FALSE(sv.starts_with("alsk32"));
