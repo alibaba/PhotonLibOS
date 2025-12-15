@@ -171,8 +171,7 @@ public:
             }
             bool operator == (const iterator& rhs) const
             {
-                return _part.data() == rhs._part.data() &&
-                       _part.length() == rhs._part.length();
+                return _part == rhs._part;
             }
             bool operator != (const iterator& rhs) const
             {
