@@ -34,9 +34,6 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 
-// #include "common/fault_injector.h"
-// #include "common/logger.h"
-
 namespace photon {
 namespace objstore {
 
@@ -113,8 +110,6 @@ std::string_view lookup_mime_type(std::string_view name) {
 using photon::net::http::verbstr;
 
 #define make_ccl estring::make_conditional_cat_list
-#define IS_FAULT_INJECTION_ENABLED(x) false
-#define FAULT_INJECTION(x, y)
 
 class OssUrl {
  public:
@@ -174,9 +169,6 @@ class OssUrl {
 static int do_http_call(HTTP_STACK_OP &op, const OssOptions &options,
                         std::string_view object, std::string *code = nullptr) {
   int ret = -1;
-  if (IS_FAULT_INJECTION_ENABLED(FI_OssError_Call_Timeout)) {
-    LOG_ERROR_RETURN(ETIMEDOUT, ret, "mock oss request timeout");
-  }
   auto retry_times = options.retry_times;
   auto retry_interval = options.retry_base_interval_us;
 
@@ -188,11 +180,6 @@ __retry:
   int __saved_errno = errno;
   {
     int r = 0;
-    FAULT_INJECTION(FI_OssError_Failed_Without_Call, [&]() {
-      r = -1;
-      op.status_code = -1;
-      __saved_errno = EIO;
-    });
     auto start_time = std::chrono::steady_clock::now();
     LOG_DEBUG("Sending oss request ` ` Range[`]", verbstr[op.req.verb()],
               op.req.target(), op.req.headers["Range"]);
@@ -207,11 +194,6 @@ __retry:
         "Got oss response ` ` Range[`], code=` content_length=` latency_us=`",
         verbstr[op.req.verb()], op.req.target(), op.req.headers["Range"],
         op.resp.status_code(), op.resp.headers.content_length(), latency);
-    FAULT_INJECTION(FI_OssError_Call_Failed, [&]() {
-      r = -1;
-      op.status_code = -1;
-      __saved_errno = EIO;
-    });
     if (r < 0) {
       if (retry_times-- > 0) {
         photon::thread_usleep(retry_interval);
@@ -221,12 +203,8 @@ __retry:
         goto __retry;
       }
     }
-    FAULT_INJECTION(FI_OssError_5xx, [&]() {
-      r = -1;
-      op.status_code = 503;
-      __saved_errno = EIO;
-    });
   }
+
   if (op.status_code != 200 && op.status_code != 206 && op.status_code != 204) {
     if (op.status_code != -1 && op.status_code != 404) {
       auto reader = get_xml_node(op);
@@ -244,9 +222,6 @@ __retry:
           error_res["Message"].to_string_view(),
           error_res["EC"].to_string_view());
       // clang-format on
-
-      FAULT_INJECTION(FI_OssError_Qps_Limited,
-                      [&]() { code_view = "TotalQpsLimitExceeded"; });
 
       if (code_view.find("QpsLimitExceeded") != std::string::npos) {
         if (qps_limit_retry_interval > 0) {
@@ -694,9 +669,6 @@ retry:
     if (key) deleted_size++;
   }
 
-  FAULT_INJECTION(FI_Oss_Partial_Deletion,
-                  [&]() { deleted_size--; });
-
   if (deleted_size != to_delete_size) {
     // Partial deletion happens when OSS server side is with pressure.
     // If this is the case , we just have another try. It's OK if some keys
@@ -846,7 +818,6 @@ retry:
 
   uint64_t content_length = op.resp.headers.content_length();
   auto ret = op.resp.readv(iov, iovcnt);
-  FAULT_INJECTION(FI_OssError_Read_Partial, [&]() { ret--; });
 
   // we have encountered partial read issue because of the socket was
   // unexpectedly closed
