@@ -10,3 +10,8 @@ endif()
 
 target_link_libraries(test-checksum PRIVATE photon_shared)
 add_test(NAME test-checksum COMMAND $<TARGET_FILE:test-checksum>)
+
+add_executable(test-digest test_digest.cpp)
+target_include_directories(test-digest PRIVATE ${OPENSSL_INCLUDE_DIRS})
+target_link_libraries(test-digest PRIVATE photon_shared)
+add_test(NAME test-digest COMMAND $<TARGET_FILE:test-digest>)
