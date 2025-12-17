@@ -1272,9 +1272,9 @@ TEST(string_key, unordered_map_string_kv) {
     EXPECT_EQ(new_map.size(), test_map.size());
     new_map.clear();
     new_map["3yyy"] = "3";
-    new_map = std::move(unordered_map_string_kv{test_map});
+    new_map = unordered_map_string_kv{test_map};
     EXPECT_EQ(new_map.size(), test_map.size());
-    unordered_map_string_kv new_map2 = std::move(unordered_map_string_kv{test_map});
+    unordered_map_string_kv new_map2{unordered_map_string_kv{test_map}};
     EXPECT_EQ(new_map2.size(), test_map.size());
 }
 
