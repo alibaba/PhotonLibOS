@@ -159,7 +159,7 @@ class OssUrl {
   estring_view url() { return m_url; }
 };
 
-static int do_http_call(HTTP_STACK_OP& op, const OssOptions& options,
+static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
                         std::string_view object, std::string* code = nullptr) {
   int ret = -1;
   auto retry_times = options.retry_times;
@@ -303,14 +303,13 @@ static std::string md5_base64(iovector_view view) {
   return ret;
 }
 
-class OssClientImpl : public OssClient {
+class OssClientImpl : public Client {
  public:
-  OssClientImpl(const OssOptions& options, Authenticator* authenticator);
+  OssClientImpl(const ClientOptions& options, Authenticator* authenticator);
   ~OssClientImpl();
 
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
-                   const ListObjectsParameters& = {},
-                   std::string* marker = nullptr);
+                   ListObjectsParameters = {}, std::string* marker = nullptr);
 
   int head_object(std::string_view object, ObjectHeaderMeta& meta);
 
@@ -337,14 +336,14 @@ class OssClientImpl : public OssClient {
                       int part_number, uint64_t* expected_crc64 = nullptr);
 
   int upload_part_copy(void* context, off_t offset, size_t count,
-                       int part_number, std::string_view from = "");
+                       int part_number, std::string_view from = {});
 
   int complete_multipart_upload(void* context, uint64_t* expected_crc64);
 
   int abort_multipart_upload(void* context);
 
-  int delete_objects(std::string_view prefix,
-                     const std::vector<std::string_view>& objects);
+  int delete_objects(const std::vector<std::string_view>& objects,
+                     std::string_view prefix = {});
 
   int delete_object(std::string_view obj);
 
@@ -353,7 +352,7 @@ class OssClientImpl : public OssClient {
 
   int get_object_meta(std::string_view obj, ObjectMeta& meta);
 
-  void set_credentials(Authenticator::CredentialParameters&& credentials);
+  void set_credentials(CredentialParameters&& credentials);
 
  private:
   int append_auth_headers(photon::net::http::Verb v, OssUrl& oss_url,
@@ -380,14 +379,14 @@ class OssClientImpl : public OssClient {
   std::string m_endpoint, m_bucket;
   bool m_is_http = false;
 
-  OssOptions m_oss_options;
+  ClientOptions m_oss_options;
   photon::net::http::Client* m_client = nullptr;
   Authenticator* m_authenticator = nullptr;
 };
 
 #define OssClient OssClientImpl
 
-OssClient::OssClient(const OssOptions& options, Authenticator* authenticator)
+OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
     : m_bucket(options.bucket),
       m_oss_options(options),
       m_authenticator(authenticator) {
@@ -404,9 +403,7 @@ OssClient::OssClient(const OssOptions& options, Authenticator* authenticator)
 
   m_client = photon::net::http::new_http_client();
   m_client->timeout(m_oss_options.request_timeout_us);
-  m_client->set_user_agent(m_oss_options.user_agent.size()
-                               ? std::string_view(m_oss_options.user_agent)
-                               : std::string_view("Photon-OSS-Client"));
+  m_client->set_user_agent(m_oss_options.user_agent);
 
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;
@@ -474,7 +471,7 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
     auto key = child["Prefix"];
     if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
     auto com_prefix = key.to_string_view();
-    auto r = cb({com_prefix, "", 0, 0, true /*comm prefix*/});
+    auto r = cb({com_prefix, {}, 0, 0, true /*comm prefix*/});
     if (r < 0) return r;
   }
   return 0;
@@ -507,11 +504,11 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
   if (!_mark.empty())
     query_params.insert({OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker});
 
-  OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
+  OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, "", resp_code);
+  r = do_http_call(op, m_oss_options, {}, resp_code);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
@@ -551,11 +548,11 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
   if (!_mark.empty())
     query_params.insert({OSS_PARAM_KEY_MARKER, escaped_marker});
 
-  OssUrl oss_url(m_endpoint, bucket, "", m_is_http);
+  OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
   if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, "", resp_code);
+  r = do_http_call(op, m_oss_options, {}, resp_code);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
@@ -581,7 +578,7 @@ int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
     op.req.headers.insert(OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE, "true");
   }
 
-  std::string_view dst_type = "";  // use the same content type as the source
+  std::string_view dst_type{};  // use the same content type as the source
   if (set_mime) {
     auto src_type = lookup_mime_type(src_oss_url.object());
     auto new_dst_type = lookup_mime_type(dst_oss_url.object());
@@ -703,8 +700,8 @@ int OssClient::rename_object(std::string_view src_path,
   return do_delete_object(src_oss_url);
 }
 
-int OssClient::delete_objects(std::string_view obj_prefix,
-                              const std::vector<std::string_view>& objects) {
+int OssClient::delete_objects(const std::vector<std::string_view>& objects,
+                              std::string_view obj_prefix) {
   size_t start = 0;
   // 1000 is the largest allowed batch size.
   while (start < objects.size()) {
@@ -717,8 +714,7 @@ int OssClient::delete_objects(std::string_view obj_prefix,
 }
 
 int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
-                            const ListObjectsParameters& params,
-                            std::string* nct) {
+                            ListObjectsParameters params, std::string* nct) {
   std::string marker;
   int max_keys = params.max_keys;
   if (nct) marker = *nct;
@@ -1131,8 +1127,7 @@ int OssClient::delete_object(std::string_view obj_path) {
   return do_delete_object(oss_url);
 }
 
-void OssClient::set_credentials(
-    Authenticator::CredentialParameters&& credentials) {
+void OssClient::set_credentials(CredentialParameters&& credentials) {
   if (m_authenticator) {
     m_authenticator->set_credentials(std::move(credentials));
   }
@@ -1171,7 +1166,7 @@ class BasicAuthenticator : public Authenticator {
 
   void sign_v1(photon::net::http::Headers& headers,
                const Authenticator::SignParameters& params,
-               const Authenticator::CredentialParameters& cred) {
+               const CredentialParameters& cred) {
     estring auth, data2sign;
     std::string_view ak = cred.accessKeyId;
     std::string_view sk = cred.accessKeySecret;
@@ -1228,7 +1223,7 @@ class BasicAuthenticator : public Authenticator {
 
   void sign_v4(photon::net::http::Headers& headers,
                const Authenticator::SignParameters& params,
-               const Authenticator::CredentialParameters& cred) {
+               const CredentialParameters& cred) {
     estring auth, canonical_request, string2sign, signing_key;
     std::string_view ak = cred.accessKeyId;
     std::string_view sk = cred.accessKeySecret;
@@ -1322,7 +1317,7 @@ class BasicAuthenticator : public Authenticator {
       : m_credentials(std::move(credentials)) {}
 
   void set_credentials(CredentialParameters&& credentials) {
-    m_credentials = credentials;
+    m_credentials = std::move(credentials);
   }
 
   int sign(photon::net::http::Headers& headers,
@@ -1417,26 +1412,26 @@ class CachedAuthenticator : public Authenticator {
   }
 };
 
-OssClient* new_oss_client(const OssOptions& opt, Authenticator* auth) {
+Client* new_oss_client(const ClientOptions& opt, Authenticator* auth) {
   return new OssClientImpl(opt, auth);
 }
 
-OssClient* new_oss_client(const OssOptions& opt, uint32_t cache_ttl_secs,
-                          Authenticator::CredentialParameters&& credentials) {
-  auto auth = new_basic_authenticator(std::move(credentials));
+Client* new_oss_client(const ClientOptions& opt, uint32_t cache_ttl_secs,
+                       CredentialParameters&& credentials) {
+  auto auth = new_basic_oss_authenticator(std::move(credentials));
   if (!auth) return nullptr;
-  if (cache_ttl_secs) auth = new_cached_authenticator(auth, cache_ttl_secs);
+  if (cache_ttl_secs) auth = new_cached_oss_authenticator(auth, cache_ttl_secs);
   return new_oss_client(opt, auth);
 }
 
-Authenticator* new_basic_authenticator(
-    Authenticator::CredentialParameters&& credentials) {
+Authenticator* new_basic_oss_authenticator(CredentialParameters&& credentials) {
   return new BasicAuthenticator(std::move(credentials));
 }
 
-Authenticator* new_cached_authenticator(Authenticator* auth,
-                                        uint32_t cache_ttl_secs) {
-  return new CachedAuthenticator(auth, cache_ttl_secs);
+Authenticator* new_cached_oss_authenticator(Authenticator* auth,
+                                            uint32_t cache_ttl_secs) {
+  if (cache_ttl_secs) return new CachedAuthenticator(auth, cache_ttl_secs);
+  return auth;
 }
 
 }  // namespace objstore

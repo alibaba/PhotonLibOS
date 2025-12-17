@@ -36,17 +36,17 @@ std::string_view lookup_mime_type(std::string_view name);
 
 static constexpr int OSS_MAX_PATH_LEN = 1023;
 
-struct OssOptions {
+struct ClientOptions {
   std::string endpoint;
   std::string bucket;
   std::string region;
   int max_list_ret_cnt = 1000;
-  std::string user_agent;  // "Photon-OSS-Client" by default
+  std::string user_agent = "Photon-ObjStore-Client";
   std::string bind_ips;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
   int retry_times = 2;
 
-  // When OSS request timeouts or encounters 5xx error, OSS SDK will
+  // When the request timeouts or encounters 5xx error, we will
   // retry the request with times of the base interval.
   // For QPSLimit case, the policy is different. We will retry more
   // times until we have waited the "request time out" period.
@@ -104,6 +104,12 @@ struct ListObjectsCBParameters {
 
 using ListObjectsCallback = Delegate<int, const ListObjectsCBParameters&>;
 
+struct CredentialParameters {
+  std::string accessKeyId;
+  std::string accessKeySecret;
+  std::string securityToken;
+};
+
 class Authenticator : Object {
  public:
   struct SignParameters {
@@ -116,22 +122,16 @@ class Authenticator : Object {
   virtual int sign(photon::net::http::Headers& headers,
                    const SignParameters& params) = 0;
 
-  struct CredentialParameters {
-    std::string accessKeyId;
-    std::string accessKeySecret;
-    std::string securityToken;
-  };
-
   virtual const CredentialParameters* get_credentials() { return nullptr; }
 
   // may be ignored for some implementations
   virtual void set_credentials(CredentialParameters&& credentials) = 0;
 };
 
-class OssClient : public Object {
+class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
-                           const ListObjectsParameters& = {},
+                           ListObjectsParameters = {},
                            std::string* marker = nullptr) = 0;
 
   virtual int head_object(std::string_view object, ObjectHeaderMeta& meta) = 0;
@@ -176,7 +176,7 @@ class OssClient : public Object {
                               uint64_t* expected_crc64 = nullptr) = 0;
 
   virtual int upload_part_copy(void* context, off_t offset, size_t count,
-                               int part_number, std::string_view from = "") = 0;
+                               int part_number, std::string_view from = {}) = 0;
 
   // if expected_crc64 is specified, we will compare the value with the
   // returned object crc64 to validate the object integrity.
@@ -186,11 +186,11 @@ class OssClient : public Object {
   virtual int abort_multipart_upload(void* context) = 0;
 
   class MultipartUploadContext {
-    OssClient* _client;
+    Client* _client;
     void* _ctx;
 
    public:
-    MultipartUploadContext(OssClient* client, void* ctx)
+    MultipartUploadContext(Client* client, void* ctx)
         : _client(client), _ctx(ctx) {}
 
     ssize_t upload(const struct iovec* iov, int iovcnt, int part_number,
@@ -200,7 +200,7 @@ class OssClient : public Object {
     }
 
     int copy(off_t offset, size_t count, int part_number,
-             std::string_view from = "") {
+             std::string_view from = {}) {
       return _client->upload_part_copy(_ctx, offset, count, part_number, from);
     }
 
@@ -221,8 +221,8 @@ class OssClient : public Object {
 
   // prefix + objects are to be deleted
   // no slash will be added after the prefix
-  virtual int delete_objects(std::string_view prefix,
-                             const std::vector<std::string_view>& objects) = 0;
+  virtual int delete_objects(const std::vector<std::string_view>& objects,
+                             std::string_view prefix = {}) = 0;
 
   virtual int delete_object(std::string_view obj) = 0;
 
@@ -232,21 +232,21 @@ class OssClient : public Object {
 
   virtual int get_object_meta(std::string_view obj, ObjectMeta& meta) = 0;
 
-  virtual void set_credentials(
-      Authenticator::CredentialParameters&& credentials) = 0;
+  virtual void set_credentials(CredentialParameters&& credentials) = 0;
 };
 
-OssClient* new_oss_client(const OssOptions& opt, Authenticator* auth);
+Client* new_oss_client(const ClientOptions& opt, Authenticator* auth);
 
-OssClient* new_oss_client(
-    const OssOptions& opt, uint32_t cache_ttl_secs = 60,
-    Authenticator::CredentialParameters&& credentials = {});
+// if cache_ttl_secs is 0, no cache authenticator will be created.
+Client* new_oss_client(const ClientOptions& opt, uint32_t cache_ttl_secs = 60,
+                       CredentialParameters&& credentials = {});
 
-Authenticator* new_basic_authenticator(
-    Authenticator::CredentialParameters&& credentials = {});
+Authenticator* new_basic_oss_authenticator(
+    CredentialParameters&& credentials = {});
 
-Authenticator* new_cached_authenticator(Authenticator* auth,
-                                        uint32_t cache_ttl_secs = 60);
+// if cache_ttl_secs is 0, the original authenticator will be returned.
+Authenticator* new_cached_oss_authenticator(Authenticator* auth,
+                                            uint32_t cache_ttl_secs = 60);
 
 // one typical CustomAutheticator example
 /*class CustomAuthenticator : public Authenticator {

@@ -22,9 +22,9 @@ using namespace photon::objstore;
 
 class BasicAuthOssTest : public ::testing::Test {
  protected:
-  OssClient* client = nullptr;
-  virtual void CreateOssClient(const OssOptions& opts) {
-    auto auth = new_basic_authenticator({FLAGS_ak, FLAGS_sk, ""});
+  Client* client = nullptr;
+  virtual void CreateOssClient(const ClientOptions& opts) {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
     client = new_oss_client(opts, auth);
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
@@ -35,7 +35,7 @@ class BasicAuthOssTest : public ::testing::Test {
             .count();
     bucket_prefix_ = "test_prefix_" + std::to_string(random_suffix) + "/";
 
-    OssOptions opts_;
+    ClientOptions opts_;
     opts_.bucket = FLAGS_bucket;
     opts_.endpoint = FLAGS_endpoint;
     opts_.max_list_ret_cnt = 2;
@@ -58,8 +58,8 @@ class BasicAuthOssTest : public ::testing::Test {
 
       if (objects.size()) {
         if (rand() % 2) {
-          client->delete_objects("", std::vector<std::string_view>(
-                                         objects.begin(), objects.end()));
+          client->delete_objects(
+              std::vector<std::string_view>(objects.begin(), objects.end()));
         } else {
           for (auto& obj : objects) {
             ret = client->delete_object(obj);
@@ -94,9 +94,9 @@ class BasicAuthOssTest : public ::testing::Test {
 
 class CachedAuthOssTest : public BasicAuthOssTest {
  protected:
-  void CreateOssClient(const OssOptions& opts) override {
-    auto auth = new_basic_authenticator({FLAGS_ak, FLAGS_sk, ""});
-    auth = new_cached_authenticator(auth, 3 /*ttl*/);
+  void CreateOssClient(const ClientOptions& opts) override {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_oss_authenticator(auth, 3 /*ttl*/);
     client = new_oss_client(opts, auth);
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
@@ -124,9 +124,9 @@ class RandInvalidateCacheAuthenticator : public Authenticator {
 
 class CustomCachedAuthOssTest : public CachedAuthOssTest {
  protected:
-  void CreateOssClient(const OssOptions& opts) override {
-    auto auth = new_basic_authenticator({FLAGS_ak, FLAGS_sk, ""});
-    auth = new_cached_authenticator(auth, 3 /*ttl*/);
+  void CreateOssClient(const ClientOptions& opts) override {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_oss_authenticator(auth, 3 /*ttl*/);
     client = new_oss_client(opts, new RandInvalidateCacheAuthenticator(auth));
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
