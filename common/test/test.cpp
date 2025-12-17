@@ -32,6 +32,8 @@ limitations under the License.
 #include "../range-lock.h"
 #include "../expirecontainer.h"
 #include "../retval.h"
+#include "../strbuilder.h"
+#include "../ordered_span.h"
 #include <photon/thread/timer.h>
 #include <photon/thread/thread11.h>
 
@@ -955,7 +957,6 @@ TEST(estring, test)
     EXPECT_EQ(a[4], "q3r1234");
     EXPECT_EQ(a[5], "poiu");
 
-
     auto sv = s;//.view();
     EXPECT_TRUE(sv.starts_with("alskdjf"));
     EXPECT_FALSE(sv.starts_with("alsk32"));
@@ -1364,6 +1365,49 @@ TEST(RangeLock, Basic) {
   m.lock(12288, 4096);
   m.unlock(4096, 8192);
   m.unlock(12288, 4096);
+}
+
+TEST(strBuilder, test) {
+    strBuider<64*1024> sb("asdf", "qwer"), sb250;
+    EXPECT_EQ(sb, "asdfqwer");
+    EXPECT_EQ(sb250, "");
+    sb += "hahaha";
+    EXPECT_EQ(sb, "asdfqwerhahaha");
+    sb + "123" + "!@#$" + "PWD";
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD");
+    sb.appends("(234)", "\n");
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n");
+    sb.append('\t');
+    EXPECT_EQ(sb, "asdfqwerhahaha123!@#$PWD(234)\n\t");
+}
+
+DEFINE_CONST_STATIC_ORDERED_STRINGS(os, {"asdf", "qwer", "xzyh"});
+
+TEST(ordered_span, strings) {
+    EXPECT_EQ(os.count("asdf"), 1);
+    EXPECT_EQ(os.count("bbq"), 0);
+    EXPECT_EQ(os.count("qwer"), 1);
+    EXPECT_EQ(os.count("xzyh"), 1);
+    DEFINE_ORDERED_STRING_KV(oskv, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
+    for (auto s: os) {
+        EXPECT_NE(oskv[s], "");
+    }
+
+    DEFINE_APPENDABLE_ORDERED_STRING_KV(aoskv, 5, {{"asdf", "1"}, {"qwer", "2"}, {"xzyh", "3"}});
+    EXPECT_EQ(aoskv.size(), oskv.size());
+
+    auto it1 = oskv.begin(), it2 = aoskv.begin();
+    for (;it1 != oskv.end(); ++it1, ++it2) {
+        EXPECT_EQ(*it1, *it2);
+    }
+    EXPECT_EQ(it2, aoskv.end());
+
+    aoskv.insert({"bbq", "14ygrhe"});
+    aoskv.append({"zzz", "..."});
+    EXPECT_EQ(aoskv.size(), oskv.size() + 2);
+    std::vector<SKV> res(aoskv.begin(), aoskv.end()), truth ={
+        {"asdf", "1"}, {"bbq", "14ygrhe"}, {"qwer", "2"}, {"xzyh", "3"}, {"zzz", "..."}};
+    EXPECT_EQ(res, truth);
 }
 
 TEST(PooledAllocator, allocFailed) {
