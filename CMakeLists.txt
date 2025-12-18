@@ -102,7 +102,10 @@ if (${ARCH} STREQUAL x86_64)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
     endif ()
 elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    if (NOT CMAKE_CXX_FLAGS MATCHES "-march=|-mcpu=")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
+    endif ()
 endif ()
 
 # Default build type is Release
