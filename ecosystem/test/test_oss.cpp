@@ -1,9 +1,9 @@
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
-#include <photon/common/estring.h>
-#include <photon/common/checksum/crc64ecma.h>
-#include <photon/photon.h>
 #include <photon/common/alog.h>
+#include <photon/common/checksum/crc64ecma.h>
+#include <photon/common/estring.h>
+#include <photon/photon.h>
 #include <photon/thread/thread.h>
 
 #include <chrono>
@@ -22,10 +22,9 @@ using namespace photon::objstore;
 
 class BasicAuthOssTest : public ::testing::Test {
  protected:
-  OssClient *client = nullptr;
-  virtual void CreateOssClient(const OssOptions& opts) {
-    auto auth = new_basic_authenticator(
-        {FLAGS_ak, FLAGS_sk, ""});
+  Client* client = nullptr;
+  virtual void CreateOssClient(const ClientOptions& opts) {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
     client = new_oss_client(opts, auth);
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
@@ -36,7 +35,7 @@ class BasicAuthOssTest : public ::testing::Test {
             .count();
     bucket_prefix_ = "test_prefix_" + std::to_string(random_suffix) + "/";
 
-    OssOptions opts_;
+    ClientOptions opts_;
     opts_.bucket = FLAGS_bucket;
     opts_.endpoint = FLAGS_endpoint;
     opts_.max_list_ret_cnt = 2;
@@ -50,24 +49,25 @@ class BasicAuthOssTest : public ::testing::Test {
   void TearDown() override {
     if (client && !bucket_prefix_.empty()) {
       std::vector<std::string> objects;
-      auto cb = [&](const ListObjectsCBParams &cb) {
+      auto cb = [&](const ListObjectsCBParameters& cb) {
         objects.emplace_back(std::string(cb.key));
         return 0;
       };
-      int ret = client->list_objects(bucket_prefix_, cb, false);
+      int ret = client->list_objects(bucket_prefix_, cb);
       ASSERT_EQ(ret, 0);
 
       if (objects.size()) {
         if (rand() % 2) {
-          client->delete_objects("", std::vector<std::string_view>(objects.begin(), objects.end()));
+          client->delete_objects(
+              std::vector<std::string_view>(objects.begin(), objects.end()));
         } else {
-          for (auto &obj : objects) {
+          for (auto& obj : objects) {
             ret = client->delete_object(obj);
             ASSERT_EQ(ret, 0);
           }
         }
         objects.clear();
-        ret = client->list_objects(bucket_prefix_, cb, false);
+        ret = client->list_objects(bucket_prefix_, cb);
         ASSERT_EQ(ret, 0);
         ASSERT_EQ(objects.size(), 0);
       }
@@ -94,10 +94,9 @@ class BasicAuthOssTest : public ::testing::Test {
 
 class CachedAuthOssTest : public BasicAuthOssTest {
  protected:
-  void CreateOssClient(const OssOptions& opts) override {
-    auto auth = new_basic_authenticator(
-        {FLAGS_ak, FLAGS_sk, ""});
-    auth = new_cached_authenticator(auth, 3/*ttl*/);
+  void CreateOssClient(const ClientOptions& opts) override {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_oss_authenticator(auth, 3 /*ttl*/);
     client = new_oss_client(opts, auth);
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
@@ -106,29 +105,28 @@ class CachedAuthOssTest : public BasicAuthOssTest {
 };
 
 class RandInvalidateCacheAuthenticator : public Authenticator {
-  Authenticator *auth_ = nullptr;
+  Authenticator* auth_ = nullptr;
 
  public:
-  RandInvalidateCacheAuthenticator(Authenticator *auth) : auth_(auth) {}
+  RandInvalidateCacheAuthenticator(Authenticator* auth) : auth_(auth) {}
   ~RandInvalidateCacheAuthenticator() { delete auth_; }
-  virtual int sign(photon::net::http::Headers &headers,
-                   const SignParameters &params) override {
+  virtual int sign(photon::net::http::Headers& headers,
+                   const SignParameters& params) override {
     auto new_params = params;
     new_params.invalidate_cache = rand() % 2;
     return auth_->sign(headers, new_params);
   }
 
-  virtual void set_credentials(CredentialParameters &&credentials) override {
+  virtual void set_credentials(CredentialParameters&& credentials) override {
     auth_->set_credentials(std::move(credentials));
   }
 };
 
 class CustomCachedAuthOssTest : public CachedAuthOssTest {
  protected:
-  void CreateOssClient(const OssOptions& opts) override {
-    auto auth = new_basic_authenticator(
-        {FLAGS_ak, FLAGS_sk, ""});
-    auth = new_cached_authenticator(auth, 3/*ttl*/);
+  void CreateOssClient(const ClientOptions& opts) override {
+    auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
+    auth = new_cached_oss_authenticator(auth, 3 /*ttl*/);
     client = new_oss_client(opts, new RandInvalidateCacheAuthenticator(auth));
     ASSERT_NE(client, nullptr) << "Failed to create OSS client";
   }
@@ -136,7 +134,7 @@ class CustomCachedAuthOssTest : public CachedAuthOssTest {
 
 void BasicAuthOssTest::list_objects() {
   std::vector<std::string> test_objects = {
-      // there are in lexicographic order
+      // they are in lexicographic order
       get_real_test_path("list-test/obj1.txt"),
       get_real_test_path("list-test/obj2.txt"),
       get_real_test_path("list-test/obj3.txt"),
@@ -148,7 +146,7 @@ void BasicAuthOssTest::list_objects() {
   char buf[3] = {3};
   iovec iov{buf, 3};
   auto crc64 = crc64ecma(buf, 3, 0);
-  for (const auto &key : test_objects) {
+  for (const auto& key : test_objects) {
     int ret = client->put_object(key, &iov, 1, &crc64);
     ASSERT_EQ(ret, 3);
   }
@@ -164,7 +162,7 @@ void BasicAuthOssTest::list_objects() {
         : key(k), etag(e), size(s), mtime(m), is_com_prefix(is_com) {}
   };
   std::vector<ListObjectsInfo> listed_objects;
-  auto list_callback = [&](const ListObjectsCBParams &params) {
+  auto list_callback = [&](const ListObjectsCBParameters& params) {
     listed_objects.emplace_back(params.key, params.etag, params.size,
                                 params.mtime, params.is_com_prefix);
     return 0;
@@ -204,15 +202,19 @@ void BasicAuthOssTest::list_objects() {
 
   test_list_func([&](std::string_view prefix, ListObjectsCallback cb,
                      bool delimiter, int max_keys) {
-    return client->list_objects(prefix, cb, delimiter, max_keys);
+    ListObjectsParameters params;
+    params.slash_delimiter = delimiter;
+    params.max_keys = max_keys;
+    params.ver = 2;
+    return client->list_objects(prefix, cb, params);
   });
   test_list_func([&](std::string_view prefix, ListObjectsCallback cb,
                      bool delimiter, int max_keys) {
-    return client->list_objects_v1(prefix, cb, delimiter, max_keys);
-  });
-  test_list_func([&](std::string_view prefix, ListObjectsCallback cb,
-                     bool delimiter, int max_keys) {
-    return client->list_objects_v2(prefix, cb, delimiter, max_keys);
+    ListObjectsParameters params;
+    params.slash_delimiter = delimiter;
+    params.max_keys = max_keys;
+    params.ver = 1;
+    return client->list_objects(prefix, cb, params);
   });
 
   auto test_one_shot = [&](auto list_fun) {
@@ -233,22 +235,21 @@ void BasicAuthOssTest::list_objects() {
     }
   };
   test_one_shot([&](std::string_view prefix, ListObjectsCallback cb,
-                    bool delimiter, int max_keys, std::string *marker) {
-    return client->list_objects(prefix, cb, delimiter, max_keys, marker);
+                    bool delimiter, int max_keys, std::string* marker) {
+    ListObjectsParameters params;
+    params.slash_delimiter = delimiter;
+    params.max_keys = max_keys;
+    params.ver = 1;
+    return client->list_objects(prefix, cb, params, marker);
   });
   test_one_shot([&](std::string_view prefix, ListObjectsCallback cb,
-                    bool delimiter, int max_keys, std::string *marker) {
-    return client->list_objects_v1(prefix, cb, delimiter, max_keys, marker);
+                    bool delimiter, int max_keys, std::string* marker) {
+    ListObjectsParameters params;
+    params.slash_delimiter = delimiter;
+    params.max_keys = max_keys;
+    params.ver = 2;
+    return client->list_objects(prefix, cb, params, marker);
   });
-  test_one_shot([&](std::string_view prefix, ListObjectsCallback cb,
-                    bool delimiter, int max_keys, std::string *marker) {
-    return client->list_objects_v2(prefix, cb, delimiter, max_keys, marker);
-  });
-
-  int ret = client->check_prefix_with_list_objects(get_real_test_path("list-test/"), true);
-  EXPECT_EQ(ret, 0);
-  ret = client->check_prefix_with_list_objects(get_real_test_path("list-test/"), false);
-  EXPECT_EQ(ret, 0);
 }
 
 void BasicAuthOssTest::put_and_get_meta() {
@@ -293,7 +294,7 @@ void BasicAuthOssTest::put_and_get_meta() {
   ObjectHeaderMeta hmeta2;
   char buf2[2];
   iovec iov2{buf2, 2};
-  ret = client->get_object_range(path, &iov2, 1, file_size-1, &hmeta2);
+  ret = client->get_object_range(path, &iov2, 1, file_size - 1, &hmeta2);
   ASSERT_EQ(ret, 1);
   /// From testing, get obj range will return all the following fileds.
   EXPECT_EQ(hmeta2.flags, hmeta.flags);
@@ -347,7 +348,7 @@ void BasicAuthOssTest::append_and_get() {
 void BasicAuthOssTest::multipart() {
   auto path = get_real_test_path("multipart_upload/testfile");
 
-  void *context = nullptr;
+  void* context = nullptr;
   int ret = client->init_multipart_upload(path, &context);
   ASSERT_EQ(ret, 0);
   const size_t buf_size = 1048577;
@@ -407,7 +408,8 @@ void CachedAuthOssTest::repeatedly_get() {
   iovec iov{buf, file_size};
   auto crc64 = crc64ecma(buf, file_size, 0);
   for (int i = 0; i < 10; i++) {
-    auto path = get_real_test_path("rput_and_get/testfile.suffix"+std::to_string(i));
+    auto path =
+        get_real_test_path("rput_and_get/testfile.suffix" + std::to_string(i));
     int ret = client->put_object(path, &iov, 1, &crc64);
     ASSERT_EQ(ret, file_size) << "Failed to upload object for metadata test";
     paths.push_back(path);
@@ -444,7 +446,7 @@ TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
