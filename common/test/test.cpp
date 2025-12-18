@@ -1198,6 +1198,19 @@ TEST(string_key, unordered_map_string_kv) {
 
     test_map["qwer"] = "1111";
     EXPECT_EQ(test_map["qwer"], "1111");
+
+    unordered_map_string_kv new_map{test_map};
+    EXPECT_EQ(new_map.size(), test_map.size());
+    new_map.clear();
+    new_map["2xxx"] = "2";
+    new_map = test_map;
+    EXPECT_EQ(new_map.size(), test_map.size());
+    new_map.clear();
+    new_map["3yyy"] = "3";
+    new_map = unordered_map_string_kv{test_map};
+    EXPECT_EQ(new_map.size(), test_map.size());
+    unordered_map_string_kv new_map2{unordered_map_string_kv{test_map}};
+    EXPECT_EQ(new_map2.size(), test_map.size());
 }
 
 TEST(string_key, unordered_map_string_kv_perf) {
