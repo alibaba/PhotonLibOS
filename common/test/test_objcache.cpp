@@ -23,11 +23,13 @@ limitations under the License.
 #undef private
 #undef protected
 
-#include <thread>
 #include <gtest/gtest.h>
+#include <photon/common/alog.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/thread11.h>
-#include <photon/common/alog.h>
+
+#include <thread>
+
 #include "../../test/ci-tools.h"
 
 static int thread_local release_cnt = 0;
@@ -315,7 +317,6 @@ void* objcache_borrow_v2(void* arg) {
     return 0;
 }
 
-
 TEST(ObjectCacheV2, borrow) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
@@ -536,6 +537,105 @@ TEST(ObjectCache, movedout) {
     photon::thread_join(th2);
     auto x = oc.borrow(0, [] { return new int(3);});
     EXPECT_EQ(3, *x);
+}
+
+TEST(ObjectCache, num_limit) {
+    // Never expire by default but will control object num to 10
+    ObjectCache<int, int*> oc(-1UL, -1UL, 10);
+    for (int i = 0; i < 20; i++) {
+        auto x = oc.borrow(i, [i] { return new int(i); });
+    }
+    EXPECT_EQ(10, oc.size());
+    // All key left should larger than 10, since 0~9 will be expire due to num
+    // limit
+    for (auto x : oc._set) {
+        EXPECT_GE(((ObjectCache<int, int*>::KeyedItem*)x)->key(), 10);
+    }
+
+    ObjectCache<int, ShowOnDtor*> oc2(-1UL, -1UL, 10);
+
+    for (int i = 0; i < 20; i++) {
+        EXPECT_NE(nullptr, oc2.acquire(i, [i] { return new ShowOnDtor(i); }));
+    }
+
+    EXPECT_EQ(
+        20,
+        oc2.size());  // due to all objects are using, no one will be expired
+
+    for (int i = 0; i < 10; i++) {
+        oc2.release(i, false, true);
+    }
+
+    for (auto x : oc2._set) {
+        LOG_INFO("Exists ", ((ObjectCache<int, int*>::KeyedItem*)x)->key());
+    }
+
+    EXPECT_EQ(10, oc2.size());
+
+    for (int i = 10; i < 20; i++) {
+        oc2.release(i, false, true);
+    }
+
+    EXPECT_EQ(10, oc2.size());
+    for (int i = 0; i < 20; i++) {
+        EXPECT_NE(nullptr, oc2.acquire(i, [i] { return new int(i); }));
+    }
+}
+
+void* multi_thread_case(void* arg) {
+    auto args = (OCArg*)arg;
+    auto oc = args->oc;
+    auto id = args->id;
+    auto ctor = [&]() {
+        cycle_cnt++;
+        return new ShowOnDtor(id);
+    };
+    // acquire every 10ms
+    photon::thread_usleep(10 * 1000UL * id);
+    auto ret = oc->acquire(id, ctor);
+    LOG_DEBUG("Acquired ", VALUE(id));
+    EXPECT_NE(nullptr, ret);
+    // object holds for 50ms
+    photon::thread_usleep(50 * 1000UL);
+    // every 10 objs will recycle
+    oc->release(id);
+    LOG_DEBUG("Released ", VALUE(id));
+    return 0;
+}
+
+TEST(ObjectCache, multithread_with_limit) {
+    set_log_output_level(ALOG_INFO);
+    DEFER(set_log_output_level(ALOG_DEBUG));
+    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10, 1UL * 1000 * 1000,
+                                         10);
+    cycle_cnt = 0;
+    release_cnt = 0;
+    // 10s, during the test, nothing will be free if not set recycle
+    std::vector<std::thread> ths;
+    for (int i = 0; i < 10; i++) {
+        ths.emplace_back([&] {
+            photon::vcpu_init();
+            DEFER(photon::vcpu_fini());
+            std::vector<photon::join_handle*> handles;
+            std::vector<OCArg> args;
+            for (int i = 0; i < 100; i++) {
+                args.emplace_back(OCArg({&ocache, i + 1}));
+            }
+            for (auto& arg : args) {
+                handles.emplace_back(photon::thread_enable_join(
+                    photon::thread_create(&multi_thread_case, &arg)));
+            }
+            for (const auto& handle : handles) {
+                photon::thread_join(handle);
+            }
+        });
+    }
+    for (auto& x : ths) {
+        x.join();
+    }
+
+    EXPECT_EQ(cycle_cnt, release_cnt);
+    EXPECT_EQ(10, ocache.size());
 }
 
 int main(int argc, char** argv) {

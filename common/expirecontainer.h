@@ -15,15 +15,16 @@ limitations under the License.
 */
 
 #pragma once
+#include <photon/common/intrusive_list.h>
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
-#include <photon/common/intrusive_list.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/timer.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <tuple>
 #include <type_traits>
 #include <unordered_set>
@@ -78,8 +79,9 @@ protected:
 
     intrusive_list<Item> _list;
     uint64_t _lifespan;
+    uint64_t _num_limit;
     photon::Timer _timer;
-    photon::spinlock _lock; // protect _list/_set operations
+    photon::spinlock _lock;  // protect _list/_set operations
 
     using ItemPtr = Item*;
     struct ItemHash {
@@ -94,7 +96,8 @@ protected:
     using Set = std::unordered_set<ItemPtr, ItemHash, ItemEqual>;
     Set _set;
 
-    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle);
+    ExpireContainerBase(uint64_t lifespan, uint64_t timer_cycle,
+                        uint64_t num_limit);
     ~ExpireContainerBase() { clear(); }
 
     using iterator = decltype(_set)::iterator;
@@ -127,16 +130,19 @@ public:
     size_t lifespan() { return _lifespan; }
 
     [[deprecated("use lifespan() instead")]]
-    size_t expiration() { return _lifespan; }
+    size_t expiration() {
+        return _lifespan;
+    }
 };
 
 template <typename KeyType, typename... Ts>
 class ExpireContainer : public ExpireContainerBase {
 public:
     using Base = ExpireContainerBase;
-    ExpireContainer(uint64_t expiration) : Base(expiration, expiration / 16) {}
-    ExpireContainer(uint64_t expiration, uint64_t timer_cycle)
-        : Base(expiration, timer_cycle) {}
+    ExpireContainer(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1UL) {}
+    ExpireContainer(uint64_t lifespan, uint64_t timer_cycle,
+                    uint64_t num_limit = -1UL)
+        : Base(lifespan, timer_cycle, num_limit) {}
 
 protected:
     using KeyedItem = typename Base::KeyedItem<Base::Item, KeyType>;
@@ -205,7 +211,7 @@ public:
     using Base = ExpireContainer<T>;
     using Base::Base;
     using typename Base::Item;
-    bool keep_alive(const T &x, bool insert_if_not_exists) {
+    bool keep_alive(const T& x, bool insert_if_not_exists) {
         return Base::keep_alive(Item(x), insert_if_not_exists);
     }
 };
@@ -378,9 +384,10 @@ public:
     using ValEntity = typename Item::ValEntity;
     using Borrow = typename Base::Borrow<__ObjectCache>;
 
-    __ObjectCache(uint64_t expiration) : Base(expiration, expiration / 16) {}
-    __ObjectCache(uint64_t expiration, uint64_t timer_cycle)
-        : Base(expiration, timer_cycle) {}
+    __ObjectCache(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1UL) {}
+    __ObjectCache(uint64_t lifespan, uint64_t timer_cycle,
+                  uint64_t num_limit = -1UL)
+        : Base(lifespan, timer_cycle, num_limit) {}
 
     template <typename Constructor>
     ItemPtr ref_acquire(const InterfaceKey& key, const Constructor& ctor,
@@ -402,8 +409,9 @@ public:
         return Base::find(KeyedItem(key));
     }
 
-    // Borrow has defined a bool operator to indicate if ref_acquire is succeeded.
-    // Users should take care of the error handling if (!borrow_result)
+    // Borrow has defined a bool operator to indicate if ref_acquire is
+    // succeeded. Users should take care of the error handling if
+    // (!borrow_result)
     template <typename Constructor>
     Borrow borrow(const typename Item::InterfaceKey& key,
                   const Constructor& ctor, uint64_t failure_cooldown = 0) {
@@ -463,4 +471,3 @@ public:
             Base::release(typename Base::Item(key), recycle, destroy));
     }
 };
-
