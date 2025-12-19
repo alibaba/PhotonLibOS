@@ -112,7 +112,7 @@ public:
 
         int ret = ftruncate(shm_fd_, shm_size_); (void)ret;
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
-        if (!shm_begin_ptr_) {
+        if (shm_begin_ptr_ == MAP_FAILED) {
             close(shm_fd_);
             LOG_ERROR_RETURN(0, -1, "SharedMemoryBufferAllocator, mmap failed");
         }
@@ -238,7 +238,7 @@ public:
 
         int ret = ftruncate(shm_fd_, shm_size_); (void)ret;
         shm_begin_ptr_ = (char*)mmap(NULL, shm_size_, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
-        if (!shm_begin_ptr_) {
+        if (shm_begin_ptr_ == MAP_FAILED) {
             LOG_ERROR("SharedMemoryInitiator, mmap failed");
             close(shm_fd_);
         }
