@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/thread/thread.h>
 
+#include <iterator>
 #include <vector>
 
 #include "../base_socket.h"
@@ -94,10 +95,97 @@ public:
     }
 };
 
+
+struct ALPNProtos {
+    const unsigned char* buf;
+    unsigned int buflen;
+
+    struct iterator {
+        using difference_type = long;
+        using value_type = estring_view;
+        using pointer = const estring_view *;
+        using reference = const estring_view &;
+        using iterator_category = std::forward_iterator_tag;
+        const ALPNProtos* proto;
+        size_t pos;
+
+        bool operator==(iterator& rhs) const {
+            return proto == rhs.proto && pos == rhs.pos;
+        }
+
+        bool operator!=(iterator& rhs) const { return !(*this == rhs); }
+
+        estring_view sv() const noexcept {
+            if (!proto) return estring_view();
+            return estring_view{(const char*)&proto->buf[pos + 1],
+                                (uint8_t)proto->buf[pos]};
+        }
+
+        estring_view operator*() const { return sv(); }
+        iterator& operator++() {
+            if (!proto) return *this;
+            if (proto->buf[pos]) {
+                pos += 1 + proto->buf[pos];
+                if (pos >= proto->buflen) {
+                    proto = nullptr;
+                    pos = 0;
+                }
+            } else {
+                proto = nullptr;
+                pos = 0;
+            }
+            return *this;
+        }
+
+        iterator operator++(int) {
+            auto ret = *this;
+            ++(*this);
+            return ret;
+        }
+    };
+
+    iterator begin() const { return {this, 0}; }
+    iterator end() const { return {nullptr, 0}; }
+    estring_view operator[](size_t idx) const {
+        auto it = begin();
+        for (size_t i = 0; i < idx; i++) {
+            ++it;
+        }
+        return *it;
+    }
+    uint8_t bufsize() const { return buflen; }
+};
+
+template <size_t BufSize = 256>
+struct ALPNProtosBuf : public ALPNProtos {
+    char __buf[BufSize]{};
+
+    ALPNProtosBuf() : ALPNProtos{(const unsigned char*)__buf, 0} {}
+
+    int insert(estring_view sv) {
+        if (sv.back() == '\0') sv = sv.substr(0, sv.size() - 1);
+        if (sv.empty()) return -1;
+        size_t pos = 0;
+        while (buf[pos] && pos < BufSize) {
+            pos += 1 + (uint8_t)__buf[pos];
+        }
+        if (pos >= BufSize || pos + sv.size() + 1 >= BufSize) {
+            errno = ENOSPC;
+            return -1;
+        }
+        __buf[pos] = sv.size();
+        memmove(&__buf[pos + 1], sv.data(), sv.size());
+        buflen = pos + sv.size() + 1;
+        return 0;
+    }
+};
+
+
 class TLSContextImpl : public TLSContext {
 public:
     SSL_CTX* ctx;
     char pempassword[MAX_PASSPHASE_SIZE];
+    Delegate<estring_view, const std::vector<estring_view>&> alpn_select_cb;
 
     explicit TLSContextImpl(TLSVersion ver) {
         char errbuf[4096];
@@ -124,10 +212,39 @@ public:
             LOG_ERROR(0, -1, "Failed to initial TLS: ", errbuf);
         }
         SSL_CTX_set_ecdh_auto(ctx, 1);
+        SSL_CTX_set_alpn_select_cb(ctx, ctx_alpn_select_cb, this);
     }
 
     ~TLSContextImpl() override {
         if (ctx) SSL_CTX_free(ctx);
+    }
+
+    static int ctx_alpn_select_cb(SSL* ssl, const unsigned char** out, unsigned char*outlen, const unsigned char* in, unsigned int inlen, void* arg) {
+        auto ctx = ((TLSContextImpl*)arg);
+        assert(ctx->ctx == SSL_get_SSL_CTX(ssl));
+        if (in == nullptr || inlen == 0) {
+            return SSL_TLSEXT_ERR_NOACK;
+        }
+        ALPNProtos pts{in, inlen};
+        std::vector<estring_view> es(pts.begin(), pts.end());
+        auto ret = ctx->alpn_select_cb(es);
+        if (ret.empty()) {
+            return SSL_TLSEXT_ERR_ALERT_FATAL;
+        }
+        *out = (const unsigned char*)ret.data();
+        *outlen = ret.length();
+        return SSL_TLSEXT_ERR_OK;
+    }
+
+    int set_alpn_select_cb(Delegate<estring_view, const std::vector<estring_view>&> cb) override {
+        alpn_select_cb = cb;
+        return 0;
+    }
+
+    int set_alpn_protos(const std::vector<estring_view>& protos) override {
+        ALPNProtosBuf<4096> buf;
+        for (auto x : protos) buf.insert(x);
+        return SSL_CTX_set_alpn_protos(ctx, buf.buf, buf.buflen);
     }
 
     static int pem_password_cb(char* buf, int size, int rwflag, void* ptr) {
@@ -350,6 +467,14 @@ public:
             default:
                 break;
         }
+
+        auto handshake = SSL_do_handshake(ssl);
+        while (handshake < 0) {
+            auto err = SSL_get_error(ssl, handshake);
+            if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
+                return;
+            }
+        }
     }
 
     ~TLSSocketStream() {
@@ -518,6 +643,16 @@ ISocketServer* new_tls_server(TLSContext* ctx, ISocketServer* base,
         LOG_ERROR_RETURN(EINVAL, nullptr, "invalid parameters, ", VALUE(ctx),
                          VALUE(base));
     return new TLSSocketServer(ctx, base, ownership);
+}
+
+estring_view tls_stream_get_alpn_selected(ISocketStream* stream) {
+    auto s = dynamic_cast<TLSSocketStream*>(stream);
+    if (!s) return {};
+    const unsigned char* data;
+    unsigned int len;
+    SSL_get0_alpn_selected(s->ssl, &data, &len);
+    if (!data) return {};
+    return {(char*)data, len};
 }
 
 }  // namespace net

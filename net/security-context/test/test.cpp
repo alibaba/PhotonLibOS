@@ -19,6 +19,8 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
+#include <photon/common/estring.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/net/security-context/tls-stream.h>
@@ -352,6 +354,53 @@ TEST(Socket, nested) {
     auto u5 = server->get_underlay_object(-1);
     auto fd = server->get_underlay_fd();
     ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
+}
+
+estring_view alpn_select_cb(void*, const std::vector<estring_view>& p) {
+    for (auto const &x : p) {
+        LOG_INFO(VALUE(x));
+    }
+    return p[1];
+}
+
+TEST(basic, alpn) {
+    // Server side
+    auto ctx_s = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(delete ctx_s);
+    ctx_s->set_alpn_select_cb({alpn_select_cb, nullptr});
+    auto srv = net::new_tls_server(ctx_s, net::new_tcp_socket_server(), true);
+    DEFER(delete srv);
+
+    srv->bind_v4any();
+    srv->listen();
+    photon::thread_create11([&]{
+        net::ISocketStream* s_s = nullptr;
+        while (!s_s) {
+            s_s = srv->accept();
+        }
+        DEFER(delete s_s);
+        auto server_proto = net::tls_stream_get_alpn_selected(s_s);
+        LOG_INFO(VALUE(server_proto));
+    });
+    auto ep = srv->getsockname();
+    LOG_INFO("Listen at `", ep);
+
+
+    // Client side
+    // Build ALPN Protos buf and set to client
+    auto ctx_c = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(delete ctx_c);
+    auto ret = ctx_c->set_alpn_protos({"h2", "http/1.1"});
+    LOG_INFO("set_alpn_protos `", ret);
+    auto cli =
+        net::new_tls_client(ctx_c, net::new_tcp_socket_client(), true);
+    DEFER(delete cli);
+
+    auto port = ep.port;
+    auto s_c = cli->connect(net::EndPoint("127.0.0.1", port));
+    DEFER(delete s_c);
+    auto cli_proto = net::tls_stream_get_alpn_selected(s_c);
+    LOG_INFO(VALUE(cli_proto));
 }
 
 int main(int argc, char** arg) {
