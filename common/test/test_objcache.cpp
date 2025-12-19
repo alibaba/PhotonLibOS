@@ -545,7 +545,7 @@ TEST(ObjectCache, num_limit) {
     for (int i = 0; i < 20; i++) {
         auto x = oc.borrow(i, [i] { return new int(i); });
     }
-    EXPECT_EQ(10, oc.size());
+    EXPECT_EQ(10UL, oc.size());
     // All key left should larger than 10, since 0~9 will be expire due to num
     // limit
     for (auto x : oc._set) {
@@ -559,7 +559,7 @@ TEST(ObjectCache, num_limit) {
     }
 
     EXPECT_EQ(
-        20,
+        20UL,
         oc2.size());  // due to all objects are using, no one will be expired
 
     for (int i = 0; i < 10; i++) {
@@ -570,13 +570,13 @@ TEST(ObjectCache, num_limit) {
         LOG_INFO("Exists ", ((ObjectCache<int, int*>::KeyedItem*)x)->key());
     }
 
-    EXPECT_EQ(10, oc2.size());
+    EXPECT_EQ(10UL, oc2.size());
 
     for (int i = 10; i < 20; i++) {
         oc2.release(i, false, true);
     }
 
-    EXPECT_EQ(10, oc2.size());
+    EXPECT_EQ(10UL, oc2.size());
     for (int i = 0; i < 20; i++) {
         EXPECT_NE(nullptr, oc2.acquire(i, [i] { return new int(i); }));
     }
@@ -635,7 +635,7 @@ TEST(ObjectCache, multithread_with_limit) {
     }
 
     EXPECT_EQ(cycle_cnt, release_cnt);
-    EXPECT_EQ(10, ocache.size());
+    EXPECT_EQ(10UL, ocache.size());
 }
 
 int main(int argc, char** argv) {
