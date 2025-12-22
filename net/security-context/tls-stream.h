@@ -116,15 +116,5 @@ void tls_stream_set_hostname(ISocketStream* stream, const char* hostname);
 
 estring_view tls_stream_get_alpn_selected(ISocketStream* stream);
 
-class TLSStream : public ISocketStream {
-public:
-    void set_hostname(const char* hostname) {
-        tls_stream_set_hostname(this, hostname);
-    }
-    std::string_view get_alpn_selected() {
-        return tls_stream_get_alpn_selected(this);
-    }
-};
-
 }  // namespace net
 }  // namespace photon
