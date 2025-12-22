@@ -17,15 +17,15 @@ limitations under the License.
 #pragma once
 
 #include <photon/common/object.h>
-
+#include <photon/common/estring.h>
+#include <photon/common/callback.h>
+#include <photon/net/socket.h>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace photon {
 namespace net {
-
-class ISocketStream;
-class ISocketServer;
-class ISocketClient;
 
 enum class SecurityRole {
     Client = 1,
@@ -49,6 +49,12 @@ public:
     virtual int set_cert(const char* cert_str) = 0;
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
     virtual int set_verify_mode(VerifyMode mode = VerifyMode::NONE) = 0;
+    // set client-side alpn protos in proto-list format
+    virtual int set_alpn_protos(const std::vector<estring_view>& protos) = 0;
+    // set server-side callback to choose proto
+    // return value must be one string_view of the vector
+    virtual int set_alpn_select_cb(
+        Delegate<estring_view, const std::vector<estring_view>&>) = 0;
 };
 
 enum class TLSVersion{
@@ -107,6 +113,8 @@ ISocketClient* new_tls_client(TLSContext* ctx, ISocketClient* base,
                               bool ownership = false);
 
 void tls_stream_set_hostname(ISocketStream* stream, const char* hostname);
+
+estring_view tls_stream_get_alpn_selected(ISocketStream* stream);
 
 }  // namespace net
 }  // namespace photon
