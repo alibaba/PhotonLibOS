@@ -24,6 +24,7 @@ static const char OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE[]  = "x-oss-copy-source
 static const char OSS_HEADER_KEY_X_OSS_METADATA_DIRECTIVE[] = "x-oss-metadata-directive";
 static const char OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR[]     = "x-oss-range-behavior";
 static const char OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE[]   = "x-oss-forbid-overwrite";
+static const char OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET[]   = "x-oss-symlink-target";
 
 static const char OSS_PARAM_KEY_CONTINUATION_TOKEN[]        = "continuation-token";
 static const char OSS_PARAM_KEY_OBJECT_META[]     = "objectMeta";
@@ -38,6 +39,7 @@ static const char OSS_PARAM_KEY_PART_NUMBER[]     = "partNumber";
 static const char OSS_PARAM_KEY_UPLOAD_ID[]       = "uploadId";
 static const char OSS_PARAM_KEY_APPEND[]          = "append";
 static const char OSS_PARAM_KEY_POSITION[]        = "position";
+static const char OSS_PARAM_KEY_SYMLINK[]         = "symlink";
 
 static constexpr int GMT_DATE_LIMIT = 64;
 static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds

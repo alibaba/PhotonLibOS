@@ -97,6 +97,7 @@ struct ListObjectsParameters {
 struct ListObjectsCBParameters {
   std::string_view key;
   std::string_view etag;
+  std::string_view type;
   size_t size = 0;
   time_t mtime = 0;
   bool is_com_prefix = false;
@@ -229,6 +230,10 @@ class Client : public Object {
   virtual int rename_object(std::string_view src_path,
                             std::string_view dst_path,
                             bool set_mime = false) = 0;
+
+  virtual int put_symlink(std::string_view obj, std::string_view target) = 0;
+
+  virtual int get_symlink(std::string_view obj, std::string& target) = 0;
 
   virtual int get_object_meta(std::string_view obj, ObjectMeta& meta) = 0;
 
