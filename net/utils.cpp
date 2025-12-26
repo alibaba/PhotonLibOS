@@ -275,44 +275,31 @@ protected:
     };
     IPAddr do_resolve(std::string_view host, Delegate<bool, IPAddr> filter) {
         auto ctr = [&]() -> IPAddrList* {
-            auto addrs = new IPAddrList();
-            std::shared_ptr<ResolveCtx> ctx = std::make_shared<ResolveCtx>();
-            ctx->addrs = addrs;
+            std::unique_ptr<IPAddrList> addrs(new IPAddrList());
+            auto ctx = std::make_shared<ResolveCtx>();
+            ctx->addrs = addrs.get();
             ctx->host = std::string(host);
             ctx->filter = filter;
             std::thread([ctx]() {
-                IPAddrList ret;
                 auto cb = [&](IPAddr addr) -> int {
                     SCOPED_LOCK(ctx->lock);
-                    if (ctx->filter && !ctx->filter.fire(addr))
-                        return 0;
-                    ret.push_back(new IPAddrNode(addr));
+                    if (ctx->filter && !ctx->filter.fire(addr)) return 0;
+                    if (ctx->addrs) {
+                        ctx->addrs->push_back(new IPAddrNode(addr));
+                    }
                     return 0;
                 };
                 _gethostbyname(ctx->host, cb);
-                {
-                    SCOPED_LOCK(ctx->lock);
-                    if (ctx->addrs) {
-                        ctx->addrs->push_back(std::move(ret));
-                        ctx->sem.signal(1);
-                    } else {
-                        LOG_ERROR("resolve timeout");
-                        while(!ret.empty())
-                            delete ret.pop_front();
-                    }
-                }
+                ctx->sem.signal(1);
             }).detach();
             ctx->sem.wait(1, resolve_timeout_);
-            {
-                SCOPED_LOCK(ctx->lock);
-                ctx->addrs = nullptr;
-                ctx->filter = {};
-            }
+            SCOPED_LOCK(ctx->lock);
+            ctx->addrs = nullptr;
+            ctx->filter = {};
             if (addrs->empty()) {
-                delete addrs;
                 return nullptr;
             }
-            return addrs;
+            return addrs.release();
         };
         auto ips = dnscache_.borrow(host, ctr, 1UL * 1000);
         if (!ips || ips->empty()) {
