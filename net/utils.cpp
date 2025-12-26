@@ -266,36 +266,46 @@ protected:
     struct IPAddrList : public intrusive_list<IPAddrNode>, spinlock {
         ~IPAddrList() { delete_all(); }
     };
+    struct ResolveCtx {
+        std::string host;
+        Delegate<bool, IPAddr> filter;
+        spinlock lock;
+        IPAddrList *addrs;
+        photon::semaphore sem;
+    };
     IPAddr do_resolve(std::string_view host, Delegate<bool, IPAddr> filter) {
         auto ctr = [&]() -> IPAddrList* {
-            auto addrs = new IPAddrList();
-            photon::semaphore sem;
-            std::thread([&]() {
-                auto now = std::chrono::steady_clock::now();
-                IPAddrList ret;
+            std::unique_ptr<IPAddrList> addrs(new IPAddrList());
+            auto ctx = std::make_shared<ResolveCtx>();
+            ctx->addrs = addrs.get();
+            ctx->host = std::string(host);
+            ctx->filter = filter;
+            std::thread([ctx]() {
                 auto cb = [&](IPAddr addr) -> int {
-                    if (filter && !filter.fire(addr))
-                        return 0;
-                    ret.push_back(new IPAddrNode(addr));
+                    SCOPED_LOCK(ctx->lock);
+                    if (ctx->filter && !ctx->filter.fire(addr)) return 0;
+                    if (ctx->addrs) {
+                        ctx->addrs->push_back(new IPAddrNode(addr));
+                    }
                     return 0;
                 };
-                _gethostbyname(host, cb);
-                auto time_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                                        std::chrono::steady_clock::now() - now).count();
-                if ((uint64_t)time_elapsed <= resolve_timeout_) {
-                    addrs->push_back(std::move(ret));
-                    sem.signal(1);
-                } else {
-                    LOG_ERROR("resolve timeout");
-                    while(!ret.empty())
-                        delete ret.pop_front();
-                }
+                _gethostbyname(ctx->host, cb);
+                ctx->sem.signal(1);
             }).detach();
-            sem.wait(1, resolve_timeout_);
-            return addrs;
+            ctx->sem.wait(1, resolve_timeout_);
+            SCOPED_LOCK(ctx->lock);
+            ctx->addrs = nullptr;
+            ctx->filter = {};
+            if (addrs->empty()) {
+                return nullptr;
+            }
+            return addrs.release();
         };
-        auto ips = dnscache_.borrow(host, ctr);
-        if (ips->empty()) LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for '`' failed", host);
+        auto ips = dnscache_.borrow(host, ctr, 1UL * 1000);
+        if (!ips || ips->empty()) {
+            ips.recycle(true);
+            LOG_ERRNO_RETURN(0, IPAddr(), "Domain resolution for '`' failed", host);
+        }
         SCOPED_LOCK(*ips);
         auto ret = ips->front();
         ips->node = ret->next();  // access in round robin order
