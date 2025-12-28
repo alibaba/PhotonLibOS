@@ -36,7 +36,10 @@ TEST(Socket, pooled) {
         DEFER(LOG_INFO("Done connection `", stream));
         conncount++;
         char buf[4];
-        while (stream->read(buf, 4) > 0) stream->write("TEST", 4);
+        int i=0;
+        while (stream->read(buf, 4) > 0){ i ++; stream->write("TEST", 4); break;}
+        photon::thread_sleep(10);
+        stream->close();
         return 0;
     };
     server->set_handler(handler);
@@ -47,6 +50,7 @@ TEST(Socket, pooled) {
     DEFER(delete client);
     task(client, server->getsockname());
     EXPECT_EQ(1, conncount);
+    ::sleep(100);
 }
 
 TEST(Socket, pooled_multisock) {

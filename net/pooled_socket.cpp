@@ -18,6 +18,8 @@ limitations under the License.
 
 #include <unordered_map>
 
+#include <unistd.h>
+
 #include <photon/common/alog.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
@@ -133,10 +135,19 @@ protected:
     }
 
     void rm_watch(StreamListNode* node) {
+        static int i = 0;
+        if(i++ % 5 == 0){
+            LOG_WARN("skip rm_watch");
+            return;
+        }
         if (node->fd >= 0) ev->rm_interest({node->fd, EVENT_READ, node});
     }
 
     ISocketStream* get_from_pool(const EndPoint& ep) {
+        static int i = 0;
+        if(i++ % 5 == 0){
+            return nullptr;
+        }
         auto it = fdmap.find(ep);
         if (it == fdmap.end()) return nullptr;
         assert(it != fdmap.end());
@@ -148,11 +159,14 @@ protected:
     }
 
     void push_into_pool(StreamListNode* node) {
+        LOG_DEBUG("push into pool");
         fdmap[node->key].push_back(node);
         add_watch(node);
     }
 
     void drop_from_pool(StreamListNode* node) {
+        LOG_DEBUG("drop_from_pool");
+
         // or node have no record
         auto it = fdmap.find(node->key);
         auto& list = it->second;
