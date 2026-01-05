@@ -78,10 +78,10 @@ struct ObjectMeta {
   DEFINE_OPTIONAL_FIELD(size_t, size, 1)
   DEFINE_OPTIONAL_FIELD(time_t, mtime, 1 << 1)
   DEFINE_OPTIONAL_FIELD(std::string, etag, 1 << 2)
+  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
 };
 
 struct ObjectHeaderMeta : public ObjectMeta {
-  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
   DEFINE_OPTIONAL_FIELD(std::string, storage_class, 1 << 4)
   DEFINE_OPTIONAL_FIELD(uint64_t, crc64, 1 << 5)
 

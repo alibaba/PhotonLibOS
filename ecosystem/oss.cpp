@@ -784,13 +784,7 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta) {
   int ret = fill_meta(op, (ObjectMeta&)meta);
   if (ret < 0) return ret;
 
-  auto it = op.resp.headers.find("x-oss-object-type");
-  if (it != op.resp.headers.end()) {
-    meta.set_type();
-    meta.type.assign(it.second().data(), it.second().size());
-  }
-
-  it = op.resp.headers.find("x-oss-storage-class");
+  auto it = op.resp.headers.find("x-oss-storage-class");
   if (it != op.resp.headers.end()) {
     meta.set_storage_class();
     meta.storage_class.assign(it.second().data(), it.second().size());
@@ -820,6 +814,12 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
   if (it != op.resp.headers.end()) {
     meta.set_etag();
     meta.etag.assign(it.second().data(), it.second().size());
+  }
+
+  it = op.resp.headers.find("x-oss-object-type");
+  if (it != op.resp.headers.end()) {
+    meta.set_type();
+    meta.type.assign(it.second().data(), it.second().size());
   }
   return 0;
 }
