@@ -1216,14 +1216,12 @@ class BasicAuthenticator : public Authenticator {
     data2sign.appends(method, "\n", content_md5, "\n", content_type, "\n",
                       m_gmt_date, "\n");
 
-    append_headers(data2sign, headers, false);
-
-    data2sign.appends(
-        make_ccl(!token.empty(), "x-oss-security-token:", token, "\n"), "/",
-        params.bucket, "/", params.object);
     if (!token.empty()) {
       headers.insert("x-oss-security-token", token);
     }
+    append_headers(data2sign, headers, false);
+
+    data2sign.appends("/", params.bucket, "/", params.object);
 
     // complete this list if needed. currently it's for ossfs use only.
     // must appear in dictionary order!
