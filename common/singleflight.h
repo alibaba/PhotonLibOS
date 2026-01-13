@@ -99,6 +99,11 @@ class SingleFlight {
          *
          * Each thread calling Do() creates a Node on its stack,
          * with lifetime covering the entire Do() call.
+         *
+         * The Node encapsulates both waiting and notification logic,
+         * supporting two synchronization modes:
+         * - Yield-based: Uses done_flag for cooperative waiting
+         * - Semaphore-based: Uses semaphore for blocking wait
          */
         struct Node {
             Node* next;        ///< Pointer to next node in the linked list
@@ -115,52 +120,96 @@ class SingleFlight {
                   result_ptr(result_ptr),
                   sem(0),
                   use_sem(use_sem) {}
+
+            /**
+             * @brief Wait for execution to complete
+             *
+             * Blocks the current thread until the executor completes and
+             * notifies. The waiting strategy is determined by use_sem:
+             * - If use_sem=false: Spin-yields checking done_flag
+             * - If use_sem=true: Blocks on semaphore wait
+             *
+             * @note After this method returns, the result (if any) is
+             * guaranteed to be written to result_ptr
+             */
+            void wait() {
+                if (use_sem) {
+                    sem.wait(1);
+                } else {
+                    while (!done_flag.load(std::memory_order_acquire)) {
+                        photon::thread_yield();
+                    }
+                }
+            }
+
+            /**
+             * @brief Write result and notify waiting thread
+             *
+             * Called by the executor to deliver the result and wake up this
+             * waiting node. Uses different notification mechanisms based on
+             * the waiting mode:
+             * - If use_sem=false: Sets done_flag with release semantics
+             * - If use_sem=true: Only signals the semaphore (skip done_flag)
+             *
+             * @tparam T Result type
+             * @param result Pointer to result object (nullptr if no result)
+             *
+             * @note ORDERING and safety:
+             * 1. Write result (if applicable)
+             * 2a. Semaphore mode: Signal semaphore (waiter blocked, won't
+             * destruct) 2b. Yield mode: Set done_flag (this is the LAST access
+             * to Node)
+             *
+             * @note Performance: Semaphore mode skips done_flag modification to
+             * avoid unnecessary atomic operation and memory barrier, since
+             * semaphore provides sufficient synchronization on its own.
+             *
+             * @note Safety: Both branches are safe without pre-reading use_sem:
+             * - Semaphore branch: Waiter blocked at sem.wait(), Node won't
+             * destruct until sem.signal() completes
+             * - Yield branch: done_flag.store() is the last Node access before
+             *   waiter may wake up and destruct
+             */
+            template <typename T>
+            void set_result_and_notify(const T* result) {
+                if (result && result_ptr) {
+                    *(T*)result_ptr = *result;
+                }
+                if (use_sem) {
+                    // Semaphore mode: signal directly without touching
+                    // done_flag The semaphore's internal synchronization
+                    // provides sufficient happens-before guarantee for result
+                    // visibility
+                    sem.signal(1);
+                } else {
+                    // Yield mode: set done_flag to release spin-waiting thread
+                    // This is the last access to Node before waiter may
+                    // destruct it
+                    done_flag.store(true, std::memory_order_release);
+                }
+            }
         };
 
         std::atomic<Node*> head{};  ///< Head pointer of linked list, using
                                     ///< atomic operations for thread safety
 
         /**
-         * @brief Wait for execution to complete
+         * @brief Register node and determine current thread's role
          *
-         * Waiting coroutines call this method, blocking until the executor
-         * completes done(). Supports two wait modes:
-         * - If use_sem is false: Uses photon::thread_yield() for cooperative
-         * waiting (suitable for short operations, lower latency)
-         * - If use_sem is true: Uses semaphore blocking (suitable for long
-         * operations to reduce CPU usage)
+         * Atomically inserts the current thread's node at the head of the
+         * waiting list using lock-free CAS operations. The first thread to
+         * successfully insert with next == nullptr becomes the executor,
+         * while subsequent threads become waiters.
          *
-         * @param node Reference to the node containing wait state
-         * @note Waits on done_flag to ensure result has been written before
-         * returning
-         */
-        void __wait(Node& node) {
-            if (node.use_sem) {
-                node.sem.wait(1);
-            } else {
-                while (!node.done_flag.load(std::memory_order_acquire)) {
-                    photon::thread_yield();
-                }
-            }
-        }
-
-        /**
-         * @brief Register node and determine current coroutine's role
+         * @param node Reference to the Node object on the caller's stack
+         * @return true if current thread is a waiter (should wait for result),
+         *         false if it's the executor (should execute func)
          *
-         * Inserts the current coroutine's node at the head of the list
-         * (stack-style insertion). The first coroutine to successfully insert
-         * with next == nullptr becomes the executor, while other coroutines
-         * become waiters and enter __wait().
-         *
-         * @param node Reference to the Node object on the stack
-         * @return true if current coroutine is a waiter, false if it's the
-         * executor
-         *
-         * @note This method uses CAS operations to ensure thread-safe list
-         * insertion
-         * @note The Node object must remain valid until __wait() returns
-         * or execution completes
-         * @note Uses photon::spin_wait() for brief spinning when CAS fails
+         * @note Thread-safe: Uses CAS with memory_order_acq_rel for
+         * synchronization
+         * @note The Node must remain valid on the stack until this method
+         * returns (for executors) or until wait() returns (for waiters)
+         * @note Uses photon::spin_wait() for backoff when CAS contention occurs
          */
         bool ready(Node& node) {
             auto n = &node;
@@ -168,46 +217,37 @@ class SingleFlight {
             while (!head.compare_exchange_weak(n->next, n,
                                                std::memory_order_acq_rel))
                 photon::spin_wait();
-            if (n->next) __wait(node);
+            if (n->next) node.wait();
             return n->next != nullptr;
         }
 
         /**
-         * @brief Complete execution and notify all waiters
+         * @brief Notify all waiting threads with the execution result
          *
-         * The executor coroutine calls this method to traverse all nodes in the
-         * list and notify waiters:
-         * 1. Load the entire waiting list atomically
-         * 2. For each waiting node:
-         *    a. Copy result to node's result_ptr (if applicable)
-         *    b. Set done_flag to release yield-based waiters
-         *    c. Signal semaphore to release semaphore-based waiters
-         * 3. Clear the head pointer to nullptr
+         * Called by the executor thread after completing func execution.
+         * Atomically detaches the entire waiting list and iterates through
+         * each node to deliver the result and wake up waiting threads.
+         *
+         * Process:
+         * 1. Atomically swap head with nullptr (detach entire list)
+         * 2. For each node in the detached list:
+         *    - Call set_result_and_notify() to write result and wake the waiter
+         * 3. Continue until all nodes are processed
          *
          * @tparam T Result type
-         * @param result Pointer to the result object (nullptr indicates no
-         * return value)
+         * @param result Pointer to the result object (nullptr for void return)
          *
-         * @note Critical ordering: result must be written and done_flag must be
-         * set BEFORE signaling the semaphore, because once sem.signal() is
-         * called, the waiting coroutine may wake up immediately and access the
-         * result.
-         * @note For yield-based waiters, done_flag ensures they see the result
-         * before proceeding.
+         * @note Memory safety: Uses exchange() to ensure no new nodes can be
+         * added after detachment, preventing use-after-free
+         * @note All waiters are guaranteed to see the result due to
+         * release-acquire semantics in set_result_and_notify()
          */
         template <typename T>
         void done(const T* result = nullptr) {
             auto n = head.exchange(nullptr, std::memory_order_acq_rel);
             while (n) {
                 auto next = n->next;
-                if (result && n->result_ptr) {
-                    *(T*)n->result_ptr = *result;
-                }
-                if (n->use_sem) {
-                    n->sem.signal(1);
-                } else {
-                    n->done_flag.store(true, std::memory_order_release);
-                }
+                n->set_result_and_notify(result);
                 n = next;
             }
         }
