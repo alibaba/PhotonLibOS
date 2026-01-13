@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <photon/common/sharedcall.h>
+#include <photon/common/singleflight.h>
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
 
@@ -25,7 +25,7 @@ limitations under the License.
 #include "../../test/ci-tools.h"
 
 TEST(Basic, stdthreads) {
-    photon::SharedCall sc;
+    photon::SingleFlight sc;
     std::vector<std::thread> jhs;
     std::atomic<int> count{0};
     for (int i = 0; i < 3; i++) {
@@ -47,7 +47,7 @@ TEST(Basic, stdthreads) {
 }
 
 TEST(Basic, photonthreads) {
-    photon::SharedCall sc;
+    photon::SingleFlight sc;
     std::vector<photon::join_handle*> jhs;
     std::atomic<int> count{0};
     for (int i = 0; i < 3; i++) {
