@@ -41,17 +41,20 @@ namespace photon {
  *
  * Usage examples:
  * @code
- * photon::SingleFlight sc;
+ * photon::SingleFlight sf;
  *
- * // Example 1: Function with return value
- * auto result = sc.Do([&]() {
- *     // Expensive operation, e.g., database query
- *     return fetch_data_from_db(key);
+ * // Example 1: Short operation with yield-based waiting (default)
+ * auto result = sf.Do([&]() {
+ *     return quick_operation();  // Executes only once
  * });
  *
- * // Example 2: Function without return value
- * sc.Do([&]() {
- *     // Perform some operation
+ * // Example 2: Long operation with semaphore-based waiting
+ * auto data = sf.Do([&]() {
+ *     return expensive_db_query();  // Long operation
+ * }, true);  // use_sem = true for better CPU efficiency
+ *
+ * // Example 3: Void return type
+ * sf.Do([&]() {
  *     process_data();
  * });
  *
@@ -59,7 +62,7 @@ namespace photon {
  * std::vector<photon::thread*> threads;
  * for (int i = 0; i < 100; i++) {
  *     threads.push_back(photon::thread_create11([&]() {
- *         auto data = sc.Do([&]() {
+ *         auto result = sf.Do([&]() {
  *             return expensive_operation();  // Executes only once
  *         });
  *         // All threads receive the same result
@@ -70,14 +73,16 @@ namespace photon {
  * Performance characteristics:
  * - Lock-free design using CAS operations for high-performance concurrency
  * - Stack-allocated Node objects to avoid heap allocation overhead
- * - Uses photon coroutine scheduling to avoid blocking system threads
+ * - Flexible waiting strategies:
+ *   * Yield-based (default): Better for short operations, lower latency
+ *   * Semaphore-based: Better for long operations, reduces CPU usage
  *
  * Caveats:
  * - Exception handling is not supported; func should not throw exceptions
  * - Each SingleFlight instance works independently; different instances don't
  * share state
- * - Suitable for short-lived operations; long operations will cause other
- * coroutines to wait
+ * - Choose appropriate wait mode based on operation duration for optimal
+ * performance
  */
 class SingleFlight {
     /**
@@ -99,6 +104,8 @@ class SingleFlight {
             Node* next;        ///< Pointer to next node in the linked list
             void* result_ptr;  ///< Pointer to result storage location (address
                                ///< of stack variable)
+            photon::semaphore* sem_ptr;  ///< Optional semaphore for blocking
+                                         ///< wait (nullptr = yield-based wait)
         };
 
         std::atomic<Node*> head{};  ///< Head pointer of linked list, using
@@ -107,14 +114,21 @@ class SingleFlight {
         /**
          * @brief Wait for the linked list to be cleared
          *
-         * Spin-waits until head becomes nullptr, indicating all nodes have been
-         * processed. Waiting coroutines call this method, blocking until the
-         * executor completes done().
+         * Waiting coroutines call this method, blocking until the executor
+         * completes done(). Supports two wait modes:
+         * - If sem is nullptr: Uses photon::thread_yield() for cooperative
+         * waiting (suitable for short operations)
+         * - If sem is provided: Uses semaphore blocking (suitable for long
+         * operations to reduce CPU usage)
          *
-         * @note Uses photon::thread_yield() to avoid blocking the underlying
-         * system thread
+         * @param sem Optional semaphore pointer for blocking wait
+         * @note Spin-waits checking head until it becomes nullptr, indicating
+         * all nodes have been processed
          */
-        void __wait() {
+        void __wait(photon::semaphore* sem) {
+            if (sem) {
+                sem->wait(1);
+            }
             while (head.load(std::memory_order_acquire)) {
                 photon::thread_yield();
             }
@@ -131,6 +145,8 @@ class SingleFlight {
          * @tparam T Pointer type of the result type
          * @param node_ptr Pointer to the Node object on the stack
          * @param result_ptr Pointer to result storage location (optional)
+         * @param sem_ptr Optional semaphore for blocking wait (nullptr =
+         * yield-based wait)
          * @return true if current coroutine is a waiter, false if it's the
          * executor
          *
@@ -141,14 +157,16 @@ class SingleFlight {
          * @note Uses photon::spin_wait() for brief spinning when CAS fails
          */
         template <typename T>
-        bool ready(Node* node_ptr, T* result_ptr = nullptr) {
+        bool ready(Node* node_ptr, T* result_ptr = nullptr,
+                   photon::semaphore* sem_ptr = nullptr) {
             node_ptr->result_ptr = result_ptr;
+            node_ptr->sem_ptr = sem_ptr;
             auto n = node_ptr;
             n->next = head.load(std::memory_order_acquire);
             while (!head.compare_exchange_weak(n->next, n,
                                                std::memory_order_acq_rel))
                 photon::spin_wait();
-            if (n->next) __wait();
+            if (n->next) __wait(node_ptr->sem_ptr);
             return n->next != nullptr;
         }
 
@@ -158,8 +176,9 @@ class SingleFlight {
          * The executor coroutine calls this method to traverse all nodes in the
          * list:
          * 1. Copy the result to each node's result_ptr (if non-null)
-         * 2. Remove that node from the list
-         * 3. Finally set head to nullptr, releasing all waiting coroutines
+         * 2. Signal the semaphore if the node uses semaphore-based waiting
+         * 3. Remove that node from the list
+         * 4. Finally set head to nullptr, releasing all waiting coroutines
          *
          * @tparam T Result type
          * @param result Pointer to the result object (nullptr indicates no
@@ -169,8 +188,8 @@ class SingleFlight {
          * destructed
          * @note Uses CAS operations to ensure concurrency safety, with
          * automatic retry on failure
-         * @note Result copying occurs before node removal to ensure memory
-         * safety
+         * @note Result copying and semaphore signaling occur before node
+         * removal to ensure memory safety
          */
         template <typename T>
         void done(const T* result = nullptr) {
@@ -178,8 +197,12 @@ class SingleFlight {
             while (n) {
                 auto next = n->next;
                 auto res_ptr = n->result_ptr;
+                auto sem_ptr = n->sem_ptr;
                 if (result && res_ptr) {
                     *(T*)res_ptr = *result;
+                }
+                if (sem_ptr) {
+                    sem_ptr->signal(1);
                 }
                 if (head.compare_exchange_weak(n, next,
                                                std::memory_order_acq_rel)) {
@@ -195,17 +218,24 @@ public:
      *
      * @tparam Func Callable object type
      * @param func Function to execute, must return void
+     * @param use_sem If true, waiting coroutines use semaphore blocking; if
+     * false, use thread_yield()
      *
      * When multiple coroutines call simultaneously, only one coroutine will
      * execute func, while others wait until execution completes.
      *
-     * @note Uses photon coroutine scheduling, does not block system threads
+     * @note For short operations, use default (use_sem=false) for better
+     * performance
+     * @note For long operations, set use_sem=true to reduce CPU usage during
+     * waiting
      */
     template <typename Func,
               typename RetType = decltype(std::declval<Func>()())>
-    std::enable_if_t<std::is_void<RetType>::value, void> Do(Func&& func) {
+    std::enable_if_t<std::is_void<RetType>::value, void> Do(
+        Func&& func, bool use_sem = false) {
         WaitLink::Node node;
-        if (!wl.ready<void*>(&node)) {
+        photon::semaphore sem;
+        if (!wl.ready<void*>(&node, nullptr, use_sem ? &sem : nullptr)) {
             func();
             wl.done<void*>();
         }
@@ -216,6 +246,8 @@ public:
      *
      * @tparam Func Callable object type
      * @param func Function to execute, with return type RetType
+     * @param use_sem If true, waiting coroutines use semaphore blocking; if
+     * false, use thread_yield()
      * @return RetType The function's return value
      *
      * When multiple coroutines call simultaneously, only one coroutine will
@@ -224,13 +256,19 @@ public:
      *
      * @note RetType must be a copyable type
      * @note Return value is passed by value copy to avoid dangling references
+     * @note For short operations, use default (use_sem=false) for better
+     * performance
+     * @note For long operations, set use_sem=true to reduce CPU usage during
+     * waiting
      */
     template <typename Func,
               typename RetType = decltype(std::declval<Func>()())>
-    std::enable_if_t<!std::is_void<RetType>::value, RetType> Do(Func&& func) {
+    std::enable_if_t<!std::is_void<RetType>::value, RetType> Do(
+        Func&& func, bool use_sem = false) {
         RetType result;
         WaitLink::Node node;
-        if (!wl.ready(&node, &result)) {
+        photon::semaphore sem;
+        if (!wl.ready(&node, &result, use_sem ? &sem : nullptr)) {
             result = func();
             wl.done(&result);
         }

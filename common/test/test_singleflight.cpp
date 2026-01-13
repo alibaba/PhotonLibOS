@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include <photon/common/singleflight.h>
+#include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread11.h>
 
@@ -33,6 +34,7 @@ TEST(Basic, stdthreads) {
             photon::init();
             DEFER(photon::fini());
             auto ret = sc.Do([&] {
+                LOG_INFO("DO at `", photon::CURRENT);
                 count.fetch_add(1);
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 return count.load();
@@ -54,10 +56,56 @@ TEST(Basic, photonthreads) {
         jhs.emplace_back(
             photon::thread_enable_join(photon::thread_create11([&] {
                 auto ret = sc.Do([&] {
+                    LOG_INFO("DO at `", photon::CURRENT);
                     count.fetch_add(1);
-                    photon::thread_usleep(1);
+                    photon::thread_sleep(1);
                     return count.load();
                 });
+                EXPECT_EQ(1, ret);
+            })));
+    }
+    for (auto& t : jhs) {
+        photon::thread_join(t);
+    }
+    EXPECT_EQ(1, count.load());
+}
+
+TEST(UseSem, stdthreads) {
+    photon::SingleFlight sc;
+    std::vector<std::thread> jhs;
+    std::atomic<int> count{0};
+    for (int i = 0; i < 3; i++) {
+        jhs.emplace_back([&] {
+            photon::init();
+            DEFER(photon::fini());
+            auto ret = sc.Do([&] {
+                LOG_INFO("DO at `", photon::CURRENT);
+                count.fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                return count.load();
+            }, true);
+            EXPECT_EQ(1, ret);
+        });
+    }
+    for (auto& t : jhs) {
+        t.join();
+    }
+    EXPECT_EQ(1, count.load());
+}
+
+TEST(UseSem, photonthreads) {
+    photon::SingleFlight sc;
+    std::vector<photon::join_handle*> jhs;
+    std::atomic<int> count{0};
+    for (int i = 0; i < 3; i++) {
+        jhs.emplace_back(
+            photon::thread_enable_join(photon::thread_create11([&] {
+                auto ret = sc.Do([&] {
+                    LOG_INFO("DO at `", photon::CURRENT);
+                    count.fetch_add(1);
+                    photon::thread_sleep(1);
+                    return count.load();
+                }, true);
                 EXPECT_EQ(1, ret);
             })));
     }
