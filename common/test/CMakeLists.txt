@@ -42,3 +42,7 @@ target_link_libraries(perf-alog PRIVATE photon_shared)
 add_executable(test-delegates test_delegates.cpp)
 target_link_libraries(test-delegates PRIVATE photon_shared)
 add_test(NAME test-delegates COMMAND $<TARGET_FILE:test-delegates>)
+
+add_executable(test-sharedcall test_sharedcall.cpp)
+target_link_libraries(test-sharedcall PRIVATE photon_shared)
+add_test(NAME test-sharedcall COMMAND $<TARGET_FILE:test-sharedcall>)
