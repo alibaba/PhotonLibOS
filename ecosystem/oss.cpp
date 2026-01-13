@@ -111,8 +111,7 @@ class OssUrl {
   estring m_url, m_raw_object;
   uint64_t m_url_size;
   rstring_view16 m_bucket, m_object;
-  OssUrl() {}
-
+  OssUrl() = default;
   OssUrl(std::string_view endpoint, std::string_view bucket,
          std::string_view object, bool is_http) {
     assert(!bucket.empty());
@@ -319,6 +318,8 @@ class OssClientImpl : public Client {
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr);
+
+  int batch_get_objects(std::vector<GetObjectParameters>& params);
 
   ssize_t put_object(std::string_view object, const struct iovec* iov,
                      int iovcnt, uint64_t* expected_crc64 = nullptr);
@@ -879,6 +880,308 @@ retry:
   return ret;
 }
 
+struct BatchGetResult {
+  uint32_t request_count = 0;
+  uint32_t success_count = 0;
+  uint32_t status_code = 0;
+  std::string error_msg;
+};
+
+class FrameStream;
+struct Frame {
+  enum class FrameKind : uint8_t { None, Data, Meta, End };
+
+  FrameKind kind = FrameKind::None;
+  uint32_t ref_id = 0;
+  uint32_t payload_size = 0;
+  uint32_t tail_size = 0;  // checksum size
+
+  BatchGetResult read_end(FrameStream& stream) const;
+  std::unordered_map<estring_view, estring> read_meta(
+      FrameStream& stream) const;
+  ssize_t read_data(FrameStream& stream, const struct iovec* iov,
+                    int iovcnt) const;
+  bool skip(FrameStream& stream) const;
+};
+
+static inline uint32_t be32_to_host(const uint8_t* p) {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) | (static_cast<uint32_t>(p[3]));
+}
+
+class FrameStream {
+ public:
+  using Response = photon::net::http::Response;
+
+  explicit FrameStream(Response* response) : response_(response) {}
+
+  class Iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = Frame;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const value_type*;
+    using reference = const value_type&;
+
+    Iterator() : stream_(nullptr) {}
+    explicit Iterator(FrameStream* s) : stream_(s) { parse_next(); }
+
+    reference operator*() const { return current_; }
+    pointer operator->() const { return &current_; }
+
+    Iterator& operator++() {
+      if (stream_) parse_next();
+      return *this;
+    }
+
+    bool operator==(const Iterator& other) const noexcept {
+      return stream_ == other.stream_;
+    }
+    bool operator!=(const Iterator& other) const noexcept {
+      return !(*this == other);
+    }
+
+   private:
+    void parse_next() {
+      static constexpr uint32_t FRAME_DATA = 0xFF2;
+      static constexpr uint32_t FRAME_META = 0xFF1;
+      static constexpr uint32_t FRAME_END = 0xFF4;
+
+      // |version| Frame-Type |  ref-id    | Payload Length|Header Checksum|Payload|Payload Checksum|
+      // |<1---->| <--3 bytes>|<--4 bytes->| <--4 bytes--->|<--4 bytes-----><-n/a--><--4 bytes----->|
+
+      uint8_t header[16];
+      if (!stream_->read_exact(header, sizeof(header))) {
+        stream_ = nullptr;
+        return;
+      }
+
+      header[0] = 0;  // ignore version bit
+
+      uint32_t type = be32_to_host(header);
+      if (type != FRAME_DATA && type != FRAME_META && type != FRAME_END) {
+        stream_ = nullptr;
+        return;
+      }
+
+      current_.ref_id = be32_to_host(header + 4);
+      current_.payload_size = be32_to_host(header + 8);
+      current_.tail_size = 4;
+
+      if (type == FRAME_DATA)
+        current_.kind = Frame::FrameKind::Data;
+      else if (type == FRAME_META)
+        current_.kind = Frame::FrameKind::Meta;
+      else if (type == FRAME_END)
+        current_.kind = Frame::FrameKind::End;
+    }
+
+    FrameStream* stream_ = nullptr;
+    Frame current_;
+  };
+
+  Iterator begin() { return Iterator(this); }
+  Iterator end() const { return {}; }
+
+ private:
+  BatchGetResult read_end_frame(const Frame& frame) {
+    size_t total = frame.payload_size + frame.tail_size;
+    std::vector<uint8_t> buf(total);
+    if (!read_exact(buf.data(), total)) return {};
+
+    BatchGetResult ret;
+    ret.request_count = be32_to_host(buf.data());
+    ret.success_count = be32_to_host(buf.data() + 4);
+    ret.status_code = be32_to_host(buf.data() + 8);
+
+    if (frame.payload_size > 12) {
+      ret.error_msg.assign(reinterpret_cast<const char*>(buf.data() + 12),
+                           frame.payload_size - 12);
+    }
+    // ignore last 4 bytes (checksum)
+    return ret;
+  }
+  std::unordered_map<estring_view, estring> read_meta_frame(
+      const Frame& frame) {
+    size_t total = frame.payload_size + frame.tail_size;
+    std::vector<char> buf(total);
+    if (!read_exact(reinterpret_cast<uint8_t*>(buf.data()), total)) return {};
+
+    static const std::unordered_set<estring_view> headers = {
+        "x-oss-storage-class", "x-oss-hash-crc64ecma",
+        "x-oss-object-type",   "ETag",
+        "x-oss-response-code", "Last-Modified",
+        "x-oss-object-size"};
+
+    estring_view meta_str(buf.data(), frame.payload_size);
+    std::unordered_map<estring_view, estring> meta;
+    for (auto line : meta_str.split_lines()) {
+      auto pos = line.find(':');
+      if (pos == estring_view::npos) continue;
+      estring_view key(line.substr(0, pos));
+      auto it = headers.find(key.trim());
+      if (it == headers.end()) continue;
+      estring_view val(line.substr(pos + 1));
+      meta.emplace(*it, photon::net::http::url_unescape(val.trim()));
+    }
+    return meta;
+  }
+
+  ssize_t read_data_frame(const Frame& frame, const struct iovec* iov,
+                          int iovcnt) {
+    ssize_t ret = response_->readv(iov, iovcnt);
+    if (ret < 0 || static_cast<size_t>(ret) != frame.payload_size) {
+      LOG_ERROR("Data frame mismatch: expected `, got `", frame.payload_size,
+                ret);
+      return ret < 0 ? ret : -1;
+    }
+    if (!skip_bytes(frame.tail_size))
+      LOG_ERROR_RETURN(EIO, -1, "Failed to skip data frame tail");
+    return ret;
+  }
+
+  bool skip_frame(const Frame& frame) {
+    return skip_bytes(frame.payload_size + frame.tail_size);
+  }
+
+  bool read_exact(uint8_t* buf, size_t n) {
+    while (n > 0) {
+      size_t got = response_->read(buf, n);
+      if (got == 0 || got > n) return false;
+      buf += got;
+      n -= got;
+    }
+    return true;
+  }
+
+  bool skip_bytes(size_t n) {
+    std::vector<uint8_t> dummy(std::min(n, size_t(128*1024)));
+    while (n > 0) {
+      size_t chunk = std::min(n, dummy.size());
+      if (!read_exact(dummy.data(), chunk)) return false;
+      n -= chunk;
+    }
+    return true;
+  }
+
+  Response* response_ = nullptr;
+  friend struct Frame;
+};
+
+BatchGetResult Frame::read_end(FrameStream& stream) const {
+  assert(kind == FrameKind::End);
+  return stream.read_end_frame(*this);
+}
+
+std::unordered_map<estring_view, estring> Frame::read_meta(
+    FrameStream& stream) const {
+  assert(kind == FrameKind::Meta);
+  return stream.read_meta_frame(*this);
+}
+
+ssize_t Frame::read_data(FrameStream& stream, const struct iovec* iov,
+                         int iovcnt) const {
+  assert(kind == FrameKind::Data);
+  return stream.read_data_frame(*this, iov, iovcnt);
+}
+
+bool Frame::skip(FrameStream& stream) const { return stream.skip_frame(*this); }
+
+int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
+  static std::string_view req_head = "<GetObjectsRequest>";
+  static std::string_view req_tail = "</GetObjectsRequest>";
+  estring req_list;
+  for (size_t i = 0; i < params.size(); i++) {
+    iovector_view view((struct iovec*)params[i].iov, params[i].iovcnt);
+    auto cnt = view.sum();
+    req_list.appends("<Object><ObjectName>", xml_escape(params[i].object),
+                     "</ObjectName><Range>bytes=", params[i].offset, "-",
+                     params[i].offset + cnt - 1, "</Range><RefId>", i + 1,
+                     "</RefId></Object>");
+    params[i].result = -1;
+  }
+
+  struct iovec iov[3] = {{(void*)req_head.data(), req_head.size()},
+                         {(void*)req_list.data(), req_list.size()},
+                         {(void*)req_tail.data(), req_tail.size()}};
+  iovector_view body_view(iov, 3);
+
+  OssUrl oss_url(m_endpoint, m_bucket, "/", m_is_http);
+  auto md5 = md5_base64(body_view);
+
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {// must appear in dictionary order!
+                                         {OSS_PARAM_KEY_BATCH_GET, ""}});
+
+  DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
+  op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
+  op.req.headers.content_length(body_view.sum());
+  op.body_writer = {&body_view, &body_writer_cb};
+  int r =
+      append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
+
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+
+  uint32_t read_good_cnt = 0;
+  FrameStream stream(&op.resp);
+  for (const auto& frame : stream) {
+    if (frame.kind == Frame::FrameKind::Meta) {
+      auto& param = params[frame.ref_id - 1];
+      auto meta_map = frame.read_meta(stream);
+      auto it = meta_map.find("x-oss-response-code");
+      if (it != meta_map.end()) {
+        auto status_code = estring_view(it->second).to_int64();
+        param.result = (status_code == 200) ? 0 : -1;
+        if (status_code != 200) {
+          LOG_ERROR("Object ` failed with status code `", param.object,
+                    status_code);
+        }
+      }
+
+      if (param.meta && param.result == 0) {
+        param.meta->set_type(meta_map["x-oss-object-type"]);
+        param.meta->set_etag(meta_map["ETag"]);
+        param.meta->set_storage_class(meta_map["x-oss-storage-class"]);
+        param.meta->set_mtime(
+            get_lastmodified(meta_map["Last-Modified"].c_str()));
+        param.meta->set_crc64(
+            estring_view(meta_map["x-oss-hash-crc64ecma"]).to_uint64());
+        param.meta->set_size(
+            estring_view(meta_map["x-oss-object-size"]).to_int64());
+      }
+    } else if (frame.kind == Frame::FrameKind::Data) {
+      auto& param = params[frame.ref_id - 1];
+      iovector_view view((struct iovec*)param.iov, param.iovcnt);
+      if (view.sum() != frame.payload_size || param.result != 0) {
+        LOG_ERROR("Skip object ` data frame expected `, got `, result `",
+                  param.object, view.sum(), frame.payload_size, param.result);
+        if (!frame.skip(stream))
+          LOG_ERROR_RETURN(EIO, -1, "Failed to skip data frame");
+        continue;
+      }
+
+      r = frame.read_data(stream, param.iov, param.iovcnt);
+      if (r < 0) return r;
+      read_good_cnt++;
+    } else {
+      auto result = frame.read_end(stream);
+      LOG_DEBUG("End frame status code ` request cnt ` success cnt `",
+                result.status_code, result.request_count, result.success_count);
+      if (read_good_cnt != result.success_count) {
+        LOG_ERROR("Mismatch between read good cnt ` and success cnt `",
+                  read_good_cnt, result.success_count);
+        return -1;
+      }
+      return result.success_count;
+    }
+  }
+  return 0;
+}
+
 ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
                               int iovcnt, uint64_t* expected_crc64) {
   iovector_view view((struct iovec*)iov, iovcnt);
@@ -1231,7 +1534,7 @@ class BasicAuthenticator : public Authenticator {
         OSS_PARAM_KEY_DELETE,      OSS_PARAM_KEY_OBJECT_META,
         OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_POSITION,
         OSS_PARAM_KEY_SYMLINK,     OSS_PARAM_KEY_UPLOAD_ID,
-        OSS_PARAM_KEY_UPLOADS,
+        OSS_PARAM_KEY_UPLOADS,     OSS_PARAM_KEY_BATCH_GET
     };
 
     if (params.query_params.size()) {
