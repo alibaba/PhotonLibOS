@@ -203,11 +203,10 @@ class SingleFlight {
                 if (result && n->result_ptr) {
                     *(T*)n->result_ptr = *result;
                 }
-                // CRITICAL: Set done_flag before signaling semaphore
-                // to ensure result visibility before waking waiters
-                n->done_flag.store(true, std::memory_order_release);
                 if (n->use_sem) {
                     n->sem.signal(1);
+                } else {
+                    n->done_flag.store(true, std::memory_order_release);
                 }
                 n = next;
             }
