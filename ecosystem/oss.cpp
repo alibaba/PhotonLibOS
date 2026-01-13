@@ -408,6 +408,7 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client = photon::net::http::new_http_client();
   m_client->timeout(m_oss_options.request_timeout_us);
   m_client->set_user_agent(m_oss_options.user_agent);
+  if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
 
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;

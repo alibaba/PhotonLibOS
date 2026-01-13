@@ -40,6 +40,7 @@ struct ClientOptions {
   std::string endpoint;
   std::string bucket;
   std::string region;
+  std::string proxy;
   int max_list_ret_cnt = 1000;
   std::string user_agent = "Photon-ObjStore-Client";
   std::string bind_ips;
