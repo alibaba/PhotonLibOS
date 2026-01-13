@@ -104,33 +104,43 @@ class SingleFlight {
             Node* next;        ///< Pointer to next node in the linked list
             void* result_ptr;  ///< Pointer to result storage location (address
                                ///< of stack variable)
-            photon::semaphore* sem_ptr;  ///< Optional semaphore for blocking
-                                         ///< wait (nullptr = yield-based wait)
+            photon::semaphore sem;
+            bool use_sem;  ///< If true, use semaphore for blocking wait;
+                           ///< if false, use yield-based spinning
+            std::atomic<bool> done_flag{
+                false};  ///< Flag indicating execution completion
+
+            Node(void* result_ptr, bool use_sem)
+                : next(nullptr),
+                  result_ptr(result_ptr),
+                  sem(0),
+                  use_sem(use_sem) {}
         };
 
         std::atomic<Node*> head{};  ///< Head pointer of linked list, using
                                     ///< atomic operations for thread safety
 
         /**
-         * @brief Wait for the linked list to be cleared
+         * @brief Wait for execution to complete
          *
          * Waiting coroutines call this method, blocking until the executor
          * completes done(). Supports two wait modes:
-         * - If sem is nullptr: Uses photon::thread_yield() for cooperative
-         * waiting (suitable for short operations)
-         * - If sem is provided: Uses semaphore blocking (suitable for long
+         * - If use_sem is false: Uses photon::thread_yield() for cooperative
+         * waiting (suitable for short operations, lower latency)
+         * - If use_sem is true: Uses semaphore blocking (suitable for long
          * operations to reduce CPU usage)
          *
-         * @param sem Optional semaphore pointer for blocking wait
-         * @note Spin-waits checking head until it becomes nullptr, indicating
-         * all nodes have been processed
+         * @param node Reference to the node containing wait state
+         * @note Waits on done_flag to ensure result has been written before
+         * returning
          */
-        void __wait(photon::semaphore* sem) {
-            if (sem) {
-                sem->wait(1);
-            }
-            while (head.load(std::memory_order_acquire)) {
-                photon::thread_yield();
+        void __wait(Node& node) {
+            if (node.use_sem) {
+                node.sem.wait(1);
+            } else {
+                while (!node.done_flag.load(std::memory_order_acquire)) {
+                    photon::thread_yield();
+                }
             }
         }
 
@@ -142,31 +152,23 @@ class SingleFlight {
          * with next == nullptr becomes the executor, while other coroutines
          * become waiters and enter __wait().
          *
-         * @tparam T Pointer type of the result type
-         * @param node_ptr Pointer to the Node object on the stack
-         * @param result_ptr Pointer to result storage location (optional)
-         * @param sem_ptr Optional semaphore for blocking wait (nullptr =
-         * yield-based wait)
+         * @param node Reference to the Node object on the stack
          * @return true if current coroutine is a waiter, false if it's the
          * executor
          *
-         * @note This method uses CAS operations to ensure coroutine-safe list
+         * @note This method uses CAS operations to ensure thread-safe list
          * insertion
-         * @note The object pointed to by node_ptr must remain valid until
-         * ready() and done() complete
+         * @note The Node object must remain valid until __wait() returns
+         * or execution completes
          * @note Uses photon::spin_wait() for brief spinning when CAS fails
          */
-        template <typename T>
-        bool ready(Node* node_ptr, T* result_ptr = nullptr,
-                   photon::semaphore* sem_ptr = nullptr) {
-            node_ptr->result_ptr = result_ptr;
-            node_ptr->sem_ptr = sem_ptr;
-            auto n = node_ptr;
+        bool ready(Node& node) {
+            auto n = &node;
             n->next = head.load(std::memory_order_acquire);
             while (!head.compare_exchange_weak(n->next, n,
                                                std::memory_order_acq_rel))
                 photon::spin_wait();
-            if (n->next) __wait(node_ptr->sem_ptr);
+            if (n->next) __wait(node);
             return n->next != nullptr;
         }
 
@@ -174,40 +176,40 @@ class SingleFlight {
          * @brief Complete execution and notify all waiters
          *
          * The executor coroutine calls this method to traverse all nodes in the
-         * list:
-         * 1. Copy the result to each node's result_ptr (if non-null)
-         * 2. Signal the semaphore if the node uses semaphore-based waiting
-         * 3. Remove that node from the list
-         * 4. Finally set head to nullptr, releasing all waiting coroutines
+         * list and notify waiters:
+         * 1. Load the entire waiting list atomically
+         * 2. For each waiting node:
+         *    a. Copy result to node's result_ptr (if applicable)
+         *    b. Set done_flag to release yield-based waiters
+         *    c. Signal semaphore to release semaphore-based waiters
+         * 3. Clear the head pointer to nullptr
          *
          * @tparam T Result type
          * @param result Pointer to the result object (nullptr indicates no
          * return value)
          *
-         * @note Must be called before any waiting coroutine's Node object is
-         * destructed
-         * @note Uses CAS operations to ensure concurrency safety, with
-         * automatic retry on failure
-         * @note Result copying and semaphore signaling occur before node
-         * removal to ensure memory safety
+         * @note Critical ordering: result must be written and done_flag must be
+         * set BEFORE signaling the semaphore, because once sem.signal() is
+         * called, the waiting coroutine may wake up immediately and access the
+         * result.
+         * @note For yield-based waiters, done_flag ensures they see the result
+         * before proceeding.
          */
         template <typename T>
         void done(const T* result = nullptr) {
-            auto n = head.load(std::memory_order_acquire);
+            auto n = head.exchange(nullptr, std::memory_order_acq_rel);
             while (n) {
                 auto next = n->next;
-                auto res_ptr = n->result_ptr;
-                auto sem_ptr = n->sem_ptr;
-                if (result && res_ptr) {
-                    *(T*)res_ptr = *result;
+                if (result && n->result_ptr) {
+                    *(T*)n->result_ptr = *result;
                 }
-                if (sem_ptr) {
-                    sem_ptr->signal(1);
+                // CRITICAL: Set done_flag before signaling semaphore
+                // to ensure result visibility before waking waiters
+                n->done_flag.store(true, std::memory_order_release);
+                if (n->use_sem) {
+                    n->sem.signal(1);
                 }
-                if (head.compare_exchange_weak(n, next,
-                                               std::memory_order_acq_rel)) {
-                    n = next;
-                }
+                n = next;
             }
         }
     } wl;
@@ -233,9 +235,8 @@ public:
               typename RetType = decltype(std::declval<Func>()())>
     std::enable_if_t<std::is_void<RetType>::value, void> Do(
         Func&& func, bool use_sem = false) {
-        WaitLink::Node node;
-        photon::semaphore sem;
-        if (!wl.ready<void*>(&node, nullptr, use_sem ? &sem : nullptr)) {
+        WaitLink::Node node(nullptr, use_sem);
+        if (!wl.ready(node)) {
             func();
             wl.done<void*>();
         }
@@ -266,9 +267,8 @@ public:
     std::enable_if_t<!std::is_void<RetType>::value, RetType> Do(
         Func&& func, bool use_sem = false) {
         RetType result;
-        WaitLink::Node node;
-        photon::semaphore sem;
-        if (!wl.ready(&node, &result, use_sem ? &sem : nullptr)) {
+        WaitLink::Node node(&result, use_sem);
+        if (!wl.ready(node)) {
             result = func();
             wl.done(&result);
         }
