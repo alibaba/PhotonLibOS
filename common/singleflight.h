@@ -156,9 +156,8 @@ class SingleFlight {
              *
              * @note ORDERING and safety:
              * 1. Write result (if applicable)
-             * 2a. Semaphore mode: Signal semaphore (waiter blocked, won't
-             * destruct) 2b. Yield mode: Set done_flag (this is the LAST access
-             * to Node)
+             * 2. Semaphore mode: Signal semaphore (waiter blocked, won't destruct)
+             *    Yield mode: Set done_flag (this is the LAST access to Node)
              *
              * @note Performance: Semaphore mode skips done_flag modification to
              * avoid unnecessary atomic operation and memory barrier, since
@@ -166,7 +165,7 @@ class SingleFlight {
              *
              * @note Safety: Both branches are safe without pre-reading use_sem:
              * - Semaphore branch: Waiter blocked at sem.wait(), Node won't
-             * destruct until sem.signal() completes
+             *   destruct until sem.signal() completes
              * - Yield branch: done_flag.store() is the last Node access before
              *   waiter may wake up and destruct
              */
@@ -176,15 +175,12 @@ class SingleFlight {
                     *(T*)result_ptr = *result;
                 }
                 if (use_sem) {
-                    // Semaphore mode: signal directly without touching
-                    // done_flag The semaphore's internal synchronization
-                    // provides sufficient happens-before guarantee for result
-                    // visibility
+                    // Semaphore mode: signal directly without touching done_flag
+                    // The semaphore provides sufficient synchronization
                     sem.signal(1);
                 } else {
                     // Yield mode: set done_flag to release spin-waiting thread
-                    // This is the last access to Node before waiter may
-                    // destruct it
+                    // This is the last access to Node before waiter may destruct
                     done_flag.store(true, std::memory_order_release);
                 }
             }
@@ -212,13 +208,12 @@ class SingleFlight {
          * @note Uses photon::spin_wait() for backoff when CAS contention occurs
          */
         bool ready(Node& node) {
-            auto n = &node;
-            n->next = head.load(std::memory_order_acquire);
-            while (!head.compare_exchange_weak(n->next, n,
+            node.next = head.load(std::memory_order_acquire);
+            while (!head.compare_exchange_weak(node.next, &node,
                                                std::memory_order_acq_rel))
                 photon::spin_wait();
-            if (n->next) node.wait();
-            return n->next != nullptr;
+            if (node.next) node.wait();
+            return node.next != nullptr;
         }
 
         /**
@@ -241,14 +236,19 @@ class SingleFlight {
          * added after detachment, preventing use-after-free
          * @note All waiters are guaranteed to see the result due to
          * release-acquire semantics in set_result_and_notify()
+         * @note CRITICAL: Must save n->next BEFORE calling set_result_and_notify()
+         * because the Node may be destructed immediately after notification
          */
         template <typename T>
         void done(const T* result = nullptr) {
             auto n = head.exchange(nullptr, std::memory_order_acq_rel);
             while (n) {
+                // CRITICAL: Save next pointer before notifying
+                // After set_result_and_notify(), the waiter may wake up and
+                // destruct the Node, making n->next invalid
                 auto next = n->next;
                 n->set_result_and_notify(result);
-                n = next;
+                n = next;  // Safe: using saved value, not accessing freed memory
             }
         }
     } wl;
