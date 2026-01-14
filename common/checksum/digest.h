@@ -33,6 +33,7 @@ struct Digest {
     ~Digest() { EVP_MD_CTX_free(_ctx); }
 #else
     EVP_MD_CTX ctx{}, *_ctx = &ctx;
+    ~Digest() { EVP_MD_CTX_cleanup(_ctx); }
 #endif
     Digest()  { EVP_DigestInit_ex(_ctx, MD(), NULL); }
     Digest(std::string_view data) : Digest() { update(data); }
