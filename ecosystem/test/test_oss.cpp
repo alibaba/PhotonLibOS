@@ -87,6 +87,7 @@ class BasicAuthOssTest : public ::testing::Test {
   void copy_and_rename();
   void append_and_get();
   void multipart();
+  void symlink();
 
  private:
   std::string bucket_prefix_;
@@ -401,6 +402,31 @@ void BasicAuthOssTest::multipart() {
   ASSERT_EQ(ret, 0);
 }
 
+void BasicAuthOssTest::symlink() {
+  auto src = get_real_test_path("symlink/source");
+  auto target = "symlink/target";
+
+  int r = client->put_symlink(src, target);
+  ASSERT_EQ(r, 0);
+
+  std::string oss_target;
+  r = client->get_symlink(src, oss_target);
+  ASSERT_EQ(r, 0);
+
+  EXPECT_EQ(oss_target, target);
+
+  std::vector<std::string> objects;
+  auto cb = [&](const ListObjectsCBParameters& cb) {
+    objects.emplace_back(cb.key);
+    if (cb.type == "Symlink") return 0;
+    return -1;
+  };
+  int ret = client->list_objects(get_real_test_path("symlink/"), cb);
+  EXPECT_EQ(ret, 0);
+  ASSERT_EQ(objects.size(), 1);
+  EXPECT_EQ(objects[0], src);
+}
+
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
@@ -438,12 +464,14 @@ TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
+TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(CachedAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
+TEST_F(CachedAuthOssTest, symlink) { symlink(); }
 TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 
 int main(int argc, char* argv[]) {
