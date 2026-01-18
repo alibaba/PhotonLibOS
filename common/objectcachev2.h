@@ -29,6 +29,9 @@ It should work as `ObjectCache` in code do not depends on acquire/release API.
 
 **/
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 template <typename K, typename VPtr>
 class ObjectCacheV2 {
 protected:
@@ -225,3 +228,5 @@ public:
         lru_list.node = nullptr;
     }
 };
+
+#pragma GCC diagnostic pop
