@@ -40,6 +40,7 @@ struct ClientOptions {
   std::string endpoint;
   std::string bucket;
   std::string region;
+  std::string proxy;
   int max_list_ret_cnt = 1000;
   std::string user_agent = "Photon-ObjStore-Client";
   std::string bind_ips;
@@ -78,10 +79,10 @@ struct ObjectMeta {
   DEFINE_OPTIONAL_FIELD(size_t, size, 1)
   DEFINE_OPTIONAL_FIELD(time_t, mtime, 1 << 1)
   DEFINE_OPTIONAL_FIELD(std::string, etag, 1 << 2)
+  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
 };
 
 struct ObjectHeaderMeta : public ObjectMeta {
-  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
   DEFINE_OPTIONAL_FIELD(std::string, storage_class, 1 << 4)
   DEFINE_OPTIONAL_FIELD(uint64_t, crc64, 1 << 5)
 
@@ -97,6 +98,7 @@ struct ListObjectsParameters {
 struct ListObjectsCBParameters {
   std::string_view key;
   std::string_view etag;
+  std::string_view type;
   size_t size = 0;
   time_t mtime = 0;
   bool is_com_prefix = false;
@@ -229,6 +231,10 @@ class Client : public Object {
   virtual int rename_object(std::string_view src_path,
                             std::string_view dst_path,
                             bool set_mime = false) = 0;
+
+  virtual int put_symlink(std::string_view obj, std::string_view target) = 0;
+
+  virtual int get_symlink(std::string_view obj, std::string& target) = 0;
 
   virtual int get_object_meta(std::string_view obj, ObjectMeta& meta) = 0;
 
