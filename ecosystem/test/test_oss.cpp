@@ -508,6 +508,13 @@ void BasicAuthOssTest::batch_get_objects() {
              hmeta.mtime, hmeta.crc64, hmeta.storage_class, hmeta.type);
   }
 
+  for (auto& param : params_vec) {
+    if (param.iov) {
+      // good object 
+      ASSERT_EQ(param.result, param.iov->iov_len);
+    }
+  }
+
   for (size_t i = 0; i < good_objs.size(); i++) {
     bool data_correct = true;
     for (size_t j = i; j < file_size ; j++) {

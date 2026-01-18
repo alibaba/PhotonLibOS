@@ -158,6 +158,8 @@ class Client : public Object {
   // return value is the object count which data is successfully downloaded.
   // It's possible only some objects get to be downloaded successfully.
   // return -1 if some other errors happen.
+  // The batch_get_objects interface works only when whitelisting enabled 
+  // at OSS server side.
   virtual int batch_get_objects(std::vector<GetObjectParameters>& params) = 0;
 
   // return value is the object size if the operation succeeds, otherwise

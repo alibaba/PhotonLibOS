@@ -902,6 +902,8 @@ struct Frame {
   ssize_t read_data(FrameStream& stream, const struct iovec* iov,
                     int iovcnt) const;
   bool skip(FrameStream& stream) const;
+
+  operator bool() const { return kind != FrameKind::None; }
 };
 
 static inline uint32_t be32_to_host(const uint8_t* p) {
@@ -916,73 +918,41 @@ class FrameStream {
 
   explicit FrameStream(Response* response) : response_(response) {}
 
-  class Iterator {
-   public:
-    using iterator_category = std::input_iterator_tag;
-    using value_type = Frame;
-    using difference_type = std::ptrdiff_t;
-    using pointer = const value_type*;
-    using reference = const value_type&;
+  Frame next() {
+    static constexpr uint32_t FRAME_DATA = 0xFF2;
+    static constexpr uint32_t FRAME_META = 0xFF1;
+    static constexpr uint32_t FRAME_END = 0xFF4;
 
-    Iterator() : stream_(nullptr) {}
-    explicit Iterator(FrameStream* s) : stream_(s) { parse_next(); }
+    // |version| Frame-Type |  ref-id    | Payload Length|Header
+    // Checksum|Payload|Payload Checksum|
+    // |<1---->| <--3 bytes>|<--4 bytes->| <--4 bytes--->|<--4
+    // bytes-----><-n/a--><--4 bytes----->|
 
-    reference operator*() const { return current_; }
-    pointer operator->() const { return &current_; }
-
-    Iterator& operator++() {
-      if (stream_) parse_next();
-      return *this;
+    uint8_t header[16];
+    if (!read_exact(header, sizeof(header))) {
+      return {};
     }
 
-    bool operator==(const Iterator& other) const noexcept {
-      return stream_ == other.stream_;
-    }
-    bool operator!=(const Iterator& other) const noexcept {
-      return !(*this == other);
-    }
+    header[0] = 0;  // ignore version bit
 
-   private:
-    void parse_next() {
-      static constexpr uint32_t FRAME_DATA = 0xFF2;
-      static constexpr uint32_t FRAME_META = 0xFF1;
-      static constexpr uint32_t FRAME_END = 0xFF4;
-
-      // |version| Frame-Type |  ref-id    | Payload Length|Header Checksum|Payload|Payload Checksum|
-      // |<1---->| <--3 bytes>|<--4 bytes->| <--4 bytes--->|<--4 bytes-----><-n/a--><--4 bytes----->|
-
-      uint8_t header[16];
-      if (!stream_->read_exact(header, sizeof(header))) {
-        stream_ = nullptr;
-        return;
-      }
-
-      header[0] = 0;  // ignore version bit
-
-      uint32_t type = be32_to_host(header);
-      if (type != FRAME_DATA && type != FRAME_META && type != FRAME_END) {
-        stream_ = nullptr;
-        return;
-      }
-
-      current_.ref_id = be32_to_host(header + 4);
-      current_.payload_size = be32_to_host(header + 8);
-      current_.tail_size = 4;
-
-      if (type == FRAME_DATA)
-        current_.kind = Frame::FrameKind::Data;
-      else if (type == FRAME_META)
-        current_.kind = Frame::FrameKind::Meta;
-      else if (type == FRAME_END)
-        current_.kind = Frame::FrameKind::End;
+    uint32_t type = be32_to_host(header);
+    if (type != FRAME_DATA && type != FRAME_META && type != FRAME_END) {
+      return {};
     }
 
-    FrameStream* stream_ = nullptr;
-    Frame current_;
-  };
+    Frame frame;
+    frame.ref_id = be32_to_host(header + 4);
+    frame.payload_size = be32_to_host(header + 8);
+    frame.tail_size = 4;
 
-  Iterator begin() { return Iterator(this); }
-  Iterator end() const { return {}; }
+    if (type == FRAME_DATA)
+      frame.kind = Frame::FrameKind::Data;
+    else if (type == FRAME_META)
+      frame.kind = Frame::FrameKind::Meta;
+    else if (type == FRAME_END)
+      frame.kind = Frame::FrameKind::End;
+    return frame;
+  }
 
  private:
   BatchGetResult read_end_frame(const Frame& frame) {
@@ -1056,7 +1026,7 @@ class FrameStream {
   }
 
   bool skip_bytes(size_t n) {
-    std::vector<uint8_t> dummy(std::min(n, size_t(128*1024)));
+    std::vector<uint8_t> dummy(std::min(n, size_t(128 * 1024)));
     while (n > 0) {
       size_t chunk = std::min(n, dummy.size());
       if (!read_exact(dummy.data(), chunk)) return false;
@@ -1128,7 +1098,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
 
   uint32_t read_good_cnt = 0;
   FrameStream stream(&op.resp);
-  for (const auto& frame : stream) {
+  while (auto frame = stream.next()) {
     if (frame.kind == Frame::FrameKind::Meta) {
       auto& param = params[frame.ref_id - 1];
       auto meta_map = frame.read_meta(stream);
@@ -1156,7 +1126,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
     } else if (frame.kind == Frame::FrameKind::Data) {
       auto& param = params[frame.ref_id - 1];
       iovector_view view((struct iovec*)param.iov, param.iovcnt);
-      if (view.sum() != frame.payload_size || param.result != 0) {
+      if (view.sum() != frame.payload_size || param.result < 0) {
         LOG_ERROR("Skip object ` data frame expected `, got `, result `",
                   param.object, view.sum(), frame.payload_size, param.result);
         if (!frame.skip(stream))
@@ -1166,6 +1136,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
 
       r = frame.read_data(stream, param.iov, param.iovcnt);
       if (r < 0) return r;
+      param.result = r;
       read_good_cnt++;
     } else {
       auto result = frame.read_end(stream);
