@@ -350,6 +350,10 @@ class OssClientImpl : public Client {
   int rename_object(std::string_view src_path, std::string_view dst_path,
                     bool set_mime = false);
 
+  int put_symlink(std::string_view obj, std::string_view target);
+
+  int get_symlink(std::string_view obj, std::string& target);
+
   int get_object_meta(std::string_view obj, ObjectMeta& meta);
 
   void set_credentials(CredentialParameters&& credentials);
@@ -404,6 +408,7 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client = photon::net::http::new_http_client();
   m_client->timeout(m_oss_options.request_timeout_us);
   m_client->set_user_agent(m_oss_options.user_agent);
+  if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
 
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;
@@ -463,15 +468,16 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
     auto obj_key = key.to_string_view();
     auto dsize = size.to_int64_t();
     auto etag = child["ETag"].to_string_view();
-    auto r =
-        cb({obj_key, etag, (size_t)dsize, mtim, false /*not comm prefix*/});
+    auto type = child["Type"].to_string_view();
+    auto r = cb(
+        {obj_key, etag, type, (size_t)dsize, mtim, false /*not comm prefix*/});
     if (r < 0) return r;
   }
   for (auto child : list_bucket_result.enumerable_children("CommonPrefixes")) {
     auto key = child["Prefix"];
     if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
     auto com_prefix = key.to_string_view();
-    auto r = cb({com_prefix, {}, 0, 0, true /*comm prefix*/});
+    auto r = cb({com_prefix, {}, {}, 0, 0, true /*comm prefix*/});
     if (r < 0) return r;
   }
   return 0;
@@ -700,6 +706,36 @@ int OssClient::rename_object(std::string_view src_path,
   return do_delete_object(src_oss_url);
 }
 
+int OssClient::put_symlink(std::string_view obj, std::string_view target) {
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {
+                                            {OSS_PARAM_KEY_SYMLINK, ""},
+                                        });
+  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
+  auto escaped_tgt = photon::net::http::url_escape(target);
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET, escaped_tgt);
+  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
+  return do_http_call(op, m_oss_options, oss_url.object());
+}
+
+int OssClient::get_symlink(std::string_view obj, std::string& target) {
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {
+                                            {OSS_PARAM_KEY_SYMLINK, ""},
+                                        });
+  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
+  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
+  if (r < 0) return r;
+  r = do_http_call(op, m_oss_options, oss_url.object());
+  if (r < 0) return r;
+  target = photon::net::http::url_unescape(
+      op.resp.headers[OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET]);
+  return r;
+}
+
 int OssClient::delete_objects(const std::vector<std::string_view>& objects,
                               std::string_view obj_prefix) {
   size_t start = 0;
@@ -749,13 +785,7 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta) {
   int ret = fill_meta(op, (ObjectMeta&)meta);
   if (ret < 0) return ret;
 
-  auto it = op.resp.headers.find("x-oss-object-type");
-  if (it != op.resp.headers.end()) {
-    meta.set_type();
-    meta.type.assign(it.second().data(), it.second().size());
-  }
-
-  it = op.resp.headers.find("x-oss-storage-class");
+  auto it = op.resp.headers.find("x-oss-storage-class");
   if (it != op.resp.headers.end()) {
     meta.set_storage_class();
     meta.storage_class.assign(it.second().data(), it.second().size());
@@ -785,6 +815,12 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
   if (it != op.resp.headers.end()) {
     meta.set_etag();
     meta.etag.assign(it.second().data(), it.second().size());
+  }
+
+  it = op.resp.headers.find("x-oss-object-type");
+  if (it != op.resp.headers.end()) {
+    meta.set_type();
+    meta.type.assign(it.second().data(), it.second().size());
   }
   return 0;
 }
@@ -966,7 +1002,7 @@ ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
                            {{OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
                             {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}});
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
 
@@ -995,7 +1031,7 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   estring part_num_str = std::to_string(part_number);
 
@@ -1065,7 +1101,7 @@ int OssClient::complete_multipart_upload(void* context,
   struct iovec iov{(void*)(req_body.data()), req_body.size()};
 
   iovector_view view(&iov, 1);
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFER(delete ctx);
 
@@ -1089,7 +1125,7 @@ int OssClient::abort_multipart_upload(void* context) {
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFER(delete ctx);
 
@@ -1181,14 +1217,12 @@ class BasicAuthenticator : public Authenticator {
     data2sign.appends(method, "\n", content_md5, "\n", content_type, "\n",
                       m_gmt_date, "\n");
 
-    append_headers(data2sign, headers, false);
-
-    data2sign.appends(
-        make_ccl(!token.empty(), "x-oss-security-token:", token, "\n"), "/",
-        params.bucket, "/", params.object);
     if (!token.empty()) {
       headers.insert("x-oss-security-token", token);
     }
+    append_headers(data2sign, headers, false);
+
+    data2sign.appends("/", params.bucket, "/", params.object);
 
     // complete this list if needed. currently it's for ossfs use only.
     // must appear in dictionary order!
@@ -1196,7 +1230,8 @@ class BasicAuthenticator : public Authenticator {
         OSS_PARAM_KEY_APPEND,      OSS_PARAM_KEY_CONTINUATION_TOKEN,
         OSS_PARAM_KEY_DELETE,      OSS_PARAM_KEY_OBJECT_META,
         OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_POSITION,
-        OSS_PARAM_KEY_UPLOAD_ID,   OSS_PARAM_KEY_UPLOADS,
+        OSS_PARAM_KEY_SYMLINK,     OSS_PARAM_KEY_UPLOAD_ID,
+        OSS_PARAM_KEY_UPLOADS,
     };
 
     if (params.query_params.size()) {
