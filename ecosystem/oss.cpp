@@ -521,6 +521,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
+  if (!list_bucket_result) LOG_ERROR_RETURN(EINVAL, -1, "unexpected empty response");
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
@@ -565,6 +566,7 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
+  if (!list_bucket_result) LOG_ERROR_RETURN(EINVAL, -1, "unexpected empty response");
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
@@ -958,7 +960,7 @@ class FrameStream {
   BatchGetResult read_end_frame(const Frame& frame) {
     size_t total = frame.payload_size + frame.tail_size;
     std::vector<uint8_t> buf(total);
-    if (!read_exact(buf.data(), total)) return {};
+    if (total < 12 || !read_exact(buf.data(), total)) return {};
 
     BatchGetResult ret;
     ret.request_count = be32_to_host(buf.data());
