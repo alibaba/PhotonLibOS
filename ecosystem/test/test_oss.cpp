@@ -465,9 +465,11 @@ void BasicAuthOssTest::batch_get_objects() {
   DEFER(for (auto buf : bufs) { delete buf; });
 
   for (size_t i = 0; i < good_objs.size(); i++) {
-    char* buffer = (char *)malloc(file_size-i);
+    auto buf_size = (i == 0) ? (file_size + 1) : (file_size - i);
+
+    char* buffer = (char *)malloc(buf_size);
     bufs[i] = buffer;
-    iovs[i] = {buffer, file_size-i};
+    iovs[i] = {buffer, buf_size};
 
     GetObjectParameters params;
     params.offset = i;
@@ -511,7 +513,11 @@ void BasicAuthOssTest::batch_get_objects() {
   for (auto& param : params_vec) {
     if (param.iov) {
       // good object 
-      ASSERT_EQ(param.result, param.iov->iov_len);
+      if (param.iov->iov_len > file_size) {
+        ASSERT_EQ(param.result, file_size); // only valid data are returned
+      } else {
+        ASSERT_EQ(param.result, param.iov->iov_len);
+      }
     }
   }
 
