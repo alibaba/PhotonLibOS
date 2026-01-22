@@ -190,6 +190,8 @@ public:
                 m_line_size -= m_cursor;
                 m_cursor = 0;
             }
+        } else if (m_cursor == m_line_size) {   // reset
+            m_cursor = m_line_size = 0;
         }
 
         bool get_line_finish = false;
