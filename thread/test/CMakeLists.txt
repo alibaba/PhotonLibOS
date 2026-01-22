@@ -49,3 +49,7 @@ add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stac
 add_executable(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)
 target_link_libraries(test-st-utest PRIVATE photon_shared)
 add_test(NAME test-st-utest COMMAND $<TARGET_FILE:test-st-utest>)
+
+add_executable(test-go-channel test-go-channel.cpp)
+target_link_libraries(test-go-channel PRIVATE photon_shared)
+add_test(NAME test-go-channel COMMAND $<TARGET_FILE:test-go-channel>)
