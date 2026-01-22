@@ -92,6 +92,15 @@ public:
     ssize_t write_stream(IStream *stream, size_t size_limit = -1);
     int close() override { return 0; }
 
+    // Release ownership of socket stream and return it (like unique_ptr::release)
+    // After this call, the Message no longer owns or references the socket
+    net::ISocketStream* steal_socket_stream() {
+        auto* s = m_stream;
+        m_stream = nullptr;
+        m_stream_ownership = false;
+        return s;
+    }
+
     // size of body: infer from Content-Range/Content-Length in response header
     size_t body_size() const;
     // size of origin resource: infer from Content-Range/Content-Length in response header
