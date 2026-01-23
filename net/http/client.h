@@ -32,6 +32,8 @@ namespace net {
 class TLSContext;
 namespace http {
 
+class IWebSocketStream;  // Forward declaration for websocket_connect
+
 class ICookieJar : public Object {
 public:
     virtual int get_cookies_from_headers(std::string_view host, Message* message) = 0;
@@ -166,6 +168,16 @@ public:
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
                                           bool secure = false, uint64_t timeout = -1UL) = 0;
+
+    /**
+     * @brief Connect to a WebSocket server
+     * 
+     * @param url Full URL for the WebSocket endpoint (e.g., "http://example.com/ws")
+     * @param timeout Timeout in microseconds (-1 for infinite)
+     * @return Pointer to IWebSocketStream on success, nullptr on failure
+     */
+    IWebSocketStream* websocket_connect(std::string_view url, uint64_t timeout = -1UL);
+
 protected:
     StoredURL m_proxy_url;
     std::string m_user_agent;
