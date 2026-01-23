@@ -39,23 +39,49 @@ static uint32_t generate_masking_key() {
     return std::uniform_int_distribution<uint32_t>{}(gen);
 }
 
-static void apply_mask(void* data, size_t len, uint32_t mask) {
+// Core implementation: apply mask to a buffer with offset, returns new offset
+static size_t apply_mask_impl(void* data, size_t len, uint32_t mask, size_t offset) {
+    if (len == 0) return offset;
+
     auto* p = static_cast<uint8_t*>(data);
     auto* k = reinterpret_cast<uint8_t*>(&mask);
-    for (size_t i = 0; i < len; i++) {
-        p[i] ^= k[i & 3];
+    size_t idx = 0;
+
+    // Process until 8-byte memory aligned
+    while (idx < len && (reinterpret_cast<uintptr_t>(p + idx) & 7) != 0) {
+        p[idx] ^= k[(offset + idx) & 3];
+        idx++;
     }
+
+    // Create 64-bit mask adjusted for current offset
+    // Rotate mask to align with (offset + idx) & 3
+    size_t shift = ((offset + idx) & 3) * 8;
+    uint32_t adjusted_mask = (shift == 0) ? mask : (mask >> shift) | (mask << (32 - shift));
+    uint64_t mask64 = (static_cast<uint64_t>(adjusted_mask) << 32) | adjusted_mask;
+
+    // 8-byte batch processing
+    while (idx + 8 <= len) {
+        *reinterpret_cast<uint64_t*>(p + idx) ^= mask64;
+        idx += 8;
+    }
+
+    // Process remaining bytes
+    while (idx < len) {
+        p[idx] ^= k[(offset + idx) & 3];
+        idx++;
+    }
+
+    return offset + len;
+}
+
+static void apply_mask(void* data, size_t len, uint32_t mask) {
+    apply_mask_impl(data, len, mask, 0);
 }
 
 static void apply_mask_iov(iovec* iov, int iovcnt, uint32_t mask) {
-    auto* k = reinterpret_cast<uint8_t*>(&mask);
     size_t offset = 0;
     for (int i = 0; i < iovcnt; i++) {
-        auto* p = static_cast<uint8_t*>(iov[i].iov_base);
-        for (size_t j = 0; j < iov[i].iov_len; j++) {
-            p[j] ^= k[(offset + j) & 3];
-        }
-        offset += iov[i].iov_len;
+        offset = apply_mask_impl(iov[i].iov_base, iov[i].iov_len, mask, offset);
     }
 }
 
