@@ -368,6 +368,9 @@ private:
 IWebSocketStream* websocket_connect(Client* client, std::string_view url, uint64_t timeout) {
     if (!client)
         LOG_ERROR_RETURN(EINVAL, nullptr, "Invalid client");
+
+    if (url.empty())
+        LOG_ERROR_RETURN(EINVAL, nullptr, "Invalid URL");
     
     Client::OperationOnStack<4 * 1024> op(client, Verb::GET, url);
     
