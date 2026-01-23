@@ -147,21 +147,19 @@ static ssize_t parse_frame_header(ISocketStream* stream, WebSocketOpcode* opcode
 // ============================================================================
 
 static std::string compute_accept_key(std::string_view client_key) {
-    std::string data = std::string(client_key) + SHA1_MAGIC;
+    estring data = estring().appends(client_key, SHA1_MAGIC);
     uint8_t hash[20];
     sha1 hasher;
     hasher.update(data.data(), data.size());
     hasher.finalize(hash);
-    std::string result;
-    Base64Encode({reinterpret_cast<char*>(hash), 20}, result);
-    return result;
+    Base64Encode({reinterpret_cast<char*>(hash), 20}, data);
+    return data;
 }
 
 static std::string generate_websocket_key() {
-    uint8_t random[16];
-    std::random_device rd;
-    for (int i = 0; i < 4; i++)
-        reinterpret_cast<uint32_t*>(random)[i] = rd();
+    static thread_local std::mt19937 gen{std::random_device{}()};
+    static thread_local std::uniform_int_distribution<uint32_t> dist;
+    uint32_t random[4] = {dist(gen), dist(gen), dist(gen), dist(gen)};
     std::string key;
     Base64Encode({reinterpret_cast<char*>(random), 16}, key);
     return key;
@@ -231,7 +229,7 @@ public:
         // Read payload
         if (payload_len > 0) {
             auto view = iov->view();
-            if (read_payload_iov(view.iov, view.iovcnt, payload_len, masked, mask) < 0)
+            if (read_payload_iov(view, payload_len, masked, mask) < 0)
                 return -1;
         }
         
@@ -271,9 +269,8 @@ private:
     ssize_t send_frame_iov(WebSocketOpcode opcode, const iovec* iov, int iovcnt, uint64_t timeout) {
         if (!m_stream || m_is_closed) return -1;
         
-        size_t payload_len = 0;
-        for (int i = 0; i < iovcnt; i++)
-            payload_len += iov[i].iov_len;
+        iovector_view payload(const_cast<iovec*>(iov), iovcnt);
+        size_t payload_len = payload.sum();
         
         uint8_t header[MAX_HEADER_SIZE];
         uint32_t mask = 0;
@@ -285,26 +282,21 @@ private:
         ssize_t expected = header_len + payload_len;
         ssize_t nwritten;
         
+        IOVector send_buf;
+        send_buf.push_back(header, header_len);
+        
         if (m_is_client && payload_len > 0) {
             // Client must mask - copy and mask payload
-            std::vector<uint8_t> masked(payload_len);
-            size_t offset = 0;
-            for (int i = 0; i < iovcnt; i++) {
-                memcpy(masked.data() + offset, iov[i].iov_base, iov[i].iov_len);
-                offset += iov[i].iov_len;
-            }
-            apply_mask(masked.data(), payload_len, mask);
-            
-            iovec send_iov[2] = {{header, header_len}, {masked.data(), payload_len}};
-            nwritten = m_stream->writev(send_iov, 2);
+            send_buf.push_back(payload_len);
+            auto* masked = static_cast<uint8_t*>(send_buf.back().iov_base);
+            payload.memcpy_to(masked, payload_len);
+            apply_mask(masked, payload_len, mask);
         } else {
             // Server or empty payload - send directly
-            std::vector<iovec> send_iov(1 + iovcnt);
-            send_iov[0] = {header, header_len};
             for (int i = 0; i < iovcnt; i++)
-                send_iov[1 + i] = iov[i];
-            nwritten = m_stream->writev(send_iov.data(), 1 + iovcnt);
+                send_buf.push_back(iov[i]);
         }
+        nwritten = m_stream->writev(send_buf.iovec(), send_buf.iovcnt());
         
         if (nwritten != expected)
             LOG_ERROR_RETURN(0, -1, "Failed to send frame");
@@ -332,39 +324,27 @@ private:
         }
         if (opcode) *opcode = op;
         
-        // Check buffer capacity
-        size_t available = 0;
-        for (int i = 0; i < iovcnt; i++)
-            available += iov[i].iov_len;
-        if (available < static_cast<size_t>(payload_len))
+        // Check buffer capacity using iovector_view
+        iovector_view view(iov, iovcnt);
+        if (view.sum() < static_cast<size_t>(payload_len))
             LOG_ERROR_RETURN(ENOBUFS, -1, "Buffer too small for payload");
         
-        if (payload_len > 0 && read_payload_iov(iov, iovcnt, payload_len, masked, mask) < 0)
+        if (payload_len > 0 && read_payload_iov(view, payload_len, masked, mask) < 0)
             return -1;
         
         handle_control_frame(op, iov, iovcnt, payload_len);
         return payload_len;
     }
 
-    ssize_t read_payload_iov(iovec* iov, int iovcnt, size_t len, bool masked, uint32_t mask) {
-        // Adjust iov to exact length needed
-        size_t remaining = len;
-        int adjusted_cnt = 0;
-        std::vector<iovec> adjusted(iovcnt);
+    ssize_t read_payload_iov(iovector_view view, size_t len, bool masked, uint32_t mask) {
+        // Shrink view to exact length needed
+        view.shrink_to(len);
         
-        for (int i = 0; i < iovcnt && remaining > 0; i++) {
-            adjusted[i] = iov[i];
-            if (adjusted[i].iov_len > remaining)
-                adjusted[i].iov_len = remaining;
-            remaining -= adjusted[i].iov_len;
-            adjusted_cnt++;
-        }
-        
-        if (m_stream->readv(adjusted.data(), adjusted_cnt) != static_cast<ssize_t>(len))
+        if (m_stream->readv(view.iov, view.iovcnt) != static_cast<ssize_t>(len))
             LOG_ERROR_RETURN(0, -1, "Failed to read payload");
         
         if (masked)
-            apply_mask_iov(adjusted.data(), adjusted_cnt, mask);
+            apply_mask_iov(view.iov, view.iovcnt, mask);
         
         return len;
     }
@@ -389,33 +369,24 @@ IWebSocketStream* websocket_connect(Client* client, std::string_view url, uint64
     if (!client)
         LOG_ERROR_RETURN(EINVAL, nullptr, "Invalid client");
     
-    auto* op = client->new_operation(Verb::GET, url);
-    if (!op)
-        LOG_ERROR_RETURN(ENOMEM, nullptr, "Failed to create operation");
+    Client::OperationOnStack<4 * 1024> op(client, Verb::GET, url);
     
     std::string key = generate_websocket_key();
-    op->req.headers.insert("Upgrade", "websocket");
-    op->req.headers.insert("Connection", "Upgrade");
-    op->req.headers.insert("Sec-WebSocket-Key", key);
-    op->req.headers.insert("Sec-WebSocket-Version", "13");
-    op->timeout = Timeout(timeout);
-    op->follow = 0;
-    op->retry = 0;
+    op.req.headers.insert("Upgrade", "websocket");
+    op.req.headers.insert("Connection", "Upgrade");
+    op.req.headers.insert("Sec-WebSocket-Key", key);
+    op.req.headers.insert("Sec-WebSocket-Version", "13");
+    op.timeout = Timeout(timeout);
+    op.follow = 0;
+    op.retry = 0;
     
-    if (op->call() < 0 || op->status_code != 101) {
-        int code = op->status_code;
-        client->destroy_operation(op);
-        LOG_ERROR_RETURN(0, nullptr, "Upgrade failed: status=", code);
-    }
+    if (op.call() < 0 || op.status_code != 101)
+        LOG_ERROR_RETURN(0, nullptr, "Upgrade failed: status=", op.status_code);
     
-    if (op->resp.headers["Sec-WebSocket-Accept"] != compute_accept_key(key)) {
-        client->destroy_operation(op);
+    if (op.resp.headers["Sec-WebSocket-Accept"] != compute_accept_key(key))
         LOG_ERROR_RETURN(0, nullptr, "Accept key mismatch");
-    }
     
-    auto* stream = op->resp.steal_socket_stream();
-    client->destroy_operation(op);
-    
+    auto* stream = op.resp.steal_socket_stream();
     if (!stream)
         LOG_ERROR_RETURN(0, nullptr, "Failed to get socket");
     
