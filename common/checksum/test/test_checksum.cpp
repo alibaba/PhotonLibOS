@@ -228,32 +228,64 @@ TEST(TestChecksum, crc64ecma_hw_asm) {
 }
 
 TEST(TestChecksum, crc32_combine) {
-    const uint32_t N = 10, M = 512;
-    uint32_t crc[N] = {0};
+    const uint32_t N = 10, M = 510;
     unsigned char buf[M * N];
     for (auto& c: buf) c = rand();
+    auto x = crc32c_sw(buf, M * N, 0);
+    EXPECT_EQ(x, crc32c_hw(buf, M * N, 0));
+
+    for (size_t i = 0; i < 10000; ++i) {
+        uint32_t L1 = rand() % (sizeof(buf) / 2);
+        uint32_t L2 = sizeof(buf) - L1;
+        auto crc1 = crc32c_hw(buf, L1, 0);
+        auto crc2 = crc32c_hw(buf + L1, L2, 0);
+        EXPECT_EQ(x, crc32c_combine_hw(crc1, crc2, L2));
+    }
+
+    uint32_t crc[N] = {0};
     crc32c_series_sw(buf, M, N, crc);
-    auto x = crc[0];
-    for (uint32_t i = 1; i < N; ++i)
-        x = crc32c_combine_sw(x, crc[i], M);
-    EXPECT_EQ(x, crc32c_sw(buf, M * N, 0));
     EXPECT_EQ(x, crc32c_combine_series_sw(crc, M, N));
+    EXPECT_EQ(x, crc32c_combine_series_hw(crc, M, N));
 
     memset(crc, 0, sizeof(crc));
     crc32c_series_hw(buf, M, N, crc);
-    /*auto*/ x = crc[0];
-    for (uint32_t i = 1; i < N; ++i)
-        x = crc32c_combine_hw(x, crc[i], M);
-    EXPECT_EQ(x, crc32c_hw(buf, M * N, 0));
+    EXPECT_EQ(x, crc32c_combine_series_sw(crc, M, N));
     EXPECT_EQ(x, crc32c_combine_series_hw(crc, M, N));
 
-    auto crc1 = crc32c_hw(buf, 128, 0);
-    auto crc2 = crc32c_hw(buf + 128, sizeof(buf) - 128*2, 0);
-    auto crc3 = crc32c_hw(buf + sizeof(buf) - 128, 128, 0);
-    EXPECT_EQ(crc32c_trim({x, sizeof(buf)}, {crc1, 128}, {crc3, 128}), crc2);
+    for (size_t i = 0; i < 10000; ++i) {
+        uint32_t L1 = 100 + rand() % 64,
+                 L3 = 100 + rand() % 64;
+        auto crc1 = crc32c_hw(buf, L1, 0);
+        auto crc2 = crc32c_hw(buf + L1, sizeof(buf) - L1 - L3, 0);
+        auto crc3 = crc32c_hw(buf + sizeof(buf) - L3, L3, 0);
+        EXPECT_EQ(crc32c_trim({x, sizeof(buf)}, {crc1, L1}, {crc3, L3}), crc2);
+    }
 }
 
-void crc32c_series_hw_old(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts);
+TEST(TestChecksum, crc64_combine) {
+    const uint32_t N = 10, M = 510;
+    unsigned char buf[M * N];
+    memset(buf, 0, sizeof(buf));
+    *(uint64_t*)buf = 0x1234567890abcdef;
+    auto y = crc64ecma_sw(buf, 30, 0);
+    auto y1 = crc64ecma_sw(buf, 8, 0);
+    EXPECT_EQ(y, crc64ecma_sw(buf+8, 30-8, y1));
+    auto y2 = crc64ecma_sw(buf+8, 30-8, 0);
+    EXPECT_EQ(y, crc64ecma_combine_hw(y1, y2, 30-8));
+
+    for (auto& c: buf) c = rand();
+    auto x = crc64ecma_sw(buf, M * N, 0);
+    EXPECT_EQ(x, crc64ecma_hw(buf, M * N, 0));
+
+    for (size_t i = 0; i < 10000; ++i) {
+        uint32_t L2 = rand() % (sizeof(buf) / 2);
+        uint32_t L1 = sizeof(buf) - L2;
+        auto crc1 = crc64ecma_sw(buf, L1, 0);
+        auto crc2 = crc64ecma_sw(buf + L1, L2, 0);
+        EXPECT_EQ(x, crc64ecma_combine_hw(crc1, crc2, L2));
+        EXPECT_EQ(x, crc64ecma_sw(buf + L1, L2, crc1));
+    }
+}
 
 TEST(Perf, crc32c_hw_series) {
     const uint32_t PART_SIZE = 4096;
