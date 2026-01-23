@@ -159,6 +159,25 @@ class OssUrl {
   estring_view url() { return m_url; }
 };
 
+template <typename T>
+struct NodeValue {
+  explicit NodeValue(SimpleDOM::Node node) : node_(node) {}
+  operator T() const { return convert_node_value(); }
+  bool has_value() const { return node_; }
+
+ private:
+  T convert_node_value() const {
+    return convert_impl(static_cast<T*>(nullptr));
+  }
+  std::string_view convert_impl(std::string_view*) const {
+    return node_.to_string_view();
+  }
+  int64_t convert_impl(int64_t*) const { return node_.to_int64_t(); }
+  SimpleDOM::Node node_;
+};
+using NodeStrValue = NodeValue<std::string_view>;
+using NodeInt64Value = NodeValue<int64_t>;
+
 static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
                         std::string_view object) {
   int ret = -1;
@@ -469,25 +488,28 @@ int OssClient::sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
 int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
                                  ListObjectsCallback cb) {
   for (auto child : list_bucket_result.enumerable_children("Contents")) {
-    auto key = child["Key"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto size = child["Size"];
-    if (!size) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto mtime = child["LastModified"];
-    auto mtim = get_list_lastmodified(mtime.to_string_view());
-    auto obj_key = key.to_string_view();
-    auto dsize = size.to_int64_t();
-    auto etag = child["ETag"].to_string_view();
-    auto type = child["Type"].to_string_view();
-    auto r = cb(
-        {obj_key, etag, type, (size_t)dsize, mtim, false /*not comm prefix*/});
+    auto key = NodeStrValue(child["Key"]);
+    auto size = NodeInt64Value(child["Size"]);
+    auto mtime = NodeStrValue(child["LastModified"]);
+    auto etag = NodeStrValue(child["ETag"]);
+    auto type = NodeStrValue(child["Type"]);
+
+    if (!key.has_value() || !size.has_value() || !mtime.has_value() ||
+        !etag.has_value() || !type.has_value())
+      LOG_ERROR_RETURN(EINVAL, -1,
+                       "unexpected response: missing required fields");
+
+    auto mtim = get_list_lastmodified(mtime);
+    auto r = cb({key, etag, type, static_cast<size_t>(size), mtim,
+                 false /*not comm prefix*/});
     if (r < 0) return r;
   }
   for (auto child : list_bucket_result.enumerable_children("CommonPrefixes")) {
-    auto key = child["Prefix"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto com_prefix = key.to_string_view();
-    auto r = cb({com_prefix, {}, {}, 0, 0, true /*comm prefix*/});
+    auto key = NodeStrValue(child["Prefix"]);
+    if (!key.has_value())
+      LOG_ERROR_RETURN(EINVAL, -1,
+                       "unexpected response: missing required fields");
+    auto r = cb({key, {}, {}, 0, 0, true /*comm prefix*/});
     if (r < 0) return r;
   }
   return 0;
@@ -531,8 +553,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
-    auto next_marker = list_bucket_result["NextContinuationToken"];
-    *marker = next_marker ? next_marker.to_string_view() : "";
+    *marker = NodeStrValue(list_bucket_result["NextContinuationToken"]);
   }
   return 0;
 }
@@ -573,8 +594,7 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
-    auto next_marker = list_bucket_result["NextMarker"];
-    *marker = next_marker ? next_marker.to_string_view() : "";
+    *marker = NodeStrValue(list_bucket_result["NextMarker"]);
   }
   return 0;
 }
@@ -1240,13 +1260,13 @@ int OssClient::init_multipart_upload(std::string_view object, void** context) {
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
-  auto child = reader["InitiateMultipartUploadResult"]["UploadId"];
-  if (!child)
+  auto upload_id = NodeStrValue(reader["InitiateMultipartUploadResult"]["UploadId"]);
+  if (!upload_id.has_value())
     LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no upload id provided");
 
   oss_multipart_context* ctx = new oss_multipart_context;
   ctx->obj_path.appends(object);
-  ctx->upload_id = child.to_string_view();
+  ctx->upload_id = upload_id;
 
   *context = ctx;
   return 0;
@@ -1325,12 +1345,11 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
-  auto child = reader["CopyPartResult"]["ETag"];
-  if (!child)
+  auto etag = NodeStrValue(reader["CopyPartResult"]["ETag"]);
+  if (!etag.has_value())
     LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no etag provided");
 
-  auto etag = child.to_string_view();
-  if (etag.empty())
+  if ((static_cast<std::string_view>(etag)).empty())
     LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
   SCOPED_LOCK(ctx->lock);
