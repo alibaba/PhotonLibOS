@@ -44,7 +44,6 @@ inline T do_crc(const uint8_t *data, size_t nbytes, T crc, F1 f1, F8 f8) {
         crc = f8(crc, *(uint64_t*)(data + offset));
         offset += sizeof(uint64_t);
     }
-
     // Process any bytes remaining after the last aligned 8-byte block.
     while (offset < nbytes) {
         crc = f1(crc, data[offset]);
@@ -515,8 +514,8 @@ uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
     return crc32c_hw_portable(data, nbytes, crc);
 }
 
-// for 2nd size of 16, 32, ..., 2G bytes
-const static uint32_t crc32c_combine_table[] = {
+const static uint32_t crc32c_lshift_table[] = {
+    // by length of 16, 32, ..., 2G bytes
     0x493c7d27, 0xba4fc28e, 0x9e4addf8, 0x0d3b6092,
     0xb9e02b86, 0xdd7e3b0c, 0x170076fa, 0xa51b6135,
     0x82f89c77, 0x54a86326, 0x1dc403cc, 0x5ae703ab,
@@ -526,16 +525,20 @@ const static uint32_t crc32c_combine_table[] = {
     0xd610d67e, 0x6b086b3f, 0xd94f3c0b, 0xbf818109,
 };
 
-static uint32_t crc32c_shift(uint32_t crc1, uint32_t len2,
+// virtually pad `len2` bytes of 0 to source
+// data, and return resulting crc value
+// `len2` must be >= 16
+static uint32_t crc32c_lshift_big(uint32_t crc1, uint32_t len2,
            uint32_t (*shift)(uint32_t crc1, uint32_t x)) {
     for (len2 >>= 4; len2; len2 &= len2 - 1) {
-        auto x = crc32c_combine_table[__builtin_ctz(len2)];
+        auto x = crc32c_lshift_table[__builtin_ctz(len2)];
         crc1 = shift(crc1, x);
     }
     return crc1;
 }
 
-static uint32_t crc32c_shift_hw(uint32_t crc1, uint32_t x) {
+// do lshift with SIMD instructions
+static uint32_t do_crc32c_lshift_hw(uint32_t crc1, uint32_t x) {
     uint64_t dat64;
     __m128i crc1x, cnstx;
     crc1x = _mm_setr_epi32(crc1, 0, 0, 0);
@@ -546,15 +549,15 @@ static uint32_t crc32c_shift_hw(uint32_t crc1, uint32_t x) {
 }
 
 uint32_t crc32c_combine_hw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
-    crc1 = crc32c_shift(crc1, len2, crc32c_shift_hw);
-    if (unlikely(len2 &= 16 - 1)) {
-        // I don't know why this doesn't work, while it works for crc32c_combine_sw()
-        LOG_ERROR_RETURN(EINVAL, -1, "len2 must be a multiple of 16");
+    if (unlikely(!crc1)) return crc2;
+    if (unlikely(!len2)) return crc1;
+    if (unlikely(len2 & 15)) {
         if (unlikely(len2 & 8)) crc1 = crc32c(crc1, (uint64_t)0);
         if (unlikely(len2 & 4)) crc1 = crc32c(crc1, (uint32_t)0);
         if (unlikely(len2 & 2)) crc1 = crc32c(crc1, (uint16_t)0);
         if (unlikely(len2 & 1)) crc1 = crc32c(crc1, (uint8_t)0);
     }
+    crc1 = crc32c_lshift_big(crc1, len2, do_crc32c_lshift_hw);
     return crc1 ^ crc2;
 }
 
@@ -575,26 +578,28 @@ static uint64_t bit_reverse32_64(uint32_t x) {
         return x64 << 32;
 }
 
-static uint32_t crc32c_shift_sw(uint32_t crc1, uint32_t x) {
+// do lshift with traditional scalar instructions
+static uint32_t do_crc32c_lshift_sw(uint32_t crc1, uint32_t x) {
     uint64_t q = 0, xrev = bit_reverse32_64(x);
     for (int i = 0; i < 64; i++, xrev >>= 1)
         q = (q << 1) | __builtin_parity(crc1 & xrev);
     return crc32c_sw((uint8_t*)&q, 8, 0);
 }
 
+const static unsigned char zeros[32] = {0};
 uint32_t crc32c_combine_sw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
-    crc1 = crc32c_shift(crc1, len2, crc32c_shift_sw);
-    if (unlikely(len2 &= 16 - 1)) {
-        const static unsigned char zero[8] = {0};
-        if (unlikely(len2 & 8)) crc1 = crc32c_sw(zero, 8, crc1);
-        if (unlikely(len2 & 4)) crc1 = crc32c_sw(zero, 4, crc1);
-        if (unlikely(len2 & 2)) crc1 = crc32c_sw(zero, 2, crc1);
-        if (unlikely(len2 & 1)) crc1 = crc32c_sw(zero, 1, crc1);
+    if (unlikely(!crc1)) return crc2;
+    if (unlikely(!len2)) return crc1;
+    if (unlikely(len2 & 15)) {
+        crc1 = crc32c_sw(zeros, len2 & 15, crc1);
     }
+    crc1 = crc32c_lshift_big(crc1, len2, do_crc32c_lshift_sw);
     return crc1 ^ crc2;
 }
 
-static uint32_t crc32_remove0(uint32_t crc1, size_t len2) {
+// virtually remove `len2` bytes of trailing 0 from
+// source data, and return resulting crc value
+static uint32_t crc32c_rshift_sw(uint32_t crc1, size_t len2) {
     // remove the effect of the zeros added to crc1
     // If crc1 = crcA * x^len2 mod p(x), then crcA = crc1 * (x^len2)^(-1) mod p(x)
     // Based on crc32_combine_return_crcA0, but uses inverse matrix to remove zeros.
@@ -679,9 +684,9 @@ uint32_t crc32c_trim_sw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Co
         LOG_ERRNO_RETURN(EINVAL, 0, "total size (`) is shorter than summed sizes of prefix (`) + suffix (`)", all.size, prefix.size, suffix.size);
     auto crc = all.crc;
     if (prefix.size)
-        crc ^= crc32c_shift(prefix.crc, all.size - prefix.size, crc32c_shift_hw);
+        crc = crc32c_combine_sw(prefix.crc, crc, all.size - prefix.size);
     if (suffix.size)
-        crc = crc32_remove0(crc ^ suffix.crc, suffix.size);
+        crc = crc32c_rshift_sw(crc ^ suffix.crc, suffix.size);
     return crc;
 }
 
@@ -849,6 +854,64 @@ _barrett:
 uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
     return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_sse);
 }
+
+__attribute__((aligned(16), used))
+const static uint64_t crc64ecma_lshift_table[] = {
+    // by length of 32, 64, ..., 4G bytes
+    0xe05dd497ca393ae4, 0xb5ea1af9c013aca4, 0x9e735cb59b4724da, 0x2ecbc6dd0447c685,
+    0x15d325270d465dfe, 0x3f663335b446e329, 0x68a971ffad4f1766, 0xb7fd3098b8293475,
+    0x1b225daef15ff37d, 0xea0ddceb7273a052, 0x620648e8f01b0134, 0xfba68785783fd770,
+    0x4c0976fee55cc2f6, 0x2b4d20a2ca417feb, 0xf8a6eaabee9c15b0, 0x2068c6b926839fed,
+    0xc8fef34a6a17f35a, 0x0de5614bc4140f08, 0x724fd734d6b83fac, 0x710def1593c89dfa,
+    0x337733943ec752b9, 0x2a46a23b7286e04a, 0x5e7857ffbea8390a, 0xa2988a6572c32450,
+    0xdb67937ee00fcea3, 0xb427cfd9f16baa88, 0x465d86031d8426b3, 0x56ebf2f895082092,
+};
+
+// virtually pad `len2` bytes of 0 to source
+// data, and return resulting crc value
+// `len2` must be >= 32
+static uint64_t crc64ecma_lshift_big(uint64_t crc1, uint32_t len2,
+           uint64_t (*shift)(uint64_t crc1, uint64_t x)) {
+    for (len2 >>= 5; len2; len2 &= len2 - 1) {
+        auto x = crc64ecma_lshift_table[__builtin_ctz(len2)];
+        crc1 = shift(crc1, x);
+    }
+    return crc1;
+}
+
+static uint64_t do_crc64ecma_lshift_hw(uint64_t crc, uint64_t x) {
+    __m128i crc1x, crc2x, crc3x, constx;
+    const __m128i rk5 = _mm_loadl_epi64((__m128i*)&rk[5-1]);
+    const __m128i rk7 = _mm_loadu_si128((__m128i*)&rk[7-1]);
+
+    crc1x = _mm_cvtsi64_si128(crc);
+    constx = _mm_cvtsi64_si128(x);
+    crc1x = _mm_clmulepi64_si128(crc1x, constx, 0x00);
+
+    // Fold to 64b
+    crc2x = _mm_clmulepi64_si128(crc1x, rk5, 0x00);
+    crc3x = _mm_bsrli_si128(crc1x, 8);
+    crc1x = _mm_xor_si128(crc2x, crc3x);
+
+    // Reduce
+    crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
+    crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
+    crc2x = _mm_bslli_si128(crc2x, 8);
+    crc1x = _mm_xor_si128(crc1x, crc2x);
+    crc1x = _mm_xor_si128(crc1x, crc3x);
+    return _mm_extract_epi64(crc1x, 1);
+}
+
+uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
+    if (unlikely(!crc1)) return crc2;
+    if (unlikely(!len2)) return crc1;
+    if (unlikely(len2 & 31)) {
+        crc1 = ~crc64ecma_hw(zeros, len2 & 31, ~crc1);
+    }
+    crc1 = crc64ecma_lshift_big(crc1, len2, do_crc64ecma_lshift_hw);
+    return crc1 ^ crc2;
+}
+
 
 #ifdef __x86_64__
 #ifdef __clang__

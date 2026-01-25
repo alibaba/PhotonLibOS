@@ -41,3 +41,5 @@ inline bool is_crc64ecma_hw_available() {
     extern uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
     return crc64ecma_auto != crc64ecma_sw;
 }
+
+uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2);
