@@ -127,8 +127,8 @@ public:
         // Quote from rfc2616#section-3.6.1: The chunk-size field is a string of hex digits
         // indicating the size of the chunk.
         m_chunked_remain = line.substr(0, p).hex_to_uint64();
+        m_cursor += p + 2;
         if (m_chunked_remain != 0 || p == 0) {
-            m_cursor += p + 2;
             return true;
         }
         m_finish = true;
@@ -189,6 +189,8 @@ public:
                 m_line_size -= m_cursor;
                 m_cursor = 0;
             }
+        } else if (m_cursor == m_line_size) {   // reset
+            m_cursor = m_line_size = 0;
         }
 
         bool get_line_finish = false;
