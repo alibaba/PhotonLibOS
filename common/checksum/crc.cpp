@@ -120,10 +120,13 @@ uint64_t crc64ecma_sw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
 uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc);
 uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc);
 uint32_t (*crc32c_auto)(const uint8_t*, size_t, uint32_t) = nullptr;
-uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
 uint32_t (*crc32c_combine_auto)(uint32_t crc1, uint32_t crc2, uint32_t len2);
 uint32_t (*crc32c_combine_series_auto)(uint32_t* crc, uint32_t part_size, uint32_t n_parts);
 void (*crc32c_series_auto)(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint32_t* crc_parts);
+uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
+uint64_t (*crc64ecma_combine_auto)(uint64_t crc1, uint64_t crc2, uint32_t len2);
+uint64_t (*crc64ecma_combine_series_auto)(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
+void (*crc64ecma_series_auto)(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts);
 
 __attribute__((constructor))
 static void crc_init() {
@@ -157,6 +160,9 @@ static void crc_init() {
     tie32 = sw32;
     crc64ecma_auto = crc64ecma_sw;
 #endif
+    crc64ecma_combine_auto = (crc64ecma_auto == crc64ecma_sw) ?
+                              crc64ecma_combine_sw :
+                              crc64ecma_combine_hw ;
 }
 
 #ifdef __x86_64__
@@ -912,6 +918,33 @@ uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
     return crc1 ^ crc2;
 }
 
+inline __uint128_t clmul(uint64_t a, uint64_t b) {
+    __uint128_t ret = 0;
+    for (uint32_t i = 0; i < 64; ++i)
+        if ((a >> i) & 1)
+            ret ^= (__uint128_t)b << i;
+    return ret;
+}
+
+static uint64_t do_crc64ecma_lshift_sw(uint64_t crc, uint64_t x) {
+    __uint128_t crc1x = clmul(crc, x);
+    __uint128_t crc2x = clmul(crc1x, rk[5-1]);
+    __uint128_t crc3x = crc1x >> 64;
+    crc1x = crc2x ^ crc3x;
+    crc2x = clmul(crc1x, rk[7-1]);
+    crc3x = clmul(crc2x, rk[7]);
+    return (crc1x >> 64) ^ crc2x ^ (crc3x >> 64);
+}
+
+uint64_t crc64ecma_combine_sw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
+    if (unlikely(!crc1)) return crc2;
+    if (unlikely(!len2)) return crc1;
+    if (unlikely(len2 & 31)) {
+        crc1 = ~crc64ecma_sw(zeros, len2 & 31, ~crc1);
+    }
+    crc1 = crc64ecma_lshift_big(crc1, len2, do_crc64ecma_lshift_sw);
+    return crc1 ^ crc2;
+}
 
 #ifdef __x86_64__
 #ifdef __clang__

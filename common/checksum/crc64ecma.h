@@ -42,4 +42,25 @@ inline bool is_crc64ecma_hw_available() {
     return crc64ecma_auto != crc64ecma_sw;
 }
 
+void crc64ecma_series_sw(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts);
+void crc64ecma_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts);
+inline void crc64ecma_series(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts) {
+    extern void (*crc64ecma_series_auto)(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts);
+    crc64ecma_series_auto(buffer, part_size, n_parts, crc_parts);
+}
+
+
+uint64_t crc64ecma_combine_sw(uint64_t crc1, uint64_t crc2, uint32_t len2);
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2);
+inline uint64_t crc64ecma_combine(uint64_t crc1, uint64_t crc2, uint32_t len2) {
+    extern uint64_t (*crc64ecma_combine_auto)(uint64_t crc1, uint64_t crc2, uint32_t len2);
+    return crc64ecma_combine_auto(crc1, crc2, len2);
+}
+
+// combine a series of CRC32C values of a fixed part size
+uint64_t crc64ecma_combine_series_sw(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
+uint64_t crc64ecma_combine_series_hw(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
+inline uint32_t crc64ecma_combine_series(uint64_t* crc, uint32_t part_size, uint32_t n_parts) {
+    extern uint64_t (*crc64ecma_combine_series_auto)(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
+    return crc64ecma_combine_series_auto(crc, part_size, n_parts);
+}

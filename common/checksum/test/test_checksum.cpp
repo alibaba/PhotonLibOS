@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <unistd.h>
+#include <photon/common/alog.h>
 #include "../../../test/ci-tools.h"
 #include "../../../test/gtest.h"
 
@@ -262,7 +263,9 @@ TEST(TestChecksum, crc32_combine) {
     }
 }
 
-TEST(TestChecksum, crc64_combine) {
+void test_crc64_combine(uint64_t (*crc64_combine)(uint64_t crc1,
+        uint64_t crc2, uint32_t len2), ALogStringL name) {
+    LOG_INFO(name);
     const uint32_t N = 10, M = 510;
     unsigned char buf[M * N];
     memset(buf, 0, sizeof(buf));
@@ -271,7 +274,7 @@ TEST(TestChecksum, crc64_combine) {
     auto y1 = crc64ecma_sw(buf, 8, 0);
     EXPECT_EQ(y, crc64ecma_sw(buf+8, 30-8, y1));
     auto y2 = crc64ecma_sw(buf+8, 30-8, 0);
-    EXPECT_EQ(y, crc64ecma_combine_hw(y1, y2, 30-8));
+    EXPECT_EQ(y, crc64_combine(y1, y2, 30-8));
 
     for (auto& c: buf) c = rand();
     auto x = crc64ecma_sw(buf, M * N, 0);
@@ -282,9 +285,14 @@ TEST(TestChecksum, crc64_combine) {
         uint32_t L1 = sizeof(buf) - L2;
         auto crc1 = crc64ecma_sw(buf, L1, 0);
         auto crc2 = crc64ecma_sw(buf + L1, L2, 0);
-        EXPECT_EQ(x, crc64ecma_combine_hw(crc1, crc2, L2));
+        EXPECT_EQ(x, crc64_combine(crc1, crc2, L2));
         EXPECT_EQ(x, crc64ecma_sw(buf + L1, L2, crc1));
     }
+}
+
+TEST(TestChecksum, crc64_combine) {
+    test_crc64_combine(crc64ecma_combine_hw, "hw");
+    test_crc64_combine(crc64ecma_combine_sw, "sw");
 }
 
 TEST(Perf, crc32c_hw_series) {
