@@ -1147,7 +1147,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       auto& param = params[frame.ref_id - 1];
       if (param.result < 0) {
         std::string msg(frame.payload_size, 0);
-        iovec iov = {msg.data(), frame.payload_size};
+        iovec iov = {&msg[0], frame.payload_size};
         r = frame.read_data(stream, &iov, 1);
         if (r < 0) return r;
         LOG_ERROR("reading object ` failed with result ` msg `", param.object,
