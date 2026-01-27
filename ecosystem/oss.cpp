@@ -178,6 +178,25 @@ struct NodeValue {
 using NodeStrValue = NodeValue<estring_view>;
 using NodeInt64Value = NodeValue<int64_t>;
 
+// Should be called only when status code is in error state.
+// Normally with 4xx or 5xx.
+static int error_http_status_to_errno(int status_code) {
+  switch (status_code) {
+    case 400:
+      return EINVAL;
+    case 401:
+    case 403:
+      return EACCES;
+    case 404:
+      return ENOENT;
+    case 409:
+      return ENOTSUP;
+    case 416:
+      return EINVAL;
+  }
+  return EIO;
+}
+
 static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
                         std::string_view object) {
   int ret = -1;
@@ -254,24 +273,13 @@ __retry:
         goto __retry;
       }
     }
-    switch (op.status_code) {
-      case -1:
+    if (op.status_code == -1) {
         LOG_ERROR("operation on [`] failed!, http connection error", object);
         errno = __saved_errno;
         return ret;
-      case 400:
-      case 409:
-        errno = ENOTSUP;
-        break;
-      case 403:
-        errno = EACCES;
-        break;
-      case 404:
-        errno = ENOENT;
-        break;
-      case 416:
-        errno = EINVAL;
-        break;
+    }
+    if (op.status_code / 100 == 4) {
+      errno = error_http_status_to_errno(op.status_code);
     }
     return ret;
   }
@@ -1114,7 +1122,10 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       auto it = meta_map.find("x-oss-response-code");
       if (it != meta_map.end()) {
         auto status_code = estring_view(it->second).to_int64();
-        param.result = (status_code == 200 || status_code == 206) ? 0 : -1;
+        param.result = 0;
+        if (status_code / 100 != 2) {
+          param.result = -error_http_status_to_errno(status_code);
+        }
         if (param.result < 0) {
           LOG_ERROR("Object ` failed with status code `", param.object,
                     status_code);
@@ -1134,8 +1145,18 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       }
     } else if (frame.kind == Frame::FrameKind::Data) {
       auto& param = params[frame.ref_id - 1];
+      if (param.result < 0) {
+        std::string msg(frame.payload_size, 0);
+        iovec iov = {msg.data(), frame.payload_size};
+        r = frame.read_data(stream, &iov, 1);
+        if (r < 0) return r;
+        LOG_ERROR("reading object ` failed with result ` msg `", param.object,
+                  param.result, msg);
+        continue;
+      }
+
       iovector_view view((struct iovec*)param.iov, param.iovcnt);
-      if (view.sum() < frame.payload_size || param.result < 0) {
+      if (view.sum() < frame.payload_size) {
         LOG_ERROR("Skip object ` data frame expected `, got `, result `",
                   param.object, view.sum(), frame.payload_size, param.result);
         if (!frame.skip(stream))
