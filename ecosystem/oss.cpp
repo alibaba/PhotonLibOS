@@ -169,14 +169,33 @@ struct NodeValue {
   T convert_node_value() const {
     return convert_impl(static_cast<T*>(nullptr));
   }
-  std::string_view convert_impl(std::string_view*) const {
+  estring_view convert_impl(estring_view*) const {
     return node_.to_string_view();
   }
   int64_t convert_impl(int64_t*) const { return node_.to_int64_t(); }
   SimpleDOM::Node node_;
 };
-using NodeStrValue = NodeValue<std::string_view>;
+using NodeStrValue = NodeValue<estring_view>;
 using NodeInt64Value = NodeValue<int64_t>;
+
+// Should be called only when status code is in error state.
+// Normally with 4xx or 5xx.
+static int error_http_status_to_errno(int status_code) {
+  switch (status_code) {
+    case 400:
+      return EINVAL;
+    case 401:
+    case 403:
+      return EACCES;
+    case 404:
+      return ENOENT;
+    case 409:
+      return ENOTSUP;
+    case 416:
+      return EINVAL;
+  }
+  return EIO;
+}
 
 static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
                         std::string_view object) {
@@ -254,24 +273,13 @@ __retry:
         goto __retry;
       }
     }
-    switch (op.status_code) {
-      case -1:
+    if (op.status_code == -1) {
         LOG_ERROR("operation on [`] failed!, http connection error", object);
         errno = __saved_errno;
         return ret;
-      case 400:
-      case 409:
-        errno = ENOTSUP;
-        break;
-      case 403:
-        errno = EACCES;
-        break;
-      case 404:
-        errno = ENOENT;
-        break;
-      case 416:
-        errno = EINVAL;
-        break;
+    }
+    if (op.status_code / 100 == 4) {
+      errno = error_http_status_to_errno(op.status_code);
     }
     return ret;
   }
@@ -553,7 +561,8 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
-    *marker = NodeStrValue(list_bucket_result["NextContinuationToken"]);
+    auto next_marker = list_bucket_result["NextContinuationToken"];
+    *marker = next_marker ? next_marker.to_string_view() : "";
   }
   return 0;
 }
@@ -594,7 +603,8 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
-    *marker = NodeStrValue(list_bucket_result["NextMarker"]);
+    auto next_marker = list_bucket_result["NextMarker"];
+    *marker = next_marker ? next_marker.to_string_view() : "";
   }
   return 0;
 }
@@ -1112,7 +1122,10 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       auto it = meta_map.find("x-oss-response-code");
       if (it != meta_map.end()) {
         auto status_code = estring_view(it->second).to_int64();
-        param.result = (status_code == 200 || status_code == 206) ? 0 : -1;
+        param.result = 0;
+        if (status_code / 100 != 2) {
+          param.result = -error_http_status_to_errno(status_code);
+        }
         if (param.result < 0) {
           LOG_ERROR("Object ` failed with status code `", param.object,
                     status_code);
@@ -1132,8 +1145,18 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       }
     } else if (frame.kind == Frame::FrameKind::Data) {
       auto& param = params[frame.ref_id - 1];
+      if (param.result < 0) {
+        std::string msg(frame.payload_size, 0);
+        iovec iov = {&msg[0], frame.payload_size};
+        r = frame.read_data(stream, &iov, 1);
+        if (r < 0) return r;
+        LOG_ERROR("reading object ` failed with result ` msg `", param.object,
+                  param.result, msg);
+        continue;
+      }
+
       iovector_view view((struct iovec*)param.iov, param.iovcnt);
-      if (view.sum() < frame.payload_size || param.result < 0) {
+      if (view.sum() < frame.payload_size) {
         LOG_ERROR("Skip object ` data frame expected `, got `, result `",
                   param.object, view.sum(), frame.payload_size, param.result);
         if (!frame.skip(stream))
@@ -1266,7 +1289,7 @@ int OssClient::init_multipart_upload(std::string_view object, void** context) {
 
   oss_multipart_context* ctx = new oss_multipart_context;
   ctx->obj_path.appends(object);
-  ctx->upload_id = upload_id;
+  ctx->upload_id = static_cast<estring_view>(upload_id);
 
   *context = ctx;
   return 0;
@@ -1349,11 +1372,11 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   if (!etag.has_value())
     LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no etag provided");
 
-  if ((static_cast<std::string_view>(etag)).empty())
+  if ((static_cast<estring_view>(etag)).empty())
     LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
   SCOPED_LOCK(ctx->lock);
-  ctx->part_list.emplace_back(part_number, etag);
+  ctx->part_list.emplace_back(part_number, static_cast<estring_view>(etag));
   return 0;
 }
 
