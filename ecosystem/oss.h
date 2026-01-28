@@ -130,6 +130,16 @@ class Authenticator : Object {
   virtual void set_credentials(CredentialParameters&& credentials) = 0;
 };
 
+struct GetObjectParameters {
+  std::string_view object;
+  const iovec* iov = nullptr;
+  int iovcnt = 0;
+  off_t offset = 0;
+
+  ObjectHeaderMeta* meta = nullptr;
+  int result = -1;
+};
+
 class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
@@ -144,6 +154,13 @@ class Client : public Object {
                                    const struct iovec* iov, int iovcnt,
                                    off_t offset,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
+
+  // return value is the object count which data is successfully downloaded.
+  // It's possible only some objects get to be downloaded successfully.
+  // return -1 if some other errors happen.
+  // The batch_get_objects interface works only when whitelisting enabled 
+  // at OSS server side.
+  virtual int batch_get_objects(std::vector<GetObjectParameters>& params) = 0;
 
   // return value is the object size if the operation succeeds, otherwise
   // return -1.
