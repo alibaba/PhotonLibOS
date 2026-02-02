@@ -315,17 +315,20 @@ class OssClientImpl : public Client {
 
   int fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta);
   int fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta);
+  int fill_upload_response(HTTP_STACK_OP& op, ObjectUploadResponse& resp);
 
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr);
 
   ssize_t put_object(std::string_view object, const struct iovec* iov,
-                     int iovcnt, uint64_t* expected_crc64 = nullptr);
+                     int iovcnt, uint64_t* expected_crc64 = nullptr,
+                     ObjectUploadResponse* resp = nullptr);
 
   ssize_t append_object(std::string_view object, const struct iovec* iov,
                         int iovcnt, off_t position,
-                        uint64_t* expected_crc64 = nullptr);
+                        uint64_t* expected_crc64 = nullptr,
+                        ObjectUploadResponse* resp = nullptr);
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
                   bool overwrite = false, bool set_mime = false);
@@ -338,7 +341,8 @@ class OssClientImpl : public Client {
   int upload_part_copy(void* context, off_t offset, size_t count,
                        int part_number, std::string_view from = {});
 
-  int complete_multipart_upload(void* context, uint64_t* expected_crc64);
+  int complete_multipart_upload(void* context, uint64_t* expected_crc64 = nullptr,
+                                ObjectUploadResponse* resp = nullptr);
 
   int abort_multipart_upload(void* context);
 
@@ -789,6 +793,19 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
   return 0;
 }
 
+int OssClient::fill_upload_response(HTTP_STACK_OP& op,
+                                    ObjectUploadResponse& resp) {
+  auto len = op.resp.resource_size();
+  if (len == -1) LOG_ERROR_RETURN(0, -1, "Unexpected http response header");
+
+  auto it = op.resp.headers.find("ETag");
+  if (it != op.resp.headers.end()) {
+    resp.set_etag();
+    resp.etag.assign(it.second().data(), it.second().size());
+  }
+  return 0;
+}
+
 ssize_t OssClient::get_object_range(std::string_view obj_path,
                                     const struct iovec* iov, int iovcnt,
                                     off_t offset, ObjectHeaderMeta* meta) {
@@ -844,7 +861,8 @@ retry:
 }
 
 ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
-                              int iovcnt, uint64_t* expected_crc64) {
+                              int iovcnt, uint64_t* expected_crc64,
+                              ObjectUploadResponse* resp) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
@@ -863,12 +881,14 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
+  if (resp) fill_upload_response(op, *resp);
   return cnt;
 }
 
 ssize_t OssClient::append_object(std::string_view object,
                                  const struct iovec* iov, int iovcnt,
-                                 off_t position, uint64_t* expected_crc64) {
+                                 off_t position, uint64_t* expected_crc64,
+                                 ObjectUploadResponse* resp) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
@@ -895,6 +915,7 @@ ssize_t OssClient::append_object(std::string_view object,
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
+  if (resp) fill_upload_response(op, *resp);
   return cnt;
 }
 
@@ -1038,7 +1059,8 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
 }
 
 int OssClient::complete_multipart_upload(void* context,
-                                         uint64_t* expected_crc64) {
+                                         uint64_t* expected_crc64,
+                                         ObjectUploadResponse* resp) {
   assert(context);
 
   oss_multipart_context* ctx = (oss_multipart_context*)context;
@@ -1080,7 +1102,10 @@ int OssClient::complete_multipart_upload(void* context,
   if (r < 0) return r;
   r = do_http_call(op, m_oss_options, oss_url.object());
   if (r < 0) return r;
-  return verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  if (r < 0) return r;
+  if (resp) fill_upload_response(op, *resp);
+  return r;
 }
 
 int OssClient::abort_multipart_upload(void* context) {
