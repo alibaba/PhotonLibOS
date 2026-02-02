@@ -74,10 +74,14 @@ static SimpleDOM::Node get_xml_node(HTTP_STACK_OP& op) {
 }
 
 // convert oss last modified time, e.g. "Fri, 04 Mar 2022 02:46:25 GMT"
-static time_t get_lastmodified(const char* s) {
-  struct tm tm;
-  memset(&tm, 0, sizeof(struct tm));
-  strptime(s, "%a, %d %b %Y %H:%M:%S %Z", &tm);
+static time_t get_lastmodified(std::string_view sv) {
+  if (sv.size() != 29) {
+    LOG_ERROR_RETURN(0, 0, "invalid lastmodified time: ", sv);
+  }
+  struct tm tm{};
+  if (!strptime(sv.data(), "%a, %d %b %Y %H:%M:%S GMT", &tm)) {
+    LOG_ERROR_RETURN(0, 0, "invalid lastmodified time: ", sv);
+  }
   return timegm(&tm);  // GMT
 }
 
@@ -87,9 +91,8 @@ static time_t get_list_lastmodified(std::string_view sv) {
   if (sv.size() != 24) {
     LOG_ERROR_RETURN(0, 0, "invalid lastmodified time: ", sv);
   }
-  struct tm tm;
-  memset(&tm, 0, sizeof(struct tm));
-  if (!strptime(sv.data(), "%Y-%m-%dT%H:%M:%S.000%Z", &tm)) {
+  struct tm tm{};
+  if (!strptime(sv.data(), "%Y-%m-%dT%H:%M:%S.000Z", &tm)) {
     LOG_ERROR_RETURN(0, 0, "invalid lastmodified time: ", sv);
   }
   return timegm(&tm);  // GMT
@@ -832,7 +835,7 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
     if (it.second().empty())
       meta.set_mtime(0);
     else
-      meta.set_mtime(get_lastmodified(it.second().data()));
+      meta.set_mtime(get_lastmodified(it.second()));
   }
 
   it = op.resp.headers.find("ETag");
@@ -1137,7 +1140,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
         param.meta->set_etag(meta_map["ETag"]);
         param.meta->set_storage_class(meta_map["x-oss-storage-class"]);
         param.meta->set_mtime(
-            get_lastmodified(meta_map["Last-Modified"].c_str()));
+            get_lastmodified(meta_map["Last-Modified"]));
         param.meta->set_crc64(
             estring_view(meta_map["x-oss-hash-crc64ecma"]).to_uint64());
         param.meta->set_size(
@@ -1634,13 +1637,15 @@ class BasicAuthenticator : public Authenticator {
   }
 
   void update_gmt_date() {  // avoid updating GMT Time every time
-    time_t t = photon::now / 1000 / 1000;
-    if (t - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
-      m_last_tim = t;
-      std::time_t tm = std::time(nullptr);
-      struct tm* p = gmtime(&tm);
-      strftime(m_gmt_date, GMT_DATE_LIMIT, "%a, %d %b %Y %H:%M:%S %Z", p);
-      strftime(m_gmt_date_iso8601, GMT_DATE_LIMIT, "%Y%m%dT%H%M%SZ", p);
+    time_t now = std::time(nullptr);
+
+    if (now - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
+      struct tm tm{};
+      if (gmtime_r(&now, &tm)) {
+        m_last_tim = now;
+        strftime(m_gmt_date, GMT_DATE_LIMIT, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+        strftime(m_gmt_date_iso8601, GMT_DATE_LIMIT, "%Y%m%dT%H%M%SZ", &tm);
+      }
     }
   }
 
