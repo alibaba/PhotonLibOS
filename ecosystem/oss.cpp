@@ -51,6 +51,7 @@ using photon::net::http::verbstr;
   int _CONCAT(__eno__, __LINE__) = 0;                 \
   DEFER(errno = _CONCAT(__eno__, __LINE__));          \
   HTTP_STACK_OP op(client, verb, (url));              \
+  op.retry = 0;                                       \
   auto _CONCAT(_CONCAT(__defer__, __LINE__), __1__) = \
       make_defer([&]() __INLINE__ { _CONCAT(__eno__, __LINE__) = errno; });
 
@@ -111,8 +112,7 @@ class OssUrl {
   estring m_url, m_raw_object;
   uint64_t m_url_size;
   rstring_view16 m_bucket, m_object;
-  OssUrl() {}
-
+  OssUrl() = default;
   OssUrl(std::string_view endpoint, std::string_view bucket,
          std::string_view object, bool is_http) {
     assert(!bucket.empty());
@@ -159,8 +159,46 @@ class OssUrl {
   estring_view url() { return m_url; }
 };
 
+template <typename T>
+struct NodeValue {
+  explicit NodeValue(SimpleDOM::Node node) : node_(node) {}
+  operator T() const { return convert_node_value(); }
+  bool has_value() const { return node_; }
+
+ private:
+  T convert_node_value() const {
+    return convert_impl(static_cast<T*>(nullptr));
+  }
+  estring_view convert_impl(estring_view*) const {
+    return node_.to_string_view();
+  }
+  int64_t convert_impl(int64_t*) const { return node_.to_int64_t(); }
+  SimpleDOM::Node node_;
+};
+using NodeStrValue = NodeValue<estring_view>;
+using NodeInt64Value = NodeValue<int64_t>;
+
+// Should be called only when status code is in error state.
+// Normally with 4xx or 5xx.
+static int error_http_status_to_errno(int status_code) {
+  switch (status_code) {
+    case 400:
+      return EINVAL;
+    case 401:
+    case 403:
+      return EACCES;
+    case 404:
+      return ENOENT;
+    case 409:
+      return ENOTSUP;
+    case 416:
+      return EINVAL;
+  }
+  return EIO;
+}
+
 static int do_http_call(HTTP_STACK_OP& op, const ClientOptions& options,
-                        std::string_view object, std::string* code = nullptr) {
+                        std::string_view object) {
   int ret = -1;
   auto retry_times = options.retry_times;
   auto retry_interval = options.retry_base_interval_us;
@@ -202,11 +240,6 @@ __retry:
     if (op.status_code != -1 && op.status_code != 404) {
       auto reader = get_xml_node(op);
       auto error_res = reader["Error"];
-      if (error_res) {
-        if (code) {
-          *code = error_res["Code"].to_string_view();
-        }
-      }
       std::string_view code_view = error_res["Code"].to_string_view();
       // clang-format off
       LOG_ERROR(
@@ -240,24 +273,13 @@ __retry:
         goto __retry;
       }
     }
-    switch (op.status_code) {
-      case -1:
+    if (op.status_code == -1) {
         LOG_ERROR("operation on [`] failed!, http connection error", object);
         errno = __saved_errno;
         return ret;
-      case 400:
-      case 409:
-        errno = ENOTSUP;
-        break;
-      case 403:
-        errno = EACCES;
-        break;
-      case 404:
-        errno = ENOENT;
-        break;
-      case 416:
-        errno = EINVAL;
-        break;
+    }
+    if (op.status_code / 100 == 4) {
+      errno = error_http_status_to_errno(op.status_code);
     }
     return ret;
   }
@@ -321,6 +343,8 @@ class OssClientImpl : public Client {
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr);
 
+  int batch_get_objects(std::vector<GetObjectParameters>& params);
+
   ssize_t put_object(std::string_view object, const struct iovec* iov,
                      int iovcnt, uint64_t* expected_crc64 = nullptr,
                      ObjectUploadResponse* resp = nullptr);
@@ -354,23 +378,30 @@ class OssClientImpl : public Client {
   int rename_object(std::string_view src_path, std::string_view dst_path,
                     bool set_mime = false);
 
+  int put_symlink(std::string_view obj, std::string_view target);
+
+  int get_symlink(std::string_view obj, std::string& target);
+
   int get_object_meta(std::string_view obj, ObjectMeta& meta);
 
   void set_credentials(CredentialParameters&& credentials);
 
  private:
-  int append_auth_headers(photon::net::http::Verb v, OssUrl& oss_url,
+  int append_auth_headers(photon::net::http::Verb v, const OssUrl& oss_url,
                           photon::net::http::Headers& headers,
                           const StringKV& query_params = {},
                           bool invalidate_cache = false);
+  int sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
+                    const OssUrl& oss_url, const StringKV& query_params = {},
+                    bool invalidate_cache = false);
 
   int walk_list_results(const SimpleDOM::Node& node, ListObjectsCallback cb);
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
-                         std::string* marker, std::string* resp_code = nullptr);
+                         std::string* marker);
   int do_list_objects_v1(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
-                         std::string* marker, std::string* resp_code = nullptr);
+                         std::string* marker);
 
   int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url, bool overwrite,
                      bool set_mime);
@@ -408,6 +439,7 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client = photon::net::http::new_http_client();
   m_client->timeout(m_oss_options.request_timeout_us);
   m_client->set_user_agent(m_oss_options.user_agent);
+  if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
 
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;
@@ -439,7 +471,7 @@ OssClient::~OssClient() {
 #undef OssClient
 #define OssClient inline OssClientImpl
 
-int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl& oss_url,
+int OssClient::append_auth_headers(photon::net::http::Verb v, const OssUrl& oss_url,
                                    photon::net::http::Headers& headers,
                                    const StringKV& query_params,
                                    bool invalidate_cache) {
@@ -455,27 +487,41 @@ int OssClient::append_auth_headers(photon::net::http::Verb v, OssUrl& oss_url,
   return m_authenticator->sign(headers, params);
 }
 
+int OssClient::sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
+                             const OssUrl& oss_url,
+                             const StringKV& query_params,
+                             bool invalidate_cache) {
+  int r = append_auth_headers(verb, oss_url, op.req.headers, query_params,
+                              invalidate_cache);
+  if (r < 0) return r;
+  return do_http_call(op, m_oss_options, oss_url.object());
+}
+
 int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
                                  ListObjectsCallback cb) {
   for (auto child : list_bucket_result.enumerable_children("Contents")) {
-    auto key = child["Key"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto size = child["Size"];
-    if (!size) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto mtime = child["LastModified"];
-    auto mtim = get_list_lastmodified(mtime.to_string_view());
-    auto obj_key = key.to_string_view();
-    auto dsize = size.to_int64_t();
-    auto etag = child["ETag"].to_string_view();
-    auto r =
-        cb({obj_key, etag, (size_t)dsize, mtim, false /*not comm prefix*/});
+    auto key = NodeStrValue(child["Key"]);
+    auto size = NodeInt64Value(child["Size"]);
+    auto mtime = NodeStrValue(child["LastModified"]);
+    auto etag = NodeStrValue(child["ETag"]);
+    auto type = NodeStrValue(child["Type"]);
+
+    if (!key.has_value() || !size.has_value() || !mtime.has_value() ||
+        !etag.has_value() || !type.has_value())
+      LOG_ERROR_RETURN(EINVAL, -1,
+                       "unexpected response: missing required fields");
+
+    auto mtim = get_list_lastmodified(mtime);
+    auto r = cb({key, etag, type, static_cast<size_t>(size), mtim,
+                 false /*not comm prefix*/});
     if (r < 0) return r;
   }
   for (auto child : list_bucket_result.enumerable_children("CommonPrefixes")) {
-    auto key = child["Prefix"];
-    if (!key) LOG_ERROR_RETURN(EINVAL, -1, "unexpected response");
-    auto com_prefix = key.to_string_view();
-    auto r = cb({com_prefix, {}, 0, 0, true /*comm prefix*/});
+    auto key = NodeStrValue(child["Prefix"]);
+    if (!key.has_value())
+      LOG_ERROR_RETURN(EINVAL, -1,
+                       "unexpected response: missing required fields");
+    auto r = cb({key, {}, {}, 0, 0, true /*comm prefix*/});
     if (r < 0) return r;
   }
   return 0;
@@ -484,8 +530,7 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
 int OssClient::do_list_objects_v2(std::string_view bucket,
                                   std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters,
-                                  int maxKeys, std::string* marker,
-                                  std::string* resp_code) {
+                                  int maxKeys, std::string* marker) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -510,14 +555,13 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
 
   OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, {}, resp_code);
+  int r = sign_and_call(op, Verb::GET, oss_url, query_params);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
+  if (!list_bucket_result) LOG_ERROR_RETURN(EINVAL, -1, "unexpected empty response");
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
@@ -530,8 +574,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
 int OssClient::do_list_objects_v1(std::string_view bucket,
                                   std::string_view prefix,
                                   ListObjectsCallback cb, bool delimiters,
-                                  int maxKeys, std::string* marker,
-                                  std::string* resp_code) {
+                                  int maxKeys, std::string* marker) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -554,14 +597,13 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
 
   OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
-  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, {}, resp_code);
+  int r = sign_and_call(op, Verb::GET, oss_url, query_params);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(0, -1, "failed to parse xml resp_body");
   auto list_bucket_result = reader["ListBucketResult"];
+  if (!list_bucket_result) LOG_ERROR_RETURN(EINVAL, -1, "unexpected empty response");
   r = walk_list_results(list_bucket_result, cb);
   if (r < 0) return r;
   if (marker) {
@@ -593,18 +635,12 @@ int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
     }
   }
 
-  int r = append_auth_headers(Verb::PUT, dst_oss_url, op.req.headers);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, dst_oss_url.object());
-  return r;
+  return sign_and_call(op, Verb::PUT, dst_oss_url);
 }
 
 int OssClient::do_delete_object(OssUrl& oss_url) {
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.url());
-  int r = append_auth_headers(Verb::DELETE, oss_url, op.req.headers);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
-  return r;
+  return sign_and_call(op, Verb::DELETE, oss_url);
 }
 
 static std::string xml_escape(std::string_view object) {
@@ -704,6 +740,32 @@ int OssClient::rename_object(std::string_view src_path,
   return do_delete_object(src_oss_url);
 }
 
+int OssClient::put_symlink(std::string_view obj, std::string_view target) {
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {
+                                            {OSS_PARAM_KEY_SYMLINK, ""},
+                                        });
+  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
+  auto escaped_tgt = photon::net::http::url_escape(target);
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET, escaped_tgt);
+  return sign_and_call(op, Verb::PUT, oss_url, query_params);
+}
+
+int OssClient::get_symlink(std::string_view obj, std::string& target) {
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {
+                                            {OSS_PARAM_KEY_SYMLINK, ""},
+                                        });
+  OssUrl oss_url(m_endpoint, m_bucket, obj, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
+  int r = sign_and_call(op, Verb::GET, oss_url, query_params);
+  if (r < 0) return r;
+  target = photon::net::http::url_unescape(
+      op.resp.headers[OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET]);
+  return r;
+}
+
 int OssClient::delete_objects(const std::vector<std::string_view>& objects,
                               std::string_view obj_prefix) {
   size_t start = 0;
@@ -742,9 +804,7 @@ int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
 int OssClient::head_object(std::string_view object, ObjectHeaderMeta& meta) {
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.url());
-  int r = append_auth_headers(Verb::HEAD, oss_url, op.req.headers);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::HEAD, oss_url);
   if (r < 0) return r;
   return fill_meta(op, meta);
 }
@@ -753,13 +813,7 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta) {
   int ret = fill_meta(op, (ObjectMeta&)meta);
   if (ret < 0) return ret;
 
-  auto it = op.resp.headers.find("x-oss-object-type");
-  if (it != op.resp.headers.end()) {
-    meta.set_type();
-    meta.type.assign(it.second().data(), it.second().size());
-  }
-
-  it = op.resp.headers.find("x-oss-storage-class");
+  auto it = op.resp.headers.find("x-oss-storage-class");
   if (it != op.resp.headers.end()) {
     meta.set_storage_class();
     meta.storage_class.assign(it.second().data(), it.second().size());
@@ -789,6 +843,12 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
   if (it != op.resp.headers.end()) {
     meta.set_etag();
     meta.etag.assign(it.second().data(), it.second().size());
+  }
+
+  it = op.resp.headers.find("x-oss-object-type");
+  if (it != op.resp.headers.end()) {
+    meta.set_type();
+    meta.type.assign(it.second().data(), it.second().size());
   }
   return 0;
 }
@@ -822,10 +882,7 @@ retry:
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
   op.req.headers.range(offset, offset + cnt - 1);
-  int r = append_auth_headers(Verb::GET, oss_url, op.req.headers, {},
-                              invalidate_cache);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache);
   if (r < 0) {
     if (errno == EACCES && !invalidate_cache) {
       invalidate_cache = true;
@@ -860,6 +917,305 @@ retry:
   return ret;
 }
 
+struct BatchGetResult {
+  uint32_t request_count = 0;
+  uint32_t success_count = 0;
+  uint32_t status_code = 0;
+  std::string error_msg;
+};
+
+class FrameStream;
+struct Frame {
+  enum class FrameKind : uint8_t { None, Data, Meta, End };
+
+  FrameKind kind = FrameKind::None;
+  uint32_t ref_id = 0;
+  uint32_t payload_size = 0;
+  uint32_t tail_size = 0;  // checksum size
+
+  BatchGetResult read_end(FrameStream& stream) const;
+  std::unordered_map<estring_view, estring> read_meta(
+      FrameStream& stream) const;
+  ssize_t read_data(FrameStream& stream, const struct iovec* iov,
+                    int iovcnt) const;
+  bool skip(FrameStream& stream) const;
+
+  operator bool() const { return kind != FrameKind::None; }
+};
+
+static inline uint32_t be32_to_host(const uint8_t* p) {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) | (static_cast<uint32_t>(p[3]));
+}
+
+class FrameStream {
+ public:
+  using Response = photon::net::http::Response;
+
+  explicit FrameStream(Response* response) : response_(response) {}
+
+  Frame next() {
+    static constexpr uint32_t FRAME_DATA = 0xFF2;
+    static constexpr uint32_t FRAME_META = 0xFF1;
+    static constexpr uint32_t FRAME_END = 0xFF4;
+
+    // |version| Frame-Type |  ref-id    | Payload Length|Header
+    // Checksum|Payload|Payload Checksum|
+    // |<1---->| <--3 bytes>|<--4 bytes->| <--4 bytes--->|<--4
+    // bytes-----><-n/a--><--4 bytes----->|
+
+    uint8_t header[16];
+    if (!read_exact(header, sizeof(header))) {
+      return {};
+    }
+
+    header[0] = 0;  // ignore version bit
+
+    uint32_t type = be32_to_host(header);
+    if (type != FRAME_DATA && type != FRAME_META && type != FRAME_END) {
+      return {};
+    }
+
+    Frame frame;
+    frame.ref_id = be32_to_host(header + 4);
+    frame.payload_size = be32_to_host(header + 8);
+    frame.tail_size = 4;
+
+    if (type == FRAME_DATA)
+      frame.kind = Frame::FrameKind::Data;
+    else if (type == FRAME_META)
+      frame.kind = Frame::FrameKind::Meta;
+    else if (type == FRAME_END)
+      frame.kind = Frame::FrameKind::End;
+    return frame;
+  }
+
+ private:
+  BatchGetResult read_end_frame(const Frame& frame) {
+    size_t total = frame.payload_size + frame.tail_size;
+    std::vector<uint8_t> buf(total);
+    if (total < 12 || !read_exact(buf.data(), total)) return {};
+
+    BatchGetResult ret;
+    ret.request_count = be32_to_host(buf.data());
+    ret.success_count = be32_to_host(buf.data() + 4);
+    ret.status_code = be32_to_host(buf.data() + 8);
+
+    if (frame.payload_size > 12) {
+      ret.error_msg.assign(reinterpret_cast<const char*>(buf.data() + 12),
+                           frame.payload_size - 12);
+    }
+    // ignore last 4 bytes (checksum)
+    return ret;
+  }
+  std::unordered_map<estring_view, estring> read_meta_frame(
+      const Frame& frame) {
+    size_t total = frame.payload_size + frame.tail_size;
+    std::vector<char> buf(total);
+    if (!read_exact(reinterpret_cast<uint8_t*>(buf.data()), total)) return {};
+
+    static const std::unordered_set<estring_view> headers = {
+        "x-oss-storage-class", "x-oss-hash-crc64ecma",
+        "x-oss-object-type",   "ETag",
+        "x-oss-response-code", "Last-Modified",
+        "x-oss-object-size"};
+
+    estring_view meta_str(buf.data(), frame.payload_size);
+    std::unordered_map<estring_view, estring> meta;
+    for (auto line : meta_str.split_lines()) {
+      auto pos = line.find(':');
+      if (pos == estring_view::npos) continue;
+      estring_view key(line.substr(0, pos));
+      auto it = headers.find(key.trim());
+      if (it == headers.end()) continue;
+      estring_view val(line.substr(pos + 1));
+      meta.emplace(*it, photon::net::http::url_unescape(val.trim()));
+    }
+    return meta;
+  }
+
+  ssize_t read_data_frame(const Frame& frame, const struct iovec* iov,
+                          int iovcnt) {
+    ssize_t ret = response_->readv(iov, iovcnt);
+    if (ret < 0 || static_cast<size_t>(ret) != frame.payload_size) {
+      LOG_ERROR("Data frame mismatch: expected `, got `", frame.payload_size,
+                ret);
+      return ret < 0 ? ret : -1;
+    }
+    if (!skip_bytes(frame.tail_size))
+      LOG_ERROR_RETURN(EIO, -1, "Failed to skip data frame tail");
+    return ret;
+  }
+
+  bool skip_frame(const Frame& frame) {
+    return skip_bytes(frame.payload_size + frame.tail_size);
+  }
+
+  bool read_exact(uint8_t* buf, size_t n) {
+    while (n > 0) {
+      size_t got = response_->read(buf, n);
+      if (got == 0 || got > n) return false;
+      buf += got;
+      n -= got;
+    }
+    return true;
+  }
+
+  bool skip_bytes(size_t n) {
+    std::vector<uint8_t> dummy(std::min(n, size_t(128 * 1024)));
+    while (n > 0) {
+      size_t chunk = std::min(n, dummy.size());
+      if (!read_exact(dummy.data(), chunk)) return false;
+      n -= chunk;
+    }
+    return true;
+  }
+
+  Response* response_ = nullptr;
+  friend struct Frame;
+};
+
+BatchGetResult Frame::read_end(FrameStream& stream) const {
+  assert(kind == FrameKind::End);
+  return stream.read_end_frame(*this);
+}
+
+std::unordered_map<estring_view, estring> Frame::read_meta(
+    FrameStream& stream) const {
+  assert(kind == FrameKind::Meta);
+  return stream.read_meta_frame(*this);
+}
+
+ssize_t Frame::read_data(FrameStream& stream, const struct iovec* iov,
+                         int iovcnt) const {
+  assert(kind == FrameKind::Data);
+  return stream.read_data_frame(*this, iov, iovcnt);
+}
+
+bool Frame::skip(FrameStream& stream) const { return stream.skip_frame(*this); }
+
+int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
+  static std::string_view req_head = "<GetObjectsRequest>";
+  static std::string_view req_tail = "</GetObjectsRequest>";
+  estring req_list;
+  for (size_t i = 0; i < params.size(); i++) {
+    iovector_view view((struct iovec*)params[i].iov, params[i].iovcnt);
+    auto cnt = view.sum();
+    req_list.appends("<Object><ObjectName>", xml_escape(params[i].object),
+                     "</ObjectName><Range>bytes=", params[i].offset, "-",
+                     params[i].offset + cnt - 1, "</Range><RefId>", i + 1,
+                     "</RefId></Object>");
+    params[i].result = -1;
+  }
+
+  struct iovec iov[3] = {{(void*)req_head.data(), req_head.size()},
+                         {(void*)req_list.data(), req_list.size()},
+                         {(void*)req_tail.data(), req_tail.size()}};
+  iovector_view body_view(iov, 3);
+
+  OssUrl oss_url(m_endpoint, m_bucket, "/", m_is_http);
+  auto md5 = md5_base64(body_view);
+
+  DEFINE_CONST_STATIC_ORDERED_STRING_KV(query_params,
+                                        {// must appear in dictionary order!
+                                         {OSS_PARAM_KEY_BATCH_GET, ""}});
+
+  DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
+  op.req.headers.insert(OSS_HEADER_KEY_CONTENT_MD5, md5);
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
+  op.req.headers.content_length(body_view.sum());
+  op.body_writer = {&body_view, &body_writer_cb};
+
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
+  if (r < 0) return r;
+
+  uint32_t read_good_cnt = 0;
+  FrameStream stream(&op.resp);
+  while (auto frame = stream.next()) {
+    if (frame.kind == Frame::FrameKind::Meta) {
+      auto& param = params[frame.ref_id - 1];
+      auto meta_map = frame.read_meta(stream);
+      auto it = meta_map.find("x-oss-response-code");
+      if (it != meta_map.end()) {
+        auto status_code = estring_view(it->second).to_int64();
+        param.result = 0;
+        if (status_code / 100 != 2) {
+          param.result = -error_http_status_to_errno(status_code);
+        }
+        if (param.result < 0) {
+          LOG_ERROR("Object ` failed with status code `", param.object,
+                    status_code);
+        }
+      }
+
+      if (param.meta && param.result == 0) {
+        param.meta->set_type(meta_map["x-oss-object-type"]);
+        param.meta->set_etag(meta_map["ETag"]);
+        param.meta->set_storage_class(meta_map["x-oss-storage-class"]);
+        param.meta->set_mtime(
+            get_lastmodified(meta_map["Last-Modified"].c_str()));
+        param.meta->set_crc64(
+            estring_view(meta_map["x-oss-hash-crc64ecma"]).to_uint64());
+        param.meta->set_size(
+            estring_view(meta_map["x-oss-object-size"]).to_int64());
+      }
+    } else if (frame.kind == Frame::FrameKind::Data) {
+      auto& param = params[frame.ref_id - 1];
+      if (param.result < 0) {
+        std::string msg(frame.payload_size, 0);
+        iovec iov = {&msg[0], frame.payload_size};
+        r = frame.read_data(stream, &iov, 1);
+        if (r < 0) return r;
+        LOG_ERROR("reading object ` failed with result ` msg `", param.object,
+                  param.result, msg);
+        continue;
+      }
+
+      iovector_view view((struct iovec*)param.iov, param.iovcnt);
+      if (view.sum() < frame.payload_size) {
+        LOG_ERROR("Skip object ` data frame expected `, got `, result `",
+                  param.object, view.sum(), frame.payload_size, param.result);
+        if (!frame.skip(stream))
+          LOG_ERROR_RETURN(EIO, -1, "Failed to skip data frame");
+        continue;
+      }
+
+      if (view.sum() > frame.payload_size) {
+        // rebuild the iovs if the returned data is less than expected.
+        std::vector<iovec> iovs;
+        iovs.reserve(param.iovcnt);
+        size_t remaining = frame.payload_size;
+        for(auto i = 0; i < param.iovcnt; i++) {
+          auto cur = std::min(remaining, param.iov[i].iov_len);
+          iovs.push_back({param.iov[i].iov_base, cur});
+          remaining -= cur;
+          if (remaining == 0) break;
+        }
+        
+        r = frame.read_data(stream, &iovs[0], iovs.size());
+      } else {
+        r = frame.read_data(stream, param.iov, param.iovcnt);
+      }
+
+      if (r < 0) return r;
+      param.result = r;
+      read_good_cnt++;
+    } else {
+      auto result = frame.read_end(stream);
+      LOG_DEBUG("End frame status code ` request cnt ` success cnt `",
+                result.status_code, result.request_count, result.success_count);
+      if (read_good_cnt != result.success_count) {
+        LOG_ERROR("Mismatch between read good cnt ` and success cnt `",
+                  read_good_cnt, result.success_count);
+        return -1;
+      }
+      return result.success_count;
+    }
+  }
+  return 0;
+}
+
 ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
                               int iovcnt, uint64_t* expected_crc64,
                               ObjectUploadResponse* resp) {
@@ -875,9 +1231,7 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
   }
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::PUT, oss_url);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
@@ -908,10 +1262,7 @@ ssize_t OssClient::append_object(std::string_view object,
   }
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  int r =
-      append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
@@ -948,21 +1299,18 @@ int OssClient::init_multipart_upload(std::string_view object, void** context) {
   if (!content_type.empty())
     op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
 
-  int r =
-      append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
-  auto child = reader["InitiateMultipartUploadResult"]["UploadId"];
-  if (!child)
+  auto upload_id = NodeStrValue(reader["InitiateMultipartUploadResult"]["UploadId"]);
+  if (!upload_id.has_value())
     LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no upload id provided");
 
   oss_multipart_context* ctx = new oss_multipart_context;
   ctx->obj_path.appends(object);
-  ctx->upload_id = child.to_string_view();
+  ctx->upload_id = static_cast<estring_view>(upload_id);
 
   *context = ctx;
   return 0;
@@ -987,15 +1335,13 @@ ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
                            {{OSS_PARAM_KEY_PART_NUMBER, part_nums_str},
                             {OSS_PARAM_KEY_UPLOAD_ID, ctx->upload_id}});
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
 
   op.req.headers.content_length(cnt);
   op.body_writer = {&view, &body_writer_cb};
-  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::PUT, oss_url, query_params);
   if (r < 0) return r;
 
   auto etag = op.resp.headers["ETag"];
@@ -1016,7 +1362,7 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   estring part_num_str = std::to_string(part_number);
 
@@ -1038,23 +1384,20 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range);
-  int r = append_auth_headers(Verb::PUT, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::PUT, oss_url, query_params);
   if (r < 0) return r;
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
-  auto child = reader["CopyPartResult"]["ETag"];
-  if (!child)
+  auto etag = NodeStrValue(reader["CopyPartResult"]["ETag"]);
+  if (!etag.has_value())
     LOG_ERROR_RETURN(EINVAL, -1, "invalid response with no etag provided");
 
-  auto etag = child.to_string_view();
-  if (etag.empty())
+  if ((static_cast<estring_view>(etag)).empty())
     LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
   SCOPED_LOCK(ctx->lock);
-  ctx->part_list.emplace_back(part_number, etag);
+  ctx->part_list.emplace_back(part_number, static_cast<estring_view>(etag));
   return 0;
 }
 
@@ -1087,7 +1430,7 @@ int OssClient::complete_multipart_upload(void* context,
   struct iovec iov{(void*)(req_body.data()), req_body.size()};
 
   iovector_view view(&iov, 1);
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFER(delete ctx);
 
@@ -1097,10 +1440,7 @@ int OssClient::complete_multipart_upload(void* context,
   DEFINE_ONSTACK_OP(m_client, Verb::POST, oss_url.append_params(query_params));
   op.req.headers.content_length(req_body.size());
   op.body_writer = {&view, &body_writer_cb};
-  int r =
-      append_auth_headers(Verb::POST, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::POST, oss_url, query_params);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
   if (r < 0) return r;
@@ -1114,7 +1454,7 @@ int OssClient::abort_multipart_upload(void* context) {
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
 
-  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path.c_str(), m_is_http);
+  OssUrl oss_url(m_endpoint, m_bucket, ctx->obj_path, m_is_http);
 
   DEFER(delete ctx);
 
@@ -1124,11 +1464,7 @@ int OssClient::abort_multipart_upload(void* context) {
 
   DEFINE_ONSTACK_OP(m_client, Verb::DELETE,
                     oss_url.append_params(query_params));
-  int r =
-      append_auth_headers(Verb::DELETE, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
-  return r;
+  return sign_and_call(op, Verb::DELETE, oss_url, query_params);
 }
 
 int OssClient::get_object_meta(std::string_view object, ObjectMeta& meta) {
@@ -1139,10 +1475,7 @@ int OssClient::get_object_meta(std::string_view object, ObjectMeta& meta) {
                                         });
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::HEAD, oss_url.append_params(query_params));
-  int r =
-      append_auth_headers(Verb::HEAD, oss_url, op.req.headers, query_params);
-  if (r < 0) return r;
-  r = do_http_call(op, m_oss_options, oss_url.object());
+  int r = sign_and_call(op, Verb::HEAD, oss_url, query_params);
   if (r < 0) return r;
   return fill_meta(op, meta);
 }
@@ -1206,14 +1539,12 @@ class BasicAuthenticator : public Authenticator {
     data2sign.appends(method, "\n", content_md5, "\n", content_type, "\n",
                       m_gmt_date, "\n");
 
-    append_headers(data2sign, headers, false);
-
-    data2sign.appends(
-        make_ccl(!token.empty(), "x-oss-security-token:", token, "\n"), "/",
-        params.bucket, "/", params.object);
     if (!token.empty()) {
       headers.insert("x-oss-security-token", token);
     }
+    append_headers(data2sign, headers, false);
+
+    data2sign.appends("/", params.bucket, "/", params.object);
 
     // complete this list if needed. currently it's for ossfs use only.
     // must appear in dictionary order!
@@ -1221,7 +1552,8 @@ class BasicAuthenticator : public Authenticator {
         OSS_PARAM_KEY_APPEND,      OSS_PARAM_KEY_CONTINUATION_TOKEN,
         OSS_PARAM_KEY_DELETE,      OSS_PARAM_KEY_OBJECT_META,
         OSS_PARAM_KEY_PART_NUMBER, OSS_PARAM_KEY_POSITION,
-        OSS_PARAM_KEY_UPLOAD_ID,   OSS_PARAM_KEY_UPLOADS,
+        OSS_PARAM_KEY_SYMLINK,     OSS_PARAM_KEY_UPLOAD_ID,
+        OSS_PARAM_KEY_UPLOADS,     OSS_PARAM_KEY_BATCH_GET
     };
 
     if (params.query_params.size()) {

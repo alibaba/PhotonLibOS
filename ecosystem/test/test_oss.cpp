@@ -1,6 +1,7 @@
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/common/checksum/crc64ecma.h>
 #include <photon/common/estring.h>
 #include <photon/photon.h>
@@ -9,6 +10,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <random>
+#include <algorithm>
 
 #include "../oss.h"
 
@@ -87,6 +90,8 @@ class BasicAuthOssTest : public ::testing::Test {
   void copy_and_rename();
   void append_and_get();
   void multipart();
+  void symlink();
+  void batch_get_objects();
 
  private:
   std::string bucket_prefix_;
@@ -401,6 +406,134 @@ void BasicAuthOssTest::multipart() {
   ASSERT_EQ(ret, 0);
 }
 
+void BasicAuthOssTest::symlink() {
+  auto src = get_real_test_path("symlink/source");
+  auto target = "symlink/target";
+
+  int r = client->put_symlink(src, target);
+  ASSERT_EQ(r, 0);
+
+  std::string oss_target;
+  r = client->get_symlink(src, oss_target);
+  ASSERT_EQ(r, 0);
+
+  EXPECT_EQ(oss_target, target);
+
+  std::vector<std::string> objects;
+  auto cb = [&](const ListObjectsCBParameters& cb) {
+    objects.emplace_back(cb.key);
+    if (cb.type == "Symlink") return 0;
+    return -1;
+  };
+  int ret = client->list_objects(get_real_test_path("symlink/"), cb);
+  EXPECT_EQ(ret, 0);
+  ASSERT_EQ(objects.size(), 1);
+  EXPECT_EQ(objects[0], src);
+}
+
+void BasicAuthOssTest::batch_get_objects() {
+  int good_obj_cnt = 6, bad_obj_cnt = 3;
+  std::vector<std::string> good_objs;
+  std::vector<std::string> bad_objs;
+
+  const size_t file_size = 1024;
+  char test_data[file_size];
+  for (size_t i = 0; i < file_size; i++) {
+    test_data[i] = 'A' + (i % 26);
+  }
+  iovec iov{test_data, file_size};
+
+  for (int i = 0; i < good_obj_cnt; i++) {
+    auto src = get_real_test_path("batch_get_objects/good_testfile" +
+                                  std::to_string(i));
+    good_objs.push_back(src);
+
+    auto crc64 = crc64ecma(test_data, file_size, 0);
+    int ret = client->put_object(src, &iov, 1, &crc64);
+    ASSERT_EQ(ret, (int)file_size) << "Failed to upload test object " << i;
+  }
+
+  for (int i = 0; i < bad_obj_cnt; i++) {
+    auto src = get_real_test_path("batch_get_objects/bad_testfile" +
+                                  std::to_string(i));
+    bad_objs.push_back(src);
+  }
+
+  std::vector<GetObjectParameters> params_vec;
+  std::vector<char*> bufs(good_objs.size());
+  std::vector<struct iovec> iovs(good_objs.size());
+  DEFER(for (auto buf : bufs) { delete buf; });
+
+  for (size_t i = 0; i < good_objs.size(); i++) {
+    auto buf_size = (i == 0) ? (file_size + 1) : (file_size - i);
+
+    char* buffer = (char *)malloc(buf_size);
+    bufs[i] = buffer;
+    iovs[i] = {buffer, buf_size};
+
+    GetObjectParameters params;
+    params.offset = i;
+    params.iov = &iovs[i];
+    params.iovcnt = 1;
+    params.object = good_objs[i];
+    params_vec.push_back(params);
+  }
+
+  for (size_t i = 0; i < bad_objs.size(); i++) {
+    GetObjectParameters params;
+    params.object = bad_objs[i];
+    params_vec.push_back(params);
+
+    // no need to fill other information for bad objects
+  }
+
+  ObjectHeaderMeta hmeta;
+  if (good_obj_cnt > 0) {
+    params_vec[rand() % good_obj_cnt].meta = &hmeta;
+  }
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::shuffle(params_vec.begin(), params_vec.end(), gen);
+
+  int ret = client->batch_get_objects(params_vec);
+  ASSERT_EQ(ret, good_obj_cnt);
+
+  if (good_obj_cnt > 0) {
+    EXPECT_EQ(hmeta.size, file_size);
+    EXPECT_TRUE(!hmeta.etag.empty());
+    EXPECT_NE(hmeta.mtime, 0);
+    EXPECT_TRUE(hmeta.has_crc64());
+    EXPECT_TRUE(!hmeta.storage_class.empty());
+    EXPECT_TRUE(!hmeta.type.empty());
+    LOG_INFO("etag ` mtime ` crc64 ` storage_class ` type `", hmeta.etag,
+             hmeta.mtime, hmeta.crc64, hmeta.storage_class, hmeta.type);
+  }
+
+  for (auto& param : params_vec) {
+    if (param.iov) {
+      // good object 
+      if (param.iov->iov_len > file_size) {
+        ASSERT_EQ(param.result, file_size); // only valid data are returned
+      } else {
+        ASSERT_EQ(param.result, param.iov->iov_len);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < good_objs.size(); i++) {
+    bool data_correct = true;
+    for (size_t j = i; j < file_size ; j++) {
+      if (bufs[i][j-i] != (char)('A' + (j % 26))) {
+        data_correct = false;
+        LOG_INFO("Data mismatch for good object ` at offset ` ` `", i, j, (int)bufs[i][j], ('A' + (j % 26)));
+        break;
+      }
+    }
+    ASSERT_TRUE(data_correct) << "Data mismatch for good object " << i;
+  }
+}
+
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
@@ -438,12 +571,16 @@ TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
+TEST_F(BasicAuthOssTest, symlink) { symlink(); }
+TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
 TEST_F(CachedAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
+TEST_F(CachedAuthOssTest, symlink) { symlink(); }
+TEST_F(CachedAuthOssTest, batch_get_objects) { batch_get_objects(); }
 TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 
 int main(int argc, char* argv[]) {

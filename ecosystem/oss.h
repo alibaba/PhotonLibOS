@@ -40,6 +40,7 @@ struct ClientOptions {
   std::string endpoint;
   std::string bucket;
   std::string region;
+  std::string proxy;
   int max_list_ret_cnt = 1000;
   std::string user_agent = "Photon-ObjStore-Client";
   std::string bind_ips;
@@ -80,10 +81,10 @@ struct ObjectMeta : public OptionalFieldBase {
   DEFINE_OPTIONAL_FIELD(size_t, size, 1)
   DEFINE_OPTIONAL_FIELD(time_t, mtime, 1 << 1)
   DEFINE_OPTIONAL_FIELD(std::string, etag, 1 << 2)
+  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
 };
 
 struct ObjectHeaderMeta : public ObjectMeta {
-  DEFINE_OPTIONAL_FIELD(std::string, type, 1 << 3)  // Appendable/Normal/...
   DEFINE_OPTIONAL_FIELD(std::string, storage_class, 1 << 4)
   DEFINE_OPTIONAL_FIELD(uint64_t, crc64, 1 << 5)
 };
@@ -103,6 +104,7 @@ struct ListObjectsParameters {
 struct ListObjectsCBParameters {
   std::string_view key;
   std::string_view etag;
+  std::string_view type;
   size_t size = 0;
   time_t mtime = 0;
   bool is_com_prefix = false;
@@ -134,6 +136,16 @@ class Authenticator : Object {
   virtual void set_credentials(CredentialParameters&& credentials) = 0;
 };
 
+struct GetObjectParameters {
+  std::string_view object;
+  const iovec* iov = nullptr;
+  int iovcnt = 0;
+  off_t offset = 0;
+
+  ObjectHeaderMeta* meta = nullptr;
+  int result = -1;
+};
+
 class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
@@ -148,6 +160,13 @@ class Client : public Object {
                                    const struct iovec* iov, int iovcnt,
                                    off_t offset,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
+
+  // return value is the object count which data is successfully downloaded.
+  // It's possible only some objects get to be downloaded successfully.
+  // return -1 if some other errors happen.
+  // The batch_get_objects interface works only when whitelisting enabled 
+  // at OSS server side.
+  virtual int batch_get_objects(std::vector<GetObjectParameters>& params) = 0;
 
   // return value is the object size if the operation succeeds, otherwise
   // return -1.
@@ -238,6 +257,10 @@ class Client : public Object {
   virtual int rename_object(std::string_view src_path,
                             std::string_view dst_path,
                             bool set_mime = false) = 0;
+
+  virtual int put_symlink(std::string_view obj, std::string_view target) = 0;
+
+  virtual int get_symlink(std::string_view obj, std::string& target) = 0;
 
   virtual int get_object_meta(std::string_view obj, ObjectMeta& meta) = 0;
 

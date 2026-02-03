@@ -84,7 +84,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
-set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
+set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2")    # Only for CI test
+if(CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+endif()
 set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
 set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
@@ -102,7 +105,10 @@ if (${ARCH} STREQUAL x86_64)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcrc32")
     endif ()
 elseif (${ARCH} STREQUAL aarch64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=native -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+    if (NOT CMAKE_CXX_FLAGS MATCHES "-march=|-mcpu=")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
+    endif ()
 endif ()
 
 # Default build type is Release
