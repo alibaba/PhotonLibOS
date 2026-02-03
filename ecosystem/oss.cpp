@@ -1637,9 +1637,9 @@ class BasicAuthenticator : public Authenticator {
   }
 
   void update_gmt_date() {  // avoid updating GMT Time every time
-    time_t now = std::time(nullptr);
-
-    if (now - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
+    time_t t = photon::now / 1000 / 1000;
+    if (t - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
+      std::time_t now = std::time(nullptr);
       struct tm tm{};
       if (gmtime_r(&now, &tm)) {
         m_last_tim = now;
