@@ -287,7 +287,7 @@ __retry:
 }
 
 static int verify_crc64_if_needed(HTTP_STACK_OP& op, std::string_view object,
-                                  uint64_t* expected_crc64) {
+                                  const uint64_t* expected_crc64) {
   if (!expected_crc64) return 0;
   auto it = op.resp.headers.find("x-oss-hash-crc64ecma");
   if (it == op.resp.headers.end()) {
@@ -337,6 +337,7 @@ class OssClientImpl : public Client {
 
   int fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta);
   int fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta);
+  int fill_upload_response(HTTP_STACK_OP& op, ObjectUploadOptions& opts);
 
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
@@ -345,11 +346,11 @@ class OssClientImpl : public Client {
   int batch_get_objects(std::vector<GetObjectParameters>& params);
 
   ssize_t put_object(std::string_view object, const struct iovec* iov,
-                     int iovcnt, uint64_t* expected_crc64 = nullptr);
+                     int iovcnt, ObjectUploadOptions& opts);
 
   ssize_t append_object(std::string_view object, const struct iovec* iov,
                         int iovcnt, off_t position,
-                        uint64_t* expected_crc64 = nullptr);
+                        ObjectUploadOptions& opts);
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
                   bool overwrite = false, bool set_mime = false);
@@ -357,12 +358,12 @@ class OssClientImpl : public Client {
   int init_multipart_upload(std::string_view object, void** context);
 
   ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
-                      int part_number, uint64_t* expected_crc64 = nullptr);
+                      int part_number, ObjectUploadOptions& opts);
 
   int upload_part_copy(void* context, off_t offset, size_t count,
                        int part_number, std::string_view from = {});
 
-  int complete_multipart_upload(void* context, uint64_t* expected_crc64);
+  int complete_multipart_upload(void* context, ObjectUploadOptions& opts);
 
   int abort_multipart_upload(void* context);
 
@@ -849,6 +850,17 @@ int OssClient::fill_meta(HTTP_STACK_OP& op, ObjectMeta& meta) {
   return 0;
 }
 
+int OssClient::fill_upload_response(HTTP_STACK_OP& op,
+                                    ObjectUploadOptions& opts) {
+  if (opts.etag) {
+    auto it = op.resp.headers.find("ETag");
+    if (it != op.resp.headers.end()) {
+      opts.etag->assign(it.second().data(), it.second().size());
+    }
+  }
+  return 0;
+}
+
 ssize_t OssClient::get_object_range(std::string_view obj_path,
                                     const struct iovec* iov, int iovcnt,
                                     off_t offset, ObjectHeaderMeta* meta) {
@@ -1200,7 +1212,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
 }
 
 ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
-                              int iovcnt, uint64_t* expected_crc64) {
+                              int iovcnt, ObjectUploadOptions& opts) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
@@ -1215,14 +1227,15 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
   op.body_writer = {&view, &body_writer_cb};
   int r = sign_and_call(op, Verb::PUT, oss_url);
   if (r < 0) return r;
-  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
   if (r < 0) return r;
+  fill_upload_response(op, opts);
   return cnt;
 }
 
 ssize_t OssClient::append_object(std::string_view object,
                                  const struct iovec* iov, int iovcnt,
-                                 off_t position, uint64_t* expected_crc64) {
+                                 off_t position, ObjectUploadOptions& opts) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
 
@@ -1244,8 +1257,9 @@ ssize_t OssClient::append_object(std::string_view object,
   op.body_writer = {&view, &body_writer_cb};
   int r = sign_and_call(op, Verb::POST, oss_url, query_params);
   if (r < 0) return r;
-  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
   if (r < 0) return r;
+  fill_upload_response(op, opts);
   return cnt;
 }
 
@@ -1297,7 +1311,7 @@ int OssClient::init_multipart_upload(std::string_view object, void** context) {
 
 ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
                                int iovcnt, int part_number,
-                               uint64_t* expected_crc64) {
+                               ObjectUploadOptions& opts) {
   iovector_view view((struct iovec*)iov, iovcnt);
   auto cnt = view.sum();
   assert(cnt > 0);
@@ -1327,7 +1341,7 @@ ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
   if (etag.empty())
     LOG_ERROR_RETURN(EINVAL, -1, "unexpected response with empty etag");
 
-  r = verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
   if (r < 0) return r;
 
   SCOPED_LOCK(ctx->lock);
@@ -1381,7 +1395,7 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
 }
 
 int OssClient::complete_multipart_upload(void* context,
-                                         uint64_t* expected_crc64) {
+                                         ObjectUploadOptions& opts) {
   assert(context);
 
   oss_multipart_context* ctx = (oss_multipart_context*)context;
@@ -1420,7 +1434,10 @@ int OssClient::complete_multipart_upload(void* context,
   op.body_writer = {&view, &body_writer_cb};
   int r = sign_and_call(op, Verb::POST, oss_url, query_params);
   if (r < 0) return r;
-  return verify_crc64_if_needed(op, oss_url.object(), expected_crc64);
+  r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
+  if (r < 0) return r;
+  fill_upload_response(op, opts);
+  return r;
 }
 
 int OssClient::abort_multipart_upload(void* context) {
