@@ -92,6 +92,7 @@ class BasicAuthOssTest : public ::testing::Test {
   void multipart();
   void symlink();
   void batch_get_objects();
+  void upload_with_options();
 
  private:
   std::string bucket_prefix_;
@@ -534,6 +535,59 @@ void BasicAuthOssTest::batch_get_objects() {
   }
 }
 
+void BasicAuthOssTest::upload_with_options() {
+  // put_object
+  auto path = get_real_test_path("upload_with_options/testfile");
+  const size_t file_size = 1025;
+  char buf[file_size] = {3};
+  auto crc64 = crc64ecma(buf, file_size, 0);
+  iovec iov{buf, file_size};
+
+  std::string etag;
+  ObjectUploadOptions opts{&crc64, &etag};
+  int ret = client->put_object(path, &iov, 1, opts);
+  ASSERT_EQ(ret, file_size) << "Failed to put object for upload test";
+
+  uint64_t invalid_crc64 = 0xdeadbeef;
+  ObjectUploadOptions opts_wrong_crc64{&invalid_crc64, &etag};
+  ret = client->put_object(path, &iov, 1, opts_wrong_crc64);
+  ASSERT_EQ(ret, -1) << "crc64 check did not work";
+
+  ObjectMeta meta;
+  ret = client->get_object_meta(path, meta);
+  ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(meta.has_etag());
+  EXPECT_EQ(meta.etag, etag);
+
+  // append_object
+  path = get_real_test_path("upload_with_options/testfile.append");
+
+  ret = client->append_object(path, &iov, 1, 0, opts);
+  ASSERT_EQ(ret, file_size) << "Failed to append object for upload test";
+
+  ret = client->get_object_meta(path, meta);
+  ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(meta.has_etag());
+  EXPECT_EQ(meta.etag, etag);
+
+  // multipart
+  path = get_real_test_path("upload_with_options/testfile.multipart");
+  void* context = nullptr;
+  ret = client->init_multipart_upload(path, &context);
+  ASSERT_EQ(ret, 0);
+
+  ret = client->upload_part(context, &iov, 1, 1, opts);
+  ASSERT_EQ(ret, file_size) << "Failed to upload object for upload test";
+
+  ret = client->complete_multipart_upload(context, opts);
+  ASSERT_EQ(ret, 0);
+
+  ret = client->get_object_meta(path, meta);
+  ASSERT_EQ(ret, 0);
+  EXPECT_TRUE(meta.has_etag());
+  EXPECT_EQ(meta.etag, etag);
+}
+
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
@@ -573,6 +627,8 @@ TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
+
+TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
@@ -581,6 +637,8 @@ TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 TEST_F(CachedAuthOssTest, symlink) { symlink(); }
 TEST_F(CachedAuthOssTest, batch_get_objects) { batch_get_objects(); }
+
+TEST_F(CachedAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 
 int main(int argc, char* argv[]) {
