@@ -111,13 +111,6 @@ struct fuse_pipe {
 int fuse_session_receive_splice(
         struct fuse_session *se,
         struct fuse_buf *buf,
-        struct fuse_pipe *iopipe) {
-    return fuse_session_receive_splice(se, buf, iopipe, fuse_session_fd(se));
-}
-
-int fuse_session_receive_splice(
-        struct fuse_session *se,
-        struct fuse_buf *buf,
         struct fuse_pipe *iopipe,
         int fd) {
 
@@ -170,6 +163,13 @@ int fuse_session_receive_splice(
     buf->size = tmpbuf.size;
 
     return res;
+}
+
+int fuse_session_receive_splice(
+        struct fuse_session *se,
+        struct fuse_buf *buf,
+        struct fuse_pipe *iopipe) {
+    return fuse_session_receive_splice(se, buf, iopipe, fuse_session_fd(se));
 }
 
 int fuse_session_receive_fd(
