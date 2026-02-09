@@ -278,9 +278,9 @@ namespace rpc
         ValueType m_checksum;
     };
 
-#define PROCESS_FIELDS(...)                     \
-        template<typename AR>                   \
-        void process_fields(AR& ar) {           \
+#define PROCESS_FIELDS(...)                        \
+        template<typename AR>                      \
+        void process_fields(AR& ar) {              \
             return reduce(ar, ## __VA_ARGS__);     \
         }
 
