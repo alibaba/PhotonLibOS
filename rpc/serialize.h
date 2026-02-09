@@ -281,7 +281,7 @@ namespace rpc
 #define PROCESS_FIELDS(...)                     \
         template<typename AR>                   \
         void process_fields(AR& ar) {           \
-            return reduce(ar, __VA_ARGS__);     \
+            return reduce(ar, ## __VA_ARGS__);     \
         }
 
     template<typename K, typename V>
