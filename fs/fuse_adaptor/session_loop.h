@@ -26,6 +26,8 @@ limitations under the License.
 #include <fuse.h>
 #endif
 
+#include <liburing.h>
+
 namespace photon {
 namespace fs {
 
