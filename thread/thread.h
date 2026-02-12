@@ -589,6 +589,132 @@ namespace photon
         bool m_locked;
     };
 
+    // High-performance rwlock without starvation prevention.
+    // Optimized for read-heavy workloads using lock-free atomic operations
+    // for the read lock fast path.
+    //
+    // State encoding:
+    //   state > 0  : number of active readers
+    //   state == 0 : unlocked
+    //   state == -1: write-locked
+    class qrwlock {
+    protected:
+        constexpr static int64_t MAX_SHARED_LOCK_COUNT = 1 << 16;
+        constexpr static int64_t WRITE_LOCKED = -1;
+
+        std::atomic<int64_t> lock_state{0};
+        photon::condition_variable cv_shared;
+        photon::condition_variable cv_unique;
+        photon::spinlock spin;
+        photon::thread* write_lock_owner{nullptr};
+
+        // Must be called with spinlock held.
+        void try_wake() {
+            if (!cv_unique.notify_one()) {
+                cv_shared.notify_all();
+            }
+        }
+
+        // Common blocking lock pattern: fast-path try, then slow-path wait
+        // loop. try_fn must be safe to call both with and without spinlock
+        // held.
+        template <typename TryFunc>
+        int do_lock(TryFunc&& try_fn, photon::condition_variable& cv,
+                    Timeout timeout) {
+            if (try_fn()) return 0;
+            SCOPED_LOCK(spin);
+            while (true) {
+                if (try_fn()) return 0;
+                int ret = cv.wait(spin, timeout);
+                if (ret < 0) {
+                    return -1;
+                }
+            }
+        }
+
+        void __unlock_unique() {
+            SCOPED_LOCK(spin);
+            assert(lock_state.load(std::memory_order_relaxed) == WRITE_LOCKED);
+            assert(write_lock_owner == photon::CURRENT);
+            write_lock_owner = nullptr;
+            lock_state.store(0, std::memory_order_release);
+            try_wake();
+        }
+
+        void __unlock_shared() {
+            auto prev = lock_state.fetch_sub(1, std::memory_order_acq_rel);
+            assert(prev > 0);  // prev<=0 indicates misuse
+            if (prev == 1) {
+                SCOPED_LOCK(spin);
+                try_wake();
+            }
+        }
+
+        bool __trylock() {
+            int64_t expected = 0;
+            if (lock_state.compare_exchange_strong(expected, WRITE_LOCKED,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed)) {
+                write_lock_owner = photon::CURRENT;
+                return true;
+            }
+            return false;
+        }
+
+        bool __trylock_shared() {
+            auto state = lock_state.load(std::memory_order_acquire);
+            while (state >= 0 && state < MAX_SHARED_LOCK_COUNT) {
+                if (lock_state.compare_exchange_weak(state, state + 1,
+                                                     std::memory_order_acq_rel,
+                                                     std::memory_order_acquire))
+                    return true;
+            }
+            return false;
+        }
+
+    public:
+        qrwlock() = default;
+        qrwlock(const qrwlock&) = delete;
+        qrwlock& operator=(const qrwlock&) = delete;
+
+        int try_lock(int mode) {
+            if (mode == WLOCK)
+                return __trylock() ? 0 : -1;
+            else
+                return __trylock_shared() ? 0 : -1;
+        }
+
+        int lock(int mode, Timeout timeout = {}) {
+            if (mode == WLOCK)
+                return do_lock([this] { return __trylock(); }, cv_unique,
+                               timeout);
+            else
+                return do_lock([this] { return __trylock_shared(); }, cv_shared,
+                               timeout);
+        }
+
+        int unlock() {
+            auto cur_state = lock_state.load(std::memory_order_acquire);
+            if (cur_state == 0) {
+                errno = ENOLCK;
+                return -1;
+            }
+            if (cur_state == WRITE_LOCKED) {
+                __unlock_unique();
+            } else {
+                __unlock_shared();
+            }
+            return 0;
+        }
+
+        // Debug snapshot; may be stale immediately after return.
+        photon::thread* get_write_lock_owner() const {
+            if (lock_state.load(std::memory_order_acquire) == WRITE_LOCKED)
+                return write_lock_owner;
+            return nullptr;
+        }
+    };
+
     // create `n` threads to run `start(arg)`, then get joined
     void threads_create_join(uint64_t n, thread_entry start, void* arg,
                           uint64_t stack_size = DEFAULT_STACK_SIZE);
