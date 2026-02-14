@@ -575,20 +575,15 @@ uint32_t crc32c_combine_series_hw(uint32_t* crc, uint32_t part_size, uint32_t n_
     return res;
 }
 
-static uint64_t bit_reverse32_64(uint32_t x) {
-        x = (((x & 0xaaaaaaaa) >> 1) | ((x & 0x55555555) << 1));
-        x = (((x & 0xcccccccc) >> 2) | ((x & 0x33333333) << 2));
-        x = (((x & 0xf0f0f0f0) >> 4) | ((x & 0x0f0f0f0f) << 4));
-        x = (((x & 0xff00ff00) >> 8) | ((x & 0x00ff00ff) << 8));
-        uint64_t x64 = (x >> 16) | (x << 16);
-        return x64 << 32;
+inline uint64_t clmul(uint32_t a, uint32_t b) {
+    uint64_t ret = 0, B = b;
+    for (uint32_t i = 0; i < 32; ++i, a>>=1, B<<=1)
+        if (a&1) ret ^= B;
+    return ret;
 }
 
-// do lshift with traditional scalar instructions
 static uint32_t do_crc32c_lshift_sw(uint32_t crc1, uint32_t x) {
-    uint64_t q = 0, xrev = bit_reverse32_64(x);
-    for (int i = 0; i < 64; i++, xrev >>= 1)
-        q = (q << 1) | __builtin_parity(crc1 & xrev);
+    auto q = clmul(crc1, x);
     return crc32c_sw((uint8_t*)&q, 8, 0);
 }
 
@@ -863,43 +858,40 @@ uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
 
 __attribute__((aligned(16), used))
 const static uint64_t crc64ecma_lshift_table[] = {
-    // by length of 32, 64, ..., 4G bytes
-    0xe05dd497ca393ae4, 0xb5ea1af9c013aca4, 0x9e735cb59b4724da, 0x2ecbc6dd0447c685,
-    0x15d325270d465dfe, 0x3f663335b446e329, 0x68a971ffad4f1766, 0xb7fd3098b8293475,
-    0x1b225daef15ff37d, 0xea0ddceb7273a052, 0x620648e8f01b0134, 0xfba68785783fd770,
-    0x4c0976fee55cc2f6, 0x2b4d20a2ca417feb, 0xf8a6eaabee9c15b0, 0x2068c6b926839fed,
-    0xc8fef34a6a17f35a, 0x0de5614bc4140f08, 0x724fd734d6b83fac, 0x710def1593c89dfa,
-    0x337733943ec752b9, 0x2a46a23b7286e04a, 0x5e7857ffbea8390a, 0xa2988a6572c32450,
-    0xdb67937ee00fcea3, 0xb427cfd9f16baa88, 0x465d86031d8426b3, 0x56ebf2f895082092,
+    // by length of 1, 2, 4, 8, ..., 4G bytes
+    0x0100000000000000, 0x0001000000000000, 0x0000000100000000, 0x0000000000000001,
+    0xdabe95afc7875f40, 0x3be653a30fe1af51, 0x081f6054a7842df4, 0xd7d86b2af73de740,
+    0xf31fd9271e228b79, 0x430af18f45bfec70, 0xdb77241e49bab9e4, 0xf42819f9b69abd6a,
+    0x8366e0bd97880af6, 0x3a0dc386f69b9d51, 0x6537db4df869f6e6, 0xa349f9a86a172f2e,
+    0x629f50ac6fdf5d3a, 0xcb3c521f853fb4a1, 0x6d1de95abb95074b, 0x9172d2fcc1985c9c,
+    0xc996d644b4a25645, 0x7d4a8a9b19cb8376, 0xbd09c74d8e1fd5e2, 0xb3223c4776751d27,
+    0x57f0d333946ab755, 0x4b2c7a963a1e77c7, 0x78ff6b0f1d73d8c7, 0x740d65cdcd060ca9,
+    0xc7f7a66770f6ce2e, 0xe8195ee90ae40993, 0xd9443a2e9c8cb27f, 0x17a88be197b6abdc,
+    0x6975abb7ef289b8f,
 };
 
 // virtually pad `len2` bytes of 0 to source
 // data, and return resulting crc value
-// `len2` must be >= 32
-static uint64_t crc64ecma_lshift_big(uint64_t crc1, uint32_t len2,
-           uint64_t (*shift)(uint64_t crc1, uint64_t x)) {
-    for (len2 >>= 5; len2; len2 &= len2 - 1) {
+static uint64_t do_crc64ecma_combine(uint64_t crc1, uint64_t crc2,
+        uint32_t len2, uint64_t (*shift)(uint64_t crc1, uint64_t x)) {
+    if (unlikely(!crc1)) return crc2;
+    if (unlikely(!len2)) return crc1;
+    for (; len2; len2 &= len2 - 1) {
         auto x = crc64ecma_lshift_table[__builtin_ctz(len2)];
         crc1 = shift(crc1, x);
     }
-    return crc1;
+    return crc1 ^ crc2;
 }
 
 static uint64_t do_crc64ecma_lshift_hw(uint64_t crc, uint64_t x) {
     __m128i crc1x, crc2x, crc3x, constx;
-    const __m128i rk5 = _mm_loadl_epi64((__m128i*)&rk[5-1]);
     const __m128i rk7 = _mm_loadu_si128((__m128i*)&rk[7-1]);
 
     crc1x = _mm_cvtsi64_si128(crc);
     constx = _mm_cvtsi64_si128(x);
     crc1x = _mm_clmulepi64_si128(crc1x, constx, 0x00);
 
-    // Fold to 64b
-    crc2x = _mm_clmulepi64_si128(crc1x, rk5, 0x00);
-    crc3x = _mm_bsrli_si128(crc1x, 8);
-    crc1x = _mm_xor_si128(crc2x, crc3x);
-
-    // Reduce
+    // Barrett Reduce
     crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
     crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
     crc2x = _mm_bslli_si128(crc2x, 8);
@@ -909,41 +901,25 @@ static uint64_t do_crc64ecma_lshift_hw(uint64_t crc, uint64_t x) {
 }
 
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
-    if (unlikely(!crc1)) return crc2;
-    if (unlikely(!len2)) return crc1;
-    if (unlikely(len2 & 31)) {
-        crc1 = ~crc64ecma_hw(zeros, len2 & 31, ~crc1);
-    }
-    crc1 = crc64ecma_lshift_big(crc1, len2, do_crc64ecma_lshift_hw);
-    return crc1 ^ crc2;
+    return do_crc64ecma_combine(crc1, crc2, len2, do_crc64ecma_lshift_hw);
 }
 
 inline __uint128_t clmul(uint64_t a, uint64_t b) {
-    __uint128_t ret = 0;
-    for (uint32_t i = 0; i < 64; ++i)
-        if ((a >> i) & 1)
-            ret ^= (__uint128_t)b << i;
+    __uint128_t ret = 0, B = b;
+    for (uint32_t i = 0; i < 64; ++i, a>>=1, B<<=1)
+        if (a&1) ret ^= B;
     return ret;
 }
 
 static uint64_t do_crc64ecma_lshift_sw(uint64_t crc, uint64_t x) {
     __uint128_t crc1x = clmul(crc, x);
-    __uint128_t crc2x = clmul(crc1x, rk[5-1]);
-    __uint128_t crc3x = crc1x >> 64;
-    crc1x = crc2x ^ crc3x;
-    crc2x = clmul(crc1x, rk[7-1]);
-    crc3x = clmul(crc2x, rk[7]);
+    __uint128_t crc2x = clmul(crc1x, rk[7-1]);
+    __uint128_t crc3x = clmul(crc2x, rk[7]);
     return (crc1x >> 64) ^ crc2x ^ (crc3x >> 64);
 }
 
 uint64_t crc64ecma_combine_sw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
-    if (unlikely(!crc1)) return crc2;
-    if (unlikely(!len2)) return crc1;
-    if (unlikely(len2 & 31)) {
-        crc1 = ~crc64ecma_sw(zeros, len2 & 31, ~crc1);
-    }
-    crc1 = crc64ecma_lshift_big(crc1, len2, do_crc64ecma_lshift_sw);
-    return crc1 ^ crc2;
+    return do_crc64ecma_combine(crc1, crc2, len2, do_crc64ecma_lshift_sw);
 }
 
 #ifdef __x86_64__
