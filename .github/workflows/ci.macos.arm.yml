@@ -20,10 +20,13 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install openssl gflags googletest gsasl
+          brew install openssl@3 gflags googletest gsasl
 
       - name: Build
         run: |
+          export OPENSSL_TOP=$(brew --prefix openssl@3)
+          export OPENSSL_VERSION=$(ls -1 $OPENSSL_TOP | grep -E '^[0-9]' | head -1)
+          export OPENSSL_DIR="$OPENSSL_TOP/$OPENSSL_VERSION"
           cmake -B ${{github.workspace}}/build \
             -D PHOTON_CXX_STANDARD=17 \
             -D PHOTON_ENABLE_ECOSYSTEM=ON \
@@ -31,7 +34,7 @@ jobs:
             -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_LIBCURL=ON \
-            -D OPENSSL_ROOT_DIR=/opt/homebrew/Cellar/openssl@3/3.6.0
+            -D OPENSSL_ROOT_DIR=${OPENSSL_DIR}
           cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 
       - name: Test
