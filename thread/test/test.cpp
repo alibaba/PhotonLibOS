@@ -1891,6 +1891,192 @@ TEST(future, test2) {
     EXPECT_EQ(v, PROMISE_VALUE);
 }
 
+TEST(qrwlock, BasicLockUnlock) {
+    qrwlock mtx;
+
+    // Test exclusive lock
+    EXPECT_EQ(0, mtx.lock(WLOCK));
+    mtx.unlock();
+
+    // Test shared lock
+    EXPECT_EQ(0, mtx.lock(RLOCK));
+    mtx.unlock();
+}
+
+TEST(qrwlock, TryLock) {
+    qrwlock mtx;
+
+    // Try lock should succeed when unlocked
+    EXPECT_TRUE(mtx.try_lock(WLOCK) == 0);
+    // Try lock should fail when write-locked
+    EXPECT_FALSE(mtx.try_lock(WLOCK) == 0);
+    EXPECT_FALSE(mtx.try_lock(RLOCK) == 0);
+    mtx.unlock();
+
+    // Try shared lock should succeed when unlocked
+    EXPECT_TRUE(mtx.try_lock(RLOCK) == 0);
+    // Additional shared locks should succeed
+    EXPECT_TRUE(mtx.try_lock(RLOCK) == 0);
+    // Write lock should fail when read-locked
+    EXPECT_FALSE(mtx.try_lock(WLOCK) == 0);
+    mtx.unlock();
+    mtx.unlock();
+}
+
+TEST(qrwlock, MultipleReaders) {
+    qrwlock mtx;
+    constexpr int NUM_READERS = 100;
+
+    // Acquire many shared locks
+    for (int i = 0; i < NUM_READERS; i++) {
+        EXPECT_TRUE(mtx.try_lock(RLOCK) == 0);
+    }
+
+    // Write lock should fail
+    EXPECT_FALSE(mtx.try_lock(WLOCK) == 0);
+
+    // Release all shared locks
+    for (int i = 0; i < NUM_READERS; i++) {
+        mtx.unlock();
+    }
+
+    // Now write lock should succeed
+    EXPECT_TRUE(mtx.try_lock(WLOCK) == 0);
+    mtx.unlock();
+}
+
+TEST(qrwlock, ConcurrentReaders) {
+    qrwlock mtx;
+    std::atomic<int> active_readers{0};
+    std::atomic<int> max_concurrent{0};
+    std::atomic<uint64_t> total_ops{0};
+    constexpr int NUM_THREADS = 32;
+    constexpr int OPS_PER_THREAD = 1000;
+
+    std::vector<photon::join_handle*> handles;
+    for (int i = 0; i < NUM_THREADS; i++) {
+        handles.emplace_back(photon::thread_enable_join(
+            photon::thread_create11([&]() {
+                for (int j = 0; j < OPS_PER_THREAD; j++) {
+                    mtx.lock(RLOCK);
+                    int cur = active_readers.fetch_add(1, std::memory_order_relaxed) + 1;
+                    // Track max concurrent readers
+                    int prev_max = max_concurrent.load(std::memory_order_relaxed);
+                    while (cur > prev_max &&
+                           !max_concurrent.compare_exchange_weak(prev_max, cur)) {}
+                    photon::thread_yield();
+                    active_readers.fetch_sub(1, std::memory_order_relaxed);
+                    mtx.unlock();
+                    total_ops.fetch_add(1, std::memory_order_relaxed);
+                }
+            })));
+    }
+
+    for (auto& h : handles) {
+        photon::thread_join(h);
+    }
+
+    EXPECT_EQ(0, active_readers.load());
+    EXPECT_GT(max_concurrent.load(), 1);  // Should have concurrent readers
+    EXPECT_EQ(NUM_THREADS * OPS_PER_THREAD, total_ops.load());
+    LOG_INFO("Max concurrent readers: `", max_concurrent.load());
+}
+
+TEST(qrwlock, ReaderWriterExclusion) {
+    qrwlock mtx;
+    std::atomic<bool> writing{false};
+    std::atomic<int> active_readers{0};
+    std::atomic<uint64_t> read_ops{0};
+    std::atomic<uint64_t> write_ops{0};
+    constexpr int NUM_READERS = 16;
+    constexpr int NUM_WRITERS = 4;
+    constexpr int OPS_PER_THREAD = 500;
+
+    std::vector<photon::join_handle*> handles;
+
+    // Reader threads
+    for (int i = 0; i < NUM_READERS; i++) {
+        handles.emplace_back(photon::thread_enable_join(
+            photon::thread_create11([&]() {
+                for (int j = 0; j < OPS_PER_THREAD; j++) {
+                    mtx.lock(RLOCK);
+                    active_readers.fetch_add(1, std::memory_order_relaxed);
+                    EXPECT_FALSE(writing.load(std::memory_order_acquire));
+                    photon::thread_yield();
+                    EXPECT_FALSE(writing.load(std::memory_order_acquire));
+                    active_readers.fetch_sub(1, std::memory_order_relaxed);
+                    mtx.unlock();
+                    read_ops.fetch_add(1, std::memory_order_relaxed);
+                }
+            })));
+    }
+
+    // Writer threads
+    for (int i = 0; i < NUM_WRITERS; i++) {
+        handles.emplace_back(photon::thread_enable_join(
+            photon::thread_create11([&]() {
+                for (int j = 0; j < OPS_PER_THREAD; j++) {
+                    mtx.lock(WLOCK);
+                    EXPECT_EQ(0, active_readers.load(std::memory_order_acquire));
+                    writing.store(true, std::memory_order_release);
+                    photon::thread_yield();
+                    EXPECT_EQ(0, active_readers.load(std::memory_order_acquire));
+                    writing.store(false, std::memory_order_release);
+                    mtx.unlock();
+                    write_ops.fetch_add(1, std::memory_order_relaxed);
+                }
+            })));
+    }
+
+    for (auto& h : handles) {
+        photon::thread_join(h);
+    }
+
+    EXPECT_EQ(NUM_READERS * OPS_PER_THREAD, read_ops.load());
+    EXPECT_EQ(NUM_WRITERS * OPS_PER_THREAD, write_ops.load());
+    LOG_INFO("Read ops: `, Write ops: `", read_ops.load(), write_ops.load());
+}
+
+TEST(qrwlock, LockTimeout) {
+    qrwlock mtx;
+
+    // Acquire write lock in main coroutine
+    EXPECT_EQ(0, mtx.lock(WLOCK));
+
+    // Try to acquire read lock with timeout in another coroutine
+    auto jh = photon::thread_enable_join(
+        photon::thread_create11([&]() {
+            EXPECT_EQ(-1, mtx.lock(RLOCK, 100 * 1000));
+            EXPECT_EQ(ETIMEDOUT, errno);
+        }));
+
+    // Must yield to let the waiter run and timeout
+    photon::thread_usleep(200 * 1000);  // Sleep longer than timeout
+
+    photon::thread_join(jh);
+    mtx.unlock();
+}
+
+TEST(qrwlock, WriteLockTimeout) {
+    qrwlock mtx;
+
+    // Acquire read lock in main coroutine
+    EXPECT_EQ(0, mtx.lock(RLOCK));
+
+    // Try to acquire write lock with timeout in another coroutine
+    auto jh = photon::thread_enable_join(
+        photon::thread_create11([&]() {
+            EXPECT_EQ(-1, mtx.lock(WLOCK, 100 * 1000));
+            EXPECT_EQ(ETIMEDOUT, errno);
+        }));
+
+    // Must yield to let the waiter run and timeout
+    photon::thread_usleep(200 * 1000);  // Sleep longer than timeout
+
+    photon::thread_join(jh);
+    mtx.unlock();
+}
+
 int main(int argc, char** arg)
 {
     if (!photon::is_using_default_engine()) return 0;
