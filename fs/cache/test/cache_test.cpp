@@ -547,7 +547,7 @@ TEST(CachePool, evict_file) {
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
       1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
-  DEFER({ delete cacheAllocator; delete roCachedFs; })
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
 
   auto fileName = "/file_to_evict";
   auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
@@ -604,7 +604,7 @@ TEST(CachePool, random_evict_file) {
   auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
       1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
   auto cachePool = roCachedFs->get_pool();
-  DEFER({ delete cacheAllocator; delete roCachedFs; })
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
 
   const size_t bufSize = 1024 * 1024;
   IOVector buffer(*cacheAllocator);
