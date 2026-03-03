@@ -124,7 +124,7 @@ int FileCachePool::stat(CacheStat* stat, std::string_view pathname) {
 int FileCachePool::evict(std::string_view filename) {
   auto fileIter = fileIndex_.find(filename);
   if (fileIter == fileIndex_.end()) {
-    LOG_ERROR("Evict no such file , name: `", filename.data());
+    LOG_ERROR("Evict no such file , name: `", filename);
     return 0;
   }
 
@@ -136,14 +136,7 @@ int FileCachePool::evict(std::string_view filename) {
   int err = 0;
   {
     photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
-    for (int retry_times = 3; retry_times > 0; retry_times--) {
-      err = mediaFs_->truncate(filePath.data(), 0);
-      if (err && errno == EINTR) {
-        photon::thread_usleep(100);
-      } else {
-        break;
-      }
-    }
+    err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
   }
   if (err) {
@@ -264,18 +257,7 @@ void FileCachePool::eviction() {
 
     {
       photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
-      for (int retry_times = 3; retry_times > 0; retry_times--) {
-        err = mediaFs_->truncate(fileName.data(), 0);
-        // Truncate to 0 failed means unable to free the file.
-        // It should not consider as a part of cache.
-        // Treat it as already released. The only exception is errno EINTR,
-        // meaning truncate was interrupted by a signal and should be retried.
-        if (err && errno == EINTR) {
-          photon::thread_usleep(100);
-        } else {
-          break;
-        }
-      }
+      err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
     }
 
