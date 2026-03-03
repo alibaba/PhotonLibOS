@@ -93,6 +93,7 @@ struct ListObjectsParameters {
   uint8_t ver = 2;
   bool slash_delimiter = false;
   uint16_t max_keys = 0;
+  std::string_view start_after = {};
 };
 
 struct ListObjectsCBParameters {
@@ -166,7 +167,7 @@ class Client : public Object {
   // return value is the object count which data is successfully downloaded.
   // It's possible only some objects get to be downloaded successfully.
   // return -1 if some other errors happen.
-  // The batch_get_objects interface works only when whitelisting enabled 
+  // The batch_get_objects interface works only when whitelisting enabled
   // at OSS server side.
   virtual int batch_get_objects(std::vector<GetObjectParameters>& params) = 0;
 
