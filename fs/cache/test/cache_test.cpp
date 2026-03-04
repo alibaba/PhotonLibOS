@@ -41,6 +41,9 @@ namespace fs {
 
 // Cleanup and recreate the test dir
 inline void SetupTestDir(const std::string& dir) {
+  if (::access(dir.c_str(), F_OK) != 0) {
+    ::mkdir(dir.c_str(), 0755);
+  }
   std::string cmd = std::string("rm -r ") + dir;
   EXPECT_NE(-1, system(cmd.c_str()));
   cmd = std::string("mkdir -p ") + dir;
@@ -534,6 +537,145 @@ TEST(CachedFS, fn_trans_func) {
   auto cs2 = cachedFile2->get_store();
   EXPECT_EQ(cs1, cs2);
 }
+
+TEST(CachePool, evict_file) {
+  std::string root = "/tmp/ease/cache/evict_file_test/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  auto fileName = "/file_to_evict";
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+  
+  const size_t bufSize = 1024 * 1024;
+  IOVector buffer(*cacheAllocator);
+  buffer.push_back(bufSize);
+
+  auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  EXPECT_EQ(ret, (ssize_t)bufSize);
+
+  ret = cacheStore->do_preadv2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  EXPECT_EQ(ret, (ssize_t)bufSize);
+
+  struct stat stBefore;
+  std::string fullPath = root + fileName;
+  EXPECT_EQ(0, ::stat(fullPath.c_str(), &stBefore));
+  EXPECT_EQ(stBefore.st_size, (off_t)bufSize);
+
+  EXPECT_EQ(0, cachePool->evict(fileName));
+
+  ret = cacheStore->do_preadv2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  EXPECT_EQ(ret, 0);
+
+  struct stat stAfter;
+  EXPECT_EQ(0, ::stat(fullPath.c_str(), &stAfter));
+  EXPECT_EQ(stAfter.st_size, 0);
+
+  cacheStore->release();
+
+  cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+
+  auto tres = cacheStore->try_preadv2(buffer.iovec(), buffer.iovcnt(), bufSize, 0);
+  EXPECT_EQ(tres.refill_offset, (ssize_t)bufSize);
+  EXPECT_EQ(tres.refill_size, bufSize);
+
+  ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  EXPECT_EQ(ret, (ssize_t)bufSize);
+
+  ret = cacheStore->do_preadv2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  EXPECT_EQ(ret, (ssize_t)bufSize);
+
+  cacheStore->release();
+}
+
+TEST(CachePool, random_evict_file) {
+  std::string root = "/tmp/ease/cache/random_evict_file_test/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t bufSize = 1024 * 1024;
+  IOVector buffer(*cacheAllocator);
+  buffer.push_back(bufSize);
+  auto fileName = "/huge_file";
+
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  cacheStore->set_actual_size(200 * bufSize);
+
+  off_t last_evict_offset = 0;
+  off_t written = 0;
+  auto random_release_evict_open = [&]() {
+    if (rand() % 5 == 0) {
+      cacheStore->release();
+      cacheStore = nullptr;
+    }
+    if (rand() % 3 == 0) {
+      cachePool->evict(fileName);
+      last_evict_offset = written;
+    }
+    if (rand() % 5 == 0 && cacheStore) {
+      cacheStore->release();
+      cacheStore = nullptr;
+    }
+    if (cacheStore == nullptr) {
+      cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+    }
+  };
+
+  for (int i = 0; i < 100; i++) {
+    random_release_evict_open();
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), written, 0);
+    EXPECT_EQ(ret, (ssize_t)bufSize);
+    written += ret;
+
+    if (rand() % 4 == 0) {
+      // write again
+      random_release_evict_open();
+      auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), written, 0);
+      EXPECT_EQ(ret, (ssize_t)bufSize);
+      written += ret;
+    }
+
+    for (int j = 0; j < 10; j++) {
+      random_release_evict_open();
+      off_t qoffset = (rand() % ((i + 1) * 3)) * bufSize;
+      size_t qsize = (rand() % 10 + 1) * bufSize;
+      auto qres = cacheStore->queryRefillRange(qoffset, qsize);
+      if (qoffset + qsize <= (size_t)last_evict_offset || qoffset >= written ||
+          (qoffset < last_evict_offset && qoffset + qsize > (size_t)written)) {
+        EXPECT_EQ(qres.first, qoffset);
+        EXPECT_EQ(qres.second, qsize);
+      } else if (qoffset < last_evict_offset && qoffset + qsize <= (size_t)written) {
+        EXPECT_EQ(qres.first, qoffset);
+        EXPECT_EQ(qres.second, size_t(last_evict_offset - qoffset));
+      } else if (qoffset >= last_evict_offset && qoffset + qsize > (size_t)written) {
+        EXPECT_EQ(qres.first, written);
+        EXPECT_EQ(qres.second, size_t(qoffset + qsize - written));
+      } else {
+        EXPECT_EQ(qres.second, 0UL);
+        IOVector read_buffer(*cacheAllocator);
+        read_buffer.push_back(qsize);
+        ret = cacheStore->do_preadv2(read_buffer.iovec(), read_buffer.iovcnt(), qoffset, 0);
+        EXPECT_EQ(ret, (ssize_t)qsize);
+      }
+    }
+  }
+
+  if (cacheStore) cacheStore->release();
+}
+
 }
 }
 int main(int argc, char** argv) {
