@@ -33,6 +33,7 @@ static const char OSS_PARAM_KEY_MAX_KEYS[]        = "max-keys";
 static const char OSS_PARAM_KEY_DELIMITER[]       = "delimiter";
 static const char OSS_PARAM_KEY_PREFIX[]          = "prefix";
 static const char OSS_PARAM_KEY_MARKER[]          = "marker";
+static const char OSS_PARAM_KEY_START_AFTER[]     = "start-after";
 static const char OSS_PARAM_KEY_DELETE[]          = "delete";
 static const char OSS_PARAM_KEY_UPLOADS[]         = "uploads";
 static const char OSS_PARAM_KEY_PART_NUMBER[]     = "partNumber";

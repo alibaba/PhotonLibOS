@@ -398,7 +398,7 @@ class OssClientImpl : public Client {
   int walk_list_results(const SimpleDOM::Node& node, ListObjectsCallback cb);
   int do_list_objects_v2(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
-                         std::string* marker);
+                         std::string* marker, std::string_view start_after);
   int do_list_objects_v1(std::string_view bucket, std::string_view prefix,
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
                          std::string* marker);
@@ -527,10 +527,9 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
   return 0;
 }
 
-int OssClient::do_list_objects_v2(std::string_view bucket,
-                                  std::string_view prefix,
-                                  ListObjectsCallback cb, bool delimiters,
-                                  int maxKeys, std::string* marker) {
+int OssClient::do_list_objects_v2(std::string_view bucket, std::string_view prefix,
+                                  ListObjectsCallback cb, bool delimiters, int maxKeys,
+                                  std::string* marker, std::string_view start_after) {
   if (maxKeys > 1000 || maxKeys <= 0) maxKeys = m_oss_options.max_list_ret_cnt;
   estring_view _mark;
   if (marker) _mark = *marker;
@@ -538,6 +537,7 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
   estring escaped_prefix = photon::net::http::url_escape(prefix);
   estring escaped_delimiter = photon::net::http::url_escape("/");
   estring escaped_marker = photon::net::http::url_escape(_mark);
+  estring escaped_start_after = photon::net::http::url_escape(start_after);
   estring max_key_str = std::to_string(maxKeys);
   // must appear in dictionary order!
   DEFINE_APPENDABLE_ORDERED_STRING_KV(
@@ -552,7 +552,8 @@ int OssClient::do_list_objects_v2(std::string_view bucket,
     query_params.insert({OSS_PARAM_KEY_DELIMITER, escaped_delimiter});
   if (!_mark.empty())
     query_params.insert({OSS_PARAM_KEY_CONTINUATION_TOKEN, escaped_marker});
-
+  if (!start_after.empty())
+    query_params.insert({OSS_PARAM_KEY_START_AFTER, escaped_start_after});
   OssUrl oss_url(m_endpoint, bucket, {}, m_is_http);
   DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.append_params(query_params));
   int r = sign_and_call(op, Verb::GET, oss_url, query_params);
@@ -790,7 +791,7 @@ int OssClient::list_objects(std::string_view prefix, ListObjectsCallback cb,
   do {
     if (params.ver == 2) {
       r = do_list_objects_v2(m_bucket, prefix, cb, params.slash_delimiter,
-                             max_keys, &marker);
+                             max_keys, &marker, params.start_after);
     } else {
       r = do_list_objects_v1(m_bucket, prefix, cb, params.slash_delimiter,
                              max_keys, &marker);
@@ -1190,7 +1191,7 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
           remaining -= cur;
           if (remaining == 0) break;
         }
-        
+
         r = frame.read_data(stream, &iovs[0], iovs.size());
       } else {
         r = frame.read_data(stream, param.iov, param.iovcnt);
