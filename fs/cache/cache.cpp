@@ -27,11 +27,12 @@ limitations under the License.
 namespace photon {
 namespace fs{
 
-    ICachedFileSystem *new_full_file_cached_fs(IFileSystem *srcFs, IFileSystem *mediaFs,
+ICachedFileSystem *new_full_file_cached_fs(IFileSystem *srcFs, IFileSystem *mediaFs,
                                            uint64_t refillUnit, uint64_t capacityInGB,
                                            uint64_t periodInUs, uint64_t diskAvailInBytes,
                                            IOAlloc *allocator, int quotaDirLevel,
-                                           CacheFnTransFunc fn_trans_func) {
+                                           CacheFnTransFunc fn_trans_func,
+                                           uint64_t storeCacheTTLUsecs) {
     if (refillUnit % 4096 != 0 || !is_power_of_2(refillUnit)) {
         LOG_ERROR_RETURN(EINVAL, nullptr, "refill Unit need to be aligned to 4KB and power of 2")
     }
@@ -39,18 +40,20 @@ namespace fs{
         allocator = new IOAlloc;
     }
     FileCachePool *pool = nullptr;
-    pool =
-        new FileCachePool(mediaFs, capacityInGB, periodInUs, diskAvailInBytes, refillUnit);
+    pool = new FileCachePool(mediaFs, capacityInGB, periodInUs, diskAvailInBytes, 
+                             refillUnit, storeCacheTTLUsecs);
     pool->Init();
     return new_cached_fs(srcFs, pool, 4096, allocator, fn_trans_func);
 }
 
 using OC = ObjectCache<std::string, ICacheStore*>;
-ICachePool::ICachePool(uint32_t pool_size, uint32_t max_refilling, uint32_t refilling_threshold, bool pin_write)
-    : m_stores(new OC(10UL * 1000 * 1000)),
-        m_max_refilling(max_refilling),
-        m_refilling_threshold(refilling_threshold),
-        m_pin_write(pin_write) {
+ICachePool::ICachePool(uint32_t pool_size, uint32_t max_refilling, 
+                       uint32_t refilling_threshold, bool pin_write, 
+                       uint64_t store_cache_ttl_usecs)
+    : m_stores(new OC(store_cache_ttl_usecs)),
+      m_max_refilling(max_refilling),
+      m_refilling_threshold(refilling_threshold),
+      m_pin_write(pin_write) {
     if (pool_size != 0) {
         m_thread_pool = photon::new_thread_pool(pool_size, 128 * 1024UL);
         m_vcpu = photon::get_vcpu();

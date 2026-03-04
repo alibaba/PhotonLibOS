@@ -79,7 +79,9 @@ namespace fs
     class ICachePool : public Object
     {
     public:
-        ICachePool(uint32_t pool_size = 128, uint32_t max_refilling = 128, uint32_t refilling_threshold = -1U, bool pin_write = false);
+        ICachePool(uint32_t pool_size = 128, uint32_t max_refilling = 128,
+                   uint32_t refilling_threshold = -1U, bool pin_write = false,
+                   uint64_t store_cache_ttl_usecs = 10'000'000);
         ~ICachePool();
 
         ICacheStore* open(std::string_view filename, int flags, mode_t mode);

@@ -37,8 +37,9 @@ const uint64_t kMaxFreeSpace = 50 * kGB;
 const int64_t kEvictionMark = 5ll * kGB;
 
 FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
-    uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit)
-    : ICachePool(0),
+    uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit,
+    uint64_t storeCacheTTLUsecs)
+    : ICachePool(0, 128, -1U, false, storeCacheTTLUsecs),
       mediaFs_(mediaFs),
       capacityInGB_(capacityInGB),
       periodInUs_(periodInUs),
