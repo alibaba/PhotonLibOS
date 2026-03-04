@@ -35,7 +35,8 @@ namespace fs {
 class FileCachePool : public photon::fs::ICachePool {
 public:
     FileCachePool(photon::fs::IFileSystem *mediaFs, uint64_t capacityInGB, uint64_t periodInUs,
-                  uint64_t diskAvailInBytes, uint64_t refillUnit);
+                  uint64_t diskAvailInBytes, uint64_t refillUnit, 
+                  uint64_t storeCacheTTLUsecs = 10'000'000);
     ~FileCachePool();
 
     static const uint64_t kDiskBlockSize = 512; // stat(2)
