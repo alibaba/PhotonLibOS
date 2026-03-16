@@ -60,7 +60,29 @@ inline uint64_t crc64ecma_combine(uint64_t crc1, uint64_t crc2, uint32_t len2) {
 // combine a series of CRC32C values of a fixed part size
 uint64_t crc64ecma_combine_series_sw(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
 uint64_t crc64ecma_combine_series_hw(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
-inline uint32_t crc64ecma_combine_series(uint64_t* crc, uint32_t part_size, uint32_t n_parts) {
+inline uint64_t crc64ecma_combine_series(uint64_t* crc, uint32_t part_size, uint32_t n_parts) {
     extern uint64_t (*crc64ecma_combine_series_auto)(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
     return crc64ecma_combine_series_auto(crc, part_size, n_parts);
 }
+
+struct CRC64ECMA_Component {
+    uint64_t crc;
+    uint64_t size;
+};
+
+// this function removes the prefix and suffix components from a crc64ecma value
+uint64_t crc64ecma_trim_hw(CRC64ECMA_Component all,
+                           CRC64ECMA_Component prefix,
+                           CRC64ECMA_Component suffix);
+uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
+                           CRC64ECMA_Component prefix,
+                           CRC64ECMA_Component suffix);
+inline uint64_t crc64ecma_trim(CRC64ECMA_Component all,
+                               CRC64ECMA_Component prefix,
+                               CRC64ECMA_Component suffix) {
+    extern uint64_t (*crc64ecma_trim_auto)(CRC64ECMA_Component all,
+                                           CRC64ECMA_Component prefix,
+                                           CRC64ECMA_Component suffix);
+    return crc64ecma_trim_auto(all, prefix, suffix);
+}
+

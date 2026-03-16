@@ -78,10 +78,12 @@ struct CRC32C_Component {
     uint32_t size;
 };
 
-// this function removes the prefix and suffix components a crc32c value
+// this function removes the prefix and suffix components from a crc32c value
 uint32_t crc32c_trim_sw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix);
+uint32_t crc32c_trim_hw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix);
 inline uint32_t crc32c_trim(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix) {
-    return crc32c_trim_sw(all, prefix, suffix);
+    extern uint32_t (*crc32c_trim_auto)(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix);
+    return crc32c_trim_auto(all, prefix, suffix);
 }
 
 inline bool is_crc32c_hw_available() {

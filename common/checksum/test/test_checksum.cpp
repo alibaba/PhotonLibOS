@@ -241,6 +241,7 @@ TEST(TestChecksum, crc32_combine) {
         auto crc1 = crc32c_hw(buf, L1, 0);
         auto crc2 = crc32c_hw(buf + L1, L2, 0);
         EXPECT_EQ(x, crc32c_combine_hw(crc1, crc2, L2));
+        EXPECT_EQ(x, crc32c_combine_sw(crc1, crc2, L2));
     }
 
     uint32_t crc[N] = {0};
@@ -259,12 +260,14 @@ TEST(TestChecksum, crc32_combine) {
         auto crc1 = crc32c_hw(buf, L1, 0);
         auto crc2 = crc32c_hw(buf + L1, sizeof(buf) - L1 - L3, 0);
         auto crc3 = crc32c_hw(buf + sizeof(buf) - L3, L3, 0);
-        EXPECT_EQ(crc32c_trim({x, sizeof(buf)}, {crc1, L1}, {crc3, L3}), crc2);
+        EXPECT_EQ(crc2, crc32c_trim_sw({x, sizeof(buf)}, {crc1, L1}, {crc3, L3}));
+        EXPECT_EQ(crc2, crc32c_trim_hw({x, sizeof(buf)}, {crc1, L1}, {crc3, L3}));
     }
 }
 
-void test_crc64_combine(uint64_t (*crc64_combine)(uint64_t crc1,
-        uint64_t crc2, uint32_t len2), ALogStringL name) {
+void test_crc64_combine(ALogStringL name,
+        uint64_t (*_combine)(uint64_t crc1, uint64_t crc2, uint32_t len2),
+        uint64_t (*_trim)(CRC64ECMA_Component all, CRC64ECMA_Component prefix, CRC64ECMA_Component suffix)) {
     LOG_INFO(name);
     const uint32_t N = 10, M = 510;
     unsigned char buf[M * N];
@@ -274,7 +277,7 @@ void test_crc64_combine(uint64_t (*crc64_combine)(uint64_t crc1,
     auto y1 = crc64ecma_sw(buf, 8, 0);
     EXPECT_EQ(y, crc64ecma_sw(buf+8, 30-8, y1));
     auto y2 = crc64ecma_sw(buf+8, 30-8, 0);
-    EXPECT_EQ(y, crc64_combine(y1, y2, 30-8));
+    EXPECT_EQ(y, _combine(y1, y2, 30-8));
 
     for (auto& c: buf) c = rand();
     auto x = crc64ecma_sw(buf, M * N, 0);
@@ -285,14 +288,23 @@ void test_crc64_combine(uint64_t (*crc64_combine)(uint64_t crc1,
         uint32_t L1 = sizeof(buf) - L2;
         auto crc1 = crc64ecma_sw(buf, L1, 0);
         auto crc2 = crc64ecma_sw(buf + L1, L2, 0);
-        EXPECT_EQ(x, crc64_combine(crc1, crc2, L2));
+        EXPECT_EQ(x, _combine(crc1, crc2, L2));
         EXPECT_EQ(x, crc64ecma_sw(buf + L1, L2, crc1));
+    }
+
+    for (size_t i = 0; i < 10000; ++i) {
+        uint32_t L1 = 100 + rand() % 64,
+                 L3 = 100 + rand() % 64;
+        auto crc1 = crc64ecma_hw(buf, L1, 0);
+        auto crc2 = crc64ecma_hw(buf + L1, sizeof(buf) - L1 - L3, 0);
+        auto crc3 = crc64ecma_hw(buf + sizeof(buf) - L3, L3, 0);
+        EXPECT_EQ(_trim({x, sizeof(buf)}, {crc1, L1}, {crc3, L3}), crc2);
     }
 }
 
 TEST(TestChecksum, crc64_combine) {
-    test_crc64_combine(crc64ecma_combine_hw, "hw");
-    test_crc64_combine(crc64ecma_combine_sw, "sw");
+    test_crc64_combine("hw", crc64ecma_combine_hw, crc64ecma_trim_hw);
+    test_crc64_combine("sw", crc64ecma_combine_sw, crc64ecma_trim_sw);
 }
 
 TEST(Perf, crc32c_hw_series) {
