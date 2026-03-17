@@ -56,8 +56,8 @@ ssize_t QuotaFileStore::do_pwritev2(const struct iovec *iov, int iovcnt, off_t o
   }
   ssize_t ret;
   {
-    auto lruEntry = static_cast<FileCachePool::LruEntry*>(iterator_->second.get());
-    photon::scoped_rwlock wl(lruEntry->rw_lock_, photon::WLOCK);
+    auto lruEntry = iterator_->second.get();
+    photon::scoped_rwlock wl(*lruEntry->rw_lock_, photon::WLOCK);
     ret = localFile_->pwritev(iov, iovcnt, offset);
   }
   if (ret < 0 && ENOSPC == errno) {

@@ -195,7 +195,9 @@ int QuotaFilePool::evict(std::string_view filename) {
   int err;
   auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
   {
-    photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+    SCOPED_LOCK(lruEntry->lock_);
+    if (lruEntry->rw_lock_) lruEntry->rw_lock_->lock(photon::WLOCK);
+    DEFER(if (lruEntry->rw_lock_) lruEntry->rw_lock_->unlock(););
     lru.mark_key_cleared(lruEntry->QuotaLruIter);
     err = mediaFs_->truncate(filePath.data(), 0);
     if (err) {
@@ -235,7 +237,9 @@ void QuotaFilePool::dirEviction() {
       int err;
       bool flags_dir_delete = false;
       {
-        photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+        SCOPED_LOCK(lruEntry->lock_);
+        if (lruEntry->rw_lock_) lruEntry->rw_lock_->lock(photon::WLOCK);
+        DEFER(if (lruEntry->rw_lock_) lruEntry->rw_lock_->unlock(););
         if (lruEntry->openCount==0){
           dir->lru.mark_key_cleared(lruEntry->QuotaLruIter);
         } else {

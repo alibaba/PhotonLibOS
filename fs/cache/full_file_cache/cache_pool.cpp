@@ -136,7 +136,9 @@ int FileCachePool::evict(std::string_view filename) {
   }
   int err = 0;
   {
-    photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+    SCOPED_LOCK(lruEntry->lock_);
+    if (lruEntry->rw_lock_) lruEntry->rw_lock_->lock(photon::WLOCK);
+    DEFER(if (lruEntry->rw_lock_) lruEntry->rw_lock_->unlock(););
     err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
   }
@@ -257,7 +259,9 @@ void FileCachePool::eviction() {
     }
 
     {
-      photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+      SCOPED_LOCK(lruEntry->lock_);
+      if (lruEntry->rw_lock_) lruEntry->rw_lock_->lock(photon::WLOCK);
+      DEFER(if (lruEntry->rw_lock_) lruEntry->rw_lock_->unlock(););
       err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
     }

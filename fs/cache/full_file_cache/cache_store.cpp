@@ -42,17 +42,24 @@ FileCacheStore::FileCacheStore(photon::fs::ICachePool* cachePool, IFile* localFi
       localFile_(localFile),
       refillUnit_(refillUnit),
       iterator_(iterator) {
+  auto lruEntry = iterator_->second.get();
+  SCOPED_LOCK(lruEntry->lock_);
+  lruEntry->rw_lock_ = std::make_unique<photon::rwlock>();
 }
 
 FileCacheStore::~FileCacheStore() {
+  auto lruEntry = iterator_->second.get();
+  SCOPED_LOCK(lruEntry->lock_);
+  lruEntry->rw_lock_.reset();
+
   delete localFile_;  //  will close file
   cachePool_->removeOpenFile(iterator_);
 }
 
 ICacheStore::try_preadv_result FileCacheStore::try_preadv2(const struct iovec *iov, int iovcnt,
                                                            off_t offset, int flags) {
-  auto lruEntry = static_cast<FileCachePool::LruEntry *>(iterator_->second.get());
-  photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::RLOCK);
+  auto lruEntry = iterator_->second.get();
+  photon::scoped_rwlock rl(*lruEntry->rw_lock_, photon::RLOCK);
   return this->ICacheStore::try_preadv2(iov, iovcnt, offset, flags);
 }
 
@@ -70,8 +77,8 @@ ssize_t FileCacheStore::do_pwritev(const struct iovec *iov, int iovcnt, off_t of
 {
   ssize_t ret;
   iovector_view view((iovec*)iov, iovcnt);
-  auto lruEntry = static_cast<FileCachePool::LruEntry *>(iterator_->second.get());
-  photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::RLOCK);
+  auto lruEntry = iterator_->second.get();
+  photon::scoped_rwlock rl(*lruEntry->rw_lock_, photon::RLOCK);
   if (!lruEntry->truncate_done) {
     // May repeated ftruncate() here, but it doesn't matter
     ret = localFile_->ftruncate(actual_size_);

@@ -64,7 +64,10 @@ public:
         uint32_t lruIter;
         int openCount;
         uint64_t size;
-        photon::rwlock rw_lock_;
+
+        std::unique_ptr<photon::rwlock> rw_lock_;
+        photon::spinlock lock_; // to protect rw_lock_
+
         bool truncate_done;
     };
 
