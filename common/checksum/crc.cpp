@@ -70,6 +70,12 @@ void static_loop(const F& f) {
 // gcc sometimes doesn't allow always_inline
 #define BODY(i) [&](size_t i) /*__attribute__((always_inline))*/
 
+
+#define CVAL(c, val) (-!!(c) & val)
+
+const uint32_t CRC32C_POLY = 0x82f63b78;
+const uint64_t CRC64ECMA_POLY = 0xc96c5795d7870f42;
+
 template<typename T>
 struct TableCRC {
     typedef T (*Table)[256];
@@ -79,7 +85,7 @@ struct TableCRC {
         for (int n = 0; n < 256; n++) {
             T crc = n;
             static_loop<0, 7, 1>(BODY(k) {
-                crc = ((crc & 1) * POLY) ^ (crc >> 1);
+                crc = CVAL(crc&1, POLY) ^ (crc >> 1);
             });
             table[0][n] = crc;
         }
@@ -108,12 +114,12 @@ struct TableCRC {
 };
 
 uint32_t crc32c_sw(const uint8_t *buffer, size_t nbytes, uint32_t crc) {
-    const static TableCRC<uint32_t> calc(0x82f63b78);
+    const static TableCRC<uint32_t> calc(CRC32C_POLY);
     return calc(buffer, nbytes, crc);
 }
 
 uint64_t crc64ecma_sw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
-    const static TableCRC<uint64_t> calc(0xc96c5795d7870f42);
+    const static TableCRC<uint64_t> calc(CRC64ECMA_POLY);
     return ~calc(buffer, nbytes, ~crc);
 }
 
@@ -127,12 +133,14 @@ uint64_t (*crc64ecma_auto)(const uint8_t *data, size_t nbytes, uint64_t crc);
 uint64_t (*crc64ecma_combine_auto)(uint64_t crc1, uint64_t crc2, uint32_t len2);
 uint64_t (*crc64ecma_combine_series_auto)(uint64_t* crc, uint32_t part_size, uint32_t n_parts);
 void (*crc64ecma_series_auto)(const uint8_t *buffer, uint32_t part_size, uint32_t n_parts, uint64_t* crc_parts);
+uint32_t (*crc32c_trim_auto)(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix);
+uint64_t (*crc64ecma_trim_auto)(CRC64ECMA_Component all, CRC64ECMA_Component prefix,CRC64ECMA_Component suffix);
 
 __attribute__((constructor))
 static void crc_init() {
-    auto tie32 = std::tie(crc32c_auto, crc32c_series_auto, crc32c_combine_auto, crc32c_combine_series_auto);
-    auto hw32 = std::make_tuple(crc32c_hw, crc32c_series_hw, crc32c_combine_hw, crc32c_combine_series_hw); (void)hw32;
-    auto sw32 = std::make_tuple(crc32c_sw, crc32c_series_sw, crc32c_combine_sw, crc32c_combine_series_sw); (void)sw32;
+    auto tie32 = std::tie(crc32c_auto, crc32c_series_auto, crc32c_combine_auto, crc32c_combine_series_auto, crc32c_trim_auto);
+    auto hw32 = std::make_tuple(crc32c_hw, crc32c_series_hw, crc32c_combine_hw, crc32c_combine_series_hw, crc32c_trim_hw); (void)hw32;
+    auto sw32 = std::make_tuple(crc32c_sw, crc32c_series_sw, crc32c_combine_sw, crc32c_combine_series_sw, crc32c_trim_sw); (void)sw32;
 #if defined(__x86_64__)
     __builtin_cpu_init();
     tie32       = __builtin_cpu_supports("sse4.2") ? hw32 : sw32;
@@ -163,6 +171,9 @@ static void crc_init() {
     crc64ecma_combine_auto = (crc64ecma_auto == crc64ecma_sw) ?
                               crc64ecma_combine_sw :
                               crc64ecma_combine_hw ;
+    crc64ecma_trim_auto = (crc64ecma_auto == crc64ecma_sw) ?
+                           crc64ecma_trim_sw :
+                           crc64ecma_trim_hw ;
 }
 
 #ifdef __x86_64__
@@ -520,7 +531,7 @@ uint32_t crc32c_hw(const uint8_t *data, size_t nbytes, uint32_t crc) {
     return crc32c_hw_portable(data, nbytes, crc);
 }
 
-const static uint32_t crc32c_lshift_table[] = {
+const static uint32_t crc32c_lshift_table_hw[] = {
     // by length of 16, 32, ..., 2G bytes
     0x493c7d27, 0xba4fc28e, 0x9e4addf8, 0x0d3b6092,
     0xb9e02b86, 0xdd7e3b0c, 0x170076fa, 0xa51b6135,
@@ -531,20 +542,52 @@ const static uint32_t crc32c_lshift_table[] = {
     0xd610d67e, 0x6b086b3f, 0xd94f3c0b, 0xbf818109,
 };
 
-// virtually pad `len2` bytes of 0 to source
-// data, and return resulting crc value
-// `len2` must be >= 16
-static uint32_t crc32c_lshift_big(uint32_t crc1, uint32_t len2,
-           uint32_t (*shift)(uint32_t crc1, uint32_t x)) {
-    for (len2 >>= 4; len2; len2 &= len2 - 1) {
-        auto x = crc32c_lshift_table[__builtin_ctz(len2)];
-        crc1 = shift(crc1, x);
+const static uint32_t crc32c_rshift_table_hw[32] = {
+    0xa738873b, 0x616f3095, 0xc915ea3b, 0x77f5096b,
+    0x55953016, 0x8d6b52b5, 0x0e6e0c8a, 0xd6667510,
+    0xbe7257f3, 0xa319ac44, 0x095a58f0, 0x7bea9ec2,
+    0xca41fd90, 0x1ef45b26, 0xfd76e8a2, 0xc6a704fd,
+    0x0a9bdf61, 0xbd5060e9, 0x0d4e18dd, 0xf58257a3,
+    0x697849dd, 0xec59259e, 0x97cbee2c, 0x74a64152,
+    0x64c0d836, 0xb9280158, 0xac2fda6b, 0x4b416fef,
+    0x5677c2eb, 0xacef85d6, 0xb866faba, 0xa738873b,
+};
+
+const static uint32_t crc32c_lshift_table_sw[32] = {
+    0x00800000, 0x00008000, 0x82f63b78, 0x6ea2d55c,
+    0x18b8ea18, 0x510ac59a, 0xb82be955, 0xb8fdb1e7,
+    0x88e56f72, 0x74c360a4, 0xe4172b16, 0x0d65762a,
+    0x35d73a62, 0x28461564, 0xbf455269, 0xe2ea32dc,
+    0xfe7740e6, 0xf946610b, 0x3c204f8f, 0x538586e3,
+    0x59726915, 0x734d5309, 0xbc1ac763, 0x7d0722cc,
+    0xd289cabe, 0xe94ca9bc, 0x05b74f3f, 0xa51e1f42,
+    0x40000000, 0x20000000, 0x08000000, 0x00800000,
+};
+
+const static uint32_t crc32c_rshift_table_sw[32] = {
+    0xfde39562, 0xbef0965e, 0xd610d67e, 0xe67cce65,
+    0xa268b79e, 0x134fb088, 0x32998d96, 0xcedac2cc,
+    0x70118575, 0x0e004a40, 0xa7864c8b, 0xbc7be916,
+    0x10ba2894, 0x6077197b, 0x98448e4e, 0x8baf845d,
+    0xe93e07fc, 0xf58027d7, 0x5e2b422d, 0x9db2851c,
+    0x9270ed25, 0x5984e7b3, 0x7af026f1, 0xe0f4116b,
+    0xace8a6b0, 0x9e09f006, 0x6a60ea71, 0x4fd04875,
+    0x05ec76f1, 0x0bd8ede2, 0x2f63b788, 0xfde39562,
+};
+
+// *virtually* pad or remove `len` bytes of trailing 0s
+// to source data, and return resulting crc value
+template<typename T> inline
+T crc_apply_shifts(T crc, uint32_t len, const T* table,
+                   T (*apply_shift)(T, T)) {
+    for (; len; len &= len - 1) {
+        auto x = table[__builtin_ctzll(len)];
+        crc = apply_shift(crc, x);
     }
-    return crc1;
+    return crc;
 }
 
-// do lshift with SIMD instructions
-static uint32_t do_crc32c_lshift_hw(uint32_t crc1, uint32_t x) {
+static uint32_t clmul_modp_crc32c_hw(uint32_t crc1, uint32_t x) {
     uint64_t dat64;
     __m128i crc1x, cnstx;
     crc1x = _mm_setr_epi32(crc1, 0, 0, 0);
@@ -563,7 +606,8 @@ uint32_t crc32c_combine_hw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
         if (unlikely(len2 & 2)) crc1 = crc32c(crc1, (uint16_t)0);
         if (unlikely(len2 & 1)) crc1 = crc32c(crc1, (uint8_t)0);
     }
-    crc1 = crc32c_lshift_big(crc1, len2, do_crc32c_lshift_hw);
+    crc1 = crc_apply_shifts(crc1, len2>>4,
+        crc32c_lshift_table_hw, clmul_modp_crc32c_hw);
     return crc1 ^ crc2;
 }
 
@@ -575,120 +619,55 @@ uint32_t crc32c_combine_series_hw(uint32_t* crc, uint32_t part_size, uint32_t n_
     return res;
 }
 
-inline uint64_t clmul(uint32_t a, uint32_t b) {
-    uint64_t ret = 0, B = b;
-    for (uint32_t i = 0; i < 32; ++i, a>>=1, B<<=1)
-        if (a&1) ret ^= B;
-    return ret;
+// (a*b) % poly
+template<typename T, T POLY> inline
+T clmul_modp_sw(T a, T b) {
+    T pd = 0;
+    for(uint64_t i = 0; i < sizeof(T)*8; i++, b>>=1)
+        pd = (pd>>1) ^ CVAL(pd&1, POLY) ^ CVAL(b&1, a);
+    return pd;
 }
 
-static uint32_t do_crc32c_lshift_sw(uint32_t crc1, uint32_t x) {
-    auto q = clmul(crc1, x);
-    return crc32c_sw((uint8_t*)&q, 8, 0);
-}
-
-const static unsigned char zeros[32] = {0};
 uint32_t crc32c_combine_sw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
     if (unlikely(!crc1)) return crc2;
     if (unlikely(!len2)) return crc1;
-    if (unlikely(len2 & 15)) {
-        crc1 = crc32c_sw(zeros, len2 & 15, crc1);
-    }
-    crc1 = crc32c_lshift_big(crc1, len2, do_crc32c_lshift_sw);
+    crc1 = crc_apply_shifts(crc1, len2, crc32c_lshift_table_sw,
+            &clmul_modp_sw<uint32_t, CRC32C_POLY>);
     return crc1 ^ crc2;
 }
 
-// virtually remove `len2` bytes of trailing 0 from
-// source data, and return resulting crc value
-static uint32_t crc32c_rshift_sw(uint32_t crc1, size_t len2) {
-    // remove the effect of the zeros added to crc1
-    // If crc1 = crcA * x^len2 mod p(x), then crcA = crc1 * (x^len2)^(-1) mod p(x)
-    // Based on crc32_combine_return_crcA0, but uses inverse matrix to remove zeros.
-    // The matrix for removing one zero bit (M^-1) is the inverse of the matrix for appending one zero bit.
+static uint32_t crc32c_rshift_hw(uint32_t crc, size_t len) {
+    return crc_apply_shifts(crc, len, crc32c_rshift_table_hw,
+            &clmul_modp_crc32c_hw);
+}
 
-    // degenerated case
-    if (len2 == 0)
-        return crc1;
+static uint32_t crc32c_rshift_sw(uint32_t crc, size_t len) {
+    return crc_apply_shifts(crc, len, crc32c_rshift_table_sw,
+            &clmul_modp_sw<uint32_t, CRC32C_POLY>);
+}
 
-    /// CRC32 => 32 bits
-    const uint32_t CrcBits = 32;
-
-    uint32_t odd[CrcBits];  // operator for removing 2^k zeros, k is odd
-    uint32_t even[CrcBits]; // operator for removing 2^k zeros, k is even
-
-    // put operator for removing one zero bit in odd
-    // The columns of this inverse matrix are:
-    // Column j (for j from 0 to 30) is 1 << (j+1)
-    // Column 31 is 0x05EC76F1
-    for (int i = 0; i < (int)CrcBits - 1; i++)
-        odd[i] = 1U << (i + 1);
-    odd[CrcBits - 1] = 0x05EC76F1;
-
-    // put operator for removing two zero bits in even
-    // by squaring the odd matrix: even = odd * odd
-    for (int i = 0; i < (int)CrcBits; i++)
-    {
-        uint32_t vec = odd[i];
-        even[i] = 0;
-        for (int j = 0; vec != 0; j++, vec >>= 1)
-            if (vec & 1)
-                even[i] ^= odd[j];
-    }
-
-    // put operator for removing four zero bits in odd
-    // by squaring the even matrix: odd = even * even
-    for (int i = 0; i < (int)CrcBits; i++)
-    {
-        uint32_t vec = even[i];
-        odd[i] = 0;
-        for (int j = 0; vec != 0; j++, vec >>= 1)
-            if (vec & 1)
-                odd[i] ^= even[j];
-    }
-
-    // apply len2 zeros removal to crc1
-    uint32_t* a = even;
-    uint32_t* b = odd;
-    for (; len2 > 0; len2 >>= 1)
-    {
-        // square the matrix, from b to a
-        for (int i = 0; i < (int)CrcBits; i++)
-        {
-            uint32_t vec = b[i];
-            a[i] = 0;
-            for (int j = 0; vec != 0; j++, vec >>= 1)
-                if (vec & 1)
-                    a[i] ^= b[j];
-        }
-
-        // apply operator for this bit
-        if (len2 & 1)
-        {
-            // multiply crc1 by matrix a
-            uint32_t sum = 0;
-            uint32_t crc_copy = crc1;
-            for (int i = 0; crc_copy != 0; i++, crc_copy >>= 1)
-                if (crc_copy & 1)
-                    sum ^= a[i];
-            crc1 = sum;
-        }
-
-        // switch even and odd
-        uint32_t* t = a; a = b; b = t;
-    }
-
-    return crc1;
+template<typename T, typename F1, typename F2> static inline
+auto do_crc_trim(T all, T prefix, T suffix, F1 rm_prefix, F2 rm_suffix) -> decltype(all.crc) {
+    if (all.size < prefix.size + suffix.size)
+        LOG_ERRNO_RETURN(EINVAL, 0, "total size (`) must be > summed sizes of prefix (`) + suffix (`)", all.size, prefix.size, suffix.size);
+    if (unlikely(!prefix.size && !suffix.size))
+        return all.crc;
+    auto crc = all.crc;
+    if (prefix.size)
+        // crc ^= prefix.crc << (all.size - prefix.size);
+        crc = rm_prefix(prefix.crc, crc, all.size - prefix.size);
+    if (suffix.size)
+        // crc = (crc ^ suffix.crc) >> suffix.size;
+        crc = rm_suffix(crc ^ suffix.crc, suffix.size);
+    return crc;
 }
 
 uint32_t crc32c_trim_sw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix) {
-    if (all.size < prefix.size + suffix.size)
-        LOG_ERRNO_RETURN(EINVAL, 0, "total size (`) is shorter than summed sizes of prefix (`) + suffix (`)", all.size, prefix.size, suffix.size);
-    auto crc = all.crc;
-    if (prefix.size)
-        crc = crc32c_combine_sw(prefix.crc, crc, all.size - prefix.size);
-    if (suffix.size)
-        crc = crc32c_rshift_sw(crc ^ suffix.crc, suffix.size);
-    return crc;
+    return do_crc_trim(all, prefix, suffix, &crc32c_combine_sw, &crc32c_rshift_sw);
+}
+
+uint32_t crc32c_trim_hw(CRC32C_Component all, CRC32C_Component prefix, CRC32C_Component suffix) {
+    return do_crc_trim(all, prefix, suffix, &crc32c_combine_hw, &crc32c_rshift_hw);
 }
 
 uint32_t crc32c_combine_series_sw(uint32_t* crc, uint32_t part_size, uint32_t n_parts) {
@@ -856,7 +835,6 @@ uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
     return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_sse);
 }
 
-__attribute__((aligned(16), used))
 const static uint64_t crc64ecma_lshift_table[] = {
     // by length of 1, 2, 4, 8, ..., 4G bytes
     0x0100000000000000, 0x0001000000000000, 0x0000000100000000, 0x0000000000000001,
@@ -870,28 +848,15 @@ const static uint64_t crc64ecma_lshift_table[] = {
     0x6975abb7ef289b8f,
 };
 
-// virtually pad `len2` bytes of 0 to source
-// data, and return resulting crc value
-static uint64_t do_crc64ecma_combine(uint64_t crc1, uint64_t crc2,
-        uint32_t len2, uint64_t (*shift)(uint64_t crc1, uint64_t x)) {
-    if (unlikely(!crc1)) return crc2;
-    if (unlikely(!len2)) return crc1;
-    for (; len2; len2 &= len2 - 1) {
-        auto x = crc64ecma_lshift_table[__builtin_ctz(len2)];
-        crc1 = shift(crc1, x);
-    }
-    return crc1 ^ crc2;
-}
-
-static uint64_t do_crc64ecma_lshift_hw(uint64_t crc, uint64_t x) {
+static uint64_t clmul_modp_crc64ecma_hw(uint64_t crc, uint64_t x) {
     __m128i crc1x, crc2x, crc3x, constx;
-    const __m128i rk7 = _mm_loadu_si128((__m128i*)&rk[7-1]);
+    const __m128i rk7 = _mm_load_si128((__m128i*)&rk[7-1]);
 
     crc1x = _mm_cvtsi64_si128(crc);
     constx = _mm_cvtsi64_si128(x);
     crc1x = _mm_clmulepi64_si128(crc1x, constx, 0x00);
 
-    // Barrett Reduce
+    // Barrett Reduction
     crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
     crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
     crc2x = _mm_bslli_si128(crc2x, 8);
@@ -901,26 +866,59 @@ static uint64_t do_crc64ecma_lshift_hw(uint64_t crc, uint64_t x) {
 }
 
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
-    return do_crc64ecma_combine(crc1, crc2, len2, do_crc64ecma_lshift_hw);
+    if (unlikely(!crc1)) return crc2;
+    return crc2 ^ crc_apply_shifts(crc1, len2,
+        crc64ecma_lshift_table, clmul_modp_crc64ecma_hw);
 }
 
-inline __uint128_t clmul(uint64_t a, uint64_t b) {
-    __uint128_t ret = 0, B = b;
-    for (uint32_t i = 0; i < 64; ++i, a>>=1, B<<=1)
-        if (a&1) ret ^= B;
-    return ret;
-}
-
-static uint64_t do_crc64ecma_lshift_sw(uint64_t crc, uint64_t x) {
-    __uint128_t crc1x = clmul(crc, x);
-    __uint128_t crc2x = clmul(crc1x, rk[7-1]);
-    __uint128_t crc3x = clmul(crc2x, rk[7]);
-    return (crc1x >> 64) ^ crc2x ^ (crc3x >> 64);
+// (a*b) % poly
+inline uint64_t clmul_modp64_sw(uint64_t a, uint64_t b) {
+    uint64_t pd = 0;
+    for(uint64_t i = 0; i <= sizeof(a)*8; i++, b>>=1)
+        pd = (pd>>1) ^ CVAL(pd&1, CRC64ECMA_POLY) ^ CVAL(b&1, a);
+    return pd;
 }
 
 uint64_t crc64ecma_combine_sw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
-    return do_crc64ecma_combine(crc1, crc2, len2, do_crc64ecma_lshift_sw);
+    if (unlikely(!crc1)) return crc2;
+    return crc2 ^ crc_apply_shifts(crc1, len2,
+        crc64ecma_lshift_table, &clmul_modp64_sw);
 }
+
+const static uint64_t crc64ecma_rshift_table[] = {
+    // by length of 1, 2, 4, 8, ..., 2G bytes
+    0x5ddb47907c2b5ccd, 0x7906d53a625e2c59, 0xa7b7c93241ea6d5e, 0x11be34289ea15e0e,
+    0xa75238d8d774465b, 0xcc05486166e62168, 0x4d73bcf10b5b97ba, 0x6404c4fc40140811,
+    0x3c86d8103585616e, 0x4c9d5de80eb3fc42, 0xe621d2c2e1ea38e0, 0x4c015f25c72db7fd,
+    0xb0298500527ffc22, 0x841f4ee73d4ee903, 0x52cb8880eee95001, 0xde1c06e1ab074f45,
+    0xc403fa5c546155d8, 0x2a6d846bc92a4dcb, 0x740e9a93dabbe1c1, 0x3f2714f434a6183d,
+    0x0d2ebca5c42743f8, 0xd344df0a66ee91cc, 0xa240548d7eec1c14, 0x7bb3c2d579a0539d,
+    0xf30e741ac683fa8d, 0xc5a6159c1d582d1a, 0x3521482ae18cfce3, 0x620bf133c27942a9,
+    0x55f28cebfe897757, 0xdbc399e528817a2f, 0xa60805d4db63ffdd, 0x43541bc2d03d5ebf,
+};
+
+static uint64_t crc64ecma_rshift_hw(uint64_t crc, uint64_t n) {
+    return crc_apply_shifts(crc, n, crc64ecma_rshift_table,
+        clmul_modp_crc64ecma_hw);
+}
+
+static uint64_t crc64ecma_rshift_sw(uint64_t crc, uint64_t n) {
+    return crc_apply_shifts(crc, n, crc64ecma_rshift_table,
+        &clmul_modp64_sw);
+}
+
+uint64_t crc64ecma_trim_hw(CRC64ECMA_Component all,
+                           CRC64ECMA_Component prefix,
+                           CRC64ECMA_Component suffix) {
+    return do_crc_trim(all, prefix, suffix, &crc64ecma_combine_hw, &crc64ecma_rshift_hw);
+}
+
+uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
+                           CRC64ECMA_Component prefix,
+                           CRC64ECMA_Component suffix) {
+    return do_crc_trim(all, prefix, suffix, &crc64ecma_combine_sw, &crc64ecma_rshift_sw);
+}
+
 
 #ifdef __x86_64__
 #ifdef __clang__
