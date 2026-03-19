@@ -391,6 +391,10 @@ namespace photon
         thread* pop_front()
         {
             auto ret = q[0];
+            if (q.size() == 1) {
+                q.pop_back();
+                return ret;
+            }
             q[0] = q.back();
             q[0]->idx = 0;
             q.pop_back();
@@ -409,6 +413,11 @@ namespace photon
             }
 
             auto id = obj->idx;
+            if (q.size() == 1) {
+                assert(id == 0);
+                q.pop_back();
+                return 0;
+            }
             q[obj->idx] = q.back();
             q[id]->idx = id;
             q.pop_back();
@@ -426,6 +435,7 @@ namespace photon
         // compare m_nodes[idx] with parent node.
         bool up(int idx)
         {
+            assert(!q.empty());
             auto tmp = q[idx];
             bool ret = false;
             while (idx != 0){
@@ -445,6 +455,7 @@ namespace photon
         // compare m_nodes[idx] with child node.
         bool down(int idx)
         {
+            assert(!q.empty());
             auto tmp = q[idx];
             size_t cmpIdx = (idx << 1) + 1;
             bool ret = false;
