@@ -27,8 +27,6 @@ class QuotaFilePool : public FileCachePool {
     QuotaFilePool(photon::fs::IFileSystem* mediaFs, uint64_t capacityInGB, uint64_t periodInUs,
       uint64_t diskAvailInBytes, uint64_t refillUnit, int quotaDirLevel);
 
-    photon::fs::ICacheStore* do_open(std::string_view pathname, int flags, mode_t mode) override;
-
     void updateDirLru(FileIterator iter);
 
     bool dirSpaceIsFull(FileIterator iter);
@@ -42,6 +40,7 @@ class QuotaFilePool : public FileCachePool {
     int evict(std::string_view filename) override;
 
 protected:
+    photon::fs::ICacheStore* do_open(std::string_view pathname, int flags, mode_t mode) override;
     void dirEviction();
 
     bool afterFtrucate(FileIterator iter) override;
