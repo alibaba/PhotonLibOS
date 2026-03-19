@@ -2247,42 +2247,43 @@ insert_list:
         photon_thread_dealloc = _photon_thread_dealloc;
     }
 
-    extern "C" {
-    [[gnu::used]]
-    void *gdb_get_thread_stack_ptr(void *th) {
-      if (!th)
-        return nullptr;
-      return ((thread *)th)->stack._ptr;
-    }
-    [[gnu::used]]
-    void *gdb_get_current_thread() {
-      return CURRENT;
-    }
-    [[gnu::used]]
-    void *gdb_get_next_thread(void *c) {
-      if (!c)
-        return nullptr;
-      return ((thread *)c)->next();
-    }
-    [[gnu::used]]
-    void *gdb_get_vcpu(void *th) {
-      if (!th)
-        return nullptr;
-      return (void *)((thread *)th)->vcpu;
-    }
-    [[gnu::used]]
-    size_t gdb_get_sleepq_size(void *vcpu) {
-      if (!vcpu)
-        return 0;
-      return ((vcpu_t *)vcpu)->sleepq.q.size();
-    }
-    [[gnu::used]]
-    void *gdb_get_sleepq_item(void *vcpu, size_t idx) {
-      if (!vcpu)
-        return nullptr;
-      if (((vcpu_t *)vcpu)->sleepq.q.size() <= idx)
-        return nullptr;
-      return ((vcpu_t *)vcpu)->sleepq.q[idx];
-    }
-    }
-}
+}  // namespace photon
+
+// =========================================================================
+// GDB Offset Export - Global Symbols
+// These symbols are directly readable by GDB, no separate tool needed.
+// GDB Python script reads: gdb.parse_and_eval("gdb_thread_offset_vcpu")
+// =========================================================================
+
+// Export as C symbols to avoid name mangling
+extern "C" {
+
+// Thread structure offsets
+[[gnu::used]] const size_t gdb_thread_size = sizeof(photon::thread);
+[[gnu::used]] const size_t gdb_thread_offset_prev = 0;
+[[gnu::used]] const size_t gdb_thread_offset_next = sizeof(void*);
+[[gnu::used]] const size_t gdb_thread_offset_vcpu = offsetof(photon::thread, vcpu);
+[[gnu::used]] const size_t gdb_thread_offset_stack_ptr = offsetof(photon::thread, stack);
+[[gnu::used]] const size_t gdb_thread_offset_idx = offsetof(photon::thread, idx);
+[[gnu::used]] const size_t gdb_thread_offset_error_number = offsetof(photon::thread, error_number);
+[[gnu::used]] const size_t gdb_thread_offset_waitq = offsetof(photon::thread, waitq);
+[[gnu::used]] const size_t gdb_thread_offset_flags = offsetof(photon::thread, flags);
+[[gnu::used]] const size_t gdb_thread_offset_state = offsetof(photon::thread, state);
+[[gnu::used]] const size_t gdb_thread_offset_ts_wakeup = offsetof(photon::thread, ts_wakeup);
+[[gnu::used]] const size_t gdb_thread_offset_tls = offsetof(photon::thread, tls);
+[[gnu::used]] const size_t gdb_thread_offset_buf = offsetof(photon::thread, buf);
+[[gnu::used]] const size_t gdb_thread_offset_stack_size = offsetof(photon::thread, stack_size);
+
+// vCPU structure offsets
+[[gnu::used]] const size_t gdb_vcpu_size = sizeof(photon::vcpu_t);
+[[gnu::used]] const size_t gdb_vcpu_offset_sleepq = offsetof(photon::vcpu_t, sleepq);
+[[gnu::used]] const size_t gdb_vcpu_offset_nthreads = offsetof(photon::vcpu_t, nthreads);
+[[gnu::used]] const size_t gdb_vcpu_offset_idle_worker = offsetof(photon::vcpu_t, idle_worker);
+[[gnu::used]] const size_t gdb_vcpu_offset_standbyq = offsetof(photon::vcpu_t, standbyq);
+[[gnu::used]] const size_t gdb_vcpu_offset_list_node_prev = offsetof(photon::vcpu_t, __prev_ptr);
+[[gnu::used]] const size_t gdb_vcpu_offset_list_node_next = offsetof(photon::vcpu_t, __next_ptr);
+
+// Pointer size for architecture detection
+[[gnu::used]] const size_t gdb_pointer_size = sizeof(void*);
+
+}  // extern "C"
