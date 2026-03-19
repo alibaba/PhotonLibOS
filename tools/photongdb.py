@@ -173,47 +173,54 @@ def _load_offsets_from_symbols():
     thread_offsets = {}
     vcpu_offsets = {}
     
-    # Thread offsets
-    thread_symbols = [
-        ('_size', 'gdb_thread_size'),
-        ('prev', 'gdb_thread_offset_prev'),
-        ('next', 'gdb_thread_offset_next'),
-        ('vcpu', 'gdb_thread_offset_vcpu'),
-        ('stack_ptr', 'gdb_thread_offset_stack_ptr'),
-        ('idx', 'gdb_thread_offset_idx'),
-        ('error_number', 'gdb_thread_offset_error_number'),
-        ('waitq', 'gdb_thread_offset_waitq'),
-        ('flags', 'gdb_thread_offset_flags'),
-        ('state', 'gdb_thread_offset_state'),
-        ('ts_wakeup', 'gdb_thread_offset_ts_wakeup'),
-        ('tls', 'gdb_thread_offset_tls'),
-        ('buf', 'gdb_thread_offset_buf'),
-        ('stack_size', 'gdb_thread_offset_stack_size'),
+    # Check version for compatibility (now inside struct)
+    version = _read_gdb_symbol('gdb_offsets.version')
+    if version is not None:
+        cprint('INFO', f"GDB offsets version: {version}")
+    
+    # Thread offsets (from unified struct GDBOffsets)
+    thread_fields = [
+        ('_size', 'thread_size'),
+        ('prev', 'thread_offset_prev'),
+        ('next', 'thread_offset_next'),
+        ('vcpu', 'thread_offset_vcpu'),
+        ('stack_ptr', 'thread_offset_stack_ptr'),
+        ('idx', 'thread_offset_idx'),
+        ('error_number', 'thread_offset_error_number'),
+        ('waitq', 'thread_offset_waitq'),
+        ('flags', 'thread_offset_flags'),
+        ('state', 'thread_offset_state'),
+        ('ts_wakeup', 'thread_offset_ts_wakeup'),
+        ('tls', 'thread_offset_tls'),
+        ('buf', 'thread_offset_buf'),
+        ('stack_size', 'thread_offset_stack_size'),
     ]
     
-    # vCPU offsets
-    vcpu_symbols = [
-        ('_size', 'gdb_vcpu_size'),
-        ('sleepq', 'gdb_vcpu_offset_sleepq'),
-        ('nthreads', 'gdb_vcpu_offset_nthreads'),
-        ('idle_worker', 'gdb_vcpu_offset_idle_worker'),
-        ('standbyq', 'gdb_vcpu_offset_standbyq'),
-        ('list_node_prev', 'gdb_vcpu_offset_list_node_prev'),
-        ('list_node_next', 'gdb_vcpu_offset_list_node_next'),
+    # vCPU offsets (from unified struct GDBOffsets)
+    vcpu_fields = [
+        ('_size', 'vcpu_size'),
+        ('sleepq', 'vcpu_offset_sleepq'),
+        ('nthreads', 'vcpu_offset_nthreads'),
+        ('idle_worker', 'vcpu_offset_idle_worker'),
+        ('standbyq', 'vcpu_offset_standbyq'),
+        ('list_node_prev', 'vcpu_offset_list_node_prev'),
+        ('list_node_next', 'vcpu_offset_list_node_next'),
     ]
     
     success = True
     
-    for name, symbol in thread_symbols:
-        val = _read_gdb_symbol(symbol)
+    # Read thread offsets from unified struct
+    for name, field in thread_fields:
+        val = _read_gdb_symbol(f'gdb_offsets.{field}')
         if val is not None:
             thread_offsets[name] = val
         else:
             thread_offsets[name] = _DEFAULT_THREAD_OFFSETS.get(name, 0)
             success = False
     
-    for name, symbol in vcpu_symbols:
-        val = _read_gdb_symbol(symbol)
+    # Read vCPU offsets from unified struct
+    for name, field in vcpu_fields:
+        val = _read_gdb_symbol(f'gdb_offsets.{field}')
         if val is not None:
             vcpu_offsets[name] = val
         else:

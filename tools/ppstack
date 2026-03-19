@@ -51,16 +51,32 @@ if test ! -f "$PHOTONDB"; then
     exit 1
 fi
 
+# Detect libphoton.so location for solib-search-path
+PHOTON_LIB_PATH="${PHOTON_LIB_PATH:-}"
+if test -z "$PHOTON_LIB_PATH"; then
+    # Try relative to script directory
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if test -f "$SCRIPT_DIR/../build/output/libphoton.so"; then
+        PHOTON_LIB_PATH="$SCRIPT_DIR/../build/output"
+    fi
+fi
+
 GDB=${GDB:-gdb}
 
-# Run GDB, strip out unwanted noise.
-$GDB --quiet -nx $GDBARGS /proc/$1/exe $1 <<EOF 2>&1 | 
-set width 0
+# Build GDB commands
+GDB_CMDS="set width 0
 set height 0
-set pagination no
+set pagination no"
+if test -n "$PHOTON_LIB_PATH"; then
+    GDB_CMDS="$GDB_CMDS
+set solib-search-path $PHOTON_LIB_PATH"
+fi
+GDB_CMDS="$GDB_CMDS
 source $PHOTONDB
-photon_ps
-EOF
+photon_ps"
+
+# Run GDB, strip out unwanted noise.
+echo "$GDB_CMDS" | $GDB --quiet -nx $GDBARGS /proc/$1/exe $1 2>&1 |
 /bin/sed -n \
     -e 's/^\((gdb) \)*//' \
     -e '/^Thread [0-9]/p' \
