@@ -51,7 +51,6 @@ FileCacheStore::~FileCacheStore() {
 
 ICacheStore::try_preadv_result FileCacheStore::try_preadv2(const struct iovec *iov, int iovcnt,
                                                            off_t offset, int flags) {
-  auto lruEntry = iterator_->second.get();
   photon::scoped_rwlock rl(rw_lock_, photon::RLOCK);
   return this->ICacheStore::try_preadv2(iov, iovcnt, offset, flags);
 }
