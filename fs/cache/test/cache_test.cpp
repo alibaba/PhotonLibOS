@@ -676,6 +676,44 @@ TEST(CachePool, random_evict_file) {
   if (cacheStore) cacheStore->release();
 }
 
+TEST(CachePool, open_same_file) {
+  std::string root = "/tmp/ease/cache/open_same_file/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  auto fileName = "/testDir/testfile";
+
+  uint64_t written = 0;
+  for (int j = 0; j < 5; j++) {
+    std::vector<ICacheStore*> cacheStores;
+    for (int i = 0; i < 10; i++) {
+      cacheStores.push_back(cachePool->open(fileName, O_CREAT | O_RDWR, 0644));
+      ASSERT_NE(nullptr, cacheStores.back());
+    }
+
+    const size_t bufSize = 1024 * 1024;
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(bufSize);
+
+    for (auto cacheStore : cacheStores) {
+      if (rand() % 2 == 0) {
+        cacheStore->release();
+      } else {
+        auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), written, 0);
+        EXPECT_EQ(ret, (ssize_t)bufSize);
+        written += ret;
+        cacheStore->release();
+      }
+    }
+  }
+}
+
 }
 }
 int main(int argc, char** argv) {
