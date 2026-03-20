@@ -379,25 +379,23 @@ class PhotonThread:
     
     def get_saved_registers(self):
         """
-        Restore registers from saved stack.
-        Stack layout (set by Stack::init):
-            [Stack._ptr + 0]  = saved_rbp (or th pointer)
-            [Stack._ptr + 8]  = return_addr (rip)
+        Get saved registers from stack.
+        Stack layout (saved by switch_context):
+            [Stack._ptr + 0]  = saved_rbp (push %rbp)
+            [Stack._ptr + 8]  = return_addr (call's push)
+            [Stack._ptr + 16] = caller's stack frame
+        
+        To enable GDB bt, rsp must skip switch_context's frame entirely.
+        Returns: (rsp, rbp, rip) for caller's context
         """
         sp = self.stack_ptr()
         if sp == 0:
             return None, None, None
         
-        if is_aarch64():
-            # AArch64 layout may differ, needs confirmation
-            rbp = read_ptr(sp)
-            rip = read_ptr(sp + 8)
-            rsp = sp + 16
-        else:
-            # x86-64
-            rbp = read_ptr(sp)
-            rip = read_ptr(sp + 8)
-            rsp = sp + 16
+        # Read saved values
+        rbp = read_ptr(sp)       # caller's rbp
+        rip = read_ptr(sp + 8)   # return address (in caller)
+        rsp = sp + 16            # skip switch_context's frame, point to caller's stack
         
         return rsp, rbp, rip
 
@@ -1070,7 +1068,8 @@ def format_backtrace_frame(idx, addr):
 
 class PhotonLs(gdb.Command):
     """
-    List all Photon threads in current vCPU (similar to GDB 'info threads').
+    List all Photon threads (similar to GDB 'info threads').
+    Works for both live process and coredump.
     Usage: photon_ls
     """
     
@@ -1078,13 +1077,10 @@ class PhotonLs(gdb.Command):
         gdb.Command.__init__(self, "photon_ls", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
     
     def invoke(self, arg, tty):
-        global _selected_thread_idx, _in_photon_mode, _photon_threads
+        global _selected_thread_idx
         
-        # Use _photon_threads if in photon mode, otherwise load from current vCPU only
-        if _in_photon_mode and _photon_threads:
-            threads = _photon_threads
-        else:
-            threads = load_photon_threads_current_vcpu()
+        # Use collect_all_threads for pure memory read (works with coredump)
+        threads = collect_all_threads()
         
         if not threads:
             cprint('WARNING', "No photon threads found")
@@ -1108,13 +1104,13 @@ class PhotonLs(gdb.Command):
             
             # vCPU info
             extra_info = ""
-            if 'vcpu' in t:
-                extra_info += f" vCPU ({t['vcpu']:#x})"
+            if 'gdb_thread' in t and 'vcpu_addr' in t:
+                extra_info += f" vCPU {t['gdb_thread']} ({t['vcpu_addr']:#x})"
             
             # Frame info
             frame_str = format_frame_brief(rip)
-            if state == 'RUNNING' and rip == 0:
-                frame_str = "(no context available)"
+            if state == 'CURRENT' and rip == 0:
+                frame_str = "(use photon_init to enable register-based debugging)"
             
             # Format like: * 1    Thread 0x555... RUNNING vCPU 0 (LWP in thread 1)  main ()
             print(f"{marker} {i:<4} {color}Thread {addr:#x}{bcolors.ENDC} "
@@ -1228,8 +1224,10 @@ class PhotonPs(gdb.Command):
 class PhotonFr(gdb.Command):
     """
     Select a Photon thread and switch to its registers (similar to GDB 'thread' command).
+    Requires photon_init to be called first to save original registers.
     Usage: photon_fr <index>
     After selection, you can use GDB commands like 'bt', 'frame', 'print' on the thread's context.
+    Use photon_fini to restore original registers when done.
     """
     
     def __init__(self):
@@ -1241,11 +1239,13 @@ class PhotonFr(gdb.Command):
         if not require_living_process("photon_fr"):
             return
         
-        # Use _photon_threads if in photon mode, otherwise load from current vCPU
-        if _in_photon_mode and _photon_threads:
-            threads = _photon_threads
-        else:
-            threads = load_photon_threads_current_vcpu()
+        # Must be in photon mode (photon_init called)
+        if not _in_photon_mode:
+            cprint('ERROR', "Please run 'photon_init' first to save registers")
+            return
+        
+        # Get threads list - use collect_all_threads for consistent indexing
+        threads = collect_all_threads()
         
         if not threads:
             cprint('WARNING', "No photon threads found")
@@ -1273,17 +1273,29 @@ class PhotonFr(gdb.Command):
         
         # Build extra info string
         extra_info = ""
-        if 'vcpu' in t:
-            extra_info += f" vCPU ({t['vcpu']:#x})"
+        if 'gdb_thread' in t and 'vcpu_addr' in t:
+            extra_info += f" vCPU {t['gdb_thread']} ({t['vcpu_addr']:#x})"
         
         # Show switched message like GDB
         print(f"[Switching to Thread {idx}, {t['addr']:#x} ({color}{state}{bcolors.ENDC}){extra_info}]")
         
+        # Determine which registers to use
+        if state == 'CURRENT':
+            # For CURRENT thread, use saved registers from photon_init
+            rsp = _saved_registers['rsp']
+            rbp = _saved_registers['rbp']
+            rip = _saved_registers['rip']
+        else:
+            # For other threads, use registers read from stack
+            rsp = t.get('rsp')
+            rbp = t.get('rbp')
+            rip = t.get('rip')
+        
         # Actually switch to the thread's registers
-        if t.get('rsp') and t.get('rbp') and t.get('rip'):
-            if switch_to_thread_registers(t['rsp'], t['rbp'], t['rip']):
+        if rsp and rbp and rip:
+            if switch_to_thread_registers(rsp, rbp, rip):
                 # Show top frame after switching
-                print(format_backtrace_frame(0, t['rip']))
+                print(format_backtrace_frame(0, rip))
             else:
                 cprint('ERROR', "Failed to switch to thread's registers")
         else:
@@ -1291,83 +1303,13 @@ class PhotonFr(gdb.Command):
 
 
 # =============================================================================
-# Legacy commands (for compatibility) - Now with full functionality
+# Register manipulation commands (live process only)
 # =============================================================================
 
-def load_photon_threads_current_vcpu():
-    """Load photon threads from current vCPU only (for photon_init/fr)"""
-    global _photon_threads
-    _photon_threads = []
-    
-    # Get current thread (which gives us current vCPU)
-    current = get_current_thread()
-    if current == 0:
-        return []
-    
-    # Get current vCPU from current thread
-    th = PhotonThread(current)
-    current_vcpu = th.vcpu()
-    
-    if current_vcpu == 0:
-        return []
-    
-    # Collect threads from current vCPU only
-    threads = []
-    visited = set()
-    
-    # From sleepq
-    for t_addr in get_sleepq_threads(current_vcpu):
-        if t_addr not in visited:
-            visited.add(t_addr)
-            t = PhotonThread(t_addr)
-            rsp, rbp, rip = t.get_saved_registers()
-            threads.append({
-                'addr': t_addr,
-                'state': t.state_name(),
-                'rsp': rsp,
-                'rbp': rbp,
-                'rip': rip,
-                'vcpu': current_vcpu
-            })
-    
-    # From standbyq
-    standbyq_offset = VCPU_OFFSETS.get('standbyq', 56)
-    standbyq_head = read_ptr(current_vcpu + standbyq_offset)
-    if standbyq_head:
-        for t_addr in traverse_list(standbyq_head, 'next'):
-            if t_addr not in visited:
-                visited.add(t_addr)
-                t = PhotonThread(t_addr)
-                rsp, rbp, rip = t.get_saved_registers()
-                threads.append({
-                    'addr': t_addr,
-                    'state': t.state_name(),
-                    'rsp': rsp,
-                    'rbp': rbp,
-                    'rip': rip,
-                    'vcpu': current_vcpu
-                })
-    
-    # Current thread
-    if current not in visited:
-        visited.add(current)
-        t = PhotonThread(current)
-        rsp, rbp, rip = t.get_saved_registers()
-        threads.append({
-            'addr': current,
-            'state': 'CURRENT',
-            'rsp': rsp,
-            'rbp': rbp,
-            'rip': rip,
-            'vcpu': current_vcpu
-        })
-    
-    _photon_threads = threads
-    return threads
-
-
 class PhotonInit(gdb.Command):
-    """Save current registers and enter photon thread lookup mode"""
+    """Save current registers and enter photon thread debug mode.
+    After calling this, use photon_fr to switch between threads.
+    Use photon_fini or photon_rst to restore registers when done."""
     def __init__(self):
         gdb.Command.__init__(self, "photon_init", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
     def invoke(self, arg, tty):
@@ -1375,50 +1317,60 @@ class PhotonInit(gdb.Command):
         if not require_living_process("photon_init"):
             return
         
-        threads = load_photon_threads_current_vcpu()
+        if _in_photon_mode:
+            cprint('WARNING', "Already in photon debug mode. Use photon_fini to exit first.")
+            return
+        
+        threads = collect_all_threads()
         if not threads:
             cprint('WARNING', "No photon threads found")
             return
         
         if save_registers():
             _in_photon_mode = True
-            cprint('WARNING', f"Entered photon thread lookup mode ({len(threads)} threads). "
-                   "PLEASE do not step-in or continue before `photon_fini`")
+            cprint('WARNING', f"Entered photon debug mode ({len(threads)} threads). "
+                   "Use photon_fr to switch threads. Do NOT step/continue before photon_fini!")
         else:
             cprint('ERROR', "Failed to save registers")
 
 
 class PhotonFini(gdb.Command):
-    """Restore registers and exit photon thread lookup mode"""
+    """Restore original registers and exit photon debug mode."""
     def __init__(self):
         gdb.Command.__init__(self, "photon_fini", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
     def invoke(self, arg, tty):
-        global _in_photon_mode, _photon_threads
+        global _in_photon_mode, _photon_threads, _selected_thread_idx
         if not require_living_process("photon_fini"):
             return
         
         if not _in_photon_mode:
-            cprint('WARNING', "Not in photon mode")
+            cprint('WARNING', "Not in photon debug mode")
             return
         
         if restore_registers():
             _in_photon_mode = False
             _photon_threads = []
-            cprint('WARNING', "Finished photon thread lookup mode.")
+            _selected_thread_idx = 0
+            cprint('INFO', "Exited photon debug mode. Registers restored.")
         else:
             cprint('ERROR', "Failed to restore registers")
 
 
 class PhotonRst(gdb.Command):
-    """Restore registers (alias for photon_fini without clearing state)"""
+    """Restore saved registers without exiting photon debug mode.
+    Use this to quickly return to original context while staying in debug mode."""
     def __init__(self):
         gdb.Command.__init__(self, "photon_rst", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
     def invoke(self, arg, tty):
         if not require_living_process("photon_rst"):
             return
         
+        if not _saved_registers:
+            cprint('WARNING', "No saved registers. Run photon_init first.")
+            return
+        
         if restore_registers():
-            cprint('INFO', "Registers restored")
+            cprint('INFO', "Registers restored (still in photon debug mode)")
         else:
             cprint('ERROR', "Failed to restore registers")
 
@@ -1458,6 +1410,23 @@ class PhotonCurrent(gdb.Command):
 # Initialization
 # =============================================================================
 
+# Event handler: auto-restore registers before program continues
+def _on_cont(event):
+    """Called when program is about to continue (step/next/continue).
+    Auto-restore registers if in photon debug mode."""
+    global _in_photon_mode, _photon_threads, _selected_thread_idx
+    if _in_photon_mode and _saved_registers:
+        cprint('WARNING', "Auto-restoring registers before continue...")
+        restore_registers()
+        _in_photon_mode = False
+        _photon_threads = []
+        _selected_thread_idx = 0
+
+try:
+    gdb.events.cont.connect(_on_cont)
+except:
+    pass  # Older GDB versions may not support this
+
 PhotonLs()
 PhotonBt()
 PhotonPs()
@@ -1469,4 +1438,4 @@ PhotonRst()
 
 cprint('INFO', 'Photon-GDB-extension v2 loaded')
 cprint('INFO', 'Commands: photon_ls, photon_fr <n>, photon_bt [n], photon_ps, photon_current')
-cprint('INFO', 'Use photon_fr to select thread, then photon_bt to show its backtrace')
+cprint('INFO', 'Register commands: photon_init -> photon_fr -> photon_fini')
