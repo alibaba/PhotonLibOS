@@ -108,8 +108,6 @@ namespace fs
 
         void set_trans_func(CacheFnTransFunc fn_trans_func);
 
-        virtual ICacheStore* do_open(std::string_view filename, int flags, mode_t mode) = 0;
-
         virtual int rename(std::string_view oldname, std::string_view newname) = 0;
 
         virtual ssize_t list(const char* dirname, ListType type,
@@ -146,6 +144,8 @@ namespace fs
         }
 
     protected:
+        virtual ICacheStore* do_open(std::string_view filename, int flags, mode_t mode) = 0;
+
         void* m_stores;
         CacheFnTransFunc fn_trans_func;
         void* m_thread_pool = nullptr;

@@ -135,8 +135,10 @@ int FileCachePool::evict(std::string_view filename) {
     lru_.mark_key_cleared(lruEntry->lruIter);
   }
   int err = 0;
+  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  DEFER(cacheStore->release());
   {
-    photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+    photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
   }
@@ -256,8 +258,10 @@ void FileCachePool::eviction() {
         continue;
     }
 
+    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    DEFER(cacheStore->release());
     {
-      photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+      photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
     }

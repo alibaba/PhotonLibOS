@@ -45,9 +45,6 @@ public:
 
     void Init();
 
-    //  pathname must begin with '/'
-    photon::fs::ICacheStore *do_open(std::string_view pathname, int flags, mode_t mode) override;
-
     int set_quota(std::string_view pathname, size_t quota) override;
     int stat(photon::fs::CacheStat *stat,
              std::string_view pathname = std::string_view(nullptr, 0)) override;
@@ -64,7 +61,6 @@ public:
         uint32_t lruIter;
         int openCount;
         uint64_t size;
-        photon::rwlock rw_lock_;
         bool truncate_done;
     };
 
@@ -81,6 +77,8 @@ public:
     uint64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
 
 protected:
+    //  pathname must begin with '/'
+    photon::fs::ICacheStore *do_open(std::string_view pathname, int flags, mode_t mode) override;
     photon::fs::IFile *openMedia(std::string_view name, int flags, int mode);
 
     static uint64_t timerHandler(void *data);
