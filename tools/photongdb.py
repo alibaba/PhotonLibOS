@@ -1224,10 +1224,10 @@ class PhotonPs(gdb.Command):
 class PhotonFr(gdb.Command):
     """
     Select a Photon thread and switch to its registers (similar to GDB 'thread' command).
-    Requires photon_init to be called first to save original registers.
+    Automatically saves registers on first use (auto photon_init).
     Usage: photon_fr <index>
     After selection, you can use GDB commands like 'bt', 'frame', 'print' on the thread's context.
-    Use photon_fini to restore original registers when done.
+    Registers auto-restore on continue/step/next, or use photon_fini/photon_rst manually.
     """
     
     def __init__(self):
@@ -1239,12 +1239,7 @@ class PhotonFr(gdb.Command):
         if not require_living_process("photon_fr"):
             return
         
-        # Must be in photon mode (photon_init called)
-        if not _in_photon_mode:
-            cprint('ERROR', "Please run 'photon_init' first to save registers")
-            return
-        
-        # Get threads list - use collect_all_threads for consistent indexing
+        # Get threads list
         threads = collect_all_threads()
         
         if not threads:
@@ -1265,6 +1260,14 @@ class PhotonFr(gdb.Command):
         if idx < 0 or idx >= len(threads):
             print(f"Invalid index. Valid range: 0-{len(threads)-1}")
             return
+        
+        # Auto photon_init if not already in photon mode
+        if not _in_photon_mode:
+            if not save_registers():
+                cprint('ERROR', "Failed to save registers")
+                return
+            _in_photon_mode = True
+            cprint('INFO', "Auto-saved registers (will auto-restore on continue/step/next)")
         
         _selected_thread_idx = idx
         t = threads[idx]
@@ -1307,9 +1310,8 @@ class PhotonFr(gdb.Command):
 # =============================================================================
 
 class PhotonInit(gdb.Command):
-    """Save current registers and enter photon thread debug mode.
-    After calling this, use photon_fr to switch between threads.
-    Use photon_fini or photon_rst to restore registers when done."""
+    """Manually save current registers and enter photon debug mode.
+    Note: photon_fr will auto-call this if needed, so this command is optional."""
     def __init__(self):
         gdb.Command.__init__(self, "photon_init", gdb.COMMAND_STACK, gdb.COMPLETE_NONE)
     def invoke(self, arg, tty):
@@ -1318,18 +1320,12 @@ class PhotonInit(gdb.Command):
             return
         
         if _in_photon_mode:
-            cprint('WARNING', "Already in photon debug mode. Use photon_fini to exit first.")
-            return
-        
-        threads = collect_all_threads()
-        if not threads:
-            cprint('WARNING', "No photon threads found")
+            cprint('WARNING', "Already in photon debug mode.")
             return
         
         if save_registers():
             _in_photon_mode = True
-            cprint('WARNING', f"Entered photon debug mode ({len(threads)} threads). "
-                   "Use photon_fr to switch threads. Do NOT step/continue before photon_fini!")
+            cprint('INFO', "Entered photon debug mode. Use photon_fr to switch threads.")
         else:
             cprint('ERROR', "Failed to save registers")
 
