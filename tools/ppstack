@@ -1,7 +1,29 @@
 #!/usr/bin/sh
 
+# Copyright 2024 Alibaba Group Holding Limited.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ppstack - Print Photon thread stacks for a running process
+# Usage: ppstack <process-id>
+#
+# Environment variables:
+#   PHOTONDB - Path to photongdb.py (auto-detected if not set)
+#   GDB      - Path to gdb (default: gdb)
+#   GDBARGS  - Additional gdb arguments
+
 if test $# -ne 1; then
-    echo "Usage: `basename $0 .sh` <process-id>" 1>&2
+    echo "Usage: $(basename $0) <process-id>" 1>&2
     exit 1
 fi
 
@@ -10,41 +32,55 @@ if test ! -r /proc/$1; then
     exit 1
 fi
 
-# GDB doesn't allow "thread apply all bt" when the process isn't
-# threaded; need to peek at the process to determine if that or the
-# simpler "bt" should be used.
-
-backtrace="photon_ps"
-if test -d /proc/$1/task ; then
-    # Newer kernel; has a task/ directory.
-    if test `/bin/ls /proc/$1/task | /usr/bin/wc -l` -gt 1 2>/dev/null ; then
-	backtrace="thread apply all photon_ps"
+# Auto-detect photongdb.py location
+if test -z "$PHOTONDB"; then
+    # Try relative to this script first
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if test -f "$SCRIPT_DIR/photongdb.py"; then
+        PHOTONDB="$SCRIPT_DIR/photongdb.py"
+    elif test -f "/usr/local/lib/photon/tools/photongdb.py"; then
+        PHOTONDB="/usr/local/lib/photon/tools/photongdb.py"
+    else
+        echo "Cannot find photongdb.py. Set PHOTONDB environment variable." 1>&2
+        exit 1
     fi
-elif test -f /proc/$1/maps ; then
-    # Older kernel; go by it loading libpthread.
-    if /bin/grep -e libpthread /proc/$1/maps > /dev/null 2>&1 ; then
-	backtrace="thread apply all photon_ps"
+fi
+
+if test ! -f "$PHOTONDB"; then
+    echo "photongdb.py not found at: $PHOTONDB" 1>&2
+    exit 1
+fi
+
+# Detect libphoton.so location for solib-search-path
+PHOTON_LIB_PATH="${PHOTON_LIB_PATH:-}"
+if test -z "$PHOTON_LIB_PATH"; then
+    # Try relative to script directory
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if test -f "$SCRIPT_DIR/../build/output/libphoton.so"; then
+        PHOTON_LIB_PATH="$SCRIPT_DIR/../build/output"
     fi
 fi
 
 GDB=${GDB:-gdb}
-PHOTONDB=${PHOTONDB:-/usr/local/lib/photon/tools/photongdb.py}
-PHOTONSO=${PHOTONSO:-/usr/local/lib/libphoton.so}
+
+# Build GDB commands
+GDB_CMDS="set width 0
+set height 0
+set pagination no"
+if test -n "$PHOTON_LIB_PATH"; then
+    GDB_CMDS="$GDB_CMDS
+set solib-search-path $PHOTON_LIB_PATH"
+fi
+GDB_CMDS="$GDB_CMDS
+source $PHOTONDB
+photon_ps"
 
 # Run GDB, strip out unwanted noise.
-# --readnever is no longer used since .gdb_index is now in use.
-$GDB --quiet -nx $GDBARGS /proc/$1/exe $1 <<EOF 2>&1 | 
-set width 0
-set height 0
-set pagination no
-source $PHOTONDB
-add-symbol-file $PHOTONSO
-$backtrace
-EOF
+echo "$GDB_CMDS" | $GDB --quiet -nx $GDBARGS /proc/$1/exe $1 2>&1 |
 /bin/sed -n \
     -e 's/^\((gdb) \)*//' \
-    -e '/^#/p' \
-    -e '/^Thread/p' \
-    -e '/CURRENT/p' \
-    -e '/READY/p' \
-    -e '/SLEEP/p'
+    -e '/^Thread [0-9]/p' \
+    -e '/^#[0-9]/p' \
+    -e '/^INFO/p' \
+    -e '/^WARNING/p' \
+    -e '/^ERROR/p'
