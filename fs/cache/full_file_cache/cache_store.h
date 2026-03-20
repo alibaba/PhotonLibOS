@@ -47,6 +47,8 @@ public:
 
     int fstat(struct stat *buf) override;
 
+    photon::rwlock &rw_lock() { return rw_lock_; }
+
 protected:
     bool cacheIsFull();
 
@@ -69,6 +71,8 @@ protected:
     size_t refillUnit_;
     FileIterator iterator_;
     RangeLock rangeLock_;
+
+    photon::rwlock rw_lock_;
 
     ssize_t do_pwritev(const struct iovec *iov, int iovcnt, off_t offset);
 };

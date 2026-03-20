@@ -194,8 +194,11 @@ int QuotaFilePool::evict(std::string_view filename) {
   const auto& filePath = fileIter->first;
   int err;
   auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
+
+  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  DEFER(cacheStore->release());
   {
-    photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+    photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     lru.mark_key_cleared(lruEntry->QuotaLruIter);
     err = mediaFs_->truncate(filePath.data(), 0);
     if (err) {
@@ -234,8 +237,11 @@ void QuotaFilePool::dirEviction() {
       auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
       int err;
       bool flags_dir_delete = false;
+
+      auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+      DEFER(cacheStore->release());
       {
-        photon::scoped_rwlock rl(lruEntry->rw_lock_, photon::WLOCK);
+        photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
         if (lruEntry->openCount==0){
           dir->lru.mark_key_cleared(lruEntry->QuotaLruIter);
         } else {
@@ -243,6 +249,7 @@ void QuotaFilePool::dirEviction() {
         }
         err = mediaFs_->truncate(fileName.data(), 0);
       }
+
       if (err) {
         ERRNO e;
         LOG_ERROR("truncate(0) failed, name : `, ret : `, error code : `", fileName, err, e);
