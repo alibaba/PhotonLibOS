@@ -136,12 +136,12 @@ int FileCachePool::evict(std::string_view filename) {
   }
   int err = 0;
   auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  DEFER(cacheStore->release());
   {
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
   }
-  cacheStore->release();
   if (err) {
     ERRNO e;
     LOG_ERROR("truncate(0) failed, name: `, ret: `, error code: `", filePath,
@@ -259,12 +259,12 @@ void FileCachePool::eviction() {
     }
 
     auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    DEFER(cacheStore->release());
     {
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
     }
-    cacheStore->release();
 
     if (err) {
       ERRNO e;

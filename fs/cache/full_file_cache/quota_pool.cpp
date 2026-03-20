@@ -196,6 +196,7 @@ int QuotaFilePool::evict(std::string_view filename) {
   auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
 
   auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  DEFER(cacheStore->release());
   {
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     lru.mark_key_cleared(lruEntry->QuotaLruIter);
@@ -209,7 +210,6 @@ int QuotaFilePool::evict(std::string_view filename) {
     }
     afterFtrucate(fileIter);
   }
-  cacheStore->release();
   photon::thread_yield();
   return 0;
 }
@@ -239,6 +239,7 @@ void QuotaFilePool::dirEviction() {
       bool flags_dir_delete = false;
 
       auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+      DEFER(cacheStore->release());
       {
         photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
         if (lruEntry->openCount==0){
@@ -248,7 +249,6 @@ void QuotaFilePool::dirEviction() {
         }
         err = mediaFs_->truncate(fileName.data(), 0);
       }
-      cacheStore->release();
 
       if (err) {
         ERRNO e;
