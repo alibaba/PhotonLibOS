@@ -8,6 +8,7 @@
 [PhotonlibOS.github.io](https://photonlibos.github.io)
 
 ## What's New
+* Photon's RPC framework has been published in [PPoPP'26](https://ppopp26.sigplan.org/details/PPoPP-2026-papers/16/zBuffer-Zero-Copy-and-Metadata-Free-Serialization-for-Fast-RPC-with-Scatter-Gather-R) (The ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming), and the full paper can be accessed at [ACM Digital Library](https://dl.acm.org/doi/epdf/10.1145/3774934.3786426).
 * Photon has been included in [awesome-cpp](https://github.com/fffaraz/awesome-cpp).
 * Version 0.9 has been released in April 2025.
 * We present an article to illustrate the theory of Photon's coroutine.
