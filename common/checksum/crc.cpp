@@ -192,7 +192,11 @@ static void crc_init() {
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #include <arm_acle.h>
-#if defined(__GNUC__)
+#ifdef __clang__
+#pragma clang attribute push (__attribute__((target("aes,crc"))), apply_to=function)
+#else // __GNUC__
+#pragma GCC push_options
+#pragma GCC target ("+crc+crypto")
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif
 #else
@@ -686,11 +690,17 @@ uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
     return crc64ecma_auto(buffer, nbytes, crc);
 }
 
-// Pop the basic SSE/PCLMUL pragma that was pushed by crc_intrinsics.h
+// Pop the basic SSE/PCLMUL pragma that was pushed at the beginning of this file
 #if defined(__x86_64__)
 #ifdef __clang__
 #pragma clang attribute pop
 #else // __GNUC__
 #pragma GCC pop_options
 #endif
-#endif // __x86_64__
+#elif defined(__aarch64__)
+#ifdef __clang__
+#pragma clang attribute pop
+#else // __GNUC__
+#pragma GCC pop_options
+#endif
+#endif // architecture
