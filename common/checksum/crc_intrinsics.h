@@ -167,8 +167,9 @@ struct SIMD128 {
     }
 
     // Extract 64-bit value at index (0 or 1)
+    // Note: _mm_extract_epi64 requires compile-time constant for idx
     static inline __attribute__((always_inline)) uint64_t extract_u64(v128 x, int idx) {
-        return _mm_extract_epi64(x, idx);
+        return (idx == 0) ? _mm_extract_epi64(x, 0) : _mm_extract_epi64(x, 1);
     }
 
     // XOR two v128
