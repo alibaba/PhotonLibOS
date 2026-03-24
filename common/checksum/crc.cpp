@@ -404,7 +404,7 @@ uint32_t crc32c_combine_hw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
         if (unlikely(len2 & 1)) crc1 = crc32c(crc1, (uint8_t)0);
     }
     crc1 = crc_apply_shifts(crc1, len2>>4,
-        crc32c_lshift_table_hw.data(), clmul_modp_crc32c_hw);
+        crc32c_lshift_table_hw, clmul_modp_crc32c_hw);
     return crc1 ^ crc2;
 }
 
@@ -428,18 +428,18 @@ T clmul_modp_sw(T a, T b) {
 uint32_t crc32c_combine_sw(uint32_t crc1, uint32_t crc2, uint32_t len2) {
     if (unlikely(!crc1)) return crc2;
     if (unlikely(!len2)) return crc1;
-    crc1 = crc_apply_shifts(crc1, len2, crc32c_lshift_table_sw.data(),
+    crc1 = crc_apply_shifts(crc1, len2, crc32c_lshift_table_sw,
             &clmul_modp_sw<uint32_t, CRC32C_POLY>);
     return crc1 ^ crc2;
 }
 
 static uint32_t crc32c_rshift_hw(uint32_t crc, size_t len) {
-    return crc_apply_shifts(crc, len, crc32c_rshift_table_hw.data(),
+    return crc_apply_shifts(crc, len, crc32c_rshift_table_hw,
             &clmul_modp_crc32c_hw);
 }
 
 static uint32_t crc32c_rshift_sw(uint32_t crc, size_t len) {
-    return crc_apply_shifts(crc, len, crc32c_rshift_table_sw.data(),
+    return crc_apply_shifts(crc, len, crc32c_rshift_table_sw,
             &clmul_modp_sw<uint32_t, CRC32C_POLY>);
 }
 
@@ -515,12 +515,12 @@ void crc32c_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_part
 // SIMD mask accessor
 inline __attribute__((always_inline))
 v128 simd_mask(int i) {
-    auto p = &simd_mask_table.data()[(i - 1) * 2];
+    auto p = &simd_mask_table[(i - 1) * 2];
     return *(const v128*)p;
 }
 
 inline void* get_shf_table(size_t i) {
-    return (char*)pshufb_shf_table.data() + i;
+    return (char*)pshufb_shf_table + i;
 }
 
 inline __attribute__((always_inline))
@@ -616,7 +616,7 @@ static uint64_t clmul_modp_crc64ecma_hw(uint64_t crc, uint64_t x) {
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
     if (unlikely(!crc1)) return crc2;
     return crc2 ^ crc_apply_shifts(crc1, len2,
-        crc64ecma_lshift_table.data(), clmul_modp_crc64ecma_hw);
+        crc64ecma_lshift_table, clmul_modp_crc64ecma_hw);
 }
 
 // (a*b) % poly
@@ -630,18 +630,18 @@ inline uint64_t clmul_modp64_sw(uint64_t a, uint64_t b) {
 uint64_t crc64ecma_combine_sw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
     if (unlikely(!crc1)) return crc2;
     return crc2 ^ crc_apply_shifts(crc1, len2,
-        crc64ecma_lshift_table.data(), &clmul_modp64_sw);
+        crc64ecma_lshift_table, &clmul_modp64_sw);
 }
 
 // crc64ecma_rshift_table is now in crc_tables.cpp
 
 static uint64_t crc64ecma_rshift_hw(uint64_t crc, uint64_t n) {
-    return crc_apply_shifts(crc, n, crc64ecma_rshift_table.data(),
+    return crc_apply_shifts(crc, n, crc64ecma_rshift_table,
         clmul_modp_crc64ecma_hw);
 }
 
 static uint64_t crc64ecma_rshift_sw(uint64_t crc, uint64_t n) {
-    return crc_apply_shifts(crc, n, crc64ecma_rshift_table.data(),
+    return crc_apply_shifts(crc, n, crc64ecma_rshift_table,
         &clmul_modp64_sw);
 }
 

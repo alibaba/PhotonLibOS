@@ -29,7 +29,6 @@ limitations under the License.
  */
 
 #include "crc_tables.h"
-#include <array>    // for std::array
 #include <utility>  // for std::index_sequence
 
 // =============================================================================
@@ -140,19 +139,24 @@ constexpr uint64_t crc32_merge_k0(size_t blksz) { return crc32_merge_entry((blks
 constexpr uint64_t crc32_merge_k1(size_t blksz) { return crc32_merge_entry((blksz / 8 - 1) * 2 + 1); }
 
 // -----------------------------------------------------------------------------
-// Template array generator using std::index_sequence
+// Compile-time array generator using std::index_sequence
+// Produces native arrays with constexpr static storage
 // -----------------------------------------------------------------------------
-template<typename T, size_t N, T (*Gen)(size_t)>
-struct TableGenerator {
-    template<size_t... Is>
-    static constexpr std::array<T, N> generate_impl(std::index_sequence<Is...>) {
-        return {{ Gen(Is)... }};
-    }
+template<typename T, size_t N, T (*Gen)(size_t), typename Seq>
+struct CompileTimeTableImpl;
 
-    static constexpr std::array<T, N> make() {
-        return generate_impl(std::make_index_sequence<N>{});
-    }
+template<typename T, size_t N, T (*Gen)(size_t), size_t... Is>
+struct CompileTimeTableImpl<T, N, Gen, std::index_sequence<Is...>> {
+    static constexpr T value[N] = { Gen(Is)... };
 };
+
+// C++14 requires out-of-class definition for constexpr static members
+template<typename T, size_t N, T (*Gen)(size_t), size_t... Is>
+constexpr T CompileTimeTableImpl<T, N, Gen, std::index_sequence<Is...>>::value[N];
+
+// Convenience alias
+template<typename T, size_t N, T (*Gen)(size_t)>
+using CompileTimeTable = CompileTimeTableImpl<T, N, Gen, std::make_index_sequence<N>>;
 
 // Merge table: linear index 0..7 maps to blksz 64,128,256,512, each with k0,k1
 constexpr uint64_t crc32_merge_linear(size_t idx) {
@@ -180,8 +184,8 @@ constexpr uint64_t crc32_merge_linear(size_t idx) {
 //   3. Otherwise: low32 = v, bit33 = 0
 //   4. result = (bit33 << 32) | low32
 
-alignas(16) const decltype(crc32_merge_table_pclmulqdq)
-    crc32_merge_table_pclmulqdq = TableGenerator<uint64_t, CRC32_MERGE_TABLE_SIZE * 2, crc32_merge_linear>::make();
+const uint64_t (&crc32_merge_table_pclmulqdq)[CRC32_MERGE_TABLE_SIZE * 2] =
+    CompileTimeTable<uint64_t, CRC32_MERGE_TABLE_SIZE * 2, crc32_merge_linear>::value;
 
 // =============================================================================
 // CRC32C shift tables (hardware version)
@@ -193,24 +197,24 @@ alignas(16) const decltype(crc32_merge_table_pclmulqdq)
 // hardware instruction reduces it (multiplying by x^(-33)).
 // Indices 0..27 correspond to shifts by 16, 32, 64, ..., 2G bytes (128, 256, 512... bits).
 
-const decltype(crc32c_lshift_table_hw)
-    crc32c_lshift_table_hw = TableGenerator<uint32_t, CRC32_LSHIFT_TABLE_HW_SIZE, crc32c_lshift_hw>::make();
+const uint32_t (&crc32c_lshift_table_hw)[CRC32_LSHIFT_TABLE_HW_SIZE] =
+    CompileTimeTable<uint32_t, CRC32_LSHIFT_TABLE_HW_SIZE, crc32c_lshift_hw>::value;
 
 // rshift_table_hw[i] = x^(-(2^(i+3)) - 32 - 1) mod POLY
-const decltype(crc32c_rshift_table_hw)
-    crc32c_rshift_table_hw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_hw>::make();
+const uint32_t (&crc32c_rshift_table_hw)[CRC32_SHIFT_TABLE_SIZE] =
+    CompileTimeTable<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_hw>::value;
 
 // =============================================================================
 // CRC32C shift tables (software version)
 // =============================================================================
 //
 // lshift_table_sw[i] = x^(2^(i+3)) mod POLY
-const decltype(crc32c_lshift_table_sw)
-    crc32c_lshift_table_sw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_lshift_sw>::make();
+const uint32_t (&crc32c_lshift_table_sw)[CRC32_SHIFT_TABLE_SIZE] =
+    CompileTimeTable<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_lshift_sw>::value;
 
 // rshift_table_sw[i] = x^(-(2^(i+3))) mod POLY
-const decltype(crc32c_rshift_table_sw)
-    crc32c_rshift_table_sw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_sw>::make();
+const uint32_t (&crc32c_rshift_table_sw)[CRC32_SHIFT_TABLE_SIZE] =
+    CompileTimeTable<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_sw>::value;
 
 // =============================================================================
 // CRC64ECMA shift tables
@@ -219,12 +223,12 @@ const decltype(crc32c_rshift_table_sw)
 // lshift_table[i] for i = 0..3: x^(8 * 2^i - 1) for bytes 1, 2, 4, 8
 // lshift_table[i] for i = 4..32: x^(8 * 2^(i+1) - 1) for larger sizes
 
-const decltype(crc64ecma_lshift_table)
-    crc64ecma_lshift_table = TableGenerator<uint64_t, CRC64_LSHIFT_TABLE_SIZE, crc64_lshift>::make();
+const uint64_t (&crc64ecma_lshift_table)[CRC64_LSHIFT_TABLE_SIZE] =
+    CompileTimeTable<uint64_t, CRC64_LSHIFT_TABLE_SIZE, crc64_lshift>::value;
 
 // rshift_table[i] = x^(-(2^(i+3) + 1)) mod POLY
-const decltype(crc64ecma_rshift_table)
-    crc64ecma_rshift_table = TableGenerator<uint64_t, CRC64_RSHIFT_TABLE_SIZE, crc64_rshift>::make();
+const uint64_t (&crc64ecma_rshift_table)[CRC64_RSHIFT_TABLE_SIZE] =
+    CompileTimeTable<uint64_t, CRC64_RSHIFT_TABLE_SIZE, crc64_rshift>::value;
 
 // =============================================================================
 // CRC64ECMA constants (rk) for PCLMULQDQ computation
@@ -240,76 +244,92 @@ const decltype(crc64ecma_rshift_table)
 // rk9~rk20: folding constants for SSE reduction
 //   For i = 0..5, k = 7-i: rk[2*i+9] = x^(128*k-1), rk[2*i+10] = x^(128*k+63)
 
-alignas(16) const std::array<uint64_t, CRC64_RK_TABLE_SIZE> crc64_rk_table = {{
-    pow64(127),                // rk1:  x^127
-    pow64(191),                // rk2:  x^191
-    pow64(1023),               // rk3:  x^1023
-    pow64(1087),               // rk4:  x^1087
-    pow64(127),                // rk5:  x^127 (same as rk1)
-    0,                         // rk6:  unused padding
-    0x9c3e466c172963d5ULL,     // rk7:  Barrett mu constant
-    0x92d8af2baf0e1e84ULL,     // rk8:  Barrett constant
-    pow64(895),                // rk9:  x^(128*7-1) for folding xmm[0]
-    pow64(959),                // rk10: x^(128*7+63)
-    pow64(767),                // rk11: x^(128*6-1) for folding xmm[1]
-    pow64(831),                // rk12: x^(128*6+63)
-    pow64(639),                // rk13: x^(128*5-1) for folding xmm[2]
-    pow64(703),                // rk14: x^(128*5+63)
-    pow64(511),                // rk15: x^(128*4-1) for folding xmm[3]
-    pow64(575),                // rk16: x^(128*4+63)
-    pow64(383),                // rk17: x^(128*3-1) for folding xmm[4]
-    pow64(447),                // rk18: x^(128*3+63)
-    pow64(255),                // rk19: x^(128*2-1) for folding xmm[5]
-    pow64(319),                // rk20: x^(128*2+63)
-}};
+struct Crc64RkTableHolder {
+    alignas(16) static constexpr uint64_t value[CRC64_RK_TABLE_SIZE] = {
+        pow64(127),                // rk1:  x^127
+        pow64(191),                // rk2:  x^191
+        pow64(1023),               // rk3:  x^1023
+        pow64(1087),               // rk4:  x^1087
+        pow64(127),                // rk5:  x^127 (same as rk1)
+        0,                         // rk6:  unused padding
+        0x9c3e466c172963d5ULL,     // rk7:  Barrett mu constant
+        0x92d8af2baf0e1e84ULL,     // rk8:  Barrett constant
+        pow64(895),                // rk9:  x^(128*7-1) for folding xmm[0]
+        pow64(959),                // rk10: x^(128*7+63)
+        pow64(767),                // rk11: x^(128*6-1) for folding xmm[1]
+        pow64(831),                // rk12: x^(128*6+63)
+        pow64(639),                // rk13: x^(128*5-1) for folding xmm[2]
+        pow64(703),                // rk14: x^(128*5+63)
+        pow64(511),                // rk15: x^(128*4-1) for folding xmm[3]
+        pow64(575),                // rk16: x^(128*4+63)
+        pow64(383),                // rk17: x^(128*3-1) for folding xmm[4]
+        pow64(447),                // rk18: x^(128*3+63)
+        pow64(255),                // rk19: x^(128*2-1) for folding xmm[5]
+        pow64(319),                // rk20: x^(128*2+63)
+    };
+};
+alignas(16) constexpr uint64_t Crc64RkTableHolder::value[CRC64_RK_TABLE_SIZE];
+const uint64_t (&crc64_rk_table)[CRC64_RK_TABLE_SIZE] = Crc64RkTableHolder::value;
 
 // =============================================================================
 // CRC64ECMA AVX-512 constants
 // =============================================================================
 
-alignas(16) const std::array<uint64_t, CRC64_RK512_TABLE_SIZE> crc64_rk512_table = {{
-    pow64(2047),               // rk_1: x^2047 for 256-byte folding
-    pow64(2111),               // rk_2: x^2111
-    pow64(127),                // rk1
-    pow64(191),                // rk2
-    pow64(1023),               // rk3
-    pow64(1087),               // rk4
-    pow64(127),                // rk5
-    0,                         // rk6
-    0x9c3e466c172963d5ULL,     // rk7
-    0x92d8af2baf0e1e84ULL,     // rk8
-    pow64(895),                // rk9
-    pow64(959),                // rk10
-    pow64(767),                // rk11
-    pow64(831),                // rk12
-    pow64(639),                // rk13
-    pow64(703),                // rk14
-    pow64(511),                // rk15
-    pow64(575),                // rk16
-    pow64(383),                // rk17
-    pow64(447),                // rk18
-    pow64(255),                // rk19
-    pow64(319),                // rk20
-    pow64(127),                // rk_1b (copy for alignment)
-    pow64(191),                // rk_2b
-    0,                         // padding
-    0,                         // padding
-}};
+struct Crc64Rk512TableHolder {
+    alignas(16) static constexpr uint64_t value[CRC64_RK512_TABLE_SIZE] = {
+        pow64(2047),               // rk_1: x^2047 for 256-byte folding
+        pow64(2111),               // rk_2: x^2111
+        pow64(127),                // rk1
+        pow64(191),                // rk2
+        pow64(1023),               // rk3
+        pow64(1087),               // rk4
+        pow64(127),                // rk5
+        0,                         // rk6
+        0x9c3e466c172963d5ULL,     // rk7
+        0x92d8af2baf0e1e84ULL,     // rk8
+        pow64(895),                // rk9
+        pow64(959),                // rk10
+        pow64(767),                // rk11
+        pow64(831),                // rk12
+        pow64(639),                // rk13
+        pow64(703),                // rk14
+        pow64(511),                // rk15
+        pow64(575),                // rk16
+        pow64(383),                // rk17
+        pow64(447),                // rk18
+        pow64(255),                // rk19
+        pow64(319),                // rk20
+        pow64(127),                // rk_1b (copy for alignment)
+        pow64(191),                // rk_2b
+        0,                         // padding
+        0,                         // padding
+    };
+};
+alignas(16) constexpr uint64_t Crc64Rk512TableHolder::value[CRC64_RK512_TABLE_SIZE];
+const uint64_t (&crc64_rk512_table)[CRC64_RK512_TABLE_SIZE] = Crc64Rk512TableHolder::value;
 
 // =============================================================================
 // SIMD helper tables (constant, not computed)
 // =============================================================================
 
 // Mask table for SIMD blending operations
-alignas(16) const std::array<uint64_t, SIMD_MASK_TABLE_SIZE> simd_mask_table = {{
-    0xFFFFFFFFFFFFFFFF, 0x0000000000000000,  // mask1: all 1s, all 0s
-    0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,  // mask2: upper 32 bits
-    0x8080808080808080, 0x8080808080808080,  // mask3: sign bits
-}};
+struct SimdMaskTableHolder {
+    alignas(16) static constexpr uint64_t value[SIMD_MASK_TABLE_SIZE] = {
+        0xFFFFFFFFFFFFFFFF, 0x0000000000000000,  // mask1: all 1s, all 0s
+        0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,  // mask2: upper 32 bits
+        0x8080808080808080, 0x8080808080808080,  // mask3: sign bits
+    };
+};
+alignas(16) constexpr uint64_t SimdMaskTableHolder::value[SIMD_MASK_TABLE_SIZE];
+const uint64_t (&simd_mask_table)[SIMD_MASK_TABLE_SIZE] = SimdMaskTableHolder::value;
 
 // PSHUFB shift table for byte shuffling
 // These are fixed shuffle patterns, not polynomial-based
-alignas(16) const std::array<uint64_t, PSHUFB_SHF_TABLE_SIZE> pshufb_shf_table = {{
-    0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
-    0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
-}};
+struct PshufbShfTableHolder {
+    alignas(16) static constexpr uint64_t value[PSHUFB_SHF_TABLE_SIZE] = {
+        0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
+        0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
+    };
+};
+alignas(16) constexpr uint64_t PshufbShfTableHolder::value[PSHUFB_SHF_TABLE_SIZE];
+const uint64_t (&pshufb_shf_table)[PSHUFB_SHF_TABLE_SIZE] = PshufbShfTableHolder::value;
