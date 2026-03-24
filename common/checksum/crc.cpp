@@ -68,11 +68,11 @@ void static_loop(const F& f) {
     f(begin);
 }
 
-// gcc sometimes doesn't allow always_inline
-#define BODY(i) [&](size_t i) /*__attribute__((always_inline))*/
-
-
-#define CVAL(c, val) (-!!(c) & val)
+// Conditional value: returns val if c is true, 0 otherwise
+template<typename T>
+inline __attribute__((always_inline)) T cval(bool c, T val) {
+    return (-T(c)) & val;
+}
 
 template<typename T>
 struct TableCRC {
@@ -82,14 +82,14 @@ struct TableCRC {
     TableCRC(T POLY) {
         for (int n = 0; n < 256; n++) {
             T crc = n;
-            static_loop<0, 7, 1>(BODY(k) {
-                crc = CVAL(crc&1, POLY) ^ (crc >> 1);
+            static_loop<0, 7, 1>([&](size_t) {
+                crc = cval(crc & 1, POLY) ^ (crc >> 1);
             });
             table[0][n] = crc;
         }
         for (int n = 0; n < 256; n++) {
             T crc = table[0][n];
-            static_loop<1, 7, 1>(BODY(k) {
+            static_loop<1, 7, 1>([&](size_t k) {
                 crc = table[0][crc & 0xff] ^ (crc >> 8);
                 table[k][n] = crc;
             });
@@ -102,7 +102,7 @@ struct TableCRC {
         };
         auto f8 = [&](T crc, uint64_t x) {
             x ^= crc; crc = 0;
-            static_loop<0, 7, 1>(BODY(i) {
+            static_loop<0, 7, 1>([&](size_t i) {
                 crc ^= table[7-i][(x >> (i*8)) & 0xff];
             });
             return crc;
@@ -189,9 +189,24 @@ static void crc_init() {
 #pragma GCC diagnostic ignored "-Wuninitialized"
 #pragma GCC diagnostic ignored "-Winit-self"
 #endif
+
+// CRC32C hardware instructions for x86
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint8_t data) {
+    return __builtin_ia32_crc32qi(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint16_t data) {
+    return __builtin_ia32_crc32hi(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint32_t data) {
+    return __builtin_ia32_crc32si(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint64_t data) {
+    asm volatile ("crc32q %1, %q0" : "+r"(crc) : "rm"(data));
+    return crc;
+}
+
 #elif defined(__aarch64__)
-#include <arm_neon.h>
-#include <arm_acle.h>
+#include "mm_intrin_neon.h"
 #ifdef __clang__
 #pragma clang attribute push (__attribute__((target("aes,crc"))), apply_to=function)
 #else // __GNUC__
@@ -199,36 +214,70 @@ static void crc_init() {
 #pragma GCC target ("+crc+crypto")
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif
+
+// CRC32C hardware instructions for ARM
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint8_t data) {
+    return __crc32cb(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint16_t data) {
+    return __crc32ch(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint32_t data) {
+    return __crc32cw(crc, data);
+}
+inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint64_t data) {
+    return __crc32cd(crc, data);
+}
+
 #else
 #error "Unsupported architecture"
 #endif
 
-#include "crc_intrinsics.h"
+// =============================================================================
+// SIMD helpers
+// =============================================================================
 
-using namespace crc_intrinsics;
+using v128 = __m128i;
 
-// CRC32C hardware instruction wrappers (using unified interface from crc_intrinsics.h)
-// These provide backward-compatible overloaded crc32c() calls
-inline uint32_t crc32c(uint32_t crc, uint8_t data) {
-    return crc32c_u8(crc, data);
-}
-inline uint32_t crc32c(uint32_t crc, uint16_t data) {
-    return crc32c_u16(crc, data);
-}
-inline uint32_t crc32c(uint32_t crc, uint32_t data) {
-    return crc32c_u32(crc, data);
-}
-inline uint32_t crc32c(uint32_t crc, uint64_t data) {
-    return crc32c_u64(crc, data);
+// Combined PCLMULQDQ operation: clmul<0x10> ^ clmul<0x01>
+inline __attribute__((always_inline))
+v128 clmul_op(v128 x, const uint64_t* rk) {
+    return _mm_xor_si128(_mm_clmulepi64_si128(x, *(const v128*)rk, 0x10),
+                         _mm_clmulepi64_si128(x, *(const v128*)rk, 0x01));
 }
 
-// Convenience type aliases
-using SSE = SIMD128;using v128 = SIMD128::v128;
+// Load small buffer (< 16 bytes)
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
+inline __attribute__((always_inline)) v128 load_small(const void* data, size_t n) {
+    assert(n < 16);
+    uint64_t x = 0;
+    auto end = (const char*)data + n;
+    if (n & 4) x = *--(const uint32_t*&)end;
+    if (n & 2) x = (x << 16) | *--(const uint16_t*&)end;
+    if (n & 1) x = (x << 8) | *--(const uint8_t*&)end;
+#if defined(__x86_64__)
+    long vals[2] = {0, 0};
+    if (n & 8) {
+        vals[0] = *(const long*)data;
+        vals[1] = (long)x;
+    } else {
+        vals[0] = (long)x;
+    }
+    return _mm_loadu_si128((const v128*)vals);
+#else
+    uint64_t vals[2] = {x, 0};
+    if (n & 8) {
+        vals[0] = *(const uint64_t*)data;
+        vals[1] = x;
+    }
+    return _mm_loadu_si128((const v128*)vals);
+#endif
+}
 
 template<size_t blksz, typename T> inline __attribute__((always_inline))
 void crc32c_hw_block(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     if (nbytes & blksz) {
-        static_loop<0, blksz - sizeof(T), sizeof(T)>(BODY(i) {
+        static_loop<0, blksz - sizeof(T), sizeof(T)>([&](size_t i) {
             crc = crc32c(crc, *(T*)(data + i));
         });
         nbytes -= blksz;
@@ -268,7 +317,7 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     auto ptr = (const uint64_t*)data;
     const size_t blksz_8 = blksz / 8;
     uint32_t crc1 = 0, crc2 = 0;
-    static_loop<0, blksz_8 - 2, 1>(BODY(i) {
+    static_loop<0, blksz_8 - 2, 1>([&](size_t i) {
         if (i < blksz_8 * 3 / 4)
             __builtin_prefetch(data + blksz*3 + i*8*4, 0, 0);
         crc  = crc32c(crc,  ptr[i]);
@@ -279,11 +328,10 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     crc1 = crc32c(crc1, ptr[blksz_8 * 2 - 1]);
     // crc2 = crc32c(crc2, ptr[blksz_8 * 3 - 1]);
 
-    static_assert((blksz/8 - 1)*2 + 1< LEN(crc32_merge_table_pclmulqdq), "...");
-    auto k = &crc32_merge_table_pclmulqdq[(blksz/8 - 1)*2];
-    v128 c0 = SSE::from_u64((uint64_t)crc), c1 = SSE::from_u64((uint64_t)crc1);
-    auto t = SSE::pclmulqdq<0x00>(c0, k) ^
-             SSE::pclmulqdq<0x10>(c1, k) ;
+    auto k = crc32_merge_k<blksz>();
+    v128 c0 = _mm_cvtsi64_si128(crc), c1 = _mm_cvtsi64_si128(crc1);
+    auto t = _mm_xor_si128(_mm_clmulepi64_si128(c0, *(const v128*)k, 0x00),
+                           _mm_clmulepi64_si128(c1, *(const v128*)k, 0x10));
     crc = crc32c(crc2, ptr[blksz_8 * 3 - 1] ^ (uint64_t&)t);
     data += blksz * 3;
     nbytes -= blksz * 3;
@@ -339,10 +387,10 @@ T crc_apply_shifts(T crc, uint32_t len, const T* table,
 }
 
 static uint32_t clmul_modp_crc32c_hw(uint32_t crc1, uint32_t x) {
-    v128 crc1x = SSE::from_u32(crc1);
-    v128 cnstx = SSE::from_u32(x);
-    v128 result = SSE::clmul<0x00>(crc1x, cnstx);
-    uint64_t dat64 = SSE::to_u64(result);
+    v128 crc1x = _mm_setr_epi32(crc1, 0, 0, 0);
+    v128 cnstx = _mm_setr_epi32(x, 0, 0, 0);
+    v128 result = _mm_clmulepi64_si128(crc1x, cnstx, 0x00);
+    uint64_t dat64 = _mm_cvtsi128_si64(result);
     return crc32c((uint32_t)0, dat64);
 }
 
@@ -373,7 +421,7 @@ template<typename T, T POLY> inline
 T clmul_modp_sw(T a, T b) {
     T pd = 0;
     for(uint64_t i = 0; i < sizeof(T)*8; i++, b>>=1)
-        pd = (pd>>1) ^ CVAL(pd&1, POLY) ^ CVAL(b&1, a);
+        pd = (pd>>1) ^ cval(pd & 1, POLY) ^ cval(b & 1, a);
     return pd;
 }
 
@@ -464,9 +512,12 @@ void crc32c_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_part
         batch_blocks_crc(buffer, n_parts);
 }
 
-// Use tables from crc_tables.h
-#define RK(i) CRC64_RK(i)
-#define MASK(i) ({auto p = &simd_mask_table[((i)-1)*2]; *(v128*)p;})
+// SIMD mask accessor
+inline __attribute__((always_inline))
+v128 simd_mask(int i) {
+    auto p = &simd_mask_table[(i - 1) * 2];
+    return *(const v128*)p;
+}
 
 inline void* get_shf_table(size_t i) {
     return (char*)pshufb_shf_table + i;
@@ -474,20 +525,19 @@ inline void* get_shf_table(size_t i) {
 
 inline __attribute__((always_inline))
 v128 crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
-    using SIMD = SSE;
     v128 xmm[8];
     auto& ptr = (const v128*&)data;
-    static_loop<0, 7, 1>(BODY(i){ xmm[i] = SIMD::loadu(ptr+i); });
-    xmm[0] = SIMD::xor_v(xmm[0], SIMD::from_u64(~crc)); ptr += 8; nbytes -= 128;
+    static_loop<0, 7, 1>([&](size_t i){ xmm[i] = _mm_loadu_si128(ptr+i); });
+    xmm[0] = _mm_xor_si128(xmm[0], _mm_cvtsi64_si128(~crc)); ptr += 8; nbytes -= 128;
     do {
-        static_loop<0, 7, 1>(BODY(i) {
-            xmm[i] = SIMD::xor_v(SIMD::op(xmm[i], RK(3)), SIMD::loadu(ptr+i));
+        static_loop<0, 7, 1>([&](size_t i) {
+            xmm[i] = _mm_xor_si128(clmul_op(xmm[i], crc64_rk(3)), _mm_loadu_si128(ptr+i));
         });
         ptr += 8; nbytes -= 128;
     } while (nbytes >= 128);
-    static_loop<0, 6, 1>(BODY(i) {
+    static_loop<0, 6, 1>([&](size_t i) {
         auto I = (i == 6) ? 1 : (9 + i * 2);
-        xmm[7] = SIMD::xor_v(xmm[7], SIMD::op(xmm[i], RK(I)));
+        xmm[7] = _mm_xor_si128(xmm[7], clmul_op(xmm[i], crc64_rk(I)));
     });
     return xmm[7];
 }
@@ -495,49 +545,47 @@ v128 crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
 template<typename F> inline __attribute__((always_inline))
 uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc, F hw_big) {
     if (unlikely(!nbytes || !data)) return crc;
-    using SIMD = SSE;
-    using v128 = typename SIMD::v128;
-    v128 xmm7 = SSE::from_u64(~crc);
+    v128 xmm7 = _mm_cvtsi64_si128(~crc);
     auto& ptr = (const v128*&)data;
     if (nbytes >= 256) {
         xmm7 = hw_big(data, nbytes, crc);
     } else if (nbytes >= 16) {
-        xmm7 = SIMD::xor_v(xmm7, SIMD::loadu(ptr++));
+        xmm7 = _mm_xor_si128(xmm7, _mm_loadu_si128(ptr++));
         nbytes -= 16;
     } else /* 0 < nbytes < 16*/ {
-        xmm7 = SIMD::xor_v(xmm7, SIMD::load_small(data, nbytes));
+        xmm7 = _mm_xor_si128(xmm7, load_small(data, nbytes));
         if (nbytes >= 8) {
-            auto shf = SIMD::loadu(get_shf_table(nbytes));
-            xmm7 = SIMD::pshufb(xmm7, shf);
+            auto shf = _mm_loadu_si128((const v128*)get_shf_table(nbytes));
+            xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _128_done;
         } else {
-            auto shf = SIMD::loadu(get_shf_table(nbytes + 8));
-            xmm7 = SIMD::pshufb(xmm7, shf);
+            auto shf = _mm_loadu_si128((const v128*)get_shf_table(nbytes + 8));
+            xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _barrett;
         }
     }
 
     while (nbytes >= 16) {
-        xmm7 = SIMD::xor_v(SIMD::op(xmm7, RK(1)), SIMD::loadu(ptr++));
+        xmm7 = _mm_xor_si128(clmul_op(xmm7, crc64_rk(1)), _mm_loadu_si128(ptr++));
         nbytes -= 16;
     }
 
     if (nbytes) {
         auto p = data + nbytes - 16;
-        auto remainder = SIMD::loadu((v128*)p);
-        auto xmm0 = SIMD::loadu(get_shf_table(nbytes));
+        auto remainder = _mm_loadu_si128((const v128*)p);
+        auto xmm0 = _mm_loadu_si128((const v128*)get_shf_table(nbytes));
         auto xmm2 = xmm7;
-        xmm7 = SIMD::pshufb(xmm7, xmm0);
-        xmm0 = SIMD::xor_v(xmm0, MASK(3));
-        xmm2 = SIMD::pshufb(xmm2, xmm0);
-        xmm2 = SIMD::pblendvb(xmm2, remainder, xmm0);
-        xmm7 = SIMD::xor_v(xmm2, SIMD::op(xmm7, RK(1)));
+        xmm7 = _mm_shuffle_epi8(xmm7, xmm0);
+        xmm0 = _mm_xor_si128(xmm0, simd_mask(3));
+        xmm2 = _mm_shuffle_epi8(xmm2, xmm0);
+        xmm2 = _mm_blendv_epi8(xmm2, remainder, xmm0);
+        xmm7 = _mm_xor_si128(xmm2, clmul_op(xmm7, crc64_rk(1)));
     }
 _128_done:
-    xmm7  =  SIMD::xor_v(SIMD::pclmulqdq<0>(xmm7, RK(5)), SIMD::bsr8(xmm7));
+    xmm7 = _mm_xor_si128(_mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(5), 0x00), _mm_bsrli_si128(xmm7, 8));
 _barrett:
-    auto t = SIMD::pclmulqdq<0>(xmm7, RK(7));
-    xmm7  = SIMD::xor_v(xmm7, SIMD::xor_v(SIMD::pclmulqdq<0x10>(t, RK(7)), SIMD::bsl8(t)));
+    auto t = _mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(7), 0x00);
+    xmm7 = _mm_xor_si128(xmm7, _mm_xor_si128(_mm_clmulepi64_si128(t, *(const v128*)crc64_rk(7), 0x10), _mm_bslli_si128(t, 8)));
     auto p = (uint64_t*)&xmm7;
     crc = ~p[1];
     return crc;
@@ -550,19 +598,19 @@ uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
 // crc64ecma_lshift_table is now in crc_tables.cpp
 
 static uint64_t clmul_modp_crc64ecma_hw(uint64_t crc, uint64_t x) {
-    v128 rk7 = SSE::load(CRC64_RK(7));
+    v128 rk7 = _mm_load_si128((const v128*)crc64_rk(7));
 
-    v128 crc1x = SSE::from_u64(crc);
-    v128 constx = SSE::from_u64(x);
-    crc1x = SSE::clmul<0x00>(crc1x, constx);
+    v128 crc1x = _mm_cvtsi64_si128(crc);
+    v128 constx = _mm_cvtsi64_si128(x);
+    crc1x = _mm_clmulepi64_si128(crc1x, constx, 0x00);
 
     // Barrett Reduction
-    v128 crc2x = SSE::clmul<0x00>(crc1x, rk7);
-    v128 crc3x = SSE::clmul<0x10>(crc2x, rk7);
-    crc2x = SSE::bsl8(crc2x);
-    crc1x = SSE::xor_v(crc1x, crc2x);
-    crc1x = SSE::xor_v(crc1x, crc3x);
-    return SSE::extract_u64(crc1x, 1);
+    v128 crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
+    v128 crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
+    crc2x = _mm_bslli_si128(crc2x, 8);
+    crc1x = _mm_xor_si128(crc1x, crc2x);
+    crc1x = _mm_xor_si128(crc1x, crc3x);
+    return ((uint64_t*)&crc1x)[1];
 }
 
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
@@ -575,7 +623,7 @@ uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
 inline uint64_t clmul_modp64_sw(uint64_t a, uint64_t b) {
     uint64_t pd = 0;
     for(uint64_t i = 0; i <= sizeof(a)*8; i++, b>>=1)
-        pd = (pd>>1) ^ CVAL(pd&1, CRC64ECMA_POLY) ^ CVAL(b&1, a);
+        pd = (pd>>1) ^ cval(pd & 1, CRC64ECMA_POLY) ^ cval(b & 1, a);
     return pd;
 }
 
@@ -618,8 +666,7 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 #pragma GCC push_options
 #pragma GCC target ("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq")
 #endif
-// Use crc64_rk512_table from crc_tables.h
-#define _RK(i) CRC64_RK512(i)
+// crc64_rk512 accessor is in crc_tables.h
 
 using v512 = __m512i_u;
 inline __attribute__((always_inline))
@@ -644,7 +691,7 @@ __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t c
     auto zmm4 = _mm512_loadu_si512(ptr++);
     nbytes -= 128;
     if (nbytes < 384) {
-        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)crc64_rk512(3));
         do { // fold 128 bytes each iteration
             zmm0 = OP(zmm0, rk3, ptr++);
             zmm4 = OP(zmm4, rk3, ptr++);
@@ -662,14 +709,14 @@ __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t c
             zmm8 = OP(zmm8, rk_1_2, ptr++);
             nbytes -= 256;
         } while (nbytes >= 256);
-        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)_RK(3));
+        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)crc64_rk512(3));
         zmm0 = OP(zmm0, rk3, zmm7);
         zmm4 = OP(zmm4, rk3, zmm8);
     }
     auto t = _mm512_extracti64x2_epi64(zmm4, 0x03);
     auto zmm7 = v512{t[0], t[1]};
-    auto zmm1 = OP(zmm0, *(v512*)_RK(9), zmm7);
-         zmm1 = OP(zmm4, *(v512*)_RK(17), zmm1);
+    auto zmm1 = OP(zmm0, *(v512*)crc64_rk512(9), zmm7);
+         zmm1 = OP(zmm4, *(v512*)crc64_rk512(17), zmm1);
     auto zmm8 = _mm512_shuffle_i64x2(zmm1, zmm1, 0x4e);
     auto ymm8 = ((__m256i&)zmm8) ^ ((__m256i&)zmm1);
     return _mm256_extracti64x2_epi64(ymm8, 0) ^

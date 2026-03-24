@@ -44,7 +44,8 @@ constexpr uint64_t CRC64ECMA_POLY = 0xc96c5795d7870f42;
 // Table sizes
 // =============================================================================
 
-constexpr size_t CRC32_MERGE_TABLE_SIZE = 128;
+// CRC32 merge table: only for blksz = 64, 128, 256, 512 (4 entries * 2)
+constexpr size_t CRC32_MERGE_TABLE_SIZE = 4;
 constexpr size_t CRC32_LSHIFT_TABLE_HW_SIZE = 28;
 constexpr size_t CRC32_SHIFT_TABLE_SIZE = 32;
 constexpr size_t CRC64_LSHIFT_TABLE_SIZE = 33;
@@ -59,6 +60,18 @@ constexpr size_t PSHUFB_SHF_TABLE_SIZE = 4;
 // =============================================================================
 
 extern const uint64_t crc32_merge_table_pclmulqdq[CRC32_MERGE_TABLE_SIZE * 2];
+
+// Index mapping for merge table: blksz 64,128,256,512 -> array index 0,1,2,3
+constexpr size_t crc32_merge_index[4] = {0, 2, 4, 6};
+
+// Get merge table entry for given block size (64, 128, 256, 512)
+template<unsigned blksz>
+inline __attribute__((always_inline))
+const uint64_t* crc32_merge_k() {
+    static_assert(blksz == 64 || blksz == 128 || blksz == 256 || blksz == 512,
+                  "blksz must be 64, 128, 256, or 512");
+    return &crc32_merge_table_pclmulqdq[crc32_merge_index[__builtin_ctz(blksz) - 6]];
+}
 extern const uint32_t crc32c_lshift_table_hw[CRC32_LSHIFT_TABLE_HW_SIZE];
 extern const uint32_t crc32c_rshift_table_hw[CRC32_SHIFT_TABLE_SIZE];
 extern const uint32_t crc32c_lshift_table_sw[CRC32_SHIFT_TABLE_SIZE];
@@ -71,8 +84,17 @@ extern const uint64_t simd_mask_table[SIMD_MASK_TABLE_SIZE];
 extern const uint64_t pshufb_shf_table[PSHUFB_SHF_TABLE_SIZE];
 
 // =============================================================================
-// Convenience macros
+// Table accessor functions
 // =============================================================================
 
-#define CRC64_RK(i) (&crc64_rk_table[(i)-1])
-#define CRC64_RK512(i) (&crc64_rk512_table[(i)+1])
+// CRC64 RK table accessor (1-indexed)
+inline __attribute__((always_inline))
+const uint64_t* crc64_rk(int i) {
+    return &crc64_rk_table[i - 1];
+}
+
+// CRC64 RK512 table accessor
+inline __attribute__((always_inline))
+const uint64_t* crc64_rk512(int i) {
+    return &crc64_rk512_table[i + 1];
+}
