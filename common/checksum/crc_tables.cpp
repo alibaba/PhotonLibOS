@@ -307,29 +307,3 @@ struct Crc64Rk512TableHolder {
 };
 alignas(16) constexpr uint64_t Crc64Rk512TableHolder::value[CRC64_RK512_TABLE_SIZE];
 const uint64_t (&crc64_rk512_table)[CRC64_RK512_TABLE_SIZE] = Crc64Rk512TableHolder::value;
-
-// =============================================================================
-// SIMD helper tables (constant, not computed)
-// =============================================================================
-
-// Mask table for SIMD blending operations
-struct SimdMaskTableHolder {
-    alignas(16) static constexpr uint64_t value[SIMD_MASK_TABLE_SIZE] = {
-        0xFFFFFFFFFFFFFFFF, 0x0000000000000000,  // mask1: all 1s, all 0s
-        0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,  // mask2: upper 32 bits
-        0x8080808080808080, 0x8080808080808080,  // mask3: sign bits
-    };
-};
-alignas(16) constexpr uint64_t SimdMaskTableHolder::value[SIMD_MASK_TABLE_SIZE];
-const uint64_t (&simd_mask_table)[SIMD_MASK_TABLE_SIZE] = SimdMaskTableHolder::value;
-
-// PSHUFB shift table for byte shuffling
-// These are fixed shuffle patterns, not polynomial-based
-struct PshufbShfTableHolder {
-    alignas(16) static constexpr uint64_t value[PSHUFB_SHF_TABLE_SIZE] = {
-        0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
-        0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
-    };
-};
-alignas(16) constexpr uint64_t PshufbShfTableHolder::value[PSHUFB_SHF_TABLE_SIZE];
-const uint64_t (&pshufb_shf_table)[PSHUFB_SHF_TABLE_SIZE] = PshufbShfTableHolder::value;

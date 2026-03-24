@@ -52,8 +52,6 @@ constexpr size_t CRC64_LSHIFT_TABLE_SIZE = 33;
 constexpr size_t CRC64_RSHIFT_TABLE_SIZE = 32;
 constexpr size_t CRC64_RK_TABLE_SIZE = 20;
 constexpr size_t CRC64_RK512_TABLE_SIZE = 26;
-constexpr size_t SIMD_MASK_TABLE_SIZE = 6;
-constexpr size_t PSHUFB_SHF_TABLE_SIZE = 4;
 
 // =============================================================================
 // External table declarations (references to constexpr static arrays)
@@ -80,8 +78,6 @@ extern const uint64_t (&crc64ecma_lshift_table)[CRC64_LSHIFT_TABLE_SIZE];
 extern const uint64_t (&crc64ecma_rshift_table)[CRC64_RSHIFT_TABLE_SIZE];
 extern const uint64_t (&crc64_rk_table)[CRC64_RK_TABLE_SIZE];
 extern const uint64_t (&crc64_rk512_table)[CRC64_RK512_TABLE_SIZE];
-extern const uint64_t (&simd_mask_table)[SIMD_MASK_TABLE_SIZE];
-extern const uint64_t (&pshufb_shf_table)[PSHUFB_SHF_TABLE_SIZE];
 
 // =============================================================================
 // Table accessor functions

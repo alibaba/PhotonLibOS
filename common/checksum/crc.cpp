@@ -242,8 +242,8 @@ using v128 = __m128i;
 // Combined PCLMULQDQ operation: clmul<0x10> ^ clmul<0x01>
 inline __attribute__((always_inline))
 v128 clmul_op(v128 x, const uint64_t* rk) {
-    return _mm_xor_si128(_mm_clmulepi64_si128(x, *(const v128*)rk, 0x10),
-                         _mm_clmulepi64_si128(x, *(const v128*)rk, 0x01));
+    return _mm_clmulepi64_si128(x, *(const v128*)rk, 0x10) ^
+           _mm_clmulepi64_si128(x, *(const v128*)rk, 0x01);
 }
 
 // Load small buffer (< 16 bytes)
@@ -255,23 +255,12 @@ inline __attribute__((always_inline)) v128 load_small(const void* data, size_t n
     if (n & 4) x = *--(const uint32_t*&)end;
     if (n & 2) x = (x << 16) | *--(const uint16_t*&)end;
     if (n & 1) x = (x << 8) | *--(const uint8_t*&)end;
-#if defined(__x86_64__)
-    long vals[2] = {0, 0};
-    if (n & 8) {
-        vals[0] = *(const long*)data;
-        vals[1] = (long)x;
-    } else {
-        vals[0] = (long)x;
-    }
-    return _mm_loadu_si128((const v128*)vals);
-#else
     uint64_t vals[2] = {x, 0};
     if (n & 8) {
         vals[0] = *(const uint64_t*)data;
         vals[1] = x;
     }
     return _mm_loadu_si128((const v128*)vals);
-#endif
 }
 
 template<size_t blksz, typename T> inline __attribute__((always_inline))
@@ -330,8 +319,8 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
 
     auto k = crc32_merge_k<blksz>();
     v128 c0 = _mm_cvtsi64_si128(crc), c1 = _mm_cvtsi64_si128(crc1);
-    auto t = _mm_xor_si128(_mm_clmulepi64_si128(c0, *(const v128*)k, 0x00),
-                           _mm_clmulepi64_si128(c1, *(const v128*)k, 0x10));
+    auto t = _mm_clmulepi64_si128(c0, *(const v128*)k, 0x00) ^
+             _mm_clmulepi64_si128(c1, *(const v128*)k, 0x10);
     crc = crc32c(crc2, ptr[blksz_8 * 3 - 1] ^ (uint64_t&)t);
     data += blksz * 3;
     nbytes -= blksz * 3;
@@ -512,6 +501,24 @@ void crc32c_series_hw(const uint8_t *buffer, uint32_t part_size, uint32_t n_part
         batch_blocks_crc(buffer, n_parts);
 }
 
+// Helper tables for CRC64 SIMD operations
+namespace {
+
+// Mask table for SIMD blending operations
+alignas(16) constexpr uint64_t simd_mask_table[] = {
+    0xFFFFFFFFFFFFFFFF, 0x0000000000000000,  // mask1: all 1s, all 0s
+    0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,  // mask2: upper 32 bits
+    0x8080808080808080, 0x8080808080808080,  // mask3: sign bits
+};
+
+// PSHUFB shift table for byte shuffling
+alignas(16) constexpr uint64_t pshufb_shf_table[] = {
+    0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
+    0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
+};
+
+} // anonymous namespace
+
 // SIMD mask accessor
 inline __attribute__((always_inline))
 v128 simd_mask(int i) {
@@ -519,8 +526,8 @@ v128 simd_mask(int i) {
     return *(const v128*)p;
 }
 
-inline void* get_shf_table(size_t i) {
-    return (char*)pshufb_shf_table + i;
+inline const v128* get_shf_table(size_t i) {
+    return (const v128*)((const char*)pshufb_shf_table + i);
 }
 
 inline __attribute__((always_inline))
@@ -528,16 +535,16 @@ v128 crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
     v128 xmm[8];
     auto& ptr = (const v128*&)data;
     static_loop<0, 7, 1>([&](size_t i){ xmm[i] = _mm_loadu_si128(ptr+i); });
-    xmm[0] = _mm_xor_si128(xmm[0], _mm_cvtsi64_si128(~crc)); ptr += 8; nbytes -= 128;
+    xmm[0] = xmm[0] ^ _mm_cvtsi64_si128(~crc); ptr += 8; nbytes -= 128;
     do {
         static_loop<0, 7, 1>([&](size_t i) {
-            xmm[i] = _mm_xor_si128(clmul_op(xmm[i], crc64_rk(3)), _mm_loadu_si128(ptr+i));
+            xmm[i] = clmul_op(xmm[i], crc64_rk(3)) ^ _mm_loadu_si128(ptr+i);
         });
         ptr += 8; nbytes -= 128;
     } while (nbytes >= 128);
     static_loop<0, 6, 1>([&](size_t i) {
         auto I = (i == 6) ? 1 : (9 + i * 2);
-        xmm[7] = _mm_xor_si128(xmm[7], clmul_op(xmm[i], crc64_rk(I)));
+        xmm[7] = xmm[7] ^ clmul_op(xmm[i], crc64_rk(I));
     });
     return xmm[7];
 }
@@ -550,42 +557,42 @@ uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc,
     if (nbytes >= 256) {
         xmm7 = hw_big(data, nbytes, crc);
     } else if (nbytes >= 16) {
-        xmm7 = _mm_xor_si128(xmm7, _mm_loadu_si128(ptr++));
+        xmm7 = xmm7 ^ _mm_loadu_si128(ptr++);
         nbytes -= 16;
     } else /* 0 < nbytes < 16*/ {
-        xmm7 = _mm_xor_si128(xmm7, load_small(data, nbytes));
+        xmm7 = xmm7 ^ load_small(data, nbytes);
         if (nbytes >= 8) {
-            auto shf = _mm_loadu_si128((const v128*)get_shf_table(nbytes));
+            auto shf = _mm_loadu_si128(get_shf_table(nbytes));
             xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _128_done;
         } else {
-            auto shf = _mm_loadu_si128((const v128*)get_shf_table(nbytes + 8));
+            auto shf = _mm_loadu_si128(get_shf_table(nbytes + 8));
             xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _barrett;
         }
     }
 
     while (nbytes >= 16) {
-        xmm7 = _mm_xor_si128(clmul_op(xmm7, crc64_rk(1)), _mm_loadu_si128(ptr++));
+        xmm7 = clmul_op(xmm7, crc64_rk(1)) ^ _mm_loadu_si128(ptr++);
         nbytes -= 16;
     }
 
     if (nbytes) {
         auto p = data + nbytes - 16;
         auto remainder = _mm_loadu_si128((const v128*)p);
-        auto xmm0 = _mm_loadu_si128((const v128*)get_shf_table(nbytes));
+        auto xmm0 = _mm_loadu_si128(get_shf_table(nbytes));
         auto xmm2 = xmm7;
         xmm7 = _mm_shuffle_epi8(xmm7, xmm0);
-        xmm0 = _mm_xor_si128(xmm0, simd_mask(3));
+        xmm0 = xmm0 ^ simd_mask(3);
         xmm2 = _mm_shuffle_epi8(xmm2, xmm0);
         xmm2 = _mm_blendv_epi8(xmm2, remainder, xmm0);
-        xmm7 = _mm_xor_si128(xmm2, clmul_op(xmm7, crc64_rk(1)));
+        xmm7 = xmm2 ^ clmul_op(xmm7, crc64_rk(1));
     }
 _128_done:
-    xmm7 = _mm_xor_si128(_mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(5), 0x00), _mm_bsrli_si128(xmm7, 8));
+    xmm7 = _mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(5), 0x00) ^ _mm_bsrli_si128(xmm7, 8);
 _barrett:
     auto t = _mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(7), 0x00);
-    xmm7 = _mm_xor_si128(xmm7, _mm_xor_si128(_mm_clmulepi64_si128(t, *(const v128*)crc64_rk(7), 0x10), _mm_bslli_si128(t, 8)));
+    xmm7 = xmm7 ^ _mm_clmulepi64_si128(t, *(const v128*)crc64_rk(7), 0x10) ^ _mm_bslli_si128(t, 8);
     auto p = (uint64_t*)&xmm7;
     crc = ~p[1];
     return crc;
@@ -608,8 +615,8 @@ static uint64_t clmul_modp_crc64ecma_hw(uint64_t crc, uint64_t x) {
     v128 crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
     v128 crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
     crc2x = _mm_bslli_si128(crc2x, 8);
-    crc1x = _mm_xor_si128(crc1x, crc2x);
-    crc1x = _mm_xor_si128(crc1x, crc3x);
+    crc1x = crc1x ^ crc2x;
+    crc1x = crc1x ^ crc3x;
     return ((uint64_t*)&crc1x)[1];
 }
 
