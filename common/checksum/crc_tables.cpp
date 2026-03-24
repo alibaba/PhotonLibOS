@@ -29,6 +29,8 @@ limitations under the License.
  */
 
 #include "crc_tables.h"
+#include <array>    // for std::array
+#include <utility>  // for std::index_sequence
 
 // =============================================================================
 // Internal constexpr functions for compile-time CRC computation
@@ -137,6 +139,29 @@ constexpr uint64_t crc32_merge_entry(size_t idx) {
 constexpr uint64_t crc32_merge_k0(size_t blksz) { return crc32_merge_entry((blksz / 8 - 1) * 2); }
 constexpr uint64_t crc32_merge_k1(size_t blksz) { return crc32_merge_entry((blksz / 8 - 1) * 2 + 1); }
 
+// -----------------------------------------------------------------------------
+// Template array generator using std::index_sequence
+// -----------------------------------------------------------------------------
+template<typename T, size_t N, T (*Gen)(size_t)>
+struct TableGenerator {
+    template<size_t... Is>
+    static constexpr std::array<T, N> generate_impl(std::index_sequence<Is...>) {
+        return {{ Gen(Is)... }};
+    }
+
+    static constexpr std::array<T, N> make() {
+        return generate_impl(std::make_index_sequence<N>{});
+    }
+};
+
+// Merge table: linear index 0..7 maps to blksz 64,128,256,512, each with k0,k1
+constexpr uint64_t crc32_merge_linear(size_t idx) {
+    // idx 0,1 -> blksz 64; idx 2,3 -> blksz 128; idx 4,5 -> blksz 256; idx 6,7 -> blksz 512
+    size_t blksz_idx = idx / 2;
+    size_t blksz = 64ULL << blksz_idx;
+    return (idx % 2 == 0) ? crc32_merge_k0(blksz) : crc32_merge_k1(blksz);
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -155,17 +180,8 @@ constexpr uint64_t crc32_merge_k1(size_t blksz) { return crc32_merge_entry((blks
 //   3. Otherwise: low32 = v, bit33 = 0
 //   4. result = (bit33 << 32) | low32
 
-// Helper macro for generating merge table entries
-#define MERGE_ENTRY(blksz) crc32_merge_k0(blksz), crc32_merge_k1(blksz)
-
-alignas(16) const uint64_t crc32_merge_table_pclmulqdq[CRC32_MERGE_TABLE_SIZE * 2] = {
-    MERGE_ENTRY(64),   // index 0-1: blksz=64
-    MERGE_ENTRY(128),  // index 2-3: blksz=128
-    MERGE_ENTRY(256),  // index 4-5: blksz=256
-    MERGE_ENTRY(512),  // index 6-7: blksz=512
-};
-
-#undef MERGE_ENTRY
+alignas(16) const decltype(crc32_merge_table_pclmulqdq)
+    crc32_merge_table_pclmulqdq = TableGenerator<uint64_t, CRC32_MERGE_TABLE_SIZE * 2, crc32_merge_linear>::make();
 
 // =============================================================================
 // CRC32C shift tables (hardware version)
@@ -177,55 +193,24 @@ alignas(16) const uint64_t crc32_merge_table_pclmulqdq[CRC32_MERGE_TABLE_SIZE * 
 // hardware instruction reduces it (multiplying by x^(-33)).
 // Indices 0..27 correspond to shifts by 16, 32, 64, ..., 2G bytes (128, 256, 512... bits).
 
-const uint32_t crc32c_lshift_table_hw[CRC32_LSHIFT_TABLE_HW_SIZE] = {
-    crc32c_lshift_hw(0),  crc32c_lshift_hw(1),  crc32c_lshift_hw(2),  crc32c_lshift_hw(3),
-    crc32c_lshift_hw(4),  crc32c_lshift_hw(5),  crc32c_lshift_hw(6),  crc32c_lshift_hw(7),
-    crc32c_lshift_hw(8),  crc32c_lshift_hw(9),  crc32c_lshift_hw(10), crc32c_lshift_hw(11),
-    crc32c_lshift_hw(12), crc32c_lshift_hw(13), crc32c_lshift_hw(14), crc32c_lshift_hw(15),
-    crc32c_lshift_hw(16), crc32c_lshift_hw(17), crc32c_lshift_hw(18), crc32c_lshift_hw(19),
-    crc32c_lshift_hw(20), crc32c_lshift_hw(21), crc32c_lshift_hw(22), crc32c_lshift_hw(23),
-    crc32c_lshift_hw(24), crc32c_lshift_hw(25), crc32c_lshift_hw(26), crc32c_lshift_hw(27),
-};
+const decltype(crc32c_lshift_table_hw)
+    crc32c_lshift_table_hw = TableGenerator<uint32_t, CRC32_LSHIFT_TABLE_HW_SIZE, crc32c_lshift_hw>::make();
 
 // rshift_table_hw[i] = x^(-(2^(i+3)) - 32 - 1) mod POLY
-const uint32_t crc32c_rshift_table_hw[CRC32_SHIFT_TABLE_SIZE] = {
-    crc32c_rshift_hw(0),  crc32c_rshift_hw(1),  crc32c_rshift_hw(2),  crc32c_rshift_hw(3),
-    crc32c_rshift_hw(4),  crc32c_rshift_hw(5),  crc32c_rshift_hw(6),  crc32c_rshift_hw(7),
-    crc32c_rshift_hw(8),  crc32c_rshift_hw(9),  crc32c_rshift_hw(10), crc32c_rshift_hw(11),
-    crc32c_rshift_hw(12), crc32c_rshift_hw(13), crc32c_rshift_hw(14), crc32c_rshift_hw(15),
-    crc32c_rshift_hw(16), crc32c_rshift_hw(17), crc32c_rshift_hw(18), crc32c_rshift_hw(19),
-    crc32c_rshift_hw(20), crc32c_rshift_hw(21), crc32c_rshift_hw(22), crc32c_rshift_hw(23),
-    crc32c_rshift_hw(24), crc32c_rshift_hw(25), crc32c_rshift_hw(26), crc32c_rshift_hw(27),
-    crc32c_rshift_hw(28), crc32c_rshift_hw(29), crc32c_rshift_hw(30), crc32c_rshift_hw(31),
-};
+const decltype(crc32c_rshift_table_hw)
+    crc32c_rshift_table_hw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_hw>::make();
 
 // =============================================================================
 // CRC32C shift tables (software version)
 // =============================================================================
 //
 // lshift_table_sw[i] = x^(2^(i+3)) mod POLY
-const uint32_t crc32c_lshift_table_sw[CRC32_SHIFT_TABLE_SIZE] = {
-    crc32c_lshift_sw(0),  crc32c_lshift_sw(1),  crc32c_lshift_sw(2),  crc32c_lshift_sw(3),
-    crc32c_lshift_sw(4),  crc32c_lshift_sw(5),  crc32c_lshift_sw(6),  crc32c_lshift_sw(7),
-    crc32c_lshift_sw(8),  crc32c_lshift_sw(9),  crc32c_lshift_sw(10), crc32c_lshift_sw(11),
-    crc32c_lshift_sw(12), crc32c_lshift_sw(13), crc32c_lshift_sw(14), crc32c_lshift_sw(15),
-    crc32c_lshift_sw(16), crc32c_lshift_sw(17), crc32c_lshift_sw(18), crc32c_lshift_sw(19),
-    crc32c_lshift_sw(20), crc32c_lshift_sw(21), crc32c_lshift_sw(22), crc32c_lshift_sw(23),
-    crc32c_lshift_sw(24), crc32c_lshift_sw(25), crc32c_lshift_sw(26), crc32c_lshift_sw(27),
-    crc32c_lshift_sw(28), crc32c_lshift_sw(29), crc32c_lshift_sw(30), crc32c_lshift_sw(31),
-};
+const decltype(crc32c_lshift_table_sw)
+    crc32c_lshift_table_sw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_lshift_sw>::make();
 
 // rshift_table_sw[i] = x^(-(2^(i+3))) mod POLY
-const uint32_t crc32c_rshift_table_sw[CRC32_SHIFT_TABLE_SIZE] = {
-    crc32c_rshift_sw(0),  crc32c_rshift_sw(1),  crc32c_rshift_sw(2),  crc32c_rshift_sw(3),
-    crc32c_rshift_sw(4),  crc32c_rshift_sw(5),  crc32c_rshift_sw(6),  crc32c_rshift_sw(7),
-    crc32c_rshift_sw(8),  crc32c_rshift_sw(9),  crc32c_rshift_sw(10), crc32c_rshift_sw(11),
-    crc32c_rshift_sw(12), crc32c_rshift_sw(13), crc32c_rshift_sw(14), crc32c_rshift_sw(15),
-    crc32c_rshift_sw(16), crc32c_rshift_sw(17), crc32c_rshift_sw(18), crc32c_rshift_sw(19),
-    crc32c_rshift_sw(20), crc32c_rshift_sw(21), crc32c_rshift_sw(22), crc32c_rshift_sw(23),
-    crc32c_rshift_sw(24), crc32c_rshift_sw(25), crc32c_rshift_sw(26), crc32c_rshift_sw(27),
-    crc32c_rshift_sw(28), crc32c_rshift_sw(29), crc32c_rshift_sw(30), crc32c_rshift_sw(31),
-};
+const decltype(crc32c_rshift_table_sw)
+    crc32c_rshift_table_sw = TableGenerator<uint32_t, CRC32_SHIFT_TABLE_SIZE, crc32c_rshift_sw>::make();
 
 // =============================================================================
 // CRC64ECMA shift tables
@@ -234,29 +219,12 @@ const uint32_t crc32c_rshift_table_sw[CRC32_SHIFT_TABLE_SIZE] = {
 // lshift_table[i] for i = 0..3: x^(8 * 2^i - 1) for bytes 1, 2, 4, 8
 // lshift_table[i] for i = 4..32: x^(8 * 2^(i+1) - 1) for larger sizes
 
-const uint64_t crc64ecma_lshift_table[CRC64_LSHIFT_TABLE_SIZE] = {
-    crc64_lshift(0),  crc64_lshift(1),  crc64_lshift(2),  crc64_lshift(3),
-    crc64_lshift(4),  crc64_lshift(5),  crc64_lshift(6),  crc64_lshift(7),
-    crc64_lshift(8),  crc64_lshift(9),  crc64_lshift(10), crc64_lshift(11),
-    crc64_lshift(12), crc64_lshift(13), crc64_lshift(14), crc64_lshift(15),
-    crc64_lshift(16), crc64_lshift(17), crc64_lshift(18), crc64_lshift(19),
-    crc64_lshift(20), crc64_lshift(21), crc64_lshift(22), crc64_lshift(23),
-    crc64_lshift(24), crc64_lshift(25), crc64_lshift(26), crc64_lshift(27),
-    crc64_lshift(28), crc64_lshift(29), crc64_lshift(30), crc64_lshift(31),
-    crc64_lshift(32),
-};
+const decltype(crc64ecma_lshift_table)
+    crc64ecma_lshift_table = TableGenerator<uint64_t, CRC64_LSHIFT_TABLE_SIZE, crc64_lshift>::make();
 
 // rshift_table[i] = x^(-(2^(i+3) + 1)) mod POLY
-const uint64_t crc64ecma_rshift_table[CRC64_RSHIFT_TABLE_SIZE] = {
-    crc64_rshift(0),  crc64_rshift(1),  crc64_rshift(2),  crc64_rshift(3),
-    crc64_rshift(4),  crc64_rshift(5),  crc64_rshift(6),  crc64_rshift(7),
-    crc64_rshift(8),  crc64_rshift(9),  crc64_rshift(10), crc64_rshift(11),
-    crc64_rshift(12), crc64_rshift(13), crc64_rshift(14), crc64_rshift(15),
-    crc64_rshift(16), crc64_rshift(17), crc64_rshift(18), crc64_rshift(19),
-    crc64_rshift(20), crc64_rshift(21), crc64_rshift(22), crc64_rshift(23),
-    crc64_rshift(24), crc64_rshift(25), crc64_rshift(26), crc64_rshift(27),
-    crc64_rshift(28), crc64_rshift(29), crc64_rshift(30), crc64_rshift(31),
-};
+const decltype(crc64ecma_rshift_table)
+    crc64ecma_rshift_table = TableGenerator<uint64_t, CRC64_RSHIFT_TABLE_SIZE, crc64_rshift>::make();
 
 // =============================================================================
 // CRC64ECMA constants (rk) for PCLMULQDQ computation
@@ -272,7 +240,7 @@ const uint64_t crc64ecma_rshift_table[CRC64_RSHIFT_TABLE_SIZE] = {
 // rk9~rk20: folding constants for SSE reduction
 //   For i = 0..5, k = 7-i: rk[2*i+9] = x^(128*k-1), rk[2*i+10] = x^(128*k+63)
 
-alignas(16) const uint64_t crc64_rk_table[CRC64_RK_TABLE_SIZE] = {
+alignas(16) const std::array<uint64_t, CRC64_RK_TABLE_SIZE> crc64_rk_table = {{
     pow64(127),                // rk1:  x^127
     pow64(191),                // rk2:  x^191
     pow64(1023),               // rk3:  x^1023
@@ -293,13 +261,13 @@ alignas(16) const uint64_t crc64_rk_table[CRC64_RK_TABLE_SIZE] = {
     pow64(447),                // rk18: x^(128*3+63)
     pow64(255),                // rk19: x^(128*2-1) for folding xmm[5]
     pow64(319),                // rk20: x^(128*2+63)
-};
+}};
 
 // =============================================================================
 // CRC64ECMA AVX-512 constants
 // =============================================================================
 
-alignas(16) const uint64_t crc64_rk512_table[CRC64_RK512_TABLE_SIZE] = {
+alignas(16) const std::array<uint64_t, CRC64_RK512_TABLE_SIZE> crc64_rk512_table = {{
     pow64(2047),               // rk_1: x^2047 for 256-byte folding
     pow64(2111),               // rk_2: x^2111
     pow64(127),                // rk1
@@ -326,22 +294,22 @@ alignas(16) const uint64_t crc64_rk512_table[CRC64_RK512_TABLE_SIZE] = {
     pow64(191),                // rk_2b
     0,                         // padding
     0,                         // padding
-};
+}};
 
 // =============================================================================
 // SIMD helper tables (constant, not computed)
 // =============================================================================
 
 // Mask table for SIMD blending operations
-alignas(16) const uint64_t simd_mask_table[SIMD_MASK_TABLE_SIZE] = {
+alignas(16) const std::array<uint64_t, SIMD_MASK_TABLE_SIZE> simd_mask_table = {{
     0xFFFFFFFFFFFFFFFF, 0x0000000000000000,  // mask1: all 1s, all 0s
     0xFFFFFFFF00000000, 0xFFFFFFFFFFFFFFFF,  // mask2: upper 32 bits
     0x8080808080808080, 0x8080808080808080,  // mask3: sign bits
-};
+}};
 
 // PSHUFB shift table for byte shuffling
 // These are fixed shuffle patterns, not polynomial-based
-alignas(16) const uint64_t pshufb_shf_table[PSHUFB_SHF_TABLE_SIZE] = {
+alignas(16) const std::array<uint64_t, PSHUFB_SHF_TABLE_SIZE> pshufb_shf_table = {{
     0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
     0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
-};
+}};

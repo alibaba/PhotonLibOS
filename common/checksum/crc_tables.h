@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 
@@ -59,7 +60,7 @@ constexpr size_t PSHUFB_SHF_TABLE_SIZE = 4;
 // External table declarations
 // =============================================================================
 
-extern const uint64_t crc32_merge_table_pclmulqdq[CRC32_MERGE_TABLE_SIZE * 2];
+extern const std::array<uint64_t, CRC32_MERGE_TABLE_SIZE * 2> crc32_merge_table_pclmulqdq;
 
 // Index mapping for merge table: blksz 64,128,256,512 -> array index 0,1,2,3
 constexpr size_t crc32_merge_index[4] = {0, 2, 4, 6};
@@ -72,16 +73,16 @@ const uint64_t* crc32_merge_k() {
                   "blksz must be 64, 128, 256, or 512");
     return &crc32_merge_table_pclmulqdq[crc32_merge_index[__builtin_ctz(blksz) - 6]];
 }
-extern const uint32_t crc32c_lshift_table_hw[CRC32_LSHIFT_TABLE_HW_SIZE];
-extern const uint32_t crc32c_rshift_table_hw[CRC32_SHIFT_TABLE_SIZE];
-extern const uint32_t crc32c_lshift_table_sw[CRC32_SHIFT_TABLE_SIZE];
-extern const uint32_t crc32c_rshift_table_sw[CRC32_SHIFT_TABLE_SIZE];
-extern const uint64_t crc64ecma_lshift_table[CRC64_LSHIFT_TABLE_SIZE];
-extern const uint64_t crc64ecma_rshift_table[CRC64_RSHIFT_TABLE_SIZE];
-extern const uint64_t crc64_rk_table[CRC64_RK_TABLE_SIZE];
-extern const uint64_t crc64_rk512_table[CRC64_RK512_TABLE_SIZE];
-extern const uint64_t simd_mask_table[SIMD_MASK_TABLE_SIZE];
-extern const uint64_t pshufb_shf_table[PSHUFB_SHF_TABLE_SIZE];
+extern const std::array<uint32_t, CRC32_LSHIFT_TABLE_HW_SIZE> crc32c_lshift_table_hw;
+extern const std::array<uint32_t, CRC32_SHIFT_TABLE_SIZE> crc32c_rshift_table_hw;
+extern const std::array<uint32_t, CRC32_SHIFT_TABLE_SIZE> crc32c_lshift_table_sw;
+extern const std::array<uint32_t, CRC32_SHIFT_TABLE_SIZE> crc32c_rshift_table_sw;
+extern const std::array<uint64_t, CRC64_LSHIFT_TABLE_SIZE> crc64ecma_lshift_table;
+extern const std::array<uint64_t, CRC64_RSHIFT_TABLE_SIZE> crc64ecma_rshift_table;
+extern const std::array<uint64_t, CRC64_RK_TABLE_SIZE> crc64_rk_table;
+extern const std::array<uint64_t, CRC64_RK512_TABLE_SIZE> crc64_rk512_table;
+extern const std::array<uint64_t, SIMD_MASK_TABLE_SIZE> simd_mask_table;
+extern const std::array<uint64_t, PSHUFB_SHF_TABLE_SIZE> pshufb_shf_table;
 
 // =============================================================================
 // Table accessor functions
