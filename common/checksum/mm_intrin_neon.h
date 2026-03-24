@@ -183,11 +183,17 @@ int64_t _mm_extract_epi64_impl(__m128i a) {
 //   0x10: a[0] * b[1]
 //   0x11: a[1] * b[1]
 
+#if defined(__clang__)
+#define PHOTON_NEON_AESCRC_TARGET __attribute__((target("aes,crc")))
+#else
+#define PHOTON_NEON_AESCRC_TARGET
+#endif
+
 namespace _sse2neon_detail {
     // Helper to select lane based on imm bit
     template<int imm, int lane_a = (imm & 0x01) ? 1 : 0, int lane_b = (imm & 0x10) ? 1 : 0>
     struct PclmulImpl {
-        static inline __attribute__((always_inline))
+        static inline __attribute__((always_inline)) PHOTON_NEON_AESCRC_TARGET
         __m128i compute(__m128i a, __m128i b) {
             poly64_t av = (poly64_t)vgetq_lane_u64(vreinterpretq_u64_s64(a), lane_a);
             poly64_t bv = (poly64_t)vgetq_lane_u64(vreinterpretq_u64_s64(b), lane_b);
@@ -198,7 +204,7 @@ namespace _sse2neon_detail {
 } // namespace _sse2neon_detail
 
 template<int imm>
-inline __attribute__((always_inline))
+inline __attribute__((always_inline)) PHOTON_NEON_AESCRC_TARGET
 __m128i _mm_clmulepi64_si128_impl(__m128i a, __m128i b) {
     return _sse2neon_detail::PclmulImpl<imm>::compute(a, b);
 }
@@ -208,17 +214,7 @@ __m128i _mm_clmulepi64_si128_impl(__m128i a, __m128i b) {
 // =============================================================================
 // CRC32C hardware instructions
 // =============================================================================
-// Note: GCC provides __crc32c* via arm_acle.h, only Clang needs explicit definitions
-
-#if defined(__clang__)
-inline __attribute__((always_inline))
-uint32_t __crc32cb(uint32_t crc, uint8_t data) { return __builtin_arm_crc32cb(crc, data); }
-inline __attribute__((always_inline))
-uint32_t __crc32ch(uint32_t crc, uint16_t data) { return __builtin_arm_crc32ch(crc, data); }
-inline __attribute__((always_inline))
-uint32_t __crc32cw(uint32_t crc, uint32_t data) { return __builtin_arm_crc32cw(crc, data); }
-inline __attribute__((always_inline))
-uint32_t __crc32cd(uint32_t crc, uint64_t data) { return __builtin_arm_crc32cd(crc, data); }
-#endif // __clang__
+// Both GCC and modern Clang (including Apple Clang 17+) provide __crc32c* via arm_acle.h
+#include <arm_acle.h>
 
 #endif // __aarch64__
