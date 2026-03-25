@@ -57,19 +57,6 @@ constexpr size_t CRC64_RK512_TABLE_SIZE = 26;
 // External table declarations (references to constexpr static arrays)
 // =============================================================================
 
-extern const uint64_t (&crc32_merge_table_pclmulqdq)[CRC32_MERGE_TABLE_SIZE * 2];
-
-// Index mapping for merge table: blksz 64,128,256,512 -> array index 0,1,2,3
-constexpr size_t crc32_merge_index[4] = {0, 2, 4, 6};
-
-// Get merge table entry for given block size (64, 128, 256, 512)
-template<unsigned blksz>
-inline __attribute__((always_inline))
-const uint64_t* crc32_merge_k() {
-    static_assert(blksz == 64 || blksz == 128 || blksz == 256 || blksz == 512,
-                  "blksz must be 64, 128, 256, or 512");
-    return &crc32_merge_table_pclmulqdq[crc32_merge_index[__builtin_ctz(blksz) - 6]];
-}
 extern const uint32_t (&crc32c_lshift_table_hw)[CRC32_LSHIFT_TABLE_HW_SIZE];
 extern const uint32_t (&crc32c_rshift_table_hw)[CRC32_SHIFT_TABLE_SIZE];
 extern const uint32_t (&crc32c_lshift_table_sw)[CRC32_SHIFT_TABLE_SIZE];
