@@ -302,6 +302,8 @@ void crc32c_hw_small(const uint8_t*& data, size_t nbytes, uint32_t& crc) {
 
 template<uint16_t blksz> inline __attribute__((always_inline))
 bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
+    static_assert((blksz & (blksz - 1)) == 0, "blksz must be 2^n");
+    static_assert(blksz >= 32, "blksz must be >= 32");
     if (nbytes < blksz * 3) return false;
     auto ptr = (const uint64_t*)data;
     const size_t blksz_8 = blksz / 8;
@@ -317,10 +319,12 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     crc1 = crc32c(crc1, ptr[blksz_8 * 2 - 1]);
     // crc2 = crc32c(crc2, ptr[blksz_8 * 3 - 1]);
 
-    auto k = crc32_merge_k<blksz>();
+    auto ki = __builtin_ctz(blksz) - 4;
+    auto k1 = _mm_cvtsi64_si128(crc32c_lshift_table_hw[ki]),
+         k0 = _mm_cvtsi64_si128(crc32c_lshift_table_hw[ki + 1]);
     v128 c0 = _mm_cvtsi64_si128(crc), c1 = _mm_cvtsi64_si128(crc1);
-    auto t = _mm_clmulepi64_si128(c0, *(const v128*)k, 0x00) ^
-             _mm_clmulepi64_si128(c1, *(const v128*)k, 0x10);
+    auto  t = _mm_clmulepi64_si128(c0, k0, 0x00) ^
+              _mm_clmulepi64_si128(c1, k1, 0x00);
     crc = crc32c(crc2, ptr[blksz_8 * 3 - 1] ^ (uint64_t&)t);
     data += blksz * 3;
     nbytes -= blksz * 3;

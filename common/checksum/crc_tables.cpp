@@ -113,32 +113,6 @@ constexpr uint64_t crc64_lshift(size_t i) { return pow64((1ULL << (i + 3)) - 1);
 constexpr uint64_t crc64_rshift(size_t i) { return ipow64((1ULL << (i + 3)) + 1); }
 
 // -----------------------------------------------------------------------------
-// CRC32C merge table (33-bit PCLMULQDQ constants)
-// -----------------------------------------------------------------------------
-// XOR bitmap for 256 entries (bit[idx] = 1 means XOR with X_INV is needed)
-constexpr uint64_t CRC32_MERGE_XOR_BITMAP[4] = {
-    0x094d03d41b841e1bULL, 0x016fa58b3219a890ULL,
-    0x6940792842010b65ULL, 0x736ec0a8619b5349ULL,
-};
-
-constexpr bool crc32_merge_need_xor(size_t idx) {
-    return (CRC32_MERGE_XOR_BITMAP[idx / 64] >> (idx % 64)) & 1;
-}
-
-constexpr uint64_t crc32_merge_entry(size_t idx) {
-    size_t blksz = (idx / 2 + 1) * 8;
-    size_t multiplier = (idx % 2 == 0) ? 2 : 1;
-    uint64_t bits = multiplier * blksz * 8;
-    uint32_t v = pow32(bits - 33);
-    bool need_xor = crc32_merge_need_xor(idx);
-    uint32_t low32 = need_xor ? (v ^ CRC32C_X_INV) : v;
-    return ((uint64_t)need_xor << 32) | low32;
-}
-
-constexpr uint64_t crc32_merge_k0(size_t blksz) { return crc32_merge_entry((blksz / 8 - 1) * 2); }
-constexpr uint64_t crc32_merge_k1(size_t blksz) { return crc32_merge_entry((blksz / 8 - 1) * 2 + 1); }
-
-// -----------------------------------------------------------------------------
 // Compile-time array generator using std::index_sequence
 // Produces native arrays with constexpr static storage
 // -----------------------------------------------------------------------------
@@ -158,34 +132,7 @@ constexpr T CompileTimeTableImpl<T, N, Gen, std::index_sequence<Is...>>::value[N
 template<typename T, size_t N, T (*Gen)(size_t)>
 using CompileTimeTable = CompileTimeTableImpl<T, N, Gen, std::make_index_sequence<N>>;
 
-// Merge table: linear index 0..7 maps to blksz 64,128,256,512, each with k0,k1
-constexpr uint64_t crc32_merge_linear(size_t idx) {
-    // idx 0,1 -> blksz 64; idx 2,3 -> blksz 128; idx 4,5 -> blksz 256; idx 6,7 -> blksz 512
-    size_t blksz_idx = idx / 2;
-    size_t blksz = 64ULL << blksz_idx;
-    return (idx % 2 == 0) ? crc32_merge_k0(blksz) : crc32_merge_k1(blksz);
-}
-
 } // anonymous namespace
-
-// =============================================================================
-// CRC32C merge table for 3-way ILP (Instruction-Level Parallelism)
-// =============================================================================
-//
-// Only for block sizes actually used: 64, 128, 256, 512 bytes
-// Each pair contains folding constants for PCLMULQDQ:
-//   k[0] = crc32_merge_k0(B) - fold crc by 2*B*8 bits
-//   k[1] = crc32_merge_k1(B) - fold crc1 by B*8 bits
-//
-// These are 33-bit PCLMULQDQ constants computed at compile time.
-// The formula uses a bitmap to determine when to XOR with x^(-1):
-//   1. v = x^(bits - 33) mod POLY32
-//   2. If bitmap bit is set: low32 = v ^ X_INV, bit33 = 1
-//   3. Otherwise: low32 = v, bit33 = 0
-//   4. result = (bit33 << 32) | low32
-
-const uint64_t (&crc32_merge_table_pclmulqdq)[CRC32_MERGE_TABLE_SIZE * 2] =
-    CompileTimeTable<uint64_t, CRC32_MERGE_TABLE_SIZE * 2, crc32_merge_linear>::value;
 
 // =============================================================================
 // CRC32C shift tables (hardware version)
