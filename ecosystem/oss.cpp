@@ -277,8 +277,10 @@ __retry:
       }
     }
     if (op.status_code == -1) {
-        LOG_ERROR("operation on [`] failed!, http connection error", object);
+        LOG_ERROR("operation on [`] failed!, http connection error `", 
+                  object, ERRNO(__saved_errno));
         errno = __saved_errno;
+        if (errno != ETIMEDOUT) errno = EIO;
         return ret;
     }
     if (op.status_code / 100 == 4) {
