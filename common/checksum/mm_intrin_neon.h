@@ -152,6 +152,13 @@ __m128i _mm_setr_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3) {
     return vreinterpretq_s64_s32(vld1q_s32(arr));
 }
 
+inline __attribute__((always_inline))
+__m128i _mm_set_epi64x(uint64_t a0, uint64_t a1) {
+    uint64_t arr[2] = {a0, a1};
+    return vreinterpretq_s64_u64(vld1q_u64(arr));
+}
+
+
 // Set all elements to zero
 inline __attribute__((always_inline))
 __m128i _mm_setzero_si128(void) {

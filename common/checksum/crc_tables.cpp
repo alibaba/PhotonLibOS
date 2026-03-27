@@ -180,77 +180,22 @@ const uint64_t (&crc64ecma_rshift_table)[CRC64_RSHIFT_TABLE_SIZE] =
 // =============================================================================
 // CRC64ECMA constants (rk) for PCLMULQDQ computation
 // =============================================================================
-//
-// rk1, rk5: x^127 mod POLY (128-bit to 64-bit folding)
-// rk2: x^191 mod POLY
-// rk3: x^1023 mod POLY (512-bit folding)
-// rk4: x^1087 mod POLY
-// rk6: 0 (unused padding)
-// rk7: Barrett reduction constant mu = 0x9c3e466c172963d5
-// rk8: Barrett constant = 0x92d8af2baf0e1e84
-// rk9~rk20: folding constants for SSE reduction
-//   For i = 0..5, k = 7-i: rk[2*i+9] = x^(128*k-1), rk[2*i+10] = x^(128*k+63)
-
 struct Crc64RkTableHolder {
-    alignas(16) static constexpr uint64_t value[CRC64_RK_TABLE_SIZE] = {
-        pow64(127),                // rk1:  x^127
-        pow64(191),                // rk2:  x^191
-        pow64(1023),               // rk3:  x^1023
-        pow64(1087),               // rk4:  x^1087
-        pow64(127),                // rk5:  x^127 (same as rk1)
-        0,                         // rk6:  unused padding
-        0x9c3e466c172963d5ULL,     // rk7:  Barrett mu constant
-        0x92d8af2baf0e1e84ULL,     // rk8:  Barrett constant
-        pow64(895),                // rk9:  x^(128*7-1) for folding xmm[0]
-        pow64(959),                // rk10: x^(128*7+63)
-        pow64(767),                // rk11: x^(128*6-1) for folding xmm[1]
-        pow64(831),                // rk12: x^(128*6+63)
-        pow64(639),                // rk13: x^(128*5-1) for folding xmm[2]
-        pow64(703),                // rk14: x^(128*5+63)
-        pow64(511),                // rk15: x^(128*4-1) for folding xmm[3]
-        pow64(575),                // rk16: x^(128*4+63)
-        pow64(383),                // rk17: x^(128*3-1) for folding xmm[4]
-        pow64(447),                // rk18: x^(128*3+63)
-        pow64(255),                // rk19: x^(128*2-1) for folding xmm[5]
-        pow64(319),                // rk20: x^(128*2+63)
+    alignas(64) static constexpr uint64_t value[CRC64_RK_TABLE_SIZE] = {
+        // rk9~16, respectively for shifting 16*7, 16*6, 16*5, 16*4 bytes
+        pow64(895), pow64(959), pow64(767), pow64(831),
+        pow64(639), pow64(703), pow64(511), pow64(575),
+
+        // rk17~24, respectively for shifting 16*3, 16*2, 16*1, 0 bytes
+        pow64(383), pow64(447), pow64(255), pow64(319),
+        pow64(127), pow64(191), CRC64ECMA_X_INV, pow64(63),
+
+        // rk_1_2, rk3~4, respectively for shifting 16*16, 16*8 bytes
+        pow64(2047), pow64(2111), pow64(1023), pow64(1087),
+
+        // rk7: Barrett constants
+        0x9c3e466c172963d5ULL, 0x92d8af2baf0e1e84ULL,
     };
 };
-alignas(16) constexpr uint64_t Crc64RkTableHolder::value[CRC64_RK_TABLE_SIZE];
+alignas(64) constexpr uint64_t Crc64RkTableHolder::value[CRC64_RK_TABLE_SIZE];
 const uint64_t (&crc64_rk_table)[CRC64_RK_TABLE_SIZE] = Crc64RkTableHolder::value;
-
-// =============================================================================
-// CRC64ECMA AVX-512 constants
-// =============================================================================
-
-struct Crc64Rk512TableHolder {
-    alignas(16) static constexpr uint64_t value[CRC64_RK512_TABLE_SIZE] = {
-        pow64(2047),               // rk_1: x^2047 for 256-byte folding
-        pow64(2111),               // rk_2: x^2111
-        pow64(127),                // rk1
-        pow64(191),                // rk2
-        pow64(1023),               // rk3
-        pow64(1087),               // rk4
-        pow64(127),                // rk5
-        0,                         // rk6
-        0x9c3e466c172963d5ULL,     // rk7
-        0x92d8af2baf0e1e84ULL,     // rk8
-        pow64(895),                // rk9
-        pow64(959),                // rk10
-        pow64(767),                // rk11
-        pow64(831),                // rk12
-        pow64(639),                // rk13
-        pow64(703),                // rk14
-        pow64(511),                // rk15
-        pow64(575),                // rk16
-        pow64(383),                // rk17
-        pow64(447),                // rk18
-        pow64(255),                // rk19
-        pow64(319),                // rk20
-        pow64(127),                // rk_1b (copy for alignment)
-        pow64(191),                // rk_2b
-        0,                         // padding
-        0,                         // padding
-    };
-};
-alignas(16) constexpr uint64_t Crc64Rk512TableHolder::value[CRC64_RK512_TABLE_SIZE];
-const uint64_t (&crc64_rk512_table)[CRC64_RK512_TABLE_SIZE] = Crc64Rk512TableHolder::value;

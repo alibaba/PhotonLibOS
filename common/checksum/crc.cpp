@@ -241,9 +241,9 @@ using v128 = __m128i;
 
 // Combined PCLMULQDQ operation: clmul<0x10> ^ clmul<0x01>
 inline __attribute__((always_inline))
-v128 clmul_op(v128 x, const uint64_t* rk) {
-    return _mm_clmulepi64_si128(x, *(const v128*)rk, 0x10) ^
-           _mm_clmulepi64_si128(x, *(const v128*)rk, 0x01);
+v128 fold(v128 x, v128 rk) {
+    return _mm_clmulepi64_si128(x, rk, 0x10) ^
+           _mm_clmulepi64_si128(x, rk, 0x01) ;
 }
 
 // Load small buffer (< 16 bytes)
@@ -320,11 +320,11 @@ bool crc32c_3way_ILP(const uint8_t*& data, size_t& nbytes, uint32_t& crc) {
     // crc2 = crc32c(crc2, ptr[blksz_8 * 3 - 1]);
 
     auto ki = __builtin_ctz(blksz) - 4;
-    auto k1 = _mm_cvtsi64_si128(crc32c_lshift_table_hw[ki]),
-         k0 = _mm_cvtsi64_si128(crc32c_lshift_table_hw[ki + 1]);
-    v128 c0 = _mm_cvtsi64_si128(crc), c1 = _mm_cvtsi64_si128(crc1);
-    auto  t = _mm_clmulepi64_si128(c0, k0, 0x00) ^
-              _mm_clmulepi64_si128(c1, k1, 0x00);
+    auto a = _mm_set_epi64x(crc, crc1);
+    auto b = _mm_set_epi64x(crc32c_lshift_table_hw[ki+1],
+                            crc32c_lshift_table_hw[ki]);
+    auto t = _mm_clmulepi64_si128(a, b, 0x00) ^
+             _mm_clmulepi64_si128(a, b, 0x11);
     crc = crc32c(crc2, ptr[blksz_8 * 3 - 1] ^ (uint64_t&)t);
     data += blksz * 3;
     nbytes -= blksz * 3;
@@ -379,10 +379,13 @@ T crc_apply_shifts(T crc, uint32_t len, const T* table,
     return crc;
 }
 
+inline v128 clmul64_128(uint64_t a, uint64_t b) {
+    return _mm_clmulepi64_si128(_mm_cvtsi64_si128(a),
+                                _mm_cvtsi64_si128(b), 0x00);
+}
+
 static uint32_t clmul_modp_crc32c_hw(uint32_t crc1, uint32_t x) {
-    v128 crc1x = _mm_setr_epi32(crc1, 0, 0, 0);
-    v128 cnstx = _mm_setr_epi32(x, 0, 0, 0);
-    v128 result = _mm_clmulepi64_si128(crc1x, cnstx, 0x00);
+    v128 result = clmul64_128(crc1, x);
     uint64_t dat64 = _mm_cvtsi128_si64(result);
     return crc32c((uint32_t)0, dat64);
 }
@@ -516,7 +519,7 @@ alignas(16) constexpr uint64_t simd_mask_table[] = {
 };
 
 // PSHUFB shift table for byte shuffling
-alignas(16) constexpr uint64_t pshufb_shf_table[] = {
+constexpr uint64_t pshufb_shf_table[] = {
     0x8786858483828100, 0x8f8e8d8c8b8a8988,  // shift left pattern
     0x0706050403020100, 0x000e0d0c0b0a0908,  // identity + right shift
 };
@@ -524,39 +527,53 @@ alignas(16) constexpr uint64_t pshufb_shf_table[] = {
 } // anonymous namespace
 
 // SIMD mask accessor
-inline __attribute__((always_inline))
-v128 simd_mask(int i) {
+inline v128 simd_mask(int i) {
     auto p = &simd_mask_table[(i - 1) * 2];
-    return *(const v128*)p;
+    return _mm_load_si128((const v128*)p);
 }
 
-inline const v128* get_shf_table(size_t i) {
-    return (const v128*)((const char*)pshufb_shf_table + i);
+inline v128 get_shift_constant(size_t i) {
+    auto ptr = (const char*)pshufb_shf_table + i;
+    return _mm_loadu_si128((const v128*)ptr);
 }
+
+#define LOAD_RK64_512(x) _mm512_load_si512((const v512*)&crc64_rk_table[x])
+#define LOAD_RK64(x) _mm_load_si128((const v128*)&crc64_rk_table[x])
+#define CRC64_RK1       LOAD_RK64(12)     // shift 16 bytes
+#define CRC64_RK3       LOAD_RK64(18)     // shift 128 bytes
+#define CRC64_RK_1_2    LOAD_RK64(16)     // shift 256 bytes
+#define CRC64_RK7       LOAD_RK64(20)     // barrett constants
 
 inline __attribute__((always_inline))
 v128 crc64ecma_hw_big_sse(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
-    v128 xmm[8];
+    v128 xmm[8], rk3 = CRC64_RK3;
     auto& ptr = (const v128*&)data;
     static_loop<0, 7, 1>([&](size_t i){ xmm[i] = _mm_loadu_si128(ptr+i); });
-    xmm[0] = xmm[0] ^ _mm_cvtsi64_si128(~crc); ptr += 8; nbytes -= 128;
+    xmm[0] ^= _mm_cvtsi64_si128(crc); ptr += 8; nbytes -= 128;
     do {
         static_loop<0, 7, 1>([&](size_t i) {
-            xmm[i] = clmul_op(xmm[i], crc64_rk(3)) ^ _mm_loadu_si128(ptr+i);
+            xmm[i] = fold(xmm[i], rk3) ^ _mm_loadu_si128(ptr+i);
         });
         ptr += 8; nbytes -= 128;
     } while (nbytes >= 128);
     static_loop<0, 6, 1>([&](size_t i) {
-        auto I = (i == 6) ? 1 : (9 + i * 2);
-        xmm[7] = xmm[7] ^ clmul_op(xmm[i], crc64_rk(I));
+        xmm[7] ^= fold(xmm[i], LOAD_RK64(i*2));
     });
     return xmm[7];
+}
+
+inline uint64_t barrett_reduce_64(v128 x) {
+    v128 c = CRC64_RK7;
+    v128 y = _mm_clmulepi64_si128(x, c, 0x00);
+    v128 z = _mm_clmulepi64_si128(y, c, 0x10);
+    return (x ^ _mm_bslli_si128(y, 8) ^ z)[1];
 }
 
 template<typename F> inline __attribute__((always_inline))
 uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc, F hw_big) {
     if (unlikely(!nbytes || !data)) return crc;
-    v128 xmm7 = _mm_cvtsi64_si128(~crc);
+    v128 rk1 = CRC64_RK1;
+    v128 xmm7 = _mm_cvtsi64_si128(crc);
     auto& ptr = (const v128*&)data;
     if (nbytes >= 256) {
         xmm7 = hw_big(data, nbytes, crc);
@@ -566,62 +583,45 @@ uint64_t crc64ecma_hw_portable(const uint8_t *data, size_t nbytes, uint64_t crc,
     } else /* 0 < nbytes < 16*/ {
         xmm7 = xmm7 ^ load_small(data, nbytes);
         if (nbytes >= 8) {
-            auto shf = _mm_loadu_si128(get_shf_table(nbytes));
+            auto shf = get_shift_constant(nbytes);
             xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _128_done;
         } else {
-            auto shf = _mm_loadu_si128(get_shf_table(nbytes + 8));
+            auto shf = get_shift_constant(nbytes + 8);
             xmm7 = _mm_shuffle_epi8(xmm7, shf);
             goto _barrett;
         }
     }
 
     while (nbytes >= 16) {
-        xmm7 = clmul_op(xmm7, crc64_rk(1)) ^ _mm_loadu_si128(ptr++);
+        xmm7 = fold(xmm7, rk1) ^ _mm_loadu_si128(ptr++);
         nbytes -= 16;
     }
 
     if (nbytes) {
         auto p = data + nbytes - 16;
         auto remainder = _mm_loadu_si128((const v128*)p);
-        auto xmm0 = _mm_loadu_si128(get_shf_table(nbytes));
+        auto xmm0 = get_shift_constant(nbytes);
         auto xmm2 = xmm7;
         xmm7 = _mm_shuffle_epi8(xmm7, xmm0);
-        xmm0 = xmm0 ^ simd_mask(3);
+        xmm0 ^= simd_mask(3);
         xmm2 = _mm_shuffle_epi8(xmm2, xmm0);
         xmm2 = _mm_blendv_epi8(xmm2, remainder, xmm0);
-        xmm7 = xmm2 ^ clmul_op(xmm7, crc64_rk(1));
+        xmm7 = xmm2 ^ fold(xmm7, rk1);
     }
 _128_done:
-    xmm7 = _mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(5), 0x00) ^ _mm_bsrli_si128(xmm7, 8);
+    xmm7 = _mm_clmulepi64_si128(xmm7, rk1, 0x00) ^
+           _mm_bsrli_si128(xmm7, 8);
 _barrett:
-    auto t = _mm_clmulepi64_si128(xmm7, *(const v128*)crc64_rk(7), 0x00);
-    xmm7 = xmm7 ^ _mm_clmulepi64_si128(t, *(const v128*)crc64_rk(7), 0x10) ^ _mm_bslli_si128(t, 8);
-    auto p = (uint64_t*)&xmm7;
-    crc = ~p[1];
-    return crc;
+    return barrett_reduce_64(xmm7);
 }
 
 uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
-    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_sse);
+    return ~crc64ecma_hw_portable(buf, len, ~crc, crc64ecma_hw_big_sse);
 }
 
-// crc64ecma_lshift_table is now in crc_tables.cpp
-
 static uint64_t clmul_modp_crc64ecma_hw(uint64_t crc, uint64_t x) {
-    v128 rk7 = _mm_load_si128((const v128*)crc64_rk(7));
-
-    v128 crc1x = _mm_cvtsi64_si128(crc);
-    v128 constx = _mm_cvtsi64_si128(x);
-    crc1x = _mm_clmulepi64_si128(crc1x, constx, 0x00);
-
-    // Barrett Reduction
-    v128 crc2x = _mm_clmulepi64_si128(crc1x, rk7, 0x00);
-    v128 crc3x = _mm_clmulepi64_si128(crc2x, rk7, 0x10);
-    crc2x = _mm_bslli_si128(crc2x, 8);
-    crc1x = crc1x ^ crc2x;
-    crc1x = crc1x ^ crc3x;
-    return ((uint64_t*)&crc1x)[1];
+    return barrett_reduce_64(clmul64_128(crc, x));
 }
 
 uint64_t crc64ecma_combine_hw(uint64_t crc1, uint64_t crc2, uint32_t len2) {
@@ -681,53 +681,57 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 
 using v512 = __m512i_u;
 inline __attribute__((always_inline))
-v512 OP(v512 a, v512 b, v512 c) {
-    auto x = _mm512_clmulepi64_epi128((a), (b), 0x01);
-    auto y = _mm512_clmulepi64_epi128((a), (b), 0x10);
-    return   _mm512_ternarylogic_epi64(x, y, (c), 0x96);
+v512 fold512(v512 a, v512 b) {
+    auto x = _mm512_clmulepi64_epi128(a, b, 0x01);
+    auto y = _mm512_clmulepi64_epi128(a, b, 0x10);
+    return x ^ y;
 };
 
 inline __attribute__((always_inline))
-v512 OP(v512 a, v512 b, const v512* c) {
-    return OP(a, b, _mm512_loadu_si512(c));
+v512 fold512(v512 a, v512 b, v512 c) {
+    auto x = _mm512_clmulepi64_epi128(a, b, 0x01);
+    auto y = _mm512_clmulepi64_epi128(a, b, 0x10);
+    return   _mm512_ternarylogic_epi64(x, y, c, 0x96);
+};
+
+inline __attribute__((always_inline))
+v512 fold512(v512 a, v512 b, const v512* c) {
+    return fold512(a, b, _mm512_loadu_si512(c));
 }
 
 inline __attribute__((always_inline))
 __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
     assert(nbytes >= 256);
     __attribute__((aligned(16)))
-    v512 crc0 = {(long)~crc};
+    v512 crc0 = {(long)crc};
     auto& ptr = (const v512*&)data;
     auto zmm0 = _mm512_loadu_si512(ptr++); zmm0 ^= crc0;
     auto zmm4 = _mm512_loadu_si512(ptr++);
+    auto rk3 = _mm512_broadcast_i32x4(CRC64_RK3);
     nbytes -= 128;
     if (nbytes < 384) {
-        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)crc64_rk512(3));
         do { // fold 128 bytes each iteration
-            zmm0 = OP(zmm0, rk3, ptr++);
-            zmm4 = OP(zmm4, rk3, ptr++);
+            zmm0 = fold512(zmm0, rk3, ptr++);
+            zmm4 = fold512(zmm4, rk3, ptr++);
             nbytes -= 128;
         } while (nbytes >= 128);
     } else { // nbytes >= 384
-        auto rk_1_2 = _mm512_broadcast_i32x4(*(__m128i*)&crc64_rk512_table[0]);
+        auto rk_1_2 = _mm512_broadcast_i32x4(CRC64_RK_1_2);
         auto zmm7   = _mm512_loadu_si512(ptr++);
         auto zmm8   = _mm512_loadu_si512(ptr++);
         nbytes -= 128;
         do { // fold 256 bytes each iteration
-            zmm0 = OP(zmm0, rk_1_2, ptr++);
-            zmm4 = OP(zmm4, rk_1_2, ptr++);
-            zmm7 = OP(zmm7, rk_1_2, ptr++);
-            zmm8 = OP(zmm8, rk_1_2, ptr++);
+            zmm0 = fold512(zmm0, rk_1_2, ptr++);
+            zmm4 = fold512(zmm4, rk_1_2, ptr++);
+            zmm7 = fold512(zmm7, rk_1_2, ptr++);
+            zmm8 = fold512(zmm8, rk_1_2, ptr++);
             nbytes -= 256;
         } while (nbytes >= 256);
-        auto rk3 = _mm512_broadcast_i32x4(*(__m128i*)crc64_rk512(3));
-        zmm0 = OP(zmm0, rk3, zmm7);
-        zmm4 = OP(zmm4, rk3, zmm8);
+        zmm0 = fold512(zmm0, rk3, zmm7);
+        zmm4 = fold512(zmm4, rk3, zmm8);
     }
-    auto t = _mm512_extracti64x2_epi64(zmm4, 0x03);
-    auto zmm7 = v512{t[0], t[1]};
-    auto zmm1 = OP(zmm0, *(v512*)crc64_rk512(9), zmm7);
-         zmm1 = OP(zmm4, *(v512*)crc64_rk512(17), zmm1);
+    auto zmm1 = fold512(zmm0, LOAD_RK64_512(0),
+                fold512(zmm4, LOAD_RK64_512(8)));
     auto zmm8 = _mm512_shuffle_i64x2(zmm1, zmm1, 0x4e);
     auto ymm8 = ((__m256i&)zmm8) ^ ((__m256i&)zmm1);
     return _mm256_extracti64x2_epi64(ymm8, 0) ^
@@ -735,7 +739,7 @@ __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t c
 }
 
 uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
-    return crc64ecma_hw_portable(buf, len, crc, crc64ecma_hw_big_avx512);
+    return ~crc64ecma_hw_portable(buf, len, ~crc, crc64ecma_hw_big_avx512);
 }
 #ifdef __clang__
 #pragma clang attribute pop
