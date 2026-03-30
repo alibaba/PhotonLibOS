@@ -50,8 +50,7 @@ constexpr size_t CRC32_LSHIFT_TABLE_HW_SIZE = 28;
 constexpr size_t CRC32_SHIFT_TABLE_SIZE = 32;
 constexpr size_t CRC64_LSHIFT_TABLE_SIZE = 33;
 constexpr size_t CRC64_RSHIFT_TABLE_SIZE = 32;
-constexpr size_t CRC64_RK_TABLE_SIZE = 20;
-constexpr size_t CRC64_RK512_TABLE_SIZE = 26;
+constexpr size_t CRC64_RK_TABLE_SIZE = 22;
 
 // =============================================================================
 // External table declarations (references to constexpr static arrays)
@@ -64,20 +63,4 @@ extern const uint32_t (&crc32c_rshift_table_sw)[CRC32_SHIFT_TABLE_SIZE];
 extern const uint64_t (&crc64ecma_lshift_table)[CRC64_LSHIFT_TABLE_SIZE];
 extern const uint64_t (&crc64ecma_rshift_table)[CRC64_RSHIFT_TABLE_SIZE];
 extern const uint64_t (&crc64_rk_table)[CRC64_RK_TABLE_SIZE];
-extern const uint64_t (&crc64_rk512_table)[CRC64_RK512_TABLE_SIZE];
 
-// =============================================================================
-// Table accessor functions
-// =============================================================================
-
-// CRC64 RK table accessor (1-indexed)
-inline __attribute__((always_inline))
-const uint64_t* crc64_rk(int i) {
-    return &crc64_rk_table[i - 1];
-}
-
-// CRC64 RK512 table accessor
-inline __attribute__((always_inline))
-const uint64_t* crc64_rk512(int i) {
-    return &crc64_rk512_table[i + 1];
-}
