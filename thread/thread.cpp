@@ -1382,7 +1382,6 @@ insert_list:
         return r.from->set_error_number();
     }
 
-    typedef void (*defer_func)(void*);
     static int thread_usleep_defer(Timeout timeout,
         thread_list* waitq, defer_func defer, void* defer_arg)
     {
@@ -2260,7 +2259,7 @@ extern "C" const struct {
     // Increment when adding/removing/modifying/reordering offset fields
     uint32_t version = 1;
     uint32_t _reserved = 0;  // Padding for alignment
-    
+
     // Thread structure
     size_t thread_size = sizeof(photon::thread);
     size_t thread_offset_prev = 0;
@@ -2276,7 +2275,7 @@ extern "C" const struct {
     size_t thread_offset_tls = offsetof(photon::thread, tls);
     size_t thread_offset_buf = offsetof(photon::thread, buf);
     size_t thread_offset_stack_size = offsetof(photon::thread, stack_size);
-    
+
     // vCPU structure
     size_t vcpu_size = sizeof(photon::vcpu_t);
     size_t vcpu_offset_sleepq = offsetof(photon::vcpu_t, sleepq);

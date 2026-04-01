@@ -70,6 +70,12 @@ namespace photon
     thread* thread_create(thread_entry start, void* arg,
         uint64_t stack_size = DEFAULT_STACK_SIZE,
         uint32_t reserved_space = 0, uint64_t flags = 0);
+    inline thread* thread_create(Delegate<void*> start,
+        uint64_t stack_size = DEFAULT_STACK_SIZE,
+        uint32_t reserved_space = 0, uint64_t flags = 0) {
+            return thread_create(start._func, start._obj,
+                    stack_size, reserved_space, flags);
+    }
 
     // get the address of reserved space, which is right below the thread struct.
     template<typename T = void> inline
@@ -109,6 +115,9 @@ namespace photon
     // after this photon thread fall in sleep. The defer function should NEVER fall into sleep!
     typedef void (*defer_func)(void*);
     int thread_usleep_defer(Timeout timeout, defer_func defer, void* defer_arg=nullptr);
+    inline int thread_usleep_defer(Timeout timeout, Delegate<void> defer) {
+        return thread_usleep_defer(timeout, defer._func, defer._obj);
+    }
 
     inline int thread_sleep(uint64_t seconds)
     {
@@ -281,6 +290,9 @@ namespace photon
     protected:
         int wait(Timeout timeout = {});
         int wait_defer(Timeout Timeout, void(*defer)(void*), void* arg);
+        int wait_defer(Timeout timeout, Delegate<void> defer) {
+            return wait_defer(timeout, defer._func, defer._obj);
+        }
         void resume(thread* th, int error_number = -1);  // `th` must be waiting in this waitq!
         int resume_all(int error_number = -1);
         thread* resume_one(int error_number = -1);
@@ -306,6 +318,7 @@ namespace photon
             : retries(max_retries), _contending(contending) { }
         int lock(Timeout timeout = {});
         int try_lock();
+        bool locked() { return owner; }
         void unlock();
         ~mutex()
         {
@@ -334,6 +347,14 @@ namespace photon
     protected:
         int32_t recursive_count = 0;
     };
+
+    template<typename LOCK>
+    inline int thread_usleep_unlocked(Timeout timeout, LOCK& lock) {
+        assert(lock.locked());
+        int r = thread_usleep_defer(timeout, {&lock, &LOCK::unlock});
+        lock.lock();
+        return r;
+    }
 
     template <typename M>
     class locker
