@@ -32,6 +32,7 @@ limitations under the License.
 #include <thread>
 #include <chrono>
 #include <sys/uio.h>
+#include <sys/time.h>
 using namespace std;
 
 class BaseLogOutput : public ILogOutput {
@@ -207,14 +208,20 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
 }
 
 __attribute__((constructor)) static void __initial_timezone() { tzset(); }
-static time_t dayid = 0, minuteid = 0, tsdelta = 0;
+static uint64_t tsdelta = 0;
+static time_t dayid = -1, minuteid = -1;
 static struct tm alog_time = {0};
-static struct tm* alog_update_time(time_t now0) {
-    auto now = now0 + tsdelta;
+static struct tm* alog_update_time(photon::NowTime* ts) {
+    uint64_t now0 = ts->now + tsdelta;
+    time_t now = ts->sec = now0 / 1000000ul;
+    ts->usec = now0 % 1000000ul;
     int sec = now % 60;    now /= 60;
     if (unlikely(now != minuteid)) {    // calibrate wall time every minute
-        now = time(0) - timezone;
-        tsdelta = now - now0;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        now = ts->sec = tv.tv_sec - timezone;
+        ts->usec = tv.tv_usec;
+        tsdelta = ts->sec * 1000000ul + ts->usec - ts->now;
         sec = now % 60; now /= 60;
         minuteid = now;
     }
@@ -222,7 +229,7 @@ static struct tm* alog_update_time(time_t now0) {
     int hor = now % 24;    now /= 24;
     if (now != dayid) {
         dayid = now;
-        auto now_ = now0 + tsdelta;
+        time_t now_ = ts->sec;
         gmtime_r(&now_, &alog_time);
         alog_time.tm_year+=1900;
         alog_time.tm_mon++;
@@ -497,7 +504,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     auto t = &alog_time;
 #else
     auto ts = photon::__update_now();
-    auto t = alog_update_time(ts.sec());
+    auto t = alog_update_time(&ts);
 #endif
 #define DEC_W2P0(x) DEC(x).width(2).padding('0')
     log.printf(t->tm_year, '/');
@@ -506,7 +513,7 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
     log.printf(DEC_W2P0(t->tm_hour), ':');
     log.printf(DEC_W2P0(t->tm_min),  ':');
     log.printf(DEC_W2P0(t->tm_sec), '.');
-    log.printf(DEC(ts.usec()).width(6).padding('0'));
+    log.printf(DEC(ts.usec).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
     log.level = pro.level;
