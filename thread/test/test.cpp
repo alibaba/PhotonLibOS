@@ -1351,7 +1351,7 @@ TEST(photon, migrate) {
         LOG_TEMP("WORKER DONE ", CURRENT);
     });
     sem.wait(1);
-    auto task = photon::thread_create(somework, photon::get_vcpu());
+    auto task = photon::thread_create({somework, photon::get_vcpu()});
     photon::thread_enable_join(task);
     LOG_TEMP("task READY ", task);
     auto ret = photon::thread_migrate(task, vcpu);

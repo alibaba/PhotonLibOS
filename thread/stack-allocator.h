@@ -15,7 +15,7 @@ limitations under the License.
 */
 #pragma once
 
-#include <photon/thread/thread.h>
+#include <photon/common/callback.h>
 #include <stddef.h>
 
 namespace photon {
