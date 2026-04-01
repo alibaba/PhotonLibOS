@@ -174,7 +174,7 @@ static int remove_inode(ext2_filsys fs, ext2_ino_t ino) {
 #ifndef NO_TIMESTAMP
         inode.i_dtime = time(0);
 #else
-        inode.i_dtime = 0;
+        inode.i_dtime = 1;
 #endif
     }
 
