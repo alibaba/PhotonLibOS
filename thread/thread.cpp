@@ -1177,7 +1177,7 @@ R"(
         uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + usec;
         assert(tv.tv_sec <= UINT32_MAX && usec < 1000000);
         now = nnow;
-        return {nnow, ((uint64_t)tv.tv_sec << 32) | (uint32_t)usec};
+        return {nnow, (uint32_t)tv.tv_sec, (uint32_t)usec};
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
