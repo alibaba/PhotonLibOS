@@ -207,40 +207,6 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
     }
 }
 
-__attribute__((constructor)) static void __initial_timezone() { tzset(); }
-static uint64_t tsdelta = 0;
-static time_t dayid = -1, minuteid = -1;
-static struct tm alog_time = {0};
-static struct tm* alog_update_time(photon::NowTime* ts) {
-    uint64_t now0 = ts->now + tsdelta;
-    time_t now = ts->sec = now0 / 1000000ul;
-    ts->usec = now0 % 1000000ul;
-    int sec = now % 60;    now /= 60;
-    if (unlikely(now != minuteid)) {    // calibrate wall time every minute
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        now = ts->sec = tv.tv_sec - timezone;
-        ts->usec = tv.tv_usec;
-        tsdelta = ts->sec * 1000000ul + ts->usec - ts->now;
-        sec = now % 60; now /= 60;
-        minuteid = now;
-    }
-    int min = now % 60;    now /= 60;
-    int hor = now % 24;    now /= 24;
-    if (now != dayid) {
-        dayid = now;
-        time_t now_ = ts->sec;
-        gmtime_r(&now_, &alog_time);
-        alog_time.tm_year+=1900;
-        alog_time.tm_mon++;
-    } else {
-        alog_time.tm_sec = sec;
-        alog_time.tm_min = min;
-        alog_time.tm_hour = hor;
-    }
-    return &alog_time;
-}
-
 class LogOutputFile final : public BaseLogOutput {
 public:
     uint64_t log_file_size_limit = 0;
@@ -491,22 +457,63 @@ int log_output_file_close() {
     return 0;
 }
 
+// for using variable `timezone` later
+__attribute__((constructor))
+static void __init_timezone() { tzset(); }
+
+struct TM : tm {
+    uint64_t tsdelta = 0;
+    uint32_t dayid = -1, minuteid = -1, tm_usec;
+    TM() : tm{0} { }
+    template<typename T>
+    T cut(T& x, uint64_t mod) {
+        T r = x % mod;
+        x /= mod;
+        return r;
+    }
+    void update(uint64_t now0) {
+        auto now = now0 + tsdelta;
+        tm_usec = cut(now, 1000000ul);
+        time_t ts = now;
+        tm_sec = cut(now, 60);
+        if (unlikely(now != minuteid)) {    // calibrate wall time every minute
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            tv.tv_sec -= timezone;
+            now = tv.tv_sec * 1000000ul + tv.tv_usec;
+            tsdelta = now - now0;
+            tm_usec = tv.tv_usec;
+            now = ts = tv.tv_sec;
+            tm_sec = cut(now, 60);
+            minuteid = now;
+        }
+        tm_min = cut(now, 60);
+        tm_hour = cut(now, 24);
+        if (unlikely(now != dayid)) {
+            dayid = now;
+            gmtime_r(&ts, this);
+            tm_year+=1900;
+            tm_mon++;
+        }
+    }
+};
+
+static thread_local TM alog_time;
+
 LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
 {
-#ifdef LOG_BENCHMARK
-    auto t = &alog_time;
-#else
-    auto ts = photon::__update_now();
-    auto t = alog_update_time(&ts);
+#ifndef LOG_BENCHMARK
+    alog_time.update(photon::__update_now());
 #endif
-#define DEC_W2P0(x) DEC(x).width(2).padding('0')
+    const auto t = &alog_time;
+    #define DEC_W2P0(x) DEC(x).width(2).padding('0')
     log.printf(t->tm_year, '/');
     log.printf(DEC_W2P0(t->tm_mon),  '/');
     log.printf(DEC_W2P0(t->tm_mday), ' ');
     log.printf(DEC_W2P0(t->tm_hour), ':');
     log.printf(DEC_W2P0(t->tm_min),  ':');
     log.printf(DEC_W2P0(t->tm_sec), '.');
-    log.printf(DEC(ts.usec).width(6).padding('0'));
+    log.printf(DEC(t->tm_usec).width(6).padding('0'));
 
     static const char levels[] = "|DEBUG|th=|INFO |th=|WARN |th=|ERROR|th=|FATAL|th=|TEMP |th=|AUDIT|th=";
     log.level = pro.level;

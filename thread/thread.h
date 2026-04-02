@@ -39,11 +39,7 @@ namespace photon
     struct thread;
     extern __thread thread* CURRENT;
     extern volatile uint64_t now;   // a coarse-grained timestamp in unit of us
-    struct NowTime {
-        uint64_t now;
-        uint32_t sec, usec;
-    };
-    NowTime __update_now();    // update `now`
+    uint64_t __update_now();    // update `now` immediately and return it
 
     enum states
     {

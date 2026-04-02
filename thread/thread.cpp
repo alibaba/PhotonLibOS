@@ -1109,7 +1109,7 @@ R"(
 
     volatile uint64_t now;
     static std::atomic<pthread_t> ts_updater(0);
-    static inline NowTime update_now()
+    static inline uint64_t update_now()
     {
 #if defined(__x86_64__) && defined(__linux__) && defined(ENABLE_MIMIC_VDSO)
         if (likely(__mimic_vdso_time_x86))
@@ -1121,11 +1121,9 @@ R"(
 #else
         clock_gettime(CLOCK_MONOTONIC, &tv);
 #endif
-        auto usec = tv.tv_nsec / 1000ul;
-        uint64_t nnow = tv.tv_sec * 1000ul * 1000ul + usec;
-        assert(tv.tv_sec <= UINT32_MAX && usec < 1000000);
-        now = nnow;
-        return {nnow, (uint32_t)tv.tv_sec, (uint32_t)usec};
+        auto _now = tv.tv_sec * 1000ul * 1000ul + tv.tv_nsec / 1000ul;
+        now = _now;     // can not ```return now = ...;``` in debug
+        return _now;    // mode because ```now``` is a volatile variable
     }
     __attribute__((always_inline))
     static inline uint32_t _rdtsc()
@@ -1171,7 +1169,7 @@ R"(
         }
         return false;
     }
-    NowTime __update_now() {
+    uint64_t __update_now() {
         last_tsc = _rdtsc();
         return update_now();
     }
