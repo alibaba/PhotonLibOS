@@ -7,16 +7,19 @@ M: original text
 
 T: bit-width of a CRC scheme, e.g. 16, 32, 64, etc.
 
-P: the polynomial of a CRC scheme, which is inherently a (T+1)-bit polynomial, and the most significant bit (MSB) is often omitted for convenience.
+P: the polynomial of a CRC scheme, which is inherently a (T+1)-bit polynomial,
+and the most significant bit (MSB) is often omitted for convenience.
 
-CRC(M): treat M as a large binary number of $len(M)*8$ bits, can calculate $M * x^T \mod P$ in $GF(2^T)$. That is:
+CRC(M): treat M as a large binary number of $len(M)*8$ bits, can calculate
+$M * x^T \mod P$ in $GF(2^T)$. That is:
 ```
   CRC(M)
 = M * x^T mod P
 = M000..0 mod P  # padding T trailing 0s to M
 ```
 
-$GF(2^T)$: Galois Field, where ```*``` is carryless multiplication (polynomial multiplication); both ```+``` and ```-``` are ```xor```.
+$GF(2^T)$: Galois Field, where ```*``` is carryless multiplication
+(polynomial multiplication); both ```+``` and ```-``` are ```xor```.
 
 Corollary 1: CRC is linear
 ```
@@ -37,11 +40,14 @@ Given CRC(M), how to calculate CRC(M<<n)?
 = CRC(M) * x^n mod P
 = CRC(M) * (x^n mod P) mod P
 ```
-where ```x^n mod P``` is a pre-computed constant. Actually we can pre-compute all ```x^(2^i) mod P``` for i == 1, 2, 3, etc., and decompose n into power(s) of 2, then apply the calculation(s) accordingly.
+where ```x^n mod P``` is a pre-computed constant. Actually we can
+pre-compute all $x^{2^i} \mod P$ for i == 1, 2, 3, etc., and decompose
+$n$ into power(s) of 2, then apply the calculation(s) accordingly.
 
 We have 2 ways to calculate the ```mod P``` after multiplication.
 
-First, if we have a hardware instruction (or other fast approach) to calculate CRC from 2*T bits of data:
+First, if we have a hardware instruction (or other fast approach) to
+calculate CRC from 2*T bits of data:
 ```
   CRC(M) * (x^n mod P) mod P
 = CRC(M) * [x^(n-T) mod P] * x^n mod P
@@ -51,14 +57,15 @@ First, if we have a hardware instruction (or other fast approach) to calculate C
 Otherwise, we make use of Barrett reduction:
 ```
 let M' = CRC(M) * [x^n mod P]
-let // be an operator to compute the "integer" part of the quotient, ignoring the remainder.
+let // be an operator to compute the "integer" part of the quotient,
+ignoring the remainder.
 
   M' mod P
 = M' - M' // P * P
 = M' - M' * [x^(2T) // P] * [P // x^(2T)]
 = M' - M' * [x^(2T) // P] // x^T * P // x^T
 ```
-Where ```x^128 // P``` is a pre-computed constant, named ```Mu```, so
+Where ```x^(2T) // P``` is a pre-computed constant, named ```Mu```, so
 ```
   M' - M' * [x^(2T) // P] // x^T * P // x^T
 = M' + M' * Mu // x^T * P // x^T
@@ -74,10 +81,13 @@ Given CRC(M), and M has at least n trailing 0s. how to calculate CRC(M<<n)?
 = CRC(M) * x^-n mod P
 = CRC(M) * (x^-n mod P) mod P
 ```
-where ```x^-n mod P``` is a pre-computed constant. Actually we can pre-compute all ```(x^-1)^(2^i) mod P``` for i == 1, 2, 3, etc., and at runtime decompose n into power(s) of 2, then apply the calculation(s) accordingly.
+where ```x^-n mod P``` is a pre-computed constant. Actually we can
+pre-compute all $(x^{-1})^{2^i}\mod P$ for i == 1, 2, 3, etc., and at
+runtime decompose $n$ into power(s) of 2, then apply the calculation(s)
+accordingly.
 
 If P is **irreducible** (cannot be factored into lower-degree polynomials),
-we have ```x^-k = x^(2^T-1-k) mod P```, so ```x^-1 = x^(2^T-2) mod P```.
+we have $x^{-k} = x^{2^T-1-k} \mod P$, thus $x^{-1} = x^{2^T-2} \mod P$.
 This is Fermat's Little Theorem, and we can transform the equation into:
 ```
   x^-1 mod P
@@ -87,10 +97,10 @@ This is Fermat's Little Theorem, and we can transform the equation into:
 This can be obtained by repeated self-squaring and multiplication.
 
 If P is **reducible** otherwise, we should use Extended Euclidean Algorithm
-to compute ```x^-1 mod P```.
+to compute $x^{-1} \mod P$.
 
-Once we have ```x^-1 mod P```, we can easily pre-compute all
-```(x^-1)^(2^i) mod P``` for i == 1, 2, 3, etc. by applying self-squaring.
+Once we have $x^{-1} \mod P$, we can easily pre-compute all
+$(x^{-1})^{2^i} \mod P$ for i == 1, 2, 3, etc. by applying self-squaring.
 
 # Fast CRC32C Calculation with Shifting
 X86 has CRC32C instructions since SSE 4.1. They have an latency of 3 cycles,
@@ -164,7 +174,7 @@ similar trick to fold 512-bit data in each operation.
 
 ## Final Reduction of 128-bit for CRC32
 Suppose the final data is M128, so ```CRC32(M128) = M128 * x^32 mod P```, which
-is effectively 160-bit data. We can fold the highest 64-bit with ```clmul```
+is effectively 160-bit data mod by P. We can fold the highest 64-bit with ```clmul```
 and obtain a 96-bit data, which is then xor-ed with the remaining 96-bit
 data, resulting 96-bit data.
 
@@ -176,7 +186,7 @@ We finally apply Barrett reduction to the 64-bit data.
 
 ## Final Reduction of 128-bit for CRC64
 Suppose the final data is M128, so ```CRC64(M128) = M128 * x^64 mod P```, which
-is effectively 192-bit data. We can fold the highest 64-bit with ```clmul```
+is effectively 192-bit data mod by P. We can fold the highest 64-bit with ```clmul```
 and obtain a 128-bit data, which is then xor-ed with the remaining 128-bit
 data, resulting 128-bit data.
 
@@ -190,7 +200,7 @@ CRC32C, CRC64-ECMA, etc.
 
 Carryless multiplication of bit-reflected data produces results bigger than
 true result by ```x```. For example, think about ```1 * 1``` that represents
-```x^63 * x63```; it results in ```1``` that represents ```x^127```, but it
-actually should be ```x^126```. We can either fix the result by shifting 1
+```x^63 * x^63```; it results in ```1``` that represents ```x^127```, but it
+actually should be ```x^126```. We can fix the result by either shifting 1
 bit, or provide a operand constant that is smaller by ```x``` in advance.
 
