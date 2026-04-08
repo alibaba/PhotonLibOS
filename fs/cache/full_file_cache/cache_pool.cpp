@@ -79,6 +79,12 @@ ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t
     return nullptr;
   }
 
+  // Check cold container first
+  auto coldIt = coldIndex_.find(pathname);
+  if (coldIt != coldIndex_.end()) {
+    promoteToHot(coldIt);
+  }
+
   auto find = fileIndex_.find(pathname);
   if (find == fileIndex_.end()) {
     auto lruIter = lru_.push_front(fileIndex_.end());
@@ -88,6 +94,16 @@ ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t
   } else {
     lru_.access(find->second->lruIter);
     find->second->openCount++;
+  }
+
+  // If hot LRU exceeds the limit, demote the LRU tail (only if not open) to cold
+  while (lru_.size() > hotLruLimit_) {
+    auto tailIter = lru_.back();
+    if (tailIter->second->openCount == 0) {
+      demoteToCold(tailIter);
+    } else {
+      break;
+    }
   }
 
   return new FileCacheStore(this, localFile, refillUnit_, find);
@@ -123,6 +139,12 @@ int FileCachePool::stat(CacheStat* stat, std::string_view pathname) {
 }
 
 int FileCachePool::evict(std::string_view filename) {
+  // Check cold container first
+  auto coldIt = coldIndex_.find(filename);
+  if (coldIt != coldIndex_.end()) {
+    return evictColdByIndex(coldIt->second) >= 0 ? 0 : -1;
+  }
+
   auto fileIter = fileIndex_.find(filename);
   if (fileIter == fileIndex_.end()) {
     LOG_ERROR("Evict no such file , name: `", filename);
@@ -135,9 +157,9 @@ int FileCachePool::evict(std::string_view filename) {
     lru_.mark_key_cleared(lruEntry->lruIter);
   }
   int err = 0;
-  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
-  DEFER(cacheStore->release());
   {
+    auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+    DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
@@ -240,6 +262,10 @@ void FileCachePool::eviction() {
 
   isFull_ = true;
 
+  // Phase 1: evict from cold tier first.
+  actualEvict -= evictColdWhenFull(actualEvict);
+
+  // Phase 2: fall back to hot LRU eviction when cold tier is exhausted
   while (actualEvict > 0 && !lru_.empty() && !exit_) {
     auto fileIter = lru_.back();
     const auto& fileName = fileIter->first;
@@ -258,9 +284,9 @@ void FileCachePool::eviction() {
         continue;
     }
 
-    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
-    DEFER(cacheStore->release());
     {
+      auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+      DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
@@ -299,9 +325,9 @@ bool FileCachePool::afterFtrucate(FileNameMap::iterator iter) {
       if (err && (e.no == EBUSY)) {
         return false;
       }
-      lru_.remove(iter->second->lruIter);
-      fileIndex_.erase(iter);
     }
+    lru_.remove(iter->second->lruIter);
+    fileIndex_.erase(iter);
   }
   return true;
 }
@@ -321,12 +347,109 @@ int FileCachePool::insertFile(std::string_view file) {
   }
   auto fileSize = st.st_blocks * kDiskBlockSize;
 
-  auto lruIter = lru_.push_front(fileIndex_.end());
-  auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
-  auto iter = fileIndex_.emplace(file, std::move(entry)).first;
-  lru_.front() = iter;
+  if (lru_.size() >= hotLruLimit_) {
+    uint32_t idx = static_cast<uint32_t>(cold_.size());
+    auto nodeIt = coldIndex_.emplace(file, idx);
+    cold_.emplace_back(nodeIt.first, fileSize, photon::now);
+  } else {
+    auto lruIter = lru_.push_front(fileIndex_.end());
+    auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
+    auto iter = fileIndex_.emplace(file, std::move(entry)).first;
+    lru_.front() = iter;
+  }
   totalUsed_ += fileSize;
   return 0;
+}
+
+// Demote a hot-LRU entry (openCount must be 0) to the cold container.
+void FileCachePool::demoteToCold(FileNameMap::iterator iter) {
+  auto lruEntry = iter->second.get();
+
+  uint32_t idx = static_cast<uint32_t>(cold_.size());
+  auto nodeIt = coldIndex_.emplace(iter->first, idx);
+  cold_.emplace_back(nodeIt.first, lruEntry->size, photon::now);
+
+  lru_.remove(lruEntry->lruIter);
+  fileIndex_.erase(iter);
+}
+
+// Promote a cold entry back to the front of hot LRU.
+void FileCachePool::promoteToHot(ColdIndexMap::iterator iter) {
+  uint32_t idx = iter->second;
+  uint64_t size = cold_[idx].size;
+  std::string_view filename = iter->first;
+
+  // Re-insert into fileIndex_ and lru_ with openCount=0 (caller increments)
+  auto lruIter = lru_.push_front(fileIndex_.end());
+  std::unique_ptr<LruEntry> entry(new LruEntry{lruIter, 0, size});
+  auto newIter = fileIndex_.emplace(filename, std::move(entry)).first;
+  lru_.front() = newIter;
+
+  coldIndex_.erase(iter);
+  // swap-remove
+  if (idx + 1 < cold_.size()) {
+    std::swap(cold_[idx], cold_.back());
+    cold_[idx].iter->second = idx;
+  }
+  cold_.pop_back();
+}
+
+// Evict the cold entry at coldIndex and return the evicted file size.
+ssize_t FileCachePool::evictColdByIndex(uint32_t idx) {
+  assert(idx < cold_.size());
+  auto &entry = cold_[idx];
+  std::string_view filename = entry.iter->first;
+  uint64_t fileSize = entry.size;
+
+  if (fileSize > 0) {
+    int err = mediaFs_->truncate(filename.data(), 0);
+    if (err) {
+      ERRNO e;
+      LOG_ERRNO_RETURN(0, -1, "truncate(0) failed, name : `", filename);
+    }
+    totalUsed_ -= static_cast<int64_t>(fileSize);
+    entry.size = 0;
+    if (totalUsed_ < 0) totalUsed_ = 0;
+  }
+  int err = mediaFs_->unlink(filename.data());
+  if (err) {
+    ERRNO e;
+    LOG_ERRNO_RETURN(0, -1, "unlink failed, name : `", filename);
+  }
+
+  coldIndex_.erase(entry.iter);
+  if (idx + 1 < cold_.size()) {
+    std::swap(cold_[idx], cold_.back());
+    cold_[idx].iter->second = idx;
+  }
+  cold_.pop_back();
+  return fileSize;
+}
+
+uint64_t FileCachePool::evictColdWhenFull(uint64_t needEvict) {
+  uint64_t evictSize = 0;
+  while (evictSize < needEvict && !cold_.empty() && !exit_) {
+    uint32_t sz = cold_.size();
+    // Fixed candidates: head (0) and tail (sz-1), plus up to 5 random indices.
+    static const int kMaxCandidates = 7;
+    uint32_t oldest = 0;
+    uint64_t oldestTime = cold_[oldest].demoteTime;
+    if (cold_.back().demoteTime < oldestTime) {
+      oldest = sz - 1;
+      oldestTime = cold_[oldest].demoteTime;
+    }
+    for (int k = 2; k < kMaxCandidates; k++) {
+      uint32_t candidate = rand() % sz;
+      if (cold_[candidate].demoteTime < oldestTime) {
+        oldest = candidate;
+        oldestTime = cold_[oldest].demoteTime;
+      }
+    }
+    auto r = evictColdByIndex(oldest);
+    if (r >= 0) evictSize += r;
+    photon::thread_yield();
+  }
+  return evictSize;
 }
 
 }

@@ -42,6 +42,8 @@ public:
     static const uint64_t kDiskBlockSize = 512; // stat(2)
     static const uint64_t kDeleteDelayInUs = 1000;
     static const uint32_t kWaterMarkRatio = 90;
+    // max entries in hot LRU before demoting to cold (default: 100w)
+    static const uint32_t kDefaultHotLruLimit = 1'000'000;
 
     void Init();
 
@@ -109,6 +111,28 @@ protected:
     LRUContainer lru_;
     // filename -> lruEntry
     FileNameMap fileIndex_;
+
+    uint32_t hotLruLimit_ = kDefaultHotLruLimit;
+
+    // If hotLruLimit_ is reached, files are demoted to cold container.
+    using ColdIndexMap = unordered_map_string_key<uint32_t>;
+    struct ColdEntry {
+        ColdEntry(ColdIndexMap::iterator iter, uint64_t size, uint64_t demoteTime)
+            : iter(iter), size(size), demoteTime(demoteTime) {}
+        ColdIndexMap::iterator iter;
+        uint64_t size;
+        uint64_t demoteTime; // timestamp when demoted to cold
+        std::string_view filename() const { return iter->first; }
+    };
+    std::vector<ColdEntry> cold_;
+    ColdIndexMap coldIndex_;
+
+    void demoteToCold(FileNameMap::iterator iter);
+    void promoteToHot(ColdIndexMap::iterator iter);
+    uint64_t evictColdWhenFull(uint64_t needEvict);
+    ssize_t evictColdByIndex(uint32_t idx);
+
+    friend struct FileCachePoolTest;
 };
 
 }
