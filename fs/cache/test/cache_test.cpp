@@ -33,6 +33,8 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #include <photon/common/io-alloc.h>
 #include <photon/fs/cache/cache.h>
+
+#include "../full_file_cache/cache_pool.h"
 #include "random_generator.h"
 
 namespace photon {
@@ -712,6 +714,270 @@ TEST(CachePool, open_same_file) {
       }
     }
   }
+}
+
+// Friend accessor — declared as friend in FileCachePool.
+struct FileCachePoolTest {
+  static void set_demote_threshold(FileCachePool *p, uint32_t limit) {
+    p->demoteThreshold_ = limit;
+  }
+  static size_t inuse_size(FileCachePool *p) { return p->lru_.size(); }
+  static size_t idle_size(FileCachePool *p) { return p->idleLru_.size(); }
+  static bool inuse(FileCachePool *p, std::string_view n) {
+    return p->fileIndex_.find(n) != p->fileIndex_.end();
+  }
+  static bool idle(FileCachePool *p, std::string_view n) {
+    return p->idleFileIndex_.find(n) != p->idleFileIndex_.end();
+  }
+};
+
+// Open through the pool then immediately release.
+static bool openClose(ICachePool* pool, const char* name) {
+  auto s = pool->open(name, O_CREAT | O_RDWR, 0644);
+  bool success = (s != nullptr);
+  if (s) s->release();
+  return success;
+}
+
+TEST(CachePool, test_demote_threshold) {
+  std::string root = "/tmp/ease/cache/test_demote_threshold/";
+  SetupTestDir(root);
+  const size_t demoteThreshold = 10;
+  const size_t fileNum = 100;
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+  using T = FileCachePoolTest;
+
+  auto pool = dynamic_cast<FileCachePool*>(cachePool);
+  ASSERT_NE(nullptr, pool);
+  T::set_demote_threshold(pool, demoteThreshold);
+
+  for (size_t i = 0; i < fileNum; i++) {
+    photon::thread_usleep(100);
+    std::string name = "/f" + std::to_string(i);
+    ASSERT_TRUE(openClose(pool, name.c_str()));
+  }
+
+  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
+  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+
+  // first fileNum-demoteThreshold files are in idle
+  for (size_t i = 0; i < fileNum - demoteThreshold; i++) {
+    std::string name = "/f" + std::to_string(i);
+    EXPECT_TRUE(T::idle(pool, name));
+    EXPECT_FALSE(T::inuse(pool, name));
+  }
+  // last demoteThreshold files are in hot
+  for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
+    std::string name = "/f" + std::to_string(i);
+    EXPECT_TRUE(T::inuse(pool, name));
+    EXPECT_FALSE(T::idle(pool, name));
+  }
+  // re-open /f0 — must promote to hot
+  ASSERT_TRUE(openClose(pool, "/f0"));
+  EXPECT_TRUE(T::inuse(pool, "/f0"));
+  EXPECT_FALSE(T::idle(pool, "/f0"));
+
+  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
+  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+
+  // random access
+  for (size_t i = 0; i < 100; i++) {
+    int r = rand() % fileNum;
+    std::string name = "/f" + std::to_string(r);
+    ASSERT_TRUE(openClose(pool, name.c_str()));
+
+    if (rand() % 3 == 0) {
+      EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+    }
+  }
+}
+
+TEST(CachePool, evict_idle_file) {
+  std::string root = "/tmp/ease/cache/evict_idle_file/";
+  SetupTestDir(root);
+  const size_t demoteThreshold = 10;
+  const size_t fileNum = 100;
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+  using T = FileCachePoolTest;
+
+  auto pool = dynamic_cast<FileCachePool*>(cachePool);
+  ASSERT_NE(nullptr, pool);
+  T::set_demote_threshold(pool, demoteThreshold);
+
+  for (size_t i = 0; i < fileNum; i++) {
+    photon::thread_usleep(100);
+    std::string name = "/f" + std::to_string(i);
+    ASSERT_TRUE(openClose(pool, name.c_str()));
+  }
+
+  photon::thread_sleep(1);
+  ASSERT_TRUE(T::idle(pool, "/f0"));
+  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
+  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+
+  ASSERT_EQ(0, pool->evict("/f0"));
+  EXPECT_FALSE(T::idle(pool, "/f0"));
+  EXPECT_FALSE(T::inuse(pool, "/f0"));
+  EXPECT_EQ(T::inuse_size(pool), demoteThreshold);
+  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum - 1);
+
+  std::vector<bool> evicted(fileNum, false);
+  evicted[0] = true;
+  for (size_t i = 0; i < 9; i++) {
+    int index = rand() % fileNum;
+    std::string name = "/f" + std::to_string(index);
+    while (evicted[index] || !T::idle(pool, name)) {
+      index = rand() % fileNum;
+      name = "/f" + std::to_string(index);
+    }
+    ASSERT_EQ(0, pool->evict(name));
+    evicted[index] = true;
+    EXPECT_FALSE(T::idle(pool, name));
+    EXPECT_EQ(T::idle_size(pool), fileNum - demoteThreshold - 2 - i);
+  }
+}
+
+TEST(CachePool, evict_by_size_idle_first) {
+  std::string root = "/tmp/ease/cache/evict_by_size/";
+  SetupTestDir(root);
+  const uint64_t capacityGB = 1;
+  const size_t demoteThreshold = 5;
+  const size_t fileNum = 40;
+  const size_t fileSizeMB = 60;
+  const size_t fileSizeBytes = fileSizeMB * 1024 * 1024;
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      capacityGB, 0, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+  using T = FileCachePoolTest;
+
+  auto pool = dynamic_cast<FileCachePool*>(cachePool);
+  ASSERT_NE(nullptr, pool);
+  T::set_demote_threshold(pool, demoteThreshold);
+
+  IOVector buffer(*cacheAllocator);
+  buffer.push_back(fileSizeBytes);
+
+  for (size_t i = 0; i < fileNum; i++) {
+    photon::thread_usleep(1000);
+    std::string name = "/g" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
+
+  size_t remaining = T::inuse_size(pool) + T::idle_size(pool);
+  EXPECT_LT(remaining, fileNum);
+  EXPECT_LE(T::inuse_size(pool), (size_t)demoteThreshold);
+
+  for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
+    std::string name = "/g" + std::to_string(i);
+    EXPECT_TRUE(T::inuse(pool, name)) << name << " should still be in hot";
+    EXPECT_FALSE(T::idle(pool, name)) << name << " must not be in idle";
+  }
+
+  // Write a new file to trigger eviction, the idle file should be evicted first
+  std::string name = "/g" + std::to_string(fileNum);
+  auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, store);
+  store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+  store->release();
+  for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
+    std::string name = "/g" + std::to_string(i);
+    bool existed = T::inuse(pool, name) || T::idle(pool, name);
+    EXPECT_TRUE(existed) << name << " must still exist";
+  }
+}
+
+static int64_t get_physical_memory_KiB() {
+  FILE *file = fopen("/proc/self/status", "r");
+  if (file == NULL) {
+    return -1;
+  }
+
+  int64_t result = -1;
+  char line[128];
+
+  while (fgets(line, 128, file) != nullptr) {
+    if (strncmp(line, "VmRSS:", 6) == 0) {
+      int len = strlen(line);
+
+      const char *p = line;
+      for (; *p && !std::isdigit(*p); ++p) {
+      }
+
+      line[len - 3] = 0;
+      result = atoll(p);
+      break;
+    }
+  }
+
+  fclose(file);
+  return result;
+}
+
+TEST(CachePool, DISABLED_test_mem_usage) {
+  std::string root = "/tmp/ease/cache/test_mem_usage/";
+  SetupTestDir(root);
+  const uint64_t capacityGB = 1;
+  const size_t fileNum = 10'000'000;
+  const size_t inuse = 1'000'000;
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      capacityGB, 0, 128ul * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+  using T = FileCachePoolTest;
+  auto pool = dynamic_cast<FileCachePool*>(cachePool);
+
+  auto before_mem_usage = get_physical_memory_KiB();
+  LOG_INFO("Physical memory usage before: ` KiB.", before_mem_usage);
+
+  const int fileNameLength = 45;
+  for (size_t i = 0; i < fileNum; i++) {
+    std::string name = "/" + std::to_string(i);
+    name += std::string(fileNameLength - name.length(), 'a');
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->release();
+    if (i % 100'000 == 0) {
+      LOG_INFO("Opened ` files. current: ` KiB.", i+1, get_physical_memory_KiB());
+      LOG_INFO("inuse size `, idle size `", T::inuse_size(pool), T::idle_size(pool));
+    }
+  }
+  EXPECT_EQ(inuse, T::inuse_size(pool));
+  EXPECT_EQ(fileNum - inuse, T::idle_size(pool));
+
+  photon::thread_sleep(10);
+  malloc_trim(0);
+  photon::thread_sleep(10);
+
+  auto after_mem_usage = get_physical_memory_KiB();
+  LOG_INFO("Physical memory usage after: ` KiB.", after_mem_usage);
+  auto diff = after_mem_usage - before_mem_usage;
+  LOG_INFO("Physical memory usage diff: ` KiB.", diff);
 }
 
 }
