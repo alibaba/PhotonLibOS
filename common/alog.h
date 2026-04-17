@@ -443,7 +443,7 @@ struct LogBuilder {
         // so just make sure the other one will not output
         rhs.done = true;
     }
-    ~LogBuilder() __INLINE__ {
+    __attribute__((noinline)) ~LogBuilder() {
         if (!done && level >= logger->log_level) {
             builder(logger->log_output);
             done = true;
