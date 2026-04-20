@@ -42,6 +42,8 @@ public:
     static const uint64_t kDiskBlockSize = 512; // stat(2)
     static const uint64_t kDeleteDelayInUs = 1000;
     static const uint32_t kWaterMarkRatio = 90;
+    // max inuse-lru entries before demoting tail to idle-lru (default: 100w)
+    static const uint32_t kDemoteThreshold = 1'000'000;
 
     void Init();
 
@@ -109,6 +111,22 @@ protected:
     LRUContainer lru_;
     // filename -> lruEntry
     FileNameMap fileIndex_;
+
+    uint32_t demoteThreshold_ = kDemoteThreshold;
+
+    // idleFileIndex_ stores filename -> lruContainer's iterator
+    // idleLru_ stores iterators into idleFileIndex_; std::map nodes are stable.
+    typedef map_string_key<uint32_t> IdleFileNameMap;
+    typedef photon::fs::LRU<IdleFileNameMap::iterator, uint32_t> IdleLRUContainer;
+    IdleLRUContainer idleLru_;
+    IdleFileNameMap idleFileIndex_;
+
+    void demoteToIdle(FileNameMap::iterator iter);
+    void promoteFromIdle(IdleFileNameMap::iterator idleIter);
+    uint64_t evictIdleWhenFull(uint64_t needEvictSize);
+    ssize_t evictIdleEntry(IdleFileNameMap::iterator idleIter);
+
+    friend struct FileCachePoolTest;
 };
 
 }

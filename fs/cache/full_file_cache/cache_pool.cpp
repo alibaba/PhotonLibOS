@@ -79,6 +79,12 @@ ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t
     return nullptr;
   }
 
+  // Check idle container first
+  auto idleIt = idleFileIndex_.find(pathname);
+  if (idleIt != idleFileIndex_.end()) {
+    promoteFromIdle(idleIt);
+  }
+
   auto find = fileIndex_.find(pathname);
   if (find == fileIndex_.end()) {
     auto lruIter = lru_.push_front(fileIndex_.end());
@@ -88,6 +94,16 @@ ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t
   } else {
     lru_.access(find->second->lruIter);
     find->second->openCount++;
+  }
+
+  // If LRU exceeds the limit, demote the tail (only if not open) to idle
+  while (lru_.size() > demoteThreshold_) {
+    auto tailIt = lru_.back();
+    if (tailIt->second->openCount == 0) {
+      demoteToIdle(tailIt);
+    } else {
+      break;
+    }
   }
 
   return new FileCacheStore(this, localFile, refillUnit_, find);
@@ -123,6 +139,12 @@ int FileCachePool::stat(CacheStat* stat, std::string_view pathname) {
 }
 
 int FileCachePool::evict(std::string_view filename) {
+  // Check idle container first
+  auto idleIt = idleFileIndex_.find(filename);
+  if (idleIt != idleFileIndex_.end()) {
+    return evictIdleEntry(idleIt) >= 0 ? 0 : -1;
+  }
+
   auto fileIter = fileIndex_.find(filename);
   if (fileIter == fileIndex_.end()) {
     LOG_ERROR("Evict no such file , name: `", filename);
@@ -135,9 +157,9 @@ int FileCachePool::evict(std::string_view filename) {
     lru_.mark_key_cleared(lruEntry->lruIter);
   }
   int err = 0;
-  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
-  DEFER(cacheStore->release());
   {
+    auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+    DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = mediaFs_->truncate(filePath.data(), 0);
     lruEntry->truncate_done = false;
@@ -240,6 +262,10 @@ void FileCachePool::eviction() {
 
   isFull_ = true;
 
+  // Phase 1: evict from idle tier first.
+  actualEvict -= evictIdleWhenFull(actualEvict);
+
+  // Phase 2: fall back to LRU eviction when idle tier is exhausted
   while (actualEvict > 0 && !lru_.empty() && !exit_) {
     auto fileIter = lru_.back();
     const auto& fileName = fileIter->first;
@@ -258,9 +284,9 @@ void FileCachePool::eviction() {
         continue;
     }
 
-    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
-    DEFER(cacheStore->release());
     {
+      auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+      DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = mediaFs_->truncate(fileName.data(), 0);
       lruEntry->truncate_done = false;
@@ -299,9 +325,9 @@ bool FileCachePool::afterFtrucate(FileNameMap::iterator iter) {
       if (err && (e.no == EBUSY)) {
         return false;
       }
-      lru_.remove(iter->second->lruIter);
-      fileIndex_.erase(iter);
     }
+    lru_.remove(lruEntry->lruIter);
+    fileIndex_.erase(iter);
   }
   return true;
 }
@@ -321,12 +347,88 @@ int FileCachePool::insertFile(std::string_view file) {
   }
   auto fileSize = st.st_blocks * kDiskBlockSize;
 
-  auto lruIter = lru_.push_front(fileIndex_.end());
-  auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
-  auto iter = fileIndex_.emplace(file, std::move(entry)).first;
-  lru_.front() = iter;
+  if (lru_.size() >= demoteThreshold_) {
+    auto idleLruIt = idleLru_.push_front(idleFileIndex_.end());
+    auto iter = idleFileIndex_.emplace(file, idleLruIt).first;
+    idleLru_.front() = iter;
+  } else {
+    auto lruIter = lru_.push_front(fileIndex_.end());
+    auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
+    auto iter = fileIndex_.emplace(file, std::move(entry)).first;
+    lru_.front() = iter;
+  }
   totalUsed_ += fileSize;
   return 0;
+}
+
+// Demote a LRU entry (openCount must be 0) to the idle container.
+void FileCachePool::demoteToIdle(FileNameMap::iterator iter) {
+  auto idleLruIt = idleLru_.push_front(idleFileIndex_.end());
+  auto idleIndexIt = idleFileIndex_.emplace(iter->first, idleLruIt).first;
+  idleLru_.front() = idleIndexIt;
+
+  lru_.remove(iter->second->lruIter);
+  fileIndex_.erase(iter);
+}
+
+// Promote an idle entry back to the front of LRU.
+void FileCachePool::promoteFromIdle(IdleFileNameMap::iterator idleIt) {
+  uint32_t idleLruIter = idleIt->second;
+  const auto& filename = idleIt->first;
+
+  struct stat st = {};
+  uint64_t fileSize = 0;
+  if (mediaFs_->stat(filename.data(), &st) == 0) {
+    fileSize = st.st_blocks * kDiskBlockSize;
+  }
+
+  auto lruIter = lru_.push_front(fileIndex_.end());
+  auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
+  auto iter = fileIndex_.emplace(filename, std::move(entry)).first;
+  lru_.front() = iter;
+
+  idleLru_.remove(idleLruIter);
+  idleFileIndex_.erase(idleIt);
+}
+
+// Evict the idle entry pointed to by idleIt; return freed bytes or -1 on error.
+ssize_t FileCachePool::evictIdleEntry(IdleFileNameMap::iterator idleIt) {
+  const auto& filename = idleIt->first;
+
+  struct stat st = {};
+  uint64_t fileSize = 0;
+  if (mediaFs_->stat(filename.data(), &st) == 0) {
+    fileSize = st.st_blocks * kDiskBlockSize;
+  }
+
+  if (fileSize > 0) {
+    int err = mediaFs_->truncate(filename.data(), 0);
+    if (err) {
+      LOG_ERRNO_RETURN(0, -1, "truncate(0) failed, name : `", filename);
+    }
+    totalUsed_ -= static_cast<int64_t>(fileSize);
+    if (totalUsed_ < 0) totalUsed_ = 0;
+  }
+  int err = mediaFs_->unlink(filename.data());
+  if (err) {
+    // we still evict fileSize bytes even if unlink fails
+    LOG_ERRNO_RETURN(0, fileSize, "unlink failed, name : `", filename);
+  }
+
+  uint32_t idleLruIter = idleIt->second;
+  idleLru_.remove(idleLruIter);
+  idleFileIndex_.erase(idleIt);
+  return static_cast<ssize_t>(fileSize);
+}
+
+uint64_t FileCachePool::evictIdleWhenFull(uint64_t needEvict) {
+  uint64_t evictSize = 0;
+  while (evictSize < needEvict && !idleLru_.empty() && !exit_) {
+    auto r = evictIdleEntry(idleLru_.back());
+    if (r >= 0) evictSize += static_cast<uint64_t>(r);
+    photon::thread_yield();
+  }
+  return evictSize;
 }
 
 }
