@@ -195,9 +195,9 @@ int QuotaFilePool::evict(std::string_view filename) {
   int err;
   auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
 
-  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
-  DEFER(cacheStore->release());
   {
+    auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+    DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     lru.mark_key_cleared(lruEntry->QuotaLruIter);
     err = mediaFs_->truncate(filePath.data(), 0);
