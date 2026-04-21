@@ -152,7 +152,7 @@ HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wclass-memaccess"
 #endif
-    memmove(begin - 1, begin, sizeof(KV) * (it - begin));
+    memmove((void*)(begin - 1), begin, sizeof(KV) * (it - begin));
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
