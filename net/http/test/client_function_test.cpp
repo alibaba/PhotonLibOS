@@ -712,6 +712,67 @@ TEST(url, path_fix) {
     EXPECT_EQ(u2.query(), "a=b");
 }
 
+TEST(url, user_passwd) {
+    static const char url0[] = "http://root:password@123.123.1.1:3123/path";
+    URL u0(url0);
+    EXPECT_EQ(u0.user_passwd(), "root:password");
+    EXPECT_EQ(u0.user(), "root");
+    EXPECT_EQ(u0.passwd(), "password");
+    EXPECT_EQ(u0.host(), "123.123.1.1");
+    EXPECT_EQ(u0.port(), 3123);
+    EXPECT_EQ(u0.path(), "/path");
+
+    static const char url1[] = "http://user:pass@example.com";
+    URL u1(url1);
+    EXPECT_EQ(u1.user_passwd(), "user:pass");
+    EXPECT_EQ(u1.user(), "user");
+    EXPECT_EQ(u1.passwd(), "pass");
+    EXPECT_EQ(u1.host(), "example.com");
+    EXPECT_EQ(u1.port(), 80);
+
+    static const char url2[] = "https://admin:s3cret@proxy.host:8080/";
+    URL u2(url2);
+    EXPECT_EQ(u2.user_passwd(), "admin:s3cret");
+    EXPECT_EQ(u2.user(), "admin");
+    EXPECT_EQ(u2.passwd(), "s3cret");
+    EXPECT_EQ(u2.host(), "proxy.host");
+    EXPECT_EQ(u2.port(), 8080);
+    EXPECT_EQ(u2.secure(), true);
+
+    // no user_passwd at all
+    static const char url3[] = "http://example.com:8080/path";
+    URL u3(url3);
+    EXPECT_EQ(u3.user_passwd(), "");
+    EXPECT_EQ(u3.user(), "");
+    EXPECT_EQ(u3.passwd(), "");
+    EXPECT_EQ(u3.host(), "example.com");
+    EXPECT_EQ(u3.port(), 8080);
+
+    // user only, no colon, no password
+    static const char url5[] = "http://onlyuser@example.com:8080/path";
+    URL u5(url5);
+    EXPECT_EQ(u5.user_passwd(), "onlyuser");
+    EXPECT_EQ(u5.user(), "onlyuser");
+    EXPECT_EQ(u5.passwd(), "");
+    EXPECT_EQ(u5.host(), "example.com");
+
+    // user with colon but empty password: user:@host
+    static const char url6[] = "http://user:@example.com:8080/path";
+    URL u6(url6);
+    EXPECT_EQ(u6.user_passwd(), "user:");
+    EXPECT_EQ(u6.user(), "user");
+    EXPECT_EQ(u6.passwd(), "");
+    EXPECT_EQ(u6.host(), "example.com");
+    EXPECT_EQ(u6.port(), 8080);
+
+    // @ in query string should not be treated as delimiter
+    static const char url4[] = "http://example.com/path?email=a@b.com";
+    URL u4(url4);
+    EXPECT_EQ(u4.user_passwd(), "");
+    EXPECT_EQ(u4.host(), "example.com");
+    EXPECT_EQ(u4.query(), "email=a@b.com");
+}
+
 // Only for manual test
 // TEST(http_client, proxy) {
 //     auto client = new_http_client();

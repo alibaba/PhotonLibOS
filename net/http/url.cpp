@@ -50,6 +50,25 @@ void URL::from_string(std::string_view url) {
         pos += p + 3;
         url.remove_prefix(p + 3);
     }
+    // parse user:passwd (RFC 3986 Section 3.2.1): user:passwd@host
+    auto at = url.find('@');
+    auto slash = url.find('/');
+    if (at != url.npos && (slash == url.npos || at < slash)) {
+        auto userinfo = url.substr(0, at);
+        auto colon = userinfo.find(':');
+        if (colon != userinfo.npos) {
+            m_user = rstring_view16(pos, colon);
+            m_passwd = rstring_view16(pos + colon + 1, at - colon - 1);
+        } else {
+            m_user = rstring_view16(pos, at);
+            m_passwd = rstring_view16(pos + at, 0);
+        }
+        pos += at + 1;
+        url.remove_prefix(at + 1);
+    } else {
+        m_user = rstring_view16(0, 0);
+        m_passwd = rstring_view16(0, 0);
+    }
     p = url.find_first_of(":/?");
     if (p == url.npos) p = url.size();
     m_host = rstring_view16(pos, p);
