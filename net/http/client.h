@@ -83,6 +83,24 @@ public:
         void set_enable_proxy(bool enable) {
             enable_proxy = enable;
         }
+        // Set per-operation proxy URL, takes precedence over client-level proxy.
+        // Automatically enables proxy and rebuilds request line to absolute URI format.
+        void set_proxy(std::string_view proxy) {
+            proxy_url.from_string(proxy);
+            if (!enable_proxy) {
+                // redirect() handles scheme+host completion and absolute URI rebuild
+                req.redirect(req.verb(), req.target(), true);
+                enable_proxy = true;
+            }
+        }
+        const StoredURL* get_proxy() {
+            return &proxy_url;
+        }
+        // Clear per-operation proxy, fall back to client-level proxy.
+        // Does not change enable_proxy or request line format.
+        void clear_proxy() {
+            proxy_url.clear();
+        }
         int call() {
             if (!_client) return -1;
             return _client->call(this);
@@ -105,6 +123,8 @@ public:
 
     protected:
         Client* _client;
+        StoredURL proxy_url; // Per-operation proxy URL (takes precedence over
+                             // client-level proxy)
         const void *body_buffer = nullptr;
         size_t body_buffer_size = 0;
 
