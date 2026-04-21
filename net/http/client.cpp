@@ -140,6 +140,20 @@ constexpr static std::bitset<10>
     code_redirect_verb(code3xx(300, 301, 302, 307, 308));
 
 static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
+
+void Client::set_proxy(std::string_view proxy) {
+    m_proxy_url.from_string(proxy);
+    m_proxy = true;
+    auto ui = m_proxy_url.user_passwd();
+    if (!ui.empty()) {
+        std::string encoded;
+        Base64Encode(ui, encoded);
+        m_proxy_auth = "Basic " + encoded;
+    } else {
+        m_proxy_auth.clear();
+    }
+}
+
 enum RoundtripStatus {
     ROUNDTRIP_SUCCESS,
     ROUNDTRIP_FAILED,
@@ -200,7 +214,7 @@ public:
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
         ISocketStream* s;
-        if (m_proxy && !m_proxy_url.empty())
+        if (op->enable_proxy && !m_proxy_url.empty())
             s = get_dialer().dial(m_proxy_url, tmo.timeout());
         else if (!op->uds_path.empty())
             s = get_dialer().dial(op->uds_path, tmo.timeout());
@@ -288,6 +302,8 @@ public:
         op->req.headers.insert("User-Agent", m_user_agent.empty() ? std::string_view(USERAGENT)
                                                                   : std::string_view(m_user_agent));
         op->req.headers.insert("Connection", "keep-alive");
+        if (op->enable_proxy && !m_proxy_auth.empty())
+            op->req.headers.insert("Proxy-Authorization", m_proxy_auth);
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
