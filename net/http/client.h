@@ -138,10 +138,7 @@ public:
     // get common headers, to manipulate
     virtual Headers* common_headers() = 0;
 
-    void set_proxy(std::string_view proxy) {
-        m_proxy_url.from_string(proxy);
-        m_proxy = true;
-    }
+    void set_proxy(std::string_view proxy);
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
@@ -168,6 +165,7 @@ public:
                                           bool secure = false, uint64_t timeout = -1UL) = 0;
 protected:
     StoredURL m_proxy_url;
+    std::string m_proxy_auth;
     std::string m_user_agent;
     uint64_t m_timeout = -1UL;
     bool m_proxy = false;

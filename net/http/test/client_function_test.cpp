@@ -773,6 +773,22 @@ TEST(url, user_passwd) {
     EXPECT_EQ(u4.query(), "email=a@b.com");
 }
 
+TEST(http_client, set_proxy_with_auth) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://root:password@123.123.1.1:3123");
+    EXPECT_TRUE(client->has_proxy());
+    auto proxy = client->get_proxy();
+    EXPECT_EQ(proxy->host(), "123.123.1.1");
+    EXPECT_EQ(proxy->port(), 3123);
+
+    // set_proxy without userinfo should clear auth
+    client->set_proxy("http://10.0.0.1:8080");
+    EXPECT_TRUE(client->has_proxy());
+    EXPECT_EQ(client->get_proxy()->host(), "10.0.0.1");
+    EXPECT_EQ(client->get_proxy()->port(), 8080);
+}
+
 // Only for manual test
 // TEST(http_client, proxy) {
 //     auto client = new_http_client();
