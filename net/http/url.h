@@ -46,6 +46,8 @@ protected:
     rstring_view16 m_query;
     rstring_view16 m_target;
     rstring_view16 m_fragment;
+    rstring_view16 m_user;
+    rstring_view16 m_passwd;
     uint16_t m_port = 0;
     bool m_secure;
     char *m_tmp_target = nullptr;
@@ -86,6 +88,12 @@ public:
     uint16_t port() const { return m_port; }
     bool secure() const { return m_secure; }
     bool empty() const { return !m_url; }
+    std::string_view user() const { return m_url | m_user; }
+    std::string_view passwd() const { return m_url | m_passwd; }
+    std::string_view user_passwd() const {
+        uint16_t len = m_passwd.offset() + m_passwd.size() - m_user.offset();
+        return {m_url + m_user.offset(), len};
+    }
 };
 class StoredURL : public URL {
 public:
