@@ -613,6 +613,8 @@ LogBuffer& operator << (LogBuffer& log, const Prologue& pro)
         log.printf(ALogString(pro.addr_func, pro.len_func), ':');
     }
     return log;
+
+    static_assert(24 == sizeof(make_named_value("levels", levels)), "...");
 }
 
 LogBuffer& operator << (LogBuffer& log, ERRNO e) {
