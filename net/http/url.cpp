@@ -57,6 +57,26 @@ bool URL::from_string(std::string_view url_) {
     url = url.substr(0, url.find_first_of('#'));
 
     m_path = m_query = m_target = { };
+    // parse user:passwd (RFC 3986 Section 3.2.1): user:passwd@host
+    auto at = url.find('@');
+    auto slash = url.find('/');
+    if (at != url.npos && (slash == url.npos || at < slash)) {
+        uint64_t offset = url.data() - m_url;
+        auto userinfo = url.substr(0, at);
+        auto colon = userinfo.find(':');
+        if (colon != userinfo.npos) {
+            m_user = rstring_view16(offset, colon);
+            m_passwd = rstring_view16(offset + colon + 1, at - colon - 1);
+        } else {
+            m_user = rstring_view16(offset, at);
+            m_passwd = rstring_view16(offset + at, 0);
+        }
+        url.remove_prefix(at + 1);
+    } else {
+        m_user = rstring_view16(0, 0);
+        m_passwd = rstring_view16(0, 0);
+    }
+
     p = url.find_first_of(":/?");
     uint64_t offset = url.data() - m_url;
     if (p == url.npos) {
