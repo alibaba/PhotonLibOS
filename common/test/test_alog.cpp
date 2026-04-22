@@ -280,6 +280,12 @@ int test_LOG_ERRNO_RETURN()
 }
 
 __attribute__((noinline))
+uint64_t inner_function() {
+    char c = 'c';
+    return (uint64_t)&c + 1;
+}
+
+__attribute__((noinline))
 void test_log(int x)
 {
     const char* xs = " a char* string! ";
@@ -288,12 +294,24 @@ void test_log(int x)
 //    EXPECT_EQ(log_start, string("234laskdjf[xs=\"\"]"));
 //    puts(_log_buf);
 //    LOG_DEBUG("asdf:`, jkl:`, and: ", 1,2,3,4,5);
+    auto pc = inner_function();
+    EXPECT_LE((uint64_t)&x - pc, 200);
+}
+
+TEST(ALog, Buffer) {
+    test_log(10);
 }
 
 __attribute__((noinline))
 void test_log2(int x)
 {
     LOG_DEBUG(ALogStringL("asdf:"), 1, ", jkl:", 2, ", and: ", 3,4,5);
+}
+
+__attribute__((noinline))
+int hot_function(int x) {
+    LOG_DEBUG("x=`", x);
+    return x * 2 + 1;
 }
 
 /*

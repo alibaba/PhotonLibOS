@@ -350,10 +350,9 @@ static LogFormatter log_formatter;
 struct LogBuffer : public ALogBuffer
 {
 public:
-    LogBuffer(ILogOutput *output) : log_output(output)
-    {
-        ptr = buf;
-        size = sizeof(buf) - 2;
+    LogBuffer(char* bf, size_t sz, ILogOutput *output) : log_output(output) {
+        ptr = buf = bf;
+        size = sz - 2;
     }
     ~LogBuffer() __INLINE__
     {
@@ -389,7 +388,7 @@ public:
 
 protected:
     ILogOutput *log_output;
-    char buf[LOG_BUFFER_SIZE];
+    char* buf;
     void operator = (const LogBuffer& rhs);
     LogBuffer(const LogBuffer& rhs) = default;
 };
@@ -467,14 +466,14 @@ struct STFMTLogBuffer : public LogBuffer
     }
 };
 
-template<typename...Ps, typename FMT, typename...Ts> inline
-STFMTLogBuffer __log__(int level, ILogOutput* output, const Prologue& prolog,
+template<typename...Ps, typename FMT, typename...Ts> inline __INLINE__
+void __log__(int level, ILogOutput* output, const Prologue& prolog,
                        const std::tuple<Ps...>& alt, FMT fmt, Ts&&...xs) {
-    STFMTLogBuffer log(output);
+    char buf[LOG_BUFFER_SIZE];
+    STFMTLogBuffer log(buf, sizeof(buf), output);
     log << prolog << alt;
     log.print_fmt(fmt, std::forward<Ts>(xs)..., '\n');
     log.level = level;
-    return log;
 }
 
 template<typename BuilderType>
@@ -640,39 +639,6 @@ struct DeferrdErrnoSetter {
     return e;                                       \
 } while(0)
 
-#define LOG_ERRNO_RETVAL(...) LOG_ERROR_RETVAL(errno, __VA_ARGS__)
-
-// Acts like a LogBuilder
-// but able to do operations when log builds
-template <typename Builder, typename Append>
-struct __LogAppender : public Builder {
-    // using Builder members
-    using Builder::level;
-    using Builder::builder;
-    using Builder::logger;
-    using Builder::done;
-    Append append;
-    explicit __LogAppender(Builder&& rhs, Append&& append_)
-        : Builder(std::move(rhs)), append(std::move(append_)) {}
-    __LogAppender(__LogAppender&& rhs)
-        : Builder(std::move(rhs)), append(std::move(rhs.append)) {}
-    ~__LogAppender() {
-        if (!done && level >= logger->log_level) {
-            append(builder(logger->log_output));
-            done = true;
-        }
-    }
-};
-
-template <typename Builder, typename Append>
-inline __LogAppender<typename std::remove_reference<Builder>::type,
-                     typename std::remove_reference<Append>::type>
-__log_append_tail(Builder&& builder, Append&& append) {
-    return __LogAppender<typename std::remove_reference<Builder>::type,
-                         typename std::remove_reference<Append>::type>(
-        std::move(builder), std::move(append));
-}
-
 template <uint64_t N>
 struct __limit_first_n {
     uint64_t count = 0;
@@ -735,16 +701,19 @@ struct __limit_first_n_every_t {
     }
 };
 
-#define __LOG_WITH_LIMIT(type, ...)                                  \
-    [&] {                                                            \
+#define __LOG_WITH_LIMIT(type, ...) {                                \
         static type limiter;                                         \
-        auto __logstat__ = __VA_ARGS__;                              \
-        __logstat__.done = limiter();                                \
-        return __log_append_tail(std::move(__logstat__),             \
-                                 [](STFMTLogBuffer buffer) {         \
-                                     limiter.append_tail(buffer);    \
-                                 });                                 \
-    }()
+        auto output = ({                                             \
+            auto __logstat__ = __VA_ARGS__;                          \
+           (__logstat__.done = limiter()) ? nullptr :                \
+            __logstat__.logger->log_output;                          \
+        });                                                          \
+        if (output) {                                                \
+            char buf[LOG_BUFFER_SIZE];                               \
+            STFMTLogBuffer log(buf, sizeof(buf), output);            \
+            limiter.append_tail(log);                                \
+        }                                                            \
+    }
 
 // output log once every T seconds.
 // example: LOG_EVERY_T(10, LOG_INFO(....))
