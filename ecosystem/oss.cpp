@@ -57,8 +57,8 @@ using photon::net::http::verbstr;
 
 static SimpleDOM::Node get_xml_node(HTTP_STACK_OP& op) {
   auto length = op.resp.headers.content_length();
-  if (length > XML_LIMIT)
-    LOG_ERROR_RETURN(EINVAL, {}, "xml length limit excceed `", length);
+  if (length > XML_LIMIT || length == 0)
+    LOG_ERROR_RETURN(EINVAL, {}, "xml length invalid `", length);
   auto body_buf = (char*)malloc(length + 1);
   auto rc = op.resp.read(body_buf, length);
   body_buf[length] = '\0';
