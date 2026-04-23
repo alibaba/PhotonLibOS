@@ -24,6 +24,7 @@ limitations under the License.
 
 #include <cstring>
 #include <algorithm>
+#include <set>
 
 #include <photon/common/utility.h>
 #include <photon/photon.h>
@@ -719,15 +720,22 @@ TEST(CachePool, open_same_file) {
 // Friend accessor — declared as friend in FileCachePool.
 struct FileCachePoolTest {
   static void set_demote_threshold(FileCachePool *p, uint32_t limit) {
-    p->demoteThreshold_ = limit;
+    p->thresholds_[0] = limit;
   }
-  static size_t inuse_size(FileCachePool *p) { return p->lru_.size(); }
-  static size_t idle_size(FileCachePool *p) { return p->idleLru_.size(); }
-  static bool inuse(FileCachePool *p, std::string_view n) {
+  static void set_inactive_demote_threshold(FileCachePool *p, uint32_t limit) {
+    p->thresholds_[1] = limit;
+  }
+  static size_t active_size(FileCachePool *p) { return p->lru_.size(); }
+  static size_t inactive_size(FileCachePool *p) { return p->inactiveTier_.size(); }
+  static size_t idle_size(FileCachePool *p) { return p->idleTier_.size(); }
+  static bool active(FileCachePool *p, std::string_view n) {
     return p->fileIndex_.find(n) != p->fileIndex_.end();
   }
+  static bool inactive(FileCachePool *p, std::string_view n) {
+    return p->inactiveTier_.contains(n);
+  }
   static bool idle(FileCachePool *p, std::string_view n) {
-    return p->idleFileIndex_.find(n) != p->idleFileIndex_.end();
+    return p->idleTier_.contains(n);
   }
 };
 
@@ -764,28 +772,28 @@ TEST(CachePool, test_demote_threshold) {
     ASSERT_TRUE(openClose(pool, name.c_str()));
   }
 
-  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
-  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+  EXPECT_LE(T::active_size(pool), demoteThreshold);
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
 
-  // first fileNum-demoteThreshold files are in idle
+  // first fileNum-demoteThreshold files are in inactive or idle
   for (size_t i = 0; i < fileNum - demoteThreshold; i++) {
     std::string name = "/f" + std::to_string(i);
-    EXPECT_TRUE(T::idle(pool, name));
-    EXPECT_FALSE(T::inuse(pool, name));
+    EXPECT_TRUE(T::inactive(pool, name) || T::idle(pool, name));
+    EXPECT_FALSE(T::active(pool, name));
   }
-  // last demoteThreshold files are in hot
+  // last demoteThreshold files are in active
   for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
     std::string name = "/f" + std::to_string(i);
-    EXPECT_TRUE(T::inuse(pool, name));
-    EXPECT_FALSE(T::idle(pool, name));
+    EXPECT_TRUE(T::active(pool, name));
+    EXPECT_FALSE(T::inactive(pool, name));
   }
-  // re-open /f0 — must promote to hot
+  // re-open /f0 — must promote to active
   ASSERT_TRUE(openClose(pool, "/f0"));
-  EXPECT_TRUE(T::inuse(pool, "/f0"));
-  EXPECT_FALSE(T::idle(pool, "/f0"));
+  EXPECT_TRUE(T::active(pool, "/f0"));
+  EXPECT_FALSE(T::inactive(pool, "/f0"));
 
-  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
-  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+  EXPECT_LE(T::active_size(pool), demoteThreshold);
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
 
   // random access
   for (size_t i = 0; i < 100; i++) {
@@ -794,16 +802,17 @@ TEST(CachePool, test_demote_threshold) {
     ASSERT_TRUE(openClose(pool, name.c_str()));
 
     if (rand() % 3 == 0) {
-      EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
+      EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
     }
   }
 }
 
-TEST(CachePool, evict_idle_file) {
-  std::string root = "/tmp/ease/cache/evict_idle_file/";
+TEST(CachePool, three_tier_cascade) {
+  std::string root = "/tmp/ease/cache/three_tier_cascade/";
   SetupTestDir(root);
-  const size_t demoteThreshold = 10;
-  const size_t fileNum = 100;
+  const size_t activeLimit = 5;
+  const size_t inactiveLimit = 10;
+  const size_t fileNum = 30;
 
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -816,46 +825,113 @@ TEST(CachePool, evict_idle_file) {
 
   auto pool = dynamic_cast<FileCachePool*>(cachePool);
   ASSERT_NE(nullptr, pool);
-  T::set_demote_threshold(pool, demoteThreshold);
+  T::set_demote_threshold(pool, activeLimit);
+  T::set_inactive_demote_threshold(pool, inactiveLimit);
 
+  // Open 30 files sequentially — forces cascade: active → inactive → idle
+  // Sleep between opens must exceed storeCacheTTLUsecs (1ms) so that each
+  // store expires before the next open, allowing demoteToInactive to run.
   for (size_t i = 0; i < fileNum; i++) {
-    photon::thread_usleep(100);
+    photon::thread_usleep(1500);
     std::string name = "/f" + std::to_string(i);
     ASSERT_TRUE(openClose(pool, name.c_str()));
   }
 
-  photon::thread_sleep(1);
+  // --- 1. Verify tier sizes ---
+  EXPECT_LE(T::active_size(pool), activeLimit);
+  EXPECT_LE(T::inactive_size(pool), inactiveLimit);
+  EXPECT_GT(T::idle_size(pool), 0u);
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
+
+  // Earliest files in idle, middle in inactive, latest in active
+  size_t expectedIdle = fileNum - activeLimit - inactiveLimit;
+  EXPECT_EQ(T::idle_size(pool), expectedIdle);
+  for (size_t i = 0; i < expectedIdle; i++) {
+    std::string name = "/f" + std::to_string(i);
+    EXPECT_TRUE(T::idle(pool, name)) << name << " should be in idle tier";
+  }
+  for (size_t i = expectedIdle; i < fileNum - activeLimit; i++) {
+    std::string name = "/f" + std::to_string(i);
+    EXPECT_TRUE(T::inactive(pool, name)) << name << " should be in inactive tier";
+  }
+  for (size_t i = fileNum - activeLimit; i < fileNum; i++) {
+    std::string name = "/f" + std::to_string(i);
+    EXPECT_TRUE(T::active(pool, name)) << name << " should be in active tier";
+  }
+
+  // --- 2. Promote from idle → active ---
   ASSERT_TRUE(T::idle(pool, "/f0"));
-  EXPECT_LE(T::inuse_size(pool), demoteThreshold);
-  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum);
-
-  ASSERT_EQ(0, pool->evict("/f0"));
+  ASSERT_TRUE(openClose(pool, "/f0"));
+  EXPECT_TRUE(T::active(pool, "/f0"));
   EXPECT_FALSE(T::idle(pool, "/f0"));
-  EXPECT_FALSE(T::inuse(pool, "/f0"));
-  EXPECT_EQ(T::inuse_size(pool), demoteThreshold);
-  EXPECT_EQ(T::inuse_size(pool) + T::idle_size(pool), fileNum - 1);
+  EXPECT_FALSE(T::inactive(pool, "/f0"));
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
 
-  std::vector<bool> evicted(fileNum, false);
-  evicted[0] = true;
-  for (size_t i = 0; i < 9; i++) {
-    int index = rand() % fileNum;
-    std::string name = "/f" + std::to_string(index);
-    while (evicted[index] || !T::idle(pool, name)) {
-      index = rand() % fileNum;
-      name = "/f" + std::to_string(index);
+  // --- 3. Promote from inactive → active ---
+  std::string inactiveName;
+  for (size_t i = 0; i < fileNum; i++) {
+    std::string name = "/f" + std::to_string(i);
+    if (T::inactive(pool, name)) { inactiveName = name; break; }
+  }
+  ASSERT_FALSE(inactiveName.empty());
+  ASSERT_TRUE(openClose(pool, inactiveName.c_str()));
+  EXPECT_TRUE(T::active(pool, inactiveName));
+  EXPECT_FALSE(T::inactive(pool, inactiveName));
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum);
+
+  // --- 4. Evict from idle ---
+  std::string idleName;
+  for (size_t i = 0; i < fileNum; i++) {
+    std::string name = "/f" + std::to_string(i);
+    if (T::idle(pool, name)) { idleName = name; break; }
+  }
+  ASSERT_FALSE(idleName.empty());
+  size_t idleBefore = T::idle_size(pool);
+  ASSERT_EQ(0, pool->evict(idleName));
+  EXPECT_FALSE(T::idle(pool, idleName));
+  EXPECT_FALSE(T::inactive(pool, idleName));
+  EXPECT_FALSE(T::active(pool, idleName));
+  EXPECT_EQ(T::idle_size(pool), idleBefore - 1);
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum - 1);
+
+  // --- 5. Evict from inactive ---
+  inactiveName.clear();
+  for (size_t i = 0; i < fileNum; i++) {
+    std::string name = "/f" + std::to_string(i);
+    if (T::inactive(pool, name)) { inactiveName = name; break; }
+  }
+  ASSERT_FALSE(inactiveName.empty());
+  size_t inactiveBefore = T::inactive_size(pool);
+  ASSERT_EQ(0, pool->evict(inactiveName));
+  EXPECT_FALSE(T::inactive(pool, inactiveName));
+  EXPECT_EQ(T::inactive_size(pool), inactiveBefore - 1);
+  EXPECT_EQ(T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool), fileNum - 2);
+
+  // --- 6. Random access preserves invariant ---
+  // Skip evicted files to avoid re-creating cache entries.
+  std::set<std::string> evicted;
+  evicted.insert(idleName);
+  evicted.insert(inactiveName);
+  size_t totalFiles = fileNum - evicted.size();
+  for (size_t i = 0; i < 200; i++) {
+    int r = rand() % fileNum;
+    std::string name = "/f" + std::to_string(r);
+    if (evicted.count(name)) continue;
+    openClose(pool, name.c_str());
+    if (i % 10 == 0) {
+      photon::thread_usleep(1500);
+      size_t total = T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool);
+      EXPECT_EQ(total, totalFiles);
     }
-    ASSERT_EQ(0, pool->evict(name));
-    evicted[index] = true;
-    EXPECT_FALSE(T::idle(pool, name));
-    EXPECT_EQ(T::idle_size(pool), fileNum - demoteThreshold - 2 - i);
   }
 }
 
-TEST(CachePool, evict_by_size_idle_first) {
-  std::string root = "/tmp/ease/cache/evict_by_size/";
+TEST(CachePool, evict_by_size_cold_first) {
+  std::string root = "/tmp/ease/cache/evict_by_size_cold_first/";
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
-  const size_t demoteThreshold = 5;
+  const size_t activeLimit = 5;
+  const size_t inactiveLimit = 10;
   const size_t fileNum = 40;
   const size_t fileSizeMB = 60;
   const size_t fileSizeBytes = fileSizeMB * 1024 * 1024;
@@ -871,13 +947,14 @@ TEST(CachePool, evict_by_size_idle_first) {
 
   auto pool = dynamic_cast<FileCachePool*>(cachePool);
   ASSERT_NE(nullptr, pool);
-  T::set_demote_threshold(pool, demoteThreshold);
+  T::set_demote_threshold(pool, activeLimit);
+  T::set_inactive_demote_threshold(pool, inactiveLimit);
 
   IOVector buffer(*cacheAllocator);
   buffer.push_back(fileSizeBytes);
 
   for (size_t i = 0; i < fileNum; i++) {
-    photon::thread_usleep(1000);
+    photon::thread_usleep(1500);
     std::string name = "/g" + std::to_string(i);
     auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
     ASSERT_NE(nullptr, store);
@@ -885,25 +962,33 @@ TEST(CachePool, evict_by_size_idle_first) {
     store->release();
   }
 
-  size_t remaining = T::inuse_size(pool) + T::idle_size(pool);
-  EXPECT_LT(remaining, fileNum);
-  EXPECT_LE(T::inuse_size(pool), (size_t)demoteThreshold);
+  // After writing 40 x 60MB = 2.4GB with 1GB capacity, eviction should have
+  // kicked in.  Cold tiers (idle first, then inactive) are evicted before active.
+  EXPECT_LE(T::active_size(pool), activeLimit);
+  size_t totalRemaining = T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool);
+  EXPECT_LT(totalRemaining, fileNum);
 
-  for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
+  // The most recent active files must survive eviction
+  for (size_t i = fileNum - activeLimit; i < fileNum; i++) {
     std::string name = "/g" + std::to_string(i);
-    EXPECT_TRUE(T::inuse(pool, name)) << name << " should still be in hot";
-    EXPECT_FALSE(T::idle(pool, name)) << name << " must not be in idle";
+    EXPECT_TRUE(T::active(pool, name)) << name << " should still be in active";
   }
 
-  // Write a new file to trigger eviction, the idle file should be evicted first
+  // Idle tier should be drained first — if any files remain in cold tiers,
+  // idle should have fewer or equal entries compared to inactive.
+  EXPECT_LE(T::idle_size(pool), T::inactive_size(pool));
+
+  // Write one more file to trigger another round of eviction
   std::string name = "/g" + std::to_string(fileNum);
   auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
   ASSERT_NE(nullptr, store);
   store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
   store->release();
-  for (size_t i = fileNum - demoteThreshold; i < fileNum; i++) {
+
+  // Active files must still survive after the extra eviction round
+  for (size_t i = fileNum - activeLimit; i < fileNum; i++) {
     std::string name = "/g" + std::to_string(i);
-    bool existed = T::inuse(pool, name) || T::idle(pool, name);
+    bool existed = T::active(pool, name) || T::inactive(pool, name);
     EXPECT_TRUE(existed) << name << " must still exist";
   }
 }
@@ -940,7 +1025,7 @@ TEST(CachePool, DISABLED_test_mem_usage) {
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t fileNum = 10'000'000;
-  const size_t inuse = 1'000'000;
+  const size_t activeNum = 100'000;
 
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -964,11 +1049,11 @@ TEST(CachePool, DISABLED_test_mem_usage) {
     store->release();
     if (i % 100'000 == 0) {
       LOG_INFO("Opened ` files. current: ` KiB.", i+1, get_physical_memory_KiB());
-      LOG_INFO("inuse size `, idle size `", T::inuse_size(pool), T::idle_size(pool));
+      LOG_INFO("active size `, inactive size `", T::active_size(pool), T::inactive_size(pool));
     }
   }
-  EXPECT_EQ(inuse, T::inuse_size(pool));
-  EXPECT_EQ(fileNum - inuse, T::idle_size(pool));
+  EXPECT_EQ(activeNum, T::active_size(pool));
+  EXPECT_EQ(fileNum - activeNum, T::inactive_size(pool) + T::idle_size(pool));
 
   photon::thread_sleep(10);
   malloc_trim(0);
@@ -986,6 +1071,7 @@ int main(int argc, char** argv) {
   log_output_level = ALOG_ERROR;
   // photon::vcpu_init();
   ::testing::InitGoogleTest(&argc, argv);
+  srand(time(nullptr));
 
   photon::init();
   DEFER(photon::fini());
