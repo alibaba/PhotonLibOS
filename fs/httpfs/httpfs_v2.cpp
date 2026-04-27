@@ -259,7 +259,6 @@ public:
 
 inline IFile* HttpFs_v2::open(const char* pathname, int flags) {
     if (!pathname) LOG_ERROR_RETURN(EINVAL, nullptr, "NULL is not allowed");
-    if (flags != O_RDONLY) return nullptr;
 
     if (pathname[0] == '/') ++pathname;
     estring_view fn(pathname), prefix;
