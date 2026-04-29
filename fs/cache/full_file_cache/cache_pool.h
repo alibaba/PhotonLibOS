@@ -157,9 +157,29 @@ protected:
     // Eviction/promote cascades iterate coldTiers_ in order.
     InactiveCacheTier inactiveTier_;
     IdleCacheTier idleTier_;
-    std::vector<ColdCacheTier*> coldTiers_ = {&inactiveTier_, &idleTier_};
-    std::vector<uint32_t> thresholds_ = {1'000'000, 1'000'000'000};
+    std::array<ColdCacheTier*, 2> coldTiers_ = {&inactiveTier_, &idleTier_};
 
+    // Adaptive threshold tuning.
+    struct AdaptiveThreshold {
+        uint32_t min;
+        uint32_t max;
+        uint32_t value;
+
+        AdaptiveThreshold(int min, int max)
+            : min(min), max(max), value(min) {}
+        
+        void adapt(double ratio) {
+            value = std::max(min, std::min(max, static_cast<uint32_t>(value * ratio)));
+        }
+    };
+    std::array<AdaptiveThreshold, 2> thresholds_ = 
+        {AdaptiveThreshold(1'000, 100'000), AdaptiveThreshold(100'000, 100'000'000)};
+
+    static constexpr uint64_t kPromotesPerAdapt = 10'000;
+    uint64_t promoteCount_ = 0;
+    std::array<uint64_t, 3> tierHits_{};
+
+    void adaptThresholds();
     void demoteToCold();
 
     void promoteToHot(std::string_view filename);

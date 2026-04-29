@@ -720,10 +720,12 @@ TEST(CachePool, open_same_file) {
 // Friend accessor — declared as friend in FileCachePool.
 struct FileCachePoolTest {
   static void set_demote_threshold(FileCachePool *p, uint32_t limit) {
-    p->thresholds_[0] = limit;
+    p->thresholds_[0].min = limit;
+    p->thresholds_[0].value = limit;
   }
   static void set_inactive_demote_threshold(FileCachePool *p, uint32_t limit) {
-    p->thresholds_[1] = limit;
+    p->thresholds_[1].min = limit;
+    p->thresholds_[1].value = limit;
   }
   static size_t active_size(FileCachePool *p) { return p->lru_.size(); }
   static size_t inactive_size(FileCachePool *p) { return p->inactiveTier_.size(); }

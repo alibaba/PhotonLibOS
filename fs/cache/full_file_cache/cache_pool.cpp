@@ -20,6 +20,7 @@ limitations under the License.
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <numeric>
 #include <sys/statvfs.h>
 
 #include "cache_store.h"
@@ -356,8 +357,25 @@ int FileCachePool::insertFile(std::string_view file) {
   return 0;
 }
 
+void FileCachePool::adaptThresholds() {
+  uint64_t count = std::accumulate(tierHits_.begin(), tierHits_.end(), 0ULL);
+  for (size_t i = 0; i + 1 < tierHits_.size(); i++) {
+    if (count > 0) {
+      double ratio = static_cast<double>(tierHits_[i]) / count;
+      // High ratio => this tier absorbs the bulk of hits, it has room to shrink.
+      // Low ratio => hits leak to colder tiers, grow it.
+      if (ratio > 0.90) thresholds_[i].adapt(0.80);
+      else if (ratio < 0.50) thresholds_[i].adapt(1.25);
+    }
+    count -= tierHits_[i];
+  }
+
+  promoteCount_ = 0;
+  tierHits_.fill(0);
+}
+
 void FileCachePool::demoteToCold() {
-  while (lru_.size() > thresholds_[0]) {
+  while (lru_.size() > thresholds_[0].value) {
     auto tailIt = lru_.back();
     if (tailIt->second->openCount != 0) break;
 
@@ -366,7 +384,7 @@ void FileCachePool::demoteToCold() {
     fileIndex_.erase(tailIt);
 
     for (size_t i = 1; i < coldTiers_.size(); i++) {
-      if (coldTiers_[i-1]->size() > thresholds_[i]) {
+      if (coldTiers_[i-1]->size() > thresholds_[i].value) {
         auto key = coldTiers_[i-1]->victim();
         coldTiers_[i]->insert(key);
         coldTiers_[i-1]->remove(key);
@@ -376,14 +394,25 @@ void FileCachePool::demoteToCold() {
 }
 
 void FileCachePool::promoteToHot(std::string_view filename) {
+  auto find = fileIndex_.find(filename);
+  if (find != fileIndex_.end()) {
+    tierHits_[0]++;
+    return;
+  }
+
   bool found = false;
-  for (auto* tier : coldTiers_) {
-    if (tier->contains(filename)) {
+  for (size_t i = 0; i < coldTiers_.size(); ++i) {
+    if (coldTiers_[i]->contains(filename)) {
+      tierHits_[i + 1]++;
       found = true;
-      tier->remove(filename);
+      coldTiers_[i]->remove(filename);
+      break;
     }
   }
   if (!found) return;
+
+  promoteCount_++;
+  if (promoteCount_ >= kPromotesPerAdapt) adaptThresholds();
 
   struct stat st = {};
   uint64_t fileSize = 0;
