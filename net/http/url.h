@@ -100,11 +100,13 @@ public:
     StoredURL() = default;
     StoredURL(std::string_view url) { from_string(url); }
     void from_string(std::string_view url) {
-        if (m_url) {
-            free((void*)m_url);
-        }
+        free((void*)m_url);
         auto u = strndup(url.data(), url.size());
         URL::from_string({u, url.size()});
+    }
+    void clear() {
+        free((void*)m_url);
+        m_url = nullptr;
     }
     ~StoredURL() {
         free((void*)m_url);

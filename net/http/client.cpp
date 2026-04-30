@@ -214,7 +214,9 @@ public:
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
         ISocketStream* s;
-        if (op->enable_proxy && !m_proxy_url.empty())
+        if (op->enable_proxy && !op->proxy_url.empty())
+            s = get_dialer().dial(op->proxy_url, tmo.timeout());
+        else if (op->enable_proxy && !m_proxy_url.empty())
             s = get_dialer().dial(m_proxy_url, tmo.timeout());
         else if (!op->uds_path.empty())
             s = get_dialer().dial(op->uds_path, tmo.timeout());
