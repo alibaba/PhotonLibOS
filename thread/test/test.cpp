@@ -1841,13 +1841,17 @@ static void* ws_basic(void* arg) {
 }
 
 TEST(WorkStealing, basic) {
-    bool running = true, stolen = false;
+    bool running = true, ready = false, stolen = false;
     std::thread vcpu([&](){
         vcpu_init(VCPU_ENABLE_ACTIVE_WORK_STEALING);
-        while(running)
+        while(running) {
+            ready = true;
             thread_usleep(1000);
+        }
         DEFER(vcpu_fini());
     });
+    while(!ready)
+        thread_usleep(1000);
     auto th = thread_create(&ws_basic, &stolen, 0, 0,
             THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
     thread_pause_work_stealing(true, th);
@@ -1855,7 +1859,10 @@ TEST(WorkStealing, basic) {
     EXPECT_FALSE(stolen);
 
     thread_pause_work_stealing(false, th);
-    ::usleep(1000 * 10);    // emulate a busy work of 10ms
+    for (int i = 0; i < 100; i++) {
+        if (stolen) break;
+        ::usleep(1000 * 10);    // emulate a busy work of 10ms
+    }
     EXPECT_TRUE(stolen);
 
     thread_join((join_handle*)th);
