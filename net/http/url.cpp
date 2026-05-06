@@ -50,9 +50,9 @@ bool URL::from_string(std::string_view url_) {
         if (protocol.icmp("http") == 0) { }
         else if (protocol.icmp("https") == 0) { m_port = 443; m_secure = true; }
         else LOG_ERROR_RETURN(EINVAL, false, "invalid protocol: ", protocol);
+        url.remove_prefix(p + 3);
     }
 
-    url.remove_prefix(p + 3);
     // hashtag should be dropped, since it is pure client-side mark
     url = url.substr(0, url.find_first_of('#'));
 

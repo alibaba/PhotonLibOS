@@ -712,6 +712,47 @@ TEST(url, path_fix) {
     EXPECT_EQ(u2.query(), "a=b");
 }
 
+TEST(url, no_scheme) {
+    // Relative paths
+    URL u0("/");
+    EXPECT_EQ(u0.path(), "/");
+    EXPECT_EQ(u0.target(), "/");
+
+    URL u1("/echo");
+    EXPECT_EQ(u1.path(), "/echo");
+    EXPECT_EQ(u1.target(), "/echo");
+    EXPECT_EQ(u1.host(), "");
+
+    URL u2("/path?query=1");
+    EXPECT_EQ(u2.path(), "/path");
+    EXPECT_EQ(u2.target(), "/path?query=1");
+    EXPECT_EQ(u2.query(), "query=1");
+    EXPECT_EQ(u2.host(), "");
+
+    // Bare hostnames (no scheme)
+    URL u3("example.com");
+    EXPECT_EQ(u3.host(), "example.com");
+    EXPECT_EQ(u3.port(), 80);
+    EXPECT_EQ(u3.path(), "/");
+
+    URL u4("example.com:8080");
+    EXPECT_EQ(u4.host(), "example.com");
+    EXPECT_EQ(u4.port(), 8080);
+    EXPECT_EQ(u4.path(), "/");
+
+    URL u5("example.com/path");
+    EXPECT_EQ(u5.host(), "example.com");
+    EXPECT_EQ(u5.path(), "/path");
+    EXPECT_EQ(u5.target(), "/path");
+
+    URL u6("example.com:8080/path?q=1");
+    EXPECT_EQ(u6.host(), "example.com");
+    EXPECT_EQ(u6.port(), 8080);
+    EXPECT_EQ(u6.path(), "/path");
+    EXPECT_EQ(u6.query(), "q=1");
+    EXPECT_EQ(u6.target(), "/path?q=1");
+}
+
 TEST(url, utils) {
     estring_view u1 = "http://www.taobao.com", u2 = "https://www.taobao.com";
     estring_view u3 = "HTTPS://www.taobao.com/", u4 = "www.taobao.com";
