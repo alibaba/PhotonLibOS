@@ -808,6 +808,240 @@ TEST(http_client, set_proxy_with_auth) {
     EXPECT_EQ(client->get_proxy()->port(), 8080);
 }
 
+// Verify that Operation::set_proxy/clear_proxy manage operation-level proxy state
+TEST(http_client, operation_set_clear_proxy) {
+    // Client without proxy
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op));
+
+    EXPECT_TRUE(op->get_proxy()->empty());
+    EXPECT_FALSE(op->enable_proxy);
+
+    // Operation::set_proxy should enable proxy at operation level
+    op->set_proxy("http://proxy1:8080");
+    EXPECT_FALSE(op->get_proxy()->empty());
+    EXPECT_EQ(op->get_proxy()->host(), "proxy1");
+    EXPECT_EQ(op->get_proxy()->port(), 8080);
+    EXPECT_TRUE(op->enable_proxy);
+
+    // clear_proxy should clear operation-level proxy but keep enable_proxy
+    op->clear_proxy();
+    EXPECT_TRUE(op->get_proxy()->empty());
+    EXPECT_TRUE(op->enable_proxy);
+}
+
+// Verify set_proxy/clear_proxy keep request line unchanged when enable_proxy is already true
+TEST(http_client, operation_set_clear_proxy_no_rebuild) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://default-proxy:8080");
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op));
+
+    // Client-level proxy is set, so enable_proxy is already true
+    EXPECT_TRUE(op->enable_proxy);
+    auto target_before = std::string(op->req.target());
+
+    // Set operation-level proxy; should not rebuild request line
+    op->set_proxy("http://op-proxy:9090");
+    EXPECT_EQ(op->req.target(), target_before);
+    EXPECT_FALSE(op->get_proxy()->empty());
+    EXPECT_EQ(op->get_proxy()->host(), "op-proxy");
+    EXPECT_EQ(op->get_proxy()->port(), 9090);
+
+    // Clear operation-level proxy; request line still unchanged
+    op->clear_proxy();
+    EXPECT_TRUE(op->get_proxy()->empty());
+    EXPECT_EQ(op->req.target(), target_before);
+    EXPECT_TRUE(op->enable_proxy);
+}
+
+// Verify set_proxy/clear_proxy rebuild request line between relative and absolute URI
+TEST(http_client, operation_set_proxy_rebuilds_request_line) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    // No client-level proxy
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path?query=1");
+    DEFER(client->destroy_operation(op));
+
+    // Before set_proxy: request line should be relative path
+    EXPECT_FALSE(op->enable_proxy);
+    EXPECT_EQ(op->req.target(), "/path?query=1");
+
+    // After set_proxy: request line should be absolute URI
+    op->set_proxy("http://myproxy:3128");
+    EXPECT_TRUE(op->enable_proxy);
+    EXPECT_EQ(op->req.target(), "http://example.com/path?query=1");
+
+    // After clear_proxy: enable_proxy still true (request line unchanged),
+    // but no proxy is configured
+    op->clear_proxy();
+    EXPECT_TRUE(op->enable_proxy);
+    EXPECT_EQ(op->req.target(), "http://example.com/path?query=1");
+    EXPECT_TRUE(op->get_proxy()->empty());
+}
+
+// E2E test: different operations use different proxies through the same client
+namespace {
+int op_proxy_director(void* src_, Request& src, Request& dst) {
+    auto source_server = (ISocketServer*)src_;
+    // src.target() may be absolute URI (via proxy) or relative path (direct)
+    // Parse it to extract the path portion for forwarding
+    URL src_url(src.target());
+    auto url = to_url(source_server, src_url.path());
+    dst.reset(src.verb(), url);
+    for (auto kv = src.headers.begin(); kv != src.headers.end(); kv++) {
+        if (kv.first() != "Host")
+            dst.headers.insert(kv.first(), kv.second(), 1);
+    }
+    return 0;
+}
+int op_proxy_modifier(void* ctx, Response& src, Response& dst) {
+    dst.set_result(src.status_code());
+    for (auto kv : src.headers) {
+        dst.headers.insert(kv.first, kv.second);
+    }
+    // Add X-Via header to identify which proxy handled the request
+    if (ctx) {
+        dst.headers.insert("X-Via", static_cast<const char*>(ctx));
+    }
+    return 0;
+}
+int op_proxy_echo_handler(void*, Request& req, Response& resp, std::string_view) {
+    // Verify the request path was correctly forwarded
+    EXPECT_EQ(req.target(), "/echo");
+    // Echo: read the request body and send it back as-is
+    auto body_len = req.headers.content_length();
+    resp.set_result(200);
+    resp.headers.content_length(body_len);
+    char buf[4096];
+    ssize_t n;
+    while ((n = req.read(buf, sizeof(buf))) > 0) {
+        resp.write(buf, n);
+    }
+    return 0;
+}
+} // anonymous namespace
+
+TEST(http_client, operation_level_proxy_e2e) {
+    //--------start source server ------------
+    auto source_server = new_tcp_socket_server();
+    source_server->timeout(1000UL*1000);
+    source_server->bind_v4localhost();
+    source_server->listen();
+    DEFER(delete source_server);
+    auto source_http_server = new_http_server();
+    DEFER(delete source_http_server);
+    source_http_server->add_handler({nullptr, &op_proxy_echo_handler});
+    source_server->set_handler(source_http_server->get_connection_handler());
+    source_server->start_loop();
+
+    photon::thread_sleep(1);
+
+    //--------start proxy server A ------------
+    auto proxy_client_a = new_http_client();
+    DEFER(delete proxy_client_a);
+    auto proxy_server_a_tcp = new_tcp_socket_server();
+    proxy_server_a_tcp->timeout(1000UL*1000);
+    proxy_server_a_tcp->bind_v4localhost();
+    proxy_server_a_tcp->listen();
+    DEFER(delete proxy_server_a_tcp);
+    auto proxy_server_a = new_http_server();
+    DEFER(delete proxy_server_a);
+    auto proxy_handler_a = new_proxy_handler(
+        {source_server, &op_proxy_director},
+        {(void*)"proxy-a", &op_proxy_modifier}, proxy_client_a);
+    proxy_server_a->add_handler(proxy_handler_a);
+    proxy_server_a_tcp->set_handler(proxy_server_a->get_connection_handler());
+    proxy_server_a_tcp->start_loop();
+
+    //--------start proxy server B ------------
+    auto proxy_client_b = new_http_client();
+    DEFER(delete proxy_client_b);
+    auto proxy_server_b_tcp = new_tcp_socket_server();
+    proxy_server_b_tcp->timeout(1000UL*1000);
+    proxy_server_b_tcp->bind_v4localhost();
+    proxy_server_b_tcp->listen();
+    DEFER(delete proxy_server_b_tcp);
+    auto proxy_server_b = new_http_server();
+    DEFER(delete proxy_server_b);
+    auto proxy_handler_b = new_proxy_handler(
+        {source_server, &op_proxy_director},
+        {(void*)"proxy-b", &op_proxy_modifier}, proxy_client_b);
+    proxy_server_b->add_handler(proxy_handler_b);
+    proxy_server_b_tcp->set_handler(proxy_server_b->get_connection_handler());
+    proxy_server_b_tcp->start_loop();
+
+    //--------client with no default proxy --------
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    // Operation 1: use proxy A
+    auto op1 = client->new_operation(Verb::POST, to_url(source_server, "/echo"));
+    DEFER(client->destroy_operation(op1));
+    op1->set_proxy(to_url(proxy_server_a_tcp, "/"));
+    std::string body1 = "1234567890";
+    op1->req.headers.content_length(body1.size());
+    auto writer1 = [&](Request* req) -> ssize_t {
+        return req->write(body1.data(), body1.size());
+    };
+    op1->body_writer = writer1;
+    int ret1 = op1->call();
+    EXPECT_EQ(0, ret1);
+    // Verify request went through proxy A
+    EXPECT_EQ(op1->resp.headers["X-Via"], "proxy-a");
+    // Verify echo body matches request body
+    char buf1[4096] = {};
+    ret1 = op1->resp.read(buf1, sizeof(buf1));
+    EXPECT_EQ(ret1, (ssize_t)body1.size());
+    EXPECT_EQ(std::string_view(buf1, ret1), body1);
+
+    // Operation 2: use proxy B
+    auto op2 = client->new_operation(Verb::POST, to_url(source_server, "/echo"));
+    DEFER(client->destroy_operation(op2));
+    op2->set_proxy(to_url(proxy_server_b_tcp, "/"));
+    std::string body2 = "abcdefghij";
+    op2->req.headers.content_length(body2.size());
+    auto writer2 = [&](Request* req) -> ssize_t {
+        return req->write(body2.data(), body2.size());
+    };
+    op2->body_writer = writer2;
+    int ret2 = op2->call();
+    EXPECT_EQ(0, ret2);
+    // Verify request went through proxy B
+    EXPECT_EQ(op2->resp.headers["X-Via"], "proxy-b");
+    // Verify echo body matches request body
+    char buf2[4096] = {};
+    ret2 = op2->resp.read(buf2, sizeof(buf2));
+    EXPECT_EQ(ret2, (ssize_t)body2.size());
+    EXPECT_EQ(std::string_view(buf2, ret2), body2);
+
+    // Operation 3: direct connection (no proxy)
+    auto op3 = client->new_operation(Verb::POST, to_url(source_server, "/echo"));
+    DEFER(client->destroy_operation(op3));
+    std::string body3 = "ABCDEFGHIJ";
+    op3->req.headers.content_length(body3.size());
+    auto writer3 = [&](Request* req) -> ssize_t {
+        return req->write(body3.data(), body3.size());
+    };
+    op3->body_writer = writer3;
+    int ret3 = op3->call();
+    EXPECT_EQ(0, ret3);
+    // Verify request went directly (no X-Via header)
+    EXPECT_TRUE(op3->resp.headers["X-Via"].empty());
+    EXPECT_EQ(200, op3->resp.status_code());
+    // Verify echo body matches request body
+    char buf3[4096] = {};
+    ret3 = op3->resp.read(buf3, sizeof(buf3));
+    EXPECT_EQ(ret3, (ssize_t)body3.size());
+    EXPECT_EQ(std::string_view(buf3, ret3), body3);
+}
+
 // Only for manual test
 // TEST(http_client, proxy) {
 //     auto client = new_http_client();

@@ -103,6 +103,10 @@ public:
         auto u = strndup(url.data(), url.size());
         return URL::from_string({u, url.size()});
     }
+    void clear() {
+        free((void*)m_url);
+        m_url = nullptr;
+    }
     ~StoredURL() {
         free((void*)m_url);
     }
