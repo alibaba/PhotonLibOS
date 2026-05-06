@@ -1349,6 +1349,72 @@ TEST(string_key, case_insensitive) {
     test_map_case_insensitive<map_string_kv_case_insensitive>();
 }
 
+template<typename S> static
+void basic_set_test(S& test_set) {
+    const auto& const_set = test_set;
+    std::string prefix = "seggwrg90if908234j5rlkmx.c,bnmi7890wer1234rbdfb";
+
+    for (int i = 0; i < 100; i++) {
+        std::string s = prefix + std::to_string(i);
+        test_set.insert(s);
+    }
+    EXPECT_EQ(test_set.size(), 100);
+
+    for (int i = 0; i < 100; i++) {
+        std::string s = prefix + std::to_string(i);
+        EXPECT_NE(test_set.find(s), test_set.end());
+        EXPECT_EQ(test_set.count(s), 1);
+        EXPECT_NE(const_set.find(s), const_set.end());
+        EXPECT_EQ(const_set.count(s), 1);
+    }
+    for (int i = 100; i < 200; i++) {
+        std::string s = prefix + std::to_string(i);
+        EXPECT_EQ(test_set.find(s), test_set.end());
+        EXPECT_EQ(test_set.count(s), 0);
+    }
+
+    test_set.erase(prefix + "50");
+    EXPECT_EQ(test_set.size(), 99);
+    EXPECT_EQ(test_set.count(prefix + "50"), 0);
+
+    test_set.clear();
+    EXPECT_EQ(test_set.size(), 0);
+}
+
+TEST(string_key, unordered_set_string_key) {
+    unordered_set_string_key<> test_set;
+    basic_set_test(test_set);
+}
+
+TEST(string_key, set_string_key) {
+    set_string_key<> test_set;
+    basic_set_test(test_set);
+
+    std::string prefix = "seggwrg90if908234j5rlkmx.c,bnmi7890wer1234rbdfb";
+    EXPECT_EQ(test_set.lower_bound(prefix + "2"), test_set.find(prefix + "2"));
+    EXPECT_EQ(test_set.lower_bound(prefix + "1"), test_set.find(prefix + "2"));
+    EXPECT_EQ(test_set.upper_bound(prefix + "22"), test_set.find(prefix + "23"));
+
+    const auto& const_set = test_set;
+    EXPECT_EQ(const_set.lower_bound(prefix + "2"), const_set.find(prefix + "2"));
+    EXPECT_EQ(const_set.upper_bound(prefix + "22"), const_set.find(prefix + "23"));
+}
+
+template<typename S> static
+void test_set_case_insensitive() {
+    S s;
+    s.insert("asdf");
+    auto it = s.find("ASDF");
+    EXPECT_NE(it, s.end());
+    EXPECT_EQ(*it, "asdf");
+    EXPECT_EQ(s.count("kuherqf"), 0);
+}
+
+TEST(string_key, set_case_insensitive) {
+    test_set_case_insensitive<unordered_set_string_key_case_insensitive<>>();
+    test_set_case_insensitive<set_string_key_case_insensitive<>>();
+}
+
 TEST(RangeLock, Basic) {
   RangeLock m;
 
