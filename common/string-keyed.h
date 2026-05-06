@@ -21,7 +21,9 @@ limitations under the License.
 #include <photon/common/hash_combine.h>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
+#include <set>
 
 // string_key is a string_view with dedicated storage,
 // primarily used as stored keys in std::map and std::unordered_map,
@@ -192,10 +194,8 @@ template<class T,
 using unordered_map_string_key_case_insensitive = basic_map_string_key<
     std::unordered_map<string_key, T, Hasher, KeyEqual, Alloc>>;
 
-template<class T,
-    class Pred = std::less<string_key>,
-    class Alloc = std::allocator<std::pair<const string_key,T>>>
-class map_string_key : public basic_map_string_key<
+template<class T, class Pred, class Alloc>
+class ordered_map_string_key : public basic_map_string_key<
     std::map<string_key, T, Pred, Alloc>>
 {
 public:
@@ -225,6 +225,11 @@ public:
     }
 };
 
+template<class T,
+    class Pred = std::less<string_key>,
+    class Alloc = std::allocator<std::pair<const string_key,T>>>
+using map_string_key = ordered_map_string_key<T, Pred, Alloc>;
+
 class Less_CaseInsensitive {
 public:
     bool operator()(std::string_view a, std::string_view b) const {
@@ -239,8 +244,125 @@ public:
 template<class T,
     class Pred = Less_CaseInsensitive,
     class Alloc = std::allocator<std::pair<const string_key,T>>>
-using map_string_key_case_insensitive = basic_map_string_key<
-    std::map<string_key, T, Pred, Alloc>>;
+using map_string_key_case_insensitive = ordered_map_string_key<
+    T, Pred, Alloc>;
+
+// The basic class for sets with string keys, aims to avoid temp
+// std::string construction in queries, by accepting string_views.
+// S is the underlying set, either std::set or std::unordered_set
+template <class S>
+class basic_set_string_key : public S
+{
+public:
+    using base = S;
+    using typename base::const_iterator;
+    using typename base::iterator;
+    using typename base::size_type;
+    using base::base;
+
+    using base::erase;
+
+    using key_type = std::string_view;
+    using value_type = string_key;
+
+    iterator find ( const key_type& k )
+    {
+        return base::find((const string_key&)k);
+    }
+    const_iterator find ( const key_type& k ) const
+    {
+        return base::find((const string_key&)k);
+    }
+    size_type count ( const key_type& k ) const
+    {
+        return base::count((const string_key&)k);
+    }
+    std::pair<iterator,iterator> equal_range ( const key_type& k )
+    {
+        return base::equal_range((const string_key&)k);
+    }
+    std::pair<const_iterator,const_iterator> equal_range ( const key_type& k ) const
+    {
+        return base::equal_range((const string_key&)k);
+    }
+    std::pair<iterator,bool> emplace ( const key_type& k )
+    {
+        return base::emplace((const string_key&)k);
+    }
+    template <class... Args>
+    std::pair<iterator,bool> emplace ( const key_type& k, Args&&... args )
+    {
+        return base::emplace((const string_key&)k, std::forward<Args>(args)...);
+    }
+    template <class... Args>
+    iterator emplace_hint ( const_iterator position, const key_type& k, Args&&... args )
+    {
+        return base::emplace_hint(position, (const string_key&)k, std::forward<Args>(args)...);
+    }
+    std::pair<iterator,bool> insert ( const key_type& k )
+    {
+        return emplace(k);
+    }
+    iterator insert ( const_iterator hint, const key_type& k )
+    {
+        return emplace_hint(hint, k);
+    }
+    size_type erase ( const std::string_view& k )
+    {
+        return base::erase((const string_key&)k);
+    }
+};
+
+template<class Hasher = std::hash<std::string_view>,
+    class KeyEqual = std::equal_to<std::string_view>,
+    class Alloc = std::allocator<string_key>>
+using unordered_set_string_key = basic_set_string_key<
+    std::unordered_set<string_key, Hasher, KeyEqual, Alloc>>;
+
+template<class Hasher = Hasher_CaseInsensitive,
+    class KeyEqual = Equal_CaseInsensitive,
+    class Alloc = std::allocator<string_key>>
+using unordered_set_string_key_case_insensitive = basic_set_string_key<
+    std::unordered_set<string_key, Hasher, KeyEqual, Alloc>>;
+
+// ordered set with string keys, provides lower_bound/upper_bound
+template <class S>
+class ordered_set_string_key : public basic_set_string_key<S>
+{
+public:
+    using base = basic_set_string_key<S>;
+    using typename base::key_type;
+    using typename base::const_iterator;
+    using typename base::iterator;
+    using base::base;
+
+    iterator lower_bound (const key_type& k)
+    {
+        return base::lower_bound((const string_key&)k);
+    }
+    const_iterator lower_bound (const key_type& k) const
+    {
+        return base::lower_bound((const string_key&)k);
+    }
+    iterator upper_bound (const key_type& k)
+    {
+        return base::upper_bound((const string_key&)k);
+    }
+    const_iterator upper_bound (const key_type& k) const
+    {
+        return base::upper_bound((const string_key&)k);
+    }
+};
+
+template<class Pred = std::less<string_key>,
+    class Alloc = std::allocator<string_key>>
+using set_string_key = ordered_set_string_key<
+    std::set<string_key, Pred, Alloc>>;
+
+template<class Pred = Less_CaseInsensitive,
+    class Alloc = std::allocator<string_key>>
+using set_string_key_case_insensitive = ordered_set_string_key<
+    std::set<string_key, Pred, Alloc>>;
 
 // the String Key-Value (Mutable), stored together
 // in a consecutive area, so as to save one allocation
