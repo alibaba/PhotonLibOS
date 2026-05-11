@@ -255,12 +255,20 @@ void FileCachePool::eviction() {
     evictByCache = totalUsed_ - waterMark_;
   }
 
-  auto actualEvict = static_cast<int64_t>(std::max(evictByCache, evictByDisk));
+  auto actualEvict = std::min(
+    static_cast<int64_t>(std::max(evictByCache, evictByDisk)),
+    totalUsed_
+  );
+
   if (actualEvict <= 0) {
     return;
   }
 
   isFull_ = true;
+
+  if (!lru_.empty() && !exit_) {
+    LOG_AUDIT("eviction", VALUE(actualEvict), VALUE(evictByCache), VALUE(evictByDisk), VALUE(totalUsed_));
+  }
 
   // Phase 1: evict from idle tier first.
   actualEvict -= evictIdleWhenFull(actualEvict);
