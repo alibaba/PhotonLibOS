@@ -241,6 +241,7 @@ public:
         estring_view find_part(const char* begin) const
         {
             auto end = &*str.end();
+            if (begin >= end) return {};
             auto& separator = get_sep_ref(sep);
 
             if (consecutive_merge)
