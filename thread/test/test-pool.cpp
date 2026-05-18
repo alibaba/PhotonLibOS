@@ -26,6 +26,7 @@ void *func1(void *)
     return nullptr;
 }
 
+
 TEST(ThreadPool, test)
 {
     ThreadPool<64> pool(DEFAULT_STACK_SIZE);
@@ -41,19 +42,19 @@ TEST(ThreadPool, test)
     // LOG_INFO("???????????????");
 }
 
-TEST(ThreadPool, migrate) {
+TEST(workpool, migrate) {
     WorkPool wp(4, 0, 0, -1);
-    ThreadPool<64> pool(DEFAULT_STACK_SIZE);
-    vector<TPControl*> ths;
+    vector<photon::thread*> ths;
     ths.resize(FLAGS_ths_total);
     for (int i = 0; i < FLAGS_ths_total; i++) {
-        ths[i] = pool.thread_create_ex(&::func1, nullptr, true);
-        wp.thread_migrate(ths[i]->th);
+        ths[i] = thread_create(&::func1, nullptr);
+        thread_enable_join(ths[i]);
+        wp.thread_migrate(ths[i]);
     }
     LOG_INFO("----------");
     for (int i = 0; i < FLAGS_ths_total; i++) {
-        LOG_DEBUG("wait thread: `", ths[i]->th);
-        pool.join(ths[i]);
+        LOG_DEBUG("wait thread: `", ths[i]);
+        thread_join((join_handle*)ths[i]);
     }
     LOG_INFO("???????????????");
 }
