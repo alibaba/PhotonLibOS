@@ -1,11 +1,11 @@
-name: macOS ARM
+name: macOS x86_64
 
 on:
   pull_request:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS14-arm:
+  macOS13-x86:
     runs-on: macos-15
 
     steps:
@@ -20,7 +20,7 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install openssl@3 gflags googletest gsasl
+          brew install openssl@3 gflags googletest gsasl nasm
 
       - name: Build
         run: |
