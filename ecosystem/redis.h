@@ -183,8 +183,16 @@ protected:
     size_t _sum(T x, const Ts&...xs) {
         return x + _sum(xs...);
     }
-    char* ibuf() { return _xbuf; }
-    char* obuf() { return _xbuf + _bufsize; }
+    // _xbuf is a GCC zero-length flex-array; the actual storage lives in the
+    // derived class __RedisClient<BUF_SIZE>::_buf. Under -D_FORTIFY_SOURCE>=1,
+    // __builtin_object_size(_xbuf, *) yields 0, causing libc fortified wrappers
+    // (__snprintf_chk / __memcpy_chk / __memmove_chk) to falsely report
+    // buffer overflow. Launder the returned pointer through an inline-asm
+    // "+r" constraint so the optimizer/FORTIFY can no longer associate it
+    // with the original [0]-sized array, eliminating both the compile-time
+    // -Wstringop-overflow warning and the runtime buffer-overflow abort.
+    char* ibuf() { char* p = _xbuf;            __asm__("" : "+r"(p)); return p; }
+    char* obuf() { char* p = _xbuf + _bufsize; __asm__("" : "+r"(p)); return p; }
     std::string_view __getstring(size_t length);
     std::string_view __getline();
 
