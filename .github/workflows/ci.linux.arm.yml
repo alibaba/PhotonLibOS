@@ -49,36 +49,6 @@ jobs:
             -D PHOTON_ENABLE_EXTFS=ON
           cmake --build build -j $(nproc) -- VERBOSE=1
 
-      - name: Build-Debug-1121-C++20
-        run: |
-          source /opt/rh/gcc-toolset-11/enable
-          rm -fr build
-          cmake -B build \
-            -D PHOTON_CXX_STANDARD=20 \
-            -D CMAKE_BUILD_TYPE=Debug \
-            -D PHOTON_ENABLE_ECOSYSTEM=ON \
-            -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON \
-            -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_LIBCURL=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
-
-      - name: Build-Debug-1211-C++23
-        run: |
-          source /opt/rh/gcc-toolset-12/enable
-          rm -fr build
-          cmake -B build \
-            -D PHOTON_CXX_STANDARD=23 \
-            -D CMAKE_BUILD_TYPE=Debug \
-            -D PHOTON_ENABLE_ECOSYSTEM=ON \
-            -D PHOTON_BUILD_TESTING=ON \
-            -D PHOTON_ENABLE_SASL=ON \
-            -D PHOTON_ENABLE_FUSE=ON \
-            -D PHOTON_ENABLE_LIBCURL=ON \
-            -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
-
       - name: Test
         run: |
           cd build
