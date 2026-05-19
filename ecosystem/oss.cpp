@@ -513,10 +513,8 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
       LOG_ERROR_RETURN(EINVAL, -1,
                        "unexpected response: missing required fields");
 
-    estring_view type_sv = type.has_value() ? static_cast<estring_view>(type) : estring_view();
-
     auto mtim = get_list_lastmodified(mtime);
-    auto r = cb({key, etag, type_sv, static_cast<size_t>(size), mtim,
+    auto r = cb({key, etag, type, static_cast<size_t>(size), mtim,
                  false /*not comm prefix*/});
     if (r < 0) return r;
   }
