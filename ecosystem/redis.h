@@ -183,16 +183,16 @@ protected:
     size_t _sum(T x, const Ts&...xs) {
         return x + _sum(xs...);
     }
-    // _xbuf is a GCC zero-length flex-array; the actual storage lives in the
-    // derived class __RedisClient<BUF_SIZE>::_buf. Under -D_FORTIFY_SOURCE>=1,
-    // __builtin_object_size(_xbuf, *) yields 0, causing libc fortified wrappers
-    // (__snprintf_chk / __memcpy_chk / __memmove_chk) to falsely report
-    // buffer overflow. Launder the returned pointer through an inline-asm
-    // "+r" constraint so the optimizer/FORTIFY can no longer associate it
-    // with the original [0]-sized array, eliminating both the compile-time
-    // -Wstringop-overflow warning and the runtime buffer-overflow abort.
-    char* ibuf() { char* p = _xbuf;            __asm__("" : "+r"(p)); return p; }
-    char* obuf() { char* p = _xbuf + _bufsize; __asm__("" : "+r"(p)); return p; }
+    // Pointer barrier: hide the source of `p` from the optimizer / FORTIFY,
+    // so that __builtin_object_size() cannot trace the returned pointer back
+    // to its original declaration. The empty inline-asm with a "+r" constraint
+    // forces the value to materialise in a register and severs the def-use
+    // chain. This is the only construct on GCC 15 that reliably defeats
+    // __builtin_object_size; a (char*)(uintptr_t) cast is NOT enough -- GCC
+    // 15's IPA-VRP sees through integer round-trips.
+    static char* _launder(char* p) { __asm__("" : "+r"(p)); return p; }
+    char* ibuf() { return _xbuf; }
+    char* obuf() { return _xbuf + _bufsize; }
     std::string_view __getstring(size_t length);
     std::string_view __getline();
 
@@ -226,7 +226,17 @@ public:
     }
     template<typename...Ts>
     std::string_view _snprintf(const char* fmt, const Ts&...args) {
-        auto buf = obuf() + _o;
+        // `_xbuf` is a GCC zero-length flex-array; the real storage lives in
+        // the derived class __RedisClient<BUF_SIZE>::_buf. Under
+        // -D_FORTIFY_SOURCE>=1, __builtin_object_size(_xbuf, *) evaluates to
+        // 0, so without _launder() the fortified __snprintf_chk wrapper
+        // would falsely diagnose buffer overflow at both compile time
+        // (-Wstringop-overflow / -Wformat-truncation) and run time
+        // (__chk_fail abort). Note: __refill()'s memmove and put()'s memcpy
+        // also touch the same _xbuf storage; GCC 15 currently does not flag
+        // them, so we leave them alone -- if a future toolchain regresses,
+        // wrap those call sites with _launder() too.
+        auto buf = _launder(obuf() + _o);
         auto size = _bufsize - _o;
         int ret = snprintf(buf, size - _o, fmt, args...);
         assert(0 <= ret && (uint32_t)ret <= size);
