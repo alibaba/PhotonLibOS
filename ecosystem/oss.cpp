@@ -509,7 +509,7 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
     auto type = NodeStrValue(child["Type"]);
 
     if (!key.has_value() || !size.has_value() || !mtime.has_value() ||
-        !etag.has_value() || !type.has_value())
+        !etag.has_value())
       LOG_ERROR_RETURN(EINVAL, -1,
                        "unexpected response: missing required fields");
 

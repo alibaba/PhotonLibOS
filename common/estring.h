@@ -87,8 +87,8 @@ public:
         bool _ownership;
     public:
         Extraction(std::string_view sv, bool strict = false) {
-            //for regular strings, sv[sv.size()] should be accessible
-            if (!strict && sv[sv.size()] == '\0') {
+            //for regular strings, sv.data()[sv.size()] should be accessible
+            if (!strict && sv.data()[sv.size()] == '\0') {
                 _s.reset((char*)sv.data());
                 _ownership = false;
             } else if (sv.size() < N) {
