@@ -50,6 +50,7 @@ limitations under the License.
 #include "subfs.h"
 #include <photon/io/aio-wrapper.h>
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>
 #include <photon/thread/thread.h>
 #ifdef PHOTON_URING
 #include <photon/io/iouring-wrapper.h>
@@ -601,7 +602,15 @@ namespace fs
         }
 
         int mkdir(const char* pathname, mode_t mode) override {
-            return iouring_mkdir(pathname, mode);
+            // IORING_OP_MKDIRAT was added in kernel 5.15; fall back on older kernels
+            static bool iouring_mkdir_supported = []{
+                int result;
+                return (kernel_version_compare("5.15", result) == 0 && result >= 0);
+            }();
+            if (iouring_mkdir_supported) {
+                return iouring_mkdir(pathname, mode);
+            }
+            return LocalFileSystemAdaptor::mkdir(pathname, mode);
         }
 #endif
     };
