@@ -20,10 +20,12 @@ limitations under the License.
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 #include <photon/common/utility.h>
 #include <photon/photon.h>
@@ -35,6 +37,7 @@ limitations under the License.
 #include <photon/fs/cache/cache.h>
 
 #include "../full_file_cache/cache_pool.h"
+#include "../full_file_cache/cache_store.h"
 #include "random_generator.h"
 
 namespace photon {
@@ -50,6 +53,29 @@ inline void SetupTestDir(const std::string& dir) {
   EXPECT_NE(-1, system(cmd.c_str()));
   cmd = std::string("mkdir -p ") + dir;
   EXPECT_NE(-1, system(cmd.c_str()));
+}
+
+// Returns true if /dev/shm has at least requiredBytes free; otherwise prints a
+// skip notice and returns false. gtest 1.8 has no GTEST_SKIP, so callers must
+// `return` on false.
+inline bool RequireShmAvailable(size_t requiredBytes) {
+  struct statvfs st;
+  if (::statvfs("/dev/shm", &st) != 0) {
+    fprintf(stderr, "  [ SKIPPED ] statvfs /dev/shm failed: %s\n",
+            strerror(errno));
+    return false;
+  }
+  size_t avail = static_cast<size_t>(st.f_bavail) * st.f_frsize;
+  if (avail < requiredBytes) {
+    size_t needMB = (requiredBytes + 1024 * 1024 - 1) / (1024 * 1024);
+    size_t haveMB = avail / (1024 * 1024);
+    fprintf(stderr,
+            "  [ SKIPPED ] /dev/shm needs %zu MB free, only %zu MB available. "
+            "Re-run container with --shm-size=%zum or larger.\n",
+            needMB, haveMB, needMB + 64);
+    return false;
+  }
+  return true;
 }
 
 void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
@@ -978,6 +1004,270 @@ TEST(CachePool, DISABLED_test_mem_usage) {
   LOG_INFO("Physical memory usage after: ` KiB.", after_mem_usage);
   auto diff = after_mem_usage - before_mem_usage;
   LOG_INFO("Physical memory usage diff: ` KiB.", diff);
+}
+
+TEST(CachePool, range_map_deterministic) {
+  // diskAvailInBytes_ = 128 MB + ~3 MB of writes; need headroom above the
+  // eviction threshold so eviction() never fires during the test.
+  if (!RequireShmAvailable(144ul * 1024 * 1024)) return;
+  std::string root = "/dev/shm/ease/cache/range_map_det/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t refillUnit = 1024 * 1024;
+  auto fileName = "/range_det_file";
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+  cacheStore->set_actual_size(200 * refillUnit);
+
+  // Trigger fiemap failure on tmpfs -> sets fiemapUnavailable_ = true
+  // and rebuildFilledRanges() via SEEK_DATA/SEEK_HOLE
+  auto initRes = cacheStore->queryRefillRange(0, 10 * refillUnit);
+  (void)initRes;
+  // Confirm we actually exercised the fallback path. Without this, a kernel
+  // where tmpfs supports fiemap would silently take the fast path and the rest
+  // of the test would pass without proving anything.
+  ASSERT_TRUE(static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable())
+      << "fiemap fallback was not triggered; this test cannot validate the new code path";
+
+  // Write [0, 1MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    EXPECT_EQ(ret, (ssize_t)refillUnit);
+  }
+  // Write [2MB, 3MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 2 * refillUnit, 0);
+    EXPECT_EQ(ret, (ssize_t)refillUnit);
+  }
+  // Write [5MB, 6MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 5 * refillUnit, 0);
+    EXPECT_EQ(ret, (ssize_t)refillUnit);
+  }
+
+  // queryRefillRange(0, 10MB): first hole is [1MB, 2MB)
+  auto r1 = cacheStore->queryRefillRange(0, 10 * refillUnit);
+  EXPECT_EQ(r1.first, (off_t)(1 * refillUnit));
+  EXPECT_EQ(r1.second, (size_t)(1 * refillUnit));
+
+  // queryRefillRange(2MB, 1MB): fully covered
+  auto r2 = cacheStore->queryRefillRange(2 * refillUnit, refillUnit);
+  EXPECT_EQ(r2.first, 0);
+  EXPECT_EQ(r2.second, 0UL);
+
+  // queryRefillRange(3MB, 3MB): first hole is [3MB, 5MB)
+  auto r3 = cacheStore->queryRefillRange(3 * refillUnit, 3 * refillUnit);
+  EXPECT_EQ(r3.first, (off_t)(3 * refillUnit));
+  EXPECT_EQ(r3.second, (size_t)(2 * refillUnit));
+
+  // queryRefillRange(5MB, 1MB): fully covered
+  auto r4 = cacheStore->queryRefillRange(5 * refillUnit, refillUnit);
+  EXPECT_EQ(r4.first, 0);
+  EXPECT_EQ(r4.second, 0UL);
+
+  // queryRefillRange(6MB, 4MB): all hole
+  auto r5 = cacheStore->queryRefillRange(6 * refillUnit, 4 * refillUnit);
+  EXPECT_EQ(r5.first, (off_t)(6 * refillUnit));
+  EXPECT_EQ(r5.second, (size_t)(4 * refillUnit));
+
+  cacheStore->release();
+}
+
+TEST(CachePool, range_map_random) {
+  // diskAvailInBytes_ = 128 MB + up to 100 MB of writes (totalBlocks * refillUnit);
+  // shm needs to stay above 128 MB free throughout to avoid triggering eviction.
+  if (!RequireShmAvailable(240ul * 1024 * 1024)) return;
+  std::string root = "/dev/shm/ease/cache/range_map_rand/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t refillUnit = 1024 * 1024;
+  const size_t totalBlocks = 100;
+  auto fileName = "/range_rand_file";
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+  cacheStore->set_actual_size(totalBlocks * refillUnit);
+
+  // Trigger fiemap failure -> map mode
+  auto initRes = cacheStore->queryRefillRange(0, refillUnit);
+  (void)initRes;
+  ASSERT_TRUE(static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable())
+      << "fiemap fallback was not triggered";
+
+  // Track which blocks are filled (by refillUnit granularity)
+  std::vector<bool> filled(totalBlocks, false);
+  srand(42);
+
+  // Helper: find first hole in [startBlock, startBlock+count)
+  auto findFirstHole = [&](size_t startBlock, size_t count) -> std::pair<off_t, size_t> {
+    size_t endBlock = startBlock + count;
+    if (endBlock > totalBlocks) endBlock = totalBlocks;
+    // Find first unfilled block in range
+    size_t holeStart = endBlock; // sentinel: no hole
+    for (size_t b = startBlock; b < endBlock; b++) {
+      if (!filled[b]) {
+        holeStart = b;
+        break;
+      }
+    }
+    if (holeStart == endBlock) {
+      return {0, 0}; // fully covered
+    }
+    // Find end of contiguous hole
+    size_t holeEnd = holeStart;
+    for (size_t b = holeStart; b < endBlock; b++) {
+      if (filled[b]) break;
+      holeEnd = b + 1;
+    }
+    return {(off_t)(holeStart * refillUnit), (size_t)((holeEnd - holeStart) * refillUnit)};
+  };
+
+  for (int iter = 0; iter < 80; iter++) {
+    LOG_INFO("Iter `", iter);
+    // Pick a random unfilled block to write
+    std::vector<size_t> unfilled;
+    for (size_t b = 0; b < totalBlocks; b++) {
+      if (!filled[b]) unfilled.push_back(b);
+    }
+    if (unfilled.empty()) break;
+
+    // Pick start from unfilled blocks
+    size_t startIdx = rand() % unfilled.size();
+    size_t startBlock = unfilled[startIdx];
+    size_t writeCount = 1 + rand() % 3;
+    if (startBlock + writeCount > totalBlocks)
+      writeCount = totalBlocks - startBlock;
+
+    // Write writeCount blocks starting at startBlock
+    for (size_t w = 0; w < writeCount; w++) {
+      LOG_INFO("writeCount `", w);
+      size_t blk = startBlock + w;
+      if (blk >= totalBlocks) break;
+      if (!filled[blk]) {
+        IOVector buffer(*cacheAllocator);
+        buffer.push_back(refillUnit);
+        auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(),
+                                           blk * refillUnit, 0);
+        EXPECT_EQ(ret, (ssize_t)refillUnit);
+        filled[blk] = true;
+      }
+    }
+
+    // Random query and verify
+    size_t qStart = rand() % totalBlocks;
+    size_t qCount = 1 + rand() % 10;
+    if (qStart + qCount > totalBlocks) qCount = totalBlocks - qStart;
+
+    auto expected = findFirstHole(qStart, qCount);
+    auto actual = cacheStore->queryRefillRange(qStart * refillUnit, qCount * refillUnit);
+    EXPECT_EQ(actual.first, expected.first)
+        << "iter=" << iter << " qStart=" << qStart << " qCount=" << qCount;
+    EXPECT_EQ(actual.second, expected.second)
+        << "iter=" << iter << " qStart=" << qStart << " qCount=" << qCount;
+  }
+
+  cacheStore->release();
+}
+
+TEST(CachePool, range_map_evict_while_open) {
+  // diskAvailInBytes_ = 128 MB + ~4 MB peak writes.
+  if (!RequireShmAvailable(144ul * 1024 * 1024)) return;
+  std::string root = "/dev/shm/ease/cache/range_map_evict/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t refillUnit = 1024 * 1024;
+  auto fileName = "/range_evict_file";
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+  cacheStore->set_actual_size(20 * refillUnit);
+
+  // Write [0, 1MB) and [1MB, 2MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(2 * refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    EXPECT_EQ(ret, (ssize_t)(2 * refillUnit));
+  }
+
+  // Trigger fiemap failure -> map mode + rebuild
+  auto initRes = cacheStore->queryRefillRange(0, 5 * refillUnit);
+  (void)initRes;
+  ASSERT_TRUE(static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable())
+      << "fiemap fallback was not triggered";
+
+  // Write more: [3MB, 4MB), [4MB, 5MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(2 * refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 3 * refillUnit, 0);
+    EXPECT_EQ(ret, (ssize_t)(2 * refillUnit));
+  }
+
+  // Verify: queryRefillRange(0, 5MB) -> first hole is [2MB, 3MB)
+  auto r1 = cacheStore->queryRefillRange(0, 5 * refillUnit);
+  EXPECT_EQ(r1.first, (off_t)(2 * refillUnit));
+  EXPECT_EQ(r1.second, (size_t)(1 * refillUnit));
+
+  // Verify: queryRefillRange(3MB, 2MB) -> fully covered
+  auto r2 = cacheStore->queryRefillRange(3 * refillUnit, 2 * refillUnit);
+  EXPECT_EQ(r2.first, 0);
+  EXPECT_EQ(r2.second, 0UL);
+
+  // Evict without releasing cacheStore
+  EXPECT_EQ(0, cachePool->evict(fileName));
+
+  // After eviction: all ranges should be holes
+  auto r3 = cacheStore->queryRefillRange(0, 5 * refillUnit);
+  EXPECT_EQ(r3.first, (off_t)0);
+  EXPECT_EQ(r3.second, (size_t)(5 * refillUnit));
+
+  // Re-write [1MB, 2MB)
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 1 * refillUnit, 0);
+    EXPECT_EQ(ret, (ssize_t)refillUnit);
+  }
+
+  // Verify: queryRefillRange(0, 5MB) -> first hole is [0, 1MB)
+  auto r4 = cacheStore->queryRefillRange(0, 5 * refillUnit);
+  EXPECT_EQ(r4.first, (off_t)0);
+  EXPECT_EQ(r4.second, (size_t)(1 * refillUnit));
+
+  // Verify: queryRefillRange(1MB, 1MB) -> fully covered
+  auto r5 = cacheStore->queryRefillRange(1 * refillUnit, refillUnit);
+  EXPECT_EQ(r5.first, 0);
+  EXPECT_EQ(r5.second, 0UL);
+
+  // Verify: queryRefillRange(2MB, 3MB) -> [2MB, 5MB) all hole
+  auto r6 = cacheStore->queryRefillRange(2 * refillUnit, 3 * refillUnit);
+  EXPECT_EQ(r6.first, (off_t)(2 * refillUnit));
+  EXPECT_EQ(r6.second, (size_t)(3 * refillUnit));
+
+  cacheStore->release();
 }
 
 }

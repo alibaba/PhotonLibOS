@@ -16,6 +16,7 @@ limitations under the License.
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -78,6 +79,11 @@ public:
     void updateLru(FileNameMap::iterator iter);
     uint64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
 
+    // True if the media filesystem supports fiemap. Decided once at Init()
+    // time by probing an anonymous file. When false, FileCacheStore tracks
+    // filled ranges in memory from the start instead of relying on fiemap.
+    bool fiemapSupported() const { return fiemapSupported_.load(); }
+
 protected:
     //  pathname must begin with '/'
     photon::fs::ICacheStore *do_open(std::string_view pathname, int flags, mode_t mode) override;
@@ -101,6 +107,9 @@ protected:
     bool exit_;
 
     bool isFull_;
+
+    std::atomic<bool> fiemapSupported_{true};
+    void probeFiemap();
 
     virtual bool afterFtrucate(FileNameMap::iterator iter);
 

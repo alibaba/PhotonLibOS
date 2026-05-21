@@ -17,9 +17,12 @@ limitations under the License.
 #pragma once
 
 #include <stddef.h>
+#include <atomic>
 #include <string>
 #include <photon/common/range-lock.h>
+#include <photon/thread/thread.h>
 #include "cache_pool.h"
+#include "range_module.h"
 
 namespace photon {
 namespace fs {
@@ -49,6 +52,8 @@ public:
 
     photon::rwlock &rw_lock() { return rw_lock_; }
 
+    bool isFiemapUnavailable() const { return !fiemapSupported_; }
+
 protected:
     bool cacheIsFull();
 
@@ -72,9 +77,17 @@ protected:
     FileIterator iterator_;
     RangeLock rangeLock_;
 
+    const bool fiemapSupported_ = true;
+    RangeModule filledRanges_;
+
     photon::rwlock rw_lock_;
 
     ssize_t do_pwritev(const struct iovec *iov, int iovcnt, off_t offset);
+
+    void addFilledRange(off_t offset, size_t size);
+    void removeFilledRange(off_t offset, size_t count);
+    std::pair<off_t, size_t> queryRefillRangeByMap(off_t offset, size_t size);
+    void rebuildFilledRanges();
 };
 
 }

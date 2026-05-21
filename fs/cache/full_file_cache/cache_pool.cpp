@@ -27,6 +27,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
 #include <photon/common/utility.h>
+#include <photon/fs/fiemap.h>
 #include <photon/fs/path.h>
 
 namespace photon {
@@ -70,7 +71,28 @@ FileCachePool::~FileCachePool() {
 
 void FileCachePool::Init() {
   traverseDir("/");
+  probeFiemap();
   timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+}
+
+void FileCachePool::probeFiemap() {
+  auto probe = mediaFs_->open("/", O_TMPFILE | O_RDWR, 0600);
+  if (!probe) {
+    LOG_ERRNO_RETURN(0, void(), "failed to create temp fiemap probe file");
+  }
+  DEFER(delete probe);
+
+  fiemap_t<1> fie(0, 1);
+  fie.fm_mapped_extents = 0;
+  if (probe->fiemap(&fie) != 0) {
+    ERRNO e;
+    if (e.no == EOPNOTSUPP) {
+      fiemapSupported_.store(false);
+      LOG_INFO("media FS does not support fiemap, using range tracking");
+    } else {
+      LOG_ERRNO_RETURN(0, void(), "fiemap probe failed with unexpected error");
+    }
+  }
 }
 
 ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t mode) {
@@ -161,7 +183,7 @@ int FileCachePool::evict(std::string_view filename) {
     auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-    err = mediaFs_->truncate(filePath.data(), 0);
+    err = cacheStore->evict(0);
     lruEntry->truncate_done = false;
   }
   if (err) {
@@ -288,7 +310,7 @@ void FileCachePool::eviction() {
       auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
       DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-      err = mediaFs_->truncate(fileName.data(), 0);
+      err = cacheStore->evict(0);
       lruEntry->truncate_done = false;
     }
 
