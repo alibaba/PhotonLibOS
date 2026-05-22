@@ -216,7 +216,11 @@ bool FileCacheStore::cacheIsFull() {
 }
 
 std::pair<off_t, size_t> FileCacheStore::queryRefillRangeByMap(off_t offset, size_t size) {
-  auto hole = filledRanges_.queryFirstHole(offset, offset + size);
+  std::pair<off_t, off_t> hole;
+  {
+    SCOPED_LOCK(filledRangesLock_);
+    hole = filledRanges_.queryFirstHole(offset, offset + size);
+  }
   if (hole.first == 0 && hole.second == 0) return {0, 0};
   auto left = align_down(hole.first, refillUnit_);
   auto right = align_up(hole.second, refillUnit_);
@@ -225,10 +229,12 @@ std::pair<off_t, size_t> FileCacheStore::queryRefillRangeByMap(off_t offset, siz
 
 void FileCacheStore::addFilledRange(off_t offset, size_t size) {
   if (size == 0) return;
+  SCOPED_LOCK(filledRangesLock_);
   filledRanges_.addRange(offset, offset + size);
 }
 
 void FileCacheStore::removeFilledRange(off_t offset, size_t count) {
+  SCOPED_LOCK(filledRangesLock_);
   if (count == static_cast<size_t>(-1)) {
     filledRanges_.removeFrom(offset);
   } else {
@@ -237,7 +243,12 @@ void FileCacheStore::removeFilledRange(off_t offset, size_t count) {
 }
 
 void FileCacheStore::rebuildFilledRanges() {
-  filledRanges_.clear();
+  // Note: we only hold filledRangesLock_ around the in-memory map mutations. 
+  // addFilledRange already takes the lock internally.
+  {
+    SCOPED_LOCK(filledRangesLock_);
+    filledRanges_.clear();
+  }
   off_t pos = 0;
   while (true) {
     off_t dataStart = localFile_->lseek(pos, SEEK_DATA);
@@ -253,7 +264,7 @@ void FileCacheStore::rebuildFilledRanges() {
     if (holeStart < 0) {
       LOG_ERRNO_RETURN(0, void(), "SEEK_HOLE failed during range rebuild.");
     }
-    filledRanges_.addRange(dataStart, holeStart);
+    addFilledRange(dataStart, holeStart - dataStart);
     pos = holeStart;
   }
 }

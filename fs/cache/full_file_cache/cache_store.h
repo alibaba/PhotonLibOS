@@ -79,6 +79,8 @@ protected:
 
     const bool fiemapSupported_ = true;
     RangeModule filledRanges_;
+    // Guards filledRanges_. Held only across in-memory std::map ops.
+    photon::spinlock filledRangesLock_;
 
     photon::rwlock rw_lock_;
 

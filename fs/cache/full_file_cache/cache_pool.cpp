@@ -78,7 +78,11 @@ void FileCachePool::Init() {
 void FileCachePool::probeFiemap() {
   auto probe = mediaFs_->open("/", O_TMPFILE | O_RDWR, 0600);
   if (!probe) {
-    LOG_ERRNO_RETURN(0, void(), "failed to create temp fiemap probe file");
+    ERRNO e;
+    fiemapSupported_.store(false);
+    LOG_INFO("O_TMPFILE probe failed (errno=`), assuming fiemap unsupported and "
+             "using range tracking", e.no);
+    return;
   }
   DEFER(delete probe);
 

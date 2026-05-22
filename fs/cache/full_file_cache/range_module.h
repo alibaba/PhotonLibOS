@@ -17,8 +17,10 @@ limitations under the License.
 #pragma once
 
 #include <sys/types.h>
-#include <map>
 #include <algorithm>
+#include <iterator>
+#include <map>
+#include <utility>
 
 namespace photon {
 namespace fs {
