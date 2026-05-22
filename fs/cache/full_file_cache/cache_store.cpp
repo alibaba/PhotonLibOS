@@ -243,14 +243,18 @@ void FileCacheStore::removeFilledRange(off_t offset, size_t count) {
 }
 
 void FileCacheStore::rebuildFilledRanges() {
-  // Note: we only hold filledRangesLock_ around the in-memory map mutations. 
+  // Note: we only hold filledRangesLock_ around the in-memory map mutations.
   // addFilledRange already takes the lock internally.
   {
     SCOPED_LOCK(filledRangesLock_);
     filledRanges_.clear();
   }
+  // Skip rebuild on empty/new files.
+  struct stat st = {};
+  if (localFile_->fstat(&st) != 0 || st.st_size == 0) return;
+
   off_t pos = 0;
-  while (true) {
+  while (pos < st.st_size) {
     off_t dataStart = localFile_->lseek(pos, SEEK_DATA);
     if (dataStart < 0) {
       ERRNO e;
