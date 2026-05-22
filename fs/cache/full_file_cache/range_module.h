@@ -103,25 +103,33 @@ class RangeModule {
     intervals.clear();
   }
 
-  // Find the first hole in [left, right). Returns {holeStart, holeEnd}.
-  // Returns {0, 0} when there is no hole in [left, right) (including when
-  // left >= right). Because adjacent intervals are merged on insert, every
-  // real hole has holeStart < holeEnd, so {0, 0} is unambiguous as "no hole".
-  std::pair<off_t, off_t> queryFirstHole(off_t left, off_t right) {
-    off_t holeStart = left;
+  // Compute the outer refill region needed to fully cover [left, right):
+  // trim from the left edge if [left, ...) is already inside a filled interval,
+  // trim from the right edge if (..., right) is already inside a filled interval,
+  // and otherwise return [left, right) as-is — interior gaps are ignored so the
+  // caller refills the whole region in one shot (matches fiemap-path semantics).
+  // Returns {0, 0} when [left, right) is fully covered or empty.
+  std::pair<off_t, off_t> queryRefillRange(off_t left, off_t right) {
+    if (left >= right) return {0, 0};
+    off_t outLeft = left;
+    off_t outRight = right;
     auto it = intervals.upper_bound(left);
     if (it != intervals.begin()) {
       auto prev = std::prev(it);
       if (prev->second > left) {
-        holeStart = prev->second;
+        outLeft = prev->second;
       }
     }
-    if (holeStart >= right) return {0, 0};
-    off_t holeEnd = right;
-    if (it != intervals.end() && it->first < right) {
-      holeEnd = it->first;
+    if (outLeft >= outRight) return {0, 0};
+    auto rit = intervals.lower_bound(outRight);
+    if (rit != intervals.begin()) {
+      auto prev = std::prev(rit);
+      if (prev->second >= outRight && prev->first > outLeft) {
+        outRight = prev->first;
+      }
     }
-    return {holeStart, holeEnd};
+    if (outLeft >= outRight) return {0, 0};
+    return {outLeft, outRight};
   }
 
   // Remove all intervals from offset onwards (truncate semantics).

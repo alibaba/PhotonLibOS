@@ -1063,10 +1063,12 @@ TEST(CachePool, range_map_deterministic) {
     EXPECT_EQ(ret, (ssize_t)refillUnit);
   }
 
-  // queryRefillRange(0, 10MB): first hole is [1MB, 2MB)
+  // queryRefillRange(0, 10MB): outer refill region is [1MB, 10MB);
+  // [0,1MB) is filled so left edge is trimmed, right edge is past last data,
+  // interior gaps are ignored to match fiemap-path semantics.
   auto r1 = cacheStore->queryRefillRange(0, 10 * refillUnit);
   EXPECT_EQ(r1.first, (off_t)(1 * refillUnit));
-  EXPECT_EQ(r1.second, (size_t)(1 * refillUnit));
+  EXPECT_EQ(r1.second, (size_t)(9 * refillUnit));
 
   // queryRefillRange(2MB, 1MB): fully covered
   auto r2 = cacheStore->queryRefillRange(2 * refillUnit, refillUnit);
@@ -1126,28 +1128,19 @@ TEST(CachePool, range_map_random) {
   std::vector<bool> filled(totalBlocks, false);
   std::mt19937 rng(42);
 
-  // Helper: find first hole in [startBlock, startBlock+count)
-  auto findFirstHole = [&](size_t startBlock, size_t count) -> std::pair<off_t, size_t> {
+  // Helper: compute outer refill region for [startBlock, startBlock+count).
+  // Matches fiemap-path semantics: trim filled prefix from the left edge and
+  // filled suffix from the right edge; interior gaps are ignored.
+  auto findRefillRange = [&](size_t startBlock, size_t count) -> std::pair<off_t, size_t> {
     size_t endBlock = startBlock + count;
     if (endBlock > totalBlocks) endBlock = totalBlocks;
-    // Find first unfilled block in range
-    size_t holeStart = endBlock; // sentinel: no hole
-    for (size_t b = startBlock; b < endBlock; b++) {
-      if (!filled[b]) {
-        holeStart = b;
-        break;
-      }
-    }
-    if (holeStart == endBlock) {
-      return {0, 0}; // fully covered
-    }
-    // Find end of contiguous hole
-    size_t holeEnd = holeStart;
-    for (size_t b = holeStart; b < endBlock; b++) {
-      if (filled[b]) break;
-      holeEnd = b + 1;
-    }
-    return {(off_t)(holeStart * refillUnit), (size_t)((holeEnd - holeStart) * refillUnit)};
+    if (startBlock >= endBlock) return {0, 0};
+    size_t outLeft = startBlock;
+    size_t outRight = endBlock;
+    while (outLeft < outRight && filled[outLeft]) outLeft++;
+    while (outRight > outLeft && filled[outRight - 1]) outRight--;
+    if (outLeft >= outRight) return {0, 0};
+    return {(off_t)(outLeft * refillUnit), (size_t)((outRight - outLeft) * refillUnit)};
   };
 
   for (int iter = 0; iter < 80; iter++) {
@@ -1186,7 +1179,7 @@ TEST(CachePool, range_map_random) {
     size_t qCount = 1 + rng() % 10;
     if (qStart + qCount > totalBlocks) qCount = totalBlocks - qStart;
 
-    auto expected = findFirstHole(qStart, qCount);
+    auto expected = findRefillRange(qStart, qCount);
     auto actual = cacheStore->queryRefillRange(qStart * refillUnit, qCount * refillUnit);
     EXPECT_EQ(actual.first, expected.first)
         << "iter=" << iter << " qStart=" << qStart << " qCount=" << qCount;
@@ -1268,10 +1261,11 @@ TEST(CachePool, range_map_evict_while_open) {
     EXPECT_EQ(ret, (ssize_t)refillUnit);
   }
 
-  // Verify: queryRefillRange(0, 5MB) -> first hole is [0, 1MB)
+  // Verify: queryRefillRange(0, 5MB) -> outer refill region is [0, 5MB);
+  // [1MB, 2MB) is in the middle and is ignored under fiemap-path semantics.
   auto r4 = cacheStore->queryRefillRange(0, 5 * refillUnit);
   EXPECT_EQ(r4.first, (off_t)0);
-  EXPECT_EQ(r4.second, (size_t)(1 * refillUnit));
+  EXPECT_EQ(r4.second, (size_t)(5 * refillUnit));
 
   // Verify: queryRefillRange(1MB, 1MB) -> fully covered
   auto r5 = cacheStore->queryRefillRange(1 * refillUnit, refillUnit);

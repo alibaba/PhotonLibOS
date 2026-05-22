@@ -219,7 +219,7 @@ std::pair<off_t, size_t> FileCacheStore::queryRefillRangeByMap(off_t offset, siz
   std::pair<off_t, off_t> hole;
   {
     SCOPED_LOCK(filledRangesLock_);
-    hole = filledRanges_.queryFirstHole(offset, offset + size);
+    hole = filledRanges_.queryRefillRange(offset, offset + size);
   }
   if (hole.first == 0 && hole.second == 0) return {0, 0};
   auto left = align_down(hole.first, refillUnit_);
