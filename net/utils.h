@@ -57,7 +57,7 @@ IPAddr gethostbypeer(std::string_view name);
 
 // Callback returns -1 means break
 
-int _gethostbyname(std::string_view name, Callback<IPAddr> append_op);
+int _gethostbyname(std::string_view name, TempDelegate<int, IPAddr> append_op);
 
 // inline implemention for compatible
 
@@ -71,11 +71,7 @@ int _gethostbyname(std::string_view name, Callback<IPAddr> append_op);
  */
 inline IPAddr gethostbyname(std::string_view name) {
     IPAddr ret;
-    auto cb = [&](IPAddr addr) {
-        ret = addr;
-        return -1;
-    };
-    _gethostbyname(name, cb);
+    _gethostbyname(name, [&](IPAddr addr) { ret = addr; return -1; });
     return ret;
 }
 
@@ -92,12 +88,11 @@ inline IPAddr gethostbyname(std::string_view name) {
  */
 inline int gethostbyname(std::string_view name, IPAddr* buf, size_t bufsize = 1) {
     size_t i = 0;
-    auto cb = [&](IPAddr addr) {
+    return _gethostbyname(name, [&](IPAddr addr) {
         if (i >= bufsize) return -1;
         buf[i++] = addr;
         return 0;
-    };
-    return _gethostbyname(name, cb);
+    });
 }
 
 /**
@@ -112,11 +107,7 @@ inline int gethostbyname(std::string_view name, IPAddr* buf, size_t bufsize = 1)
  */
 inline int gethostbyname(std::string_view name, std::vector<IPAddr>& ret) {
     ret.clear();
-    auto cb = [&](IPAddr addr) {
-        ret.push_back(addr);
-        return 0;
-    };
-    return _gethostbyname(name, cb);
+    return _gethostbyname(name, [&](IPAddr addr) { ret.push_back(addr); return 0; });
 }
 
 /**
@@ -157,7 +148,7 @@ public:
     // When failed, return an Undefined IPAddr
     // Normally dns servers return multiple ips in random order, choosing the first one should suffice.
     virtual IPAddr resolve(std::string_view host) = 0;
-    void resolve(std::string_view host, Delegate<void, IPAddr> func) { func(resolve(host)); }
+    void resolve(std::string_view host, TempDelegate<void, IPAddr> func) { func(resolve(host)); }
     // If filter callback returns false, the IP will be abandoned.
     virtual IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr> filter) = 0;
     // Discard cache of a hostname, ip can be specified

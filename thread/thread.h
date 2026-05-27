@@ -110,7 +110,7 @@ namespace photon
     // after this photon thread fall in sleep. The defer function should NEVER fall into sleep!
     typedef void (*defer_func)(void*);
     int thread_usleep_defer(Timeout timeout, defer_func defer, void* defer_arg=nullptr);
-    inline int thread_usleep_defer(Timeout timeout, Delegate<void> defer) {
+    inline int thread_usleep_defer(Timeout timeout, TempDelegate<void> defer) {
         return thread_usleep_defer(timeout, defer._func, defer._obj);
     }
 
