@@ -47,6 +47,7 @@ jobs:
             -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_LIBCURL=ON \
             -D PHOTON_ENABLE_EXTFS=ON
+<<<<<<< HEAD
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Build-Debug-1121-C++20
@@ -77,6 +78,8 @@ jobs:
             -D PHOTON_ENABLE_FUSE=ON \
             -D PHOTON_ENABLE_LIBCURL=ON \
             -D PHOTON_ENABLE_EXTFS=ON
+=======
+>>>>>>> 729a439 (copy CI scripts from release/0.8 to 0.7 (#1226))
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test

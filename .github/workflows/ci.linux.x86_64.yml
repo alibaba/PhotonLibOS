@@ -35,10 +35,13 @@ jobs:
         run: |
           export PHOTON_CI_EV_ENGINE=io_uring
           cd build && ctest -E test-lockfree --timeout 3600 -V
+<<<<<<< HEAD
       - name: Test epoll_ng
         run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
           cd build && ctest -E test-lockfree --timeout 3600 -V
+=======
+>>>>>>> 729a439 (copy CI scripts from release/0.8 to 0.7 (#1226))
 
   gcc921:
     runs-on: ubuntu-latest
@@ -71,10 +74,13 @@ jobs:
         run: |
           export PHOTON_CI_EV_ENGINE=io_uring
           cd build && ctest -E test-lockfree --timeout 3600 -V
+<<<<<<< HEAD
       - name: Test epoll_ng
         run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
           cd build && ctest -E test-lockfree --timeout 3600 -V
+=======
+>>>>>>> 729a439 (copy CI scripts from release/0.8 to 0.7 (#1226))
 
   gcc1031:
     runs-on: ubuntu-latest
@@ -107,6 +113,7 @@ jobs:
         run: |
           export PHOTON_CI_EV_ENGINE=io_uring
           cd build && ctest -E test-lockfree --timeout 3600 -V
+<<<<<<< HEAD
       - name: Test epoll_ng
         run: |
           export PHOTON_CI_EV_ENGINE=epoll_ng
@@ -197,3 +204,5 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_FSTACK_DPDK=ON
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
+=======
+>>>>>>> 729a439 (copy CI scripts from release/0.8 to 0.7 (#1226))
