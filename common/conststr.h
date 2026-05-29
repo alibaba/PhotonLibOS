@@ -304,7 +304,7 @@ struct EnumStr : public Split {
 template <typename Accum, typename Whole>
 struct CompactStringArray {
     constexpr static decltype(auto) whole() { return Whole(); }
-    constexpr static size_t size() { return Accum::size(); }
+    constexpr static size_t size() { return Accum::size() - 1; }
 
     constexpr static std::string_view at(size_t i) {
         if (i >= size()) return {};
