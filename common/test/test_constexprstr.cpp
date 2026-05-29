@@ -112,6 +112,16 @@ TEST(TString, JoinAndSplit) {
     EXPECT_STREQ("1|2|3|4|5|6", sp.join<'|'>().chars);
 }
 
+TEST(CompactStringArray, Basic) {
+    auto p = ConstString::make_compact_str_array<size_t>(
+        TSTRING("a"), TSTRING("bc"), TSTRING("def"), TSTRING("ghij"));
+    EXPECT_EQ(4UL, p.size());
+    EXPECT_STREQ("a", p[0].data());
+    EXPECT_STREQ("bc", p[1].data());
+    EXPECT_STREQ("def", p[2].data());
+    EXPECT_STREQ("ghij", p[3].data());
+}
+
 int main(int argc, char** argv) {
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, argv);
