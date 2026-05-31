@@ -115,3 +115,40 @@ public:
     int unlock();
 };
 ```
+
+## All Synchronization Primitives
+
+| Primitive | Notes |
+|-----------|-------|
+| `spinlock` | Exponential backoff |
+| `ticket_spinlock` | FIFO ordering, no starvation |
+| `mutex` | Two-phase: CAS → yield retries → wait queue with `thread_usleep_defer` |
+| `recursive_mutex` | Re-entrant mutex |
+| `seq_mutex` | FIFO mutex |
+| `condition_variable` | Extends `waitq`, supports predicate-based wait |
+| `semaphore` | Counting, with out-of-order resume option |
+| `rwlock` | Traditional reader-writer lock |
+| `qrwlock` | Optimized for read-heavy workloads |
+| `locker<M>` / `SCOPED_LOCK` | RAII lock guard for any lock type |
+
+## Implementation Notes
+
+### mutex
+
+`photon::mutex` uses a two-phase protocol:
+
+1. Fast path: try `CAS` to acquire the lock without yielding.
+2. Contended path: retry a few times with `thread_yield()`.
+3. If still contended: push the current thread onto a wait queue and call `thread_usleep_defer()` to release the spinlock without an extra context switch.
+
+### Defer-based unlock on sleep
+
+`thread_usleep_defer(timeout, defer, arg)` executes the `defer` callback immediately after the context switch. This is what lets `mutex::unlock()` release its internal spinlock while the thread is going to sleep — without an extra round-trip through the scheduler.
+
+### Asymmetric spinlock
+
+The spinlock used inside the scheduler is optimized for the foreground vCPU accessing its own run queue (single atomic store) versus a background vCPU trying to migrate threads in (must check both flags).
+
+### Work stealing
+
+Optional cross-vCPU load balancing, enabled via the flags `VCPU_ENABLE_ACTIVE_WORK_STEALING` and `VCPU_ENABLE_PASSIVE_WORK_STEALING`. Stealers scan other vCPUs' standby queue and run queue.

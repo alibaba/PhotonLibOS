@@ -101,3 +101,105 @@ int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL);
   it will choose the next vCPU in pool (round-robin).
      
 Returns 0 for success, and <0 means failed to migrate.
+
+## Event Engines
+
+Each vCPU has a `MasterEventEngine` that blocks on I/O events and wakes sleeping photon threads via `thread_interrupt()`. Defined in `<photon/io/fd-events.h>`.
+
+### MasterEventEngine
+
+Per-vCPU, drives the idle loop:
+
+- `wait_for_fd(fd, interests, timeout)` — suspend current thread until FD event
+- `wait_and_fire_events(timeout)` — block and fire events by calling `thread_interrupt(thread*, EOK)`
+- `cancel_wait()` — wake the engine (via eventfd or equivalent)
+
+### CascadingEventEngine
+
+For complex multi-FD waits. Does NOT block the vCPU — only the calling photon thread:
+
+- `add_interest(Event)` / `rm_interest(Event)` — manage FD registrations
+- `wait_for_events(data[], count, timeout)` — wait for multiple events
+
+### Event flags
+
+```cpp
+EVENT_READ    = 1
+EVENT_WRITE   = 2
+EVENT_ERROR   = 4
+EDGE_TRIGGERED = 0x4000
+ONE_SHOT       = 0x8000
+```
+
+## Backends
+
+### epoll
+
+Headers: `<photon/io/epoll.cpp>`, `<photon/io/epoll-ng.cpp>`.
+
+- `epoll_create(1)` + eventfd for `cancel_wait`
+- `_inflight_events` vector indexed by fd
+- ONE_SHOT interests with `data=CURRENT` (photon thread pointer)
+- `wait_and_fire_events()`: `epoll_wait()` → `thread_interrupt((thread*)data, EOK)` per event
+- `epoll-ng.cpp` is the edge-triggered variant
+
+### io_uring
+
+Header: `<photon/io/iouring-wrapper.h>`.
+
+The most feature-rich backend:
+
+- SQPoll mode, IOPoll mode, registered files
+- `io_uring_prep_poll_add` / `multishot` for fd events
+- `async_io()` template for: read, write, send, recv, connect, accept, open, mkdir, close, splice, fsync
+- Cancellation via `io_uring_prep_cancel`
+- Kernel version detection (5.11, 5.15, 5.18, 5.19) for feature gating
+- `IouringFixedFileFlag` (bit 32) marks registered FDs
+
+### kqueue
+
+Header: `<photon/io/kqueue.cpp>`. BSD/macOS backend:
+
+- `EVFILT_USER` for self-wakeup (`cancel_wait`)
+- `EV_ONESHOT` for single-event waits
+
+### select
+
+Inline stub. Fallback for platforms without epoll/kqueue.
+
+## Async I/O Backends
+
+### libaio
+
+Header: `<photon/io/aio-wrapper.h>`.
+
+- `libaio_pread` / `preadv` / `pwrite` / `pwritev` — requires `O_DIRECT`, aligned buffers
+- Requires `fd_events_init()` for event notification
+
+### POSIX AIO
+
+- `posixaio_pread` / `pwrite` / `fsync` / `fdatasync`
+
+## Userspace Networking
+
+| Header | Description |
+|--------|-------------|
+| `<photon/io/fstack-dpdk.h>` | F-Stack / DPDK: `fstack_socket` / `connect` / `bind` / `listen` / `accept` / `send` / `recv` / `close` |
+| `<photon/io/spdknvme-wrapper.h>` | SPDK NVMe block device access |
+| `<photon/io/spdkbdev-wrapper.h>` | SPDK generic block device |
+
+## Signal Handling
+
+Header: `<photon/io/signal.h>`.
+
+- `sync_signal_init()` and `sync_signal(signum, handler)` — signal handlers run in a dedicated photon thread
+- `block_all_signal()` blocks all signals except `SIGSTOP` / `SIGKILL`
+
+`<photon/io/reset_handle.h>` defines `ResetHandle`, an intrusive list node with a `reset()` virtual method. `reset_all_handle()` is called during photon reinitialization.
+
+## Design Decisions
+
+- **ONE_SHOT semantics.** All backends use one-shot event registration to avoid thundering herd and ensure each event wakes exactly one thread.
+- **EOK convention.** Events fire with `EOK` (ENXIO, "Event of NeXt I/O"); the interrupted thread checks `error_number` to distinguish event wakeup from timeout.
+- **Thread pointer as event data.** `data=CURRENT` stores the photon thread pointer in the event, enabling direct `thread_interrupt()` without lookup.
+- **Separate Master and Cascading engines.** Master drives the idle loop (blocks the vCPU); Cascading handles per-thread multi-FD waits without blocking others.

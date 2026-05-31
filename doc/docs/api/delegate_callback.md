@@ -32,8 +32,8 @@ argument is a pointer of ```void*``` to distinguish individual callback
 invocations, as usually found in function pointer based callback mechanisms.
 
 Here is an example of a delegate. Suppose we have a delegate type that
-performs some sort of file open operation, and returns a pointer to an
-abstract file object.
+performs some sort of file open operation, and returns a pointer to
+an abstract file object.
 
 ```cpp
 class File;
@@ -92,3 +92,25 @@ ProcessFiles(fileNames, lambda);
 Note that ```Delegate<...>``` explicitly forbids binding to
 a temporary lambda or functor, in order to minimize the risk
 of life-cycle management of the lambda object.
+
+## Related Types
+
+`<photon/common/callback.h>` also defines:
+
+| Type | Description |
+|------|-------------|
+| `Delegate<R, Ts...>` | Zero-overhead callable: free functions, member functions, lambdas |
+| `Callback<Ts...>` | Alias for `Delegate<int, Ts...>` |
+| `Closure<ARGS...>` | Self-deleting callback (for one-shot async operations) |
+| `TempDelegate` | Binds to a temporary lambda |
+
+`<photon/common/delegates.h>` defines `Delegates<Convs...>`, a type-safe delegate facade with `DEFINE_DELEGATE_FUNCTION` macros for compile-time method dispatch.
+
+`<photon/common/PMF.h>` provides `get_member_function_address()`, which extracts a raw function pointer from a member function pointer, handling the vtable layout on x86_64 and aarch64.
+
+## Why Delegate over std::function
+
+- **Zero heap allocation.** A `Delegate` is a pair of pointers (function address + context). It never allocates.
+- **No type erasure.** Dispatch is resolved at compile time for free functions and lambdas, and at construction time (with vtable lookup) for member functions.
+- **Member function awareness.** The implementation understands the difference between plain member functions and virtual member functions on both x86_64 and aarch64, extracting the correct entry point.
+- **Lifetime safety.** Binding to a temporary lambda is explicitly rejected at compile time, avoiding the most common class of `std::function` misuse.

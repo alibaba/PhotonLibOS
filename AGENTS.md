@@ -1,5 +1,7 @@
 # AGENTS.md
 
+This file contains the coding conventions, build instructions, and common pitfalls that apply across the repository. Detailed architecture and per-module design documentation lives in `doc/docs/` — see the index at the bottom.
+
 ## Coding Principles
 
 ### .h and .cpp files
@@ -54,6 +56,31 @@ Use RAII as long as it is not troublesome.
 - `memset`/`memcpy` remain appropriate for variable-length data and for zeroing structures larger than 8 bytes.
 - Alignment and byte order are the caller's responsibility; on little-endian hosts (x86_64, arm64) this reads/writes little-endian values directly, which matches many network and on-disk wire formats.
 
+### String concatenation
+- When concatenating multiple parts into a string, prefer `estring().appends(a, b, c)` over `std::string(a) + b + c`.
+- `estring::appends` avoids creating intermediate `std::string` temporaries and accepts mixed types (string_view, integers, etc.) without manual conversion.
+- Example: `std::string key = estring().appends(host, ":", port);` not `std::string key = std::string(host) + ":" + std::to_string(port);`
+- For conditional parts, use `estring::make_conditional_cat_list(cond, parts...)` which appends only when `cond` is true:
+  ```cpp
+  estring().appends(
+      path,
+      estring::make_conditional_cat_list(has_query, "?", query));
+  ```
+
+### IStream: `read`/`write` vs `recv`/`send`
+- `read(buf, count)` and `write(buf, count)` guarantee completion of the full `count` bytes unless an error or EOF occurs. They are atomic from the caller's perspective.
+- `recv(buf, count)` and `send(buf, count)` perform a single receive/send operation and may return fewer bytes than requested.
+- When an exact amount must be transferred, prefer `read`/`write`. Use `recv`/`send` only when partial transfer is acceptable.
+
+### Code Modification
+- Separate moves from changes: when moving code, only move. Do not rename, restructure, or optimize at the same time.
+- Understand the original purpose before making changes. The existing layout is not accidental.
+- When modifying or optimizing existing code, respect the original design decisions — data structures, interfaces, implementation patterns, etc. Only change what's necessary.
+
+### Trimming white space(s)
+- Trim trailing white space(s) of every line.
+- Trim excessive new lines at the end of every file.
+
 ## Build & Test
 
 ### Prerequisites
@@ -92,3 +119,78 @@ cmake --build build -j 8
 ```bash
 cd build && ctest
 ```
+
+## Include Paths
+
+The `include/photon/` directory contains symlinks to source headers, mirroring the source tree structure. All headers are included as:
+
+```cpp
+#include <photon/photon.h>
+#include <photon/common/alog.h>
+#include <photon/thread/thread.h>
+#include <photon/net/socket.h>
+```
+
+**Internal includes** (within the same module) may use relative paths: `#include "../alog.h"`. Cross-module includes always use `<photon/module/header.h>`.
+
+The build system sets `include/` as a public include directory for `photon_shared` and `photon_static` targets. Test and example targets link against `photon_shared` to inherit the include path.
+
+## Testing
+
+**Framework:** Google Test (gtest). Tests include `../../test/gtest.h` which wraps `<gtest/gtest.h>` and suppresses sign-compare warnings. Some tests also include `../../test/ci-tools.h` for CI helpers.
+
+**Location:** Each module has a `test/` subdirectory (e.g., `common/test/`, `thread/test/`, `net/http/test/`). Test files are named `test_<feature>.cpp` or `test-<feature>.cpp`.
+
+**CMake pattern:** Each `test/` directory has its own `CMakeLists.txt` following this template:
+
+```cmake
+add_executable(test-<name> <name>.cpp)
+target_link_libraries(test-<name> PRIVATE photon_shared)
+add_test(NAME test-<name> COMMAND $<TARGET_FILE:test-<name>>)
+```
+
+**To add a new test:**
+1. Create `test_foo.cpp` in the appropriate `<module>/test/` directory
+2. Include module headers via relative paths (`"../foo.h"`) and cross-module headers via `<photon/module/header.h>`
+3. Add the three-line CMake block above to that directory's `CMakeLists.txt`
+4. Build and run: `cmake --build build -j 8 && cd build && ctest -R test-foo`
+
+**Test initialization:** Tests that exercise coroutine or I/O features must call `photon::init()` / `photon::fini()` in their `main()` or in a gtest fixture's `SetUp`/`TearDown`.
+
+## Common Pitfalls
+
+**Using `std::mutex` instead of `photon::mutex` in coroutines:** `std::mutex` blocks the OS thread (vCPU), stalling all coroutines on that vCPU. Always use `photon::mutex` (or `photon_std::mutex`) inside photon threads.
+
+**Calling photon APIs before `photon::init()`:** The current OS thread must be initialized as a vCPU before any photon API (thread creation, sync primitives, I/O) can be used. Call `photon::init()` first. If using WorkPool, each worker OS thread is initialized automatically.
+
+**Forgetting `photon::fini()` on exit:** Skips cleanup of ancillary threads (timestamp updater, etc.) and registered `fini_hook` callbacks.
+
+**Blocking syscalls in coroutines:** Direct `sleep()`, `poll()`, `select()`, or blocking `read()`/`write()` on non-photon file descriptors will block the vCPU. Use photon's coroutine-aware I/O or `thread_usleep()` instead.
+
+**Stack overflow:** Default coroutine stack is 8MB. Deep recursion or large stack-allocated buffers may exceed it. Use `thread_create11()` with an explicit `stack_size` parameter for coroutines that need more.
+
+## Conventions
+
+- **Ownership:** `ownership` parameter (typically `bool`) controls whether wrapper objects delete the wrapped object on destruction
+- **Timeout:** All I/O operations accept `Timeout` objects integrating with `photon::now` (microsecond-precision global timestamp)
+- **Error handling:** Functions return -1 or nullptr on error, set `errno`, and log via `LOG_ERROR_RETURN`
+- **Thread safety:** Photon sync primitives (mutex, semaphore, condition_variable) are coroutine-aware; std:: equivalents block the OS thread
+
+## Detailed Documentation
+
+Descriptive architecture and per-module design documentation lives under `doc/docs/` (source for the Docusaurus site). Read these on demand when working on the corresponding area:
+
+| When working on... | Read |
+|--------------------|------|
+| Overall architecture, module relationships | `doc/docs/introduction/photon-architecture.md` |
+| Coroutine runtime, scheduler, sync primitives | `doc/docs/api/thread.md`, `doc/docs/api/lock-and-synchronization.md`, `doc/docs/api/vcpu-and-multicore.md` |
+| Event engines (epoll / io_uring / kqueue), signal handling | `doc/docs/api/vcpu-and-multicore.md` (Event Engines section) |
+| Socket, HTTP client/server, TLS, connection pool | `doc/docs/api/network.md` |
+| Filesystem VFS, local fs, HTTP fs, cache layer | `doc/docs/api/filesystem-and-io.md` |
+| RPC framework, zero-copy serialization | `doc/docs/api/rpc.md` |
+| Logging, string utilities, containers, delegates | `doc/docs/api/common.md` |
+| Redis / OSS / simple_dom (JSON/XML/YAML) | `doc/docs/ecosystem/overview.md` |
+| Delegate / Callback internals | `doc/docs/api/delegate_callback.md` |
+| std-compatible API | `doc/docs/api/std-compatible-api.md` |
+| Building and integrating | `doc/docs/introduction/how-to-build.md`, `doc/docs/introduction/how-to-integrate.md` |
+| Debugging | `doc/docs/miscellaneous/debugging.md` |

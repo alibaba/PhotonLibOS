@@ -1,0 +1,8 @@
+{
+  "label": "Ecosystem",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "Clients and parsers built on top of Photon."
+  }
+}
