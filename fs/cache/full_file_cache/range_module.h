@@ -69,12 +69,12 @@ class RangeModule {
   // Returns {0, 0} when [left, right) is fully covered or empty.
   std::pair<off_t, off_t> queryRefillRange(off_t left, off_t right) {
     if (left >= right) return {0, 0};
-    if (auto it = findContaining(left); it != intervals.end())
-      left = it->second;
+    auto lit = findContaining(left);
+    if (lit != intervals.end()) left = lit->second;
     if (left >= right) return {0, 0};
-    if (auto it = findContaining(right - 1); it != intervals.end() && it->first > left)
-      right = it->first;
-    // Right-trim only fires when it->first > left, so right > left holds here.
+    auto rit = findContaining(right - 1);
+    if (rit != intervals.end() && rit->first > left) right = rit->first;
+    // Right-trim only fires when rit->first > left, so right > left holds here.
     return {left, right};
   }
 
