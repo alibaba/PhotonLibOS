@@ -1577,14 +1577,16 @@ insert_list:
             _threads.resize(n);
             pthreads = &_threads[0];
         }
+        uint64_t created = 0;
         for (uint64_t i = 0; i < n; ++i)
         {
             auto th = thread_create(start, arg, stack_size);
             if (!th) break;
             thread_enable_join(th);
             pthreads[i] = th;
+            created++;
         }
-        for (uint64_t i = 0; i < n; ++i) {
+        for (uint64_t i = 0; i < created; ++i) {
             thread_join(pthreads[i]);
         }
     }
