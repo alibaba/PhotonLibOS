@@ -174,7 +174,10 @@ static int remove_inode(ext2_filsys fs, ext2_ino_t ino) {
 #ifndef NO_TIMESTAMP
         inode.i_dtime = time(0);
 #else
-        inode.i_dtime = 1;
+        // e2fsck >= 1.46 reports LOW_DTIME (orphan-list) when
+        // 0 < i_dtime < s_inodes_count and super timestamps are 0.
+        // Use UINT32_MAX to stay non-zero and skip the check.
+        inode.i_dtime = 0xFFFFFFFFu;
 #endif
     }
 
