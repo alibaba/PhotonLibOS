@@ -248,3 +248,101 @@ photon::init(INIT_EVENT_DEFAULT, INIT_IO_LIBCURL);
 ##### 封装
 
 同样的，我们在`<photon/fs/httpfs/httpfs.h>`也封装了它的fs，称为httpfs v2。
+
+## HTTP/1.1 内部
+
+| 头文件 | 关键类型 |
+|--------|----------|
+| `message.h` | `Message`（基类）、`Request`（method/target/path/query）、`Response`（状态码）。缓冲管理、头部解析、chunked/content-length 体流。 |
+| `headers.h` | `HeadersBase` —— 紧凑头部存储，使用 `rstring_view16`（offset + length 对），可排序以便二分查找。`Headers` 增加 chunked/content_length/range 辅助。 |
+| `body.h` | 体流工厂：`new_body_read_stream()`、`new_chunked_body_read/write_stream()` |
+| `parser.h` | 轻量解析器：`skip_string`、`skip_chars`、`extract_integer`、`extract_until_char` |
+| `url.h` | `URL` —— 解析 `scheme://user:passwd@host:port/path?query#fragment` |
+| `client.h` | `Client`（抽象）：`call(Operation*)`，支持重定向跟随、重试、超时、body_writer delegate。`OperationOnStack<N>` 用于栈分配。 |
+| `server.h` | `HTTPServer`：`handle_connection()`、模式匹配的 `add_handler()`。内置：`new_fs_handler()`、`new_proxy_handler()`。 |
+
+## HTTP/2
+
+定义于 `<photon/net/http/streams.h>`。完整实现 RFC 9113 / 7541：
+
+- `FrameHeader`（9 字节打包）：DATA、HEADERS、SETTINGS、PING、GOAWAY、WINDOW_UPDATE 等。
+- `H2Connection`：`send_preface`、`recv_preface`、`send_settings`、`send_goaway`、流管理。
+- `H2Stream`：包装 connection + stream_id 的值类型；状态机（Idle → Open → HalfClosed → Closed）。
+- `huffman/codec.h`：HPACK Huffman 编解码。
+
+## WebSocket
+
+`<photon/net/http/websocket.h>`。
+
+`IWebSocketStream`：send_text/binary、recv_frame、ping、close。
+
+- 客户端：`websocket_connect()`
+- 服务端：`server_accept_websocket()` + `new_websocket_handler()`
+
+## Cookie Jar
+
+`ICookieJar`：`get_cookies_from_headers()`、`set_cookies_to_headers()`。`new_simple_cookie_jar()` 提供内存存储。
+
+## 安全流
+
+### TLS
+
+`<photon/net/security-context/tls-stream.h>`。基于 OpenSSL：
+
+- `TLSContext`：证书、密钥、口令、验证模式、ALPN 协议列表。
+- `new_tls_stream(ctx, base, role)`：把 socket 包装为 TLS。
+- `new_tls_client/server(ctx, base)`：工厂包装。
+- `tls_stream_set_hostname()`：SNI。
+- `tls_stream_get_alpn_selected()`：协商得到的 ALPN 协议。
+
+### SASL
+
+`<photon/net/security-context/sasl-stream.h>`。基于 GNU SASL：
+
+- `SaslSession`：基于属性的配置。
+- `new_sasl_client/server_session()`：创建会话。
+- `new_sasl_stream()`：把 socket 包装为 SASL 认证流。
+
+## 连接池
+
+`<photon/net/socket.h>`。`TCPSocketPool` 包装 `ISocketClient`，按 `EndPoint` 为键池化连接。
+
+- 使用 `CascadingEventEngine` 检测对端关闭（`RDHUP`），不阻塞 vCPU 的主事件引擎。
+- `Timer` 用于 TTL 驱逐。
+- `PooledTCPSocketStream` 在出错时把 socket 标记为"drop"，在正常关闭时归还到池。
+
+工厂：`new_tcp_socket_pool()`。
+
+## 其他组件
+
+| 头文件 | 描述 |
+|--------|------|
+| `<photon/net/curl.h>` | RAII libcurl 包装：GET/HEAD/POST/PUT/DELETE，基于模板的流，与光子事件循环集成 |
+| `<photon/net/iostream.h>` | `new_iostream(ISocketStream*)`：把 socket 包装为 `std::iostream` |
+| `<photon/net/vdma.h>` | 用于共享内存零拷贝网络的虚拟 DMA |
+| `<photon/net/datagram_socket.h>` | `IDatagramSocket`、`UDPSocket`、`UDS_DatagramSocket` |
+
+## 协程集成
+
+定义于 `<photon/net/basic_socket.h>`。`doio_once` 模板：
+
+1. 尝试系统调用。
+2. 若返回 `EAGAIN`，调用 `wait_for_fd_readable()` 或 `wait_for_fd_writable()`。
+3. 光子协程挂起，FD 被注册到事件引擎。
+4. 恢复后，重试系统调用。
+
+`doio_loop` 重复此过程直到出错或 EOF。
+
+## 基类
+
+`<photon/net/base_socket.h>`：
+
+- `SocketClientBase` / `SocketServerBase`：把待设置的 socket 选项存入 `SockOptBuffer`（4KB 缓冲），延迟应用以避免多次 `setsockopt` 系统调用。
+- `ForwardSocketClient` / `ForwardSocketServer` / `ForwardSocketStream`：装饰器模式，转发到下层并可选择所有权。
+
+## 设计决策
+
+- **处处抽象接口。** `ISocketStream`、`ISocketClient`、`ISocketServer` 支持透明分层（TLS 叠加 TCP、pool 叠加 TLS 等）。
+- **所有权标志。** 包装接受 `ownership` 参数，控制是否在析构时删除下层。
+- **SockOptBuffer。** socket 选项在 `connect` / `bind` 之前保存，并延迟应用 —— 避免多次 `setsockopt` 系统调用。
+- **连接池使用 CascadingEventEngine。** socket 池检测 `RDHUP` 而不阻塞 vCPU 的主事件引擎。

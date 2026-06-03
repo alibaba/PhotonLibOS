@@ -258,3 +258,101 @@ Please refer to `net/http/test/client_perf.cpp` and `net/http/test/server_perf.c
 ##### 封装
 
 Similarly, we also encapsulated its fs in `<photon/fs/httpfs/httpfs.h>`, which is called httpfs v2.
+
+## HTTP/1.1 Internals
+
+| Header | Key types |
+|--------|-----------|
+| `message.h` | `Message` (base), `Request` (verb/target/path/query), `Response` (status code). Buffer management, header parsing, chunked/content-length body streams. |
+| `headers.h` | `HeadersBase` — compact header storage using `rstring_view16` (offset + length pairs), sorted for binary search. `Headers` adds chunked/content_length/range helpers. |
+| `body.h` | Body stream factories: `new_body_read_stream()`, `new_chunked_body_read/write_stream()` |
+| `parser.h` | Lightweight parser: `skip_string`, `skip_chars`, `extract_integer`, `extract_until_char` |
+| `url.h` | `URL` — parses `scheme://user:passwd@host:port/path?query#fragment` |
+| `client.h` | `Client` (abstract): `call(Operation*)` with follow redirects, retry, timeout, body_writer delegate. `OperationOnStack<N>` for stack allocation. |
+| `server.h` | `HTTPServer`: `handle_connection()`, pattern-matched `add_handler()`. Built-in: `new_fs_handler()`, `new_proxy_handler()`. |
+
+## HTTP/2
+
+Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
+
+- `FrameHeader` (9 bytes packed): DATA, HEADERS, SETTINGS, PING, GOAWAY, WINDOW_UPDATE, etc.
+- `H2Connection`: `send_preface`, `recv_preface`, `send_settings`, `send_goaway`, stream management.
+- `H2Stream`: value type wrapping connection + stream_id; state machine (Idle → Open → HalfClosed → Closed).
+- `huffman/codec.h`: HPACK Huffman encode/decode.
+
+## WebSocket
+
+`<photon/net/http/websocket.h>`.
+
+`IWebSocketStream`: send_text/binary, recv_frame, ping, close.
+
+- Client-side: `websocket_connect()`
+- Server-side: `server_accept_websocket()` + `new_websocket_handler()`
+
+## Cookie Jar
+
+`ICookieJar`: `get_cookies_from_headers()`, `set_cookies_to_headers()`. `new_simple_cookie_jar()` provides an in-memory storage.
+
+## Security Streams
+
+### TLS
+
+`<photon/net/security-context/tls-stream.h>`. Built on OpenSSL:
+
+- `TLSContext`: cert, key, passphrase, verify mode, ALPN protos.
+- `new_tls_stream(ctx, base, role)`: wrap a socket with TLS.
+- `new_tls_client/server(ctx, base)`: factory wrappers.
+- `tls_stream_set_hostname()`: SNI.
+- `tls_stream_get_alpn_selected()`: negotiated ALPN protocol.
+
+### SASL
+
+`<photon/net/security-context/sasl-stream.h>`. Built on GNU SASL:
+
+- `SaslSession`: property-based configuration.
+- `new_sasl_client/server_session()`: create sessions.
+- `new_sasl_stream()`: wrap a socket with SASL authentication.
+
+## Connection Pool
+
+`<photon/net/socket.h>`. `TCPSocketPool` wraps `ISocketClient`, pools connections by `EndPoint` key.
+
+- Uses `CascadingEventEngine` to detect peer close (`RDHUP`) without blocking the vCPU's main event engine.
+- `Timer` for TTL eviction.
+- `PooledTCPSocketStream` marks a socket as "drop" on error, returns it to the pool on clean close.
+
+Factory: `new_tcp_socket_pool()`.
+
+## Other Components
+
+| Header | Description |
+|--------|-------------|
+| `<photon/net/curl.h>` | RAII libcurl wrapper: GET/HEAD/POST/PUT/DELETE, template-based streams, integrates with photon event loop |
+| `<photon/net/iostream.h>` | `new_iostream(ISocketStream*)`: wrap socket as `std::iostream` |
+| `<photon/net/vdma.h>` | Virtual DMA for zero-copy shared memory networking |
+| `<photon/net/datagram_socket.h>` | `IDatagramSocket`, `UDPSocket`, `UDS_DatagramSocket` |
+
+## Coroutine Integration
+
+Defined in `<photon/net/basic_socket.h>`. The `doio_once` template:
+
+1. Try the syscall.
+2. On `EAGAIN`, call `wait_for_fd_readable()` or `wait_for_fd_writable()`.
+3. The photon thread suspends; the FD is registered with the event engine.
+4. On resume, retry the syscall.
+
+`doio_loop` repeats this until error or EOF.
+
+## Base Classes
+
+`<photon/net/base_socket.h>`:
+
+- `SocketClientBase` / `SocketServerBase`: store pending socket options in `SockOptBuffer` (4KB buffer), applied lazily to avoid multiple `setsockopt` syscalls.
+- `ForwardSocketClient` / `ForwardSocketServer` / `ForwardSocketStream`: decorator pattern forwarding to underlay with optional ownership.
+
+## Design Decisions
+
+- **Abstract interfaces everywhere.** `ISocketStream`, `ISocketClient`, `ISocketServer` enable transparent layering (TLS over TCP, pool over TLS, etc.).
+- **Ownership flag.** Wrappers accept an `ownership` parameter controlling whether the underlay is deleted on destruction.
+- **SockOptBuffer.** Socket options are stored before `connect` / `bind` and applied lazily — avoids multiple `setsockopt` syscalls.
+- **CascadingEventEngine for pools.** The socket pool monitors for `RDHUP` without blocking the vCPU's main event engine.

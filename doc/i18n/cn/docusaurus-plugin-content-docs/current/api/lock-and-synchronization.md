@@ -111,3 +111,40 @@ public:
     int unlock();
 };
 ```
+
+## 全部同步原语
+
+| 原语 | 说明 |
+|------|------|
+| `spinlock` | 指数退避 |
+| `ticket_spinlock` | FIFO 顺序，无饥饿 |
+| `mutex` | 两阶段：CAS → yield 重试 → 配合 `thread_usleep_defer` 的等待队列 |
+| `recursive_mutex` | 可重入 mutex |
+| `seq_mutex` | FIFO mutex |
+| `condition_variable` | 扩展 `waitq`，支持基于谓词的等待 |
+| `semaphore` | 计数信号量，支持乱序恢复选项 |
+| `rwlock` | 传统读写锁 |
+| `qrwlock` | 针对读多场景优化 |
+| `locker<M>` / `SCOPED_LOCK` | 任意锁类型的 RAII 守卫 |
+
+## 实现细节
+
+### mutex
+
+`photon::mutex` 使用两阶段协议：
+
+1. 快路径：尝试 `CAS` 获取锁，不让出。
+2. 竞争路径：多次 `thread_yield()` 重试。
+3. 仍竞争：把当前协程推入等待队列，调用 `thread_usleep_defer()`，在不需要额外上下文切换的情况下释放内部 spinlock。
+
+### 基于 defer 的睡眠时解锁
+
+`thread_usleep_defer(timeout, defer, arg)` 在上下文切换后立即执行 `defer` 回调。这正是 `mutex::unlock()` 能在协程进入睡眠时释放内部 spinlock 的原因 —— 不需要经过调度器的额外往返。
+
+### 非对称 spinlock
+
+调度器内部使用的 spinlock 针对两种场景做了优化："前台 vCPU 访问自己的 runq"（单次原子 store）与"后台 vCPU 尝试迁入协程"（必须检查两个 flag）。
+
+### 工作窃取
+
+可选的跨 vCPU 负载平衡，通过 flag `VCPU_ENABLE_ACTIVE_WORK_STEALING` 和 `VCPU_ENABLE_PASSIVE_WORK_STEALING` 启用。窃取者扫描其他 vCPU 的 standby 队列和 run 队列。

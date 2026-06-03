@@ -413,3 +413,57 @@ int Timer::cancel();
 int Timer::reset(uint64_t new_timeout = -1);
 int Timer::stop();
 ```
+
+## Runtime Internals
+
+### vCPU queues
+
+Each vCPU maintains three internal queues:
+
+- **RunQ** — intrusive circular doubly-linked list of `READY` threads. Private to the vCPU; no locking for normal operations.
+- **SleepQ** — binary min-heap ordered by `ts_wakeup` (microsecond wakeup time).
+- **StandbyQ** — threads pushed by other vCPUs (cross-vCPU migration), drained into RunQ during `resume_threads()`.
+- **Idle Worker** — a dedicated coroutine that drives the event engine when no photon thread is runnable.
+
+### thread struct
+
+The `thread` struct lives at the **bottom of the stack** (the stack grows upward). Key states: `READY`, `RUNNING`, `SLEEPING`, `DONE`, `STANDBY`.
+
+Stack allocation: minimum 16KB + guard page, page-aligned. Use `use_pooled_stack_allocator()` for better performance when creating many short-lived threads.
+
+### Context switch
+
+Platform-specific assembly (`_photon_switch_context`) saves and restores the stack pointer. `_photon_switch_context_defer` executes a callback on the source thread's stack after saving context — this is what allows mutexes to be unlocked during sleep without an extra context switch.
+
+### Scheduler
+
+- `thread_yield()` — yield to next thread in RunQ.
+- `thread_usleep(timeout)` — sleep for N microseconds (push to SleepQ, switch context).
+- `thread_usleep_defer(timeout, defer, arg)` — sleep + execute defer immediately after switch-out. Critical for mutex unlock-on-sleep.
+- `thread_interrupt(th, errno)` — wake a sleeping thread (sets `error_number`).
+- `thread_shutdown(th, flag)` — mark for shutdown, interrupt if sleeping.
+
+## Channels
+
+Go-style typed channels, defined in `<photon/thread/go.h>`.
+
+- `channel<T>` — available in buffered (lock-free MPMC queue + semaphore) and unbuffered (mutex rendezvous) variants.
+- `select()` — multiplexed channel operations.
+
+## std Compatibility
+
+`<photon/thread/std-compat.h>` provides drop-in replacements that use photon's coroutine-aware primitives:
+
+| Type | Replaces |
+|------|----------|
+| `photon_std::thread` | `std::thread` |
+| `photon_std::mutex` | `std::mutex` |
+| `photon_std::condition_variable` | `std::condition_variable` |
+| `photon_std::promise` / `future` | `std::promise` / `std::future` |
+
+## Design Decisions
+
+- **Per-vCPU private queues.** RunQ and SleepQ are never shared across vCPUs during normal scheduling, avoiding locking overhead.
+- **Asymmetric spinlock.** Optimized for foreground vCPU accessing its own run queue (single atomic store) vs background access (must check both flags).
+- **Defer-based unlock-on-sleep.** `thread_usleep_defer()` releases the mutex spinlock without an extra context switch.
+- **Coroutine at stack bottom.** Assembly can access the thread struct directly from the stack pointer.

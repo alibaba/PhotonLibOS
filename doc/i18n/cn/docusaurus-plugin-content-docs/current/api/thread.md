@@ -414,3 +414,57 @@ int Timer::cancel();
 int Timer::reset(uint64_t new_timeout = -1);
 int Timer::stop();
 ```
+
+## 运行时内部
+
+### vCPU 队列
+
+每个 vCPU 维护三个内部队列：
+
+- **RunQ** —— `READY` 协程的侵入式循环双向链表。vCPU 私有，正常操作无需加锁。
+- **SleepQ** —— 按 `ts_wakeup`（微秒唤醒时间）排序的二叉最小堆。
+- **StandbyQ** —— 由其他 vCPU 推入的协程（跨 vCPU 迁移），在 `resume_threads()` 期间被合并到 RunQ。
+- **Idle Worker** —— 专用的协程，在没有可运行的光子协程时驱动事件引擎。
+
+### thread 结构体
+
+`thread` 结构体位于 **栈底**（栈向上增长）。主要状态：`READY`、`RUNNING`、`SLEEPING`、`DONE`、`STANDBY`。
+
+栈分配：最小 16KB + guard page，按页对齐。频繁创建短生命周期协程时建议使用 `use_pooled_stack_allocator()` 以获得更好性能。
+
+### 上下文切换
+
+平台相关的汇编（`_photon_switch_context`）保存并恢复栈指针。`_photon_switch_context_defer` 在保存完上下文后，在源协程的栈上执行回调 —— 这正是 mutex 能在睡眠期间释放锁而无需额外上下文切换的原因。
+
+### 调度器
+
+- `thread_yield()` —— 让出给 RunQ 中的下一个协程。
+- `thread_usleep(timeout)` —— 睡眠 N 微秒（推入 SleepQ 并切换上下文）。
+- `thread_usleep_defer(timeout, defer, arg)` —— 睡眠 + 在切出后立即执行 defer。对 mutex 睡眠时解锁至关重要。
+- `thread_interrupt(th, errno)` —— 唤醒睡眠中的协程（设置 `error_number`）。
+- `thread_shutdown(th, flag)` —— 标记为关闭，若在睡眠中则唤醒。
+
+## Channel
+
+Go 风格的带类型 channel，定义在 `<photon/thread/go.h>`。
+
+- `channel<T>` —— 提供带缓冲（无锁 MPMC 队列 + semaphore）和无缓冲（mutex 会合）两种变体。
+- `select()` —— 多路复用 channel 操作。
+
+## std 兼容层
+
+`<photon/thread/std-compat.h>` 提供基于光子协程感知原语的替换品，可直接替换标准库使用：
+
+| 类型 | 替换 |
+|------|------|
+| `photon_std::thread` | `std::thread` |
+| `photon_std::mutex` | `std::mutex` |
+| `photon_std::condition_variable` | `std::condition_variable` |
+| `photon_std::promise` / `future` | `std::promise` / `std::future` |
+
+## 设计决策
+
+- **vCPU 私有队列。** RunQ 和 SleepQ 在正常调度期间从不跨 vCPU 共享，避免锁开销。
+- **非对称 spinlock。** 针对"前台 vCPU 访问自己的 runq"（单次原子 store）和"后台 vCPU 访问"（必须检查两个 flag）分别优化。
+- **基于 defer 的睡眠时解锁。** `thread_usleep_defer()` 在不需要额外上下文切换的情况下释放 mutex 内部的 spinlock。
+- **协程位于栈底。** 汇编可直接通过栈指针访问 thread 结构体。

@@ -30,5 +30,13 @@
   "sidebar.docSidebar.category.Miscellaneous.link.generated-index.description": {
     "message": "其他工具",
     "description": "The generated-index page description for category Miscellaneous in sidebar docSidebar"
+  },
+  "sidebar.docSidebar.category.Ecosystem": {
+    "message": "生态",
+    "description": "The label for category Ecosystem in sidebar docSidebar"
+  },
+  "sidebar.docSidebar.category.Ecosystem.link.generated-index.description": {
+    "message": "基于 Photon 构建的客户端与解析器",
+    "description": "The generated-index page description for category Ecosystem in sidebar docSidebar"
   }
 }

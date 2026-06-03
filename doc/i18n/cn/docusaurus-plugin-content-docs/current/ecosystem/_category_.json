@@ -1,0 +1,8 @@
+{
+  "label": "生态",
+  "position": 5,
+  "link": {
+    "type": "generated-index",
+    "description": "基于 Photon 构建的客户端与解析器。"
+  }
+}
