@@ -79,6 +79,18 @@ inline bool RequireShmAvailable(size_t requiredBytes) {
   return true;
 }
 
+// Returns true and emits a [ SKIPPED ] notice + releases the store if the
+// host filesystem supports fiemap; the caller should `return` after a true
+// result so the fallback-path tests stay deterministic on either backend.
+inline bool SkipIfFiemapSupported(ICacheStore* store) {
+  if (static_cast<FileCacheStore*>(store)->isFiemapUnavailable()) return false;
+  fprintf(stderr,
+          "  [ SKIPPED ] fiemap is supported on this filesystem; "
+          "fallback range-map path cannot be exercised here.\n");
+  store->release();
+  return true;
+}
+
 void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
   std::string prefix = "";
   const size_t dirQuota = 32ul * 1024 * 1024;
@@ -1026,20 +1038,7 @@ TEST(CachePool, range_map_deterministic) {
   ASSERT_NE(nullptr, cacheStore);
   cacheStore->set_actual_size(200 * refillUnit);
 
-  // Trigger fiemap failure on tmpfs -> sets fiemapUnavailable_ = true
-  // and rebuildFilledRanges() via SEEK_DATA/SEEK_HOLE
-  auto initRes = cacheStore->queryRefillRange(0, 10 * refillUnit);
-  (void)initRes;
-  // We need to actually exercise the fallback path to validate this code.
-  // On kernels/filesystems where tmpfs supports fiemap, skip rather than fail
-  // so the suite stays portable.
-  if (!static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable()) {
-    fprintf(stderr,
-            "  [ SKIPPED ] fiemap is supported on this filesystem; "
-            "fallback range-map path cannot be exercised here.\n");
-    cacheStore->release();
-    return;
-  }
+  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Write [0, 1MB)
   {
@@ -1113,16 +1112,7 @@ TEST(CachePool, range_map_random) {
   ASSERT_NE(nullptr, cacheStore);
   cacheStore->set_actual_size(totalBlocks * refillUnit);
 
-  // Trigger fiemap failure -> map mode
-  auto initRes = cacheStore->queryRefillRange(0, refillUnit);
-  (void)initRes;
-  if (!static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable()) {
-    fprintf(stderr,
-            "  [ SKIPPED ] fiemap is supported on this filesystem; "
-            "fallback range-map path cannot be exercised here.\n");
-    cacheStore->release();
-    return;
-  }
+  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Track which blocks are filled (by refillUnit granularity)
   std::vector<bool> filled(totalBlocks, false);
@@ -1216,16 +1206,7 @@ TEST(CachePool, range_map_evict_while_open) {
     EXPECT_EQ(ret, (ssize_t)(2 * refillUnit));
   }
 
-  // Trigger fiemap failure -> map mode + rebuild
-  auto initRes = cacheStore->queryRefillRange(0, 5 * refillUnit);
-  (void)initRes;
-  if (!static_cast<FileCacheStore*>(cacheStore)->isFiemapUnavailable()) {
-    fprintf(stderr,
-            "  [ SKIPPED ] fiemap is supported on this filesystem; "
-            "fallback range-map path cannot be exercised here.\n");
-    cacheStore->release();
-    return;
-  }
+  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Write more: [3MB, 4MB), [4MB, 5MB)
   {

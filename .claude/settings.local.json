@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr *)",
+      "Bash(curl -sS \"https://api.github.com/repos/alibaba/PhotonLibOS/pulls/1230/comments\")",
+      "Bash(python3 -c \"import json,sys; data=json.load\\(sys.stdin\\); [print\\('---'\\); print\\('id:',c['id']\\); print\\('user:',c['user']['login']\\); print\\('path:',c['path']\\); print\\('line:',c.get\\('line',c.get\\('original_line'\\)\\)\\); print\\('body:',c['body'][:600]\\) for c in data]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(git diff *)",
+      "Read(//tmp/**)"
+    ]
+  }
+}

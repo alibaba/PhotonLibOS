@@ -16,7 +16,6 @@ limitations under the License.
 
 #pragma once
 
-#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -80,9 +79,11 @@ public:
     uint64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
 
     // True if the media filesystem supports fiemap. Decided once at Init()
-    // time by probing an anonymous file. When false, FileCacheStore tracks
-    // filled ranges in memory from the start instead of relying on fiemap.
-    bool fiemapSupported() const { return fiemapSupported_.load(); }
+    // time by probing a named file. When false, FileCacheStore tracks filled
+    // ranges in memory from the start instead of relying on fiemap.
+    // Written only by probeFiemap() during Init(); plain bool is enough since
+    // all FileCacheStore reads happen-after Init().
+    bool fiemapSupported() const { return fiemapSupported_; }
 
 protected:
     //  pathname must begin with '/'
@@ -108,7 +109,7 @@ protected:
 
     bool isFull_;
 
-    std::atomic<bool> fiemapSupported_{true};
+    bool fiemapSupported_ = true;
     void probeFiemap();
 
     virtual bool afterFtrucate(FileNameMap::iterator iter);

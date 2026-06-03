@@ -25,127 +25,70 @@ limitations under the License.
 namespace photon {
 namespace fs {
 
-// A disjoint interval set that supports add/remove/query operations.
-// Internally stored as a sorted map: key = interval start, value = interval end.
-// All intervals are half-open [left, right). Overlapping/adjacent intervals are
-// automatically merged on insertion.
+// A disjoint interval set: half-open [left, right) ranges keyed by start,
+// merged on insert and split on partial removal.
 class RangeModule {
  public:
-  RangeModule() {}
-
-  // Add interval [left, right), merging with any overlapping or adjacent intervals.
+  // Add [left, right), merging with overlapping or adjacent intervals.
   void addRange(off_t left, off_t right) {
+    if (left >= right) return;
     auto it = intervals.upper_bound(left);
-    if (it != intervals.begin()) {
-      auto start = std::prev(it);
-      if (start->second >= right) {
-        return;
-      }
-      if (start->second >= left) {
-        left = start->first;
-        intervals.erase(start);
-      }
-    }
+    if (it != intervals.begin() && std::prev(it)->second >= left) --it;
     while (it != intervals.end() && it->first <= right) {
+      left = std::min(left, it->first);
       right = std::max(right, it->second);
       it = intervals.erase(it);
     }
     intervals[left] = right;
   }
 
-  // Return true if [left, right) is fully covered by existing intervals.
-  bool queryRange(off_t left, off_t right) {
-    auto it = intervals.upper_bound(left);
-    if (it == intervals.begin()) {
-      return false;
-    }
-    it = std::prev(it);
-    return right <= it->second;
-  }
-
-  // Remove interval [left, right), splitting/trimming existing intervals as needed.
+  // Remove [left, right), splitting/trimming overlapping intervals as needed.
   void removeRange(off_t left, off_t right) {
+    if (left >= right) return;
     auto it = intervals.upper_bound(left);
-    if (it != intervals.begin()) {
-      auto start = std::prev(it);
-      if (start->second >= right) {
-        off_t ri = start->second;
-        if (start->first == left) {
-          intervals.erase(start);
-        } else {
-          start->second = left;
-        }
-        if (right != ri) {
-          intervals[right] = ri;
-        }
-        return;
-      } else if (start->second > left) {
-        if (start->first == left) {
-          intervals.erase(start);
-        } else {
-          start->second = left;
-        }
-      }
-    }
+    if (it != intervals.begin() && std::prev(it)->second > left) --it;
     while (it != intervals.end() && it->first < right) {
-      if (it->second <= right) {
-        it = intervals.erase(it);
-      } else {
-        intervals[right] = it->second;
-        intervals.erase(it);
-        break;
-      }
+      off_t s = it->first, e = it->second;
+      it = intervals.erase(it);
+      if (s < left) intervals[s] = left;            // preserve left tail
+      if (e > right) intervals[right] = e;          // preserve right tail
     }
   }
 
-  // Remove all intervals.
-  void clear() {
-    intervals.clear();
+  // Drop every interval starting at or after `offset` (truncate semantics).
+  void removeFrom(off_t offset) {
+    removeRange(offset, std::numeric_limits<off_t>::max());
   }
 
-  // Compute the outer refill region needed to fully cover [left, right):
-  // trim from the left edge if [left, ...) is already inside a filled interval,
-  // trim from the right edge if (..., right) is already inside a filled interval,
-  // and otherwise return [left, right) as-is — interior gaps are ignored so the
-  // caller refills the whole region in one shot (matches fiemap-path semantics).
+  void clear() { intervals.clear(); }
+
+  // Outer refill region needed to fully cover [left, right): trim the left
+  // edge if it sits inside a filled interval, trim the right edge likewise,
+  // ignore interior gaps so the caller refills the whole region in one shot
+  // (matches the fiemap-path semantics in cache_store).
   // Returns {0, 0} when [left, right) is fully covered or empty.
   std::pair<off_t, off_t> queryRefillRange(off_t left, off_t right) {
     if (left >= right) return {0, 0};
-    off_t outLeft = left;
-    off_t outRight = right;
-    auto it = intervals.upper_bound(left);
-    if (it != intervals.begin()) {
-      auto prev = std::prev(it);
-      if (prev->second > left) {
-        outLeft = prev->second;
-      }
-    }
-    if (outLeft >= outRight) return {0, 0};
-    auto rit = intervals.lower_bound(outRight);
-    if (rit != intervals.begin()) {
-      auto prev = std::prev(rit);
-      if (prev->second >= outRight && prev->first > outLeft) {
-        outRight = prev->first;
-      }
-    }
-    if (outLeft >= outRight) return {0, 0};
-    return {outLeft, outRight};
-  }
-
-  // Remove all intervals from offset onwards (truncate semantics).
-  void removeFrom(off_t offset) {
-    auto it = intervals.lower_bound(offset);
-    if (it != intervals.begin()) {
-      auto prev = std::prev(it);
-      if (prev->second > offset) {
-        prev->second = offset;
-      }
-    }
-    intervals.erase(it, intervals.end());
+    if (auto it = findContaining(left); it != intervals.end())
+      left = it->second;
+    if (left >= right) return {0, 0};
+    if (auto it = findContaining(right - 1); it != intervals.end() && it->first > left)
+      right = it->first;
+    // Right-trim only fires when it->first > left, so right > left holds here.
+    return {left, right};
   }
 
  private:
-  std::map<off_t, off_t> intervals;  // key: start, value: end (half-open)
+  std::map<off_t, off_t> intervals;     // key: start, value: end (half-open)
+
+  // Iterator to the interval that strictly contains `pos` (start <= pos < end),
+  // or end() if none.
+  std::map<off_t, off_t>::iterator findContaining(off_t pos) {
+    auto it = intervals.upper_bound(pos);
+    if (it == intervals.begin()) return intervals.end();
+    auto prev = std::prev(it);
+    return prev->second > pos ? prev : intervals.end();
+  }
 };
 
 }

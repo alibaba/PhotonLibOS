@@ -70,36 +70,30 @@ FileCachePool::~FileCachePool() {
 }
 
 void FileCachePool::Init() {
-  traverseDir("/");
   probeFiemap();
+  traverseDir("/");
   timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
 }
 
 void FileCachePool::probeFiemap() {
-  auto probe = mediaFs_->open("/", O_TMPFILE | O_RDWR, 0600);
+  static const char* probePath = "/.photon_fiemap_probe";
+  struct stat st = {};
+  bool preExists = (mediaFs_->stat(probePath, &st) == 0);
+  auto probe = mediaFs_->open(probePath, O_CREAT | O_RDWR, 0600);
   if (!probe) {
-    ERRNO e;
-    // If we can't create an O_TMPFILE probe on this filesystem, fall back to
-    // range tracking to avoid hard failures later when calling fiemap.
-    if (e.no == EOPNOTSUPP || e.no == ENOTTY || e.no == EINVAL) {
-      fiemapSupported_.store(false);
-      LOG_INFO("media FS does not support O_TMPFILE in fiemap probe, using range tracking");
-      return;
-    }
-    LOG_ERRNO_RETURN(0, void(), "failed to create temp fiemap probe file");
+    fiemapSupported_ = false;
+    LOG_ERRNO_RETURN(0, void(), "fiemap probe file open failed");
   }
-  DEFER(delete probe);
+  DEFER({
+    delete probe;
+    if (!preExists) mediaFs_->unlink(probePath);
+  });
 
   fiemap_t<1> fie(0, 1);
   fie.fm_mapped_extents = 0;
   if (probe->fiemap(&fie) != 0) {
-    ERRNO e;
-    if (e.no == EOPNOTSUPP || e.no == ENOTTY || e.no == EINVAL) {
-      fiemapSupported_.store(false);
-      LOG_INFO("media FS does not support fiemap, using range tracking");
-    } else {
-      LOG_ERRNO_RETURN(0, void(), "fiemap probe failed with unexpected error");
-    }
+    fiemapSupported_ = false;
+    LOG_INFO("Call fiemap failed, errno `", ERRNO());
   }
 }
 
