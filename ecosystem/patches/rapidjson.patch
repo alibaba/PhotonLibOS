@@ -74,3 +74,76 @@ index fef82c25..cd51ccd3 100644
      size_t Tell() { return static_cast<size_t>(src_ - head_); }
 
      // Write
+diff --git a/include/rapidjson/document.h b/include/rapidjson/document.h
+index e3e20df..a2d3768 100644
+--- a/include/rapidjson/document.h
++++ b/include/rapidjson/document.h
+@@ -2332,6 +2332,8 @@ public:
+     // Implementation of Handler
+     bool Null() { new (stack_.template Push<ValueType>()) ValueType(); return true; }
+     bool Bool(bool b) { new (stack_.template Push<ValueType>()) ValueType(b); return true; }
++    // enabled via kParseBoolsAsStringFlag in reader.h; treat raw bool token as a string value
++    bool RawBool(const Ch* str, SizeType length, bool copy) { return String(str, length, copy); }
+     bool Int(int i) { new (stack_.template Push<ValueType>()) ValueType(i); return true; }
+     bool Uint(unsigned i) { new (stack_.template Push<ValueType>()) ValueType(i); return true; }
+     bool Int64(int64_t i) { new (stack_.template Push<ValueType>()) ValueType(i); return true; }
+diff --git a/include/rapidjson/prettywriter.h b/include/rapidjson/prettywriter.h
+index 0dcb0fe..0ba090c 100644
+--- a/include/rapidjson/prettywriter.h
++++ b/include/rapidjson/prettywriter.h
+@@ -96,6 +96,11 @@ public:
+         return Base::WriteString(str, length);
+     }
+
++    // enabled via kParseBoolsAsStringFlag in reader.h; treat raw bool token as a string value
++    bool RawBool(const Ch* str, SizeType length, bool copy = false) {
++        return String(str, length, copy);
++    }
++
+     bool String(const Ch* str, SizeType length, bool copy = false) {
+         (void)copy;
+         PrettyPrefix(kStringType);
+diff --git a/include/rapidjson/schema.h b/include/rapidjson/schema.h
+index b182aa2..84e0896 100644
+--- a/include/rapidjson/schema.h
++++ b/include/rapidjson/schema.h
+@@ -187,6 +187,12 @@ public:
+         return true;
+     }
+
++    // enabled via kParseBoolsAsStringFlag in reader.h; treat raw bool token as a string value
++    bool RawBool(const Ch* str, SizeType len, bool) {
++        WriteBuffer(kStringType, str, len * sizeof(Ch));
++        return true;
++    }
++
+     bool String(const Ch* str, SizeType len, bool) {
+         WriteBuffer(kStringType, str, len * sizeof(Ch));
+         return true;
+@@ -1695,6 +1701,9 @@ RAPIDJSON_MULTILINEMACRO_END
+     bool Double(double d)   { RAPIDJSON_SCHEMA_HANDLE_VALUE_(Double, (CurrentContext(), d), (d)); }
+     bool RawNumber(const Ch* str, SizeType length, bool copy)
+                                     { RAPIDJSON_SCHEMA_HANDLE_VALUE_(String, (CurrentContext(), str, length, copy), (str, length, copy)); }
++    // enabled via kParseBoolsAsStringFlag in reader.h; treat raw bool token as a string value
++    bool RawBool(const Ch* str, SizeType length, bool copy)
++                                    { RAPIDJSON_SCHEMA_HANDLE_VALUE_(String, (CurrentContext(), str, length, copy), (str, length, copy)); }
+     bool String(const Ch* str, SizeType length, bool copy)
+                                     { RAPIDJSON_SCHEMA_HANDLE_VALUE_(String, (CurrentContext(), str, length, copy), (str, length, copy)); }
+
+diff --git a/include/rapidjson/writer.h b/include/rapidjson/writer.h
+index 94f22dd..624904d 100644
+--- a/include/rapidjson/writer.h
++++ b/include/rapidjson/writer.h
+@@ -189,6 +189,11 @@ public:
+         return EndValue(WriteString(str, length));
+     }
+
++    // enabled via kParseBoolsAsStringFlag in reader.h; treat raw bool token as a string value
++    bool RawBool(const Ch* str, SizeType length, bool copy = false) {
++        return String(str, length, copy);
++    }
++
+     bool String(const Ch* str, SizeType length, bool copy = false) {
+         (void)copy;
+         Prefix(kStringType);
+
