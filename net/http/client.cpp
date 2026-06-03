@@ -317,7 +317,7 @@ public:
             switch (ret) {
                 case ROUNDTRIP_NEED_RETRY:
                     photon::thread_usleep(sleep_interval * 1000UL);
-                    sleep_interval = (sleep_interval + 500) * 2;
+                    sleep_interval = std::min((sleep_interval + 500) * 2, 5000UL);
                     ++retry;
                     break;
                 case ROUNDTRIP_FAST_RETRY:
