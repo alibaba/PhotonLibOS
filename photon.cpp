@@ -163,6 +163,8 @@ void fini_hook(Delegate<void> handler) {
 }
 
 int fini() {
+    if (!CURRENT)
+        return -1;
     for (auto h : get_hook_vector()) {
         h.fire();
     }
