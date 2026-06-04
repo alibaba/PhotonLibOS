@@ -391,6 +391,7 @@ namespace photon
             auto ret = q[0];
             if (q.size() == 1) {
                 q.pop_back();
+                ret->idx = -1;
                 return ret;
             }
             q[0] = q.back();
@@ -403,20 +404,21 @@ namespace photon
 
         int pop(thread *obj)
         {
-            if (obj->idx == -1) return -1;
-            if ((size_t)obj->idx == q.size() - 1){
+            auto id = obj->idx;
+            if (id == -1) return -1;
+            if ((size_t)id == q.size() - 1){
                 q.pop_back();
                 obj->idx = -1;
                 return 0;
             }
 
-            auto id = obj->idx;
             if (q.size() == 1) {
                 assert(id == 0);
                 q.pop_back();
+                obj->idx = -1;
                 return 0;
             }
-            q[obj->idx] = q.back();
+            q[id] = q.back();
             q[id]->idx = id;
             q.pop_back();
             if (!up(id)) down(id);
