@@ -34,6 +34,7 @@ limitations under the License.
 #include "fs/exportfs.h"
 #include "common/alog.h"
 #include "common/callback.h"
+#include "common/utility.h"
 #include <vector>
 
 namespace photon {
@@ -94,59 +95,48 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     if (vcpu_init() < 0)
         return -1;
 
+    bool ok = false;
+    g_event_engine = event_engine;
+    g_io_engine = io_engine;
+    DEFER(if (!ok) fini());
+
     const uint64_t ALL_ENGINES =
             INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
             INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
+        bool engine_ok = false;
         for (auto x : recommended_order) {
             if ((x & event_engine) && init_event_engine(x, event_engine, options) == 0) {
-                g_event_engine |= x;
-                goto next;
+                engine_ok = true;
+                break;
             }
         }
-        LOG_ERROR("All master engines init failed");
-        goto fail;
-    }
-next:
-    if (INIT_EVENT_SIGNAL & event_engine) {
-        if (sync_signal_init() < 0)
-            goto fail;
-        g_event_engine |= INIT_EVENT_SIGNAL;
+        if (!engine_ok)
+            LOG_ERROR_RETURN(0, -1, "All master engines init failed");
     }
 
-#define INIT_IO_OR_FAIL(name, prefix, ...) \
-    if (INIT_IO_##name & io_engine) { \
-        if (prefix##_init(__VA_ARGS__) < 0) goto fail; \
-        g_io_engine |= INIT_IO_##name; \
-    }
+    if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
+        return -1;
 
 #ifdef ENABLE_FSTACK_DPDK
-    INIT_IO_OR_FAIL(FSTACK_DPDK, fstack_dpdk);
+    INIT_IO(FSTACK_DPDK, fstack_dpdk);
 #endif
-    INIT_IO_OR_FAIL(EXPORTFS, exportfs)
+    INIT_IO(EXPORTFS, exportfs)
 #ifdef ENABLE_CURL
-    INIT_IO_OR_FAIL(LIBCURL, libcurl)
+    INIT_IO(LIBCURL, libcurl)
 #endif
 #ifdef __linux__
-    INIT_IO_OR_FAIL(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
-    INIT_IO_OR_FAIL(SOCKET_EDGE_TRIGGER, et_poller)
+    INIT_IO(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
+    INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
-
-#undef INIT_IO_OR_FAIL
-
-    g_event_engine = event_engine;
-    g_io_engine = io_engine;
     if (!reset_handle_registed) {
         pthread_atfork(nullptr, nullptr, &reset_all_handle);
         LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
         reset_handle_registed = true;
     }
+    ok = true;
     return 0;
-
-fail:
-    fini();
-    return -1;
 }
 
 int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
