@@ -101,26 +101,40 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     if (event_engine & ALL_ENGINES) {
         for (auto x : recommended_order) {
             if ((x & event_engine) && init_event_engine(x, event_engine, options) == 0) {
+                g_event_engine |= x;
                 goto next;
             }
         }
-        LOG_ERROR_RETURN(0, -1, "All master engines init failed");
+        LOG_ERROR("All master engines init failed");
+        goto fail;
     }
 next:
-    if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
-        return -1;
+    if (INIT_EVENT_SIGNAL & event_engine) {
+        if (sync_signal_init() < 0)
+            goto fail;
+        g_event_engine |= INIT_EVENT_SIGNAL;
+    }
+
+#define INIT_IO_OR_FAIL(name, prefix, ...) \
+    if (INIT_IO_##name & io_engine) { \
+        if (prefix##_init(__VA_ARGS__) < 0) goto fail; \
+        g_io_engine |= INIT_IO_##name; \
+    }
 
 #ifdef ENABLE_FSTACK_DPDK
-    INIT_IO(FSTACK_DPDK, fstack_dpdk);
+    INIT_IO_OR_FAIL(FSTACK_DPDK, fstack_dpdk);
 #endif
-    INIT_IO(EXPORTFS, exportfs)
+    INIT_IO_OR_FAIL(EXPORTFS, exportfs)
 #ifdef ENABLE_CURL
-    INIT_IO(LIBCURL, libcurl)
+    INIT_IO_OR_FAIL(LIBCURL, libcurl)
 #endif
 #ifdef __linux__
-    INIT_IO(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
-    INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
+    INIT_IO_OR_FAIL(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
+    INIT_IO_OR_FAIL(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
+
+#undef INIT_IO_OR_FAIL
+
     g_event_engine = event_engine;
     g_io_engine = io_engine;
     if (!reset_handle_registed) {
@@ -129,6 +143,10 @@ next:
         reset_handle_registed = true;
     }
     return 0;
+
+fail:
+    fini();
+    return -1;
 }
 
 int init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
