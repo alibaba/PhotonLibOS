@@ -316,8 +316,10 @@ public:
             if (ret == ROUNDTRIP_SUCCESS || ret == ROUNDTRIP_FAILED) break;
             switch (ret) {
                 case ROUNDTRIP_NEED_RETRY:
-                    photon::thread_usleep(sleep_interval * 1000UL);
-                    sleep_interval = std::min((sleep_interval + 500) * 2, 5000UL);
+                    // never sleep past the remaining deadline, otherwise a single
+                    // backoff can overshoot the operation timeout by a wide margin
+                    photon::thread_usleep(std::min(sleep_interval * 1000UL, tmo.timeout()));
+                    sleep_interval = (sleep_interval + 500) * 2;
                     ++retry;
                     break;
                 case ROUNDTRIP_FAST_RETRY:
