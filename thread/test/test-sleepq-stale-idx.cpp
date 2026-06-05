@@ -25,10 +25,10 @@ limitations under the License.
 #include <photon/thread/workerpool.h>
 
 TEST(SleepQueue, pop_front_single_sleeper_clears_idx_before_migrate) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    ASSERT_EQ(0, photon::init());
     DEFER(photon::fini());
 
-    photon::WorkPool pool(1, photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE, 0);
+    photon::WorkPool pool(1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, 0);
     std::atomic<bool> done{false};
 
     photon::thread_create11([&] {
