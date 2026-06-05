@@ -25,9 +25,15 @@ namespace http {
 void URL::fix_target() {
     auto t = (m_url | m_target);
     if (m_target.size() == 0 || t.front() != '/') {
-        m_tmp_target = (char*)malloc(m_target.size() + 1);
+        // Allocate (size + 2): one extra byte for the leading '/' and one
+        // trailing '\0' so m_tmp_target stays a valid C string. This avoids
+        // a heap-buffer-overflow when something implicitly converts the raw
+        // pointer to std::string_view via the const-char* constructor (which
+        // calls strlen).
+        m_tmp_target = (char*)malloc(m_target.size() + 2);
         m_tmp_target[0] = '/';
-        memcpy(m_tmp_target+1, t.data(), t.size());
+        memcpy(m_tmp_target + 1, t.data(), t.size());
+        m_tmp_target[m_target.size() + 1] = '\0';
         m_target = rstring_view16(0, m_target.size()+1);
         m_path = rstring_view16(0, m_path.size()+1);
     }
