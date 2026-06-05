@@ -27,7 +27,7 @@ namespace photon
     }
 
     void set_bypass_threadpool(bool flag) {
-        __bypass_threadpool = true;
+        __bypass_threadpool = flag;
     }
 
     TPControl* ThreadPoolBase::thread_create_ex(thread_entry start, void* arg, bool joinable)
