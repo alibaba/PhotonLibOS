@@ -39,3 +39,7 @@ add_test(NAME test-lib-data COMMAND $<TARGET_FILE:test-lib-data>)
 add_executable(test-multi-vcpu-locking test-multi-vcpu-locking.cpp)
 target_link_libraries(test-multi-vcpu-locking PRIVATE photon_shared)
 add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-locking>)
+
+add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
+target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
+add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
