@@ -57,10 +57,17 @@ public:
                    m_partial_body_buf((char*)body.data()),
                    m_partial_body_remain(body.size()),
                    m_body_remain(body_remain) {
+        if (body_remain == SIZE_MAX) {
+            // Close-delimited mode: read until peer closes the connection.
+            // Do not use m_body_remain as a counter; m_close_delim drives the
+            // logic in read()/close() instead.
+            m_close_delim = true;
+        }
     }
     ~BodyReadStream() {
     }
     virtual int close() override {
+        if (m_close_delim) return 0;
         auto stream_remain = m_body_remain - m_partial_body_remain;
         if (stream_remain > SKIP_LIMIT) return -1;
         if (stream_remain && !m_stream->skip_read(stream_remain)) return -1;
@@ -69,13 +76,13 @@ public:
 
     virtual ssize_t read(void *buf, size_t count) override {
         ssize_t ret = 0;
-        if (count > m_body_remain) count = m_body_remain;
+        if (!m_close_delim && count > m_body_remain) count = m_body_remain;
         auto read_from_remain = std::min(count, m_partial_body_remain);
         if (read_from_remain > 0) {
             memcpy(buf, m_partial_body_buf, read_from_remain);
             buf = (char*)buf + read_from_remain;
             count -= read_from_remain;
-            m_body_remain -= read_from_remain;
+            if (!m_close_delim) m_body_remain -= read_from_remain;
             m_partial_body_remain -= read_from_remain;
             m_partial_body_buf += read_from_remain;
             ret += read_from_remain;
@@ -84,7 +91,7 @@ public:
             auto r = m_stream->read(buf, count);
             if (r < 0)
                 return r;
-            m_body_remain -= r;
+            if (!m_close_delim) m_body_remain -= r;
             ret += r;
         }
         return ret;
@@ -108,6 +115,7 @@ protected:
     net::ISocketStream *m_stream;
     char* m_partial_body_buf;
     size_t m_partial_body_remain, m_body_remain;
+    bool m_close_delim = false;
 };
 
 class ChunkedBodyReadStream : public BodyReadStream {
