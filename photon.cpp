@@ -96,8 +96,6 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
         return -1;
 
     bool ok = false;
-    g_event_engine = event_engine;
-    g_io_engine = io_engine;
     DEFER(if (!ok) fini());
 
     const uint64_t ALL_ENGINES =
@@ -105,17 +103,14 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
             INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
-        bool engine_ok = false;
         for (auto x : recommended_order) {
             if ((x & event_engine) && init_event_engine(x, event_engine, options) == 0) {
-                engine_ok = true;
-                break;
+                goto next;
             }
         }
-        if (!engine_ok)
-            LOG_ERROR_RETURN(0, -1, "All master engines init failed");
+        LOG_ERROR_RETURN(0, -1, "All master engines init failed");
     }
-
+next:
     if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
         return -1;
 
@@ -130,6 +125,8 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     INIT_IO(LIBAIO, libaio_wrapper, options.libaio_queue_depth)
     INIT_IO(SOCKET_EDGE_TRIGGER, et_poller)
 #endif
+    g_event_engine = event_engine;
+    g_io_engine = io_engine;
     if (!reset_handle_registed) {
         pthread_atfork(nullptr, nullptr, &reset_all_handle);
         LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
