@@ -105,7 +105,7 @@ public:
             .msg_flags = 0,
         };
         auto ret = DOIO_ONCE(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
-                         wait_for_fd_writable(fd));
+                         wait_for_fd_readable(fd));
         if (addrlen) *addrlen = hdr.msg_namelen;
         return ret;
     }
