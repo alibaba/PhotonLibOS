@@ -268,10 +268,10 @@ size_t Message::body_size() const {
     it = headers.find("Content-Range");
     if (it == headers.end()) return 0;
     size_t start, end;
-    if (sscanf("bytes %lu-%lu", it.second().data(), &start, &end) == 2) {
+    if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
         return end-start+1;
     }
-    if (sscanf("bytes */%lu", it.second().data(), &end) == 1) {
+    if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
         return end;
     }
     return 0;
