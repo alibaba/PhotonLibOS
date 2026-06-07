@@ -129,6 +129,7 @@ void base64_translate_3to4(const char *in, char *out)  {
 }
 
 void Base64Encode(std::string_view in, std::string &out) {
+    if (in.empty()) { out.clear(); return; }
     auto main = in.size() / 3;
     auto remain = in.size() % 3;
     if (0 == remain) {
