@@ -64,6 +64,7 @@ public:
                     LOG_ERROR("iouring: failed to unregister cascading event fd ", ERRNO());
             }
             close(m_eventfd);
+            m_eventfd = -1;
         }
         if (m_ring != nullptr) {
             io_uring_queue_exit(m_ring);
