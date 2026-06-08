@@ -49,3 +49,7 @@ add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stac
 add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
 target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
 add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
+
+add_executable(test-workpool-fanout test-workpool-fanout.cpp)
+target_link_libraries(test-workpool-fanout PRIVATE photon_shared ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
+add_test(NAME test-workpool-fanout COMMAND $<TARGET_FILE:test-workpool-fanout>)
