@@ -210,6 +210,7 @@ public:
         if (ctx == nullptr) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
             LOG_ERROR(0, -1, "Failed to initial TLS: ", errbuf);
+            return;
         }
         SSL_CTX_set_ecdh_auto(ctx, 1);
         SSL_CTX_set_alpn_select_cb(ctx, ctx_alpn_select_cb, this);
@@ -261,6 +262,11 @@ public:
         auto bio = BIO_new_mem_buf((void*)cert_str, -1);
         DEFER(BIO_free(bio));
         auto cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        if (cert == nullptr) {
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
+            LOG_ERROR_RETURN(0, -1, "Failed to read X509 cert: ", errbuf);
+        }
+        DEFER(X509_free(cert));
         auto ret = SSL_CTX_use_certificate(ctx, cert);
         if (ret != 1) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
@@ -279,6 +285,11 @@ public:
         DEFER(BIO_free(bio));
         auto key =
             PEM_read_bio_PrivateKey(bio, nullptr, &pem_password_cb, this);
+        if (key == nullptr) {
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
+            LOG_ERROR_RETURN(0, -1, "Failed to read private key: ", errbuf);
+        }
+        DEFER(EVP_PKEY_free(key));
         auto ret = SSL_CTX_use_PrivateKey(ctx, key);
         if (ret != 1) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
@@ -387,16 +398,17 @@ public:
     };
 
     static BIO_METHOD* BIO_s_sockstream() {
-        static std::unique_ptr<BIO_METHOD, BIOMethodDeleter> meth(
-            BIO_meth_new(BIO_TYPE_SOURCE_SINK, "BIO_PHOTON_SOCKSTREAM"));
-        auto ret = meth.get();
-        BIO_meth_set_write(ret, &TLSSocketStream::ssbio_bwrite);
-        BIO_meth_set_read(ret, &TLSSocketStream::ssbio_bread);
-        BIO_meth_set_puts(ret, &TLSSocketStream::ssbio_bputs);
-        BIO_meth_set_ctrl(ret, &TLSSocketStream::ssbio_ctrl);
-        BIO_meth_set_create(ret, &TLSSocketStream::ssbio_create);
-        BIO_meth_set_destroy(ret, &TLSSocketStream::ssbio_destroy);
-        return ret;
+        static std::unique_ptr<BIO_METHOD, BIOMethodDeleter> meth([] {
+            auto m = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "BIO_PHOTON_SOCKSTREAM");
+            BIO_meth_set_write(m, &TLSSocketStream::ssbio_bwrite);
+            BIO_meth_set_read(m, &TLSSocketStream::ssbio_bread);
+            BIO_meth_set_puts(m, &TLSSocketStream::ssbio_bputs);
+            BIO_meth_set_ctrl(m, &TLSSocketStream::ssbio_ctrl);
+            BIO_meth_set_create(m, &TLSSocketStream::ssbio_create);
+            BIO_meth_set_destroy(m, &TLSSocketStream::ssbio_destroy);
+            return m;
+        }());
+        return meth.get();
     }
 
     static ISocketStream* get_bio_sockstream(BIO* b) {

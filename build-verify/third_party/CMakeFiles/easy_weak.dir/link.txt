@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../output/libeasy_weak.a CMakeFiles/easy_weak.dir/easy_weak/easy_weak.cpp.o
+/usr/bin/ranlib ../output/libeasy_weak.a

@@ -231,6 +231,18 @@ class CurlResetHandle : public ResetHandle {
 };
 static thread_local CurlResetHandle *reset_handler = nullptr;
 
+static void libcurl_init_cleanup() {
+    delete cctx.g_timer;
+    cctx.g_timer = nullptr;
+    if (cctx.g_loop) {
+        cctx.g_loop->stop();
+        delete cctx.g_loop;
+        cctx.g_loop = nullptr;
+    }
+    delete cctx.g_poller;
+    cctx.g_poller = nullptr;
+}
+
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
@@ -239,18 +251,24 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
         cctx.g_loop->start();
         cctx.g_timer =
             new photon::Timer(-1UL, {nullptr, &on_timer}, true, 8UL * 1024 * 1024);
-        if (!cctx.g_timer)
+        if (!cctx.g_timer) {
+            libcurl_init_cleanup();
             LOG_ERROR_RETURN(EFAULT, -1, "failed to create photon timer");
+        }
 
-        if (global_initialized != CURLE_OK)
+        if (global_initialized != CURLE_OK) {
+            libcurl_init_cleanup();
             LOG_ERROR_RETURN(EIO, -1, "CURL global init error: ",
                             curl_easy_strerror(global_initialized));
+        }
 
         LOG_DEBUG("libcurl version ", curl_version());
 
         cctx.g_libcurl_multi = curl_multi_init();
-        if (cctx.g_libcurl_multi == nullptr)
+        if (cctx.g_libcurl_multi == nullptr) {
+            libcurl_init_cleanup();
             LOG_ERROR_RETURN(EIO, -1, "failed to init libcurl-multi");
+        }
 
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_TIMERFUNCTION, timer_cb);

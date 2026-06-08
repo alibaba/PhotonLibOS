@@ -1,0 +1,2 @@
+/usr/bin/ar qc ../output/libfstack_weak.a CMakeFiles/fstack_weak.dir/fstack_weak/fstack_weak.cpp.o
+/usr/bin/ranlib ../output/libfstack_weak.a

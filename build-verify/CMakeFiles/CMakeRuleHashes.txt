@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+06862244258e0c6a263e8434b2ba4533 CMakeFiles/_photon_static_archive
+620512f5533860639e95490e5d35e38d CMakeFiles/copy_includes
