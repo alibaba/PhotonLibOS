@@ -142,20 +142,8 @@ struct RSockFD {
             }
             return x;
         } while (tmo.timeout());
-        return 0;
-    }
-
-    template <int EVENT, typename FUNC, typename... ARGS>
-    ssize_t do_io_fully_action(uint64_t t, FUNC f, size_t n, ARGS... args) {
-        Timeout tmo(t);
-        ssize_t x = 0;
-        while (x < (ssize_t)n) {
-            auto ret = do_io_action<EVENT>(tmo.timeout(), f, args...);
-            if (ret < 0) return ret;
-            if (ret == 0) return x;
-            x += ret;
-        }
-        return x;
+        errno = ETIMEDOUT;
+        return -1;
     }
 
     ssize_t recv(uint64_t timeout, void* buf, size_t count, int flags = 0) {
@@ -167,13 +155,31 @@ struct RSockFD {
         return do_io_action<POLLIN>(timeout, rrecvmsg, msg, flags);
     }
     ssize_t read(uint64_t timeout, void* buf, size_t count) {
-        return do_io_fully_action<POLLIN>(timeout, rrecv, count, buf, count, 0);
+        Timeout tmo(timeout);
+        ssize_t total = 0;
+        while ((size_t)total < count) {
+            auto ret = do_io_action<POLLIN>(tmo.timeout(), rrecv, buf, count - total, 0);
+            if (ret < 0) return ret;
+            if (ret == 0) break;
+            total += ret;
+            buf = (char*)buf + ret;
+        }
+        return total;
     }
     ssize_t readv(uint64_t timeout, const struct iovec* iov, int iovcnt) {
         iovector_view viov{(iovec*)iov, iovcnt};
-        tmp_msg_hdr msg(viov);
-        return do_io_fully_action<POLLIN>(timeout, rrecvmsg, viov.sum(), msg,
-                                          0);
+        size_t count = viov.sum();
+        Timeout tmo(timeout);
+        ssize_t total = 0;
+        while ((size_t)total < count) {
+            tmp_msg_hdr msg(viov);
+            auto ret = do_io_action<POLLIN>(tmo.timeout(), rrecvmsg, msg, 0);
+            if (ret < 0) return ret;
+            if (ret == 0) break;
+            total += ret;
+            viov.extract_front(ret);
+        }
+        return total;
     }
     ssize_t send(uint64_t timeout, const void* buf, size_t count,
                  int flags = 0) {
@@ -185,14 +191,33 @@ struct RSockFD {
         return do_io_action<POLLOUT>(timeout, rsendmsg, msg, flags);
     }
     ssize_t write(uint64_t timeout, const void* buf, size_t count) {
-        return do_io_fully_action<POLLOUT>(timeout, rsend, count, buf, count,
-                                           0);
+        Timeout tmo(timeout);
+        ssize_t total = 0;
+        size_t remaining = count;
+        while ((size_t)total < count) {
+            auto ret = do_io_action<POLLOUT>(tmo.timeout(), rsend, buf, remaining, 0);
+            if (ret < 0) return ret;
+            if (ret == 0) break;
+            total += ret;
+            buf = (const char*)buf + ret;
+            remaining -= ret;
+        }
+        return total;
     }
     ssize_t writev(uint64_t timeout, const struct iovec* iov, int iovcnt) {
         iovector_view viov{(iovec*)iov, iovcnt};
-        tmp_msg_hdr msg(viov);
-        return do_io_fully_action<POLLOUT>(timeout, rsendmsg, viov.sum(), msg,
-                                           0);
+        size_t count = viov.sum();
+        Timeout tmo(timeout);
+        ssize_t total = 0;
+        while ((size_t)total < count) {
+            tmp_msg_hdr msg(viov);
+            auto ret = do_io_action<POLLOUT>(tmo.timeout(), rsendmsg, msg, 0);
+            if (ret < 0) return ret;
+            if (ret == 0) break;
+            total += ret;
+            viov.extract_front(ret);
+        }
+        return total;
     }
     int shutdown(ShutdownHow how) {
         return rshutdown(fd, static_cast<int>(how));

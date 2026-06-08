@@ -506,6 +506,7 @@ namespace rpc
                 iov.push_back(s.addr(), s.size());
                 DeserializerIOV deserializer;
                 auto* t = deserializer.deserialize<V>(&iov);
+                if (!t) return;
 
                 m_pair.first = m_ptr->first | *m_base_buffer;
                 m_pair.second = *t;
