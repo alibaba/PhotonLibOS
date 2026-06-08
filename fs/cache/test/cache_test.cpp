@@ -25,12 +25,9 @@ limitations under the License.
 
 #include <cstring>
 #include <algorithm>
-<<<<<<< HEAD
 #include <set>
-=======
 #include <random>
 #include <vector>
->>>>>>> 48d7395 (feat(cache): probe fiemap support and track ranges as fallback (#1230))
 
 #include <photon/common/utility.h>
 #include <photon/photon.h>
