@@ -151,6 +151,7 @@ public:
     }
 
     photon::vcpu_base *get_vcpu_in_pool(size_t index) {
+        SCOPED_LOCK(worker_lock);
         auto size = vcpus.size();
         if (index >= size) {
             index = vcpu_index++ % size;
