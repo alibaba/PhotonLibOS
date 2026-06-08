@@ -45,3 +45,7 @@ add_test(NAME test-multi-vcpu-locking COMMAND $<TARGET_FILE:test-multi-vcpu-lock
 add_executable(test-pooled-stack-allocator test-pooled-stack-allocator.cpp)
 target_link_libraries(test-pooled-stack-allocator PRIVATE photon_shared)
 add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stack-allocator>)
+
+add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
+target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
+add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
