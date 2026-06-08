@@ -58,6 +58,9 @@ ssize_t QuotaFileStore::do_pwritev2(const struct iovec *iov, int iovcnt, off_t o
   {
     photon::scoped_rwlock wl(rw_lock_, photon::WLOCK);
     ret = localFile_->pwritev(iov, iovcnt, offset);
+    if (ret > 0 && !fiemapSupported_) {
+      addFilledRange(offset, ret);
+    }
   }
   if (ret < 0 && ENOSPC == errno) {
     cachePool_->forceRecycle();

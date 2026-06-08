@@ -19,6 +19,7 @@ limitations under the License.
 #include <sys/stat.h>
 #include "sys/statvfs.h"
 #include <sys/uio.h>
+#include <unistd.h>
 
 #include <photon/common/alog.h>
 #include <photon/common/alog-audit.h>
@@ -41,7 +42,11 @@ FileCacheStore::FileCacheStore(photon::fs::ICachePool* cachePool, IFile* localFi
     : cachePool_(static_cast<FileCachePool*>(cachePool)),
       localFile_(localFile),
       refillUnit_(refillUnit),
-      iterator_(iterator) {
+      iterator_(iterator),
+      fiemapSupported_(cachePool_->fiemapSupported()) {
+  if (!fiemapSupported_) {
+    rebuildFilledRanges();
+  }
 }
 
 FileCacheStore::~FileCacheStore() {
@@ -82,6 +87,9 @@ ssize_t FileCacheStore::do_pwritev(const struct iovec *iov, int iovcnt, off_t of
   ScopedRangeLock lock(rangeLock_, offset, view.sum());
   SCOPE_AUDIT_THRESHOLD(10UL * 1000, "file:write", AU_FILEOP("", offset, ret));
   ret = localFile_->pwritev(iov, iovcnt, offset);
+  if (ret > 0 && !fiemapSupported_) {
+    addFilledRange(offset, ret);
+  }
   return ret;
 }
 
@@ -113,6 +121,11 @@ std::pair<off_t, size_t> FileCacheStore::queryRefillRange(off_t offset, size_t s
   off_t alignLeft = align_down(offset, kBlockSize);
   off_t alignRight = align_up(offset + size, kBlockSize);
   ReadRequest request{alignLeft, static_cast<size_t>(alignRight - alignLeft)};
+
+  if (!fiemapSupported_) {
+    return queryRefillRangeByMap(request.offset, request.size);
+  }
+
   struct fiemap_t<kFieExtentSize> fie(request.offset, request.size);
   fie.fm_mapped_extents = 0;
 
@@ -174,8 +187,9 @@ int FileCacheStore::stat(CacheStat* stat) {
 }
 
 int FileCacheStore::evict(off_t offset, size_t count, int flags) {
+  int ret;
   if (static_cast<size_t>(-1) == count) {
-    return localFile_->ftruncate(offset);
+    ret = localFile_->ftruncate(offset);
   } else {
     #ifndef FALLOC_FL_KEEP_SIZE
     #define FALLOC_FL_KEEP_SIZE     0x01 /* default is extend size */
@@ -184,8 +198,13 @@ int FileCacheStore::evict(off_t offset, size_t count, int flags) {
     #define FALLOC_FL_PUNCH_HOLE	0x02 /* de-allocates range */
     #endif
     int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-    return localFile_->fallocate(mode, offset, count);
+    ret = localFile_->fallocate(mode, offset, count);
   }
+
+  if (ret == 0 && !fiemapSupported_) {
+    removeFilledRange(offset, count);
+  }
+  return ret;
 }
 
 int FileCacheStore::fstat(struct stat *buf) {
@@ -194,6 +213,64 @@ int FileCacheStore::fstat(struct stat *buf) {
 
 bool FileCacheStore::cacheIsFull() {
   return cachePool_->isFull();
+}
+
+std::pair<off_t, size_t> FileCacheStore::queryRefillRangeByMap(off_t offset, size_t size) {
+  std::pair<off_t, off_t> hole;
+  {
+    SCOPED_LOCK(filledRangesLock_);
+    hole = filledRanges_.queryRefillRange(offset, offset + size);
+  }
+  if (hole.first == 0 && hole.second == 0) return {0, 0};
+  auto left = align_down(hole.first, refillUnit_);
+  auto right = align_up(hole.second, refillUnit_);
+  return {left, right - left};
+}
+
+void FileCacheStore::addFilledRange(off_t offset, size_t size) {
+  if (size == 0) return;
+  SCOPED_LOCK(filledRangesLock_);
+  filledRanges_.addRange(offset, offset + size);
+}
+
+void FileCacheStore::removeFilledRange(off_t offset, size_t count) {
+  SCOPED_LOCK(filledRangesLock_);
+  if (count == static_cast<size_t>(-1)) {
+    filledRanges_.removeFrom(offset);
+  } else {
+    filledRanges_.removeRange(offset, offset + count);
+  }
+}
+
+void FileCacheStore::rebuildFilledRanges() {
+  // Note: we only hold filledRangesLock_ around the in-memory map mutations.
+  // addFilledRange already takes the lock internally.
+  {
+    SCOPED_LOCK(filledRangesLock_);
+    filledRanges_.clear();
+  }
+  // Skip rebuild on empty/new files.
+  struct stat st = {};
+  if (localFile_->fstat(&st) != 0 || st.st_size == 0) return;
+
+  off_t pos = 0;
+  while (pos < st.st_size) {
+    off_t dataStart = localFile_->lseek(pos, SEEK_DATA);
+    if (dataStart < 0) {
+      ERRNO e;
+      // ENXIO from SEEK_DATA means "no more data past pos".
+      if (e.no != ENXIO) {
+        LOG_ERRNO_RETURN(0, void(), "SEEK_DATA failed during range rebuild.");
+      }
+      break;
+    }
+    off_t holeStart = localFile_->lseek(dataStart, SEEK_HOLE);
+    if (holeStart < 0) {
+      LOG_ERRNO_RETURN(0, void(), "SEEK_HOLE failed during range rebuild.");
+    }
+    addFilledRange(dataStart, holeStart - dataStart);
+    pos = holeStart;
+  }
 }
 
 }

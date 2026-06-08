@@ -200,7 +200,7 @@ int QuotaFilePool::evict(std::string_view filename) {
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     lru.mark_key_cleared(lruEntry->QuotaLruIter);
-    err = mediaFs_->truncate(filePath.data(), 0);
+    err = cacheStore->evict(0);
     if (err) {
       ERRNO e;
       LOG_ERROR("truncate(0) failed, name : `, ret : `, error code : `", filePath, err, ERRNO());
@@ -247,7 +247,7 @@ void QuotaFilePool::dirEviction() {
         } else {
           dir->lru.access(lruEntry->QuotaLruIter);
         }
-        err = mediaFs_->truncate(fileName.data(), 0);
+        err = cacheStore->evict(0);
       }
 
       if (err) {

@@ -10,7 +10,7 @@ jobs:
 
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4
+      options: --cpus 4 --shm-size 512m
 
     steps:
       - uses: szenius/set-timezone@v2.0
