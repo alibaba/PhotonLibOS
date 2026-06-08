@@ -1097,6 +1097,181 @@ TEST(http_client, operation_level_proxy_e2e) {
 //     EXPECT_EQ(200, op->status_code);
 // }
 
+// Helpers/tests for issue #1256 -- HTTP/1.0 close-delimited responses
+static std::string g_close_delim_payload;
+static int close_delimited_handler(void*, ISocketStream* sock) {
+    EXPECT_NE(nullptr, sock);
+    // Drain the request (request line + headers ending with \r\n\r\n).
+    char buf[4096];
+    size_t got = 0;
+    while (got < sizeof(buf)) {
+        auto r = sock->recv(buf + got, sizeof(buf) - got);
+        if (r <= 0) break;
+        got += r;
+        if (std::string_view(buf, got).find("\r\n\r\n") != std::string_view::npos) break;
+    }
+    static const char hdr[] =
+        "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n";
+    auto wr = sock->write(hdr, sizeof(hdr) - 1);
+    EXPECT_EQ((ssize_t)(sizeof(hdr) - 1), wr);
+    if (!g_close_delim_payload.empty()) {
+        wr = sock->write(g_close_delim_payload.data(), g_close_delim_payload.size());
+        EXPECT_EQ((ssize_t)g_close_delim_payload.size(), wr);
+    }
+    // Returning lets the server framework close the connection, signalling EOF
+    // to the client (RFC 7230 §3.3.3 close-delimited framing).
+    return 0;
+}
+
+// Same as close_delimited_handler but uses HTTP/1.1 with explicit
+// "Connection: close" instead of HTTP/1.0 implicit close.
+static int close_delimited_http11_handler(void*, ISocketStream* sock) {
+    EXPECT_NE(nullptr, sock);
+    char buf[4096];
+    size_t got = 0;
+    while (got < sizeof(buf)) {
+        auto r = sock->recv(buf + got, sizeof(buf) - got);
+        if (r <= 0) break;
+        got += r;
+        if (std::string_view(buf, got).find("\r\n\r\n") != std::string_view::npos) break;
+    }
+    static const char hdr[] =
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
+        "Connection: close\r\n\r\n";
+    auto wr = sock->write(hdr, sizeof(hdr) - 1);
+    EXPECT_EQ((ssize_t)(sizeof(hdr) - 1), wr);
+    if (!g_close_delim_payload.empty()) {
+        wr = sock->write(g_close_delim_payload.data(), g_close_delim_payload.size());
+        EXPECT_EQ((ssize_t)g_close_delim_payload.size(), wr);
+    }
+    return 0;
+}
+
+TEST(http_client, http10_close_delimited) {
+    g_close_delim_payload.assign(8000, 'A');
+    g_close_delim_payload.append(8000, 'B');
+
+    auto server = new_tcp_socket_server();
+    DEFER(delete server);
+    server->set_handler({nullptr, &close_delimited_handler});
+    EXPECT_EQ(0, server->bind_v4localhost());
+    EXPECT_EQ(0, server->listen(100));
+    server->start_loop();
+    photon::thread_sleep(1);
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    auto op = client->new_operation(Verb::GET, to_url(server, "/cd"));
+    DEFER(client->destroy_operation(op));
+    op->req.headers.content_length(0);
+    int ret = op->call();
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(200, op->resp.status_code());
+
+    std::string out;
+    out.resize(g_close_delim_payload.size() + 1024);
+    size_t total = 0;
+    while (total < out.size()) {
+        auto r = op->resp.read((char*)out.data() + total, out.size() - total);
+        ASSERT_GE(r, 0);
+        if (r == 0) break;
+        total += r;
+    }
+    out.resize(total);
+    EXPECT_EQ(g_close_delim_payload.size(), out.size());
+    EXPECT_EQ(g_close_delim_payload, out);
+}
+
+TEST(http_client, http11_connection_close_no_content_length) {
+    // RFC 7230 §3.3.3: HTTP/1.1 with explicit "Connection: close" and neither
+    // Content-Length nor Transfer-Encoding is also close-delimited.
+    g_close_delim_payload.assign(6000, 'C');
+    g_close_delim_payload.append(6000, 'D');
+
+    auto server = new_tcp_socket_server();
+    DEFER(delete server);
+    server->set_handler({nullptr, &close_delimited_http11_handler});
+    EXPECT_EQ(0, server->bind_v4localhost());
+    EXPECT_EQ(0, server->listen(100));
+    server->start_loop();
+    photon::thread_sleep(1);
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    auto op = client->new_operation(Verb::GET, to_url(server, "/cd11"));
+    DEFER(client->destroy_operation(op));
+    op->req.headers.content_length(0);
+    int ret = op->call();
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(200, op->resp.status_code());
+    EXPECT_EQ("close", op->resp.headers["Connection"]);
+
+    std::string out;
+    out.resize(g_close_delim_payload.size() + 1024);
+    size_t total = 0;
+    while (total < out.size()) {
+        auto r = op->resp.read((char*)out.data() + total, out.size() - total);
+        ASSERT_GE(r, 0);
+        if (r == 0) break;
+        total += r;
+    }
+    out.resize(total);
+    EXPECT_EQ(g_close_delim_payload.size(), out.size());
+    EXPECT_EQ(g_close_delim_payload, out);
+}
+
+TEST(http_server, forward_proxy_close_delimited) {
+    g_close_delim_payload.assign(5000, 'X');
+    g_close_delim_payload.append(5000, 'Y');
+
+    // Upstream: raw TCP server returning HTTP/1.0 close-delimited body.
+    auto upstream = new_tcp_socket_server();
+    DEFER(delete upstream);
+    upstream->set_handler({nullptr, &close_delimited_handler});
+    EXPECT_EQ(0, upstream->bind_v4localhost());
+    EXPECT_EQ(0, upstream->listen(100));
+    upstream->start_loop();
+
+    // Photon forward proxy in front of the upstream.
+    auto proxy_tcp = new_tcp_socket_server();
+    DEFER(delete proxy_tcp);
+    EXPECT_EQ(0, proxy_tcp->bind_v4localhost());
+    EXPECT_EQ(0, proxy_tcp->listen(100));
+    auto proxy_http = new_http_server();
+    DEFER(delete proxy_http);
+    auto proxy_handler = new_default_forward_proxy_handler(30 * 1000 * 1000);
+    proxy_http->add_handler(proxy_handler, true);
+    proxy_tcp->set_handler(proxy_http->get_connection_handler());
+    proxy_tcp->start_loop();
+    photon::thread_sleep(1);
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    auto op = client->new_operation(Verb::GET, to_url(upstream, "/cd"));
+    DEFER(client->destroy_operation(op));
+    op->req.headers.content_length(0);
+    op->set_proxy(to_url(proxy_tcp, "/"));
+    int ret = op->call();
+    EXPECT_EQ(0, ret);
+    EXPECT_EQ(200, op->resp.status_code());
+    // The default forward proxy modifier must re-frame close-delimited
+    // upstream responses as Transfer-Encoding: chunked downstream.
+    EXPECT_EQ("chunked", op->resp.headers["Transfer-Encoding"]);
+
+    std::string out;
+    out.resize(g_close_delim_payload.size() + 1024);
+    size_t total = 0;
+    while (total < out.size()) {
+        auto r = op->resp.read((char*)out.data() + total, out.size() - total);
+        ASSERT_GE(r, 0);
+        if (r == 0) break;
+        total += r;
+    }
+    out.resize(total);
+    EXPECT_EQ(g_close_delim_payload.size(), out.size());
+    EXPECT_EQ(g_close_delim_payload, out);
+}
+
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
