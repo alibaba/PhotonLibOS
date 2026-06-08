@@ -56,11 +56,9 @@ struct fuse_pipe {
     int pipefd[2] = {-1, -1};
     ssize_t flush() {
         int nuldev_fd = open("/dev/null", O_WRONLY);
-        if (nuldev_fd < 0) {
-            LOG_ERROR("fuse-adaptor failed to open null device: `", strerror(errno));
-            return -1;
-        }
-
+        if (nuldev_fd < 0)
+            LOG_ERRNO_RETURN(0, -1, "fuse-adaptor failed to open null device");
+        DEFER(close(nuldev_fd));
         return splice(pipefd[0], NULL, nuldev_fd, NULL, size, SPLICE_F_MOVE);
     }
 
