@@ -124,7 +124,9 @@ int Message::append_bytes(uint16_t size) {
         LOG_ERRNO_RETURN(0, -1, "failed to parse headers");
 
     m_abandon = (headers["Connection"] == "close" ||
-                !headers["Trailer"].empty());
+                !headers["Trailer"].empty() ||
+                ((std::string_view{m_buf, m_buf_size} | m_version) == "1.0" &&
+                 headers["Connection"] != "keep-alive"));
     message_status = HEADER_PARSED;
     LOG_DEBUG("header parsed");
     return 0;
@@ -266,14 +268,21 @@ size_t Message::body_size() const {
     if (it != headers.end()) return estring_view(it.second()).to_uint64();
     // or calc from Content-Range
     it = headers.find("Content-Range");
-    if (it == headers.end()) return 0;
-    size_t start, end;
-    if (sscanf("bytes %lu-%lu", it.second().data(), &start, &end) == 2) {
-        return end-start+1;
+    if (it != headers.end()) {
+        size_t start, end;
+        if (sscanf("bytes %lu-%lu", it.second().data(), &start, &end) == 2) {
+            return end-start+1;
+        }
+        if (sscanf("bytes */%lu", it.second().data(), &end) == 1) {
+            return end;
+        }
+        return 0;
     }
-    if (sscanf("bytes */%lu", it.second().data(), &end) == 1) {
-        return end;
-    }
+    // No Content-Length and no Content-Range. If the connection will be closed
+    // (Connection: close, Trailer, or HTTP/1.0 implicit close) and the response
+    // is not chunked, this is RFC 7230 §3.3.3 close-delimited framing: read
+    // body until peer closes the connection.
+    if (m_abandon && !headers.chunked()) return SIZE_MAX;
     return 0;
 }
 
