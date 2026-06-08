@@ -268,15 +268,6 @@ size_t Message::body_size() const {
     if (it != headers.end()) return estring_view(it.second()).to_uint64();
     // or calc from Content-Range
     it = headers.find("Content-Range");
-<<<<<<< HEAD
-    if (it == headers.end()) return 0;
-    size_t start, end;
-    if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
-        return end-start+1;
-    }
-    if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
-        return end;
-=======
     if (it != headers.end()) {
         size_t start, end;
         if (sscanf("bytes %lu-%lu", it.second().data(), &start, &end) == 2) {
@@ -286,7 +277,6 @@ size_t Message::body_size() const {
             return end;
         }
         return 0;
->>>>>>> 356aaf3 (FIX: http client deal with close delimited response (#1257) (#1260))
     }
     // No Content-Length and no Content-Range. If the connection will be closed
     // (Connection: close, Trailer, or HTTP/1.0 implicit close) and the response

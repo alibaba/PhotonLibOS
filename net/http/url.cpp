@@ -23,12 +23,6 @@ namespace photon {
 namespace net {
 namespace http {
 
-<<<<<<< HEAD
-bool URL::from_string(std::string_view url_) {
-    estring_view url(url_); // [http[s]://]domain.or.ip[:port][/[path[?query]]]
-    m_url = url.data();     // target := /path?query
-    LOG_DEBUG(VALUE(url));  // target and path both start with '/
-=======
 void URL::fix_target() {
     auto t = (m_url | m_target);
     if (m_target.size() == 0 || t.front() != '/') {
@@ -45,8 +39,11 @@ void URL::fix_target() {
         m_path = rstring_view16(0, m_path.size()+1);
     }
 }
->>>>>>> 356aaf3 (FIX: http client deal with close delimited response (#1257) (#1260))
 
+bool URL::from_string(std::string_view url_) {
+    estring_view url(url_); // [http[s]://]domain.or.ip[:port][/[path[?query]]]
+    m_url = url.data();     // target := /path?query
+    LOG_DEBUG(VALUE(url));  // target and path both start with '/
     free(m_tmp_target);
     m_tmp_target = nullptr;
     DEFER({ // fix the problem that path and target do not start with '/'
