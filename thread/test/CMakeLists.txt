@@ -46,12 +46,10 @@ add_executable(test-pooled-stack-allocator test-pooled-stack-allocator.cpp)
 target_link_libraries(test-pooled-stack-allocator PRIVATE photon_shared)
 add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stack-allocator>)
 
-<<<<<<< HEAD
 add_executable(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)
 target_link_libraries(test-st-utest PRIVATE photon_shared)
 add_test(NAME test-st-utest COMMAND $<TARGET_FILE:test-st-utest>)
-=======
+
 add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
 target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
 add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
->>>>>>> 4ea3788 ([Pick][0.7 to 0.8] | Fix Photon SleepQueue stale idx corruption during wakeup and migration (#1255) (#1258)  (#1259))
