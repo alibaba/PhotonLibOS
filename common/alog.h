@@ -308,6 +308,7 @@ protected:
     {
         int ret = ::snprintf(buf.ptr, buf.size, fmt, x);
         if (ret < 0) return;
+        if ((size_t)ret > buf.size) ret = buf.size;
         buf.consume(ret);
     }
 
