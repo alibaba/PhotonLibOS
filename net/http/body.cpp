@@ -251,9 +251,16 @@ public:
 
     virtual ssize_t writev(const struct iovec *iov, int iovcnt) override {
         auto count = iovector_view((struct iovec*)iov, iovcnt).sum();
-        if (m_cnt + count > m_size) LOG_WARN("data size overflow");
         ssize_t wc = std::min(count, m_size - m_cnt);
-        if (m_stream->writev(iov, iovcnt) != wc) return -1;
+        if (m_cnt + count > m_size) {
+            LOG_WARN("data size overflow");
+            SmartCloneIOV<32> ciovec(iov, iovcnt);
+            iovector_view view(ciovec.ptr, iovcnt);
+            view.shrink_to(wc);
+            if (m_stream->writev(view.iov, view.iovcnt) != wc) return -1;
+        } else {
+            if (m_stream->writev(iov, iovcnt) != wc) return -1;
+        }
         m_cnt += wc;
         return wc;
     }
