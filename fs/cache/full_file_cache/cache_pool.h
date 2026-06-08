@@ -78,6 +78,13 @@ public:
     void updateLru(FileNameMap::iterator iter);
     uint64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
 
+    // True if the media filesystem supports fiemap. Decided once at Init()
+    // time by probing a named file. When false, FileCacheStore tracks filled
+    // ranges in memory from the start instead of relying on fiemap.
+    // Written only by probeFiemap() during Init(); plain bool is enough since
+    // all FileCacheStore reads happen-after Init().
+    bool fiemapSupported() const { return fiemapSupported_; }
+
 protected:
     //  pathname must begin with '/'
     photon::fs::ICacheStore *do_open(std::string_view pathname, int flags, mode_t mode) override;
@@ -101,6 +108,9 @@ protected:
     bool exit_;
 
     bool isFull_;
+
+    bool fiemapSupported_ = true;
+    void probeFiemap();
 
     virtual bool afterFtrucate(FileNameMap::iterator iter);
 

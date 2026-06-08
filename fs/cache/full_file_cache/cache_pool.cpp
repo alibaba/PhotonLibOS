@@ -27,6 +27,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
 #include <photon/common/utility.h>
+#include <photon/fs/fiemap.h>
 #include <photon/fs/path.h>
 
 namespace photon {
@@ -69,8 +70,31 @@ FileCachePool::~FileCachePool() {
 }
 
 void FileCachePool::Init() {
+  probeFiemap();
   traverseDir("/");
   timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+}
+
+void FileCachePool::probeFiemap() {
+  static const char* probePath = "/.photon_fiemap_probe";
+  struct stat st = {};
+  bool preExists = (mediaFs_->stat(probePath, &st) == 0);
+  auto probe = mediaFs_->open(probePath, O_CREAT | O_RDWR, 0600);
+  if (!probe) {
+    fiemapSupported_ = false;
+    LOG_ERRNO_RETURN(0, void(), "fiemap probe file open failed");
+  }
+  DEFER({
+    delete probe;
+    if (!preExists) mediaFs_->unlink(probePath);
+  });
+
+  fiemap_t<1> fie(0, 1);
+  fie.fm_mapped_extents = 0;
+  if (probe->fiemap(&fie) != 0) {
+    fiemapSupported_ = false;
+    LOG_INFO("Call fiemap failed, errno `", ERRNO());
+  }
 }
 
 ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t mode) {
@@ -161,7 +185,7 @@ int FileCachePool::evict(std::string_view filename) {
     auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-    err = mediaFs_->truncate(filePath.data(), 0);
+    err = cacheStore->evict(0);
     lruEntry->truncate_done = false;
   }
   if (err) {
@@ -296,7 +320,7 @@ void FileCachePool::eviction() {
       auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
       DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-      err = mediaFs_->truncate(fileName.data(), 0);
+      err = cacheStore->evict(0);
       lruEntry->truncate_done = false;
     }
 
