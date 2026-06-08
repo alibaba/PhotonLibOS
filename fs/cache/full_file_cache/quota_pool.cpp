@@ -138,6 +138,9 @@ void QuotaFilePool::updateDirQuota(FileIterator iter, size_t quota) {
 
 int QuotaFilePool::set_quota(std::string_view pathname, size_t quota) {
   auto pos = getQuotaCtrlPos(pathname.data());
+  if (!pos) {
+    LOG_ERROR_RETURN(EINVAL, -1, "pathname don't contain dir name:`", pathname)
+  }
   std::string dirName(pathname.data() + 1, pos);
   auto find = dirInfos_.find(dirName.c_str());
   if (dirInfos_.end() == find) {
@@ -160,6 +163,9 @@ int QuotaFilePool::stat(CacheStat* stat, std::string_view pathname) {
     stat->used_size /= refillUnit_;
   } else if ('/' == pathname.back()) {
     auto pos = getQuotaCtrlPos(pathname.data());
+    if (!pos) {
+      LOG_ERROR_RETURN(EINVAL, -1, "pathname don't contain dir name:`", pathname)
+    }
     std::string dirName(pathname.data() + 1, pos);
     auto find = dirInfos_.find(dirName.c_str());
     if (find != dirInfos_.end()) {
@@ -180,6 +186,9 @@ int QuotaFilePool::stat(CacheStat* stat, std::string_view pathname) {
 
 int QuotaFilePool::evict(std::string_view filename) {
   auto pos = getQuotaCtrlPos(filename.data());
+  if (!pos) {
+    LOG_ERROR_RETURN(EINVAL, -1, "pathname don't contain dir name:`", filename)
+  }
   std::string dirName(filename.data() + 1, pos);
   auto find = dirInfos_.find(dirName.c_str());
   if (dirInfos_.end() == find) {

@@ -191,8 +191,9 @@ void* ICacheStore::async_refill(void* args) {
 
     ctx->store->pool_->m_refilling.fetch_sub(1, std::memory_order_relaxed);
     ctx->store->range_lock_.unlock(ctx->refill_off, ctx->refill_size);
+    auto vcpu = static_cast<photon::vcpu_base*>(ctx->store->pool_->m_vcpu);
     ctx->store->release();
-    photon::thread_migrate(photon::CURRENT, static_cast<photon::vcpu_base*>(ctx->store->pool_->m_vcpu));
+    photon::thread_migrate(photon::CURRENT, vcpu);
     delete ctx;
     return nullptr;
 }
