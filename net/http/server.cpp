@@ -287,7 +287,9 @@ public:
         ret = m_modifier(op.resp, resp);
         if (ret < 0) return ret;
 
-        resp.write_stream((IStream*)(&op.resp));
+        auto wc = resp.write_stream((IStream*)(&op.resp));
+        if (wc < 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to forward upstream response body");
 
         return 0;
     }
@@ -375,8 +377,17 @@ public:
 
     static int default_forward_proxy_modifier(void*, Response &src, Response &dst) {
         dst.set_result(src.status_code());
+        bool src_has_cl = src.headers.find("Content-Length") != src.headers.end();
+        bool src_chunked = src.headers.chunked();
         for (auto kv : src.headers) {
             dst.headers.insert(kv.first, kv.second);
+        }
+        // RFC 7230 §3.3.3: when the upstream response is close-delimited
+        // (no Content-Length and no Transfer-Encoding: chunked), re-frame the
+        // downstream response as chunked so the client can detect EOF without
+        // forcing us to close the downstream connection.
+        if (!src_has_cl && !src_chunked) {
+            dst.headers.insert("Transfer-Encoding", "chunked");
         }
         return 0;
     }
