@@ -193,7 +193,7 @@ int64_t _mm_extract_epi64_impl(__m128i a) {
 #if defined(__clang__)
 #define PHOTON_NEON_AESCRC_TARGET __attribute__((target("aes,crc")))
 #else
-#define PHOTON_NEON_AESCRC_TARGET
+#define PHOTON_NEON_AESCRC_TARGET __attribute__((target("+crc+crypto")))
 #endif
 
 namespace _sse2neon_detail {
