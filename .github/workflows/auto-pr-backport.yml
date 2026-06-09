@@ -8,7 +8,6 @@ on:
 
 jobs:
   auto-pr:
-    if: ${{ !contains(github.event.head_commit.message, 'auto-pr-') }}
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -23,6 +22,17 @@ jobs:
         git config --global advice.mergeConflict false
         git config --global --add safe.directory "${{ github.workspace }}"
         git config -l
+
+    - name: detect merge source
+      id: detect
+      run: |
+        MERGE_BRANCH=$(git show -s --format=%B ${{ github.event.after }} | grep -oE 'from [^ ]+' | head -n 1 | cut -d' ' -f2) || true
+        echo "MERGE_BRANCH=$MERGE_BRANCH"
+        if echo "$MERGE_BRANCH" | grep -qE '^(auto-pr-[a-f0-9]+-)'; then
+          echo "SKIP=true" >> $GITHUB_OUTPUT
+        else
+          echo "SKIP=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: check branch names
       id: branch_info
@@ -53,14 +63,14 @@ jobs:
 
     - name: create pr branch
       id: create_branch
-      if: steps.branch_info.outputs.HAS_PREV == 'true'
+      if: steps.branch_info.outputs.HAS_PREV == 'true' && steps.detect.outputs.SKIP != 'true'
       run: |
         PRBRANCH=backport-pr-${{github.event.after}}-${{steps.branch_info.outputs.PREV_VERSION}}
         echo "PRBRANCH=$PRBRANCH" >> $GITHUB_OUTPUT
 
     - name: Cherry-pick commits into ${{steps.branch_info.outputs.PREV_BRANCH}}
       id: merge-changes
-      if: steps.branch_info.outputs.HAS_PREV == 'true'
+      if: steps.branch_info.outputs.HAS_PREV == 'true' && steps.detect.outputs.SKIP != 'true'
       run: |
         set -x
         git checkout ${{steps.branch_info.outputs.PREV_BRANCH}}
@@ -85,7 +95,7 @@ jobs:
 
     - uses: actions/github-script@v7
       name: Open backport PR to ${{steps.branch_info.outputs.PREV_BRANCH}}
-      if: steps.branch_info.outputs.HAS_PREV == 'true'
+      if: steps.branch_info.outputs.HAS_PREV == 'true' && steps.detect.outputs.SKIP != 'true'
       env:
           TITLE: ${{steps.merge-changes.outputs.TITLE}}
           MESSAGE: ${{steps.merge-changes.outputs.MESSAGE}}
