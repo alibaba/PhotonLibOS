@@ -9,7 +9,7 @@ jobs:
   clean-auto-pr:
     if: ${{ github.event.pull_request.merged }} &&
         ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id }} &&
-        ${{ github.event.pull_request.head.ref == 'auto-pr-*' }}
+        ${{ startsWith(github.event.pull_request.head.ref, 'auto-pr-') || startsWith(github.event.pull_request.head.ref, 'backport-pr-') }}
     runs-on: ubuntu-latest
     steps:
         - uses: actions/checkout@v4
