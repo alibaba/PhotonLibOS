@@ -49,3 +49,7 @@ add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stac
 add_executable(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)
 target_link_libraries(test-st-utest PRIVATE photon_shared)
 add_test(NAME test-st-utest COMMAND $<TARGET_FILE:test-st-utest>)
+
+add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
+target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
+add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
