@@ -5,6 +5,11 @@ on:
     branches:
       - 'release/*'
       - 'main'
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA on main or a release/* branch to backport to the previous version (single commit only)'
+        required: true
 
 jobs:
   auto-pr:
@@ -23,10 +28,48 @@ jobs:
         git config --global --add safe.directory "${{ github.workspace }}"
         git config -l
 
+    - name: resolve inputs
+      id: inputs
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          COMMIT="${{ inputs.commit_sha }}"
+          if ! git cat-file -e "${COMMIT}^{commit}" 2>/dev/null; then
+            echo "::error::commit ${COMMIT} not found"
+            exit 1
+          fi
+          # Resolve to full SHA so downstream branch names are stable
+          COMMIT=$(git rev-parse "$COMMIT")
+          # Pick the highest containing branch as source: main > release/<latest> > ... > release/<oldest>
+          CONTAINING=$(git branch -r --contains "$COMMIT" | sed 's|^[ ]*||' | grep -E '^origin/(release/|main$)' | sed 's|^origin/||')
+          if echo "$CONTAINING" | grep -qx 'main'; then
+            SOURCE_BRANCH="main"
+          else
+            SOURCE_BRANCH=$(echo "$CONTAINING" | grep '^release/' | sort -V | tail -n 1)
+          fi
+          if [ -z "$SOURCE_BRANCH" ]; then
+            echo "::error::commit ${COMMIT} is not on main or any release/* branch"
+            exit 1
+          fi
+          RANGE_START="$COMMIT"
+        else
+          COMMIT="${{ github.event.after }}"
+          RANGE_START="${{ github.event.commits[0].id }}"
+          SOURCE_BRANCH=$(echo $GITHUB_REF | sed 's|refs/heads/||')
+        fi
+        echo "COMMIT=$COMMIT" >> $GITHUB_OUTPUT
+        echo "RANGE_START=$RANGE_START" >> $GITHUB_OUTPUT
+        echo "SOURCE_BRANCH=$SOURCE_BRANCH" >> $GITHUB_OUTPUT
+        echo "resolved: COMMIT=$COMMIT RANGE_START=$RANGE_START SOURCE_BRANCH=$SOURCE_BRANCH"
+
     - name: detect merge source
       id: detect
       run: |
-        MERGE_BRANCH=$(git show -s --format=%B ${{ github.event.after }} | grep -oE 'from [^ ]+' | head -n 1 | cut -d' ' -f2) || true
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # Manual trigger: user explicitly requested it, never skip
+          echo "SKIP=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        MERGE_BRANCH=$(git show -s --format=%B ${{ steps.inputs.outputs.COMMIT }} | grep -oE 'from [^ ]+' | head -n 1 | cut -d' ' -f2) || true
         echo "MERGE_BRANCH=$MERGE_BRANCH"
         if echo "$MERGE_BRANCH" | grep -qE '^(auto-pr-[a-f0-9]+-)'; then
           echo "SKIP=true" >> $GITHUB_OUTPUT
@@ -37,14 +80,14 @@ jobs:
     - name: check branch names
       id: branch_info
       run: |
-        RELEASE_VERSIONS=$(git branch -r | grep 'origin/release/' | cut -d '/' -f 4 | sort -V)
-        CURRENT_BRANCH=$(echo $GITHUB_REF | sed 's|refs/heads/||')
+        RELEASE_VERSIONS=$(git branch -r | grep 'origin/release/' | cut -d '/' -f 3 | sort -V)
+        CURRENT_BRANCH="${{ steps.inputs.outputs.SOURCE_BRANCH }}"
         if [ "$CURRENT_BRANCH" = "main" ]; then
-          # Pushed to main: backport to the highest release version
+          # Source on main: backport to the highest release version
           PREV_VERSION=$(echo "$RELEASE_VERSIONS" | tail -n 1)
           CURRENT_VERSION="main"
         else
-          CURRENT_VERSION=$(echo $GITHUB_REF | rev | cut -d '/' -f 1 | rev)
+          CURRENT_VERSION=$(echo "$CURRENT_BRANCH" | rev | cut -d '/' -f 1 | rev)
           # Find the previous (lower) version
           PREV_VERSION=$(echo "$RELEASE_VERSIONS" | grep -w $CURRENT_VERSION -B 1 | head -n 1)
         fi
@@ -65,7 +108,7 @@ jobs:
       id: create_branch
       if: steps.branch_info.outputs.HAS_PREV == 'true' && steps.detect.outputs.SKIP != 'true'
       run: |
-        PRBRANCH=backport-pr-${{github.event.after}}-${{steps.branch_info.outputs.PREV_VERSION}}
+        PRBRANCH=backport-pr-${{steps.inputs.outputs.COMMIT}}-${{steps.branch_info.outputs.PREV_VERSION}}
         echo "PRBRANCH=$PRBRANCH" >> $GITHUB_OUTPUT
 
     - name: Cherry-pick commits into ${{steps.branch_info.outputs.PREV_BRANCH}}
@@ -75,15 +118,17 @@ jobs:
         set -x
         git checkout ${{steps.branch_info.outputs.PREV_BRANCH}}
         git checkout -b ${{steps.create_branch.outputs.PRBRANCH}}
+        RANGE_START=${{ steps.inputs.outputs.RANGE_START }}
+        COMMIT=${{ steps.inputs.outputs.COMMIT }}
         echo "TITLE<<__AUTOPR_EOF" >> $GITHUB_OUTPUT
-        git log --format="| %s" ${{ github.event.commits[0].id }}~..${{ github.event.after }} | tr '\n' ' ' >> $GITHUB_OUTPUT
+        git log --format="| %s" ${RANGE_START}~..${COMMIT} | tr '\n' ' ' >> $GITHUB_OUTPUT
         echo "" >> $GITHUB_OUTPUT
         echo "__AUTOPR_EOF" >> $GITHUB_OUTPUT
         echo "MESSAGE<<__AUTOPR_EOF" >> $GITHUB_OUTPUT
-        git log --format="> %B" ${{ github.event.commits[0].id }}~..${{ github.event.after }} >> $GITHUB_OUTPUT
+        git log --format="> %B" ${RANGE_START}~..${COMMIT} >> $GITHUB_OUTPUT
         echo "__AUTOPR_EOF" >> $GITHUB_OUTPUT
         cat $GITHUB_OUTPUT
-        REVS=$(git rev-list --reverse ${{ github.event.commits[0].id }}~..${{ github.event.after }} )
+        REVS=$(git rev-list --reverse ${RANGE_START}~..${COMMIT})
         for rev in "$REVS"; do
           if ! git cherry-pick ${rev} ; then
             git add -u
