@@ -37,7 +37,7 @@ jobs:
     - name: check branch names
       id: branch_info
       run: |
-        RELEASE_VERSIONS=$(git branch -r | grep 'origin/release/' | cut -d '/' -f 4 | sort -V)
+        RELEASE_VERSIONS=$(git branch -r | grep 'origin/release/' | cut -d '/' -f 3 | sort -V)
         CURRENT_BRANCH=$(echo $GITHUB_REF | sed 's|refs/heads/||')
         if [ "$CURRENT_BRANCH" = "main" ]; then
           # Pushed to main: backport to the highest release version
