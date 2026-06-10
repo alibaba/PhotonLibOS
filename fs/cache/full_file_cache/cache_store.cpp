@@ -118,13 +118,14 @@ ssize_t FileCacheStore::do_pwritev2(const struct iovec *iov, int iovcnt, off_t o
 
 std::pair<off_t, size_t> FileCacheStore::queryRefillRange(off_t offset, size_t size) {
   ScopedRangeLock lock(rangeLock_, offset, size);
+
+  if (!fiemapSupported_) {
+    return queryRefillRangeByMap(offset, size);
+  }
+
   off_t alignLeft = align_down(offset, kBlockSize);
   off_t alignRight = align_up(offset + size, kBlockSize);
   ReadRequest request{alignLeft, static_cast<size_t>(alignRight - alignLeft)};
-
-  if (!fiemapSupported_) {
-    return queryRefillRangeByMap(request.offset, request.size);
-  }
 
   struct fiemap_t<kFieExtentSize> fie(request.offset, request.size);
   fie.fm_mapped_extents = 0;

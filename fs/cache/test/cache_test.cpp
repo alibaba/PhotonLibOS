@@ -1019,11 +1019,11 @@ TEST(CachePool, DISABLED_test_mem_usage) {
   LOG_INFO("Physical memory usage diff: ` KiB.", diff);
 }
 
-TEST(CachePool, range_map_deterministic) {
-  // diskAvailInBytes_ = 128 MB + ~3 MB of writes; need headroom above the
-  // eviction threshold so eviction() never fires during the test.
-  if (!RequireShmAvailable(144ul * 1024 * 1024)) return;
-  std::string root = "/dev/shm/ease/cache/range_map_det/";
+static void refillRangeDeterministic(bool useShm) {
+  std::string root = useShm
+      ? "/dev/shm/ease/cache/refill_range_det/"
+      : "/root/tmp/ease/cache/refill_range_det/";
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1037,8 +1037,6 @@ TEST(CachePool, range_map_deterministic) {
   auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
   ASSERT_NE(nullptr, cacheStore);
   cacheStore->set_actual_size(200 * refillUnit);
-
-  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Write [0, 1MB)
   {
@@ -1092,11 +1090,11 @@ TEST(CachePool, range_map_deterministic) {
   cacheStore->release();
 }
 
-TEST(CachePool, range_map_random) {
-  // diskAvailInBytes_ = 128 MB + up to 100 MB of writes (totalBlocks * refillUnit);
-  // shm needs to stay above 128 MB free throughout to avoid triggering eviction.
-  if (!RequireShmAvailable(240ul * 1024 * 1024)) return;
-  std::string root = "/dev/shm/ease/cache/range_map_rand/";
+static void refillRangeRandom(bool useShm) {
+  std::string root = useShm
+      ? "/dev/shm/ease/cache/refill_range_rand/"
+      : "/root/tmp/ease/cache/refill_range_rand/";
+  if (useShm && !RequireShmAvailable(240ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1111,8 +1109,6 @@ TEST(CachePool, range_map_random) {
   auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
   ASSERT_NE(nullptr, cacheStore);
   cacheStore->set_actual_size(totalBlocks * refillUnit);
-
-  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Track which blocks are filled (by refillUnit granularity)
   std::vector<bool> filled(totalBlocks, false);
@@ -1180,10 +1176,11 @@ TEST(CachePool, range_map_random) {
   cacheStore->release();
 }
 
-TEST(CachePool, range_map_evict_while_open) {
-  // diskAvailInBytes_ = 128 MB + ~4 MB peak writes.
-  if (!RequireShmAvailable(144ul * 1024 * 1024)) return;
-  std::string root = "/dev/shm/ease/cache/range_map_evict/";
+static void refillRangeEvictWhileOpen(bool useShm) {
+  std::string root = useShm
+      ? "/dev/shm/ease/cache/refill_range_evict/"
+      : "/root/tmp/ease/cache/refill_range_evict/";
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1205,8 +1202,6 @@ TEST(CachePool, range_map_evict_while_open) {
     auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
     EXPECT_EQ(ret, (ssize_t)(2 * refillUnit));
   }
-
-  if (SkipIfFiemapSupported(cacheStore)) return;
 
   // Write more: [3MB, 4MB), [4MB, 5MB)
   {
@@ -1259,6 +1254,94 @@ TEST(CachePool, range_map_evict_while_open) {
   EXPECT_EQ(r6.second, (size_t)(3 * refillUnit));
 
   cacheStore->release();
+}
+
+static void refillRangeNonAlignedTail(bool useShm) {
+  std::string root = useShm
+      ? "/dev/shm/ease/cache/refill_range_unaligned/"
+      : "/root/tmp/ease/cache/refill_range_unaligned/";
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, mediaFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ul * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t refillUnit = 1024 * 1024;
+  const off_t tailSize = 5000;  // not a multiple of 4K (4096)
+  const off_t fileSize = 2 * (off_t)refillUnit + tailSize;
+  auto fileName = "/range_unaligned_file";
+  auto cacheStore = cachePool->open(fileName, O_CREAT | O_RDWR, 0644);
+  ASSERT_NE(nullptr, cacheStore);
+  cacheStore->set_actual_size(fileSize);
+
+  // Fill [0, 2MB): aligned bulk write
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(2 * refillUnit);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    EXPECT_EQ(ret, (ssize_t)(2 * refillUnit));
+  }
+  // Fill [2MB, 2MB+5000): non-4K-aligned tail write
+  {
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(tailSize);
+    auto ret = cacheStore->do_pwritev2(buffer.iovec(), buffer.iovcnt(),
+                                       2 * refillUnit, 0);
+    EXPECT_EQ(ret, (ssize_t)tailSize);
+  }
+
+  // Query the exact filled range [0, fileSize) — should be fully covered.
+  // Before the fix, align_up(fileSize, 4K) overshoots EOF and the
+  // beyond-EOF space is misidentified as a hole → returns {2MB, 1MB}.
+  auto r1 = cacheStore->queryRefillRange(0, static_cast<size_t>(fileSize));
+  EXPECT_EQ(r1.first, 0);
+  EXPECT_EQ(r1.second, 0UL);
+
+  // Query the partial-block tail [2MB, 2MB+5000) — should be fully covered.
+  auto r2 = cacheStore->queryRefillRange(2 * refillUnit, tailSize);
+  EXPECT_EQ(r2.first, 0);
+  EXPECT_EQ(r2.second, 0UL);
+
+  // Query the last 4K block straddling the partial tail [2MB-4096, 2MB+5000):
+  // all within the filled region, should be fully covered.
+  auto r3 = cacheStore->queryRefillRange(2 * refillUnit - 4096, 4096 + tailSize);
+  EXPECT_EQ(r3.first, 0);
+  EXPECT_EQ(r3.second, 0UL);
+
+  // Now evict [1MB, 2MB) to create a hole before the tail.
+  EXPECT_EQ(0, cacheStore->evict(1 * refillUnit, refillUnit));
+
+  // Query [1MB, fileSize): first hole is [1MB, 2MB), tail [2MB, 2MB+5000)
+  // is filled.  Outer refill region is exactly [1MB, 2MB).
+  auto r4 = cacheStore->queryRefillRange(1 * refillUnit,
+                                         static_cast<size_t>(fileSize) - 1 * refillUnit);
+  EXPECT_EQ(r4.first, (off_t)(1 * refillUnit));
+  EXPECT_EQ(r4.second, (size_t)(1 * refillUnit));
+
+  cacheStore->release();
+}
+
+TEST(CachePool, refill_range_deterministic) {
+  refillRangeDeterministic(true);
+  refillRangeDeterministic(false);
+}
+
+TEST(CachePool, refill_range_random) {
+  refillRangeRandom(true);
+  refillRangeRandom(false);
+}
+
+TEST(CachePool, refill_range_evict_while_open) {
+  refillRangeEvictWhileOpen(true);
+  refillRangeEvictWhileOpen(false);
+}
+
+TEST(CachePool, refill_range_non_aligned_tail) {
+  refillRangeNonAlignedTail(true);
+  refillRangeNonAlignedTail(false);
 }
 
 }
