@@ -233,6 +233,8 @@ public:
         shm_fd_ = shm_open(shm_name, O_RDWR, 0666);
         if (shm_fd_ < 0) {
             LOG_ERROR("SharedMemoryInitiator::Construct, shm_open failed");
+            shm_begin_ptr_ = nullptr;
+            return;
         }
         LOG_DEBUG("SharedMemoryInitiator: ", VALUE(shm_fd_), VALUE(shm_size_));
 
@@ -241,6 +243,9 @@ public:
         if (shm_begin_ptr_ == MAP_FAILED) {
             LOG_ERROR("SharedMemoryInitiator, mmap failed");
             close(shm_fd_);
+            shm_fd_ = -1;
+            shm_begin_ptr_ = nullptr;
+            return;
         }
     }
 
@@ -249,7 +254,7 @@ public:
         if (buf_map_.size() > 0) {
             LOG_ERROR("SharedMemoryInitiator::Destruct, buf_map_ is not empty, some user not unmap, below force delete and unmap");
         }
-        if (shm_begin_ptr_) {
+        if (shm_begin_ptr_ && shm_begin_ptr_ != MAP_FAILED) {
             munmap(shm_begin_ptr_, shm_size_);
         }
         if (shm_fd_ >= 0) {
