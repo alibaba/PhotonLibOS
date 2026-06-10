@@ -52,6 +52,7 @@ struct ClientOptions {
   // For QPSLimit case, the policy is different. We will retry more
   // times until we have waited the "request time out" period.
   uint64_t retry_base_interval_us = 100'000;
+  std::vector<std::pair<std::string, std::string>> custom_headers;
 };
 
 struct ObjectMeta {
