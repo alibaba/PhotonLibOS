@@ -99,8 +99,7 @@ namespace fs
 
         char path[PATH_MAX];
         if (len >= PATH_MAX - 1) {
-            errno = ENAMETOOLONG;
-            return -1;
+            LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname too long");
         }
         if (pathname[0] != '/') {
             *path = '/';
