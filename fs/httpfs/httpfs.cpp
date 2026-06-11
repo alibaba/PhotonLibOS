@@ -27,6 +27,7 @@ limitations under the License.
 #include "../../net/curl.h"
 #include <photon/thread/thread.h>
 #include <photon/common/string-keyed.h>
+#include <photon/common/estring.h>
 #include <photon/common/string_view.h>
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
@@ -275,21 +276,13 @@ public:
     }
 };
 
-static bool strciprefix(char const* a, char const* b) {
-    for (;; a++, b++) {
-        int d = tolower((unsigned char)*a) - tolower((unsigned char)*b);
-        if (d != 0 || !*a) return d;
-    }
-    return !*b;
-}
-
 IFile* HttpFs::open(const char* pathname, int flags) {
     std::string url;
-    std::string_view fn(pathname);
+    estring_view fn(pathname);
     // ignore prefix '/'
     if (fn.front() == '/') fn = fn.substr(1);
-    if (!strciprefix(fn.data(), HTTP_PREFIX) &&
-        !strciprefix(fn.data(), HTTPS_PREFIX)) {
+    if (!fn.istarts_with(HTTP_PREFIX) &&
+        !fn.istarts_with(HTTPS_PREFIX)) {
         url = default_https ? HTTPS_PREFIX : HTTP_PREFIX;
         url += '/';
     }
