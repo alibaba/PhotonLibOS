@@ -36,7 +36,7 @@ public:
     Executor(int init_ev = photon::INIT_EVENT_DEFAULT,
              int init_io = photon::INIT_IO_DEFAULT,
              const PhotonOptions& options = {},
-             const ExecutorQueueOption& queue_options = {-1UL, 1024});
+             const ExecutorQueueOption& queue_options = {1024, 1024});
     ~Executor();
 
     template <
