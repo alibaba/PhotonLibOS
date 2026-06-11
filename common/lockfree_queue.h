@@ -317,8 +317,8 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
-    alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head;
-    alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail;
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head{0};
+    alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail{0};
 
     T slots[Base::SLOTS_NUM];
     explicit LockfreeBatchMPMCRingQueue(size_t c) : Base(c) {}
