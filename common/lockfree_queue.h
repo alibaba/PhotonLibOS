@@ -518,11 +518,18 @@ namespace common {
 /**
  * @brief RingChannel is a photon wrapper to make LockfreeQueue send/recv
  * efficiently wait and spin using photon style sync mechanism.
- * In order.
- * In considering of performance, RingChannel will use semaphore to hang-up
- * photon thread when queue is empty, and once it got object by recv, it will
- * trying using `thread_yield` instead of semaphore, to get better performance
- * and load balancing.
+ *
+ * Notification model (multi-producer, multi-consumer safe):
+ *   - Each consumer entering the slow path bumps `idler`.
+ *   - Each producer, after `push`, may issue at most one `signal(1)` per push,
+ *     and only when `pending < idler`. `pending` mirrors the in-flight
+ *     `queue_sem.m_count`, so the semaphore counter is hard-capped by the
+ *     observed number of idle consumers, never accumulating with burst size.
+ *   - A `seq_cst` fence in send() and a `seq_cst` RMW on `idler` in recv()
+ *     close the Dekker-style window: at any time at least one of
+ *     (consumer sees the push) or (producer signals) must hold, so the queue
+ *     can never end up non-empty while every consumer sleeps.
+ *
  * Watch out that `recv` should run in photon environment (because it has to)
  * use photon semaphore to be notified that new item has sended. `send` could
  * running in photon or std::thread environment (needs to set template `Pause`
@@ -535,9 +542,10 @@ namespace common {
 template <typename QueueType>
 class RingChannel : public QueueType {
 protected:
-    photon::semaphore queue_sem;
-    std::atomic<uint64_t> idler{0};
-    uint64_t default_yield_turn = -1UL;
+    photon::semaphore     queue_sem;
+    std::atomic<uint64_t> idler{0};    // # consumers in idle/wait
+    std::atomic<uint64_t> pending{0};  // mirror of queue_sem.m_count
+    uint64_t default_yield_turn = 1024;
     uint64_t default_yield_usec = 1024;
 
     using T = decltype(std::declval<QueueType>().recv());
@@ -560,16 +568,43 @@ public:
         while (!push(x)) {
             Pause::pause();
         }
-        // meke sure that idler load happends after push work done.
-        if (idler.load(std::memory_order_seq_cst)) queue_sem.signal(1);
+        // Dekker barrier: ensure the prior push (mark.store release) is
+        // ordered before the following idler load, paired with the seq_cst
+        // RMW on `idler` in recv(). This guarantees that we cannot
+        // simultaneously miss the consumer's idler++ AND have the consumer
+        // miss our push.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        auto cur_idler = idler.load(std::memory_order_seq_cst);
+        if (cur_idler == 0) return;
+
+        // Cap pending (== m_count) at cur_idler so a long burst can never
+        // accumulate stale wake-up tokens. Multiple producers may each succeed
+        // up to the observed idler count, preserving fan-out for N consumers.
+        auto p = pending.load(std::memory_order_acquire);
+        for (;;) {
+            if (p >= cur_idler) {
+                auto fresh = idler.load(std::memory_order_relaxed);
+                if (fresh <= cur_idler) return;
+                cur_idler = fresh;
+                continue;
+            }
+            if (pending.compare_exchange_weak(p, p + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                queue_sem.signal(1);
+                return;
+            }
+            // CAS failed: `p` was refreshed automatically; retry.
+        }
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
         if (pop(x)) return x;
-        // yield once if failed, so photon::now will be update
+        // yield once if failed, so photon::now will be updated
         photon::thread_yield();
-        idler.fetch_add(1, std::memory_order_acq_rel);
-        DEFER(idler.fetch_sub(1, std::memory_order_acq_rel));
+        // seq_cst on idler is the other half of the Dekker barrier (see send).
+        idler.fetch_add(1, std::memory_order_seq_cst);
+        DEFER(idler.fetch_sub(1, std::memory_order_seq_cst));
         Timeout yield_timeout(max_yield_usec);
         uint64_t yield_turn = max_yield_turn;
         while (!pop(x)) {
@@ -578,7 +613,12 @@ public:
                 photon::thread_yield();
             } else {
                 // wait for 100ms
-                queue_sem.wait(1, 100UL * 1000);
+                int r = queue_sem.wait(1, 100UL * 1000);
+                // r == 0 means we actually consumed one m_count token; mirror
+                // it on `pending`. r < 0 (timeout/interrupt) does not touch
+                // m_count, so we must not touch `pending` either.
+                if (r == 0)
+                    pending.fetch_sub(1, std::memory_order_acq_rel);
                 // reset yield mark and set into busy wait
                 yield_turn = max_yield_turn;
                 yield_timeout.timeout(max_yield_usec);
@@ -587,6 +627,13 @@ public:
         return x;
     }
     T recv() { return recv(default_yield_turn, default_yield_usec); }
+
+    // Diagnostic accessor: returns the current count of in-flight wake-up
+    // tokens (mirrors `queue_sem.m_count`). Tests use this to assert that no
+    // stale signals accumulate across a producer burst.
+    uint64_t notification_pending() const {
+        return pending.load(std::memory_order_acquire);
+    }
 };
 
 }  // namespace common
