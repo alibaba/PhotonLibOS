@@ -10,7 +10,11 @@ jobs:
 
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
+<<<<<<< HEAD
       options: --cpus 4 --shm-size 512m
+=======
+      options: --cpus 4 --shm-size 512m --privileged
+>>>>>>> 5fe2fd5 ([Pick][0.9 to main] | feat(cache): probe fiemap support and track ranges as fallback (#1230)  (#1275))
 
     steps:
       - uses: szenius/set-timezone@v2.0
