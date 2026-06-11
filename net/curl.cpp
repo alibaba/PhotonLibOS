@@ -161,7 +161,10 @@ public:
         : loop(new_event_loop({this, &cURLLoop::wait_fds},
                               {this, &cURLLoop::on_poll})) {}
 
-    ~cURLLoop() override { delete loop; }
+    ~cURLLoop() override {
+        loop->stop();
+        delete loop;
+    }
 
     void start() { loop->async_run(); }
 
@@ -230,18 +233,7 @@ class CurlResetHandle : public ResetHandle {
      }
 };
 static thread_local CurlResetHandle *reset_handler = nullptr;
-
-static void libcurl_init_cleanup() {
-    delete cctx.g_timer;
-    cctx.g_timer = nullptr;
-    if (cctx.g_loop) {
-        cctx.g_loop->stop();
-        delete cctx.g_loop;
-        cctx.g_loop = nullptr;
-    }
-    delete cctx.g_poller;
-    cctx.g_poller = nullptr;
-}
+void libcurl_fini();
 
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
@@ -251,13 +243,11 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
         cctx.g_loop->start();
         cctx.g_timer =
             new photon::Timer(-1UL, {nullptr, &on_timer}, true, 8UL * 1024 * 1024);
-        if (!cctx.g_timer) {
-            libcurl_init_cleanup();
+        if (!cctx.g_timer)
             LOG_ERROR_RETURN(EFAULT, -1, "failed to create photon timer");
-        }
+        DEFER(if (!cctx.g_libcurl_multi) libcurl_fini());
 
         if (global_initialized != CURLE_OK) {
-            libcurl_init_cleanup();
             LOG_ERROR_RETURN(EIO, -1, "CURL global init error: ",
                             curl_easy_strerror(global_initialized));
         }
@@ -266,7 +256,6 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
 
         cctx.g_libcurl_multi = curl_multi_init();
         if (cctx.g_libcurl_multi == nullptr) {
-            libcurl_init_cleanup();
             LOG_ERROR_RETURN(EIO, -1, "failed to init libcurl-multi");
         }
 
@@ -290,7 +279,6 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
 void libcurl_fini() {
     delete cctx.g_timer;
     cctx.g_timer = nullptr;
-    cctx.g_loop->stop();
     delete cctx.g_loop;
     cctx.g_loop = nullptr;
     delete cctx.g_poller;

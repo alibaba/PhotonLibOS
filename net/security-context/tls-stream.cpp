@@ -209,8 +209,7 @@ public:
         ctx = SSL_CTX_new(method);
         if (ctx == nullptr) {
             ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
-            LOG_ERROR(0, -1, "Failed to initial TLS: ", errbuf);
-            return;
+            LOG_ERROR_RETURN(0, , "Failed to initial TLS: ", errbuf);
         }
         SSL_CTX_set_ecdh_auto(ctx, 1);
         SSL_CTX_set_alpn_select_cb(ctx, ctx_alpn_select_cb, this);
