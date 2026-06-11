@@ -148,11 +148,38 @@ public:
             _box->acquire();
         }
 
-        Borrow(Borrow&& rhs) : _reader(nullptr) { *this = std::move(rhs); }
+        Borrow(Borrow&& rhs) : _reader(nullptr) {
+            _oc = rhs._oc;
+            _box = rhs._box;
+            _reader = std::move(rhs._reader);
+            _recycle = rhs._recycle;
+            rhs._oc = nullptr;
+            rhs._box = nullptr;
+        }
 
-        Borrow& operator=(Borrow&& rhs) = default;
+        Borrow& operator=(Borrow&& rhs) {
+            if (this != &rhs) {
+                if (_box) {
+                    if (_recycle) _box->reset();
+                    _box->release();
+                    if (_box->rc == 0) {
+                        SCOPED_LOCK(_oc->maplock);
+                        _oc->lru_list.pop(_box);
+                        _oc->lru_list.push_back(_box);
+                    }
+                }
+                _oc = rhs._oc;
+                _box = rhs._box;
+                _reader = std::move(rhs._reader);
+                _recycle = rhs._recycle;
+                rhs._oc = nullptr;
+                rhs._box = nullptr;
+            }
+            return *this;
+        }
 
         ~Borrow() {
+            if (!_box) return;
             if (_recycle) {
                 _box->reset();
             }
