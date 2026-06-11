@@ -77,6 +77,10 @@ ssize_t iovector_view::slice(size_t count, off_t offset, iovector_view* /*OUT*/ 
         // empty iov, takes as no useable nested iovec to store the result
         return -1;
     }
+    if (unlikely(count == 0)) {
+        iov->iovcnt = 0;
+        return 0;
+    }
     int cnt = 0;
     auto ptr = iov->iov;
     ssize_t ret = 0;
@@ -89,22 +93,34 @@ ssize_t iovector_view::slice(size_t count, off_t offset, iovector_view* /*OUT*/ 
             break;
         pos += it->iov_len;
     }
-    for (; it != e && count; ++it) {
-        if (offset > pos) {
-            ptr[cnt].iov_base = (char*)it->iov_base + (offset - pos);
-            ptr[cnt].iov_len = it->iov_len - (offset - pos);
-        } else {
-            ptr[cnt].iov_base = it->iov_base;
-            ptr[cnt].iov_len = it->iov_len;
-        }
-        if (count < ptr[cnt].iov_len)
+    // process the first element (may be partial due to offset)
+    if (it != e) {
+        ptr[cnt].iov_base = (char*)it->iov_base + (offset - pos);
+        ptr[cnt].iov_len = it->iov_len - (offset - pos);
+        if (count <= ptr[cnt].iov_len) {
             ptr[cnt].iov_len = count;
-        pos += it->iov_len;
+            ret += count;
+            iov->iovcnt = cnt + 1;
+            return ret;
+        }
         ret += ptr[cnt].iov_len;
         count -= ptr[cnt].iov_len;
         cnt++;
-        if (cnt == iov->iovcnt)
-            break;
+        ++it;
+    }
+    // process remaining full elements
+    for (; it != e && cnt < iov->iovcnt; ++it) {
+        ptr[cnt].iov_base = it->iov_base;
+        ptr[cnt].iov_len = it->iov_len;
+        if (count <= ptr[cnt].iov_len) {
+            ptr[cnt].iov_len = count;
+            ret += count;
+            iov->iovcnt = cnt + 1;
+            return ret;
+        }
+        ret += ptr[cnt].iov_len;
+        count -= ptr[cnt].iov_len;
+        cnt++;
     }
     iov->iovcnt = cnt;
     return ret;
