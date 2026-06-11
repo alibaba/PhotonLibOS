@@ -29,6 +29,7 @@ namespace http {
 
 static constexpr char SHA1_MAGIC[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 static constexpr size_t MAX_HEADER_SIZE = 14;  // 2 + 8 (extended len) + 4 (mask)
+static constexpr uint64_t MAX_WEBSOCKET_FRAME_SIZE = 16 * 1024 * 1024; // 16MB
 
 // ============================================================================
 // Frame encoding/decoding utilities
@@ -136,9 +137,12 @@ static ssize_t parse_frame_header(ISocketStream* stream, WebSocketOpcode* opcode
             len = (len << 8) | ext[i];
     }
     
+    if (len > MAX_WEBSOCKET_FRAME_SIZE)
+        LOG_ERROR_RETURN(EMSGSIZE, -1, "WebSocket frame too large: ", len);
+
     if (*masked && stream->read(mask, 4) != 4)
         LOG_ERROR_RETURN(0, -1, "Failed to read masking key");
-    
+
     return len;
 }
 
