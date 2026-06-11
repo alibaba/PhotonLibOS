@@ -393,6 +393,7 @@ class OssClientImpl : public Client {
                           photon::net::http::Headers& headers,
                           const StringKV& query_params = {},
                           bool invalidate_cache = false);
+  void inject_custom_headers(photon::net::http::Headers& headers);
   int sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
                     const OssUrl& oss_url, const StringKV& query_params = {},
                     bool invalidate_cache = false);
@@ -443,6 +444,16 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client->set_user_agent(m_oss_options.user_agent);
   if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
 
+  auto& ch = m_oss_options.custom_headers;
+  for (auto it = ch.begin(); it != ch.end();) {
+    std::transform(it->first.begin(), it->first.end(), it->first.begin(), ::tolower);
+    // reserved for authenticator;
+    if (it->first == "authorization" || it->first == "date")
+      it = ch.erase(it);
+    else
+      ++it;
+  }
+
   if (!options.bind_ips.empty()) {
     std::vector<photon::net::IPAddr> ip_vec;
     auto ips = estring_view(options.bind_ips).split(',');
@@ -486,7 +497,15 @@ int OssClient::append_auth_headers(photon::net::http::Verb v, const OssUrl& oss_
   params.object = oss_url.object();
   params.invalidate_cache = invalidate_cache;
 
+  // inject custom headers before sign so x-oss-* headers participate in signing
+  inject_custom_headers(headers);
   return m_authenticator->sign(headers, params);
+}
+
+void OssClient::inject_custom_headers(photon::net::http::Headers& headers) {
+  for (const auto& kv : m_oss_options.custom_headers) {
+    headers.insert(kv.first, kv.second);
+  }
 }
 
 int OssClient::sign_and_call(HTTP_STACK_OP& op, photon::net::http::Verb verb,
