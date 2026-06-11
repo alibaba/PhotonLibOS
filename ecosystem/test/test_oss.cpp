@@ -46,6 +46,11 @@ class BasicAuthOssTest : public ::testing::Test {
     // v4 signature with non-empty region, otherwise v1 signature.
     opts_.region = FLAGS_region;
 
+    if (random_suffix % 2) {
+      opts_.custom_headers = {{"x-custom-trace-id", "test-run-" + std::to_string(random_suffix)},
+                              {"x-oss-custom-client", "photon-test"}};
+    }
+
     CreateOssClient(opts_);
   }
 
