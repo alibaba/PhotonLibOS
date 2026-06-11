@@ -300,11 +300,9 @@ public:
         if (!workth) return;
         auto th = workth;
         workth = nullptr;
-        if (waiting) {
-            thread_interrupt(th);
-            if (!m_block_serv)
-                thread_join((join_handle*)th);
-        }
+        thread_interrupt(th);
+        if (!m_block_serv)
+            thread_join((join_handle*)th);
     }
 
     ISocketServer* set_handler(Handler handler) override {
@@ -718,6 +716,14 @@ class FstackDpdkSocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
+    ~FstackDpdkSocketServer() override {
+        terminate();
+        if (m_listen_fd < 0) return;
+        fstack_shutdown(m_listen_fd, static_cast<int>(ShutdownHow::ReadWrite));
+        fstack_close(m_listen_fd);
+        m_listen_fd = -1;
+    }
+
     int bind(const EndPoint& ep) override {
         if (m_listen_fd >= 0)
             LOG_ERROR_RETURN(EALREADY, -1, "already bound");
@@ -756,6 +762,20 @@ public:
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
 
+    ISocketStream* accept(EndPoint* remote_endpoint = nullptr) override {
+        int cfd = remote_endpoint ? do_accept(*remote_endpoint) : do_accept();
+        if (cfd < 0) {
+            return nullptr;
+        }
+        for (auto& opt : m_opts) {
+            if (fstack_setsockopt(cfd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
+                LOG_ERRNO_RETURN(EINVAL, nullptr, "Failed to setsockopt ",
+                                 VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
+            }
+        }
+        return create_stream(cfd);
+    }
+
 protected:
     KernelSocketStream* create_stream(int fd) override {
         return new FstackDpdkSocketStream(fd);
@@ -764,22 +784,6 @@ protected:
     int do_accept(struct sockaddr* addr, socklen_t* addrlen) override {
         return fstack_accept(m_listen_fd, addr, addrlen, m_timeout);
     }
-
-private:
-    class FstackSockOptBuffer : public SockOptBuffer {
-    public:
-        int setsockopt(int fd) override {
-            for (auto& opt : *this) {
-                if (fstack_setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
-                    LOG_ERRNO_RETURN(EINVAL, -1, "Failed to setsockopt ",
-                                     VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
-                }
-            }
-            return 0;
-        }
-    };
-
-    FstackSockOptBuffer m_opts;
 };
 
 #endif // ENABLE_FSTACK_DPDK

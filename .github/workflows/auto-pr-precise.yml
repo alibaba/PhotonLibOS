@@ -22,6 +22,17 @@ jobs:
         git config --global --add safe.directory "${{ github.workspace }}"
         git config -l
 
+    - name: detect merge source
+      id: detect
+      run: |
+        MERGE_BRANCH=$(git show -s --format=%B ${{ github.event.after }} | grep -oE 'from [^ ]+' | head -n 1 | cut -d' ' -f2) || true
+        echo "MERGE_BRANCH=$MERGE_BRANCH"
+        if echo "$MERGE_BRANCH" | grep -qE '^(backport-pr-[a-f0-9]+-)'; then
+          echo "SKIP=true" >> $GITHUB_OUTPUT
+        else
+          echo "SKIP=false" >> $GITHUB_OUTPUT
+        fi
+
     - name: check branch names
       id: branch_info
       run: |
@@ -47,12 +58,14 @@ jobs:
 
     - name: create pr branch
       id: create_branch
+      if: steps.detect.outputs.SKIP != 'true'
       run: |
         PRBRANCH=auto-pr-${{github.event.after}}-${{steps.branch_info.outputs.NEXT_VERSION}}
         echo "PRBRANCH=$PRBRANCH" >> $GITHUB_OUTPUT
 
     - name: Merge release branch into ${{steps.branch_info.outputs.NEXT_BRANCH}}
       id: merge-changes
+      if: steps.detect.outputs.SKIP != 'true'
       run: |
         set -x
         git checkout ${{steps.branch_info.outputs.NEXT_BRANCH}}
@@ -77,6 +90,7 @@ jobs:
 
     - uses: actions/github-script@v7
       name: Open pick PR to ${{steps.branch_info.outputs.NEXT_BRANCH}}
+      if: steps.detect.outputs.SKIP != 'true'
       env:
           TITLE: ${{steps.merge-changes.outputs.TITLE}}
           MESSAGE: ${{steps.merge-changes.outputs.MESSAGE}}

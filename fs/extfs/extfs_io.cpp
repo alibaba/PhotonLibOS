@@ -105,6 +105,12 @@ static errcode_t extfs_open(const char *name, int flags, io_channel *channel) {
 }
 
 static errcode_t extfs_close(io_channel channel) {
+    if (--channel->refcount > 0)
+        return 0;
+    if (channel->private_data)
+        ext2fs_free_mem(&channel->private_data);
+    if (channel->name)
+        ext2fs_free_mem(&channel->name);
     LOG_INFO("extfs close");
     return ext2fs_free_mem(&channel);
 }

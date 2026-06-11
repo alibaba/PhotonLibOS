@@ -146,7 +146,7 @@ ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                  Timeout timeout) {
 #ifdef __APPLE__
     off_t len = count;
-    ssize_t ret = DOIO_ONCE(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0),
+    ssize_t ret = DOIO_ONCE(::sendfile(in_fd, out_fd, *offset, &len, nullptr, 0),
                   wait_for_fd_writable(out_fd, timeout));
     return (ret == 0) ? len : (int)ret;
 #else

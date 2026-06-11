@@ -53,6 +53,7 @@ struct EventsMap {
         if (event == EV_KEY::EV_READ) return EV_UNDERLAY::EV_READ;
         if (event == EV_KEY::EV_WRITE) return EV_UNDERLAY::EV_WRITE;
         if (event == EV_KEY::EV_ERR) return EV_UNDERLAY::EV_ERR;
+        return 0;
     }
 };
 

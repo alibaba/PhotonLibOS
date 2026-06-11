@@ -147,7 +147,7 @@ protected:
     std::unique_ptr<IStream> m_body_stream;
     net::ISocketStream* m_stream = nullptr;
     bool m_stream_ownership = false;
-    bool m_abandon;
+    bool m_abandon = false;
     bool m_keep_alive = true;
     Verb m_verb = Verb::UNKNOWN;
 
