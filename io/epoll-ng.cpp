@@ -117,6 +117,7 @@ public:
                         LOG_ERROR_RETURN(err.no, , "epoll_wait() failed ", err);
                     timeout = sat_sub(timeout, cool_down_ms);
                     cool_down_ms *= 2;
+                    continue;
                 }
                 remains += ret;
                 return;
