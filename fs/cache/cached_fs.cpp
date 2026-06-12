@@ -371,6 +371,7 @@ public:
     int vioctl(int request, va_list args) override {
         IFile *src_rwfile = nullptr;
         if (cache_store_->get_src_file(&src_rwfile, O_RDWR) != 0) return -1;
+        if (!src_rwfile) LOG_ERROR_RETURN(0, -1, "source rw file is null");
         return src_rwfile->vioctl(request, args);
     }
 
