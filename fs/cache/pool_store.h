@@ -214,9 +214,9 @@ namespace fs
         }
 
         std::string_view get_src_name() { return src_name_; }
-        void set_src_name(std::string_view pathname) { src_name_ = pathname.data(); }
+        void set_src_name(std::string_view pathname) { src_name_.assign(pathname.data(), pathname.size()); }
         std::string_view get_store_key() { return store_key_; }
-        void set_store_key(std::string_view pathname) { store_key_ = pathname.data(); }
+        void set_store_key(std::string_view pathname) { store_key_.assign(pathname.data(), pathname.size()); }
         void set_pool(ICachePool* pool) { pool_ = pool; }
         void set_cached_size(off_t cached_size, int flags = 0);
         off_t get_actual_size() { return actual_size_; }

@@ -123,7 +123,7 @@ public:
         return new PersistentCacheFile(src_file, pathname, this);
     }
     IFile *open(const char *pathname, int flags, mode_t mode) {
-        return open(pathname, flags, 0644);
+        return open(pathname, flags);
     }
 
     UNIMPLEMENTED(int stat(const char *pathname, struct stat *buf) override);
