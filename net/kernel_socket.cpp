@@ -770,6 +770,8 @@ public:
     }
 
 protected:
+    using KernelSocketServer::do_accept;
+
     KernelSocketStream* create_stream(int fd) override {
         return new FstackDpdkSocketStream(fd);
     }
