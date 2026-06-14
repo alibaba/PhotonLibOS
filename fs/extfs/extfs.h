@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #pragma once
+#include <cstdint>
 #include <photon/fs/filesystem.h>
 
 namespace photon {
@@ -24,6 +25,10 @@ photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer = true);
 // make extfs on an prezeroed IFile,
 // should be truncated to specified size in advance
 int make_extfs(photon::fs::IFile *file, char *uuid = nullptr);
+
+#ifdef PHOTON_ENABLE_RESIZE
+int resize_extfs(photon::fs::IFile *file, uint64_t new_size, int flags = 0);
+#endif
 
 }
 }
