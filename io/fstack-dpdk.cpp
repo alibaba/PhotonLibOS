@@ -114,7 +114,7 @@ public:
             return 0;  // event arrived
         }
 
-        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
+        enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
         errno = (ret == 0) ? ETIMEDOUT : err.no;
         return -1;
     }
@@ -239,7 +239,7 @@ int fstack_socket(int domain, int type, int protocol) {
     int val = 1;
     if (ff_ioctl(fd, FIONBIO, &val) < 0)
         LOG_WARN("failed to set socket non-blocking");
-    if (ff_ioctl(fd, TCP_NODELAY, &val) < 0)
+    if (ff_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
         LOG_WARN("failed to set TCP_NODELAY");
     return fd;
 }
@@ -307,12 +307,12 @@ ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, Time
 
 ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
     return photon::net::DOIO_ONCE(ff_recv(sockfd, buf, count, flags),
-        g_engine->wait_for_fd_writable(sockfd, timeout));
+        g_engine->wait_for_fd_readable(sockfd, timeout));
 }
 
 ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
     return photon::net::DOIO_ONCE(ff_recvmsg(sockfd, message, flags),
-        g_engine->wait_for_fd_writable(sockfd, timeout));
+        g_engine->wait_for_fd_readable(sockfd, timeout));
 }
 
 int fstack_setsockopt(int socket, int level, int option_name, const void* option_value, socklen_t option_len) {
