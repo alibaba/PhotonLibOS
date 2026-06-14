@@ -96,7 +96,7 @@ TEST(websocket, echo_text) {
     auto tcpserver = new_tcp_socket_server();
     LOG_INFO("echo_text: tcp server created");
     
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -129,7 +129,7 @@ TEST(websocket, echo_text) {
     
     LOG_INFO("echo_text: calling websocket_connect");
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     LOG_INFO("echo_text: upgrade returned, ws=", (void*)ws);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
@@ -155,7 +155,7 @@ TEST(websocket, echo_text) {
 TEST(websocket, echo_binary) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -176,7 +176,7 @@ TEST(websocket, echo_binary) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -201,7 +201,7 @@ TEST(websocket, echo_binary) {
 TEST(websocket, multiple_messages) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -222,7 +222,7 @@ TEST(websocket, multiple_messages) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -249,7 +249,7 @@ TEST(websocket, multiple_messages) {
 TEST(websocket, large_message) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(10000UL * 1000);
+    tcpserver->timeout(10000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -270,7 +270,7 @@ TEST(websocket, large_message) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 10000000UL);
+    auto ws = client->websocket_connect(url, 10000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -295,7 +295,7 @@ TEST(websocket, large_message) {
 TEST(websocket, iovector_send) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -316,7 +316,7 @@ TEST(websocket, iovector_send) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -354,7 +354,7 @@ TEST(websocket, iovector_send) {
 TEST(websocket, close_codes) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -375,7 +375,7 @@ TEST(websocket, close_codes) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -393,7 +393,7 @@ TEST(websocket, close_codes) {
 TEST(websocket, empty_message) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -414,7 +414,7 @@ TEST(websocket, empty_message) {
     char url[64];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/ws", port);
     
-    auto ws = client->websocket_connect(url, 5000000UL);
+    auto ws = client->websocket_connect(url, 5000000ULL);
     ASSERT_NE(ws, nullptr);
     DEFER(delete ws);
     
@@ -453,7 +453,7 @@ int ws_invalid_handler(void*, Request& req, Response& resp, std::string_view) {
 TEST(websocket, invalid_upgrade_request) {
     // Setup HTTP server with WebSocket handler
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(5000UL * 1000);
+    tcpserver->timeout(5000ULL * 1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);

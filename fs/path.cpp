@@ -270,18 +270,18 @@ namespace fs
     }
     int Walker::is_dir(dirent* entry)
     {
+#ifndef _WIN32
         if (entry->d_type == DT_DIR)
             return 1;
-        if (entry->d_type == DT_UNKNOWN)
-        {
-            struct stat st;
-            auto ret = m_filesystem->lstat(m_path_buffer, &st);
-            if (ret < 0)
-                LOG_ERRNO_RETURN(0, -1, "failed to lstat '`'",
-                               std::string_view(m_path_buffer, m_path_len));
-            return S_ISDIR(st.st_mode);
-        }
-        return 0;
+        if (entry->d_type != DT_UNKNOWN)
+            return 0;
+#endif
+        struct stat st;
+        auto ret = m_filesystem->lstat(m_path_buffer, &st);
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to lstat '`'",
+                           std::string_view(m_path_buffer, m_path_len));
+        return S_ISDIR(st.st_mode);
     }
     void Walker::path_push_back(string_view s) {
         auto len0 = m_path_len;

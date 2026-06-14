@@ -43,7 +43,11 @@ static uint64_t current_time(char cur[], int length)
     struct timeval t;
     gettimeofday(&t, nullptr);
     struct tm tim;
+#ifdef _WIN32
+    { time_t tt = (time_t)t.tv_sec; localtime_s(&tim, &tt); }
+#else
     ::localtime_r(&t.tv_sec, &tim);
+#endif
     snprintf(cur, length, "%04d-%02d-%02d %02d:%02d:%02d",
         ((unsigned int)tim.tm_year + 1900) % 10000,
         ((unsigned int)tim.tm_mon + 1) % 100,

@@ -62,7 +62,7 @@ class OssCustomHeaderTest : public ::testing::Test {
   void SetUp() override {
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     tcp_server = new_tcp_socket_server();
-    tcp_server->timeout(1000UL * 1000);
+    tcp_server->timeout(1000ULL * 1000);
     tcp_server->bind_v4localhost();
     tcp_server->listen();
     http_server = new_http_server();

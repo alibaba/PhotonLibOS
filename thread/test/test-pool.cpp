@@ -175,7 +175,7 @@ TEST(workpool, async_work_lambda) {
             new auto ([r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
-                EXPECT_EQ(0UL, r->copy);
+                EXPECT_EQ(0ULL, r->copy);
                 this_thread::sleep_for(std::chrono::seconds(1));
                 LOG_INFO("FINISH");
                 delete r;
@@ -201,7 +201,7 @@ TEST(workpool, async_work_lambda_threadcreate) {
             new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
-                EXPECT_EQ(0UL, r->copy);
+                EXPECT_EQ(0ULL, r->copy);
                 thread_sleep(1);
                 sem.signal(1);
                 LOG_INFO("FINISH");
@@ -230,7 +230,7 @@ TEST(workpool, async_work_lambda_threadpool) {
             new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
-                EXPECT_EQ(0UL, r->copy);
+                EXPECT_EQ(0ULL, r->copy);
                 thread_sleep(1);
                 sem.signal(1);
                 LOG_INFO("FINISH");
@@ -283,7 +283,7 @@ TEST(workpool, async_work_lambda_threadpool_append) {
             new auto ([&sem, r]() {
                 LOG_INFO("START ", VALUE(__cplusplus), VALUE(r->copy),
                          VALUE(r->move));
-                EXPECT_EQ(0UL, r->copy);
+                EXPECT_EQ(0ULL, r->copy);
                 thread_sleep(1);
                 sem.signal(1);
                 LOG_INFO("FINISH");

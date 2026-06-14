@@ -275,7 +275,7 @@ public:
     }
 
     virtual uint64_t timeout() const override {
-        return m_stream ? m_stream->timeout() : -1UL;
+        return m_stream ? m_stream->timeout() : -1ULL;
     }
     virtual void timeout(uint64_t timeout) override {
         if (m_stream) m_stream->timeout(timeout);
@@ -324,7 +324,7 @@ public:
     }
 
     virtual uint64_t timeout() const override {
-        return m_stream ? m_stream->timeout() : -1UL;
+        return m_stream ? m_stream->timeout() : -1ULL;
     }
     virtual void timeout(uint64_t timeout) override {
         if (m_stream) m_stream->timeout(timeout);

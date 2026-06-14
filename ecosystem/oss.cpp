@@ -134,7 +134,7 @@ class OssUrl {
     if (escaped) m_raw_object = object;
 
     m_url_size = m_url.size();
-    m_bucket = {(is_http ? 7ul : 8ul), bucket.size()};
+    m_bucket = {(is_http ? 7ull : 8ull), bucket.size()};
     m_object = {m_bucket.offset() + bucket.size() + endpoint.size() + 1 + 1,
                 escaped_obj.size()};  // start without prefix /
   }

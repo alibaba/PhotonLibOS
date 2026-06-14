@@ -171,8 +171,8 @@ namespace fs
         DEFINE_ASYNC0(dirent*, get);
         DEFINE_ASYNC0(int, next);
         DEFINE_ASYNC0(void, rewinddir);
-        DEFINE_ASYNC(void, seekdir, long loc);
-        DEFINE_ASYNC0(long, telldir);
+        DEFINE_ASYNC(void, seekdir, long long loc);
+        DEFINE_ASYNC0(long long, telldir);
 
         const static uint32_t OPID_CLOSEDIR     = 128;
         const static uint32_t OPID_GETDIR       = 129;

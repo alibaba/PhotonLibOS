@@ -144,7 +144,7 @@ public:
         assert(end >= start);
         return substr(start, end - start + 1);
     }
-#if __cplusplus < 202000L
+#if __cplusplus < 202000LL
     bool starts_with(std::string_view x) const {
         return size() >= x.size() && substr(0, x.size()) == x;
     }
@@ -472,7 +472,7 @@ public:
     {
         return view().trim(spaces);
     }
-#if __cplusplus < 202000L
+#if __cplusplus < 202000LL
     bool starts_with(std::string_view x) const {
         return view().starts_with(x);
     }

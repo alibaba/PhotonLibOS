@@ -115,7 +115,7 @@ void print_heap(SleepQueue& sleepq)
     LOG_INFO("    ");
     int i = 0, k = 1;
     for (auto it : sleepq.q) {
-        printf("%lu(%d)", (unsigned long)it->ts_wakeup, it->idx);
+        printf("%llu(%d)", (unsigned long long)it->ts_wakeup, it->idx);
         i++;
         if (i == k) {
             printf("\n");
@@ -578,7 +578,7 @@ void Marker::randwrite(void* file, size_t nwrites)
 {
     EXPECT_EQ(this, &c);
     EXPECT_EQ(file, (void*)1234567);
-    EXPECT_EQ(1244UL, nwrites);
+    EXPECT_EQ(1244ULL, nwrites);
 }
 
 int test_thread(Marker x, Marker& y, Marker z, int n)
@@ -739,7 +739,7 @@ TEST(Semaphore, heavy) {
     EXPECT_EQ(ETIMEDOUT, errno);
     ret = sem.wait(thread_num+1);
     EXPECT_EQ(0, ret);
-    EXPECT_EQ(0UL, sem.m_count);
+    EXPECT_EQ(0ULL, sem.m_count);
     wait_for_completion();
 }
 
@@ -783,8 +783,8 @@ TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
     auto start = photon::now;
     photon::thread_sleep(2);
     auto dt = photon::now - start;
-    EXPECT_GT(dt, 1UL*1024*1024);
-    EXPECT_LE(dt, 3UL*1024*1024);
+    EXPECT_GT(dt, 1ULL*1024*1024);
+    EXPECT_LE(dt, 3ULL*1024*1024);
 }
 
 thread_local uint64_t rw_count;
@@ -827,7 +827,7 @@ TEST(RWLock, checklock) {
     }
     for (auto &x : handles)
         photon::thread_join(x);
-    EXPECT_EQ(100UL, rw_count);
+    EXPECT_EQ(100ULL, rw_count);
 }
 
 void* interrupt(void* th) {
@@ -839,7 +839,7 @@ TEST(RWLock, interrupt) {
     rwlock rwl;
     int ret = rwl.lock(photon::WLOCK); // write lock
     EXPECT_EQ(0, ret);
-    ret = rwl.lock(photon::RLOCK, 1000UL); // it should not be locked
+    ret = rwl.lock(photon::RLOCK, 1000ULL); // it should not be locked
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ETIMEDOUT, errno);
     photon::thread_create(&interrupt, photon::CURRENT);
@@ -905,12 +905,12 @@ void vcpu_start(uint32_t i)
 TEST(saturated, add)
 {
     uint64_t cases[][3] = {
-        {10UL, -1ULL, -1ULL},
-        {10UL, -9ULL, -1ULL},
-        {1UL, 2UL, 3UL},
-        {10UL, 3UL, 13UL},
-        {100UL, 4UL, 104UL},
-        {1000UL, 5UL, 1005UL},
+        {10ULL, -1ULL, -1ULL},
+        {10ULL, -9ULL, -1ULL},
+        {1ULL, 2ULL, 3ULL},
+        {10ULL, 3ULL, 13ULL},
+        {100ULL, 4ULL, 104ULL},
+        {1000ULL, 5ULL, 1005ULL},
     };
     for (auto& x: cases) {
         auto z = sat_add(x[0], x[1]);
@@ -929,12 +929,12 @@ TEST(saturated, sub)
 {
     test_sat_sub();
     uint64_t cases[][3] = {
-        {10UL, 1UL, 9UL},
-        {10UL, 9UL, 1UL},
-        {1UL, 2UL, 0UL},
-        {10UL, 30UL, 0UL},
-        {100UL, 400UL, 0UL},
-        {1000UL, 5000UL, 0UL},
+        {10ULL, 1ULL, 9ULL},
+        {10ULL, 9ULL, 1ULL},
+        {1ULL, 2ULL, 0ULL},
+        {10ULL, 30ULL, 0ULL},
+        {100ULL, 400ULL, 0ULL},
+        {1000ULL, 5000ULL, 0ULL},
     };
     for (auto& x: cases) {
         auto z = sat_sub(x[0], x[1]);
@@ -1116,7 +1116,7 @@ TEST(smp, rwlock) {
         for (auto &x : handles)
             photon::thread_join(x);
     });
-    EXPECT_EQ(1000UL, srw_count);
+    EXPECT_EQ(1000ULL, srw_count);
 }
 
 struct smp_cvar_args
@@ -1242,11 +1242,11 @@ void* test_smp_semaphore(void* args_)
 TEST(smp, semaphore)
 {
     smp_semaphore_args args;
-    auto n = args.n = 10UL;
+    auto n = args.n = 10ULL;
     args.sem.signal(n/2);
     std_threads_create_join(n, &photon_do,
         n*n, &test_smp_semaphore, &args);
-    EXPECT_EQ(args.sem.m_count, n*n*n*n*n + n/2UL);
+    EXPECT_EQ(args.sem.m_count, n*n*n*n*n + n/2ULL);
 }
 
 TEST(sleep_defer, basic) {
@@ -1262,12 +1262,12 @@ TEST(sleep_defer, basic) {
             photon::thread_interrupt(th, ENXIO);
         }).detach();
         while (!ready.load()) photon::thread_yield();
-        auto ret = photon::thread_usleep_defer(1000UL * 1000, [&flag] {
+        auto ret = photon::thread_usleep_defer(1000ULL * 1000, [&flag] {
             flag.store(true);
         });
         EXPECT_EQ(-1, ret);
         EXPECT_EQ(ENXIO, errno);
-        EXPECT_LT(photon::now - start, 1000UL * 1000);
+        EXPECT_LT(photon::now - start, 1000ULL * 1000);
     }
 }
 
@@ -1314,7 +1314,7 @@ void* waiter(void* arg) {
     SAVE_REG(r15);
     SAVE_REG(rbp);
     SAVE_REG(rsp);
-    photon::thread_usleep(1UL * 1000 * 1000);
+    photon::thread_usleep(1ULL * 1000 * 1000);
     CHECK_REG(rbx);
     CHECK_REG(rsi);
     CHECK_REG(rdi);
@@ -1384,7 +1384,7 @@ TEST(photon, wait_all) {
 void wait_to_be_interrupt() {
     auto th = CURRENT;
     photon::thread_usleep_defer(
-        -1UL, [&]{
+        -1ULL, [&]{
             std::thread([&]{
                 photon::thread_interrupt(th);
             }).detach();
@@ -1428,7 +1428,7 @@ TEST(photon, free_stack) {
 
 void* __null_work(void*) {
     LOG_INFO("RUNNING");
-    photon::thread_usleep(1UL * 1000 * 1000);
+    photon::thread_usleep(1ULL * 1000 * 1000);
     LOG_INFO("DONE");
     return nullptr;
 }
@@ -1493,17 +1493,17 @@ TEST(thread11, lambda) {
     photon::thread_create11([&]{
         sem.signal(1);
     });
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     auto lambda = [](photon::semaphore &sem){
         sem.signal(1);
     };
     photon::thread_create11(lambda, std::ref(sem));
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     auto lambda2 = [&sem]{
         sem.signal(1);
     };
     photon::thread_create11(lambda2);
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
 }
 
 struct simple_functor {
@@ -1602,21 +1602,21 @@ TEST(thread11, functor_invoke) {
     invoke_overloaded_functor ivf3{sem};
 
     thread_create11(ivf1, 'x');
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(ivf2, 'x');
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(ivf3, 'x');
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(ivf3, 123);
-    EXPECT_EQ(0, sem.wait(2, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(2, 1ULL*1000*1000));
     thread_create11(lambda);
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(lambda2, std::ref(sem));
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(lambda3);
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
     thread_create11(bind_obj);
-    EXPECT_EQ(0, sem.wait(1, 1UL*1000*1000));
+    EXPECT_EQ(0, sem.wait(1, 1ULL*1000*1000));
 }
 
 TEST(thread11, functor_param) {

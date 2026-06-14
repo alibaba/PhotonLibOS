@@ -109,7 +109,7 @@ int Message::append_bytes(uint16_t size) {
 
     pos += 4 - (income - left);
     auto body_begin = sv.begin() + pos - m_buf;
-    m_body = {(uint16_t)body_begin, sv.size() - pos};
+    m_body = {(uint16_t)body_begin, uint16_t(sv.size() - pos)};
     Parser p({m_buf, m_buf_size});
 
     auto parse_res = parse_start_line(p);
@@ -142,7 +142,7 @@ int Message::send_header(net::ISocketStream* stream) {
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
     memcpy(m_buf + m_buf_size + headers.size(), "\r\n", 2);
-    std::string_view sv = {m_buf, m_buf_size + headers.size() + 2UL};
+    std::string_view sv = {m_buf, m_buf_size + headers.size() + 2ULL};
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
     if (ret < (ssize_t)sv.size())
@@ -270,13 +270,19 @@ size_t Message::body_size() const {
     it = headers.find("Content-Range");
     if (it != headers.end()) {
         size_t start, end;
+<<<<<<< HEAD
         if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
             return end-start+1;
         }
         if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
+=======
+        if (sscanf(it.second().data(), "bytes %zu-%zu", &start, &end) == 2) {
+            return end - start + 1;
+        }
+        if (sscanf(it.second().data(), "bytes */%zu", &end) == 1) {
+>>>>>>> 1dac312 (make it possible to cross-compile to Windows target from MacOS and mingw)
             return end;
         }
-        return 0;
     }
     // No Content-Length and no Content-Range. If the connection will be closed
     // (Connection: close, Trailer, or HTTP/1.0 implicit close) and the response

@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <unistd.h>
 #include <thread>
 #include <chrono>
 #include <photon/common/alog.h>
@@ -12,11 +13,11 @@
 
 TEST(Throttle, basic) {
     // baseline
-    uint64_t total = 10UL * 1024 * 1024;
+    uint64_t total = 10ULL * 1024 * 1024;
     auto start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = rand() % (1ULL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         total -= step;
     }
@@ -29,14 +30,14 @@ TEST(Throttle, basic) {
     // try update time
     photon::thread_yield();
     // using throttle to limit increasing count 1M in seconds
-    photon::throttle t(1UL * 1024 * 1024);
+    photon::throttle t(1ULL * 1024 * 1024);
 
     // suppose to be done in at least 9 seconds
-    total = 10UL * 1024 * 1024;
+    total = 10ULL * 1024 * 1024;
     start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = rand() % (1ULL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         t.consume(step);
         total -= step;
@@ -46,22 +47,22 @@ TEST(Throttle, basic) {
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     LOG_INFO("cosume 10M with 1M throttle in ` us",
              DEC(duration.count()).comma(true));
-    EXPECT_GT((uint64_t) duration.count(), 9UL * 1000 * 1000);
+    EXPECT_GT((uint64_t) duration.count(), 9ULL * 1000 * 1000);
 }
 
 TEST(Throttle, restore) {
     // try update time
     photon::thread_yield();
     // using throttle to limit increasing count 1M in seconds
-    photon::throttle t(1UL * 1024 * 1024);
+    photon::throttle t(1ULL * 1024 * 1024);
 
     // suppose to be done in at least 9 seconds
-    auto total = 10UL * 1024 * 1024;
+    auto total = 10ULL * 1024 * 1024;
     uint64_t submit = 0, restore = 0;
     auto start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume about 4K ~ 1M
-        auto step = rand() % (1UL * 1024 * 1024 - 4096) + 4096;
+        auto step = rand() % (1ULL * 1024 * 1024 - 4096) + 4096;
         if (step > total) step = total;
         submit += step;
         t.consume(step);
@@ -80,34 +81,34 @@ TEST(Throttle, restore) {
              DEC(duration.count()).comma(true));
     LOG_INFO("submit ` unit resource acquire, restored ` unit",
              DEC(submit).comma(true), DEC(restore).comma(true));
-    EXPECT_GT((uint64_t) duration.count(), 9UL * 1000 * 1000);
-    EXPECT_LT((uint64_t) duration.count(), 20UL * 1000 * 1000);
+    EXPECT_GT((uint64_t) duration.count(), 9ULL * 1000 * 1000);
+    EXPECT_LT((uint64_t) duration.count(), 20ULL * 1000 * 1000);
 }
 
 TEST(Throttle, pulse) {
     // try update time
     photon::thread_yield();
     // using throttle to limit increasing count 1M in seconds
-    photon::throttle t(1UL * 1024 * 1024);
+    photon::throttle t(1ULL * 1024 * 1024);
 
     // suppose to be done in at least 9 seconds
-    auto total = 10UL * 1024 * 1024;
+    auto total = 10ULL * 1024 * 1024;
     auto start = std::chrono::steady_clock::now();
     while (total) {
         // assume each step may consume 256K
-        auto step = 256UL * 1024;
+        auto step = 256ULL * 1024;
         if (step > total) step = total;
         t.consume(step);
         total -= step;
-        photon::thread_usleep(110UL * 1000);
+        photon::thread_usleep(110ULL * 1000);
     }
     auto end = std::chrono::steady_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     LOG_INFO("cosume 10M with 1M throttle in ` us",
              DEC(duration.count()).comma(true));
-    EXPECT_GT((uint64_t) duration.count(), 9UL * 1000 * 1000);
-    EXPECT_LT((uint64_t) duration.count(), 20UL * 1000 * 1000);
+    EXPECT_GT((uint64_t) duration.count(), 9ULL * 1000 * 1000);
+    EXPECT_LT((uint64_t) duration.count(), 20ULL * 1000 * 1000);
 }
 
 template <typename IDLE>
@@ -115,21 +116,21 @@ void test_with_idle(IDLE&& idle) {
     // try update time
     photon::thread_yield();
     // using throttle to limit increasing count 1M in seconds
-    photon::throttle t(1UL * 1024 * 1024);
+    photon::throttle t(1ULL * 1024 * 1024);
 
     // suppose to be done in at least 9 seconds
     auto start = std::chrono::steady_clock::now();
-    t.consume(1UL * 1024 * 1024);
+    t.consume(1ULL * 1024 * 1024);
     // now all throttled resources are consumed
     idle();
-    t.consume(1UL * 1024 * 1024);
+    t.consume(1ULL * 1024 * 1024);
     auto end = std::chrono::steady_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     LOG_INFO("cosume 2M with 1M throttle in ` us",
              DEC(duration.count()).comma(true));
-    EXPECT_GT((uint64_t) duration.count(), 1UL * 1000 * 1000);
-    EXPECT_LT((uint64_t) duration.count(), 2UL * 1000 * 1000);
+    EXPECT_GT((uint64_t) duration.count(), 1ULL * 1000 * 1000);
+    EXPECT_LT((uint64_t) duration.count(), 2ULL * 1000 * 1000);
 }
 
 TEST(Throttle, no_sleep) {
@@ -141,7 +142,7 @@ TEST(Throttle, short_sleep) {
 }
 
 TEST(Throttle, long_sleep) {
-    test_with_idle([] { photon::thread_usleep(1100UL * 1000); });
+    test_with_idle([] { photon::thread_usleep(1100ULL * 1000); });
 }
 
 TEST(Throttle, try_consume) {
@@ -152,7 +153,7 @@ TEST(Throttle, try_consume) {
     auto start = photon::now;
     uint64_t count = 0;
     uint64_t failure = 0;
-    while (photon::now - start < 10UL * 1000 * 1000) {
+    while (photon::now - start < 10ULL * 1000 * 1000) {
         if (t.try_consume(1) == 0) {
             count++;
         } else {
@@ -162,7 +163,7 @@ TEST(Throttle, try_consume) {
     }
     LOG_INFO("Act ` times in 10 sec, prevent ` acts", DEC(count).comma(true),
              DEC(failure).comma(true));
-    EXPECT_LT(count, 11000UL);
+    EXPECT_LT(count, 11000ULL);
 }
 
 ////////////////////////////////////////
@@ -184,8 +185,8 @@ TEST_P(FindAppropriateSliceNumTest, run) {
     const auto& p = GetParam();
 
     const uint64_t test_time_sec = 10;
-    const uint64_t bw = 100'000'000UL;
-    const uint64_t time_window = 1'000'000UL;
+    const uint64_t bw = 100'000'000ULL;
+    const uint64_t time_window = 1'000'000ULL;
     const uint64_t slice_num = p.slice_num;
     const uint64_t io_interval = time_window / slice_num;
     const uint64_t bs_per_io = bw / (time_window / io_interval);
@@ -408,7 +409,7 @@ static void run_simulate(const std::atomic<bool>& running, const PriorityTestSui
     photon::throttle t(p.limit_bw);
     photon::semaphore sem;
     photon::thread_create11([&] {
-        uint64_t sleep_interval = 1'000'000UL / (p.io1.bw / p.io1.bs);
+        uint64_t sleep_interval = 1'000'000ULL / (p.io1.bw / p.io1.bs);
         while (running) {
             photon::thread_usleep(sleep_interval);
             t.consume(p.io1.bs, p.io1.prio);
@@ -417,7 +418,7 @@ static void run_simulate(const std::atomic<bool>& running, const PriorityTestSui
         sem.signal(1);
     });
     photon::thread_create11([&] {
-        uint64_t sleep_interval = 1'000'000UL / (p.io2.bw / p.io2.bs);
+        uint64_t sleep_interval = 1'000'000ULL / (p.io2.bw / p.io2.bs);
         while (running) {
             photon::thread_usleep(sleep_interval);
             t.consume(p.io2.bs, p.io2.prio);

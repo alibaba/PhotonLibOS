@@ -29,7 +29,7 @@ limitations under the License.
 namespace photon {
 namespace net {
 namespace http {
-static const uint64_t kDNSCacheLife = 3600UL * 1000 * 1000;
+static const uint64_t kDNSCacheLife = 3600ULL * 1000 * 1000;
 static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 
 
@@ -83,14 +83,14 @@ public:
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
-                             uint64_t timeout = -1UL);
+                             uint64_t timeout = -1ULL);
 
     template <typename T>
-    ISocketStream* dial(const T& x, uint64_t timeout = -1UL) {
+    ISocketStream* dial(const T& x, uint64_t timeout = -1ULL) {
         return dial(x.host_no_port(), x.port(), x.secure(), timeout);
     }
 
-    ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1UL);
+    ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1ULL);
 };
 
 ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
@@ -317,7 +317,7 @@ public:
             switch (ret) {
                 case ROUNDTRIP_NEED_RETRY:
                     photon::thread_usleep(std::min(sleep_interval, tmo.timeout()));
-                    sleep_interval = (sleep_interval + 500'000UL) * 2;
+                    sleep_interval = (sleep_interval + 500'000ULL) * 2;
                     ++retry;
                     break;
                 case ROUNDTRIP_FAST_RETRY:

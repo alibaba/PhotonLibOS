@@ -1,3 +1,9 @@
+# fs/cache implementation is only compiled on Linux (see top-level CMakeLists),
+# so the cache_test executable can only link on Linux.
+if (NOT LINUX)
+    return()
+endif ()
+
 include_directories($ENV{GFLAGS}/include)
 link_directories($ENV{GFLAGS}/lib)
 

@@ -72,7 +72,7 @@ static int socket(int family, int protocol = 0,
         set_fd_nonblocking(fd);
     if (nodelay) {
         int v = 1;
-        if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v)) < 0)
+        if (setsockopt(fd, (int)IPPROTO_TCP, (int)TCP_NODELAY, &v, sizeof(v)) < 0)
             LOG_WARN("failed to set TCP_NODELAY ", ERRNO());
     }
     return fd;
@@ -140,7 +140,7 @@ public:
     }
     int close() final {
         if (fd < 0) return 0;
-        get_vcpu()->master_event_engine->wait_for_fd(fd, 0, -1UL);
+        get_vcpu()->master_event_engine->wait_for_fd(fd, 0, -1ULL);
         auto ret = ::close(fd);
         fd = -1;
         return ret;
@@ -158,10 +158,10 @@ public:
         return get_peer_name(fd, path, count);
     }
     int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
-        return ::setsockopt(fd, level, option_name, option_value, option_len);
+        return photon::net::setsockopt(fd, level, option_name, option_value, option_len);
     }
     int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
-        return ::getsockopt(fd, level, option_name, option_value, option_len);
+        return photon::net::getsockopt(fd, level, option_name, option_value, option_len);
     }
     uint64_t timeout() const override { return m_timeout; }
     void timeout(uint64_t tm) override { m_timeout = tm; }
@@ -382,15 +382,15 @@ public:
     int getpeername(char* path, size_t count) override {
         return get_peer_name(m_listen_fd, path, count);
     }
-
+    
     int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
-        if (m_listen_fd >= 0 && ::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0)
+        if (m_listen_fd >= 0 && photon::net::setsockopt(m_listen_fd, level, option_name, option_value, option_len) != 0)
             LOG_ERRNO_RETURN(0, -1, "failed to setsockopt for fd `", m_listen_fd);
         return m_opts.put_opt(level, option_name, option_value, option_len);
     }
 
     int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
-        if (m_listen_fd >= 0 && ::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0)
+        if (m_listen_fd >= 0 && photon::net::getsockopt(m_listen_fd, level, option_name, option_value, option_len) == 0)
             return 0;
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
@@ -858,7 +858,7 @@ struct ETPoller {
     }
 
     int waiter(EventLoop*) {
-        auto ret = photon::wait_for_fd_readable(epfd, 1 * 1000UL);
+        auto ret = photon::wait_for_fd_readable(epfd, 1 * 1000ULL);
         // LOG_DEBUG("WAITER ",VALUE(ret));
         auto err = errno;
         if (ret == 0)
@@ -998,7 +998,7 @@ protected:
 
     int do_accept(struct sockaddr* addr, socklen_t* addrlen) override {
         uint64_t timeout = -1;
-        return (int) etdoio(LAMBDA(::accept4(m_listen_fd, addr, addrlen, SOCK_NONBLOCK)),
+        return (int) etdoio(LAMBDA(net::accept4(m_listen_fd, addr, addrlen, SOCK_NONBLOCK)),
                             LAMBDA_TIMEOUT(wait_for_readable(timeout)));
     }
 };

@@ -15,6 +15,14 @@ limitations under the License.
 */
 
 #pragma once
+// IPAddr is a packed struct whose `addr` member sits at offset 0 of an
+// anonymous packed union.  Taking its address triggers
+// -Waddress-of-packed-member, but the field is actually aligned (offset 0
+// modulo any alignment), so the warning is spurious.  The _in_addr_word
+// macro (defined in include/sys/socket.h) takes this address.
+#if defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+#endif
 #include <cinttypes>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -26,12 +34,6 @@ limitations under the License.
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
 #include <photon/common/string_view.h>
-
-#ifdef __linux__
-#define _in_addr_field s6_addr32
-#else // macOS
-#define _in_addr_field __u6_addr.__u6_addr32
-#endif
 
 struct LogBuffer;
 LogBuffer& operator << (LogBuffer& log, const in_addr& iaddr);
@@ -59,10 +61,10 @@ namespace net {
         }
         // V6 constructor (Network byte order)
         IPAddr(uint32_t nl1, uint32_t nl2, uint32_t nl3, uint32_t nl4) {
-            addr._in_addr_field[0] = nl1;
-            addr._in_addr_field[1] = nl2;
-            addr._in_addr_field[2] = nl3;
-            addr._in_addr_field[3] = nl4;
+            _in_addr_word(addr, 0) = nl1;
+            _in_addr_word(addr, 1) = nl2;
+            _in_addr_word(addr, 2) = nl3;
+            _in_addr_word(addr, 3) = nl4;
         }
         // V4 constructor (Internet Address)
         explicit IPAddr(in_addr internet_addr) {
@@ -87,9 +89,9 @@ namespace net {
         }
         // Check if it's actually an IPv4 address mapped in IPV6
         bool is_ipv4() const {
-            return addr._in_addr_field[0] == 0 &&
-                   addr._in_addr_field[1] == 0 &&
-                   addr._in_addr_field[2] == htonl(0x0000ffff);
+            return _in_addr_word(addr, 0) == 0 &&
+                   _in_addr_word(addr, 1) == 0 &&
+                   _in_addr_word(addr, 2) == htonl(0x0000ffff);
         }
         bool is_ipv6() const {
             return !is_ipv4();
@@ -103,7 +105,7 @@ namespace net {
         // Should ONLY be used for IPv4 address
         uint32_t to_nl() const {
             assert(is_ipv4());
-            return addr._in_addr_field[3];
+            return _in_addr_word(addr, 3);
         }
         bool is_loopback() const {
             return is_ipv4() ? mem_equal(V4Loopback()) : mem_equal(V6Loopback());
@@ -119,7 +121,7 @@ namespace net {
             if (is_ipv4()) {
                 return (to_nl() & htonl(0xffff0000)) == htonl(0xa9fe0000);
             } else {
-                return (addr._in_addr_field[0] & htonl(0xffc00000)) == htonl(0xfe800000);
+                return (_in_addr_word(addr, 0) & htonl(0xffc00000)) == htonl(0xfe800000);
             }
         }
         bool operator==(const IPAddr& rhs) const {
@@ -145,10 +147,10 @@ namespace net {
             map_v4(addr_.s_addr);
         }
         void map_v4(uint32_t nl) {
-            addr._in_addr_field[0] = 0x00000000;
-            addr._in_addr_field[1] = 0x00000000;
-            addr._in_addr_field[2] = htonl(0xffff);
-            addr._in_addr_field[3] = nl;
+            _in_addr_word(addr, 0) = 0x00000000;
+            _in_addr_word(addr, 1) = 0x00000000;
+            _in_addr_word(addr, 2) = htonl(0xffff);
+            _in_addr_word(addr, 3) = nl;
         }
     };
 
@@ -296,7 +298,7 @@ namespace net {
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
-    extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1UL,
+    extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1ULL,
                                                   bool client_ownership = false);
 
     extern "C" ISocketClient* new_zerocopy_tcp_client();

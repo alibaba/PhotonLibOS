@@ -9,8 +9,8 @@ class throttle {
 protected:
     photon::semaphore sem;
     uint64_t last_retrieve = 0;
-    uint64_t m_limit = -1UL;
-    uint64_t m_limit_per_slice = -1UL;
+    uint64_t m_limit = -1ULL;
+    uint64_t m_limit_per_slice = -1ULL;
     uint64_t m_time_window;
     uint64_t m_time_window_per_slice;
     uint64_t m_slice_num;
@@ -31,9 +31,9 @@ protected:
 
 public:
     /**
-     * @param limit -1UL means no limit, 0 means lowest speed (hang)
+     * @param limit -1ULL means no limit, 0 means lowest speed (hang)
      */
-    explicit throttle(uint64_t limit, uint64_t time_window = 1000UL * 1000,
+    explicit throttle(uint64_t limit, uint64_t time_window = 1000ULL * 1000,
              uint64_t slice = 100) : m_slice_num(slice) {
         update(limit);
         // Equals to DIV_ROUND_UP

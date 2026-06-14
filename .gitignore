@@ -1,5 +1,5 @@
 # build
-/build/
+/build*/
 
 # vscode
 /.vscode/
@@ -28,3 +28,6 @@
 
 # claude
 /.claude/
+
+#MacOS
+.DS_Store

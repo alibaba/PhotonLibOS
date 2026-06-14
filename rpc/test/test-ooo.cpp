@@ -281,7 +281,7 @@ void twice_issue(OutOfOrder_Execution_Engine *engine) {
     OutOfOrderContext args, args_same;
     args.engine = engine;
     args.flag_tag_valid = true;
-    args.tag = 20150820UL;
+    args.tag = 20150820ULL;
     args.do_issue.bind(nullptr, null_op);
     args.do_completion.bind(nullptr, null_op);
     args_same = args;
@@ -313,7 +313,7 @@ void auto_gen_tag_overwhelm(OutOfOrder_Execution_Engine *engine) {
     args.do_collect.bind(nullptr, null_op);
     ret = ooo_issue_operation(args_same);
     EXPECT_EQ(0, ret);
-    EXPECT_EQ(2UL, args_same.tag);
+    EXPECT_EQ(2ULL, args_same.tag);
     ooo_wait_completion(args);
     ooo_wait_completion(args_same);
 }
@@ -346,7 +346,7 @@ TEST(OutOfOrder, error_change_arg) {
     int ret = ooo_issue_operation(args);
     EXPECT_EQ(0, ret);
     auto otag = args.tag;
-    args.tag = 20150820UL;
+    args.tag = 20150820ULL;
     errno = 0;
     ret = ooo_wait_completion(args);
     EXPECT_EQ(-1, ret);

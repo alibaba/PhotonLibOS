@@ -69,5 +69,5 @@ int main() {
     server->listen();
     server->start_loop(false);
 
-    photon::thread_sleep(-1UL);
+    photon::thread_sleep(-1ULL);
 }

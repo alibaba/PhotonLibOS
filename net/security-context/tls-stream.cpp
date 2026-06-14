@@ -77,7 +77,7 @@ public:
         OpenSSL_add_all_ciphers();
         OpenSSL_add_all_digests();
         OpenSSL_add_all_algorithms();
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
         mtx.clear();
         for (int i = 0; i < CRYPTO_num_locks(); i++) {
             mtx.emplace_back(std::make_unique<photon::mutex>());
@@ -88,7 +88,7 @@ public:
     }
 
     ~GlobalSSLContext() {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
         CRYPTO_set_id_callback(NULL);
         CRYPTO_set_locking_callback(NULL);
 #endif
@@ -339,7 +339,7 @@ public:
     SSL* ssl;
     BIO* ssbio;
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#if OPENSSL_VERSION_NUMBER < 0x10100000LL
     static void* BIO_get_data(BIO* b) { return b->ptr; }
 
     static void BIO_set_data(BIO* b, void* ptr) { b->ptr = ptr; }
@@ -583,7 +583,7 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
 };
 
 void tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if OPENSSL_VERSION_NUMBER >= 0x10100000LL
     if (auto s1 = dynamic_cast<TLSSocketStream*>(stream)) {
         if (SSL_set_tlsext_host_name(s1->ssl, hostname) != 1)
             LOG_ERROR("Failed to set hostname on tls stream: `", VALUE(hostname));

@@ -223,8 +223,8 @@ namespace fs
             return rst;
         }
         virtual void rewinddir()=0;
-        virtual void seekdir(long loc)=0;
-        virtual long telldir()=0;
+        virtual void seekdir(long long loc)=0;
+        virtual long long telldir()=0;
         UNIMPLEMENTED_POINTER(Object* get_underlay_object(int i = 0));
     };
 
@@ -280,11 +280,11 @@ namespace fs
         {
             dirp->rewinddir();
         }
-        void seekdir(DIR *dirp, long loc)
+        void seekdir(DIR *dirp, long long loc)
         {
             dirp->seekdir(loc);
         }
-        long telldir(DIR *dirp)
+        long long telldir(DIR *dirp)
         {
             return dirp->telldir();
         }

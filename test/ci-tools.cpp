@@ -53,7 +53,7 @@ static estring get_engine_names(uint64_t engs) {
         names = "none";
     } else {
         for (uint64_t i = 0; i < 64; ++i) {
-            auto name = get_engine_name(engs & (1UL << i));
+            auto name = get_engine_name(engs & (1ULL<< i));
             if (name.size()) names.appends(name, ", ");
         }
         if (names.size() > 2)

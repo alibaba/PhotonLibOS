@@ -207,7 +207,7 @@ namespace fs
             Value(const Value& rhs)             = delete;
             ~Value();
 
-            const static uint64_t MASK = 1UL << 63;
+            const static uint64_t MASK = 1ULL << 63;
             void* value;
         };
 

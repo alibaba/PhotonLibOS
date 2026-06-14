@@ -25,7 +25,7 @@ void test_alog(int id) {
     LOG_INFO("Perf alog ", id);
     auto start = GetSteadyTimeNs();
     for (int i = 0; i < 4; i++) {
-        uint64_t arg = id * 100000000UL + i * 1000000UL;
+        uint64_t arg = id * 100000000ULL + i * 1000000ULL;
         auto th = photon::thread_create(task, &arg);
         photon::thread_yield_to(th);
         jhs.emplace_back(photon::thread_enable_join(th));
@@ -56,7 +56,7 @@ int main() {
         LOG_AUDIT("test async log ", i);
         auto t1 = GetSteadyTimeNs();
         cost += (t1 - t0);
-        photon::thread_usleep(100*1000UL);
+        photon::thread_usleep(100*1000ULL);
     }
     LOG_INFO("single async log spent ` ns", cost/100);
     return 0;

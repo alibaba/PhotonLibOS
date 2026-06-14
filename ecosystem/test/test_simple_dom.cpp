@@ -69,10 +69,10 @@ static char xml[] = R"(
 </ListBucketResult>
 )";
 
-using ObjectList = vector<tuple<long, unsigned char, string_view, int64_t, bool>>;
+using ObjectList = vector<tuple<int64_t, unsigned char, string_view, int64_t, bool>>;
 
-const long DT_DIR = 10;
-const long DT_REG = 20;
+const int64_t DT_DIR = 10;
+const int64_t DT_REG = 20;
 
 void print_all1(Node node) {
     for (size_t i = 0; i < node.num_children(); ++i) {

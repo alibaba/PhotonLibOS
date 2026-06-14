@@ -138,7 +138,7 @@ void stask(photon::net::ISocketClient* client, photon::net::EndPoint ep) {
 }
 
 TEST(Socket, pooled_expiration) {
-    DEFER(photon::thread_usleep(100UL * 1000));
+    DEFER(photon::thread_usleep(100ULL * 1000));
     auto server = photon::net::new_tcp_socket_server();
     int conncount = 0;
     server->bind_v4localhost();
@@ -165,7 +165,7 @@ TEST(Socket, pooled_expiration) {
     DEFER(delete server);
     auto client = photon::net::new_tcp_socket_pool(
         photon::net::new_tcp_socket_client(),
-        1UL * 1000 * 1000, true);  // release every 1 sec
+        1ULL * 1000 * 1000, true);  // release every 1 sec
     DEFER(delete client);
     auto ep = server->getsockname();
     std::vector<photon::join_handle*> jhs;

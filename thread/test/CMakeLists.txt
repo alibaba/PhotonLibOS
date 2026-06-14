@@ -48,6 +48,9 @@ add_test(NAME test-pooled-stack-allocator COMMAND $<TARGET_FILE:test-pooled-stac
 
 add_executable(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.cpp)
 target_link_libraries(test-st-utest PRIVATE photon_shared)
+# if (WIN32)
+#     set_property(TARGET test-st-utest PROPERTY CXX_STANDARD 17)
+# endif ()
 add_test(NAME test-st-utest COMMAND $<TARGET_FILE:test-st-utest>)
 
 add_executable(test-go-channel test-go-channel.cpp)

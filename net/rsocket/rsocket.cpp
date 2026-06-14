@@ -256,7 +256,7 @@ struct RSockFD {
 class RSocketStream : public photon::net::ISocketStream {
 public:
     RSockFD rfd;
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
 
     explicit RSocketStream(RSockFD&& fd) : rfd(std::move(fd)) {}
 
@@ -367,7 +367,7 @@ public:
 
 class RSocketClient : public photon::net::ISocketClient {
 public:
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
     SockOptBuffer m_opts;
 
     photon::net::ISocketStream* connect(const char* path,
@@ -422,7 +422,7 @@ public:
     bool waiting = false;
     Handler m_handler;
     std::atomic<photon::thread*> workth{};
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
     ~RSocketServer() override { terminate(); }
     int bind(const EndPoint& ep) override { return rfd.bind(ep); }
     int bind(const char* path, size_t count) override {

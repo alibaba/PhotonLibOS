@@ -27,8 +27,8 @@ function(build_from_src [dep])
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND sh -c "CFLAGS=\"-fPIC -O3\" ./configure --prefix=${BINARY_DIR} --static"
-                BUILD_COMMAND $(MAKE)
+                CONFIGURE_COMMAND sh -c "CC=${CMAKE_C_COMPILER} CFLAGS=\"-fPIC -O3\" ./configure --prefix=${BINARY_DIR} --static"
+                BUILD_COMMAND $(MAKE) libz.a
                 INSTALL_COMMAND $(MAKE) install
         )
         set(ZLIB_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
@@ -54,7 +54,10 @@ function(build_from_src [dep])
                 gflags
                 URL ${PHOTON_GFLAGS_SOURCE}
                 URL_MD5 1a865b93bacfa963201af3f75b7bd64c
-                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                           -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                           -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                           -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
                 INSTALL_COMMAND ""
         )
         if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -62,14 +65,22 @@ function(build_from_src [dep])
         endif ()
         ExternalProject_Get_Property(gflags BINARY_DIR)
         set(GFLAGS_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
-        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a PARENT_SCOPE)
+        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags_static${POSTFIX}.a)
+        if (WIN32)
+            list(APPEND GFLAGS_LIBRARIES -lshlwapi)
+        endif ()
+        set(GFLAGS_LIBRARIES ${GFLAGS_LIBRARIES} PARENT_SCOPE)
 
     elseif (dep STREQUAL "googletest")
         ExternalProject_Add(
                 googletest
                 URL ${PHOTON_GOOGLETEST_SOURCE}
                 URL_MD5 e82199374acdfda3f425331028eb4e2a
-                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DINSTALL_GTEST=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                           -DINSTALL_GTEST=OFF
+                           -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                           -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                           -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
                 INSTALL_COMMAND ""
         )
         ExternalProject_Get_Property(googletest SOURCE_DIR)
@@ -85,9 +96,12 @@ function(build_from_src [dep])
                 URL_MD5 3f76825f195e52d4b10c70040681a275
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared
-                BUILD_COMMAND $(MAKE)
-                INSTALL_COMMAND $(MAKE) install
+                CONFIGURE_COMMAND ./Configure mingw64 -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared --cross-compile-prefix=x86_64-w64-mingw32-
+                BUILD_COMMAND $(MAKE) build_libs
+                INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR}/lib ${BINARY_DIR}/include
+                    COMMAND ${CMAKE_COMMAND} -E copy libcrypto.a ${BINARY_DIR}/lib/
+                    COMMAND ${CMAKE_COMMAND} -E copy libssl.a ${BINARY_DIR}/lib/
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory include/openssl ${BINARY_DIR}/include/openssl
                 LOG_CONFIGURE ON
                 LOG_BUILD ON
                 LOG_INSTALL ON
@@ -109,6 +123,10 @@ function(build_from_src [dep])
                 CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
                     -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
                     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
+                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                    -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
+                    -DHAVE_IOCTLSOCKET_FIONBIO=1
+                    -DHAVE_IOCTLSOCKET=1
         )
         add_dependencies(curl openssl)
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)

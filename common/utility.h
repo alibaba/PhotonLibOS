@@ -134,15 +134,15 @@ inline constexpr bool is_power_of_2(uint64_t x) {
 inline constexpr uint8_t log2_truncate(size_t x) {
     assert(x > 0);
     uint8_t exp = sizeof(x) * 8 - 1 - __builtin_clzl(x);
-    assert(x & (1UL << exp));
+    assert(x & (1ULL<< exp));
     return exp;
 }
 
 inline constexpr uint8_t log2_round(size_t x) {
     assert(x > 0);
     uint8_t exp = log2_truncate(x);
-    assert(x & (1UL << exp));
-    bool carry = exp && (x & (1UL << (exp - 1)));
+    assert(x & (1ULL<< exp));
+    bool carry = exp && (x & (1ULL<< (exp - 1)));
     return exp + carry;
 }
 
@@ -153,7 +153,7 @@ inline constexpr uint8_t log2_round_up(size_t x) {
 
 inline size_t round_up_to_exp2(size_t x) {
     if (x == 0) return 1;
-    uint32_t y =  1UL << log2_truncate(x);
+    uint32_t y =  1ULL<< log2_truncate(x);
     assert(x&y);
     return y << (!!(x^y));
 }
@@ -329,7 +329,7 @@ namespace photon {
 // Saturating addition, no upward overflow
 __attribute__((always_inline)) inline
 uint64_t sat_add(uint64_t x, uint64_t y) {
-	uint64_t z, c = __builtin_uaddl_overflow(x, y, (unsigned long*)&z);
+	uint64_t z = 0, c = __builtin_uaddl_overflow(x, y, (unsigned long*)&z);
 	return -c | z;
 }
 

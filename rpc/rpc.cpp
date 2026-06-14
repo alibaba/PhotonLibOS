@@ -478,7 +478,7 @@ namespace rpc {
             if (!sock)
                 LOG_ERRNO_RETURN(0, nullptr, "failed to connect to ", ep);
             LOG_DEBUG("connected to ", ep);
-            sock->timeout(-1UL);
+            sock->timeout(-1ULL);
             if (tls) {
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
             }
@@ -513,7 +513,7 @@ namespace rpc {
                                      "Connect to unix domain socket failed");
                 }
                 // stub socket always set timeout for single action
-                sock->timeout(-1UL);
+                sock->timeout(-1ULL);
                 return new_rpc_stub(sock, true);
             });
         }

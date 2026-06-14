@@ -129,7 +129,7 @@ namespace fs
                 delete ptr;
             } else {
                 auto n_ptr = ptr;
-                perform(-1UL, new auto ([n_ptr] { delete n_ptr; }));
+                perform(-1ULL, new auto ([n_ptr] { delete n_ptr; }));
             }
             ptr = nullptr;
         }
@@ -142,7 +142,7 @@ namespace fs
     __attribute__((visibility("hidden"))) Delegate<void> ExportBase::op;
     __attribute__((visibility("hidden"))) ThreadPoolBase* ExportBase::pool = nullptr;
 
-#if __cplusplus > 202000L
+#if __cplusplus > 202000LL
 #define PERFORM(ID, expr) \
     perform(timeout, new auto([=, this]() { do_callback(ID, expr, done); }));
 #else
@@ -352,16 +352,16 @@ namespace fs
         {
             PERFORM(OPID_REWINDDIR, _rewinddir());
         }
-        int _seekdir(long loc)
+        int _seekdir(long long loc)
         {
             m_dirp->seekdir(loc);
             return 0;
         }
-        OVERRIDE_ASYNC(void, seekdir, long loc)
+        OVERRIDE_ASYNC(void, seekdir, long long loc)
         {
             PERFORM(OPID_SEEKDIR, _seekdir(loc));
         }
-        OVERRIDE_ASYNC0(long, telldir)
+        OVERRIDE_ASYNC0(long long, telldir)
         {
             PERFORM(OPID_TELLDIR, m_dirp->telldir());
         }

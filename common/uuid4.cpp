@@ -45,8 +45,13 @@ static uint64_t xorshift128plus(uint64_t *s)
 
 int uuid4_init(void)
 {
-#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
-
+#if defined(_WIN32)
+    // Use rand_s on Windows instead of /dev/urandom.
+    // seed is uint64_t[2] = 16 bytes; rand_s fills 4 bytes per call.
+    for (char *p = (char*)seed, *end = p + sizeof(seed); p < end; p += 4) {
+        if (rand_s((unsigned int*)p) != 0) return UUID4_EFAILURE;
+    }
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
     int res;
     FILE *fp = fopen("/dev/urandom", "rb");
     if (!fp)

@@ -65,7 +65,7 @@ TEST(workpool, fanout_wakeup) {
     // `arrived.signal(1)` concurrently. Without it, only one worker would
     // ever be released by the channel, so `arrived` saturates at 1 and the
     // wait times out.
-    int r = arrived.wait(N, /*timeout_us=*/5UL * 1000 * 1000);
+    int r = arrived.wait(N, /*timeout_us=*/5ULL * 1000 * 1000);
     EXPECT_EQ(0, r);
     LOG_INFO("fan-out check: arrived.wait(`) returned ` (vcpu_num=`)",
              N, r, N);

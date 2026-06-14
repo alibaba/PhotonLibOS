@@ -241,7 +241,7 @@ public:
     void collect() {
         StreamListNode* nodes[16];
         while (collector) {
-            auto ret = ev->wait_for_events((void**)nodes, 16, -1UL);
+            auto ret = ev->wait_for_events((void**)nodes, 16, -1ULL);
             for (int i = 0; i < ret; i++) {
                 // since destructed socket should never become readable before
                 // it have been acquired again

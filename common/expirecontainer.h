@@ -139,9 +139,9 @@ template <typename KeyType, typename... Ts>
 class ExpireContainer : public ExpireContainerBase {
 public:
     using Base = ExpireContainerBase;
-    ExpireContainer(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1UL) {}
+    ExpireContainer(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1ULL) {}
     ExpireContainer(uint64_t lifespan, uint64_t timer_cycle,
-                    uint64_t num_limit = -1UL)
+                    uint64_t num_limit = -1ULL)
         : Base(lifespan, timer_cycle, num_limit) {}
 
 protected:
@@ -384,9 +384,9 @@ public:
     using ValEntity = typename Item::ValEntity;
     using Borrow = typename Base::Borrow<__ObjectCache>;
 
-    __ObjectCache(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1UL) {}
+    __ObjectCache(uint64_t lifespan) : Base(lifespan, lifespan / 16, -1ULL) {}
     __ObjectCache(uint64_t lifespan, uint64_t timer_cycle,
-                  uint64_t num_limit = -1UL)
+                  uint64_t num_limit = -1ULL)
         : Base(lifespan, timer_cycle, num_limit) {}
 
     template <typename Constructor>

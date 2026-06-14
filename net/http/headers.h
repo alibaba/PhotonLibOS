@@ -138,11 +138,11 @@ class Headers: public HeadersBase {
 public:
     std::pair<ssize_t, ssize_t> range() const;
     int range(uint64_t from, uint64_t to) {
-        return insert_format("Range", "bytes=%lu-%lu", from, to);
+        return insert_format("Range", "bytes=%llu-%llu", (unsigned long long)from, (unsigned long long)to);
     }
     int content_range(size_t start, size_t end, ssize_t size = -1) {
         auto s = (size == -1 ? "*" : std::to_string(size));
-        return insert_format("Content-Range", "bytes %lu-%lu/%s", start, end, s.c_str());
+        return insert_format("Content-Range", "bytes %llu-%llu/%s", (unsigned long long)start, (unsigned long long)end, s.c_str());
     }
     bool chunked() const {
         return get_value("Transfer-Encoding") == "chunked";
@@ -153,7 +153,7 @@ public:
     }
 
     int content_length(uint64_t cl) {
-        return insert_format("Content-Length", "%lu", cl);
+        return insert_format("Content-Length", "%llu", (unsigned long long)cl);
     }
 };
 

@@ -26,6 +26,9 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
 #include <photon/common/alog.h>
+#ifdef _WIN32
+#include <photon/io/iocp.h>
+#endif
 #include "../../test/gtest.h"
 using namespace photon;
 
@@ -115,6 +118,7 @@ void* rand_write(void* _args)
 }
 
 int test_aio(const char* fn, bool is_posix);
+#ifdef __linux__
 int test_libaio(const char* fn)
 {
     int ret = libaio_wrapper_init();
@@ -131,20 +135,15 @@ int test_posix_libaio(const char* fn)
     system("rm -f test_file.bin");
     return test_aio(fn, true);
 }
+#endif
 
-void create_n_thread_do(int n, thread_entry entry, void* arg)
+#ifdef _WIN32
+int test_iocp(const char* fn)
 {
-    const int N_THREAD = 100;
-    join_handle* jh[N_THREAD];
-    if (n > N_THREAD) n = N_THREAD;
-    for (int i = 0; i < n; ++i)
-    {
-        auto th = thread_create(entry, arg);
-        jh[i] = thread_enable_join(th);
-    }
-    for (int i = 0; i < n; ++i)
-        thread_join(jh[i]);
+    system("rm -f test_file.bin");
+    return test_aio(fn, false);
 }
+#endif
 
 template<typename W>
 void do_test_aio(rand_args_t& args)
@@ -153,9 +152,9 @@ void do_test_aio(rand_args_t& args)
     int status = -4;
     auto engine = abi::__cxa_demangle(typeid(W).name(), NULL, NULL, &status);
     LOG_DEBUG("Testing ` randread with ` threads, ioengine is ", DEC(args.n).comma(true), N, engine);
-    create_n_thread_do(N, &rand_read<W>, &args);
+    threads_create_join(N, &rand_read<W>, &args);
     LOG_DEBUG("Testing ` randwrite with ` threads, ioengine is ", DEC(args.n).comma(true), N, engine);
-    create_n_thread_do(N, &rand_write<W>, &args);
+    threads_create_join(N, &rand_write<W>, &args);
     W::fsync(args.fd);
     W::fdatasync(args.fd);
     LOG_DEBUG("done!");
@@ -204,13 +203,19 @@ int test_aio(const char* fn, bool is_posix)
     args.length = FILE_SIZE;
     if (is_posix)
     {
+#ifdef __linux__
         args.n = 1000 * 10;
         do_test_aio<posixaio>(args);
+#endif
     }
     else
     {
         args.n = 1000 * 100;
+#ifdef _WIN32
+        do_test_aio<photon::iocp>(args);
+#elif defined(__linux__)
         do_test_aio<libaio>(args);
+#endif
     }
     return 0;
 }
@@ -222,8 +227,12 @@ int main(int argc, char** arg) {
         return -1;
     DEFER(photon::fini());
 
+#ifdef __linux__
     test_libaio("/tmp/test-syncio");
     test_posix_libaio("/tmp/test-syncio");
+#elif defined(_WIN32)
+    test_iocp("/tmp/test-syncio");
+#endif
 
     usleep(0);
     return RUN_ALL_TESTS();

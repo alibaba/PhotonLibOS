@@ -103,7 +103,7 @@ static void server(int server_index) {
     int sock_fd = photon::net::socket(AF_INET, SOCK_STREAM, 0);
     int val = 1;
     socklen_t len_opt = sizeof(val);
-    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &val, len_opt);
+    photon::net::setsockopt(sock_fd, SOL_SOCKET, SO_REUSEPORT, &val, len_opt);
     bind(sock_fd, storage.get_sockaddr(), storage.get_socklen());
     listen(sock_fd, 1024);
     socklen_t len;

@@ -29,8 +29,8 @@ limitations under the License.
 
 namespace photon {
 
-template <size_t MIN_ALLOCATION_SIZE = 4UL * 1024,
-          size_t MAX_ALLOCATION_SIZE = 64UL * 1024 * 1024>
+template <size_t MIN_ALLOCATION_SIZE = 4ULL * 1024,
+          size_t MAX_ALLOCATION_SIZE = 64ULL * 1024 * 1024>
 class PooledStackAllocator {
     constexpr static bool is_power2(size_t n) { return (n & (n - 1)) == 0; }
     static_assert(is_power2(MAX_ALLOCATION_SIZE), "must be 2^n");
@@ -147,7 +147,7 @@ public:
 template <size_t MIN_ALLOCATION_SIZE, size_t MAX_ALLOCATION_SIZE>
 size_t PooledStackAllocator<MIN_ALLOCATION_SIZE,
                             MAX_ALLOCATION_SIZE>::trim_threshold =
-    1024UL * 1024 * 1024;
+    1024ULL * 1024 * 1024;
 
 static PooledStackAllocator<>& get_pooled_stack_allocator() {
     thread_local PooledStackAllocator<> _alloc;

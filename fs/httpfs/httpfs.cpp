@@ -24,14 +24,14 @@ limitations under the License.
 #include <string>
 #include <vector>
 
-#include "../../net/curl.h"
+#include <photon/net/curl.h>
 #include <photon/thread/thread.h>
 #include <photon/common/string-keyed.h>
 #include <photon/common/estring.h>
 #include <photon/common/string_view.h>
 #include <photon/common/timeout.h>
 #include <photon/common/utility.h>
-#include "../virtual-file.h"
+#include <photon/fs/virtual-file.h>
 
 namespace photon {
 namespace fs {

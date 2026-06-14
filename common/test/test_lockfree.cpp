@@ -205,7 +205,7 @@ int test_queue_batch(const char *name, QType &queue) {
             for (size_t x = 0; x < items_num / sender_num;) {
                 auto tm = std::chrono::high_resolution_clock::now();
                 LSType::lock(wlock);
-                while (!(size = queue.push_batch(&vec[x], std::min(32UL, vec.size() - x)))) {
+                while (!(size = queue.push_batch(&vec[x], std::min(size_t(32ULL), vec.size() - x)))) {
                     LSType::unlock(wlock);
                     CPUPause::pause();
                     LSType::lock(wlock);

@@ -24,7 +24,7 @@ ExpireContainerBase::ExpireContainerBase(uint64_t lifespan,
     : _lifespan(lifespan),
       _num_limit(num_limit),
       _timer(std::max(static_cast<uint64_t>(1000), timer_cycle),
-             {this, &ExpireContainerBase::expire}, true, 8UL * 1024 * 1024) {}
+             {this, &ExpireContainerBase::expire}, true, 8ULL * 1024 * 1024) {}
 
 auto ExpireContainerBase::insert(Item* item) -> std::pair<iterator, bool> {
     return _set.emplace(item);

@@ -20,6 +20,11 @@ limitations under the License.
 
 #include <initializer_list>
 #include <string>
+
+#ifdef DELETE
+#undef DELETE
+#endif
+
 #include <unordered_map>
 
 #include <photon/common/alog-functionptr.h>

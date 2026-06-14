@@ -139,6 +139,7 @@ DECLARE_MASTER_AND_CASCADING_ENGINE(select);
 // DECLARE_MASTER_AND_CASCADING_ENGINE(iouring);
 DECLARE_MASTER_AND_CASCADING_ENGINE(kqueue);
 DECLARE_MASTER_AND_CASCADING_ENGINE(epoll_ng);
+DECLARE_MASTER_AND_CASCADING_ENGINE(iocp);
 
 struct iouring_args {
     bool is_master    = true;
@@ -185,6 +186,10 @@ new_master_event_engine(uint64_t master_engine, const Ts&...xs) {
         case INIT_EVENT_KQUEUE:
             return new_kqueue_master_engine(xs...);
 #endif
+#ifdef _WIN32
+        case INIT_EVENT_IOCP:
+            return new_iocp_master_engine(xs...);
+#endif
         default:
             return nullptr;
     }
@@ -208,6 +213,8 @@ inline int fd_events_fini() {
 inline CascadingEventEngine* new_default_cascading_engine() {
 #ifdef __APPLE__
     return new_kqueue_cascading_engine();
+#elif defined(_WIN32)
+    return new_iocp_cascading_engine();
 #else
     return new_epoll_cascading_engine();
 #endif

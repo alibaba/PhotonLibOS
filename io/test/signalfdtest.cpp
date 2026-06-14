@@ -106,7 +106,7 @@ TEST(SignalFD, blockall) {
     block_all_signal();
     kill(getpid(), SIGPIPE);
     // yield out
-    thread_usleep(1000UL);
+    thread_usleep(1000ULL);
     // once signal have not delievered, test will be terminated
     EXPECT_TRUE(true);
 }

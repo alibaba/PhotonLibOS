@@ -14,7 +14,7 @@ void* coroutine(void* /*arg*/)
     return NULL;
 }
 
-VOID TEST(CoroutineTest, StartCoroutine)
+TEST(CoroutineTest, StartCoroutine)
 {
     st_thread_t trd = st_thread_create(coroutine, NULL, 1, 0);
     EXPECT_TRUE(trd != NULL);
@@ -23,7 +23,7 @@ VOID TEST(CoroutineTest, StartCoroutine)
     st_thread_join(trd, NULL);
 }
 
-VOID TEST(CoroutineTest, StartCoroutineX3)
+TEST(CoroutineTest, StartCoroutineX3)
 {
     st_thread_t trd0 = st_thread_create(coroutine, NULL, 1, 0);
     st_thread_t trd1 = st_thread_create(coroutine, NULL, 1, 0);
@@ -57,7 +57,7 @@ void* coroutine_add(void* arg)
     return NULL;
 }
 
-VOID TEST(CoroutineTest, StartCoroutineAdd)
+TEST(CoroutineTest, StartCoroutineAdd)
 {
     int v = 0;
     st_thread_t trd = st_thread_create(coroutine_add, &v, 1, 0);
@@ -69,7 +69,7 @@ VOID TEST(CoroutineTest, StartCoroutineAdd)
     EXPECT_EQ(100, v);
 }
 
-VOID TEST(CoroutineTest, StartCoroutineAddX3)
+TEST(CoroutineTest, StartCoroutineAddX3)
 {
     int v = 0;
     st_thread_t trd0 = st_thread_create(coroutine_add, &v, 1, 0);
@@ -106,7 +106,7 @@ void* coroutine_params(void* arg)
     return NULL;
 }
 
-VOID TEST(CoroutineTest, StartCoroutineParams)
+TEST(CoroutineTest, StartCoroutineParams)
 {
     int r0 = 0;
     st_thread_t trd = st_thread_create(coroutine_params, &r0, 1, 0);

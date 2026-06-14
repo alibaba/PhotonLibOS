@@ -104,7 +104,7 @@ bool URL::from_string(std::string_view url_) {
     if (url.empty()) return true;
     if (url.front() == ':') {
         url.remove_prefix(1); // Skip ':'
-        uint64_t port_val = -1UL, port_len = url.to_uint64_check(&port_val);
+        uint64_t port_val = -1ULL, port_len = url.to_uint64_check(&port_val);
         if (!port_len || port_val >= 65536)
             LOG_ERROR_RETURN(EINVAL, false, "invalid port ", url)
         m_port = static_cast<uint16_t>(port_val);

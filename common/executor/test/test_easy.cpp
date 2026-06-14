@@ -88,7 +88,7 @@ TEST(easy_executor, test) {
     EasyCoroutinePool ecp;
     photon::Executor eth;
 
-    printf("Task applied, wait for loop\n");
+    LOG_DEBUG("Task applied, wait for loop");
 
     easy_atomic_set(count, 10000);
     auto start = std::chrono::high_resolution_clock::now();
@@ -101,6 +101,5 @@ TEST(easy_executor, test) {
     auto spent = std::chrono::high_resolution_clock::now() - start;
     auto microsec =
         std::chrono::duration_cast<std::chrono::microseconds>(spent).count();
-    printf("10k tasks done, take %ld us, qps=%ld\n", microsec,
-           10000L * 1000000 / microsec);
+    LOG_DEBUG("10k tasks done, take ` us, qps=", microsec, 10000ULL * 1000000 / microsec);
 }

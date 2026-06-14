@@ -112,7 +112,7 @@ namespace rpc
         /**
          * @param req Request of Message
          * @param resp_iov iovector for the Response
-         * @param timeout timeout in milliseconds, -1UL for no timeout. 
+         * @param timeout timeout in milliseconds, -1ULL for no timeout. 
          * @return Pointer of the Response. nullptr for failure. No need to delete.
          * @note For this call, we don't need to assign buffers for the Response any more.
          *       `resp_iov` will use its internal allocator to fulfill the memory requirement.

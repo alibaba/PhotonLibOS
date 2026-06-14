@@ -34,6 +34,7 @@ namespace fs
 
     const int ioengine_iouring = 3;         // depends on photon::iouring_wrapper_init()
 
+    const int ioengine_iocp = 4;            // depends on IOCP engine (Windows only)
 
     extern "C" IFileSystem* new_localfs_adaptor(const char* root_path = nullptr,
                                                 int io_engine_type = 0);

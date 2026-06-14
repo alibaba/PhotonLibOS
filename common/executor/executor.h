@@ -41,7 +41,7 @@ public:
 
     template <
         typename Context = AutoContext, typename Func,
-#if __cplusplus < 201703L
+#if __cplusplus < 201703LL
         typename R = typename std::result_of<Func()>::type,
 #else
         typename R = typename std::invoke_result<Func>::type,
@@ -64,7 +64,7 @@ public:
 
     template <
         typename Context = AutoContext, typename Func,
-#if __cplusplus < 201703L
+#if __cplusplus < 201703LL
         typename R = typename std::result_of<Func()>::type,
 #else
         typename R = typename std::invoke_result<Func>::type,
@@ -103,7 +103,7 @@ public:
     static Executor *export_as_executor();
 
 protected:
-    static constexpr int64_t kCondWaitMaxTime = 100L * 1000;
+    static constexpr int64_t kCondWaitMaxTime = 100LL * 1000;
 
     struct create_on_current_vcpu {};
 

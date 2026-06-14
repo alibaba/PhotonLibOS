@@ -108,7 +108,7 @@ public:
      * [0, vcpu_num), it will choose the next one in pool (round-robin).
      * @return int 0 for success, and <0 means failed to migrate.
      */
-    int thread_migrate(photon::thread* th = CURRENT, size_t index = -1UL);
+    int thread_migrate(photon::thread* th = CURRENT, size_t index = -1ULL);
 
 protected:
     class impl;  // does not depend on T

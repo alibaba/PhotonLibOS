@@ -40,7 +40,7 @@ template<typename Rep, typename Period>
 inline uint64_t __duration_to_microseconds(const ::std::chrono::duration<Rep, Period>& d) {
     using namespace ::std::chrono;
     // Don't use the evil duration::max() and duration::min(). Use fixed number as a boundary.
-    static constexpr auto MAX_DURATION = hours(24UL * 365 * 100);
+    static constexpr auto MAX_DURATION = hours(24ULL * 365 * 100);
     static constexpr auto MIN_DURATION = microseconds(1);
     if (d <= d.zero()) {
         return 0;

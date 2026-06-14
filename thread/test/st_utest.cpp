@@ -35,7 +35,7 @@ GTEST_API_ int main(int argc, char **argv) {
 }
 
 // basic test and samples.
-VOID TEST(SampleTest, ExampleIntSizeTest)
+TEST(SampleTest, ExampleIntSizeTest)
 {
     EXPECT_EQ(1, (int)sizeof(int8_t));
     EXPECT_EQ(2, (int)sizeof(int16_t));

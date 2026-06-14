@@ -246,7 +246,7 @@ public:
     _RedisClient& put(_strint x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
         static_assert(sizeof(x) == sizeof(long long), "...");
-        auto s = _snprintf("$00\r\n%ld\r\n", (long)x._x);
+        auto s = _snprintf("$00\r\n%lld\r\n", (long long)x._x);
         assert(7 < s.size() && s.size() < 99);
         auto n = s.size() - 7;
         (char&)s[1] = '0' + n / 10;
@@ -255,7 +255,7 @@ public:
     }
     _RedisClient& put(int64_t x) {
         assert(_o + __MAX_SIZE(x) < _bufsize);
-        _snprintf("%ld", (long)x);
+        _snprintf("%lld", (long long)x);
         return *this;
     }
     _RedisClient& put(_char x) {
@@ -728,14 +728,14 @@ public:
 inline void refstring::add_ref() { if (_rc) _rc->_refcnt++; }
 inline void refstring::del_ref() { if (_rc) _rc->_refcnt--; }
 
-template<uint32_t BUF_SIZE = 16*1024UL>
+template<uint32_t BUF_SIZE = 16*1024ULL>
 class __RedisClient : public _RedisClient {
     char _buf[BUF_SIZE * 2];
 public:
     __RedisClient(ISocketStream* s, bool s_ownership) : _RedisClient(s, s_ownership, BUF_SIZE) { }
 };
 
-using RedisClient = __RedisClient<16*1024UL>;
+using RedisClient = __RedisClient<16*1024ULL>;
 
 #pragma GCC diagnostic pop
 

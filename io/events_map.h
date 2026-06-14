@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef EV_ERR
+#undef EV_ERR
+#endif
+
 #include <photon/io/fd-events.h>
 
 namespace photon {

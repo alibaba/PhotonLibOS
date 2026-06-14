@@ -97,7 +97,7 @@ static thread_local ScalePoolController* g_scale_pool_controller;
 struct ScalePoolController {
     photon::Timer timer;
     intrusive_list<IdentityPoolBase> entries;
-    ScalePoolController(uint64_t interval = 1000UL * 1000)
+    ScalePoolController(uint64_t interval = 1000ULL * 1000)
         : timer(interval, {this, &ScalePoolController::scan_pool_scale}) {}
 
     ~ScalePoolController() { }

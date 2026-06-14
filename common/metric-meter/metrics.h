@@ -52,7 +52,7 @@ public:
     int64_t sum = 0;
     int64_t cnt = 0;
     uint64_t time = 0;
-    uint64_t m_interval = 60UL * 1000 * 1000;
+    uint64_t m_interval = 60ULL * 1000 * 1000;
 
     void normalize() {
         auto now = photon::now;
@@ -86,8 +86,8 @@ class QPSCounter {
 public:
     int64_t counter = 0;
     uint64_t time = photon::now;
-    uint64_t m_interval = 1UL * 1000 * 1000;
-    static constexpr uint64_t SEC = 1UL * 1000 * 1000;
+    uint64_t m_interval = 1ULL * 1000 * 1000;
+    static constexpr uint64_t SEC = 1ULL * 1000 * 1000;
 
     void normalize() {
         auto now = photon::now;
@@ -132,7 +132,7 @@ class IntervalMaxCounter {
 public:
     int64_t maxv = 0, last_max = 0;
     uint64_t time = 0;
-    uint64_t m_interval = 5UL * 1000 * 1000;
+    uint64_t m_interval = 5ULL * 1000 * 1000;
 
     void normalize() {
         if (photon::now - time >= 2 * m_interval) {

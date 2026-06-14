@@ -53,8 +53,8 @@ using FileOpenCallback = Delegate<void, const char*, IFile*>;
  * @return IFileSystem* created httpfs
  */
 IFileSystem* new_httpfs(bool default_https = false,
-                        uint64_t conn_timeout = -1UL,
-                        uint64_t stat_expire = -1UL,
+                        uint64_t conn_timeout = -1ULL,
+                        uint64_t stat_expire = -1ULL,
                         FileOpenCallback open_cb = {});
 /**
  * @brief create http file object
@@ -69,17 +69,17 @@ IFileSystem* new_httpfs(bool default_https = false,
  * @return IFile* created httpfile
  */
 IFile* new_httpfile(const char* url, IFileSystem* httpfs = nullptr,
-                    uint64_t conn_timeout = -1UL, uint64_t stat_expire = -1UL,
+                    uint64_t conn_timeout = -1ULL, uint64_t stat_expire = -1ULL,
                     FileOpenCallback open_cb = {});
 
 IFileSystem* new_httpfs_v2(bool default_https = false,
-                           uint64_t conn_timeout = -1UL,
-                           uint64_t stat_expire = -1UL,
+                           uint64_t conn_timeout = -1ULL,
+                           uint64_t stat_expire = -1ULL,
                            net::http::Client* client = nullptr,
                            bool client_ownership = false);
 
 IFile* new_httpfile_v2(const char* url, IFileSystem* httpfs = nullptr,
-                       uint64_t conn_timeout = -1UL,
-                       uint64_t stat_expire = -1UL);
+                       uint64_t conn_timeout = -1ULL,
+                       uint64_t stat_expire = -1ULL);
 }  // namespace fs
 }

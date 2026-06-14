@@ -62,7 +62,7 @@ void client_test(net::ISocketStream* stream, net::TLSContext* ctx) {
     for (int i = 0; i < 256; i++) {
         rx += ss->recv(b, 4096);
     }
-    EXPECT_EQ(1048576UL, rx);
+    EXPECT_EQ(1048576ULL, rx);
     sem.wait(1);
 }
 
@@ -148,7 +148,7 @@ void close_reading_client_test(net::ISocketStream* stream, net::TLSContext* ctx)
     for (int i = 0; i < 100; i++) {
         rx += ss->read(b, 4096);
     }
-    EXPECT_EQ(409600UL, rx);
+    EXPECT_EQ(409600ULL, rx);
     delete ss;
     stream->close();
     sem.wait(1);}
@@ -244,7 +244,7 @@ void s_client_test(net::ISocketStream* stream) {
     for (int i = 0; i < 256; i++) {
         rx += stream->recv(b, 4096);
     }
-    EXPECT_EQ(1048576UL, rx);
+    EXPECT_EQ(1048576ULL, rx);
     sem.wait(1);
 }
 

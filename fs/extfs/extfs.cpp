@@ -1273,11 +1273,11 @@ public:
         loc = 0;
         next();
     }
-    virtual void seekdir(long loc) override {
+    virtual void seekdir(long long loc) override {
         this->loc = loc;
         next();
     }
-    virtual long telldir() override {
+    virtual long long telldir() override {
         return loc;
     }
 };

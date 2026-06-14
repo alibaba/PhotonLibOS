@@ -50,7 +50,7 @@ limitations under the License.
 #include <string.h>
 //#include <gmock/gmock.h>
 //#include <malloc.h>
-#ifndef __clang__
+#if !defined(__clang__) && !defined(_WIN32)
 #include <gnu/libc-version.h>
 #endif
 #include "../../test/gtest.h"
@@ -809,7 +809,7 @@ TEST(iovector, pipe) {
         c = rand() % 256;
 
     auto do_test=[](initializer_list<uint16_t> v1,
-                    initializer_list<uint16_t> v2, size_t n = -1UL) {
+                    initializer_list<uint16_t> v2, size_t n = -1ULL) {
         IOVector iov1, iov2;
         auto ptr = data;
         for (auto n: v1) {
@@ -1652,7 +1652,7 @@ int main(int argc, char **argv)
     // #ifdef GIT_VERSION
     auto version = get_version();
     cout<<"git HEAD: "<<version.c_str() << endl;
-#ifndef __clang__
+#if !defined(__clang__) && !defined(_WIN32)
     cout<<"gnu_get_libc_version() = "<< gnu_get_libc_version() <<endl;
 #endif
     // #endif

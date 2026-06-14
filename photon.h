@@ -46,6 +46,9 @@ const uint64_t INIT_IO_FSTACK_DPDK = SHIFT(20);
 const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_IOURING | INIT_EVENT_EPOLL |
                                     INIT_EVENT_SELECT  | INIT_EVENT_SIGNAL;
 const uint64_t INIT_IO_DEFAULT    = INIT_IO_LIBAIO     | INIT_IO_LIBCURL;
+#elif defined(_WIN32)
+const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_IOCP | INIT_EVENT_SELECT;
+const uint64_t INIT_IO_DEFAULT    = INIT_IO_LIBCURL;
 #else   // macOS, FreeBSD ...
 const uint64_t INIT_EVENT_DEFAULT = INIT_EVENT_KQUEUE | INIT_EVENT_SELECT |
                                     INIT_EVENT_SIGNAL;

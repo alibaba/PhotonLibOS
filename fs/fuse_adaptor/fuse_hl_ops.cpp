@@ -158,7 +158,7 @@ static int xmp_opendir(const char *path, struct fuse_file_info *fi)
     LOG_DEBUG(VALUE(path));
     CHECK_FS();
     auto dirp = fs->opendir(path);
-    fi->fh = (unsigned long) dirp;
+    fi->fh = (uint64_t) dirp;
     if(!dirp) \
         LOG_ERROR_RETURN(0, -errno, VALUE(path));
     return 0;

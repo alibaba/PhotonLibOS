@@ -178,7 +178,7 @@ namespace fs
         virtual int fstat(struct stat *buf) = 0;
         virtual int set_crc(uint32_t crc) { errno = ENOSYS; return -1; }
         virtual int get_crc(uint32_t* crc) { errno = ENOSYS; return -1; }
-        virtual uint64_t get_handle() { return -1UL; }
+        virtual uint64_t get_handle() { return -1ULL; }
         virtual int fdatasync() { errno = ENOSYS; return -1; }
         virtual int close() { return 0; }
 
@@ -269,7 +269,7 @@ namespace fs
     protected:
         int open_src_file(photon::fs::IFile** src_file, int flags = O_RDONLY);
         int tryget_size();
-        ssize_t do_prefetch(size_t count, off_t offset, int flags, uint64_t batch_size = 32 * 1024 * 1024UL);
+        ssize_t do_prefetch(size_t count, off_t offset, int flags, uint64_t batch_size = 32 * 1024 * 1024ULL);
 
         std::string src_name_;
         std::string store_key_;

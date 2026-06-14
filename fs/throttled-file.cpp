@@ -39,7 +39,7 @@ namespace fs
         StatisticsQueue(uint32_t rate, uint32_t capacity) : m_events(capacity), m_rate(rate)
         {
             m_limit = (uint64_t)m_rate * m_time_window;
-            m_timestamp_base = (photon::now / 1024UL) & ~((1UL<<29)-1);
+            m_timestamp_base = (photon::now / 1024ULL) & ~((1ULL<<29)-1);
         }
         const Sample& back() const
         {
@@ -48,11 +48,11 @@ namespace fs
 
         uint64_t try_pop()
         {
-            auto now = photon::now / 1024UL;
+            auto now = photon::now / 1024ULL;
             _update_timestamp_base(now);
             if (rate()) {
-                auto w0 = now - m_time_window * 1024UL;
-                uint64_t head_working_time = m_events.front().amount / rate() * 1024UL;
+                auto w0 = now - m_time_window * 1024ULL;
+                uint64_t head_working_time = m_events.front().amount / rate() * 1024ULL;
                 while (!m_events.empty() && _get_time(m_events.front().time_stamp) < w0 &&
                     _get_time(m_events.front().time_stamp) + head_working_time <= now)
                 {
@@ -64,12 +64,12 @@ namespace fs
         }
         void push_back(uint32_t amount)
         {
-            auto now = photon::now / 1024UL;
+            auto now = photon::now / 1024ULL;
             if (rate()) {
                 while (sum() >= limit()) {
-                    uint64_t next_check = _get_time(m_events.front().time_stamp) + m_time_window * 1024UL;
+                    uint64_t next_check = _get_time(m_events.front().time_stamp) + m_time_window * 1024ULL;
                     if (next_check > now)
-                        wait_for_pop((next_check - now) * 1024UL);
+                        wait_for_pop((next_check - now) * 1024ULL);
                     photon::thread_yield();
                     now = try_pop();
                 }
@@ -121,8 +121,8 @@ namespace fs
     protected:
         inline __attribute__((always_inline))
         void _update_timestamp_base(uint64_t now) {
-            if (now > m_timestamp_base + ((1UL<<30) - 1)) {
-                uint64_t new_base = now & ~((1UL<<29) - 1);
+            if (now > m_timestamp_base + ((1ULL<<30) - 1)) {
+                uint64_t new_base = now & ~((1ULL<<29) - 1);
                 for (size_t i = 0; i< m_events.size(); i++) {
                     m_events[i].time_stamp = m_events[i].time_stamp + m_timestamp_base - new_base;
                 }

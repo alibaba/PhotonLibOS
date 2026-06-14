@@ -23,6 +23,10 @@ limitations under the License.
 #include "../../test/ci-tools.h"
 #include "../../test/gtest.h"
 
+#ifdef DELETE
+#undef DELETE
+#endif
+
 DEFINE_ENUM_STR(VERBS, verbs, UNKNOW, DELETE, GET, HEAD, POST, PUT, CONNECT,
                 OPTIONS, TRACE, COPY, LOCK, MKCOL, MOV, PROPFIND, PROPPATCH,
                 SEARCH, UNLOCK, BIND, REBIND, UNBIND, ACL, REPORT, MKACTIVITY,
@@ -102,7 +106,7 @@ TEST(TString, JoinAndSplit) {
         "4, 5, 6");
     // seperate by ',' and ignore ' '
     auto sp = d.split<',', ' '>();
-    EXPECT_EQ(6UL, sp.size);
+    EXPECT_EQ(6ULL, sp.size);
     EXPECT_TRUE("1" == sp.views[0]);
     EXPECT_TRUE("2" == sp.views[1]);
     EXPECT_TRUE("3" == sp.views[2]);
@@ -115,7 +119,7 @@ TEST(TString, JoinAndSplit) {
 TEST(CompactStringArray, Basic) {
     auto p = ConstString::make_compact_str_array<size_t>(
         TSTRING("a"), TSTRING("bc"), TSTRING("def"), TSTRING("ghij"));
-    EXPECT_EQ(4UL, p.size());
+    EXPECT_EQ(4ULL, p.size());
     EXPECT_STREQ("a", p[0].data());
     EXPECT_STREQ("bc", p[1].data());
     EXPECT_STREQ("def", p[2].data());

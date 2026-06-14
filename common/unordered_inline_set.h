@@ -8,7 +8,7 @@
 #include <cmath>
 #include <string.h>
 #include <utility>
-#if __cplusplus >= 202300L
+#if __cplusplus >= 202300LL
 #include <concepts>
 #include <ranges>
 #endif
@@ -331,7 +331,7 @@ public:
     : unordered_inline_set(init, bucket_count,
                     hash, key_equal(), alloc) {}
 
-#if __cplusplus >= 202300L
+#if __cplusplus >= 202300LL
     template<std::ranges::input_range R>
         requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     unordered_inline_set( std::from_range_t, R&& rg,
@@ -495,7 +495,7 @@ public:
         return insert<K>(std::forward<K>(value)).first;
     }
 
-#if __cplusplus >= 202300L
+#if __cplusplus >= 202300LL
     template<std::ranges::input_range R>
         requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     void insert_range( R&& rg );
