@@ -498,6 +498,8 @@ protected:
 
     ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
         ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
+        if (n < 0)
+            return n;
         m_num_calls++;
         auto ret = zerocopy_confirm(sockfd, m_num_calls - 1, timeout);
         if (ret < 0)
