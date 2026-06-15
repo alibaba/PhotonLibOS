@@ -98,6 +98,9 @@ namespace fs
         if (len == 0) return 0;
 
         char path[PATH_MAX];
+        if (len >= PATH_MAX - 1) {
+            LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname too long");
+        }
         if (pathname[0] != '/') {
             *path = '/';
             memcpy(path + 1, pathname.begin(), len);
@@ -284,6 +287,8 @@ namespace fs
         auto len0 = m_path_len;
         auto len1 = s.length();
         assert(len0 + len1 < sizeof(m_path_buffer) - 1);
+        if (len0 + len1 >= sizeof(m_path_buffer) - 1)
+            return;
         memcpy(m_path_buffer + len0, s.data(), len1 + 1);
         m_path_len = len0 + len1;
     }
