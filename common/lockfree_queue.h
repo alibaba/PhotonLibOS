@@ -636,6 +636,126 @@ public:
     }
 };
 
+// FlexRingChannel: composition-based wrapper for FlexQueue types.
+// Unlike RingChannel (which inherits from QueueType), FlexRingChannel holds
+// a pointer to a dynamically-allocated FlexQueue. This avoids the memory
+// layout conflict where RingChannel's members (semaphore, idler, etc.) would
+// overlap with the zero-length slots[] array in the base queue class.
+//
+// Usage:
+//   using FlexRing = FlexLockfreeMPMCRingQueue<Delegate<void>>;
+//   auto* ch = FlexRingChannel<FlexRing>::create(1024);
+//   ch->send(task);
+//   auto task = ch->recv();
+//   FlexRingChannel<FlexRing>::destroy(ch);
+template <typename FlexQueueType>
+class FlexRingChannel {
+    FlexQueueType* queue;
+    photon::semaphore     queue_sem;
+    std::atomic<uint64_t> idler{0};    // # consumers in idle/wait
+    std::atomic<uint64_t> pending{0};  // mirror of queue_sem.m_count
+    uint64_t default_yield_turn = 1024;
+    uint64_t default_yield_usec = 1024;
+
+    using T = decltype(std::declval<FlexQueueType>().recv());
+
+    FlexRingChannel(FlexQueueType* q, uint64_t yield_turn, uint64_t yield_usec)
+        : queue(q), default_yield_turn(yield_turn),
+          default_yield_usec(yield_usec) {}
+
+public:
+    ~FlexRingChannel() = default;
+
+    FlexRingChannel(const FlexRingChannel&) = delete;
+    FlexRingChannel& operator=(const FlexRingChannel&) = delete;
+
+    static FlexRingChannel* create(size_t capacity,
+                                   uint64_t max_yield_turn = 1024,
+                                   uint64_t max_yield_usec = 1024) {
+        auto q = FlexQueueType::create(capacity);
+        if (!q) return nullptr;
+        return new FlexRingChannel(q, max_yield_turn, max_yield_usec);
+    }
+
+    static void destroy(FlexRingChannel* ch) {
+        if (!ch) return;
+        FlexQueueType::destroy(ch->queue);
+        delete ch;
+    }
+
+    template <typename Pause = ThreadPause>
+    void send(const T& x) {
+        queue->template send<Pause>(x);
+        // Dekker barrier: ensure the prior push is ordered before the
+        // following idler load, paired with the seq_cst RMW on `idler`
+        // in recv().
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        auto cur_idler = idler.load(std::memory_order_seq_cst);
+        if (cur_idler == 0) return;
+
+        // Cap pending (== m_count) at cur_idler so a long burst can never
+        // accumulate stale wake-up tokens.
+        auto p = pending.load(std::memory_order_acquire);
+        for (;;) {
+            if (p >= cur_idler) {
+                auto fresh = idler.load(std::memory_order_relaxed);
+                if (fresh <= cur_idler) return;
+                cur_idler = fresh;
+                continue;
+            }
+            if (pending.compare_exchange_weak(p, p + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                queue_sem.signal(1);
+                return;
+            }
+        }
+    }
+
+    T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
+        T x;
+        if (queue->pop(x)) return x;
+        // yield once if failed, so photon::now will be updated
+        photon::thread_yield();
+        // seq_cst on idler is the other half of the Dekker barrier (see send).
+        idler.fetch_add(1, std::memory_order_seq_cst);
+        DEFER(idler.fetch_sub(1, std::memory_order_seq_cst));
+        Timeout yield_timeout(max_yield_usec);
+        uint64_t yield_turn = max_yield_turn;
+        while (!queue->pop(x)) {
+            if (yield_turn > 0 && !yield_timeout.expired()) {
+                yield_turn--;
+                photon::thread_yield();
+            } else {
+                // wait for 100ms
+                int r = queue_sem.wait(1, 100UL * 1000);
+                // r == 0 means we actually consumed one m_count token; mirror
+                // it on `pending`. r < 0 (timeout/interrupt) does not touch
+                // m_count, so we must not touch `pending` either.
+                if (r == 0)
+                    pending.fetch_sub(1, std::memory_order_acq_rel);
+                // reset yield mark and set into busy wait
+                yield_turn = max_yield_turn;
+                yield_timeout.timeout(max_yield_usec);
+            }
+        }
+        return x;
+    }
+
+    T recv() { return recv(default_yield_turn, default_yield_usec); }
+
+    bool empty() const { return queue->empty(); }
+    bool full() const { return queue->full(); }
+    size_t read_available() const { return queue->read_available(); }
+    size_t write_available() const { return queue->write_available(); }
+
+    // Diagnostic accessor: returns the current count of in-flight wake-up
+    // tokens (mirrors `queue_sem.m_count`).
+    uint64_t notification_pending() const {
+        return pending.load(std::memory_order_acquire);
+    }
+};
+
 }  // namespace common
 }  // namespace photon
 

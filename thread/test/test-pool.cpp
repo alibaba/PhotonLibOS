@@ -300,6 +300,64 @@ TEST(workpool, async_work_lambda_threadpool_append) {
     LOG_INFO("DONE");
 }
 
+TEST(workpool, custom_ring_size) {
+    // Small ring (will be rounded up to power of 2)
+    {
+        WorkPool wp(2, 0, 0, 0, 4);
+        semaphore sem;
+        std::atomic<int> counter{0};
+        for (int i = 0; i < 16; i++) {
+            wp.async_call(new auto([&sem, &counter] {
+                counter.fetch_add(1, std::memory_order_relaxed);
+                sem.signal(1);
+            }));
+        }
+        sem.wait(16);
+        EXPECT_EQ(counter.load(), 16);
+    }
+    // Non-power-of-two ring size
+    {
+        WorkPool wp(2, 0, 0, 0, 1000);
+        semaphore sem;
+        std::atomic<int> counter{0};
+        for (int i = 0; i < 64; i++) {
+            wp.async_call(new auto([&sem, &counter] {
+                counter.fetch_add(1, std::memory_order_relaxed);
+                sem.signal(1);
+            }));
+        }
+        sem.wait(64);
+        EXPECT_EQ(counter.load(), 64);
+    }
+    // Large ring size
+    {
+        WorkPool wp(2, 0, 0, -1, 256 * 1024);
+        EXPECT_EQ(wp.get_vcpu_num(), 2);
+        semaphore sem;
+        std::atomic<int> counter{0};
+        for (int i = 0; i < 64; i++) {
+            wp.async_call(new auto([&sem, &counter] {
+                counter.fetch_add(1, std::memory_order_relaxed);
+                sem.signal(1);
+            }));
+        }
+        sem.wait(64);
+        EXPECT_EQ(counter.load(), 64);
+    }
+}
+
+TEST(workpool, ring_size_with_call) {
+    // Verify synchronous call works with custom ring size
+    WorkPool wp(2, 0, 0, 0, 32);
+    std::atomic<int> sum{0};
+    for (int i = 0; i < 20; i++) {
+        wp.call([&sum, i] {
+            sum.fetch_add(i);
+        });
+    }
+    EXPECT_EQ(sum.load(), 190);  // 0+1+...+19
+}
+
 int main(int argc, char** arg)
 {
     if (!is_using_default_engine()) return 0;
