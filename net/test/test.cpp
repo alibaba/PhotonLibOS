@@ -616,7 +616,7 @@ uint16_t _srvport = 0;
 
 int test_socket_server() {
     server_thread = photon::CURRENT;
-    int fd = net::socket(AF_INET, SOCK_STREAM, 0);
+    int fd = net::socket(AF_INET, (int)SOCK_STREAM, 0);
     if (fd < 0) LOG_ERRNO_RETURN(0, -1, "failed to photon::net::socket()");
 
     int state = 1;
@@ -667,7 +667,7 @@ TEST(ConnectTest, HandleNoneZeroInput) {
     addr.sin_port = htons(_srvport);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    int fd = net::socket(AF_INET, SOCK_STREAM, 0);
+    int fd = net::socket(AF_INET, (int)SOCK_STREAM, 0);
 
     photon::thread_usleep(1000 * 200);
     puts("before connect()");

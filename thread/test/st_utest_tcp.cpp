@@ -22,7 +22,7 @@ void* tcp_server(void* /*arg*/)
     st_netfd_t stfd = NULL;
     StFdCleanup(fd, stfd);
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, (int)SOCK_STREAM, 0);
     ST_ASSERT_ERROR(fd == -1, fd, "Create socket");
 
     struct sockaddr_in addr;
@@ -58,7 +58,7 @@ void* tcp_client(void* /*arg*/)
     st_netfd_t stfd = NULL;
     StFdCleanup(fd, stfd);
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, (int)SOCK_STREAM, 0);
     ST_ASSERT_ERROR(fd == -1, fd, "Create socket");
 
     struct sockaddr_in addr;

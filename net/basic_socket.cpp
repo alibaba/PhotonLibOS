@@ -91,7 +91,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
                 ret = photon::wait_for_fd_writable(fd, timeout);
                 if (ret < 0) return -1;
                 socklen_t n = sizeof(err);
-                ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &n);
+                ret = getsockopt(fd, (int)SOL_SOCKET, (int)SO_ERROR, &err, &n);
                 if (unlikely(ret < 0)) return -1;
                 if (err) {
                     errno = err;

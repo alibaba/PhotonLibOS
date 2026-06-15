@@ -16,10 +16,13 @@ limitations under the License.
 
 #pragma once
 // IPAddr is a packed struct whose `addr` member sits at offset 0 of an
-// anonymous packed union.  Taking its address triggers
-// -Waddress-of-packed-member, but the field is actually aligned (offset 0
-// modulo any alignment), so the warning is spurious.  The _in_addr_word
-// macro (defined in include/sys/socket.h) takes this address.
+// anonymous packed union.  On Windows (MinGW), the _in_addr_word() helper
+// takes its address (via _in_addr_word_helper), which triggers
+// -Waddress-of-packed-member.  The field is actually aligned (offset 0
+// modulo any alignment), so the warning is spurious.  On Linux/macOS,
+// _in_addr_word() expands to a plain array access and never takes an
+// address — so the warning doesn't fire there, and an unguarded pragma
+// would trigger -Wpragmas (unknown option), breaking -Werror builds.
 #if defined(_WIN32) && (defined(__GNUC__) || defined(__clang__))
 #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
 #endif
