@@ -148,7 +148,7 @@ public:
         if (e.fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
         if ((size_t)e.fd >= _inflight_events.size())
-            _inflight_events.resize(e.fd * 2);
+            _inflight_events.resize(e.fd * 2 + 2);
         auto& entry = _inflight_events[e.fd];
         if (e.interests & entry.interests) {
             if (((e.interests & entry.interests & EVENT_READ) &&
