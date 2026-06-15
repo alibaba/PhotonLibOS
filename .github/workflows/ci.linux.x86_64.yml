@@ -9,7 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
+<<<<<<< HEAD
       options: --cpus 4 --privileged
+=======
+      options: --cpus 4 --privileged --shm-size 512m
+>>>>>>> 2b7fabf (fix(cache): skip 4K alignment for map path in queryRefillRange (#1353) (#1361))
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
