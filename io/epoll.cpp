@@ -121,7 +121,7 @@ public:
         if (unlikely(!e.interests))
             return 0;
         if (unlikely((size_t)e.fd >= _inflight_events.size()))
-            _inflight_events.resize(e.fd * 2);
+            _inflight_events.resize(e.fd * 2 + 2);
 
         e.interests &= EVENT_RWEO;
         auto& entry = _inflight_events[e.fd];
