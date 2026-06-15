@@ -605,6 +605,7 @@ namespace photon
         bool m_locked;
     };
 
+<<<<<<< HEAD
     // High-performance rwlock without starvation prevention.
     // Optimized for read-heavy workloads using lock-free atomic operations
     // for the read lock fast path.
@@ -717,6 +718,8 @@ namespace photon
         }
     };
 
+=======
+>>>>>>> 4652030 ([Backport][main to 0.9] | Fix crash in threads_create_join on partial failure (#1252)  (#1328))
     // create `n` threads to run `start(arg)`, then get joined;
     // returns the number of threads actually created (< n if
     // thread_create() failed partway), which is the number joined.
