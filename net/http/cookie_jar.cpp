@@ -80,7 +80,6 @@ public:
     }
 
     int set_cookies_to_headers(Request* request) {
-<<<<<<< HEAD
         bool first_kv = true;
         vector<string_view> eliminate;
         if (request->headers.insert("Cookie", "") != 0) return -1;
@@ -100,33 +99,6 @@ public:
         }
         for (auto key : eliminate) {
             m_kv.erase(key);
-=======
-        uint64_t now = time(0);
-        auto& h = request->headers;
-        bool first = true;
-        for (auto it = m_cookies.begin(); it != m_cookies.end(); ) {
-            if (now > it->second.expire) {
-                it = m_cookies.erase(it);
-                continue;
-            }
-            DEFER(++it);
-            if (!request->secure() && starts_with(it->first, "__Secure-")) continue;
-            if (!starts_with(request->abs_path(), it->second.get_path())) continue;
-            auto d = it->second.get_domain();
-            if (!d.empty() && d != request->host()) continue;
-            size_t size = it->first.size() + 1 + it->second.value.size();
-            if (first) {
-                if (h.space_remain() < size + 10+6) return -1;
-                h.insert("Cookie", "");
-                first = false;
-            } else {
-                if (h.space_remain() < size + 2+6) return -1;
-                h.value_append("; ");
-            }
-            h.value_append(it->first);
-            h.value_append("=");
-            h.value_append(it->second.get_value());
->>>>>>> 4aecbb9 (Fix HTTP range parsing, cookie jar, and body writev cap (#1288) (#1370))
         }
         return 0;
     }
