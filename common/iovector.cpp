@@ -262,7 +262,6 @@ ssize_t iovector_view::extract_back(size_t bytes, iovector_view* iov)
 }
 #undef _this
 
-<<<<<<< HEAD
 size_t iovector_view::memcpy_to(void* buf, size_t size)
 {
     auto buf0 = buf;
@@ -277,37 +276,6 @@ size_t iovector_view::memcpy_to(void* buf, size_t size)
         size -= len;
         if (size == 0)
             break;
-=======
-inline void operator+=(iovec& v, size_t nbytes) {
-    (char*&)v.iov_base += nbytes;
-    v.iov_len -= nbytes;
-}
-
-class iov_iterator {
-    const iovec* _iov;
-    iovec _v;
-    int _iovcnt;
-public:
-    iov_iterator(iov_iterator&&) = default;
-    iov_iterator(const iov_iterator&) = default;
-    iov_iterator(iovector_view v) : _iov(v.iov), _v(v.iov[0]), _iovcnt(v.iovcnt) { }
-    bool empty() const { return _iovcnt == 0; }
-    iovec front() const { return _v; }
-    iov_iterator& operator += (size_t n) {
-        assert(_iovcnt);
-        assert(n <= _v.iov_len);
-        if (n < _v.iov_len) { _v += n; }
-        else {
-            if (--_iovcnt > 0) {
-                _v = *++_iov;
-            } else {
-                ++_iov;
-                _v = {};
-            }
-            assert(_iovcnt == 0 || _v.iov_base);
-        }
-        return *this;
->>>>>>> 96d8213 (Fix alog snprintf overflow and iovector slice/iterator bugs (#1283))
     }
     return (char*)buf - (char*)buf0;
 }
