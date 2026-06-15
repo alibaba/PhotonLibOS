@@ -272,13 +272,8 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
-<<<<<<< HEAD
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head;
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail;
-=======
-    alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head{0};
-    alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail{0};
->>>>>>> e8b2e5f (Fix lockfree queue init and ObjectCache move/lock bugs (#1284))
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head{0};
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail{0};
 
     T slots[Base::capacity];
 
