@@ -694,6 +694,7 @@ class FstackDpdkSocketServer : public KernelSocketServer {
 public:
     using KernelSocketServer::KernelSocketServer;
 
+<<<<<<< HEAD
     int init() override {
         m_listen_fd = fstack_socket(m_socket_family, SOCK_STREAM, 0);
         if (m_listen_fd < 0)
@@ -701,6 +702,23 @@ public:
         if (m_socket_family == AF_INET) {
             int val = 1;
             fstack_setsockopt(m_listen_fd, IPPROTO_TCP, TCP_NODELAY, &val, (socklen_t) sizeof(val));
+=======
+    ~FstackDpdkSocketServer() override {
+        terminate();
+        if (m_listen_fd < 0) return;
+        fstack_shutdown(m_listen_fd, static_cast<int>(ShutdownHow::ReadWrite));
+        fstack_close(m_listen_fd);
+        m_listen_fd = -1;
+    }
+
+    int bind(const EndPoint& ep) override {
+        if (m_listen_fd >= 0)
+            LOG_ERROR_RETURN(EALREADY, -1, "already bound");
+        auto s = sockaddr_storage(ep);
+        m_listen_fd = fstack_socket(s.get_sockaddr()->sa_family, SOCK_STREAM, 0);   // already non-blocking and no-delay
+        if (m_listen_fd < 0) {
+            LOG_ERRNO_RETURN(0, -1, "fail to setup DPDK listen fd");
+>>>>>>> 8d91d18 (Fix FstackDpdkSocketServer destructor and m_opts shadow (#1286) (#1338) (#1368))
         }
         return 0;
     }
@@ -731,6 +749,20 @@ public:
         return m_opts.get_opt(level, option_name, option_value, option_len);
     }
 
+    ISocketStream* accept(EndPoint* remote_endpoint = nullptr) override {
+        int cfd = remote_endpoint ? do_accept(*remote_endpoint) : do_accept();
+        if (cfd < 0) {
+            return nullptr;
+        }
+        for (auto& opt : m_opts) {
+            if (fstack_setsockopt(cfd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
+                LOG_ERRNO_RETURN(EINVAL, nullptr, "Failed to setsockopt ",
+                                 VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
+            }
+        }
+        return create_stream(cfd);
+    }
+
 protected:
     KernelSocketStream* create_stream(int fd) override {
         return new FstackDpdkSocketStream(fd);
@@ -739,22 +771,6 @@ protected:
     int fd_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) override {
         return fstack_accept(fd, addr, addrlen, m_timeout);
     }
-
-private:
-    class FstackSockOptBuffer : public SockOptBuffer {
-    public:
-        int setsockopt(int fd) override {
-            for (auto& opt : *this) {
-                if (fstack_setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
-                    LOG_ERRNO_RETURN(EINVAL, -1, "Failed to setsockopt ",
-                                     VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
-                }
-            }
-            return 0;
-        }
-    };
-
-    FstackSockOptBuffer m_opts;
 };
 
 #endif // ENABLE_FSTACK_DPDK
