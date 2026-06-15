@@ -77,28 +77,50 @@ ssize_t iovector_view::slice(size_t count, off_t offset, iovector_view* /*OUT*/ 
         // empty iov, takes as no useable nested iovec to store the result
         return -1;
     }
+    if (unlikely(count == 0)) {
+        iov->iovcnt = 0;
+        return 0;
+    }
     int cnt = 0;
-    off_t pos = 0;
     auto ptr = iov->iov;
     ssize_t ret = 0;
-    for (auto &p : *this) {
-        if (count && (pos + (off_t)p.iov_len > offset)) {
-            if (offset > pos) {
-                ptr[cnt].iov_base = (char*)p.iov_base + (offset - pos);
-                ptr[cnt].iov_len = p.iov_len - (offset - pos);
-            } else {
-                ptr[cnt].iov_base = p.iov_base;
-                ptr[cnt].iov_len = p.iov_len;
-            }
-            if (count < ptr[cnt].iov_len)
-                ptr[cnt].iov_len = count;
-            pos += p.iov_len;
-            ret += ptr[cnt].iov_len;
-            count -= ptr[cnt].iov_len;
-            cnt ++;
-            if (cnt == iov->iovcnt)
-                break;
+    auto it = begin();
+    auto e = end();
+    // skip iovec elements before offset
+    off_t pos = 0;
+    for (; it != e; ++it) {
+        if (pos + (off_t)it->iov_len > offset)
+            break;
+        pos += it->iov_len;
+    }
+    // process the first element (may be partial due to offset)
+    if (it != e) {
+        ptr[cnt].iov_base = (char*)it->iov_base + (offset - pos);
+        ptr[cnt].iov_len = it->iov_len - (offset - pos);
+        if (count <= ptr[cnt].iov_len) {
+            ptr[cnt].iov_len = count;
+            ret += count;
+            iov->iovcnt = cnt + 1;
+            return ret;
         }
+        ret += ptr[cnt].iov_len;
+        count -= ptr[cnt].iov_len;
+        cnt++;
+        ++it;
+    }
+    // process remaining full elements
+    for (; it != e && cnt < iov->iovcnt; ++it) {
+        ptr[cnt].iov_base = it->iov_base;
+        ptr[cnt].iov_len = it->iov_len;
+        if (count <= ptr[cnt].iov_len) {
+            ptr[cnt].iov_len = count;
+            ret += count;
+            iov->iovcnt = cnt + 1;
+            return ret;
+        }
+        ret += ptr[cnt].iov_len;
+        count -= ptr[cnt].iov_len;
+        cnt++;
     }
     iov->iovcnt = cnt;
     return ret;
@@ -259,9 +281,13 @@ public:
         assert(_iovcnt);
         assert(n <= _v.iov_len);
         if (n < _v.iov_len) { _v += n; }
-        else { 
-            _v = *++_iov; 
-            _iovcnt--; 
+        else {
+            if (--_iovcnt > 0) {
+                _v = *++_iov;
+            } else {
+                ++_iov;
+                _v = {};
+            }
             assert(_iovcnt == 0 || _v.iov_base);
         }
         return *this;
