@@ -24,6 +24,13 @@ option(PHOTON_ENABLE_SASL "enable sasl" OFF)
 option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
 option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
 option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
+<<<<<<< HEAD
+=======
+option(PHOTON_ENABLE_RESIZE "enable resize_extfs (requires external resize_fs)" OFF)
+option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
+option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
+set(PHOTON_DEFAULT_LOG_LEVEL "0" CACHE STRING "default log level")
+>>>>>>> d6bd1fd (extfs: add resize_extfs interface with compile switch and fix extfs_close (#1276) (#1346) (#1364))
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -197,6 +204,9 @@ if (PHOTON_ENABLE_FSTACK_DPDK)
 endif ()
 if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
+    if (NOT PHOTON_ENABLE_RESIZE)
+        list(REMOVE_ITEM EXTFS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/fs/extfs/resize.cpp")
+    endif()
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif ()
 
