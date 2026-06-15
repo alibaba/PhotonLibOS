@@ -225,11 +225,11 @@ ssize_t sendfile_n(ISocketStream* out_stream,
         size_t s = sizeof(buf);
         if (s > count) s = count;
         ssize_t n_read = ::pread(in_fd, buf, s, offset);
-        if (n_read != (ssize_t) s)
+        if (n_read <= 0)
             LOG_ERRNO_RETURN(0, (ssize_t)-1, "failed to read fd ", in_fd);
         offset += n_read;
-        ssize_t n_write = out_stream->write(buf, s);
-        if (n_write != (ssize_t) s)
+        ssize_t n_write = out_stream->write(buf, n_read);
+        if (n_write != n_read)
             LOG_ERRNO_RETURN(0, (ssize_t)-1, "failed to write to stream ", out_stream);
         return n_write;
     };
