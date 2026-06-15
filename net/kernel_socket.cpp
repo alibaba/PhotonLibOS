@@ -472,6 +472,9 @@ public:
             m_listen_fd = socket(AF_SMC, ver);
             if (m_listen_fd < 0) return -1;
         }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
         int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)
             LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
@@ -726,6 +729,9 @@ public:
         m_listen_fd = fstack_socket(s.get_sockaddr()->sa_family, SOCK_STREAM, 0);   // already non-blocking and no-delay
         if (m_listen_fd < 0) {
             LOG_ERRNO_RETURN(0, -1, "fail to setup DPDK listen fd");
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
         }
         int ret = fstack_bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
         if (ret < 0)
