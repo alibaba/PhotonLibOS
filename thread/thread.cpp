@@ -678,7 +678,7 @@ namespace photon
         Switch try_goto(thread* th) const {
             assert(th->vcpu == vcpu);
             th->remove_from_list();
-            current->insert_after(th);
+            current->insert_before(th);
             return _do_goto(th);
         }
         bool single() const {
