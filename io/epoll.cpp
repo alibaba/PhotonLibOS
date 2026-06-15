@@ -214,11 +214,16 @@ ok:     entry.interests |= eint;
                 if (err.no == EINTR) continue;
                 usleep(1024L * cool_down_ms);
                 timeout = sat_sub(timeout, cool_down_ms);
+<<<<<<< HEAD
                 if (cool_down_ms < 16) {
                     cool_down_ms *= 2;
                     continue;
                 }
                 LOG_ERROR_RETURN(err.no, -1, "epoll_wait() failed ", err);
+=======
+                cool_down_ms *= 2;
+                continue;
+>>>>>>> 6102e23 (Fix missing continue in epoll event loops and dead-code UB (#1277) (#1345) (#1365))
             }
             return _events_remain = ret;
         }
