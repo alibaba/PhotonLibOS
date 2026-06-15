@@ -22,6 +22,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 #include <algorithm>
+#include <cassert>
 #include <future>
 #include <random>
 #include <thread>
@@ -31,20 +32,24 @@ namespace photon {
 
 class WorkPool::impl {
 public:
-    static constexpr uint32_t RING_SIZE = 65536;
     static constexpr uint64_t QUEUE_YIELD_COUNT = 256;
     static constexpr uint64_t QUEUE_YIELD_US = 1024;
+
+    using FlexRing = FlexLockfreeMPMCRingQueue<Delegate<void>>;
+    using FlexRingChannel = common::FlexRingChannel<FlexRing>;
 
     photon::spinlock worker_lock;
     std::vector<std::thread> owned_std_threads;
     std::vector<photon::vcpu_base *> vcpus;
     std::atomic<uint64_t> vcpu_index{0};
-    photon::common::RingChannel<
-        LockfreeMPMCRingQueue<Delegate<void>, RING_SIZE>>
-        ring;
+    FlexRingChannel* ring;
     int mode;
 
-    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode) : mode(mode) {
+    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size)
+        : mode(mode) {
+        assert(ring_size > 0 && "workpool ring_size must be > 0");
+        ring = FlexRingChannel::create(ring_size, QUEUE_YIELD_COUNT, QUEUE_YIELD_US);
+        if (!ring) abort();
         vcpus.reserve(vcpu_num);
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
@@ -63,17 +68,18 @@ public:
             while (vcpus.size()) std::this_thread::yield();
         }
         worker_lock.lock();
+        FlexRingChannel::destroy(ring);
     }
 
     void enqueue(Delegate<void> call, AutoContext = {}) {
-        if (likely(CURRENT)) ring.send<PhotonPause>(call);
-        else                 ring.send<ThreadPause>(call);
+        if (likely(CURRENT)) ring->send<PhotonPause>(call);
+        else                 ring->send<ThreadPause>(call);
     }
     void enqueue(Delegate<void> call, StdContext) {
-        ring.send<ThreadPause>(call);
+        ring->send<ThreadPause>(call);
     }
     void enqueue(Delegate<void> call, PhotonContext) {
-        ring.send<PhotonPause>(call);
+        ring->send<PhotonPause>(call);
     }
     template <typename Context>
     void do_call(Delegate<void> call) {
@@ -123,7 +129,7 @@ public:
         ready_vcpu.signal(1);
         for (;;) {
             auto yc = running_tasks ? 0 : QUEUE_YIELD_COUNT;
-            auto task = ring.recv(yc, QUEUE_YIELD_US);
+            auto task = ring->recv(yc, QUEUE_YIELD_US);
             if (!task) break;
             running_tasks = running_tasks + 1; // ++ -- are deprecated for volatile in C++20
             TaskLB tasklb{task, &running_tasks};
@@ -197,8 +203,8 @@ private:
     StdSemaphore ready_vcpu;
 };
 
-WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode)
-    : pImpl(new impl(vcpu_num, ev_engine, io_engine, mode)) {}
+WorkPool::WorkPool(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size)
+    : pImpl(new impl(vcpu_num, ev_engine, io_engine, mode, ring_size)) {}
 
 WorkPool::~WorkPool() { /* implicitly delete pImpl */}
 

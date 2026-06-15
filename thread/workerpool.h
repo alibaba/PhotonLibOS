@@ -37,9 +37,12 @@ public:
      * @param thread_mod threads work in which mode, -1 for non-thread mode, set
      * to 0 will create photon thread for every task, and >0 to create photon
      * thread in photon thread pool with this size.
+     * @param ring_size capacity of the internal lock-free ring buffer for task
+     * dispatching (default 65536). Must be > 0; rounded up to the next power of
+     * two internally.
      */
     explicit WorkPool(size_t vcpu_num, int ev_engine = 0, int io_engine = 0,
-                      int thread_mod = -1);
+                      int thread_mod = -1, size_t ring_size = 65536);
 
     WorkPool(const WorkPool& other) = delete;
     WorkPool& operator=(const WorkPool& rhs) = delete;

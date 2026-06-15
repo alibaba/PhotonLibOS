@@ -258,6 +258,73 @@ TEST(lockfree_queue, test_queue) {
     test_queue_batch<WithLock, WithLock>("FlexPhotonSPSCQueue+Batch", cuqueue);
 }
 
+TEST(FlexRingChannel, basic) {
+    using FlexRing = FlexLockfreeMPMCRingQueue<int>;
+    using Channel = photon::common::FlexRingChannel<FlexRing>;
+
+    auto* ch = Channel::create(16);
+    ASSERT_NE(ch, nullptr);
+    DEFER(Channel::destroy(ch));
+
+    EXPECT_TRUE(ch->empty());
+    EXPECT_FALSE(ch->full());
+    EXPECT_EQ(ch->read_available(), 0u);
+
+    for (int i = 1; i <= 10; i++) {
+        ch->send(i);
+    }
+    EXPECT_FALSE(ch->empty());
+    EXPECT_EQ(ch->read_available(), 10u);
+
+    for (int i = 1; i <= 10; i++) {
+        int val = ch->recv();
+        EXPECT_EQ(val, i);
+    }
+    EXPECT_TRUE(ch->empty());
+    EXPECT_EQ(ch->read_available(), 0u);
+}
+
+TEST(FlexRingChannel, mpmc) {
+    using FlexRing = FlexLockfreeMPMCRingQueue<int>;
+    using Channel = photon::common::FlexRingChannel<FlexRing>;
+
+    auto* ch = Channel::create(2048);
+    ASSERT_NE(ch, nullptr);
+    DEFER(Channel::destroy(ch));
+
+    constexpr int num_items = 1000;
+    std::atomic<int> sum{0};
+    std::atomic<bool> producer_done{false};
+
+    // Producer thread (std::thread)
+    std::thread producer([&] {
+        for (int i = 1; i <= num_items; i++) {
+            ch->send<ThreadPause>(i);
+        }
+        producer_done.store(true);
+    });
+
+    // Consumer thread (photon thread)
+    auto consumer = photon::thread_create([](void* arg) -> void* {
+        auto* args = (std::pair<Channel*, std::atomic<int>*>*)arg;
+        auto* ch = args->first;
+        auto* sum = args->second;
+        for (int i = 0; i < 1000; i++) {
+            int val = ch->recv();
+            sum->fetch_add(val);
+        }
+        delete args;
+        return nullptr;
+    }, new std::pair<Channel*, std::atomic<int>*>(ch, &sum));
+    photon::thread_enable_join(consumer);
+
+    producer.join();
+    photon::thread_join((photon::join_handle*)consumer);
+
+    int expected = num_items * (num_items + 1) / 2;
+    EXPECT_EQ(sum.load(), expected);
+}
+
 int main(int argc, char **arg) {
     if (!photon::is_using_default_engine()) return 0;
     ::testing::InitGoogleTest(&argc, arg);
@@ -265,5 +332,7 @@ int main(int argc, char **arg) {
     DEFER(luqueue.destroy(&luqueue));
     DEFER(lubqueue.destroy(&lubqueue));
     DEFER(cuqueue.destroy(&cuqueue));
+    photon::vcpu_init();
+    DEFER(photon::vcpu_fini());
     return RUN_ALL_TESTS();
 }
