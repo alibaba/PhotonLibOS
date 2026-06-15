@@ -112,7 +112,7 @@ public:
             return 0;  // event arrived
         }
 
-        // enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
+        enqueue(fd, ev, EV_DELETE, 0, CURRENT, true); // immediately
         errno = (ret == 0) ? ETIMEDOUT : err.no;
         return -1;
     }
@@ -235,9 +235,16 @@ int fstack_socket(int domain, int type, int protocol) {
     if (fd < 0)
         return fd;
     int val = 1;
+<<<<<<< HEAD
     int ret = ff_ioctl(fd, FIONBIO, &val);
     if (ret != 0)
         return -1;
+=======
+    if (ff_ioctl(fd, FIONBIO, &val) < 0)
+        LOG_WARN("failed to set socket non-blocking");
+    if (ff_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
+        LOG_WARN("failed to set TCP_NODELAY");
+>>>>>>> 1ed28f0 (Fix fstack recv direction, stale event cleanup, and TCP_NODELAY (#1278) (#1344) (#1367))
     return fd;
 }
 
@@ -302,6 +309,7 @@ ssize_t fstack_sendmsg(int sockfd, const struct msghdr* message, int flags, uint
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_writable(sockfd, timeout)));
 }
 
+<<<<<<< HEAD
 ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t timeout) {
     return net::doio(LAMBDA(ff_recv(sockfd, buf, count, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
@@ -310,6 +318,16 @@ ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, uint64_t tim
 ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, uint64_t timeout) {
     return net::doio(LAMBDA(ff_recvmsg(sockfd, message, flags)),
                      LAMBDA_TIMEOUT(g_engine->wait_for_fd_readable(sockfd, timeout)));
+=======
+ssize_t fstack_recv(int sockfd, void* buf, size_t count, int flags, Timeout timeout) {
+    return photon::net::DOIO_ONCE(ff_recv(sockfd, buf, count, flags),
+        g_engine->wait_for_fd_readable(sockfd, timeout));
+}
+
+ssize_t fstack_recvmsg(int sockfd, struct msghdr* message, int flags, Timeout timeout) {
+    return photon::net::DOIO_ONCE(ff_recvmsg(sockfd, message, flags),
+        g_engine->wait_for_fd_readable(sockfd, timeout));
+>>>>>>> 1ed28f0 (Fix fstack recv direction, stale event cleanup, and TCP_NODELAY (#1278) (#1344) (#1367))
 }
 
 int fstack_setsockopt(int socket, int level, int option_name, const void* option_value, socklen_t option_len) {
