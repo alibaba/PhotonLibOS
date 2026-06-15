@@ -151,12 +151,6 @@ void* ObjectCacheBase::ref_release(ItemPtr item, bool recycle, bool destroy) {
 }
 
 // the argument `key` plays the roles of (type-erased) key
-<<<<<<< HEAD
-void* ObjectCacheBase::release(const Item& key_item, bool recycle, bool destroy) {
-    auto item = ExpireContainerBase::TypedIterator<Item>(Base::find(key_item));
-    if (item == end()) return nullptr;
-    return ref_release(*item, recycle, destroy);
-=======
 void* ObjectCacheBase::release(const Item& key_item, bool recycle,
                                bool destroy) {
     ItemPtr item;
@@ -167,5 +161,5 @@ void* ObjectCacheBase::release(const Item& key_item, bool recycle,
         item = *it;
     }
     return ref_release(item, recycle, destroy);
->>>>>>> e8b2e5f (Fix lockfree queue init and ObjectCache move/lock bugs (#1284))
+
 }
