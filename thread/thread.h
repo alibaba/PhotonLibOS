@@ -522,8 +522,10 @@ namespace photon
         bool m_locked;
     };
 
-    // create `n` threads to run `start(arg)`, then get joined
-    void threads_create_join(uint64_t n, thread_entry start, void* arg,
+    // create `n` threads to run `start(arg)`, then get joined;
+    // returns the number of threads actually created (< n if
+    // thread_create() failed partway), which is the number joined.
+    uint64_t threads_create_join(uint64_t n, thread_entry start, void* arg,
                           uint64_t stack_size = DEFAULT_STACK_SIZE);
 
     bool is_master_event_engine_default();
