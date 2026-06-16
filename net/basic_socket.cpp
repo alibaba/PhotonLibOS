@@ -142,14 +142,9 @@ ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                  uint64_t timeout) {
 #ifdef __APPLE__
     off_t len = count;
-<<<<<<< HEAD
     ssize_t ret =
-        doio(LAMBDA(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0)),
+        doio(LAMBDA(::sendfile(in_fd, out_fd, *offset, &len, nullptr, 0)),
              LAMBDA_TIMEOUT(wait_for_fd_writable(out_fd, timeout)));
-=======
-    ssize_t ret = DOIO_ONCE(::sendfile(in_fd, out_fd, *offset, &len, nullptr, 0),
-                  wait_for_fd_writable(out_fd, timeout));
->>>>>>> 9cdd7f5 (Fix macOS sendfile source/dest argument order (#1306) (#1334) (#1375))
     return (ret == 0) ? len : (int)ret;
 #else
     return doio(LAMBDA(::sendfile(out_fd, in_fd, offset, count)),
