@@ -151,8 +151,15 @@ void* ObjectCacheBase::ref_release(ItemPtr item, bool recycle, bool destroy) {
 }
 
 // the argument `key` plays the roles of (type-erased) key
-void* ObjectCacheBase::release(const Item& key_item, bool recycle, bool destroy) {
-    auto item = ExpireContainerBase::TypedIterator<Item>(Base::find(key_item));
-    if (item == end()) return nullptr;
-    return ref_release(*item, recycle, destroy);
+void* ObjectCacheBase::release(const Item& key_item, bool recycle,
+                               bool destroy) {
+    ItemPtr item;
+    {
+        SCOPED_LOCK(_lock);
+        auto it = ExpireContainerBase::TypedIterator<Item>(Base::__find_prelock(key_item));
+        if (it == end()) return nullptr;
+        item = *it;
+    }
+    return ref_release(item, recycle, destroy);
+
 }
