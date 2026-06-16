@@ -23,6 +23,7 @@ limitations under the License.
 #include <sstream>
 #include <sys/types.h>
 #include <unistd.h>
+#include <algorithm>
 #include <vector>
 #include <sys/sysmacros.h>
 #include <sys/statvfs.h>
@@ -710,14 +711,7 @@ static int do_ext2fs_readdir(ext2_filsys fs, const char *path, std::vector<::dir
     ext2_ino_t ino = string_to_inode(fs, path, 1);
     if (!ino) return -ENOENT;
 
-    ext2_file_t file;
-    errcode_t ret = ext2fs_file_open(
-        fs,
-        ino,  // inode,
-        0,    // flags TODO
-        &file);
-    if (ret) return parse_extfs_error(fs, ino, ret);
-    ret = ext2fs_check_directory(fs, ino);
+    errcode_t ret = ext2fs_check_directory(fs, ino);
     if (ret) return parse_extfs_error(fs, ino, ret);
     auto block_buf = (char *)malloc(fs->blocksize);
     ret = ext2fs_dir_iterate(
@@ -954,9 +948,14 @@ static int do_ext2fs_fiemap(ext2_filsys fs, ext2_ino_t ino, struct photon::fs::f
     std::vector<std::pair<off_t, size_t>> blocks;
     errcode_t ret = ino_iter_blocks(fs, ino, blocks);
     if (ret) return parse_extfs_error(fs, ino, ret);
-    map->fm_mapped_extents = blocks.size();
+    if (map->fm_extent_count == 0) {
+        map->fm_mapped_extents = blocks.size();
+        return 0;
+    }
     photon::fs::fiemap_extent *ext_buf = &map->fm_extents[0];
-    for (size_t i = 0; i < blocks.size(); i++) {
+    size_t count = std::min(blocks.size(), (size_t)map->fm_extent_count);
+    map->fm_mapped_extents = count;
+    for (size_t i = 0; i < count; i++) {
         LOG_DEBUG("find block ` `", blocks[i].first * fs->blocksize, blocks[i].second * fs->blocksize);
         ext_buf[i].fe_physical = blocks[i].first * fs->blocksize;
         ext_buf[i].fe_length = blocks[i].second * fs->blocksize;
@@ -1472,8 +1471,10 @@ public:
 
         if (follow) {
             auto b = func();
-            if (b) ino = *b;
-
+            if (b) {
+                ino = *b;
+                delete b;
+            }
         } else {
             auto b = ino_cache.borrow(str, func);
             if (b) ino = *b;
