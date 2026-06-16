@@ -237,8 +237,6 @@ int main() {
 #endif
     test_queue<WithLock, WithLock>("PhotonSPSCQueue", cqueue);
     test_queue_batch<WithLock, WithLock>("PhotonSPSCQueue+Batch", cqueue);
-<<<<<<< HEAD
-=======
     test_queue<WithLock, WithLock>("FlexPhotonSPSCQueue", cuqueue);
     test_queue_batch<WithLock, WithLock>("FlexPhotonSPSCQueue+Batch", cuqueue);
 }
@@ -320,5 +318,4 @@ int main(int argc, char **arg) {
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
     return RUN_ALL_TESTS();
->>>>>>> 8bcbb00 (feat(thread): make WorkPool ring_size configurable with FlexRingChannel (#1314))
 }
