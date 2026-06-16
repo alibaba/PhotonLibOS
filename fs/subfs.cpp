@@ -328,7 +328,7 @@ namespace fs
                 return 0;
             IOVector iovs(iov, iovcnt);
             iovs.shrink_to(m_length - offset);
-            return m_file->pwritev(iovs.iovec(), iovs.iovcnt(), offset);
+            return m_file->pwritev(iovs.iovec(), iovs.iovcnt(), offset + m_offset);
         }
     };
 
