@@ -100,9 +100,14 @@ public:
             .msg_iovlen = (decltype(msghdr::msg_iovlen))iovcnt,
             .msg_control = nullptr, .msg_controllen = 0, .msg_flags = flags,
         };
+<<<<<<< HEAD
         auto ret =
             doio([&] { return ::recvmsg(fd, &hdr, MSG_DONTWAIT | flags); },
                  [&] { return photon::wait_for_fd_readable(fd); });
+=======
+        auto ret = DOIO_ONCE(::recvmsg(fd, &hdr, MSG_DONTWAIT | flags),
+                         wait_for_fd_readable(fd));
+>>>>>>> 0771526 (Fix UDP recv waiting on writable instead of readable (#1261) (#1326) (#1396))
         if (addrlen) *addrlen = hdr.msg_namelen;
         return ret;
     }
