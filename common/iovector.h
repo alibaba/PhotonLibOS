@@ -365,6 +365,7 @@ public:
     // note that the buffer may be constituted by multiple iovec elements;
     size_t push_front(size_t bytes)
     {
+        if (iov_begin == 0) return 0;
         auto v = new_iovec(bytes);
         IF_ASSERT_RETURN(v.iov_len, 0);
         if (push_front(v) == bytes)
@@ -390,6 +391,7 @@ public:
     // note that the buffer may constitute multiple iovec elements;
     size_t push_back(size_t bytes)
     {
+        if (iov_end >= capacity) return 0;
         auto v = new_iovec(bytes);
         IF_ASSERT_RETURN(v.iov_len, 0);
         if (push_back(v) == bytes)
