@@ -1977,7 +1977,7 @@ insert_list:
             th->vcpu->nthreads--;
             th->vcpu = v;
             v->nthreads++;
-        } while (q.front()->allow_work_stealing());
+        } while (!q.empty() && q.front()->allow_work_stealing());
         return stolen.eject_whole();
     }
     inline __attribute__((always_inline))
@@ -1994,8 +1994,11 @@ insert_list:
         scoped_rwlock _(vcpu_list_rwlock, RLOCK);
         auto u = vcpu->next;
         while (u != vcpu) {
-            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING))
+            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
+                SCOPED_LOCK(vcpu_list_lock);
+                u = u->next;
                 continue;
+            }
             thread* th;
             if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
                 vcpu->idle_worker->insert_list_tail(th);
