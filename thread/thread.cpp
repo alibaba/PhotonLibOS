@@ -1994,7 +1994,7 @@ insert_list:
         while (u != vcpu) {
             if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
                 SCOPED_LOCK(vcpu_list_lock);
-                u = u->next();
+                u = u->next;
                 continue;
             }
             thread* th;
