@@ -27,6 +27,13 @@ limitations under the License.
 #include "net/curl.h"
 #include "net/socket.h"
 #include "fs/exportfs.h"
+<<<<<<< HEAD
+=======
+#include "common/alog.h"
+#include "common/callback.h"
+#include "common/utility.h"
+#include <vector>
+>>>>>>> d834e6f (Fix resource leak in photon::init() on partial failure (#1254) (#1327) (#1398))
 
 namespace photon {
 
@@ -58,7 +65,15 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine) {
     if (vcpu_init() < 0)
         return -1;
 
+<<<<<<< HEAD
     const uint64_t ALL_ENGINES = INIT_EVENT_EPOLL  |
+=======
+    bool ok = false;
+    DEFER(if (!ok) fini());
+
+    const uint64_t ALL_ENGINES =
+            INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
+>>>>>>> d834e6f (Fix resource leak in photon::init() on partial failure (#1254) (#1327) (#1398))
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
             INIT_EVENT_SELECT  | INIT_EVENT_IOCP;
     if (event_engine & ALL_ENGINES) {
@@ -93,6 +108,7 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine) {
         LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
         reset_handle_registed = true;
     }
+    ok = true;
     return 0;
 }
 
@@ -101,6 +117,15 @@ int init(uint64_t event_engine, uint64_t io_engine) {
 }
 
 int fini() {
+<<<<<<< HEAD
+=======
+    if (!CURRENT)
+        return -1;
+    for (auto h : get_hook_vector()) {
+        h.fire();
+    }
+    get_hook_vector().clear();
+>>>>>>> d834e6f (Fix resource leak in photon::init() on partial failure (#1254) (#1327) (#1398))
 #ifdef __linux__
     FINI_IO(LIBAIO, libaio_wrapper)
     FINI_IO(SOCKET_EDGE_TRIGGER, et_poller)
