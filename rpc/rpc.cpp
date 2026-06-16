@@ -184,6 +184,8 @@ namespace rpc {
         return new StubImpl(stream, ownership);
     }
 
+    static constexpr uint32_t MAX_RPC_MESSAGE_SIZE = 64 * 1024 * 1024; // 64MB
+
     class SkeletonImpl final: public Skeleton
     {
     public:
@@ -268,6 +270,8 @@ namespace rpc {
                     LOG_ERROR_RETURN(ENOSYS, -1, "unable to find function service for ID ", header.function.function);
 
                 func = it->second;
+                if (header.size > MAX_RPC_MESSAGE_SIZE)
+                    LOG_ERROR_RETURN(EMSGSIZE, -1, "RPC message too large: ", header.size);
                 ret = request.push_back(header.size);
                 if (ret != header.size) {
                     LOG_ERRNO_RETURN(ENOMEM, -1, "Failed to allocate iov");
