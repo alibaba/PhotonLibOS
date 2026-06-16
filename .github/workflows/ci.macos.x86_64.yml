@@ -2,10 +2,12 @@ name: macOS x86_64
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
   macOS13-x86:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: macos-15
 
     steps:
