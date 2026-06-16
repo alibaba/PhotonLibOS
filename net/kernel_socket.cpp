@@ -448,6 +448,38 @@ protected:
     }
 };
 
+<<<<<<< HEAD
+=======
+class SMCSocketClient : public KernelSocketClient {
+public:
+    virtual KernelSocketStream* create_stream(int socket_family) {
+        int ver = (socket_family == AF_INET6);
+        return new_stream<KernelSocketStream>(AF_SMC, ver);
+    }
+};
+
+class SMCSocketServer : public KernelSocketServer {
+public:
+    int bind(const EndPoint& ep) override {
+        auto s = sockaddr_storage(ep);
+        if (m_listen_fd < 0) {
+            int ver = (s.get_sockaddr()->sa_family == AF_INET6);
+            m_listen_fd = socket(AF_SMC, ver);
+            if (m_listen_fd < 0) return -1;
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
+        int ret = ::bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
+    }
+
+    UNIMPLEMENTED(int bind(const char* path, size_t count));
+};
+
+>>>>>>> f7d061e (Fix missing setsockopt replay in SMC and fstack-dpdk bind (#1271) (#1317) (#1406))
 #ifdef __linux__
 class ZeroCopySocketStream : public KernelSocketStream {
 public:
@@ -705,9 +737,27 @@ public:
         return 0;
     }
 
+<<<<<<< HEAD
     int bind(uint16_t port, IPAddr addr) override {
         auto addr_in = EndPoint(addr, port).to_sockaddr_in();
         return fstack_bind(m_listen_fd, (sockaddr*) &addr_in, sizeof(addr_in));
+=======
+    int bind(const EndPoint& ep) override {
+        if (m_listen_fd >= 0)
+            LOG_ERROR_RETURN(EALREADY, -1, "already bound");
+        auto s = sockaddr_storage(ep);
+        m_listen_fd = fstack_socket(s.get_sockaddr()->sa_family, SOCK_STREAM, 0);   // already non-blocking and no-delay
+        if (m_listen_fd < 0) {
+            LOG_ERRNO_RETURN(0, -1, "fail to setup DPDK listen fd");
+        }
+        if (m_opts.setsockopt(m_listen_fd) != 0) {
+            return -1;
+        }
+        int ret = fstack_bind(m_listen_fd, s.get_sockaddr(), s.get_socklen());
+        if (ret < 0)
+            LOG_ERRNO_RETURN(0, ret, "failed to bind to ", s.to_endpoint());
+        return 0;
+>>>>>>> f7d061e (Fix missing setsockopt replay in SMC and fstack-dpdk bind (#1271) (#1317) (#1406))
     }
 
     int bind(const char* path, size_t count) override {
