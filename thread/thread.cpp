@@ -1435,10 +1435,10 @@ R"(
         return 0;
     }
 
-    void threads_create_join(uint64_t n,
+    uint64_t threads_create_join(uint64_t n,
         thread_entry start, void* arg, uint64_t stack_size)
     {
-        if (n == 0) return;
+        if (n == 0) return 0;
         thread* threads[32];
         thread** pthreads = threads;
         std::vector<thread*> _threads;
@@ -1447,16 +1447,18 @@ R"(
             _threads.resize(n);
             pthreads = &_threads[0];
         }
+        uint64_t created = 0;
         for (uint64_t i = 0; i < n; ++i)
         {
             auto th = thread_create(start, arg, stack_size);
             if (!th) break;
             thread_enable_join(th);
-            pthreads[i] = th;
+            pthreads[created++] = th;
         }
-        for (uint64_t i = 0; i < n; ++i) {
+        for (uint64_t i = 0; i < created; ++i) {
             thread_join(pthreads[i]);
         }
+        return created;
     }
 
     void Timer::stub()
