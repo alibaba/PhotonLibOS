@@ -1866,6 +1866,82 @@ R"(
     void reset_master_event_engine_default() {
         CURRENT->get_vcpu()->reset_master_event_engine_default();
     }
+<<<<<<< HEAD
+=======
+    inline __attribute__((always_inline))
+    thread* ws_scan_q(vcpu_t* v, thread* first, bool possibly_running) {
+        // the first must be unstealable
+        assert(!first->allow_work_stealing());
+        thread_list stolen;
+        uint64_t count = 0;
+        auto th = first->next();
+        while(th != first) {
+            SCOPED_LOCK(th->lock);
+            if ((possibly_running && th->state == states::RUNNING) ||
+                                    !th->allow_work_stealing()) {
+                th = th->next();
+            } else {
+                auto next = th->remove_from_list();
+                stolen.push_back(th); count++;
+                th->vcpu->nthreads--;
+                th->vcpu = v;
+                v->nthreads++;
+                th = next;
+            }
+        }
+        (void)count;
+        return stolen.eject_whole();
+    }
+    inline __attribute__((always_inline))
+    thread* ws_scan_standbyq(vcpu_t* v, vcpu_t* u) {
+        auto& q = u->standbyq;
+        if (q.empty()) return nullptr;
+        SCOPED_LOCK(q.lock);
+        if (q.empty()) return nullptr;
+        if (!q.front()->allow_work_stealing())
+            return ws_scan_q(v, q.front(), false);
+
+        thread_list stolen;
+        do {
+            SCOPED_LOCK(q.front()->lock);
+            auto th = q.pop_front();
+            stolen.push_back(th);
+            th->vcpu->nthreads--;
+            th->vcpu = v;
+            v->nthreads++;
+        } while (!q.empty() && q.front()->allow_work_stealing());
+        return stolen.eject_whole();
+    }
+    inline __attribute__((always_inline))
+    thread* ws_scan_runq(vcpu_t* v, vcpu_t* u) {
+        if (!u->runq_lock.background_try_lock()) return 0;
+        DEFER(u->runq_lock.background_unlock());
+        return ws_scan_q(v, u->idle_worker, true);
+    }
+    static bool try_work_stealing(vcpu_t* vcpu) {
+        assert(CURRENT->get_vcpu() == vcpu);
+        assert(CURRENT == vcpu->idle_worker);
+        if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
+            return false;
+        scoped_rwlock _(vcpu_list_rwlock, RLOCK);
+        auto u = vcpu->next;
+        while (u != vcpu) {
+            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
+                SCOPED_LOCK(vcpu_list_lock);
+                u = u->next;
+                continue;
+            }
+            thread* th;
+            if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
+                vcpu->idle_worker->insert_list_tail(th);
+                return true;
+            }
+            SCOPED_LOCK(vcpu_list_lock);
+            u = u->next;
+        }
+        return false;
+    }
+>>>>>>> 6860ea8 ([Backport][main to 0.9] | Fix critical bugs in work-stealing and thread-pool (#1246)  (#1331))
     static void* idler(void*) {
         RunQ rq;
         auto last_idle = now;
