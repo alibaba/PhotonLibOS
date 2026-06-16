@@ -608,6 +608,11 @@ namespace photon
         }
         Switch try_goto(thread* th) const {
             assert(th->vcpu == vcpu);
+<<<<<<< HEAD
+=======
+            th->remove_from_list();
+            current->insert_before(th);
+>>>>>>> 881432e (try_goto: insert target before current to reduce runq reordering (#1316) (#1351) (#1383) (#1419))
             return _do_goto(th);
         }
         bool single() const {
