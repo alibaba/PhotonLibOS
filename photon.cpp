@@ -34,6 +34,7 @@ limitations under the License.
 #include "fs/exportfs.h"
 #include "common/alog.h"
 #include "common/callback.h"
+#include "common/utility.h"
 #include <vector>
 
 namespace photon {
@@ -73,6 +74,9 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
     if (vcpu_init() < 0)
         return -1;
 
+    bool ok = false;
+    DEFER(if (!ok) fini());
+
     const uint64_t ALL_ENGINES =
             INIT_EVENT_EPOLL   | INIT_EVENT_EPOLL_NG |
             INIT_EVENT_IOURING | INIT_EVENT_KQUEUE |
@@ -111,6 +115,7 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
         LOG_DEBUG("reset_all_handle registed ", VALUE(getpid()));
         reset_handle_registed = true;
     }
+    ok = true;
     return 0;
 }
 
@@ -128,6 +133,8 @@ void fini_hook(Delegate<void> handler) {
 }
 
 int fini() {
+    if (!CURRENT)
+        return -1;
     for (auto h : get_hook_vector()) {
         h.fire();
     }
