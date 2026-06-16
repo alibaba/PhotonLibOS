@@ -45,14 +45,13 @@ int resize_extfs(photon::fs::IFile *file, uint64_t new_size, int flags) {
     blk64_t blks = new_size / fs->blocksize;
     ret = resize_fs(fs, &blks, flags, NULL);
     if (ret) {
-        if (ret == EXT2_ET_TOOSMALL) {
-            uint64_t min_size = (uint64_t)blks * fs->blocksize;
-            ext2fs_close_free(&fs);
-            LOG_ERROR_RETURN(0, -1, "resize_fs failed: target too small, minimum size required: ` MB (` blocks)",
-                           min_size / 1024 / 1024, blks);
-        }
+        uint64_t min_size = (uint64_t)blks * fs->blocksize;
         ext2fs_close_free(&fs);
-        LOG_ERRNO_RETURN(0, -1, "resize_fs failed, ret=`", ret);
+        if (ret == EXT2_ET_TOOSMALL) {
+            LOG_ERROR_RETURN(0, -1, "resize_fs failed: target too small, minimum size required: ` MB (` blocks)",
+                             min_size / 1024 / 1024, blks);
+        }
+        LOG_ERROR_RETURN(0, -1, "resize_fs failed, ret=`", ret);
     }
     ext2fs_close_free(&fs);
     return 0;
