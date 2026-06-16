@@ -45,16 +45,12 @@ public:
     FlexRingChannel* ring;
     int mode;
 
-<<<<<<< HEAD
-    impl(size_t vcpu_num, int ev_engine, int io_engine, int mode) : mode(mode) {
-=======
     impl(size_t vcpu_num, int ev_engine, int io_engine, int mode, size_t ring_size)
         : mode(mode) {
         assert(ring_size > 0 && "workpool ring_size must be > 0");
         ring = FlexRingChannel::create(ring_size, QUEUE_YIELD_COUNT, QUEUE_YIELD_US);
         if (!ring) abort();
         vcpus.reserve(vcpu_num);
->>>>>>> 8bcbb00 (feat(thread): make WorkPool ring_size configurable with FlexRingChannel (#1314))
         for (size_t i = 0; i < vcpu_num; ++i) {
             owned_std_threads.emplace_back(
                 &WorkPool::impl::worker_thread_routine, this, ev_engine,
