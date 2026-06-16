@@ -2051,8 +2051,13 @@ insert_list:
         auto u = vcpu->next();
         while (u != vcpu) {
             if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
+<<<<<<< HEAD
                 SCOPED_LOCK(vcpu_t::vcpu_list_lock);
                 u = u->next();
+=======
+                SCOPED_LOCK(vcpu_list_lock);
+                u = u->next;
+>>>>>>> 6860ea8 ([Backport][main to 0.9] | Fix critical bugs in work-stealing and thread-pool (#1246)  (#1331))
                 continue;
             }
             thread* th;
