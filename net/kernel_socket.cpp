@@ -309,17 +309,9 @@ public:
         if (!workth) return;
         auto th = workth;
         workth = nullptr;
-<<<<<<< HEAD
-        if (waiting) {
-            thread_interrupt(th);
-            if (!m_block)
-                thread_join((join_handle*)th);
-        }
-=======
         thread_interrupt(th);
         if (!m_block_serv)
             thread_join((join_handle*)th);
->>>>>>> 250a556 (Fix terminate() thread join and skip_read static buffer race (#1287) (#1337) (#1372))
     }
 
     ISocketServer* set_handler(Handler handler) override {
