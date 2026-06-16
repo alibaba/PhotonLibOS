@@ -272,6 +272,7 @@ public:
         if (m_stream->writev(iov, iovcnt) != (ssize_t)count) return -1;
         m_cnt += count;
         return count;
+<<<<<<< HEAD
     }
 
     virtual uint64_t timeout() const override {
@@ -279,6 +280,8 @@ public:
     }
     virtual void timeout(uint64_t timeout) override {
         if (m_stream) m_stream->timeout(timeout);
+=======
+>>>>>>> 0693d8d ([Backport][0.9 to 0.8] | Fix HTTP range parsing, cookie jar, and body writev cap (#1288) (#1370)  (#1380))
     }
 
 protected:
