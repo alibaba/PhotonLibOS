@@ -317,8 +317,13 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
+<<<<<<< HEAD
     alignas(CPUCacheLine::SIZE) std::atomic<size_t> write_head{0};
     alignas(CPUCacheLine::SIZE) std::atomic<size_t> read_tail{0};
+=======
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head{0};
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail{0};
+>>>>>>> fce4975 ([Backport][main to 0.9] | Fix lockfree queue init and ObjectCache move/lock bugs (#1284)  (#1339))
 
     T slots[Base::SLOTS_NUM];
     explicit LockfreeBatchMPMCRingQueue(size_t c) : Base(c) {}

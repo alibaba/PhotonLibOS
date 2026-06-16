@@ -167,4 +167,8 @@ void* ObjectCacheBase::release(const Item& key_item, bool recycle,
         item = *it;
     }
     return ref_release(item, recycle, destroy);
+<<<<<<< HEAD
+=======
+
+>>>>>>> fce4975 ([Backport][main to 0.9] | Fix lockfree queue init and ObjectCache move/lock bugs (#1284)  (#1339))
 }
