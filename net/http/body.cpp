@@ -280,8 +280,8 @@ public:
     }
 
     virtual ssize_t write(const void *buf, size_t count) override {
-        char chunk_size[10];
-        auto size = snprintf(chunk_size, sizeof(chunk_size), "%x\r\n", (unsigned)count);
+        char chunk_size[20];
+        auto size = snprintf(chunk_size, sizeof(chunk_size), "%zx\r\n", count);
         if (size <= 0) return -1;
         struct iovec iov[3] = {{chunk_size, (size_t)size}, {(void*)buf, count}, {&chunk_size[size - 2], 2}};
         ssize_t total = size + count + 2;
@@ -290,9 +290,9 @@ public:
     }
 
     virtual ssize_t writev(const struct iovec *iov, int iovcnt) override {
-        char chunk_size[10];
+        char chunk_size[20];
         ssize_t count = iovector_view((struct iovec*)iov, iovcnt).sum();
-        auto size = snprintf(chunk_size, sizeof(chunk_size), "%x\r\n", (unsigned)count);
+        auto size = snprintf(chunk_size, sizeof(chunk_size), "%zx\r\n", (size_t)count);
         if (m_stream->write(chunk_size, size) != size) return -1;
         if (m_stream->writev(iov, iovcnt) != count) return -1;
         if (m_stream->write(&chunk_size[size - 2], 2) != 2) return -1;
