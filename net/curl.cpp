@@ -153,7 +153,10 @@ public:
         : loop(new_event_loop({this, &cURLLoop::wait_fds},
                               {this, &cURLLoop::on_poll})) {}
 
-    ~cURLLoop() override { delete loop; }
+    ~cURLLoop() override {
+        loop->stop();
+        delete loop;
+    }
 
     void start() { loop->async_run(); }
 
@@ -210,6 +213,21 @@ void __OpenSSLGlobalInit();
 //     curl_global_cleanup();
 // }
 
+<<<<<<< HEAD
+=======
+class CurlResetHandle : public ResetHandle {
+     int reset() override {
+        LOG_INFO("reset libcurl by reset handle");
+        // interrupt g_loop by ETIMEDOUT to replace g_poller
+        if (cctx.g_loop)
+            thread_interrupt(cctx.g_loop->loop_thread(), ETIMEDOUT);
+        return 0;
+     }
+};
+static thread_local CurlResetHandle *reset_handler = nullptr;
+void libcurl_fini();
+
+>>>>>>> 2329992 (Fix TLS null ctx crash, OpenSSL leaks, and curl init (#1285) (#1371) (#1379) (#1408))
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
@@ -220,16 +238,19 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
             new photon::Timer(-1UL, {nullptr, &on_timer}, true, 8UL * 1024 * 1024);
         if (!cctx.g_timer)
             LOG_ERROR_RETURN(EFAULT, -1, "failed to create photon timer");
+        DEFER(if (!cctx.g_libcurl_multi) libcurl_fini());
 
-        if (global_initialized != CURLE_OK)
+        if (global_initialized != CURLE_OK) {
             LOG_ERROR_RETURN(EIO, -1, "CURL global init error: ",
                             curl_easy_strerror(global_initialized));
+        }
 
         LOG_DEBUG("libcurl version ", curl_version());
 
         cctx.g_libcurl_multi = curl_multi_init();
-        if (cctx.g_libcurl_multi == nullptr)
+        if (cctx.g_libcurl_multi == nullptr) {
             LOG_ERROR_RETURN(EIO, -1, "failed to init libcurl-multi");
+        }
 
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
         curl_multi_setopt(cctx.g_libcurl_multi, CURLMOPT_TIMERFUNCTION, timer_cb);
@@ -247,7 +268,6 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
 void libcurl_fini() {
     delete cctx.g_timer;
     cctx.g_timer = nullptr;
-    cctx.g_loop->stop();
     delete cctx.g_loop;
     cctx.g_loop = nullptr;
     delete cctx.g_poller;
