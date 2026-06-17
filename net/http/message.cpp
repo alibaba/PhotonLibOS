@@ -265,6 +265,7 @@ size_t Message::body_size() const {
     if (it != headers.end()) return estring_view(it.second()).to_uint64();
     // or calc from Content-Range
     it = headers.find("Content-Range");
+<<<<<<< HEAD
     if (it == headers.end()) return 0;
     size_t start, end;
     if (sscanf("bytes %lu-%lu", it.second().data(), &start, &end) == 2) {
@@ -272,6 +273,17 @@ size_t Message::body_size() const {
     }
     if (sscanf("bytes */%lu", it.second().data(), &end) == 1) {
         return end;
+=======
+    if (it != headers.end()) {
+        size_t start, end;
+        if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
+            return end-start+1;
+        }
+        if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
+            return end;
+        }
+        return 0;
+>>>>>>> 67a99c6 ([Backport][main to 0.9] | Fix swapped sscanf arguments in Content-Range parsing (#1262)  (#1325) (#1412))
     }
     return 0;
 }
