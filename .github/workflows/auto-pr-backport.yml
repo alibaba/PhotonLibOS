@@ -237,9 +237,11 @@ jobs:
             const lines = droppedFiles.split('\n').filter(Boolean).map(f => `- ${f}`).join('\n');
             body += `\n\n## Dropped new files\n\nThe following new files introduced by cherry-pick were dropped because they don't exist in \`${{steps.branch_info.outputs.PREV_BRANCH}}\`:\n\n${lines}`;
           }
+          // Strip accumulated [Backport][...] and [Pick][...] prefixes from cascading backports
+          const rawTitle = (process.env.TITLE || '').replace(/\[(?:Backport|Pick)\]\[[^\]]*\]\s*/g, '').trim();
           const { data: pr } = await github.rest.pulls.create({
             ...context.repo,
-            title: `[Backport][${{steps.branch_info.outputs.CURRENT_VERSION}} to ${{steps.branch_info.outputs.PREV_VERSION}}] ` + process.env.TITLE,
+            title: `[Backport][${{steps.branch_info.outputs.CURRENT_VERSION}} to ${{steps.branch_info.outputs.PREV_VERSION}}] ` + rawTitle,
             head: `${{steps.create_branch.outputs.PRBRANCH}}`,
             base: `${{steps.branch_info.outputs.PREV_BRANCH}}`,
             body,
