@@ -150,7 +150,7 @@ protected:
 
     bool isFull_;
 
-    bool fiemapSupported_ = true;
+    bool fiemapSupported_ = false;
     void probeFiemap();
 
     virtual bool afterFtrucate(FileNameMap::iterator iter);
