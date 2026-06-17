@@ -56,9 +56,9 @@ void IdentityPoolBase::put(void* obj)
 
 uint64_t IdentityPoolBase::do_scale()
 {
+    SCOPED_LOCK(m_mtx);
     auto des_n = (min_size_in_interval + 1) / 2;
     assert(des_n <= m_size);
-    SCOPED_LOCK(m_mtx);
     while (m_size > 0 && des_n-- > 0) {
         auto x = --m_size;
         m_mtx.unlock();
