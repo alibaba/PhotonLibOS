@@ -323,11 +323,9 @@ public:
         if (!workth) return;
         auto th = workth;
         workth = nullptr;
-        if (waiting) {
-            thread_interrupt(th);
-            if (!m_block)
-                thread_join((join_handle*)th);
-        }
+        thread_interrupt(th);
+        if (!m_block)
+            thread_join((join_handle*)th);
     }
 
     ISocketServer* set_handler(Handler handler) override {
@@ -1048,3 +1046,22 @@ extern "C" ISocketServer* new_fstack_dpdk_socket_server() {
 
 }
 }
+<<<<<<< HEAD
+=======
+
+LogBuffer& operator<<(LogBuffer& log, const in_addr& iaddr) {
+    return log << photon::net::IPAddr(iaddr);
+}
+LogBuffer& operator<<(LogBuffer& log, const in6_addr& iaddr) {
+    return log << photon::net::IPAddr(iaddr);
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+>>>>>>> 1104f42 ([Backport][0.8 to 0.7] | Fix terminate() thread join and skip_read static buffer race (#1287) (#1337) (#1372)  (#1402))
