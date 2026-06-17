@@ -212,7 +212,7 @@ void __OpenSSLGlobalInit();
 // __attribute__((destructor)) void global_fini() {
 //     curl_global_cleanup();
 // }
-
+void libcurl_fini();
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
