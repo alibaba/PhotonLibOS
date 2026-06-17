@@ -106,17 +106,8 @@ public:
     virtual int add_interest(Event e) override {
         if (e.fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid file descriptor ", e.fd);
-<<<<<<< HEAD
         if ((size_t)e.fd >= _inflight_events.size())
-            _inflight_events.resize(e.fd * 2);
-=======
-        if (unlikely(!e.interests))
-            return 0;
-        if (unlikely((size_t)e.fd >= _inflight_events.size()))
             _inflight_events.resize(e.fd * 2 + 2);
-
-        e.interests &= EVENT_RWEO;
->>>>>>> ae598a8 (Fix OOB access in event engines when fd is 0 (#1265) (#1322) (#1387) (#1423))
         auto& entry = _inflight_events[e.fd];
         if (e.interests & entry.interests) {
             if (((e.interests & entry.interests & EVENT_READ) &&
