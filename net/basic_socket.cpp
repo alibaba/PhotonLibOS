@@ -143,7 +143,7 @@ ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
 #ifdef __APPLE__
     off_t len = count;
     ssize_t ret =
-        doio(LAMBDA(::sendfile(out_fd, in_fd, *offset, &len, nullptr, 0)),
+        doio(LAMBDA(::sendfile(in_fd, out_fd, *offset, &len, nullptr, 0)),
              LAMBDA_TIMEOUT(wait_for_fd_writable(out_fd, timeout)));
     return (ret == 0) ? len : (int)ret;
 #else
