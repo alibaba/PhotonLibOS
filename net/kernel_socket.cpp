@@ -301,7 +301,11 @@ public:
         auto th = workth;
         workth = nullptr;
         thread_interrupt(th);
+<<<<<<< HEAD
         if (!m_block_serv)
+=======
+        if (!m_block)
+>>>>>>> 1104f42 ([Backport][0.8 to 0.7] | Fix terminate() thread join and skip_read static buffer race (#1287) (#1337) (#1372)  (#1402))
             thread_join((join_handle*)th);
     }
 
@@ -1121,3 +1125,9 @@ LogBuffer& operator<<(LogBuffer& log, const sockaddr_in& addr) {
 LogBuffer& operator<<(LogBuffer& log, const sockaddr_in6& addr) {
     return log << photon::net::sockaddr_storage(addr).to_endpoint();
 }
+<<<<<<< HEAD
+=======
+LogBuffer& operator<<(LogBuffer& log, const sockaddr& addr) {
+    return log << photon::net::sockaddr_storage(addr).to_endpoint();
+}
+>>>>>>> 1104f42 ([Backport][0.8 to 0.7] | Fix terminate() thread join and skip_read static buffer race (#1287) (#1337) (#1372)  (#1402))
