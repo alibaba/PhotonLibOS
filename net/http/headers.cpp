@@ -190,7 +190,7 @@ std::pair<ssize_t, ssize_t> Headers::range() const {
     auto range = found.second();
     auto eq_pos = range.find("=");
     auto dash_pos = range.find("-");
-    auto start_sv = estring_view(range.substr(eq_pos + 1, dash_pos - eq_pos + 1));
+    auto start_sv = estring_view(range.substr(eq_pos + 1, dash_pos - eq_pos - 1));
     auto end_sv = estring_view(range.substr(dash_pos + 1));
     auto start = start_sv.to_uint64();
     auto end = end_sv.to_uint64();
