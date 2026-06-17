@@ -309,11 +309,9 @@ public:
         if (!workth) return;
         auto th = workth;
         workth = nullptr;
-        if (waiting) {
-            thread_interrupt(th);
-            if (!m_block)
-                thread_join((join_handle*)th);
-        }
+        thread_interrupt(th);
+        if (!m_block)
+            thread_join((join_handle*)th);
     }
 
     ISocketServer* set_handler(Handler handler) override {
