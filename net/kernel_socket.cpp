@@ -360,6 +360,7 @@ public:
             return nullptr;
         }
         if (m_opts.setsockopt(cfd) != 0) {
+            ::close(cfd);
             return nullptr;
         }
         return create_stream(cfd);
