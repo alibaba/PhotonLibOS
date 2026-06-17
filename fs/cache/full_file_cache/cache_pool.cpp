@@ -90,11 +90,27 @@ void FileCachePool::probeFiemap() {
     if (!preExists) mediaFs_->unlink(probePath);
   });
 
-  fiemap_t<1> fie(0, 1);
-  fie.fm_mapped_extents = 0;
-  if (probe->fiemap(&fie) != 0) {
+  // Write data before probing; an empty-file probe falsely succeeds on tmpfs.
+  char buf[4096] = {};
+  if (probe->pwrite(buf, sizeof(buf), 0) != (ssize_t)sizeof(buf)) {
     fiemapSupported_ = false;
-    LOG_INFO("Call fiemap failed, errno `", ERRNO());
+    LOG_INFO("fiemap probe write failed, errno `", ERRNO());
+    return;
+  }
+
+  fiemap_t<1> fie(0, sizeof(buf));
+  fie.fm_mapped_extents = 0;
+  if (probe->fiemap(&fie) != 0 || fie.fm_mapped_extents == 0) {
+    fiemapSupported_ = false;
+    LOG_INFO("fiemap not supported on this filesystem, errno `", ERRNO());
+    return;
+  }
+
+  // Overlayfs returns extents with FIEMAP_EXTENT_UNKNOWN, which are skipped
+  // by queryRefillRange. Detect and fall back to in-memory range tracking.
+  if (fie.fm_extents[0].fe_flags & FIEMAP_EXTENT_UNKNOWN) {
+    fiemapSupported_ = false;
+    LOG_INFO("fiemap returns UNKNOWN extents, falling back to range tracking");
   }
 }
 
