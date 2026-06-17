@@ -213,21 +213,6 @@ void __OpenSSLGlobalInit();
 //     curl_global_cleanup();
 // }
 
-<<<<<<< HEAD
-=======
-class CurlResetHandle : public ResetHandle {
-     int reset() override {
-        LOG_INFO("reset libcurl by reset handle");
-        // interrupt g_loop by ETIMEDOUT to replace g_poller
-        if (cctx.g_loop)
-            thread_interrupt(cctx.g_loop->loop_thread(), ETIMEDOUT);
-        return 0;
-     }
-};
-static thread_local CurlResetHandle *reset_handler = nullptr;
-void libcurl_fini();
-
->>>>>>> 2329992 (Fix TLS null ctx crash, OpenSSL leaks, and curl init (#1285) (#1371) (#1379) (#1408))
 int libcurl_init(long flags, long pipelining, long maxconn) {
     if (cctx.g_loop == nullptr) {
         __OpenSSLGlobalInit();
