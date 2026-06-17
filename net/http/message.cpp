@@ -307,9 +307,9 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     buf_append(buf, " ");
     uint16_t target_disp = buf - m_buf;
     m_target = {uint16_t(buf - m_buf), u.target().size()};
-    if (enable_proxy) {
+    if (enable_proxy && !u.secure()) {
         m_target = {uint16_t(buf - m_buf), full_url_size(u)};
-        buf_append(buf, u.secure() ? https_url_scheme : http_url_scheme);
+        buf_append(buf, http_url_scheme);
         buf_append(buf, u.host_port());
     }
     buf_append(buf, u.target());
@@ -353,8 +353,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     }
     StoredURL u(location);
     auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        (enable_proxy ? full_url_size(u) : u.target().size());
-
+        ((enable_proxy && !u.secure()) ? full_url_size(u) : u.target().size());
     int delta = (int)new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
     if (headers.reset_host(delta, u.host_port()) < 0)
