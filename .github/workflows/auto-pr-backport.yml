@@ -147,9 +147,6 @@ jobs:
       with:
         github-token: ${{ secrets.AUTOPR_SECRET }}
         script: |
-<<<<<<< HEAD
-          await github.rest.pulls.create({
-=======
           const hasConflict = process.env.HAS_CONFLICT === 'true';
           const conflictNote = process.env.CONFLICT_NOTE || '';
           const droppedFiles = (process.env.DROPPED_FILES || '').trim();
@@ -166,7 +163,6 @@ jobs:
           // Strip accumulated [Backport][...] and [Pick][...] prefixes from cascading backports
           const rawTitle = (process.env.TITLE || '').replace(/\[(?:Backport|Pick)\]\[[^\]]*\]\s*/g, '').trim();
           const { data: pr } = await github.rest.pulls.create({
->>>>>>> ebe1055 (ci(backport): strip cascading [Backport]/[Pick] prefixes from PR title (#1464))
             ...context.repo,
             title: `[Backport][${{steps.branch_info.outputs.CURRENT_VERSION}} to ${{steps.branch_info.outputs.PREV_VERSION}}] ` + rawTitle,
             head: `${{steps.create_branch.outputs.PRBRANCH}}`,
