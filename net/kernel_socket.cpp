@@ -310,7 +310,7 @@ public:
         auto th = workth;
         workth = nullptr;
         thread_interrupt(th);
-        if (!m_block_serv)
+        if (!m_block)
             thread_join((join_handle*)th);
     }
 
