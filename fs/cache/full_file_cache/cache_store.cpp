@@ -152,7 +152,7 @@ std::pair<off_t, size_t> FileCacheStore::queryRefillRange(off_t offset, size_t s
 
   for (ssize_t i = (ssize_t)(fie.fm_mapped_extents) - 1; i >= 0; i--) {
     auto& extent = fie.fm_extents[i];
-    if ((extent.fe_flags == FIEMAP_EXTENT_UNKNOWN) || (extent.fe_flags == FIEMAP_EXTENT_UNWRITTEN)) continue;
+    if (extent.fe_flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_UNWRITTEN)) continue;
       if (extent.fe_logical < holeEnd){
         if (extent.fe_logical_end() >= holeEnd){
           holeEnd = extent.fe_logical;
@@ -162,7 +162,7 @@ std::pair<off_t, size_t> FileCacheStore::queryRefillRange(off_t offset, size_t s
 
   for (uint32_t i = 0; i < fie.fm_mapped_extents; i++) {
     auto& extent = fie.fm_extents[i];
-    if ((extent.fe_flags == FIEMAP_EXTENT_UNKNOWN) || (extent.fe_flags == FIEMAP_EXTENT_UNWRITTEN)) continue;
+    if (extent.fe_flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_UNWRITTEN)) continue;
       if (extent.fe_logical_end() > holeStart){
         if (extent.fe_logical <= holeStart){
           holeStart = extent.fe_logical_end();
