@@ -265,15 +265,13 @@ size_t Message::body_size() const {
     if (it != headers.end()) return estring_view(it.second()).to_uint64();
     // or calc from Content-Range
     it = headers.find("Content-Range");
-    if (it != headers.end()) {
-        size_t start, end;
-        if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
-            return end-start+1;
-        }
-        if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
-            return end;
-        }
-        return 0;
+    if (it == headers.end()) return 0;
+    size_t start, end;
+    if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
+        return end-start+1;
+    }
+    if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
+        return end;
     }
     return 0;
 }
