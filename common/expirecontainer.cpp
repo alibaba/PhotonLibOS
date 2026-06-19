@@ -152,11 +152,12 @@ int ObjectCacheBase::ref_release(ItemPtr item, bool recycle) {
 // the argument `key` plays the roles of (type-erased) key
 int ObjectCacheBase::release(const ObjectCacheBase::Item& key_item,
                              bool recycle) {
-    auto item = ({
+    ItemPtr item; 
+    {
         SCOPED_LOCK(_lock);
-        auto it = find(key_item);
+        auto it = ExpireContainerBase::TypedIterator<Item>(Base::__find_prelock(key_item));
         if (it == end()) return -1;
-        it;
-    });
+        item = *it;
+    }
     return ref_release(*item, recycle);
 }
