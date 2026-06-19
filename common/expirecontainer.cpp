@@ -159,5 +159,5 @@ int ObjectCacheBase::release(const ObjectCacheBase::Item& key_item,
         if (it == end()) return -1;
         item = *it;
     }
-    return ref_release(*item, recycle);
+    return ref_release(item, recycle);
 }
