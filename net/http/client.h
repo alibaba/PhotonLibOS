@@ -130,16 +130,33 @@ public:
         const void *body_buffer = nullptr;
         size_t body_buffer_size = 0;
 
-        char _buf[0];
+        // Avoid UB: use pointer instead of flexible array member
+        char* _buf = nullptr;
+
+        // Internal constructors accepting external buffer pointer
+        Operation(Client* c, Verb v, std::string_view url, uint16_t buf_size, char* buf)
+            : req(buf, buf_size, v, url, c->has_proxy()),
+              enable_proxy(c->has_proxy()),
+              _client(c),
+              _buf(buf) {}
+        Operation(Client* c, uint16_t buf_size, char* buf)
+            : req(buf, buf_size),
+              enable_proxy(c->has_proxy()),
+              _client(c),
+              _buf(buf) {}
+        explicit Operation(uint16_t buf_size, char* buf)
+            : req(buf, buf_size), _client(nullptr),
+              _buf(buf) {}
+
+        // Heap-allocated constructors (used by create())
+        // Buffer is allocated immediately after the object
         Operation(Client* c, Verb v, std::string_view url, uint16_t buf_size)
-            : req(_buf, buf_size, v, url, c->has_proxy()),
-              enable_proxy(c->has_proxy()),
-              _client(c) {}
+            : Operation(c, v, url, buf_size, reinterpret_cast<char*>(this + 1)) {}
         Operation(Client* c, uint16_t buf_size)
-            : req(_buf, buf_size),
-              enable_proxy(c->has_proxy()),
-              _client(c) {}
-        explicit Operation(uint16_t buf_size) : req(_buf, buf_size), _client(nullptr) {}
+            : Operation(c, buf_size, reinterpret_cast<char*>(this + 1)) {}
+        explicit Operation(uint16_t buf_size)
+            : Operation(buf_size, reinterpret_cast<char*>(this + 1)) {}
+
         Operation() = delete;
         ~Operation() = default;
 
@@ -151,9 +168,11 @@ public:
         char _buf[BufferSize];
     public:
         OperationOnStack(Client* c, Verb v, std::string_view url):
-            Operation(c, v, url, BufferSize) {}
-        explicit OperationOnStack(Client* c): Operation(c, BufferSize) {};
-        OperationOnStack(): Operation(BufferSize) {}
+            Operation(c, v, url, BufferSize, _buf) {}
+        explicit OperationOnStack(Client* c):
+            Operation(c, BufferSize, _buf) {}
+        OperationOnStack():
+            Operation(BufferSize, _buf) {}
     };
 
     virtual int call(Operation* /*IN, OUT*/ op) = 0;
