@@ -27,6 +27,7 @@ limitations under the License.
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mswsock.h>
+#include <mstcpip.h>
 
 // Winsock's getsockname / getpeername / accept / recvfrom all take `int*` for
 // the address-length parameter, while POSIX uses `socklen_t*`.  MinGW

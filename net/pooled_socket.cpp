@@ -15,30 +15,33 @@ limitations under the License.
 */
 
 #include "socket.h"
-
-#include <unordered_map>
-
+#include <netinet/tcp.h>
+#include <vector>
+#include <unordered_set>
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>
+#include <photon/common/string_view.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/thread/timer.h>
 #include <photon/net/basic_socket.h>
-
+#include <photon/net/utils.h>
 #include "base_socket.h"
 
 namespace photon {
 namespace net {
 
 class TCPSocketPool;
+struct StreamListHead;
 
 class PooledTCPSocketStream : public ForwardSocketStream {
 public:
     TCPSocketPool* pool;
-    EndPoint ep;
-    bool drop;
+    StreamListHead* head;
+    bool drop = false;
 
-    PooledTCPSocketStream(ISocketStream* stream, TCPSocketPool* pool, const EndPoint& ep)
-            : ForwardSocketStream(stream, false), pool(pool), ep(ep), drop(false) {}
+    PooledTCPSocketStream(ISocketStream* stream, TCPSocketPool* pool, StreamListHead* head)
+            : ForwardSocketStream(stream, false), pool(pool), head(head) { }
     // release socket back to pool when dtor
     ~PooledTCPSocketStream() override;
     // forwarding all actions
@@ -102,166 +105,335 @@ public:
 };
 
 struct StreamListNode : public intrusive_list_node<StreamListNode> {
-    EndPoint key;
     std::unique_ptr<ISocketStream> stream;
-    int fd;
+    StreamListHead* head;
     Timeout timeout;
+    StreamListNode(ISocketStream* stream, StreamListHead* head, uint64_t TTL_us) :
+        stream(stream), head(head), timeout(TTL_us) { }
+};
 
-    StreamListNode(const EndPoint& key, ISocketStream* stream, int fd, uint64_t TTL_us)
-        : key(key), stream(stream), fd(fd), timeout(TTL_us) {
+struct StreamListHead : public StreamListNode {
+    // total # of sockets, including those in use, not including the head
+    uint32_t _refcnt = 0;
+    uint16_t _key_len;
+    char _key[0];
+
+    StreamListHead(std::string_view k) : StreamListNode(0, 0, 0) {
+        assert(k.size() < UINT16_MAX);
+        memcpy(_key, k.data(), k.size());
+        _key[_key_len = k.size()] = '\0';
+    }
+    std::string_view key() const { return {_key, _key_len}; }
+    static StreamListHead* create(std::string_view key) {
+        auto buf = malloc(sizeof(StreamListHead) + key.size() + 1);
+        return new (buf) StreamListHead(key);
+    }
+    void destroy() {
+        this->~StreamListHead();
+        free(this);
     }
 };
 
-class TCPSocketPool : public ForwardSocketClient {
-protected:
-    CascadingEventEngine* ev;
-    photon::thread* collector;
-    std::unordered_map<EndPoint, intrusive_list<StreamListNode>> fdmap;
-    uint64_t TTL_us;
-    photon::Timer timer;
+struct StreamList : intrusive_list<StreamListNode> {
+    StreamList(const StreamList&) = delete;
+    StreamList(StreamList&& rhs) {
+        node = rhs.node;
+        rhs.node = nullptr;
+    }
+    StreamList(std::string_view key)  {
+        auto head = StreamListHead::create(key);
+        push_back(head);
+    }
+    ~StreamList() {
+        auto h = head();
+        assert(h);
+        if (!h->single()) {
+            auto ptr = h->remove_from_list();
+            intrusive_list<StreamListNode> list(ptr);
+            h->_refcnt -= list.delete_all();
+        }
+        if (h->_refcnt)
+            LOG_ERROR("there are still ` living socket stream(s) outside the pool!", h->_refcnt);
+        h->destroy();
+        node = nullptr;
+    }
+    StreamListHead* head() const {
+        return (StreamListHead*)node;
+    }
+    void operator=(const StreamList&) = delete;
+    void operator=(StreamList&& rhs) {
+        if (this == &rhs) return;
+        if (node) delete_all();
+        node = rhs.node;
+        rhs.node = nullptr;
+    }
+};
+
+struct Hash {
+    size_t operator()(const StreamList& list) const {
+        return std::hash<std::string_view>()(list.head()->key());
+    }
+};
+
+struct Equal {
+    bool operator()(const StreamList& a, const StreamList& b) const {
+        return a.head()->key() == b.head()->key();
+    }
+    bool operator()(const StreamList& a, std::string_view b) const {
+        return a.head()->key() == b;
+    }
+};
+
+class TCPSocketPool : public ISocketPool {
+public:
+    SocketPoolArgs args;
+    std::unordered_set<StreamList, Hash, Equal> sockmap;
+    CascadingEventEngine* ev = new_default_cascading_engine();
+    join_handle* collector = thread_enable_join(
+        thread_create11(&TCPSocketPool::collect, this));
+
+    TCPSocketPool(const SocketPoolArgs& args) : args(args) { }
+
+    ~TCPSocketPool() override {
+        auto th = collector;
+        collector = nullptr;
+        thread_interrupt((thread*)th);
+        thread_join(th);
+        delete ev;
+        if (args.client_ownership)
+            delete args.sockclient;
+    }
+
+    __attribute__((noinline))
+    static void logerr_no_client() {
+        LOG_ERROR_RETURN(ENOSYS, , "a socket client must be provided when socket pool was constructed");
+    }
+    int setsockopt(int level, int option_name, const void* option_value, socklen_t option_len) override {
+        if (!args.sockclient) return logerr_no_client(), -1;
+        return args.sockclient->setsockopt(level, option_name, option_value, option_len);
+    }
+    int getsockopt(int level, int option_name, void* option_value, socklen_t* option_len) override {
+        if (!args.sockclient) return logerr_no_client(), -1;
+        return args.sockclient->getsockopt(level, option_name, option_value, option_len);
+    }
+    uint64_t timeout() const override {
+        if (!args.sockclient) return logerr_no_client(), -1;
+        return args.sockclient->timeout();
+    }
+    void timeout(uint64_t tm) override {
+        if (!args.sockclient) return logerr_no_client();
+        args.sockclient->timeout(tm);
+    }
+    Object* get_underlay_object(uint64_t recursion = 0) override {
+        return (recursion == 0) ? args.sockclient :
+                                  args.sockclient->get_underlay_object(recursion - 1);
+    }
 
     // all fd < 0 treated as socket not based on fd
     // and always reuseable. Using such socket needs user
     // to check if connected socket is still usable.
-    // if there still have unread bytes in strema, it should be closed.
+    // if there still have unread bytes in stream, it should be closed.
     bool stream_reusable(int fd) {
         return (fd < 0) || (wait_for_fd_readable(fd, 0) != 0);
     }
 
-    void add_watch(StreamListNode* node) {
-        if (node->fd >= 0) ev->add_interest({node->fd, EVENT_READ, node});
+    void add_watch(int fd, StreamListNode* node) {
+        if (fd >= 0) ev->add_interest({fd, EVENT_READ, node});
     }
 
-    void rm_watch(StreamListNode* node) {
-        if (node->fd >= 0) ev->rm_interest({node->fd, EVENT_READ, node});
-    }
-
-    ISocketStream* get_from_pool(const EndPoint& ep) {
-        auto it = fdmap.find(ep);
-        if (it == fdmap.end()) return nullptr;
-        assert(it != fdmap.end());
-        auto node = it->second.pop_front();
-        rm_watch(node);
-        DEFER(delete node);
-        if (it->second.empty()) fdmap.erase(it);
-        return node->stream.release();
-    }
-
-    void push_into_pool(StreamListNode* node) {
-        fdmap[node->key].push_back(node);
-        add_watch(node);
-    }
-
-    void drop_from_pool(StreamListNode* node) {
-        // or node have no record
-        auto it = fdmap.find(node->key);
-        auto& list = it->second;
-        list.erase(node);
-        if (list.empty()) fdmap.erase(it);
-        rm_watch(node);
-    }
-
-public:
-    TCPSocketPool(ISocketClient* client, uint64_t TTL_us,
-                  bool client_ownership = false)
-        : ForwardSocketClient(client, client_ownership),
-          ev(photon::new_default_cascading_engine()),
-          TTL_us(TTL_us),
-          timer(TTL_us, {this, &TCPSocketPool::evict}) {
-        collector = (photon::thread*)photon::thread_enable_join(
-            photon::thread_create11(&TCPSocketPool::collect, this));
-    }
-
-    ~TCPSocketPool() override {
-        timer.stop();
-        auto th = collector;
-        collector = nullptr;
-        photon::thread_interrupt((photon::thread*)th);
-        photon::thread_join((photon::join_handle*)th);
-        for (auto& l : fdmap) {
-            l.second.delete_all();
-        }
-        delete ev;
+    int rm_watch(StreamListNode* node) {
+        auto fd = node->stream->get_underlay_fd();
+        if (fd >= 0) ev->rm_interest({fd, EVENT_READ, node});
+        return fd;
     }
 
     ISocketStream* connect(const char* path, size_t count) override {
         LOG_ERROR_RETURN(ENOSYS, nullptr,
                          "Socket pool supports TCP-like socket only");
     }
-
     ISocketStream* connect(const EndPoint& remote,
                            const EndPoint* local) override {
-    again:
-        auto stream = get_from_pool(remote);
-        if (!stream) {
-            stream = m_underlay->connect(remote, local);
-            if (!stream) return nullptr;
-        } else if (!stream_reusable(stream->get_underlay_fd())) {
-            delete stream;
-            goto again;
-        }
-        return new PooledTCPSocketStream(stream, this, remote);
+        std::string_view key{(char*)&remote, sizeof(remote)};
+        return connect(key, remote, local);
     }
-    uint64_t evict() {
-        // remove empty entry in fdmap
+    ISocketStream* connect(std::string_view key, const EndPoint& remote, const EndPoint* local = nullptr) override {
+        return connect(key, [&]() -> ISocketStream* {
+            if (!args.sockclient) return logerr_no_client(), nullptr;
+            return args.sockclient->connect(remote, local);
+        });
+    }
+    ISocketStream* connect(std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) override {
+        return connect(domain_name, domain_name, port, local);
+    }
+    ISocketStream* connect(std::string_view key, std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) override {
+        return connect(key, [&]() -> ISocketStream* {
+            if (!args.sockclient) return logerr_no_client(), nullptr;
+            std::vector<IPAddr> addrs;
+            int ret = gethostbyname_nb(domain_name, addrs);
+            if (ret < 0 || addrs.empty())
+                LOG_ERRNO_RETURN(0, nullptr, "failed to resolve ", VALUE(domain_name));
+            EndPoint ep{addrs[rand() % addrs.size()], port};
+            return args.sockclient->connect(ep, local);
+        });
+    }
+    ISocketStream* connect(std::string_view key, TempDelegate<ISocketStream*> connector) override {
+        auto ret = sockmap.emplace(key);
+        auto head = ret.first->head();
+        ISocketStream* stream;
+        if (head->single()) {
+            stream = connector();
+            if (!stream)
+                return nullptr;
+            head->_refcnt++;
+            if (args.enable_tcp_keepalive)
+                set_keepalive(stream);
+        } else {
+            auto node = head->next();
+            node->remove_from_list();
+            rm_watch(node);
+            stream = node->stream.release();
+            delete node;
+        }
+        return new PooledTCPSocketStream(stream, this, head);
+    }
+
+    void set_keepalive(ISocketStream* stream) {
+        stream->setsockopt<int>(SOL_SOCKET, SO_KEEPALIVE, 1);
+#ifndef _WIN32
+#ifdef __APPLE__
+#define TCP_KEEPIDLE  TCP_KEEPALIVE
+#define SOL_TCP       IPPROTO_TCP
+#endif
+        stream->setsockopt<int>(SOL_TCP, TCP_KEEPIDLE, args.tcp_keepalive_time);
+        stream->setsockopt<int>(SOL_TCP, TCP_KEEPINTVL, args.tcp_keepalive_intvl);
+        stream->setsockopt<int>(SOL_TCP, TCP_KEEPCNT, args.tcp_keepalive_probes);
+#else
+        struct tcp_keepalive {
+            u_long onoff;
+            u_long keepalivetime;
+            u_long keepaliveinterval;
+        } keepalive_params;
+        keepalive_params.onoff = 1;
+        keepalive_params.keepalivetime = args.tcp_keepalive_time * 1000;
+        keepalive_params.keepaliveinterval = args.tcp_keepalive_intvl * 1000;
+        DWORD bytes_returned = 0;
+        SOCKET s = (SOCKET)(intptr_t)stream->get_underlay_fd();
+        WSAIoctl(s, SIO_KEEPALIVE_VALS,
+                    &keepalive_params, sizeof(keepalive_params),
+                    nullptr, 0, &bytes_returned, nullptr, nullptr);
+#endif
+    }
+
+    void release(StreamListHead* head, ISocketStream* stream) {
+        auto fd = stream->get_underlay_fd();
+        ERRNO err;
+        if (!stream_reusable(fd)) {
+            assert(head->_refcnt > 0);
+            head->_refcnt--;
+            delete stream;
+            return;
+        }
+        auto node = new StreamListNode(stream, head, args.expiration);
+        head->insert_before(node);
+        assert(head->prev() == node);
+        add_watch(fd, node);
+        errno = err.no;
+    }
+
+    Timeout check_expire_heartbeat() {
         intrusive_list<StreamListNode> freelist;
-        uint64_t near_expire = TTL_us + now;
-        for (auto it = fdmap.begin(); it != fdmap.end();) {
-            auto& list = it->second;
-            uint64_t exp;
-            while (!list.empty() && now >=
-                   (exp = list.front()->timeout.expiration())) {
-                freelist.push_back(list.pop_front());
+        auto pre_delete = [&](StreamListHead* head, StreamListNode* ptr) {
+            assert(head->_refcnt > 0);
+            head->_refcnt--;
+            auto next = ptr->remove_from_list();
+            freelist.push_back(ptr);
+            return next;
+        };
+        Timeout near_expire(args.expiration);
+        // uint64_t near_expire = sat_add(now, args.expiration), exp;
+        for (auto it = sockmap.begin(); it != sockmap.end();) {
+            assert(!it->empty());
+            auto head = it->head();
+            auto ptr = head->next();
+            while (ptr != head) {
+                if (now < ptr->timeout.expiration()) {
+                    near_expire = std::min(near_expire, ptr->timeout);
+                    break;
+                }
+                ptr = pre_delete(head, ptr);
             }
-            if (list.empty()) {
-                it = fdmap.erase(it);
-            } else {
-                near_expire = std::min(near_expire, exp);
-                it++;
+            if (args.heartbeater) {
+                while (ptr != head) {
+#ifdef _WIN32                                // a fd (handle) can not be added to multiple
+                    int fd = rm_watch(ptr);  // IOCPs, while epoll, iouring, kqueue can.
+#endif
+                    int ret = args.heartbeater(ptr->stream.get());
+                    if (ret == 0) {
+#ifdef _WIN32
+                        add_watch(fd, ptr);
+#endif
+                        ptr = ptr->next();
+                    } else {
+                        ptr = pre_delete(head, ptr);
+                    }
+                }
             }
+            if (head->_refcnt) ++it;
+            else it = sockmap.erase(it);
         }
         for (auto node : freelist) {
             rm_watch(node);
         }
         freelist.delete_all();
-        assert(near_expire > now);
-        return sat_sub(near_expire, now);
+        assert(near_expire.expiration() > now);
+        return near_expire;
     }
 
-    bool release(const EndPoint& ep, ISocketStream* stream) {
-        auto fd = stream->get_underlay_fd();
-        ERRNO err;
-        if (!stream_reusable(fd)) return false;
-        auto node = new StreamListNode(ep, stream, fd, TTL_us);
-        push_into_pool(node);
-        errno = err.no;
-        return true;
+    void check_fd_state(Timeout timeout) {
+    again:
+        StreamListNode* nodes[16];
+        auto ret = ev->wait_for_events((void**)nodes, 16, timeout);
+        for (int i = 0; i < ret; i++) {
+            // since destructed socket should never become readable before
+            // it have been acquired again
+            // if it is readable or RDHUP, both condition should treat as
+            // socket shutdown
+            assert(!nodes[i]->single());
+            assert(nodes[i] != nodes[i]->head);
+            assert(nodes[i]->head->_refcnt > 0);
+            nodes[i]->head->_refcnt--;
+            nodes[i]->remove_from_list();
+            rm_watch(nodes[i]);
+        }
+        for (int i = 0; i < ret; i++) delete nodes[i];
+        if (ret == (int)LEN(nodes)) goto again; // may have more
     }
 
     void collect() {
-        StreamListNode* nodes[16];
+        auto interval = std::min(args.heartbeat_interval,
+                                 args.expiration);
+        Timeout timeout(interval);
         while (collector) {
-            auto ret = ev->wait_for_events((void**)nodes, 16, -1ULL);
-            for (int i = 0; i < ret; i++) {
-                // since destructed socket should never become readable before
-                // it have been acquired again
-                // if it is readable or RDHUP, both condition should treat as
-                // socket shutdown
-                drop_from_pool(nodes[i]);
-            }
-            for (int i = 0; i < ret; i++) delete nodes[i];
+            check_fd_state(timeout);
+            auto next = check_expire_heartbeat();
+            timeout.timeout(interval);
+            if (timeout > next)
+                timeout = next;
         }
     }
 };
 
-PooledTCPSocketStream::~PooledTCPSocketStream() {
-    if (drop || !pool->release(ep, m_underlay)) {
+inline PooledTCPSocketStream::~PooledTCPSocketStream() {
+    if (drop) {
         delete m_underlay;
+        head->_refcnt--;
+    } else {
+        pool->release(head, m_underlay);
     }
 }
 
-extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t TTL_us, bool client_ownership) {
-    return new TCPSocketPool(client, TTL_us, client_ownership);
+extern "C" ISocketPool* new_tcp_socket_pool(const SocketPoolArgs& args) {
+    return new TCPSocketPool(args);
 }
 
 }

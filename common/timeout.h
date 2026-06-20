@@ -56,6 +56,18 @@ public:
     bool operator < (const Timeout& rhs) const {
         return m_expiration < rhs.m_expiration;
     }
+    bool operator <= (const Timeout& rhs) const {
+        return m_expiration < rhs.m_expiration;
+    }
+    bool operator > (const Timeout& rhs) const {
+        return m_expiration > rhs.m_expiration;
+    }
+    bool operator >= (const Timeout& rhs) const {
+        return m_expiration >= rhs.m_expiration;
+    }
+    bool operator == (const Timeout& rhs) const {
+        return m_expiration == rhs.m_expiration;
+    }
     Timeout& timeout_at_most(uint64_t x) {
         x = sat_add(now, x);
         if (x < m_expiration)
