@@ -74,7 +74,6 @@ namespace photon
         ~Timer()
         {
             if (!_th) return;
-            stop();
             _repeating = false;
             if (_waiting)
                 thread_interrupt(_th, ECANCELED);
