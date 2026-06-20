@@ -1486,7 +1486,6 @@ R"(
             if (!timeout)
                 timeout = _default_timeout;
         } while(_repeating);
-        _th = nullptr;
     }
     void* Timer::_stub(void* _this)
     {
