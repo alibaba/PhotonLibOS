@@ -220,8 +220,6 @@ jobs:
           cd build && ctest --timeout 3600 -V
           pkill redis-server
 
-<<<<<<< HEAD
-=======
   gcc13:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
@@ -308,7 +306,6 @@ jobs:
           cd build && ctest --timeout 3600 -V
           pkill redis-server
 
->>>>>>> f51c64f (ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410))
   fstack:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest

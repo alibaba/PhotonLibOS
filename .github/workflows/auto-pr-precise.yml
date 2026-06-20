@@ -22,8 +22,6 @@ jobs:
         git config --global --add safe.directory "${{ github.workspace }}"
         git config -l
 
-<<<<<<< HEAD
-=======
     - name: detect source pr
       id: detect
       uses: actions/github-script@v7
@@ -55,7 +53,6 @@ jobs:
           }
           core.setOutput('SKIP', 'false');
 
->>>>>>> f51c64f (ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410))
     - name: check branch names
       id: branch_info
       run: |

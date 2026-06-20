@@ -7,12 +7,8 @@ on:
 
 jobs:
   arm-linux-build-and-test:
-<<<<<<< HEAD
-    runs-on: [self-hosted, Linux, ARM64]
-=======
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-24.04-arm
->>>>>>> f51c64f (ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410))
 
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -93,12 +89,8 @@ jobs:
           pkill redis-server
 
   debug-build-from-source:
-<<<<<<< HEAD
-    runs-on: ubuntu-latest
-=======
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-24.04-arm
->>>>>>> f51c64f (ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410))
     container:
       image: almalinux:8
     steps:
