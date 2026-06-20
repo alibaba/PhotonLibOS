@@ -263,8 +263,8 @@ protected:
     using Base::idx;
     using Base::tail;  // write_tail
 
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head;
-    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail;
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> write_head{0};
+    alignas(Base::CACHELINE_SIZE) std::atomic<uint64_t> read_tail{0};
 
     T slots[Base::capacity];
 
