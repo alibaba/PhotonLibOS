@@ -17,6 +17,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
@@ -58,6 +65,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-9/enable
@@ -100,6 +114,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-10/enable
@@ -142,6 +163,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-11/enable
@@ -184,6 +212,13 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
+      - name: Setup ext4 loopback for fiemap tests
+        run: |
+          yum install -y -q e2fsprogs
+          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
+          mkfs.ext4 -q /tmp/ext4.img
+          mkdir -p /root/tmp
+          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
           source /opt/rh/gcc-toolset-12/enable
