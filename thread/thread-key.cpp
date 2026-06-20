@@ -177,7 +177,7 @@ void deallocate_tls(void** tls_) {
                         thread_keys[idx].dtor(data);
                 }
             } else {
-                idx += THREAD_KEY_1STLEVEL_SIZE;
+                idx += THREAD_KEY_2NDLEVEL_SIZE;
             }
         }
         if (!tls->specific_used) {
