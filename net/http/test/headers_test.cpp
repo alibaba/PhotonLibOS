@@ -214,16 +214,26 @@ TEST(ReqHeaders, redirect) {
     EXPECT_EQ(req.headers["test_key"], "test_value");
     auto value = req.headers["Host"];
     LOG_DEBUG(VALUE(value));
-    req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/targetName");
+    req.redirect(Verb::DELETE, "http://domain.redirect1/targetName", true);
+    EXPECT_EQ(req.target(), "http://domain.redirect1/targetName");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/redirect_test");
+    EXPECT_EQ(req.target(), "http://domain.redirect1/redirect_test");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test1", false);
     EXPECT_EQ(req.target(), "/redirect_test1");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    LOG_DEBUG(VALUE(req.target()));
+
+    // https
+    req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
+    EXPECT_EQ(req.target(), "/targetName");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    LOG_DEBUG(VALUE(req.target()));
+    req.redirect(Verb::GET, "/redirect_test", true);
+    EXPECT_EQ(req.target(), "/redirect_test");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
 }

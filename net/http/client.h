@@ -69,6 +69,10 @@ public:
         using BodyWriter = Delegate<ssize_t, Request*>;
         BodyWriter body_writer = {};
 
+        // For HTTP/1.1 proxy: merge proxy_header into req.headers (sent with the request).
+        // For HTTPS proxy: proxy_header stays separate (used by CONNECT handshake only).
+        CommonHeaders<> proxy_header;
+
         static Operation* create(Client* c, Verb v, std::string_view url,
                             uint16_t buf_size = 64 * 1024 - 1) {
             auto ptr = malloc(sizeof(Operation) + buf_size);
@@ -85,23 +89,25 @@ public:
         void set_enable_proxy(bool enable) {
             enable_proxy = enable;
         }
-        // Set per-operation proxy URL, takes precedence over client-level proxy.
-        // Automatically enables proxy and rebuilds request line to absolute URI format.
+        // Set per-operation proxy URL and enable proxy. Takes precedence over client-level proxy.
+        // Clears proxy_header (old proxy's auth is no longer valid).
         void set_proxy(std::string_view proxy) {
             proxy_url.from_string(proxy);
-            if (!enable_proxy) {
-                // redirect() handles scheme+host completion and absolute URI rebuild
-                req.redirect(req.verb(), req.target(), true);
-                enable_proxy = true;
-            }
+            enable_proxy = true;
+            proxy_header.reset();
         }
-        const StoredURL* get_proxy() {
+        // Returns the active proxy URL: per-op URL if set, else client-level URL.
+        // Contract: never returns nullptr. May point to an empty StoredURL.
+        StoredURL* get_proxy() {
+            if (!proxy_url.empty()) return &proxy_url;
+            if (_client) return _client->get_proxy();
             return &proxy_url;
         }
-        // Clear per-operation proxy, fall back to client-level proxy.
-        // Does not change enable_proxy or request line format.
-        void clear_proxy() {
-            proxy_url.clear();
+        // Returns active proxy URL if proxy is enabled AND URL is non-empty; nullptr otherwise.
+        StoredURL* get_active_proxy() {
+            if (!enable_proxy) return nullptr;
+            auto* p = get_proxy();
+            return p->empty() ? nullptr : p;
         }
         int call() {
             if (!_client) return -1;
@@ -159,8 +165,14 @@ public:
     virtual int call(Operation* /*IN, OUT*/ op) = 0;
     // get common headers, to manipulate
     virtual Headers* common_headers() = 0;
+    // get proxy headers (client-level proxy headers, inherited by operations at call() time)
+    virtual Headers* proxy_headers() = 0;
 
-    void set_proxy(std::string_view proxy);
+    void set_proxy(std::string_view proxy) {
+        m_proxy_url.from_string(proxy);
+        m_proxy = true;
+        proxy_headers()->reset();
+    }
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
@@ -197,7 +209,6 @@ public:
 
 protected:
     StoredURL m_proxy_url;
-    std::string m_proxy_auth;
     std::string m_user_agent;
     uint64_t m_timeout = -1UL;
     bool m_proxy = false;
