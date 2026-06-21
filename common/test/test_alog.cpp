@@ -602,8 +602,6 @@ TEST(ALOG, signed_zero) {
     EXPECT_STREQ("0", log_output_test.log_start());
 }
 
-<<<<<<< HEAD
-=======
 TEST(ALOG, log_with_color) {
     LOG_DEBUG("some debug log");
     LOG_INFO("some info log");
@@ -650,7 +648,6 @@ TEST(ALog, integer_width_overflow) {
          << DEC(11).width(2).padding('0');
 }
 
->>>>>>> b15810f (fix(alog): clamp integer width/padding to prevent buffer overflow (#1485))
 int main(int argc, char **argv)
 {
     if (!photon::is_using_default_engine()) return 0;
