@@ -147,7 +147,10 @@ void LogFormatter::put_integer_hbo(ALogBuffer& buf, ALogInteger X)
 
     std::reverse(begin, buf.ptr);
     auto ptr = buf.ptr;
-    move_and_fill(begin, ptr, X.width(), X.padding());
+    // Pre-clamp width to remaining buffer space
+    uint64_t width = X.width();
+    if (width > buf.size) width = buf.size;
+    move_and_fill(begin, ptr, width, X.padding());
     if (ptr > buf.ptr) {
         buf.size -= (ptr - buf.ptr);
         buf.ptr = ptr;
@@ -199,8 +202,18 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
 
     std::reverse(begin, buf.ptr);
     auto ptr = buf.ptr;
-    if (x.comma()) insert_commas(ptr, ndigits);
-    move_and_fill(begin, ptr, x.width(), x.padding());
+    // Pre-clamp width to remaining buffer space
+    uint64_t width = x.width();
+    if (width > buf.size) width = buf.size;
+    // Check if commas fit; skip if not enough room after width
+    if (x.comma()) {
+        auto ncomma = (ndigits - 1) / 3;
+        auto used = ptr - begin;
+        if (used + ncomma + width <= buf.size) {
+            insert_commas(ptr, ndigits);
+        }
+    }
+    move_and_fill(begin, ptr, width, x.padding());
     if (ptr > buf.ptr) {
         buf.size -= (ptr - buf.ptr);
         buf.ptr = ptr;
