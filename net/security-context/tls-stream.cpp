@@ -471,7 +471,12 @@ public:
         switch (r) {
             case SecurityRole::Client:
                 SSL_set_connect_state(ssl);
-                break;
+                // Defer the handshake to the first I/O. The SNI hostname is set
+                // via tls_stream_set_hostname() AFTER construction, and it must be
+                // carried in the ClientHello; handshaking here would send the
+                // ClientHello without SNI. SSL_read/SSL_write drives the client
+                // handshake once SNI has been set.
+                return;
             case SecurityRole::Server:
                 SSL_set_accept_state(ssl);
                 break;

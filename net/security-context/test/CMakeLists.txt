@@ -1,4 +1,5 @@
 add_executable(test-tls test.cpp)
+target_include_directories(test-tls PRIVATE ${OPENSSL_INCLUDE_DIRS})
 target_link_libraries(test-tls PRIVATE photon_shared)
 add_test(NAME test-tls COMMAND $<TARGET_FILE:test-tls>)
 
