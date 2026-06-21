@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <openssl/ssl.h>
+
 #include "../../../test/gtest.h"
 
 #include <photon/net/socket.h>
@@ -354,6 +356,108 @@ TEST(Socket, nested) {
     ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
 }
 
+<<<<<<< HEAD
+=======
+estring_view alpn_select_cb(void*, const std::vector<estring_view>& p) {
+    for (auto const &x : p) {
+        LOG_INFO(VALUE(x));
+    }
+    return p[1];
+}
+
+TEST(basic, alpn) {
+    // Server side
+    auto ctx_s = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(delete ctx_s);
+    ctx_s->set_alpn_select_cb({alpn_select_cb, nullptr});
+    auto srv = net::new_tls_server(ctx_s, net::new_tcp_socket_server(), true);
+    DEFER(delete srv);
+
+    srv->bind_v4any();
+    srv->listen();
+    photon::thread_create11([&]{
+        net::ISocketStream* s_s = nullptr;
+        while (!s_s) {
+            s_s = srv->accept();
+        }
+        DEFER(delete s_s);
+        auto server_proto = net::tls_stream_get_alpn_selected(s_s);
+        LOG_INFO(VALUE(server_proto));
+    });
+    auto ep = srv->getsockname();
+    LOG_INFO("Listen at `", ep);
+
+
+    // Client side
+    // Build ALPN Protos buf and set to client
+    auto ctx_c = net::new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(delete ctx_c);
+    auto ret = ctx_c->set_alpn_protos({"h2", "http/1.1"});
+    LOG_INFO("set_alpn_protos `", ret);
+    auto cli =
+        net::new_tls_client(ctx_c, net::new_tcp_socket_client(), true);
+    DEFER(delete cli);
+
+    auto port = ep.port;
+    auto s_c = cli->connect(net::EndPoint("127.0.0.1", port));
+    DEFER(delete s_c);
+    // The client handshake is lazy (deferred to the first I/O), so drive it with a
+    // write before querying the negotiated ALPN.
+    char probe = 'x';
+    s_c->write(&probe, 1);
+    auto cli_proto = net::tls_stream_get_alpn_selected(s_c);
+    LOG_INFO(VALUE(cli_proto));
+    EXPECT_TRUE(cli_proto == "http/1.1");
+}
+
+// Regression for #1292: the SNI hostname must be carried in the ClientHello.
+// A plain-TCP server captures the first flight (the ClientHello) as raw bytes;
+// the SNI extension is not encrypted, so the hostname must appear verbatim once
+// tls_stream_set_hostname() takes effect before the handshake.
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+static std::string g_captured_client_hello;
+static photon::semaphore sni_sem(0);
+
+static int sni_capture_handler(void*, net::ISocketStream* stream) {
+    char buf[4096];
+    auto n = stream->recv(buf, sizeof(buf));  // first flight == ClientHello
+    if (n > 0) g_captured_client_hello.assign(buf, n);
+    sni_sem.signal(1);
+    return 0;
+}
+
+TEST(sni, hostname_in_client_hello) {
+    g_captured_client_hello.clear();
+    DEFER(photon::wait_all());
+    auto srv = net::new_tcp_socket_server();  // plain TCP: just capture raw bytes
+    DEFER(delete srv);
+    ASSERT_EQ(0, srv->bind_v4localhost());
+    ASSERT_EQ(0, srv->listen());
+    srv->set_handler({&sni_capture_handler, nullptr});
+    ASSERT_EQ(0, srv->start_loop(false));
+    photon::thread_yield();
+    auto ep = srv->getsockname();
+
+    auto ctx = net::new_tls_context();
+    DEFER(delete ctx);
+    auto tcp_cli = net::new_tcp_socket_client();
+    tcp_cli->timeout(1UL * 1000 * 1000);  // 1s, mandatory: bounds the handshake (the plain server never sends a ServerHello)
+    auto cli = net::new_tls_client(ctx, tcp_cli, true);
+    DEFER(delete cli);
+    auto s = cli->connect(ep);
+    ASSERT_NE(nullptr, s);
+    DEFER(delete s);
+
+    const char* kHost = "sni-probe.example.test";
+    net::tls_stream_set_hostname(s, kHost);
+    char req = 'x';
+    s->write(&req, 1);  // drives the client handshake -> sends the ClientHello
+    sni_sem.wait(1);
+    EXPECT_NE(std::string::npos, g_captured_client_hello.find(kHost));
+}
+#endif
+
+>>>>>>> 6c379a3 (Fix TLS SNI: send hostname in ClientHello (#1468))
 int main(int argc, char** arg) {
 #ifdef __linux__
     int ev_engine = photon::INIT_EVENT_EPOLL;
