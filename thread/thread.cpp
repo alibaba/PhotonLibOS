@@ -2003,6 +2003,10 @@ insert_list:
             if ((possibly_running && th->state == states::RUNNING) ||
                                     !th->allow_work_stealing()) {
                 th = th->next();
+            } else if (th->idx != -1) {
+                // thread still referenced in source vCPU's sleepq; skip to
+                // avoid corrupting the heap structure after stealing.
+                th = th->next();
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
@@ -2154,7 +2158,7 @@ insert_list:
         assert(vb != th->vcpu);
         AtomicRunQ arq;
         SCOPED_LOCK(th->lock);
-        if (th->state != READY) {
+        if (th->state != READY || th->vcpu != CURRENT->vcpu) {
             LOG_ERROR_RETURN(EINVAL, -1,
                 "thread ` state changed during migrate", th)
         }
