@@ -2152,7 +2152,13 @@ insert_list:
     }
     static int do_thread_migrate(thread* th, vcpu_base* vb) {
         assert(vb != th->vcpu);
-        AtomicRunQ().remove_from_list(th);
+        AtomicRunQ arq;
+        SCOPED_LOCK(th->lock);
+        if (th->state != READY) {
+            LOG_ERROR_RETURN(EINVAL, -1,
+                "thread ` state changed during migrate", th)
+        }
+        arq.remove_from_list(th);
         th->get_vcpu()->nthreads--;
         th->state = STANDBY;
         auto vcpu = (vcpu_t*)vb;
