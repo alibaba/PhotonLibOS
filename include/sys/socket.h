@@ -28,6 +28,15 @@ limitations under the License.
 #include <ws2tcpip.h>
 #include <mswsock.h>
 
+// Winsock's getsockname / getpeername / accept / recvfrom all take `int*` for
+// the address-length parameter, while POSIX uses `socklen_t*`.  MinGW
+// typedefs socklen_t as int (ws2tcpip.h), so the bit-pattern (int*)socklen_t*
+// casts below are safe.  The static_assert fails loudly if a future toolchain
+// ever ships socklen_t as something wider (size_t / long), which would make
+// the cast write through a mis-sized pointer and corrupt the caller's length.
+static_assert(sizeof(socklen_t) == sizeof(int),
+              "MinGW socklen_t must be int-sized for (int*)socklen_t* casts");
+
 // Winsock has no native equivalents for these POSIX flags.  Synthesize
 // non-zero sentinels; the socket() / accept4() shims below read these bits
 // and apply the right platform-specific setup (ioctlsocket FIONBIO, etc.).

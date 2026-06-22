@@ -329,18 +329,15 @@ namespace photon {
 // Saturating addition, no upward overflow
 __attribute__((always_inline)) inline
 uint64_t sat_add(uint64_t x, uint64_t y) {
-	uint64_t z = 0, c = __builtin_uaddl_overflow(x, y, (unsigned long*)&z);
-	return -c | z;
+    unsigned long long z = 0, c = __builtin_uaddll_overflow(x, y, &z);
+    return -c | z;
 }
 
 // Saturating subtract, no downward overflow
 __attribute__((always_inline)) inline
 uint64_t sat_sub(uint64_t x, uint64_t y) {
-    uint64_t z, c = __builtin_usubl_overflow(x, y, (unsigned long*)&z);
-    return c ? 0 : z;
+    unsigned long long z = 0, c = __builtin_usubll_overflow(x, y, &z);
+    return (c - 1) & z;
 }
 
 }
-
-
-

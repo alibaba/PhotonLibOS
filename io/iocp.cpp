@@ -211,6 +211,7 @@ public:
     OVERLAPPED _ov = {};
     bool       _ov_pending = false;
     bool       _needs_resubmit = true;
+    uint64_t   _ov_seq = 0;              // bumped on every submit
     std::vector<uint8_t> _poll_buf;   // AFD_POLL_INFO buffer
 
     // ---- Completion key constants ----
@@ -277,6 +278,7 @@ public:
         _poll_buf.clear();
         memset(&_ov, 0, sizeof(_ov));
         _ov_pending = false;
+        _ov_seq = 0;
         _needs_resubmit = true;
         return init();
     }
@@ -300,6 +302,14 @@ public:
         ::CancelIoEx(_afd, &_ov);
         // Drain the cancelled completion from the IOCP queue.
         // We don't care about the result because we're about to resubmit.
+        //
+        // NOTE: CancelIoEx is asynchronous — the cancellation completion may
+        // not have been posted to the IOCP by the time we enter this loop.
+        // A timeout=0 drain therefore sometimes misses the ghost, which would
+        // then show up in the main event loop AFTER a fresh resubmit.  We tag
+        // every OVERLAPPED with a monotonic sequence (_ov.Pointer = _ov_seq)
+        // and have the main loop discard completions whose tag doesn't match
+        // the current sequence.
         DWORD bytes;
         ULONG_PTR key;
         OVERLAPPED* ov;
@@ -356,6 +366,8 @@ public:
 
         // Submit.  The OVERLAPPED must be zeroed.
         memset(&_ov, 0, sizeof(_ov));
+        ++_ov_seq;
+        _ov.Pointer = (PVOID)(uintptr_t)_ov_seq;
         DWORD bytes;
         BOOL ok = ::DeviceIoControl(
             _afd, IOCTL_AFD_POLL,
@@ -488,6 +500,14 @@ public:
             return 0;
         }
 
+        // Stale ghost completion from a previous cancel.  See comment in
+        // cancel_afd_poll().  Drop it; the real completion for the current
+        // submit is still in flight.
+        if ((uint64_t)(uintptr_t)ov->Pointer != _ov_seq) {
+            _needs_resubmit = true;
+            return 0;
+        }
+
         _ov_pending = false;
 
         // AFD poll completed.  Check the Status field for each handle.
@@ -605,6 +625,12 @@ public:
             }
             if (key != IOCP_KEY_AFD || ov != &_ov) break;
 
+            // Stale ghost from a previous cancel — drop and keep peeking.
+            if ((uint64_t)(uintptr_t)ov->Pointer != _ov_seq) {
+                _needs_resubmit = true;
+                continue;
+            }
+
             _ov_pending = false;
             auto* info = (AFD_POLL_INFO*)_poll_buf.data();
             for (ULONG i = 0; i < info->NumberOfHandles; i++) {
@@ -680,6 +706,8 @@ public:
         iocp_io_op op = {};
         op.th = CURRENT;
         op.ov.hEvent = (HANDLE)&op;
+        op.ov.Offset = (DWORD)(offset & 0xFFFFFFFF);
+        op.ov.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
 
         BOOL ok = ::ReadFile(h, buf, (DWORD)count, nullptr, &op.ov);
         if (ok) {
@@ -700,6 +728,8 @@ public:
         iocp_io_op op = {};
         op.th = CURRENT;
         op.ov.hEvent = (HANDLE)&op;
+        op.ov.Offset = (DWORD)(offset & 0xFFFFFFFF);
+        op.ov.OffsetHigh = (DWORD)((uint64_t)offset >> 32);
 
         BOOL ok = ::WriteFile(h, buf, (DWORD)count, nullptr, &op.ov);
         if (ok) return (ssize_t)op.ov.InternalHigh;

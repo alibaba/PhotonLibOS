@@ -270,17 +270,10 @@ size_t Message::body_size() const {
     it = headers.find("Content-Range");
     if (it != headers.end()) {
         size_t start, end;
-<<<<<<< HEAD
-        if (sscanf(it.second().data(), "bytes %lu-%lu", &start, &end) == 2) {
-            return end-start+1;
-        }
-        if (sscanf(it.second().data(), "bytes */%lu", &end) == 1) {
-=======
         if (sscanf(it.second().data(), "bytes %zu-%zu", &start, &end) == 2) {
             return end-start+1;
         }
         if (sscanf(it.second().data(), "bytes */%zu", &end) == 1) {
->>>>>>> 1dac312 (make it possible to cross-compile to Windows target from MacOS and mingw)
             return end;
         }
     }
