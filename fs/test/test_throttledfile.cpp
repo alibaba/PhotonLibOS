@@ -54,22 +54,22 @@ TEST(ThrottledFile, statistics_queue) {
     using namespace fs;
     photon::vcpu_init();
     StatisticsQueue queue(50*4096, 128);
-    EXPECT_EQ(0UL, queue.sum());
+    EXPECT_EQ(0ULL, queue.sum());
 
     queue.push_back(32);
     EXPECT_EQ(32U, queue.back().amount);
-    EXPECT_EQ(32UL, queue.sum());
+    EXPECT_EQ(32ULL, queue.sum());
     queue.push_back(64);
-    EXPECT_EQ(96UL, queue.sum());
-    EXPECT_EQ(0UL, queue.min_duration());
+    EXPECT_EQ(96ULL, queue.sum());
+    EXPECT_EQ(0ULL, queue.min_duration());
     photon::thread_sleep(2);
     queue.try_pop();
-    EXPECT_EQ(0UL, queue.sum());
+    EXPECT_EQ(0ULL, queue.sum());
     for (int i=0;i<51;i++) {
         queue.push_back(4096);
     } //4096*100 400k
 
-    EXPECT_EQ(4096*50UL, queue.limit());
+    EXPECT_EQ(4096*50ULL, queue.limit());
     EXPECT_EQ(4096*50U, queue.rate());
 }
 
@@ -84,12 +84,12 @@ TEST(ThrottledFile, scoped_queue) {
         scoped_queue sq(queue, 4096);
         // sq构造时开始排队，出作用域了开始pop，故理论上这个释放得等完整个time window
         // 随后尝试释放掉
-        EXPECT_EQ(4096UL, queue.sum());
+        EXPECT_EQ(4096ULL, queue.sum());
     }
     EXPECT_GT(photon::now, start + 1000*1000);
     photon::thread_sleep(2);
     queue.try_pop();
-    EXPECT_EQ(0UL, queue.sum());
+    EXPECT_EQ(0ULL, queue.sum());
 }
 
 TEST(ThrottledFile, scoped_semaphore) {
@@ -97,23 +97,23 @@ TEST(ThrottledFile, scoped_semaphore) {
     photon::semaphore sem(8);
     {
         scoped_semaphore ss(sem, 5);
-        EXPECT_EQ(3UL, sem.m_count);
+        EXPECT_EQ(3ULL, sem.m_count);
     }
-    EXPECT_EQ(8UL, sem.m_count);
+    EXPECT_EQ(8ULL, sem.m_count);
 }
 
 TEST(ThrottledFile, split_iovector_view) {
     using namespace fs;
     iovec iov[10];
     for (int i=0;i < 10; i++) {
-        iov[i].iov_base = (void*)(i * 4096UL);
+        iov[i].iov_base = (void*)(intptr_t)(i * 4096ULL);
         iov[i].iov_len = 4096;
     }
     split_iovector_view siv(iov, 10, 1024); // should become 40 blocks;
     for (int i=0;i<40;i++) {
         iovec *v = siv.iov;
-        EXPECT_EQ(1024UL, v->iov_len);
-        EXPECT_EQ(i * 1024UL, (uint64_t)(v->iov_base));
+        EXPECT_EQ(1024ULL, v->iov_len);
+        EXPECT_EQ(i * 1024ULL, (uint64_t)(v->iov_base));
         siv.next();
     }
 }
@@ -140,7 +140,7 @@ TEST(ThrottledFile, basic_throttled) {
     IFile * tf = new_throttled_file(pmock, limit);
     iovec iov[10];
     for (int i=0;i < 10; i++) {
-        iov[i].iov_base = (void*)(i * 4000UL);
+        iov[i].iov_base = (void*)(intptr_t)(i * 4000ULL);
         iov[i].iov_len = 4000;
     }
     const struct iovec* c_nulliov = iov;
@@ -177,7 +177,7 @@ TEST(ThrottledFile, huge_enque) {
     using namespace fs;
     StatisticsQueue q(1024, 128);
     q.push_back(4096);
-    EXPECT_EQ(3UL*1024*1024, q.min_duration());
+    EXPECT_EQ(3ULL*1024*1024, q.min_duration());
 }
 
 void enq_thread(StatisticsQueue &q) {
@@ -190,9 +190,9 @@ TEST(ThrottledFile, huge_scope_que) {
     auto start = photon::now;
     photon::thread_create11(enq_thread, q);
     do { photon::thread_yield_to(nullptr); q.try_pop(); } while (q.sum()>0);
-    EXPECT_EQ(0UL, q.sum());
-    EXPECT_GE(photon::now - start, 4UL*1000*1000);
-    EXPECT_LE(photon::now - start, 5UL*1000*1000);
+    EXPECT_EQ(0ULL, q.sum());
+    EXPECT_GE(photon::now - start, 4ULL*1000*1000);
+    EXPECT_LE(photon::now - start, 5ULL*1000*1000);
 }
 
 TEST(ThrottledFile, split_io) {
@@ -249,7 +249,7 @@ TEST(ThrottledFile, large_pulse) {
     for (auto p : jhs) {
         photon::thread_join(p);
     }
-    EXPECT_GE(photon::now - start, 4UL*1000*1000);
+    EXPECT_GE(photon::now - start, 4ULL*1000*1000);
 }
 
 TEST(ThrottledFile, limit_cover) {
@@ -274,7 +274,7 @@ TEST(ThrottledFile, limit_cover) {
     for (auto p : jhs) {
         photon::thread_join(p);
     }
-    EXPECT_GE(photon::now - start, 4UL*1000*1000);
+    EXPECT_GE(photon::now - start, 4ULL*1000*1000);
 }
 
 TEST(ThrottledFile, timestamp) {

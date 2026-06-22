@@ -65,7 +65,7 @@ ssize_t FileCacheStore::do_preadv2(const struct iovec *iov, int iovcnt, off_t of
   // multiple cacheStore preadvs but cacheFile preadv only once
   ssize_t ret = 0;
   cachePool_->updateLru(iterator_);
-  SCOPE_AUDIT_THRESHOLD(1UL * 1000, "file:read", AU_FILEOP("", offset, ret));
+  SCOPE_AUDIT_THRESHOLD(1ULL * 1000, "file:read", AU_FILEOP("", offset, ret));
   ret = localFile_->preadv(iov, iovcnt, offset);
   return ret;
 }
@@ -85,7 +85,7 @@ ssize_t FileCacheStore::do_pwritev(const struct iovec *iov, int iovcnt, off_t of
     lruEntry->truncate_done = true;
   }
   ScopedRangeLock lock(rangeLock_, offset, view.sum());
-  SCOPE_AUDIT_THRESHOLD(10UL * 1000, "file:write", AU_FILEOP("", offset, ret));
+  SCOPE_AUDIT_THRESHOLD(10ULL * 1000, "file:write", AU_FILEOP("", offset, ret));
   ret = localFile_->pwritev(iov, iovcnt, offset);
   if (ret > 0 && !fiemapSupported_) {
     addFilledRange(offset, ret);

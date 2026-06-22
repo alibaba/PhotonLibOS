@@ -17,6 +17,9 @@ limitations under the License.
 #pragma once
 #include <photon/common/string_view.h>
 #include <photon/common/conststr.h>
+#ifdef DELETE
+#undef DELETE
+#endif
 namespace photon {
 namespace net {
 namespace http {

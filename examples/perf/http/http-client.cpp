@@ -32,7 +32,7 @@ using namespace photon;
 
 DEFINE_string(ip, "127.0.0.1", "server ip");
 DEFINE_uint64(port, 19876, "port");
-DEFINE_uint64(count, -1UL, "request count per thread, -1 for endless loop");
+DEFINE_uint64(count, -1ULL, "request count per thread, -1 for endless loop");
 DEFINE_uint64(threads, 4, "num threads");
 DEFINE_uint64(body_size, 4096, "http body size");
 

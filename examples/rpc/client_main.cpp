@@ -25,7 +25,7 @@ limitations under the License.
 #include "client.h"
 
 DEFINE_int32(port, 0, "server port");
-DEFINE_string(host, "127.0.0.1", "server ip");
+DEFINE_string(server_host, "127.0.0.1", "server ip");
 DEFINE_bool(echo_perf, false, "Instead of a standalone demo, run echo performance test and show statistics");
 DEFINE_uint64(buf_size, 4096, "buffer size for echo perf test");
 DEFINE_uint64(depth, 4, "io-depth for echo perf test");
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     photon::sync_signal(SIGINT, &handle_term);
 
     ExampleClient client;
-    ep = photon::net::EndPoint(FLAGS_host.c_str(), FLAGS_port);
+    ep = photon::net::EndPoint(FLAGS_server_host.c_str(), FLAGS_port);
 
     bg_thread = photon::thread_enable_join(photon::thread_create(run_bg_thread, &client));
 

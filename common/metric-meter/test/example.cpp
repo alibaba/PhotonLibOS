@@ -48,10 +48,10 @@ uint64_t print(void*) {
 int main() {
     photon::vcpu_init();
     DEFER(photon::vcpu_fini());
-    photon::Timer printer(1UL * 100 * 1000, {print, nullptr});
-    table.maxv.interval(1000UL * 1000);
-    table.pread_latency.interval(1000UL * 1000);
-    table.pread_max.interval(1000UL * 1000);
+    photon::Timer printer(1ULL * 100 * 1000, {print, nullptr});
+    table.maxv.interval(1000ULL * 1000);
+    table.pread_latency.interval(1000ULL * 1000);
+    table.pread_max.interval(1000ULL * 1000);
     printf("%s%12s %12s %12s%s\n", WHITE, "maxv", "pread_latency", "pread_max",
            NC);
     for (int i = 0; i < 5000; i++) {

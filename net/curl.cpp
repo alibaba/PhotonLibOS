@@ -118,7 +118,7 @@ static uint64_t on_timer(void* = nullptr) {
 /* CURLMOPT_TIMERFUNCTION */
 static int timer_cb(CURLM*, long timeout_ms, void*) {
     if (timeout_ms >= 0 && cctx.g_timer) {
-        cctx.g_timer->reset(timeout_ms * 1000UL);
+        cctx.g_timer->reset(timeout_ms * 1000ULL);
     }
     return 0;
 }
@@ -242,7 +242,7 @@ int libcurl_init(long flags, long pipelining, long maxconn) {
         cctx.g_loop = new cURLLoop();
         cctx.g_loop->start();
         cctx.g_timer =
-            new photon::Timer(-1UL, {nullptr, &on_timer}, true, 8UL * 1024 * 1024);
+            new photon::Timer(-1ULL, {nullptr, &on_timer}, true, 8ULL * 1024 * 1024);
         if (!cctx.g_timer)
             LOG_ERROR_RETURN(EFAULT, -1, "failed to create photon timer");
         DEFER(if (!cctx.g_libcurl_multi) libcurl_fini());

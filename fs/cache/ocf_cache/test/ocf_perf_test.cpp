@@ -224,7 +224,7 @@ static int single_file_file_cache(IOAlloc *io_alloc, photon::fs::IFileSystem *sr
     }
     auto cached_fs = photon::fs::new_full_file_cached_fs(
         src_fs, media_fs, FLAGS_page_size, FLAGS_media_file_size_gb, 1000 * 1000,
-        2UL * FLAGS_media_file_size_gb * 1024 * 1024 * 1024, io_alloc, 0);
+        2ULL * FLAGS_media_file_size_gb * 1024 * 1024 * 1024, io_alloc, 0);
     if (cached_fs == nullptr) {
         LOG_ERROR_RETURN(0, -1, "new_ocf_cached_fs error");
     }

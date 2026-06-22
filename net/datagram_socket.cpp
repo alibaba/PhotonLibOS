@@ -29,8 +29,8 @@ limitations under the License.
 namespace photon {
 namespace net {
 
-constexpr static size_t MAX_UDP_MESSAGE_SIZE = 65507UL;
-constexpr static size_t MAX_UDS_MESSAGE_SIZE = 207UL * 1024;
+constexpr static size_t MAX_UDP_MESSAGE_SIZE = 65507ULL;
+constexpr static size_t MAX_UDS_MESSAGE_SIZE = 207ULL * 1024;
 
 class DatagramSocketBase : public IDatagramSocket {
 protected:
@@ -49,15 +49,8 @@ public:
 
     int init(int nfd) {
         auto AF = fd;
-#ifndef __APPLE__
         constexpr static auto FLAG = SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
-#else
-        constexpr static auto FLAG = SOCK_DGRAM;
-#endif
-        fd = (nfd >= 0) ? nfd : (::socket(AF, FLAG, 0));
-#ifdef __APPLE__
-        set_fd_nonblocking(fd);
-#endif
+        fd = (nfd >= 0) ? nfd : (socket(AF, FLAG, 0));
         return fd < 0;
     }
 
@@ -114,11 +107,11 @@ public:
     }
     virtual int setsockopt(int level, int option_name, const void* option_value,
                            socklen_t option_len) override {
-        return ::setsockopt(fd, level, option_name, option_value, option_len);
+        return photon::net::setsockopt(fd, level, option_name, option_value, option_len);
     };
     virtual int getsockopt(int level, int option_name, void* option_value,
                            socklen_t* option_len) override {
-        return ::getsockopt(fd, level, option_name, option_value, option_len);
+        return photon::net::getsockopt(fd, level, option_name, option_value, option_len);
     }
     // get/set timeout, in us, (default +∞)
     virtual uint64_t timeout() const override { return m_timeout; }

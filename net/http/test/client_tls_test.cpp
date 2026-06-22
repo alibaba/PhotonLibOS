@@ -55,7 +55,7 @@ TEST(client_tls, basic) {
     DEFER(delete ctx);
     auto tcpserver = net::new_tls_server(ctx, net::new_tcp_socket_server(), true);
     DEFER(delete tcpserver);
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     int r = tcpserver->bind_v4localhost();
     if (r != 0)
         LOG_ERRNO_RETURN(0, , "failed to bind to localhost");
@@ -84,7 +84,7 @@ TEST(client_tls, basic) {
 }
 
 // Server Name Indication (SNI) for SSL
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if OPENSSL_VERSION_NUMBER >= 0x10100000LL
 TEST(http_client, DISABLED_SNI) {
     auto tls = photon::net::new_tls_context();
     DEFER(delete tls);

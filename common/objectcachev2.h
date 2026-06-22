@@ -204,7 +204,7 @@ public:
     };
 
     template <typename KeyType, typename Ctor>
-    Borrow borrow(KeyType&& key, Ctor&& ctor, uint64_t cooldown = 0UL) {
+    Borrow borrow(KeyType&& key, Ctor&& ctor, uint64_t cooldown = 0ULL) {
         auto& box = __find_or_create_box(std::forward<KeyType>(key));
         DEFER(box.release());
         std::shared_ptr<V> r{};
@@ -245,7 +245,7 @@ public:
 
     ObjectCacheV2(uint64_t lifespan)
         : lifespan(lifespan),
-          _timer(1UL * 1000 * 1000, {this, &ObjectCacheV2::__expire}, true,
+          _timer(1ULL * 1000 * 1000, {this, &ObjectCacheV2::__expire}, true,
                  photon::DEFAULT_STACK_SIZE) {}
 
     ~ObjectCacheV2() {

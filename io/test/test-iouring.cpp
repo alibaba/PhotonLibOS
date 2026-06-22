@@ -450,7 +450,7 @@ TEST_F(event_engine, cascading_add) {
     sem.signal(1);
 
     void* data[5] = {};
-    ssize_t num_events = engine->wait_for_events(data, 5, -1UL);
+    ssize_t num_events = engine->wait_for_events(data, 5, -1ULL);
     ASSERT_EQ(2, num_events);
 
     // data order is not ensured
@@ -507,7 +507,7 @@ TEST_F(event_engine, cascading_remove) {
 
     // 2. Wait both
     void* data[5] = {};
-    ssize_t num_events = engine->wait_for_events(data, 5, -1UL);
+    ssize_t num_events = engine->wait_for_events(data, 5, -1ULL);
 
     // 5. Should get only one
     ASSERT_EQ(1, num_events);

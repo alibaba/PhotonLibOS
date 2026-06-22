@@ -21,6 +21,7 @@ limitations under the License.
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifdef __linux__
 bool popen_test(const std::string& cmd, int expect = 0) {
     puts(cmd.c_str());
     auto p = popen(cmd.c_str(), "r");
@@ -58,6 +59,7 @@ std::string libpath(uint64_t pid) {
     free(tp);
     return path;
 }
+#endif  // __linux__
 
 TEST(static_lib, photon_thread_alloc) {
 #ifdef __linux__

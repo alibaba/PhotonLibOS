@@ -131,7 +131,7 @@ int st_cond_destroy(st_cond_t cvar) {
 }
 
 int st_cond_wait(st_cond_t cvar) {
-    return st_cond_timedwait(cvar, -1UL);
+    return st_cond_timedwait(cvar, -1ULL);
 }
 
 int st_cond_timedwait(st_cond_t cvar, st_utime_t timeout) {

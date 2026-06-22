@@ -60,7 +60,7 @@ protected:
 public:
     virtual void write(int level, const char* begin, const char* end) = 0;
     virtual int get_log_file_fd() = 0;
-    virtual uint64_t set_throttle(uint64_t t = -1UL) = 0;
+    virtual uint64_t set_throttle(uint64_t t = -1ULL) = 0;
     virtual uint64_t get_throttle() = 0;
     virtual void destruct() = 0;
     virtual int set_level_color(int level, unsigned char code) { return 0; /* ignored by default */ }
@@ -73,14 +73,14 @@ extern ILogOutput * const log_output_stderr;
 extern ILogOutput * const log_output_stdout;
 
 ILogOutput* new_log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10,
-                                uint64_t throttle = -1UL, bool rotate_on_start = false);
-ILogOutput* new_log_output_file(int fd, uint64_t throttle = -1UL);
+                                uint64_t throttle = -1ULL, bool rotate_on_start = false);
+ILogOutput* new_log_output_file(int fd, uint64_t throttle = -1ULL);
 ILogOutput* new_async_log_output(ILogOutput* output, int num_of_queues = 1);
 
 // old-style log_output_file & log_output_file_close
 // return 0 when successed, -1 for failed
-int log_output_file(int fd, uint64_t rotate_limit = UINT64_MAX, uint64_t throttle = -1UL);
-int log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10, uint64_t throttle = -1UL);
+int log_output_file(int fd, uint64_t rotate_limit = UINT64_MAX, uint64_t throttle = -1ULL);
+int log_output_file(const char* fn, uint64_t rotate_limit = UINT64_MAX, int max_log_files = 10, uint64_t throttle = -1ULL);
 int log_output_file_close();
 
 #ifndef LOG_BUFFER_SIZE
@@ -579,7 +579,7 @@ struct ERRNO
 LogBuffer& operator << (LogBuffer& log, ERRNO e);
 
 inline LogBuffer& operator << (LogBuffer& log, const photon::reterr& rvb) {
-    auto x = rvb._errno;
+    auto x = rvb._err;
     return x ? (log << ERRNO((int)x)) : log;
 }
 
@@ -616,9 +616,9 @@ inline LogBuffer& operator<<(LogBuffer& log, const NamedValue<T>& v) {
 inline void _alog_set_errno(int x) { errno = x; }
 
 struct DeferrdErrnoSetter {
-    int _errno = 0;
-    void operator()(int x) { _errno = x; }
-    ~DeferrdErrnoSetter() { if (_errno) errno = _errno; }
+    int _saved_errno = 0;
+    void operator()(int x) { _saved_errno = x; }
+    ~DeferrdErrnoSetter() { if (_saved_errno) errno = _saved_errno; }
 };
 
 #define DECLARE_ERRNO_SETTER DeferrdErrnoSetter _alog_set_errno;

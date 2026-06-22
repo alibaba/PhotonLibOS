@@ -63,8 +63,8 @@ TEST(std_executor, test) {
     auto spent = std::chrono::high_resolution_clock::now() - start;
     auto microsec =
         std::chrono::duration_cast<std::chrono::microseconds>(spent).count();
-    printf("10k tasks done, take %ld us, qps=%ld\n", microsec,
-           10000L * 1000000 / microsec);
+    printf("10k tasks done, take %lld us, qps=%lld\n", (long long)microsec,
+           (long long)(10000LL * 1000000 / microsec));
 }
 
 int exptask(fs::IFileSystem *fs) {
@@ -108,8 +108,8 @@ TEST(std_executor, with_exportfs) {
     auto spent = std::chrono::high_resolution_clock::now() - start;
     auto microsec =
         std::chrono::duration_cast<std::chrono::microseconds>(spent).count();
-    printf("10k tasks done, take %ld us, qps=%ld\n", microsec,
-           10000L * 1000000 / microsec);
+    printf("10k tasks done, take %lld us, qps=%lld\n", (long long)microsec,
+           (long long)(10000LL * 1000000 / microsec));
 }
 
 // int astask(Executor::HybridExecutor *eth) {

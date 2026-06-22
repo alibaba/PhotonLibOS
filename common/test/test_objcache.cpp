@@ -59,12 +59,12 @@ void* objcache(void* arg) {
         return new ShowOnDtor(id);
     };
     // acquire every 10ms
-    photon::thread_usleep(10 * 1000UL * id);
+    photon::thread_usleep(10 * 1000ULL * id);
     auto ret = oc->acquire(0, ctor);
     LOG_DEBUG("Acquired ", VALUE(id));
     EXPECT_NE(nullptr, ret);
     // object holds for 50ms
-    photon::thread_usleep(50 * 1000UL);
+    photon::thread_usleep(50 * 1000ULL);
     if (id % 10 == 0) LOG_INFO("Cycle ", VALUE(id));
     // every 10 objs will recycle
     oc->release(0, id % 10 == 0);
@@ -75,7 +75,7 @@ void* objcache(void* arg) {
 TEST(ObjectCache, release_cycle) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     // 10s, during the test, nothing will be free if not set recycle
     std::vector<photon::join_handle*> handles;
     std::vector<OCArg> args;
@@ -98,17 +98,17 @@ TEST(ObjectCache, timeout_refresh) {
     release_cnt = 0;
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000);
     // 1s
     auto ctor = [] { return new ShowOnDtor(0); };
     auto ret = ocache.acquire(0, ctor); (void)ret;
-    photon::thread_usleep(1100UL * 1000);
+    photon::thread_usleep(1100ULL * 1000);
     ocache.expire();
     ocache.release(0);
     EXPECT_EQ(0, release_cnt);
     ocache.expire();
     EXPECT_EQ(0, release_cnt);
-    photon::thread_usleep(1100UL * 1000);
+    photon::thread_usleep(1100ULL * 1000);
     ocache.expire();
     EXPECT_EQ(1, release_cnt);
 }
@@ -132,7 +132,7 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
     release_cnt = 0;
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000);
     photon::semaphore sem(0);
     ph_arg a{&ocache, &sem};
     // 1s
@@ -140,17 +140,17 @@ TEST(ObjectCache, ctor_may_yield_and_null) {
         photon::thread_create(&ph_act, &a);
     }
     sem.wait(10);
-    EXPECT_EQ(1UL, ocache._set.size());
+    EXPECT_EQ(1ULL, ocache._set.size());
     ocache.expire();
-    photon::thread_usleep(1100UL * 1000);
+    photon::thread_usleep(1100ULL * 1000);
     ocache.expire();
-    EXPECT_EQ(0UL, ocache._set.size());
+    EXPECT_EQ(0ULL, ocache._set.size());
 }
 
 TEST(ObjectCache, multithread) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     cycle_cnt = 0;
     release_cnt = 0;
     // 10s, during the test, nothing will be free if not set recycle
@@ -186,13 +186,13 @@ void* objcache_borrow(void* arg) {
     auto id = args->id;
     auto ctor = [&]() { return new ShowOnDtor(id); };
     // acquire every 10ms
-    photon::thread_usleep(10 * 1000UL * id);
+    photon::thread_usleep(10 * 1000ULL * id);
     {
         auto ret = oc->borrow(0, ctor);
         LOG_DEBUG("Acquired ", VALUE(id));
         EXPECT_TRUE(ret);
         // object holds for 50ms
-        photon::thread_usleep(50 * 1000UL);
+        photon::thread_usleep(50 * 1000ULL);
         if (id % 10 == 0) {
             LOG_INFO("Cycle ", VALUE(id));
             ret.recycle(true);
@@ -207,7 +207,7 @@ void* objcache_borrow(void* arg) {
 TEST(ObjectCache, borrow) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     cycle_cnt = 0;
     release_cnt = 0;
     // 10s, during the test, nothing will be free if not set recycle
@@ -250,11 +250,11 @@ void* objcache_borrow_once(void* arg) {
     auto& count = *args->count;
     auto ctor = [&]() {
         // failed after 1s;
-        photon::thread_usleep(1000 * 1000UL);
+        photon::thread_usleep(1000 * 1000ULL);
         count++;
         return nullptr;
     };
-    auto ret = oc->borrow(0, ctor, 1000UL * 1000);
+    auto ret = oc->borrow(0, ctor, 1000ULL * 1000);
     // every 10 objs will recycle
     return 0;
 }
@@ -262,7 +262,7 @@ void* objcache_borrow_once(void* arg) {
 TEST(ObjectCache, borrow_with_once) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     cycle_cnt = 0;
     release_cnt = 0;
     std::atomic<int> count(0);
@@ -281,7 +281,7 @@ TEST(ObjectCache, borrow_with_once) {
     }
     EXPECT_EQ(1, count.load());
     ocache.borrow(0, [&] {
-        photon::thread_usleep(1000 * 1000UL);
+        photon::thread_usleep(1000 * 1000ULL);
         count++;
         return new ShowOnDtor(1);
     });
@@ -299,13 +299,13 @@ void* objcache_borrow_v2(void* arg) {
     auto id = args->id;
     auto ctor = [&]() { return new ShowOnDtor(id); };
     // acquire every 10ms
-    photon::thread_usleep(10 * 1000UL * id);
+    photon::thread_usleep(10 * 1000ULL * id);
     {
         auto ret = oc->borrow(0, ctor);
         LOG_DEBUG("Acquired ", VALUE(id));
         EXPECT_TRUE(ret);
         // object holds for 50ms
-        photon::thread_usleep(50 * 1000UL);
+        photon::thread_usleep(50 * 1000ULL);
         if (id % 10 == 0) {
             LOG_INFO("Cycle ", VALUE(id));
             ret.recycle(true);
@@ -320,7 +320,7 @@ void* objcache_borrow_v2(void* arg) {
 TEST(ObjectCacheV2, borrow) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     cycle_cnt = 0;
     release_cnt = 0;
     // 10s, during the test, nothing will be free if not set recycle
@@ -357,11 +357,11 @@ void* objcache_borrow_once_v2(void* arg) {
     auto& count = *args->count;
     auto ctor = [&]()->ShowOnDtor* {
         // failed after 1s;
-        photon::thread_usleep(1000 * 1000UL);
+        photon::thread_usleep(1000 * 1000ULL);
         count++;
         return nullptr;
     };
-    auto ret = oc->borrow(0, ctor, 1000UL * 1000);
+    auto ret = oc->borrow(0, ctor, 1000ULL * 1000);
     (void)ret;
     // every 10 objs will recycle
     return 0;
@@ -370,7 +370,7 @@ void* objcache_borrow_once_v2(void* arg) {
 TEST(ObjectCacheV2, borrow_with_once) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCacheV2<int, ShowOnDtor*> ocache(1000UL * 1000 * 10);
+    ObjectCacheV2<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10);
     cycle_cnt = 0;
     release_cnt = 0;
     std::atomic<int> count(0);
@@ -389,7 +389,7 @@ TEST(ObjectCacheV2, borrow_with_once) {
     }
     EXPECT_EQ(1, count.load());
     ocache.borrow(0, [&] {
-        photon::thread_usleep(1000 * 1000UL);
+        photon::thread_usleep(1000 * 1000ULL);
         count++;
         return new ShowOnDtor(1);
     });
@@ -474,7 +474,7 @@ struct OCArgL {
 TEST(ObjCache, with_list) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, intrusive_list<simple_node>> ocache(1000UL * 1000 * 10);
+    ObjectCache<int, intrusive_list<simple_node>> ocache(1000ULL * 1000 * 10);
     for (int i=0;i<10;i++) {
         auto &list = ocache.acquire(0, []()->intrusive_list<simple_node> {return {};});
         list.push_back(new simple_node(i));
@@ -495,7 +495,7 @@ TEST(ObjCache, with_list) {
 }
 
 TEST(ObjectCache, no_destroy) {
-    ObjectCache<int, int*> oc(1000UL * 1000);
+    ObjectCache<int, int*> oc(1000ULL * 1000);
     int* ptr = nullptr;
     auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
         auto a = oc.acquire(0, [] { return new int(1); });
@@ -518,7 +518,7 @@ TEST(ObjectCache, no_destroy) {
     oc.release(0);
 }
 TEST(ObjectCache, movedout) {
-    ObjectCache<int, int*> oc(1000UL * 1000);
+    ObjectCache<int, int*> oc(1000ULL * 1000);
     int* ptr = nullptr;
     auto th1 = photon::thread_enable_join(photon::thread_create11([&oc, &ptr] {
         auto a = oc.borrow(0, [] { return new int(1); });
@@ -541,25 +541,25 @@ TEST(ObjectCache, movedout) {
 
 TEST(ObjectCache, num_limit) {
     // Never expire by default but will control object num to 10
-    ObjectCache<int, int*> oc(-1UL, -1UL, 10);
+    ObjectCache<int, int*> oc(-1ULL, -1ULL, 10);
     for (int i = 0; i < 20; i++) {
         auto x = oc.borrow(i, [i] { return new int(i); });
     }
-    EXPECT_EQ(10UL, oc.size());
+    EXPECT_EQ(10ULL, oc.size());
     // All key left should larger than 10, since 0~9 will be expire due to num
     // limit
     for (auto x : oc._set) {
         EXPECT_GE(((ObjectCache<int, int*>::KeyedItem*)x)->key(), 10);
     }
 
-    ObjectCache<int, ShowOnDtor*> oc2(-1UL, -1UL, 10);
+    ObjectCache<int, ShowOnDtor*> oc2(-1ULL, -1ULL, 10);
 
     for (int i = 0; i < 20; i++) {
         EXPECT_NE(nullptr, oc2.acquire(i, [i] { return new ShowOnDtor(i); }));
     }
 
     EXPECT_EQ(
-        20UL,
+        20ULL,
         oc2.size());  // due to all objects are using, no one will be expired
 
     for (int i = 0; i < 10; i++) {
@@ -570,13 +570,13 @@ TEST(ObjectCache, num_limit) {
         LOG_INFO("Exists ", ((ObjectCache<int, int*>::KeyedItem*)x)->key());
     }
 
-    EXPECT_EQ(10UL, oc2.size());
+    EXPECT_EQ(10ULL, oc2.size());
 
     for (int i = 10; i < 20; i++) {
         oc2.release(i, false, true);
     }
 
-    EXPECT_EQ(10UL, oc2.size());
+    EXPECT_EQ(10ULL, oc2.size());
     for (int i = 0; i < 20; i++) {
         EXPECT_NE(nullptr, oc2.acquire(i, [i] { return new int(i); }));
     }
@@ -591,12 +591,12 @@ void* multi_thread_case(void* arg) {
         return new ShowOnDtor(id);
     };
     // acquire every 10ms
-    photon::thread_usleep(10 * 1000UL * id);
+    photon::thread_usleep(10 * 1000ULL * id);
     auto ret = oc->acquire(id, ctor);
     LOG_DEBUG("Acquired ", VALUE(id));
     EXPECT_NE(nullptr, ret);
     // object holds for 50ms
-    photon::thread_usleep(50 * 1000UL);
+    photon::thread_usleep(50 * 1000ULL);
     // every 10 objs will recycle
     oc->release(id);
     LOG_DEBUG("Released ", VALUE(id));
@@ -606,7 +606,7 @@ void* multi_thread_case(void* arg) {
 TEST(ObjectCache, multithread_with_limit) {
     set_log_output_level(ALOG_INFO);
     DEFER(set_log_output_level(ALOG_DEBUG));
-    ObjectCache<int, ShowOnDtor*> ocache(1000UL * 1000 * 10, 1UL * 1000 * 1000,
+    ObjectCache<int, ShowOnDtor*> ocache(1000ULL * 1000 * 10, 1ULL * 1000 * 1000,
                                          10);
     cycle_cnt = 0;
     release_cnt = 0;
@@ -635,7 +635,7 @@ TEST(ObjectCache, multithread_with_limit) {
     }
 
     EXPECT_EQ(cycle_cnt, release_cnt);
-    EXPECT_EQ(10UL, ocache.size());
+    EXPECT_EQ(10ULL, ocache.size());
 }
 
 int main(int argc, char** argv) {

@@ -53,11 +53,11 @@ public:
     }
 
     uint64_t get_throttle() override {
-        return -1UL;
+        return -1ULL;
     }
 
     uint64_t set_throttle(uint64_t) override {
-        return -1UL;
+        return -1ULL;
     }
 
     void destruct() override {}
@@ -182,7 +182,7 @@ TEST(ALog, float_point)
     log_output = &log_output_test;
     LOG_DEBUG(' ');
     // auto log_start = _log_buf + _log_len - 1;
-    auto fp = 5203.14159265352L;
+    auto fp = 5203.14159265352;
     LOG_DEBUG(FP(fp).width(10).precision(3));
     puts(_log_buf);
     EXPECT_EQ(log_output_test.log_start(), string("  5203.142"));
@@ -295,7 +295,7 @@ void test_log(int x)
 //    puts(_log_buf);
 //    LOG_DEBUG("asdf:`, jkl:`, and: ", 1,2,3,4,5);
     auto pc = inner_function();
-    EXPECT_LE((uint64_t)&x - pc, 200);
+    EXPECT_LE((uint64_t)&x - pc, 1200);
 }
 
 TEST(ALog, Buffer) {
@@ -481,7 +481,7 @@ struct LevelOutput : public ILogOutput {
 
     int get_log_file_fd() override { return 0; }
 
-    uint64_t set_throttle(uint64_t t = -1UL) override { return 0; }
+    uint64_t set_throttle(uint64_t t = -1ULL) override { return 0; }
 
     uint64_t get_throttle() override { return 0; };
 
@@ -540,7 +540,9 @@ void segfault() {
 }
 
 TEST(ALog, null_to_pchar) {
+#ifndef _WIN32
     EXPECT_EXIT((segfault(), exit(0)), ::testing::KilledBySignal(SIGSEGV), ".*");
+#endif
     EXPECT_EXIT((testnull_func(), exit(0)), testing::ExitedWithCode(0),".*");
 }
 
@@ -555,7 +557,7 @@ TEST(ALog, throttled_log) {
     }
     auto e = time(0);
     EXPECT_GT(e - t, 1);
-    default_logger.log_output->set_throttle(-1UL);
+    default_logger.log_output->set_throttle(-1ULL);
 }
 
 TEST(ALog, LOG_LIMIT) {

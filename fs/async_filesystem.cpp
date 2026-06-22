@@ -60,7 +60,7 @@ namespace fs
         template<typename F>
         void do_call(F& f)
         {   // use another lambda to minimize args passing
-            photon::thread_usleep_defer(-1UL, [&]{std::thread([&](){ f(); }).detach();});
+            photon::thread_usleep_defer(-1ULL, [&]{std::thread([&](){ f(); }).detach();});
         }
     };
 
@@ -85,7 +85,7 @@ namespace fs
     {
     public:
         template<typename IF, typename Func, typename...ARGS,
-#if __cplusplus < 201703L
+#if __cplusplus < 201703LL
             typename R = typename std::result_of<Func(IF*, ARGS...)>::type >
 #else
             typename R = typename std::invoke_result<Func, IF*, ARGS...>::type>
@@ -176,6 +176,7 @@ namespace fs
         }
     };
 
+    #ifdef __linux__
     class EasyPerformer {
     public:
         EasyPerformer() = default;
@@ -223,6 +224,7 @@ namespace fs
             return w.wait();
         }
     };
+#endif
 
     template<typename UIF>
     class Adaptor
@@ -425,11 +427,11 @@ namespace fs
         {
             return PERFORM0(rewinddir);
         }
-        virtual void seekdir(long loc) override
+        virtual void seekdir(long long loc) override
         {
             return PERFORM(seekdir, loc);
         }
-        virtual long telldir() override
+        virtual long long telldir() override
         {
             return PERFORM0(telldir);
         }
@@ -741,7 +743,7 @@ namespace fs
         auto adir = export_as_async_dir(dir);
         return _new_dir_adaptor<AsyncDIR, ExportPerformer>(adir, -1);
     }
-
+#ifdef __linux__
     IFile* export_as_easy_sync_file(IFile* file)
     {
         auto afile = export_as_async_file(file);
@@ -757,5 +759,6 @@ namespace fs
         auto adir = export_as_async_dir(dir);
         return _new_dir_adaptor<AsyncDIR, EasyPerformer>(adir, -1);
     }
+#endif
 }
 }

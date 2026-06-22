@@ -69,7 +69,7 @@ public:
 
     virtual int setsockopt(int fd) {
         for (auto& opt : *this) {
-            if (::setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
+            if (photon::net::setsockopt(fd, opt.level, opt.opt_name, opt.opt_val, opt.opt_len) != 0) {
                 LOG_ERRNO_RETURN(EINVAL, -1, "Failed to setsockopt ",
                                  VALUE(opt.level), VALUE(opt.opt_name), VALUE(opt.opt_val));
             }

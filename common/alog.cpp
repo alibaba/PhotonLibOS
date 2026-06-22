@@ -42,7 +42,7 @@ static uint32_t now0;
 
 class BaseLogOutput : public ILogOutput {
 public:
-    uint64_t throttle = -1UL;
+    uint64_t throttle = -1ULL;
     uint64_t count = 0;
     uint32_t ts = 0;
     int log_file_fd;
@@ -104,7 +104,7 @@ public:
         throttle_block();
     }
     void throttle_block() {
-        if (throttle == -1UL) return;
+        if (throttle == -1ULL) return;
         if (ts != now0) { ts = now0; count = 0; }
         if (++count > throttle) { ::sleep(1); }
     }
@@ -189,7 +189,7 @@ void LogFormatter::put_integer_hbo(ALogBuffer& buf, ALogInteger X)
     // print (in reversed order)
     auto x = X.uvalue();
     auto shift = X.shift();
-    unsigned char mask = (1UL << shift) - 1;
+    unsigned char mask = (1ULL<< shift) - 1;
     auto begin = buf.ptr;
     do { put(buf, "0123456789ABCDEFH" [x & mask]);
     } while (x >>= shift);
@@ -404,7 +404,7 @@ public:
     }
 };
 
-static const uint64_t SPSC_CAPACITY     = 1024 * 1024UL;
+static const uint64_t SPSC_CAPACITY     = 1024 * 1024ULL;
 static const int      MIN_NUM_OF_QUEUES = 1;
 static const int      MAX_NUM_OF_QUEUES = 128;
 static const uint32_t MAX_YIELD_TURNS   = 1024;
@@ -446,7 +446,7 @@ public:
                     ++yield_turn;
                 } else {
                     // wait for 100ms
-                    sem.wait(1, 100UL * 1000);
+                    sem.wait(1, 100ULL * 1000);
                 }
             } else {
                 yield_turn = 0;
@@ -487,7 +487,7 @@ public:
         if (ra + iov.total_length > spsc::SLOTS_NUM / 2 && ra <= spsc::SLOTS_NUM / 2) { sem.signal(1); }
     }
     virtual int get_log_file_fd() override { return log_output->get_log_file_fd(); }
-    virtual uint64_t set_throttle(uint64_t t = -1UL) override { return log_output->set_throttle(t); }
+    virtual uint64_t set_throttle(uint64_t t = -1ULL) override { return log_output->set_throttle(t); }
     virtual uint64_t get_throttle() override { return log_output->get_throttle(); }
     virtual void destruct() override {
         if (!stopped) {
@@ -574,14 +574,14 @@ struct TM : tm {
     }
     void update(uint64_t now0) {
         auto now = now0 + tsdelta;
-        tm_usec = cut(now, 1000000ul);
+        tm_usec = cut(now, 1000000ull);
         time_t ts = now;
         tm_sec = cut(now, 60);
         if (unlikely(now != minuteid)) {    // calibrate wall time every minute
             struct timeval tv;
             gettimeofday(&tv, NULL);
             tv.tv_sec -= timezone;
-            now = tv.tv_sec * 1000000ul + tv.tv_usec;
+            now = tv.tv_sec * 1000000ull + tv.tv_usec;
             tsdelta = now - now0;
             tm_usec = tv.tv_usec;
             now = ts = tv.tv_sec;

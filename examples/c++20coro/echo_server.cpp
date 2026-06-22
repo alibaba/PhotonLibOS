@@ -44,7 +44,7 @@ photon::coro::Coro<void> server(int port) {
     server->listen();
     std::ranges::for_each(socket_accept(server), [&](auto sess) {
         auto name = sess->getpeername();
-        sess->timeout(10UL * 1024 * 1024);
+        sess->timeout(10ULL * 1024 * 1024);
         LOG_INFO("Accept ", name);
         photon::coro::async_run(session, sess, name);
     });

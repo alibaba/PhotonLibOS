@@ -111,7 +111,7 @@ static int do_ext2fs_file_close(ext2_file_t file) {
     return 0;
 }
 
-static long do_ext2fs_read(
+static ssize_t do_ext2fs_read(
     ext2_file_t file,
     int flags,
     char *buffer,
@@ -139,7 +139,7 @@ static long do_ext2fs_read(
     return got;
 }
 
-static long do_ext2fs_write(
+static ssize_t do_ext2fs_write(
     ext2_file_t file,
     int flags,
     const char *buffer,
@@ -583,7 +583,7 @@ static int do_ext2fs_symlink(ext2_filsys fs, const char *src, const char *dest) 
 static int do_ext2fs_mknod(ext2_filsys fs, const char *path, unsigned int st_mode, unsigned int st_rdev) {
     ext2_ino_t parent, ino;
     errcode_t ret = 0;
-    unsigned long devmajor, devminor;
+    unsigned int devmajor, devminor;
     int filetype;
 
     DEFER(LOG_DEBUG("mknod ", VALUE(path), VALUE(parent), VALUE(ino), VALUE(ret)));
@@ -1242,7 +1242,7 @@ class ExtDIR : public photon::fs::DIR {
 public:
     std::vector<::dirent> m_dirs;
     ::dirent *direntp = nullptr;
-    long loc;
+    int64_t loc;
     ExtDIR(std::vector<::dirent> &dirs) : loc(0) {
         m_dirs = std::move(dirs);
         next();
@@ -1261,7 +1261,7 @@ public:
     }
     virtual int next() override {
         if (!m_dirs.empty()) {
-            if (loc < (long) m_dirs.size()) {
+            if (loc < (int64_t) m_dirs.size()) {
                 direntp = &m_dirs[loc++];
             } else {
                 direntp = nullptr;
@@ -1273,16 +1273,16 @@ public:
         loc = 0;
         next();
     }
-    virtual void seekdir(long loc) override {
+    virtual void seekdir(long long loc) override {
         this->loc = loc;
         next();
     }
-    virtual long telldir() override {
+    virtual long long telldir() override {
         return loc;
     }
 };
 
-static const uint64_t kMinimalInoLife = 1L * 1000 * 1000; // ino lives at least 1s
+static const uint64_t kMinimalInoLife = 1ULL * 1000 * 1000; // ino lives at least 1s
 class ExtFileSystem : public photon::fs::IFileSystem, public photon::fs::IFileSystemXAttr {
 public:
     ext2_filsys fs;

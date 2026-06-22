@@ -16,9 +16,48 @@ limitations under the License.
 
 #pragma once
 #include <csignal>
+
 #ifdef __APPLE__
 using sighandler_t = void(*)(int);
 #endif
+
+#ifdef _WIN32
+// Windows has no POSIX signal API.  Provide stub types / constants / inline
+// no-op functions so code written against the POSIX signal interface (typical
+// in examples and tests: `photon::sync_signal(SIGINT, handler)` etc.)
+// compiles and runs without modification.  Handlers registered here are
+// ignored — Windows programs that need graceful shutdown should use
+// SetConsoleCtrlHandler directly.
+#ifndef SIGTSTP
+#define SIGTSTP 0
+#endif
+#ifndef SIGPIPE
+#define SIGPIPE 0
+#endif
+#ifndef SIGTERM
+#define SIGTERM 0
+#endif
+#ifndef SIGINT
+#define SIGINT 0
+#endif
+
+struct sigaction;  // incomplete — Windows has no sigaction; declared only so
+                   // the sync_sigaction prototype below parses.
+using sighandler_t = void(*)(int);
+
+namespace photon {
+
+inline int sync_signal_init() { return 0; }
+inline int block_all_signal() { return 0; }
+inline sighandler_t sync_signal(int, sighandler_t) { return nullptr; }
+inline int sync_sigaction(int, const struct sigaction*, struct sigaction*) {
+    return 0;
+}
+inline int sync_signal_fini() { return 0; }
+
+}  // namespace photon
+
+#else  // POSIX
 
 // sync_signal will be executed sequentially in a dedicated photon thread
 namespace photon
@@ -42,3 +81,5 @@ namespace photon
 
     extern "C" int sync_signal_fini();
 }
+
+#endif  // _WIN32

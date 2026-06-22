@@ -27,8 +27,8 @@ function(build_from_src [dep])
                 URL_MD5 9b8aa094c4e5765dabf4da391f00d15c
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND sh -c "CFLAGS=\"-fPIC -O3\" ./configure --prefix=${BINARY_DIR} --static"
-                BUILD_COMMAND $(MAKE)
+                CONFIGURE_COMMAND sh -c "CC=${CMAKE_C_COMPILER} CFLAGS=\"-fPIC -O3 -include stdio.h\" ./configure --prefix=${BINARY_DIR} --static"
+                BUILD_COMMAND $(MAKE) libz.a
                 INSTALL_COMMAND $(MAKE) install
         )
         set(ZLIB_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
@@ -50,28 +50,74 @@ function(build_from_src [dep])
         set(URING_LIBRARIES ${BINARY_DIR}/lib/liburing.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "gflags")
-        ExternalProject_Add(
-                gflags
-                URL ${PHOTON_GFLAGS_SOURCE}
-                URL_MD5 1a865b93bacfa963201af3f75b7bd64c
-                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                INSTALL_COMMAND ""
-        )
+        if (WIN32)
+            ExternalProject_Add(
+                    gflags
+                    URL ${PHOTON_GFLAGS_SOURCE}
+                    URL_MD5 1a865b93bacfa963201af3f75b7bd64c
+                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                               -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
+                    INSTALL_COMMAND ""
+            )
+        else ()
+            ExternalProject_Add(
+                    gflags
+                    URL ${PHOTON_GFLAGS_SOURCE}
+                    URL_MD5 1a865b93bacfa963201af3f75b7bd64c
+                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                    INSTALL_COMMAND ""
+            )
+        endif ()
         if (CMAKE_BUILD_TYPE STREQUAL "Debug")
             set(POSTFIX "_debug")
         endif ()
         ExternalProject_Get_Property(gflags BINARY_DIR)
         set(GFLAGS_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
-        set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a PARENT_SCOPE)
+        # gflags's output name varies by platform/config:
+        #   Windows (mingw): libgflags_static.a (verified working)
+        #   Linux / macOS:   libgflags.a (no _static suffix; POSTFIX may or may
+        #                    not be honored — usually empty on Release,
+        #                    _debug on Debug, depending on gflags version)
+        # Pick the most likely name per platform; Make resolves at build time.
+        if (WIN32)
+            set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags_static${POSTFIX}.a)
+        else ()
+            set(GFLAGS_LIBRARIES ${BINARY_DIR}/lib/libgflags${POSTFIX}.a)
+        endif ()
+        if (WIN32)
+            list(APPEND GFLAGS_LIBRARIES -lshlwapi)
+        endif ()
+        set(GFLAGS_LIBRARIES ${GFLAGS_LIBRARIES} PARENT_SCOPE)
 
     elseif (dep STREQUAL "googletest")
-        ExternalProject_Add(
-                googletest
-                URL ${PHOTON_GOOGLETEST_SOURCE}
-                URL_MD5 e82199374acdfda3f425331028eb4e2a
-                CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} -DINSTALL_GTEST=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                INSTALL_COMMAND ""
-        )
+        if (WIN32)
+            ExternalProject_Add(
+                    googletest
+                    URL ${PHOTON_GOOGLETEST_SOURCE}
+                    URL_MD5 e82199374acdfda3f425331028eb4e2a
+                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                               -DINSTALL_GTEST=OFF
+                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                               -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
+                    INSTALL_COMMAND ""
+            )
+        else ()
+            ExternalProject_Add(
+                    googletest
+                    URL ${PHOTON_GOOGLETEST_SOURCE}
+                    URL_MD5 e82199374acdfda3f425331028eb4e2a
+                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                               -DINSTALL_GTEST=OFF
+                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                    INSTALL_COMMAND ""
+            )
+        endif ()
         ExternalProject_Get_Property(googletest SOURCE_DIR)
         ExternalProject_Get_Property(googletest BINARY_DIR)
         set(GOOGLETEST_INCLUDE_DIRS ${SOURCE_DIR}/googletest/include ${SOURCE_DIR}/googlemock/include PARENT_SCOPE)
@@ -79,19 +125,38 @@ function(build_from_src [dep])
 
     elseif (dep STREQUAL "openssl")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/openssl-build)
-        ExternalProject_Add(
-                openssl
-                URL ${PHOTON_OPENSSL_SOURCE}
-                URL_MD5 3f76825f195e52d4b10c70040681a275
-                UPDATE_DISCONNECTED ON
-                BUILD_IN_SOURCE ON
-                CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared
-                BUILD_COMMAND $(MAKE)
-                INSTALL_COMMAND $(MAKE) install
-                LOG_CONFIGURE ON
-                LOG_BUILD ON
-                LOG_INSTALL ON
-        )
+        if (WIN32)
+            ExternalProject_Add(
+                    openssl
+                    URL ${PHOTON_OPENSSL_SOURCE}
+                    URL_MD5 3f76825f195e52d4b10c70040681a275
+                    UPDATE_DISCONNECTED ON
+                    BUILD_IN_SOURCE ON
+                    CONFIGURE_COMMAND ./Configure mingw64 -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared --cross-compile-prefix=x86_64-w64-mingw32-
+                    BUILD_COMMAND $(MAKE) build_libs
+                    INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR}/lib ${BINARY_DIR}/include
+                        COMMAND ${CMAKE_COMMAND} -E copy libcrypto.a ${BINARY_DIR}/lib/
+                        COMMAND ${CMAKE_COMMAND} -E copy libssl.a ${BINARY_DIR}/lib/
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory include/openssl ${BINARY_DIR}/include/openssl
+                    LOG_CONFIGURE ON
+                    LOG_BUILD ON
+                    LOG_INSTALL ON
+            )
+        else ()
+            ExternalProject_Add(
+                    openssl
+                    URL ${PHOTON_OPENSSL_SOURCE}
+                    URL_MD5 3f76825f195e52d4b10c70040681a275
+                    UPDATE_DISCONNECTED ON
+                    BUILD_IN_SOURCE ON
+                    CONFIGURE_COMMAND ./config -fPIC --prefix=${BINARY_DIR} --openssldir=${BINARY_DIR} no-shared
+                    BUILD_COMMAND $(MAKE)
+                    INSTALL_COMMAND $(MAKE) install
+                    LOG_CONFIGURE ON
+                    LOG_BUILD ON
+                    LOG_INSTALL ON
+            )
+        endif ()
         set(OPENSSL_ROOT_DIR ${BINARY_DIR} PARENT_SCOPE)
         set(OPENSSL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         set(OPENSSL_LIBRARIES ${BINARY_DIR}/lib/libssl.a ${BINARY_DIR}/lib/libcrypto.a PARENT_SCOPE)
@@ -102,14 +167,29 @@ function(build_from_src [dep])
             message(FATAL_ERROR "OPENSSL_ROOT_DIR not exist")
         endif ()
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/curl-build)
-        ExternalProject_Add(
-                curl
-                URL ${PHOTON_CURL_SOURCE}
-                URL_MD5 1211d641ae670cebce361ab6a7c6acff
-                CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
-                    -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
-                    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
-        )
+        if (WIN32)
+            ExternalProject_Add(
+                    curl
+                    URL ${PHOTON_CURL_SOURCE}
+                    URL_MD5 1211d641ae670cebce361ab6a7c6acff
+                    CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
+                        -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
+                        -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
+                        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                        -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
+                        -DHAVE_IOCTLSOCKET_FIONBIO=1
+                        -DHAVE_IOCTLSOCKET=1
+            )
+        else ()
+            ExternalProject_Add(
+                    curl
+                    URL ${PHOTON_CURL_SOURCE}
+                    URL_MD5 1211d641ae670cebce361ab6a7c6acff
+                    CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
+                        -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
+                        -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
+            )
+        endif ()
         add_dependencies(curl openssl)
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         if (EXISTS ${BINARY_DIR}/lib64/libcurl.a)
@@ -117,7 +197,11 @@ function(build_from_src [dep])
         else ()
             set(_curl_lib_path ${BINARY_DIR}/lib/libcurl.a)
         endif ()
-        set(CURL_LIBRARIES ${_curl_lib_path} PARENT_SCOPE)
+        set(CURL_LIBRARIES ${_curl_lib_path})
+        if (APPLE)
+            list(APPEND CURL_LIBRARIES "-framework CoreFoundation" "-framework SystemConfiguration")
+        endif ()
+        set(CURL_LIBRARIES ${CURL_LIBRARIES} PARENT_SCOPE)
 
     elseif (dep STREQUAL "rdmacore")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/rdmacore-build)

@@ -159,7 +159,7 @@ TEST(ExportFS, basic) {
     CALL_TEST(file, preadv, cbsst, nulliov, magic, 0);
     CALL_TEST(file, pwrite, cbsst, nullptr, magic, 0);
     CALL_TEST(file, pwritev, cbsst, nulliov, magic, 0);
-    CALL_TEST(file, lseek, cboff, 0L, 0L);
+    CALL_TEST(file, lseek, cboff, 0LL, 0LL);
     CALL_TEST0(file, fsync, cbint);
     CALL_TEST0(file, fdatasync, cbint);
     CALL_TEST0(file, close, cbint);
@@ -234,8 +234,8 @@ TEST(ExportFS, basic) {
     cbdirent.bind(nullptr, callbackent<magic>);
     Callback<AsyncResult<void>*> cbvoid;
     cbvoid.bind(nullptr, callbackvoid);
-    Callback<AsyncResult<long>*> cblong;
-    cblong.bind(nullptr, callback<long, 0>);
+    Callback<AsyncResult<long long>*> cblong;
+    cblong.bind(nullptr, callback<long long, 0>);
 
     EXPECT_CALL(*mockdir, closedir()).Times(AtLeast(1)).WillRepeatedly(Return(0));
     EXPECT_CALL(*mockdir, next()).Times(AtLeast(1)).WillRepeatedly(Return(0));

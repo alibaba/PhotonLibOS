@@ -70,7 +70,7 @@ struct is_shared_ptr<std::shared_ptr<T>> : std::true_type {};
 template <typename T, size_t N>
 class LockfreeRingQueueBase {
 public:
-#if __cplusplus < 201402L
+#if __cplusplus < 201402LL
     static_assert((std::has_trivial_copy_constructor<T>::value &&
                    std::has_trivial_copy_assign<T>::value) ||
                       is_shared_ptr<T>::value,
@@ -83,7 +83,7 @@ public:
 #endif
 
     constexpr static size_t SLOTS_NUM =
-        N ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(N - 1)) : 0;
+        N ? 1ULL<< (8 * sizeof(size_t) - __builtin_clzll(N - 1)) : 0;
 
     const size_t capacity;
     const size_t mask;
@@ -95,7 +95,7 @@ public:
 
     // For only flexible queue
     explicit LockfreeRingQueueBase(size_t c)
-        : capacity(c > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(c - 1))
+        : capacity(c > 1 ? 1ULL<< (8 * sizeof(size_t) - __builtin_clzll(c - 1))
                          : 2),
           mask(capacity - 1),
           shift(__builtin_ctzll(capacity)),
@@ -103,7 +103,7 @@ public:
 
     // For only deterministic queue
     LockfreeRingQueueBase()
-        : capacity(N > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(N - 1))
+        : capacity(N > 1 ? 1ULL<< (8 * sizeof(size_t) - __builtin_clzll(N - 1))
                          : 2),
           mask(capacity - 1),
           shift(__builtin_ctzll(capacity)),
@@ -162,7 +162,7 @@ public:
 
     static size_t required_space(size_t c) {
         size_t capacity =
-            c > 1 ? 1UL << (8 * sizeof(size_t) - __builtin_clzll(c - 1)) : 2;
+            c > 1 ? 1ULL<< (8 * sizeof(size_t) - __builtin_clzll(c - 1)) : 2;
         return sizeof(Q) + capacity * sizeof(T);
     }
 
@@ -697,7 +697,7 @@ public:
                 photon::thread_yield();
             } else {
                 // wait for 100ms
-                int r = queue_sem.wait(1, 100UL * 1000);
+                int r = queue_sem.wait(1, 100ULL * 1000);
                 // r == 0 means we actually consumed one m_count token; mirror
                 // it on `pending`. r < 0 (timeout/interrupt) does not touch
                 // m_count, so we must not touch `pending` either.

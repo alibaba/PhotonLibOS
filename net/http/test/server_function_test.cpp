@@ -51,7 +51,7 @@ int idiot_handle(void*, Request &req, Response &resp, std::string_view) {
 
 TEST(http_server, headers) {
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -92,7 +92,7 @@ int body_check_handler(void*, Request &req, Response &resp, std::string_view) {
 
 TEST(http_server, post) {
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -162,9 +162,9 @@ void test_head_case(Client* client, estring_view url, off_t st, size_t len, size
     else
         EXPECT_EQ(200, op->resp.status_code());
     char range[64];
-    auto range_len = snprintf(range, sizeof(range), "bytes %lu-%lu/%lu",
-        (unsigned long)st, (unsigned long)(st + len - 1),
-        (unsigned long)fs_handler_std_str.size());
+    auto range_len = snprintf(range, sizeof(range), "bytes %llu-%llu/%llu",
+        (unsigned long long)st, (unsigned long long)(st + len - 1),
+        (unsigned long long)fs_handler_std_str.size());
     auto rangestr = op->resp.headers["Content-Range"];
     EXPECT_EQ(0, memcmp(range, rangestr.data(), range_len));
 }
@@ -174,7 +174,7 @@ TEST(http_server, fs_handler) {
     system(std::string("touch /tmp/ease_ut/http_server/fs_handler_test").c_str());
     system(std::string("printf '" + fs_handler_std_str + "' > /tmp/ease_ut/http_server/fs_handler_test").c_str());
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -231,7 +231,7 @@ int chunked_handler_pt(void*, net::ISocketStream* sock) {
             chunked_send(offset, remain, sock);
             break;
         }
-        auto max_seg = std::min(remain - 1024, 2 * 4 * 1024UL);
+        auto max_seg = std::min<uint64_t>(remain - 1024, 2 * 4 * 1024);
         auto seg = 1024 + rand() % max_seg;
         chunked_send(offset, seg, sock);
         rec.push_back(seg);
@@ -289,7 +289,7 @@ TEST(http_server, proxy_handler_get) {
     DEFER(delete client);
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -316,7 +316,7 @@ TEST(http_server, proxy_handler_get) {
 
 TEST(http_server, proxy_handler_post) {
     auto source_server = new_tcp_socket_server();
-    source_server->timeout(1000UL*1000);
+    source_server->timeout(1000ULL*1000);
     source_server->bind_v4localhost();
     source_server->listen();
     DEFER(delete source_server);
@@ -332,7 +332,7 @@ TEST(http_server, proxy_handler_post) {
     DEFER(delete client);
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -373,7 +373,7 @@ int test_forward_director(void* src_, Request& src, Request& dst) {
 
 TEST(http_server, proxy_handler_post_forward) {
     auto source_server = new_tcp_socket_server();
-    source_server->timeout(1000UL*1000);
+    source_server->timeout(1000ULL*1000);
     source_server->bind_v4localhost();
     source_server->listen();
     DEFER(delete source_server);
@@ -389,7 +389,7 @@ TEST(http_server, proxy_handler_post_forward) {
     DEFER(delete client);
     //--------start proxy server ------------
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -430,7 +430,7 @@ TEST(http_server, proxy_handler_failure) {
     DEFER(delete client_proxy);
     client_proxy->timeout_ms(500);
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -477,7 +477,7 @@ TEST(http_server, mux_handler) {
     DEFER(delete client);
     //--------start mux server ------------
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
     DEFER(delete tcpserver);

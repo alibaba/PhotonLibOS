@@ -245,7 +245,7 @@ void do_call_timeout(StubImpl& stub, uint64_t function)
     args.init();
     args.serialize(req_iov.iov);
 
-    int ret = stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1UL*1000*1000);
+    int ret = stub.do_call(function, &req_iov.iov, &resp_iov.iov, 1ULL*1000*1000);
     if (ret >= 0) {
     }
 }
@@ -267,7 +267,7 @@ int server_function_timeout(void* instance, iovector* request, rpc::Skeleton::Re
     args.deserialize(*request);
     args.verify();
 
-    photon::thread_usleep(3UL*1000*1000);
+    photon::thread_usleep(3ULL*1000*1000);
 
     IOVector iov;
     iov.push_back(STR, LEN(STR));
@@ -509,7 +509,7 @@ public:
     }
     int do_rpc_service(OperationT::Request* req, OperationT::Response* resp, IOVector* iov, IStream* stream) {
         resp->code = req->code;
-        photon::thread_usleep(5UL*1000*1000);
+        photon::thread_usleep(5ULL*1000*1000);
         return 0;
     }
 

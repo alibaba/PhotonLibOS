@@ -41,15 +41,15 @@ TEST(key, basic) {
     ASSERT_EQ(0, photon::thread_key_create(&key0, nullptr));
     ASSERT_EQ(0, photon::thread_key_create(&key1, nullptr));
     ASSERT_EQ(0, photon::thread_key_create(&key2, nullptr));
-    ASSERT_EQ(0UL, key0);
-    ASSERT_EQ(1UL, key1);
-    ASSERT_EQ(2UL, key2);
+    ASSERT_EQ(0ULL, key0);
+    ASSERT_EQ(1ULL, key1);
+    ASSERT_EQ(2ULL, key2);
     ASSERT_EQ(0, photon::thread_key_delete(key0));
     ASSERT_EQ(0, photon::thread_key_create(&key3, nullptr));
-    ASSERT_EQ(0UL, key3);
+    ASSERT_EQ(0ULL, key3);
     ASSERT_EQ(0, photon::thread_key_delete(key2));
     ASSERT_EQ(0, photon::thread_key_create(&key4, nullptr));
-    ASSERT_EQ(2UL, key4);
+    ASSERT_EQ(2ULL, key4);
     ASSERT_EQ(0, photon::thread_key_delete(key1));
     ASSERT_EQ(0, photon::thread_key_delete(key3));
     ASSERT_EQ(0, photon::thread_key_delete(key4));
@@ -66,7 +66,7 @@ TEST(key, basic) {
 
     photon::thread_key_t key;
     ASSERT_EQ(0, photon::thread_key_create(&key, nullptr));
-    ASSERT_EQ(0UL, key);
+    ASSERT_EQ(0ULL, key);
     ASSERT_EQ(0, photon::thread_setspecific(key, &g_value));
     ASSERT_EQ(&g_value, photon::thread_getspecific(key));
     ASSERT_EQ(0, photon::thread_key_delete(key));
@@ -79,7 +79,7 @@ TEST(key, dtor) {
     auto th = photon::thread_create11([&] {
         photon::thread_key_t key;
         ASSERT_EQ(0, photon::thread_key_create(&key, &Value::key_dtor));
-        ASSERT_EQ(0UL, key);
+        ASSERT_EQ(0ULL, key);
         ASSERT_EQ(0, photon::thread_setspecific(key, &g_value));
     });
     photon::thread_enable_join(th);
@@ -100,7 +100,7 @@ TEST(key, overflow) {
         ASSERT_EQ(0, photon::thread_key_delete(i));
     }
     ASSERT_EQ(0, photon::thread_key_create(&key, &Value::key_dtor));
-    ASSERT_EQ(0UL, key);
+    ASSERT_EQ(0ULL, key);
     ASSERT_EQ(0, photon::thread_key_delete(0));
 }
 

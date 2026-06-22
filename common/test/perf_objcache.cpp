@@ -12,7 +12,7 @@
 #include "../expirecontainer.h"
 #include "../objectcachev2.h"
 
-constexpr size_t count = 10UL * 1024;
+constexpr size_t count = 10ULL * 1024;
 
 std::array<uint64_t, count> keys;
 

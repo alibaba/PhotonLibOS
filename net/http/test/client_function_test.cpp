@@ -50,7 +50,7 @@ int socket_put_cb(void* self, IStream* stream) {
 int socket_get_cb(void* self, IStream* stream) { return 0; }
 
 int timeout_writer(void *self, IStream* stream) {
-    photon::thread_usleep(5 * 1000UL * 1000UL);
+    photon::thread_usleep(5 * 1000ULL * 1000ULL);
     char c = '1';
     stream->write((void*)&c, 1);
     return 0;
@@ -165,7 +165,7 @@ TEST(http_client, post) {
     system("mkdir -p /tmp/ease_ut/http_test/");
     system("echo \"this is a http_client request body text for socket stream\" > /tmp/ease_ut/http_test/ease-httpclient-posttestfile");
     auto tcpserver = new_tcp_socket_server();
-    tcpserver->timeout(1000UL*1000);
+    tcpserver->timeout(1000ULL*1000);
     tcpserver->bind_v4localhost(0);
     tcpserver->listen();
     DEFER(delete tcpserver);
@@ -328,7 +328,7 @@ int chunked_handler_pt(void*, ISocketStream* sock) {
             chunked_send(offset, remain, sock);
             break;
         }
-        auto max_seg = std::min(remain - 1024, 2 * 4 * 1024UL);
+        auto max_seg = std::min<uint64_t>(remain - 1024, 2 * 4 * 1024);
         auto seg = 1024 + rand() % max_seg;
         chunked_send(offset, seg, sock);
         rec.push_back(seg);
@@ -972,7 +972,7 @@ int op_proxy_echo_handler(void*, Request& req, Response& resp, std::string_view)
 TEST(http_client, operation_level_proxy_e2e) {
     //--------start source server ------------
     auto source_server = new_tcp_socket_server();
-    source_server->timeout(1000UL*1000);
+    source_server->timeout(1000ULL*1000);
     source_server->bind_v4localhost();
     source_server->listen();
     DEFER(delete source_server);
@@ -988,7 +988,7 @@ TEST(http_client, operation_level_proxy_e2e) {
     auto proxy_client_a = new_http_client();
     DEFER(delete proxy_client_a);
     auto proxy_server_a_tcp = new_tcp_socket_server();
-    proxy_server_a_tcp->timeout(1000UL*1000);
+    proxy_server_a_tcp->timeout(1000ULL*1000);
     proxy_server_a_tcp->bind_v4localhost();
     proxy_server_a_tcp->listen();
     DEFER(delete proxy_server_a_tcp);
@@ -1005,7 +1005,7 @@ TEST(http_client, operation_level_proxy_e2e) {
     auto proxy_client_b = new_http_client();
     DEFER(delete proxy_client_b);
     auto proxy_server_b_tcp = new_tcp_socket_server();
-    proxy_server_b_tcp->timeout(1000UL*1000);
+    proxy_server_b_tcp->timeout(1000ULL*1000);
     proxy_server_b_tcp->bind_v4localhost();
     proxy_server_b_tcp->listen();
     DEFER(delete proxy_server_b_tcp);

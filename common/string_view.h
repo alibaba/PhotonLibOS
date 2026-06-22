@@ -31,7 +31,7 @@ limitations under the License.
 // libc++ (Clang 11/16, Apple Clang): back-deployed <string_view>
   #include <string_view>
 
-#elif __cplusplus >= 201703L
+#elif __cplusplus >= 201703LL
 // C++17 or newer (libstdc++ provides <string_view>)
   #include <string_view>
 

@@ -56,7 +56,7 @@ public:
     class Operation {
     public:
         Request req;                              // request
-        Timeout timeout = {-1UL};                 // default timeout: unlimited
+        Timeout timeout = {-1ULL};                 // default timeout: unlimited
         uint16_t follow = 8;                      // default follow: 8 at most
         uint16_t retry = 5;                       // default retry: 5 at most
         Response resp;                            // response
@@ -180,11 +180,11 @@ public:
         return m_proxy;
     }
     void timeout(uint64_t timeout) { m_timeout = timeout; }
-    void timeout_ms(uint64_t tmo) { timeout(tmo * 1000UL); }
-    void timeout_s(uint64_t tmo) { timeout(tmo * 1000UL * 1000UL); }
+    void timeout_ms(uint64_t tmo) { timeout(tmo * 1000ULL); }
+    void timeout_s(uint64_t tmo) { timeout(tmo * 1000ULL * 1000ULL); }
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
-                                          bool secure = false, uint64_t timeout = -1UL) = 0;
+                                          bool secure = false, uint64_t timeout = -1ULL) = 0;
 
     /**
      * @brief Connect to a WebSocket server
@@ -193,13 +193,13 @@ public:
      * @param timeout Timeout in microseconds (-1 for infinite)
      * @return Pointer to IWebSocketStream on success, nullptr on failure
      */
-    IWebSocketStream* websocket_connect(std::string_view url, uint64_t timeout = -1UL);
+    IWebSocketStream* websocket_connect(std::string_view url, uint64_t timeout = -1ULL);
 
 protected:
     StoredURL m_proxy_url;
     std::string m_proxy_auth;
     std::string m_user_agent;
-    uint64_t m_timeout = -1UL;
+    uint64_t m_timeout = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
 };

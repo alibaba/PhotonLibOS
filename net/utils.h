@@ -163,7 +163,7 @@ public:
  * @param resolve_timeout timeout in microseconds for domain resolution.
  * @return Resolver*
  */
-Resolver* new_default_resolver(uint64_t cache_ttl = 3600UL * 1000000, uint64_t resolve_timeout = -1);
+Resolver* new_default_resolver(uint64_t cache_ttl = 3600ULL * 1000000, uint64_t resolve_timeout = -1);
 
 // parse a string list of endpoints into vector
 // ip[:port],ip[:port],ip[:port],...

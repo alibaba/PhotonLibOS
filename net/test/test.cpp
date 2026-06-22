@@ -227,8 +227,8 @@ TEST(Socket, timeout) {
     });
     serv->bind_v4localhost();
     serv->listen(100);
-    cli->timeout(1024UL * 1024);  // 1-sec;
-    EXPECT_EQ(1024UL * 1024, cli->timeout());
+    cli->timeout(1024ULL * 1024);  // 1-sec;
+    EXPECT_EQ(1024ULL * 1024, cli->timeout());
     auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
     EXPECT_NE(nullptr, sock);
@@ -237,7 +237,7 @@ TEST(Socket, timeout) {
     auto ret = sock->recv(buff, 128);
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ETIMEDOUT, errno);
-    EXPECT_GE(photon::now - now, 1000 * 1000UL);
+    EXPECT_GE(photon::now - now, 1000 * 1000ULL);
 }
 
 void prepare(char* snd, char* recv, struct iovec& siov, struct iovec& riov,
@@ -363,8 +363,8 @@ TEST(ETSocket, timeout) {
     });
     serv->bind_v4localhost();
     serv->listen(100);
-    cli->timeout(1024UL * 1024);  // 1-sec;
-    EXPECT_EQ(1024UL * 1024, cli->timeout());
+    cli->timeout(1024ULL * 1024);  // 1-sec;
+    EXPECT_EQ(1024ULL * 1024, cli->timeout());
     auto sock = cli->connect(serv->getsockname());
     DEFER(delete sock);
     EXPECT_NE(nullptr, sock);
@@ -373,7 +373,7 @@ TEST(ETSocket, timeout) {
     auto ret = sock->recv(buff, 128);
     EXPECT_EQ(-1, ret);
     EXPECT_EQ(ETIMEDOUT, errno);
-    EXPECT_GE(photon::now - now, 1000 * 1000UL);
+    EXPECT_GE(photon::now - now, 1000 * 1000ULL);
 }
 
 void ETSocket_iov_test_cli_connect(ISocketStream** sock, ISocketClient* cli, ISocketServer* serv) {
@@ -541,7 +541,7 @@ TEST(TLSSocket, basic) {
     DEFER(delete server);
 
     server->bind_v4localhost();
-    server->timeout(10UL * 1024 * 1024);
+    server->timeout(10ULL * 1024 * 1024);
 
     auto logHandle = [&](ISocketStream* sock) {
         char buff[4096];
@@ -616,11 +616,11 @@ uint16_t _srvport = 0;
 
 int test_socket_server() {
     server_thread = photon::CURRENT;
-    int fd = net::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) LOG_ERRNO_RETURN(0, -1, "failed to photon::socket()");
+    int fd = net::socket(AF_INET, (int)SOCK_STREAM, 0);
+    if (fd < 0) LOG_ERRNO_RETURN(0, -1, "failed to photon::net::socket()");
 
     int state = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &state, sizeof(state));
+    photon::net::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &state, sizeof(state));
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -667,7 +667,7 @@ TEST(ConnectTest, HandleNoneZeroInput) {
     addr.sin_port = htons(_srvport);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    int fd = net::socket(AF_INET, SOCK_STREAM, 0);
+    int fd = net::socket(AF_INET, (int)SOCK_STREAM, 0);
 
     photon::thread_usleep(1000 * 200);
     puts("before connect()");

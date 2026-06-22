@@ -14,8 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#ifndef _WIN32
 #include <sys/utsname.h>
 #include <execinfo.h>
+#endif
 #include "utility.h"
 #include "estring.h"
 #include "alog.h"
@@ -47,6 +49,11 @@ int version_compare(string_view a, string_view b, int& result) {
 }
 
 int kernel_version_compare(std::string_view dst, int& result) {
+#ifdef _WIN32
+    // uname() not available on Windows; return failure
+    result = -1;
+    return 0;
+#else
     utsname buf = {};
     uname(&buf);
     estring kernel_release(buf.release);
@@ -56,9 +63,11 @@ int kernel_version_compare(std::string_view dst, int& result) {
         LOG_ERRNO_RETURN(0, -1, "Unable to detect kernel version, `", kernel_release.c_str());
     }
     return 0;
+#endif
 }
 
 void print_stacktrace() {
+#ifndef _WIN32
     int size = 16;
     void * array[16];
     int stack_num = backtrace(array, size);
@@ -68,5 +77,6 @@ void print_stacktrace() {
         LOG_DEBUG(stacktrace[i]);
     }
     free(stacktrace);
+#endif
 }
 

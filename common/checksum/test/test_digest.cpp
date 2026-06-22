@@ -50,7 +50,7 @@ TEST(hash, sha512) {
 }
 
 TEST(hash, md5) {
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#if OPENSSL_VERSION_NUMBER >= 0x30000000LL
     auto MD5 = [](const unsigned char* data, size_t len, unsigned char* hash){
         photon::md5 md5;
         md5.update(data, len);

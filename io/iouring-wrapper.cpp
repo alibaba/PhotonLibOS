@@ -569,8 +569,8 @@ private:
     }
 
     __kernel_timespec usec_to_timespec(int64_t usec) {
-        int64_t sec = usec / 1000000L;
-        long long nsec = (usec % 1000000L) * 1000L;
+        int64_t sec = usec / 1000000LL;
+        long long nsec = (usec % 1000000LL) * 1000LL;
         return {sec, nsec};
     }
 

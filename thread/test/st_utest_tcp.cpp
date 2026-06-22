@@ -22,7 +22,7 @@ void* tcp_server(void* /*arg*/)
     st_netfd_t stfd = NULL;
     StFdCleanup(fd, stfd);
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, (int)SOCK_STREAM, 0);
     ST_ASSERT_ERROR(fd == -1, fd, "Create socket");
 
     struct sockaddr_in addr;
@@ -31,7 +31,7 @@ void* tcp_server(void* /*arg*/)
     addr.sin_port = htons(ST_UTEST_PORT);
 
     int v = 1;
-    int r0 = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(int));
+    int r0 = photon::net::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(int));
     ST_ASSERT_ERROR(r0, r0, "Set SO_REUSEADDR");
 
     r0 = ::bind(fd, (const sockaddr*)&addr, sizeof(addr));
@@ -58,7 +58,7 @@ void* tcp_client(void* /*arg*/)
     st_netfd_t stfd = NULL;
     StFdCleanup(fd, stfd);
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, (int)SOCK_STREAM, 0);
     ST_ASSERT_ERROR(fd == -1, fd, "Create socket");
 
     struct sockaddr_in addr;
@@ -75,7 +75,7 @@ void* tcp_client(void* /*arg*/)
     return NULL;
 }
 
-VOID TEST(TcpTest, TcpConnection)
+TEST(TcpTest, TcpConnection)
 {
     st_thread_t svr = st_thread_create(tcp_server, NULL, 1, 0);
     EXPECT_TRUE(svr != NULL);

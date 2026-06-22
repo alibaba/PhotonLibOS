@@ -107,7 +107,7 @@ namespace PMock {
         MOCK_METHOD0(get, struct dirent*());
         MOCK_METHOD0(readdir, struct dirent*());
         MOCK_METHOD0(rewinddir, void());
-        MOCK_METHOD1(seekdir, void(long loc));
-        MOCK_METHOD0(telldir, long());
+        MOCK_METHOD1(seekdir, void(long long loc));
+        MOCK_METHOD0(telldir, long long());
     };
 }

@@ -238,12 +238,12 @@ TEST(ForkTest, PopenInThread) {
 
     photon::semaphore sem(0);
     auto cmd = "du -s \"/tmp\"";
-    ssize_t size = -1;
+    long long size = -1;
     std::thread([&] {
         auto f = popen(cmd, "r");
         EXPECT_NE(nullptr, f);
         DEFER(fclose(f));
-        fscanf(f, "%lu", &size);
+        fscanf(f, "%lld", &size);
         sem.signal(1);
         LOG_INFO("popen done");
     }).detach();

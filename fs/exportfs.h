@@ -46,10 +46,11 @@ namespace fs
         IFile*         export_as_sync_file(IFile* file);
         IFileSystem*   export_as_sync_fs(IFileSystem* fs);
         DIR*           export_as_sync_dir(DIR* dir);
-
+#ifndef __linux__
         IFile*         export_as_easy_sync_file(IFile* file);
         IFileSystem*   export_as_easy_sync_fs(IFileSystem* fs);
         DIR*           export_as_easy_sync_dir(DIR* dir);
+#endif
     }
 }
 }

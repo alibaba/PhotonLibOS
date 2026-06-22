@@ -73,7 +73,7 @@ FileCachePool::~FileCachePool() {
 void FileCachePool::Init() {
   probeFiemap();
   traverseDir("/");
-  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8ULL * 1024 * 1024);
 }
 
 void FileCachePool::probeFiemap() {

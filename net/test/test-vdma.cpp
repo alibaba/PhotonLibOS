@@ -1,3 +1,12 @@
+// Suppress MinGW's -Wnonnull false positives on the vDMATarget* returned by
+// new_shm_vdma_target().  The factory returns a valid pointer; GCC's static
+// analyzer can't prove it across the translation unit boundary and mis-fires
+// "this pointer is null" on every target->alloc(...) / target->dealloc(...)
+// call below.  Clang (macOS) and older GCC don't have this analyzer quirk.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wnonnull"
+#endif
+
 #include "../../test/gtest.h"
 #include "../vdma/shm.cpp"
 #include <photon/photon.h>

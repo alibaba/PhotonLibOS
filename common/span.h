@@ -35,11 +35,11 @@ http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/n4820.pdf
 #define TCB_SPAN_NAMESPACE_NAME tcb
 #endif
 
-#if __cplusplus >= 201703L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)
+#if __cplusplus >= 201703LL || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703LL)
 #define TCB_SPAN_HAVE_CPP17
 #endif
 
-#if __cplusplus >= 201402L || (defined(_MSVC_LANG) && _MSVC_LANG >= 201402L)
+#if __cplusplus >= 201402LL || (defined(_MSVC_LANG) && _MSVC_LANG >= 201402LL)
 #define TCB_SPAN_HAVE_CPP14
 #endif
 

@@ -8,7 +8,7 @@
 #include <photon/thread/thread.h>
 #include <photon/thread/timer.h>
 
-DEFINE_string(host, "127.0.0.1", "rsocket server address");
+DEFINE_string(server_host, "127.0.0.1", "rsocket server address");
 DEFINE_int32(port, 95271, "rsocket port");
 DEFINE_int32(jobs, 4, "number of jobs");
 static uint64_t count = 0;
@@ -18,13 +18,13 @@ void* task(void* arg) {
     char buffer[65536];
 
     auto sess = client->connect(photon::net::EndPoint(
-        photon::net::IPAddr(FLAGS_host.c_str()), FLAGS_port));
+        photon::net::IPAddr(FLAGS_server_host.c_str()), FLAGS_port));
     if (!sess) {
         LOG_ERRNO_RETURN(0, nullptr, "connect");
     }
     DEFER(delete sess);
 
-    photon::Timeout tmo(5UL * 1024 * 1024);
+    photon::Timeout tmo(5ULL * 1024 * 1024);
 
     while (!tmo.expired()) {
         auto nsend = sess->send(buffer, sizeof(buffer));
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-    photon::net::EndPoint ep(FLAGS_host.c_str(), FLAGS_port);
+    photon::net::EndPoint ep(FLAGS_server_host.c_str(), FLAGS_port);
     if (ep.addr.is_localhost()) {
         LOG_ERROR_RETURN(
             0, EINVAL, "May not support lo address, use IP of RDMA interface");
@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
     DEFER(photon::fini());
     default_logger.log_level = ALOG_DEBUG;
 
-    LOG_INFO(VALUE(FLAGS_host), VALUE(FLAGS_port), VALUE(FLAGS_jobs));
+    LOG_INFO(VALUE(FLAGS_server_host), VALUE(FLAGS_port), VALUE(FLAGS_jobs));
 
     auto server = photon::net::new_rsocket_server();
     if (!server) {
@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
     DEFER(delete server);
 
     auto ret =
-        server->bind(photon::net::EndPoint(FLAGS_host.c_str(), FLAGS_port));
+        server->bind(photon::net::EndPoint(FLAGS_server_host.c_str(), FLAGS_port));
     if (ret < 0) {
         LOG_ERRNO_RETURN(0, -1, "bind");
     }
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
 
     server->set_handler({handler, nullptr});
 
-    photon::Timer timer(1UL * 1000 * 1000, {ontime, nullptr});
+    photon::Timer timer(1ULL * 1000 * 1000, {ontime, nullptr});
 
     server->start_loop(false);
 

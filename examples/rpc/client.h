@@ -31,7 +31,7 @@ struct ExampleClient {
     // Socket type could be tcp/udp/zerocopy/rdma ...
     ExampleClient() {
         auto sock_client = std::shared_ptr<photon::net::ISocketClient>(photon::net::new_tcp_socket_client());
-        pool.reset(photon::rpc::new_stub_pool(10UL * 1000 * 1000, 1UL * 1000 * 1000, sock_client));
+        pool.reset(photon::rpc::new_stub_pool(10ULL * 1000 * 1000, 1ULL * 1000 * 1000, sock_client));
     }
 
     int64_t RPCHeartbeat(photon::net::EndPoint ep);

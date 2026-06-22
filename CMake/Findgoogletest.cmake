@@ -1,5 +1,13 @@
-find_path(GOOGLETEST_INCLUDE_DIRS gtest/gtest.h gmock/gmock.h)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL CMAKE_HOST_SYSTEM_NAME)
+    # Cross-compiling: don't find system libs, build from source instead
+    set(GOOGLETEST_INCLUDE_DIRS "" CACHE STRING "")
+    set(GOOGLETEST_GTEST_LIBRARIES "" CACHE STRING "")
+    set(GOOGLETEST_GTEST_MAIN_LIBRARIES "" CACHE STRING "")
+    set(GOOGLETEST_GMOCK_LIBRARIES "" CACHE STRING "")
+    return()
+endif ()
 
+find_path(GOOGLETEST_INCLUDE_DIRS gtest/gtest.h gmock/gmock.h)
 find_library(GOOGLETEST_GTEST_LIBRARIES gtest)
 find_library(GOOGLETEST_GTEST_MAIN_LIBRARIES gtest_main)
 find_library(GOOGLETEST_GMOCK_LIBRARIES gmock)

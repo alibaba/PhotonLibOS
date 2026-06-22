@@ -59,10 +59,10 @@ static void run_statistics_loop(bool show_latency) {
         if (show_latency) {
             uint64_t lat = (qps_val != 0) ? (time_cost.load() / qps_val) : 0;
             LOG_INFO("qps: `, bw: ` MB/s, latency: ` us", qps_val / FLAGS_show_statistics_interval,
-                     ((qps_val * FLAGS_buf_size) >> 20UL) / FLAGS_show_statistics_interval, lat);
+                     ((qps_val * FLAGS_buf_size) >> 20ULL) / FLAGS_show_statistics_interval, lat);
         } else {
             LOG_INFO("qps: `, bw: ` MB/s", qps_val / FLAGS_show_statistics_interval,
-                     ((qps_val * FLAGS_buf_size) >> 20UL) / FLAGS_show_statistics_interval);
+                     ((qps_val * FLAGS_buf_size) >> 20ULL) / FLAGS_show_statistics_interval);
         }
         qps = 0;
         time_cost = 0;

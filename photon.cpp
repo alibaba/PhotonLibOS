@@ -18,7 +18,9 @@ limitations under the License.
 #include <inttypes.h>
 
 #include "io/fd-events.h"
+#ifndef _WIN32
 #include "io/signal.h"
+#endif
 #include "io/aio-wrapper.h"
 #include "thread/thread.h"
 #include "thread/thread-pool.h"
@@ -52,7 +54,7 @@ class Shift {
 public:
     uint8_t _n;
     constexpr Shift(uint64_t x) : _n(__builtin_ctz(x)) { }
-    operator uint64_t() { return 1UL << _n; }
+    operator uint64_t() { return 1ULL<< _n; }
 };
 
 // Try to init master engine with the recommended order
@@ -111,8 +113,10 @@ int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions
         LOG_ERROR_RETURN(0, -1, "All master engines init failed");
     }
 next:
+#ifndef _WIN32
     if ((INIT_EVENT_SIGNAL & event_engine) && sync_signal_init() < 0)
         return -1;
+#endif
 
 #ifdef ENABLE_FSTACK_DPDK
     INIT_IO(FSTACK_DPDK, fstack_dpdk);
@@ -168,8 +172,10 @@ int fini() {
     FINI_IO(FSTACK_DPDK, fstack_dpdk)
 #endif
 
+#ifndef _WIN32
     if (INIT_EVENT_SIGNAL & g_event_engine)
         sync_signal_fini();
+#endif
     fd_events_fini();
     vcpu_fini();
     g_event_engine = g_io_engine = 0;

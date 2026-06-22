@@ -106,7 +106,7 @@ TEST(easy_performer, test) {
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
-    printf("all ready\n");
+    LOG_DEBUG("all ready");
 
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 10000; i++) {
@@ -118,6 +118,5 @@ TEST(easy_performer, test) {
     auto spent = std::chrono::high_resolution_clock::now() - start;
     auto microsec =
         std::chrono::duration_cast<std::chrono::microseconds>(spent).count();
-    printf("10k tasks done, take %ld us, qps=%ld\n", microsec,
-           10000L * 1000000 / microsec);
+    LOG_DEBUG("10k tasks done, take ` us, qps=", microsec, 10000ULL * 1000000 / microsec);
 }

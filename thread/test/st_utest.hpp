@@ -13,8 +13,6 @@
 #include <photon/thread/st.h>
 #include <string>
 
-#define VOID
-
 // Close the fd automatically.
 #define StFdCleanup(fd, stfd) impl__StFdCleanup _ST_free_##fd(&fd, &stfd)
 #define StStfdCleanup(stfd) impl__StFdCleanup _ST_free_##stfd(NULL, &stfd)

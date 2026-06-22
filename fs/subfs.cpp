@@ -37,7 +37,7 @@ namespace fs
         IFileSystem* underlayfs = nullptr;
         IFileSystemXAttr* underlay_xattrfs = nullptr;
         char base_path[PATH_MAX];
-        uint base_path_len = 0;
+        uint32_t base_path_len = 0;
         bool ownership = false;
 
         int init(IFileSystem* _underlayfs, const char* _base_path, bool _ownership)
@@ -58,7 +58,7 @@ namespace fs
                 LOG_ERROR_RETURN(EINVAL, -1, "the base path '`' of file system [`] must be an directory!",
                                  _base_path, _underlayfs);
 
-            base_path_len = (uint)strlen(_base_path);
+            base_path_len = (uint32_t)strlen(_base_path);
             assert(base_path_len > 0);
             if (base_path_len > LEN(base_path) - 2)
                 LOG_ERROR_RETURN(EINVAL, -1, "the base path '`' is too long!", _base_path);

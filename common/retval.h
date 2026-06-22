@@ -26,10 +26,10 @@ namespace photon {
 struct reterr {
     // use int64_t to make sure the result is returned
     // via another register, so that it is accessed easily
-    int64_t _errno = 0;
-    bool failed() const { return unlikely(_errno); }
+    int64_t _err = 0;
+    bool failed() const { return unlikely(_err); }
     bool succeeded() const { return !failed(); }
-    int get_errno() const { return (int)_errno; }
+    int get_errno() const { return (int)_err; }
     operator int() const { return get_errno(); }
 };
 
@@ -64,7 +64,7 @@ struct retval : public reterr {
     T get() const { return _val; }
     reterr error() const { return (const reterr) *this; }
     bool operator==(const retval& rhs) const {
-        return _errno ? (_errno == rhs._errno) : (_val == rhs._val);
+        return _err ? (_err == rhs._err) : (_val == rhs._val);
     }
     bool operator!=(const retval& rhs) const {
         return !(*this == rhs);
@@ -84,7 +84,7 @@ struct retval<void> : public reterr {
     void get() const { }
     reterr error() const { return (const reterr) *this; }
     bool operator==(const retval& rhs) const {
-        return _errno == rhs._errno;
+        return _err == rhs._err;
     }
     bool operator!=(const retval& rhs) const {
         return !(*this == rhs);

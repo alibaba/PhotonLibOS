@@ -25,14 +25,14 @@ limitations under the License.
 #include <sys/uio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <sys/ioctl.h>
 #include <sys/xattr.h>
 #include <sys/time.h>
 #include <dirent.h>
+#include <sys/statvfs.h>
+#include <sys/vfs.h>
 #ifdef __linux__
 #include <linux/fs.h>
-#include <sys/vfs.h>
 #include <linux/fiemap.h>
 #ifndef FALLOC_FL_KEEP_SIZE
 #define FALLOC_FL_KEEP_SIZE     0x01 /* default is extend size */
@@ -54,6 +54,9 @@ limitations under the License.
 #include <photon/thread/thread.h>
 #ifdef PHOTON_URING
 #include <photon/io/iouring-wrapper.h>
+#endif
+#ifdef _WIN32
+#include <photon/io/iocp.h>
 #endif
 
 
@@ -166,6 +169,11 @@ namespace fs
         {
             return UISysCall(::fremovexattr(fd, name, 0));
         }
+#elif defined(_WIN32)
+        UNIMPLEMENTED(ssize_t fgetxattr(const char *name, void *value, size_t size) override);
+        UNIMPLEMENTED(ssize_t flistxattr(char *list, size_t size) override);
+        UNIMPLEMENTED(int fsetxattr(const char *name, const void *value, size_t size, int flags) override);
+        UNIMPLEMENTED(int fremovexattr(const char *name) override);
 #endif
         UNIMPLEMENTED(int fsync() override);
         UNIMPLEMENTED(int fdatasync() override);
@@ -250,7 +258,6 @@ namespace fs
 #endif
     };
 
-#ifdef __linux__
     template<typename AIOEngine>
     class AioFileAdaptor final : public BaseFileAdaptor
     {
@@ -288,13 +295,12 @@ namespace fs
             return ret;
         }
     };
-#endif
     class LocalDIR : public DIR
     {
     public:
         ::DIR* dirp;
         ::dirent* direntp;
-        long loc;
+        long long loc;
         ::dirent m_dirent;
 
         LocalDIR(::DIR* dirp) : dirp(dirp)
@@ -337,17 +343,16 @@ namespace fs
             ::rewinddir(dirp);
             next();
         }
-        virtual void seekdir(long loc) override
+        virtual void seekdir(long long loc) override
         {
-            ::seekdir(dirp, loc);
+            ::seekdir(dirp, (long)loc);
             next();
         }
-        virtual long telldir() override
+        virtual long long telldir() override
         {
             return loc;
         }
     };
-
     class psync{};
     template<typename T> static
     IFile* file_ctor(int fd, IFileSystem* fs)
@@ -385,11 +390,21 @@ namespace fs
                     break;
 #endif
 #endif
+#ifdef _WIN32
+                case ioengine_iocp:
+                    _ctor = &file_ctor<iocp>;
+                    break;
+#endif
                 default:
                     _ctor = &file_ctor<psync>;
             }
         }
+#ifdef __linux__
         bool is_libaio() { return _ctor == &file_ctor<libaio>; }
+#endif
+#ifdef _WIN32
+        bool is_iocp() { return _ctor == &file_ctor<iocp>; }
+#endif
         IFile* operator()(int fd, IFileSystem* fs) { return _ctor(fd, fs); }
     };
 
@@ -410,7 +425,12 @@ namespace fs
             if (_file_ctor.is_libaio())
                 flags |= O_DIRECT;
 #endif
+#ifdef _WIN32
+            int fd = _file_ctor.is_iocp() ? iocp_open(pathname, flags) :
+                                     UISysCall(::open(pathname, flags));
+#else
             int fd = UISysCall(::open(pathname, flags));
+#endif
             return new_local_file(fd, pathname);
         }
         virtual IFile* open(const char *pathname, int flags, mode_t mode) override
@@ -419,17 +439,31 @@ namespace fs
             if (_file_ctor.is_libaio())
                 flags |= O_DIRECT;
 #endif
+#ifdef _WIN32
+            int fd = _file_ctor.is_iocp() ? iocp_open(pathname, flags, mode) :
+                                     UISysCall(::open(pathname, flags, mode));
+#else
             int fd = UISysCall(::open(pathname, flags, mode));
+#endif
             return new_local_file(fd, pathname);
         }
         virtual IFile* creat(const char *pathname, mode_t mode) override
         {
+#ifdef _WIN32
+            int fd = _file_ctor.is_iocp() ? iocp_creat(pathname, mode) :
+                                     UISysCall(::creat(pathname, mode));
+#else
             int fd = UISysCall(::creat(pathname, mode));
+#endif
             return new_local_file(fd, pathname);
         }
         virtual int mkdir (const char *pathname, mode_t mode) override
         {
+#ifdef _WIN32
+            return UISysCall(::mkdir(pathname)); (void)mode;
+#else
             return UISysCall(::mkdir(pathname, mode));
+#endif
         }
         virtual int rmdir(const char *pathname) override
         {
@@ -493,6 +527,34 @@ namespace fs
             ::sync();
             return 0;
         }
+#ifdef _WIN32
+        // Windows lacks POSIX utime / utimes / lutimes / mknod / statfs / statvfs.
+        // The virtual interface is shared with Linux / macOS, so we stub here.
+        virtual int utime(const char *, const struct utimbuf *) override {
+            errno = ENOSYS;
+            return -1;
+        }
+        virtual int utimes(const char *, const struct timeval[2]) override {
+            errno = ENOSYS;
+            return -1;
+        }
+        virtual int lutimes(const char *, const struct timeval[2]) override {
+            errno = ENOSYS;
+            return -1;
+        }
+        virtual int mknod(const char *, mode_t, dev_t) override {
+            errno = ENOSYS;
+            return -1;
+        }
+        virtual int statfs(const char *, struct statfs *) override {
+            errno = ENOSYS;
+            return -1;
+        }
+        virtual int statvfs(const char *, struct statvfs *) override {
+            errno = ENOSYS;
+            return -1;
+        }
+#else
         virtual int utime(const char *path, const struct utimbuf *file_times) override
         {
             return UISysCall(::utime(path, file_times));
@@ -517,6 +579,7 @@ namespace fs
         {
             return UISysCall(::statvfs(path, buf));
         }
+#endif
 #ifdef __linux__
         virtual ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override
         {
@@ -583,6 +646,15 @@ namespace fs
         {
             return UISysCall(::removexattr(path, name, XATTR_NOFOLLOW));
         }
+#elif defined(_WIN32)
+        UNIMPLEMENTED(ssize_t getxattr(const char *path, const char *name, void *value, size_t size) override);
+        UNIMPLEMENTED(ssize_t lgetxattr(const char *path, const char *name, void *value, size_t size) override);
+        UNIMPLEMENTED(ssize_t listxattr(const char *path, char *list, size_t size) override);
+        UNIMPLEMENTED(ssize_t llistxattr(const char *path, char *list, size_t size) override);
+        UNIMPLEMENTED(int setxattr(const char *path, const char *name, const void *value, size_t size, int flags) override);
+        UNIMPLEMENTED(int lsetxattr(const char *path, const char *name, const void *value, size_t size, int flags) override);
+        UNIMPLEMENTED(int removexattr(const char *path, const char *name) override);
+        UNIMPLEMENTED(int lremovexattr(const char *path, const char *name) override);
 #endif
     };
 

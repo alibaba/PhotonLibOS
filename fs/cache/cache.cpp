@@ -55,7 +55,7 @@ ICachePool::ICachePool(uint32_t pool_size, uint32_t max_refilling,
       m_refilling_threshold(refilling_threshold),
       m_pin_write(pin_write) {
     if (pool_size != 0) {
-        m_thread_pool = photon::new_thread_pool(pool_size, 128 * 1024UL);
+        m_thread_pool = photon::new_thread_pool(pool_size, 128 * 1024ULL);
         m_vcpu = photon::get_vcpu();
     };
 }

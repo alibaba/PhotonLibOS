@@ -22,6 +22,9 @@ limitations under the License.
 #include <atomic>
 #include <cassert>
 #include <cerrno>
+#ifndef ESHUTDOWN
+#define ESHUTDOWN 108
+#endif
 #include <type_traits>
 #ifndef __aarch64__
 #include <emmintrin.h>

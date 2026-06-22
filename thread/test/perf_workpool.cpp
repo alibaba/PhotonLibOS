@@ -33,11 +33,11 @@ static std::atomic<uint64_t> sum_time;
 
 static void workload(uint64_t time_us) {
     auto start = std::chrono::steady_clock::now();
-    long diff_ns;
+    int64_t diff_ns;
     do {
         auto diff = std::chrono::steady_clock::now() - start;
         diff_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(diff).count();
-    } while (diff_ns < (long) time_us * 1000);
+    } while (diff_ns < (int64_t) time_us * 1000);
 }
 
 static void task_async() {
@@ -91,7 +91,7 @@ int main(int argc, char** arg) {
     set_log_output_level(ALOG_INFO);
 
     photon::use_pooled_stack_allocator();
-    photon::pooled_stack_trim_threshold(-1UL);
+    photon::pooled_stack_trim_threshold(-1ULL);
 
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     DEFER(photon::fini());

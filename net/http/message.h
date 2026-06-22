@@ -121,7 +121,7 @@ protected:
     // return 0 if header recvd
     // return 1 if end of stream
     // return negative if an error occured
-    int receive_header(uint64_t timeout = -1UL);
+    int receive_header(uint64_t timeout = -1ULL);
     int send_header(net::ISocketStream* stream = nullptr);
     // return 0 if whole header recvd
     // return 1 if end of stream

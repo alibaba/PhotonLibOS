@@ -27,7 +27,6 @@ limitations under the License.
 
 namespace photon {
 namespace net {
-int socket(int domain, int type, int protocol);
 
 int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
             Timeout timeout = {});
@@ -159,19 +158,19 @@ int do_get_name(int fd, Getter getter, char* path, size_t count);
 int do_get_name(int fd, Getter getter, EndPoint& addr);
 
 inline int get_socket_name(int fd, EndPoint& addr) {
-    return do_get_name(fd, &::getsockname, addr);
+    return do_get_name(fd, &getsockname, addr);
 }
 
 inline int get_peer_name(int fd, EndPoint& addr) {
-    return do_get_name(fd, &::getpeername, addr);
+    return do_get_name(fd, &getpeername, addr);
 }
 
 inline int get_socket_name(int fd, char* path, size_t count) {
-    return do_get_name(fd, &::getsockname, path, count);
+    return do_get_name(fd, &getsockname, path, count);
 }
 
 inline int get_peer_name(int fd, char* path, size_t count) {
-    return do_get_name(fd, &::getpeername, path, count);
+    return do_get_name(fd, &getpeername, path, count);
 }
 
 // sockaddr_storage is the container for any socket address type.

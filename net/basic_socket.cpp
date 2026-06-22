@@ -26,6 +26,9 @@ limitations under the License.
 #include <linux/errqueue.h>
 #include <sys/sendfile.h>
 #endif
+#ifdef _WIN32
+#include <photon/io/iocp.h>
+#endif
 #include <sys/uio.h>
 #include <photon/io/fd-events.h>
 #include <photon/net/socket.h>
@@ -72,17 +75,6 @@ int set_socket_nonblocking(int fd) {
 #endif
 }
 
-int socket(int domain, int type, int protocol) {
-#ifdef __APPLE__
-    auto fd = ::socket(domain, type, protocol);
-    set_fd_nonblocking(fd);
-    int val = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
-    return fd;
-#else
-    return ::socket(domain, type | SOCK_NONBLOCK, protocol);
-#endif
-}
 int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
             Timeout timeout) {
     int err = 0;
@@ -99,7 +91,7 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
                 ret = photon::wait_for_fd_writable(fd, timeout);
                 if (ret < 0) return -1;
                 socklen_t n = sizeof(err);
-                ret = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &n);
+                ret = getsockopt(fd, (int)SOL_SOCKET, (int)SO_ERROR, &err, &n);
                 if (unlikely(ret < 0)) return -1;
                 if (err) {
                     errno = err;
@@ -114,19 +106,8 @@ int connect(int fd, const struct sockaddr *addr, socklen_t addrlen,
 
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen,
            Timeout timeout) {
-#ifdef __APPLE__
-    auto ret = DOIO_ONCE(::accept(fd, addr, addrlen),
-                    wait_for_fd_readable(fd, timeout));
-    if (ret > 0) {
-        set_fd_nonblocking(ret);
-        int val = 1;
-        ::setsockopt(ret, SOL_SOCKET, SO_NOSIGPIPE, (void*)&val, sizeof(val));
-    }
-    return ret;
-#else
-    return DOIO_ONCE(::accept4(fd, addr, addrlen, SOCK_NONBLOCK),
+    return DOIO_ONCE(photon::net::accept4(fd, addr, addrlen, SOCK_NONBLOCK),
                  wait_for_fd_readable(fd, timeout));
-#endif
 }
 
 ssize_t read(int fd, void *buf, size_t count, Timeout timeout) {
@@ -149,6 +130,8 @@ ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count,
     ssize_t ret = DOIO_ONCE(::sendfile(in_fd, out_fd, *offset, &len, nullptr, 0),
                   wait_for_fd_writable(out_fd, timeout));
     return (ret == 0) ? len : (int)ret;
+#elif defined(_WIN32)
+    return iocp_sendfile(out_fd, in_fd, offset, count, timeout);
 #else
     return DOIO_ONCE(::sendfile(out_fd, in_fd, offset, count),
            wait_for_fd_writable(out_fd, timeout));
@@ -170,26 +153,26 @@ ssize_t readv_n(int fd, struct iovec *iov, int iovcnt, Timeout timeout) {
 }
 
 ssize_t send(int fd, const void *buf, size_t count, int flags, Timeout timeout) {
-    return DOIO_ONCE(::send(fd, buf, count, flags), wait_for_fd_writable(fd, timeout));
+    return DOIO_ONCE(::net_shim::send(fd, buf, count, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t sendmsg(int fd, const struct msghdr* msg, int flags, Timeout timeout) {
-    return DOIO_ONCE(::sendmsg(fd, msg, flags), wait_for_fd_writable(fd, timeout));
+    return DOIO_ONCE(::net_shim::sendmsg(fd, msg, flags), wait_for_fd_writable(fd, timeout));
 }
 
 ssize_t recv(int fd, void* buf, size_t count, int flags, Timeout timeout) {
-    return DOIO_ONCE(::recv(fd, buf, count, flags), wait_for_fd_readable(fd, timeout));
+    return DOIO_ONCE(::net_shim::recv(fd, buf, count, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t recvmsg(int fd, struct msghdr* msg, int flags, Timeout timeout) {
-    return DOIO_ONCE(::recvmsg(fd, msg, flags), wait_for_fd_readable(fd, timeout));
+    return DOIO_ONCE(::net_shim::recvmsg(fd, msg, flags), wait_for_fd_readable(fd, timeout));
 }
 
 ssize_t sendv(int fd, const struct iovec *iov, int iovcnt, int flag, Timeout timeout) {
     msghdr msg = {};
     msg.msg_iov = (struct iovec*)iov;
     msg.msg_iovlen = iovcnt;
-    return DOIO_ONCE(::sendmsg(fd, &msg, flag | MSG_NOSIGNAL),
+    return DOIO_ONCE(::net_shim::sendmsg(fd, &msg, flag | MSG_NOSIGNAL),
           wait_for_fd_writable(fd, timeout));
 }
 
@@ -287,7 +270,7 @@ int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count) {
 
     memset(&name, 0, sizeof(name));
     memcpy(name.sun_path, path, count + 1);
-#ifndef __linux__
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     name.sun_len = 0;
 #endif
     name.sun_family = AF_UNIX;

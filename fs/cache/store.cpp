@@ -305,13 +305,13 @@ void ICacheStore::set_cached_size(off_t cached_size, int flags)
 {
     if (cached_size == cached_size_) return;
     if (cached_size < cached_size_) {
-        evict(cached_size, -1UL, flags);
+        evict(cached_size, -1ULL, flags);
         return;
     }
 
     off_t size = cached_size_;
     if (size % page_size_ != 0) {
-        evict(size / page_size_ * page_size_, -1UL, flags);
+        evict(size / page_size_ * page_size_, -1ULL, flags);
     }
 }
 
@@ -399,12 +399,12 @@ rewrite:
         if (cached_size % page_size_ != 0) {
             evict(cached_size / page_size_ * page_size_);
             goto rewrite;
-        } else if (size % page_size_ != 0) len = -1UL;
+        } else if (size % page_size_ != 0) len = -1ULL;
     }
 
     auto lh = range_lock_.lock(offset, len);
     DEFER(range_lock_.unlock(lh));
-    if (len == -1UL && cached_size != cached_size_) goto rewrite;
+    if (len == -1ULL && cached_size != cached_size_) goto rewrite;
     auto write = do_pwritev2(iov, iovcnt, offset, flags);
     if (write != static_cast<ssize_t>(size)) {
         if (ENOSPC != errno)

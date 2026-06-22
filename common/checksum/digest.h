@@ -28,7 +28,7 @@ namespace photon {
 
 template<size_t LENGTH, const EVP_MD* (*MD)()>
 struct Digest {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+#if OPENSSL_VERSION_NUMBER >= 0x10100000LL
     EVP_MD_CTX* _ctx = EVP_MD_CTX_new();
     ~Digest() { EVP_MD_CTX_free(_ctx); }
 #else
