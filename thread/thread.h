@@ -722,6 +722,11 @@ namespace photon
     // thread_create() failed partway), which is the number joined.
     uint64_t threads_create_join(uint64_t n, thread_entry start, void* arg,
                           uint64_t stack_size = DEFAULT_STACK_SIZE);
+    template<typename R> inline
+    void threads_create_join(uint64_t n, TempDelegate<R> start,  // allow temp lambda
+                          uint64_t stack_size = DEFAULT_STACK_SIZE) {
+         threads_create_join(n, (thread_entry&)start._func, start._obj, stack_size);
+    }
 
     bool is_master_event_engine_default();
     void reset_master_event_engine_default();
