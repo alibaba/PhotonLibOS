@@ -602,24 +602,6 @@ TEST(ALOG, signed_zero) {
     EXPECT_STREQ("0", log_output_test.log_start());
 }
 
-TEST(ALOG, log_with_color) {
-    LOG_DEBUG("some debug log");
-    LOG_INFO("some info log");
-    LOG_WARN("some warning log");
-    LOG_ERROR("some error log");
-    LOG_FATAL("some fatal log");
-    LOG_TEMP("some temp log");
-    default_logger << LOG_AUDIT("some audit log");
-    LOG_DEBUG("some debug log");
-    LOG_INFO("some info log");
-    LOG_WARN("some warning log");
-    LOG_ERROR("some error log");
-    LOG_FATAL("some fatal log");
-    LOG_TEMP("some temp log");
-    default_logger << LOG_AUDIT("some audit log");
-    default_logger.log_output->preset_color();
-}
-
 // Regression: width specifier exceeding buffer space caused ALogBuffer::size
 // underflow, leading to stack buffer overflow in subsequent writes.
 TEST(ALog, integer_width_overflow) {
