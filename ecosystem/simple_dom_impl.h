@@ -58,7 +58,11 @@ union { struct  { // for non-root nodes
     uint8_t _flags;
     uint16_t _k_len : 12;       // key length (12 bits)
     uint16_t _v_off : 12;       // value offset (12 bits) to key end
+#ifndef _WIN32
 }__attribute__((packed));
+#else
+}__attribute__((gcc_struct, packed));
+#endif
 struct {         // for the root node
     uint8_t _flags_;                // the same as _flags
     uint8_t _node_size;             // sizeof(the node implementation)

@@ -105,8 +105,12 @@ ssize_t pread(int fd, void* buf, size_t count, off_t offset) {
     ov.Offset     = (DWORD)offset;
     ov.OffsetHigh = (DWORD)((ULONGLONG)offset >> 32);
     DWORD n = 0;
-    if (!ReadFile(h, buf, (DWORD)count, &n, &ov))
+    if (!ReadFile(h, buf, (DWORD)count, &n, &ov)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_HANDLE_EOF) return 0;
+        errno = (e == ERROR_ACCESS_DENIED) ? EACCES : EIO;
         return -1;
+    }
     return (ssize_t)n;
 }
 
@@ -117,8 +121,13 @@ ssize_t pwrite(int fd, const void* buf, size_t count, off_t offset) {
     ov.Offset     = (DWORD)offset;
     ov.OffsetHigh = (DWORD)((ULONGLONG)offset >> 32);
     DWORD n = 0;
-    if (!WriteFile(h, buf, (DWORD)count, &n, &ov))
+    if (!WriteFile(h, buf, (DWORD)count, &n, &ov)) {
+        DWORD e = GetLastError();
+        errno = (e == ERROR_ACCESS_DENIED) ? EACCES
+              : (e == ERROR_DISK_FULL)     ? ENOSPC
+              : EIO;
         return -1;
+    }
     return (ssize_t)n;
 }
 
@@ -201,9 +210,10 @@ ssize_t readlink(const char* path, char* buf, size_t bufsiz) {
 int truncate(const char* path, off_t length) {
     int fd = _open(path, O_RDWR | O_CREAT, 0666);
     if (fd < 0) return -1;
-    int ret = _chsize_s(fd, length);
+    errno_t e = _chsize_s(fd, length);
     _close(fd);
-    return ret;
+    if (e != 0) { errno = e; return -1; }
+    return 0;
 }
 
 // ---- sys/uio.h implementations ----
@@ -222,12 +232,18 @@ ssize_t writev(int fd, const struct iovec* iov, int iovcnt) {
 ssize_t readv(int fd, const struct iovec* iov, int iovcnt) {
     ssize_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
+        errno = 0;
         ssize_t n = _read(fd, iov[i].iov_base, (unsigned int)iov[i].iov_len);
-        if (n < 0) return -1;
+        if (n < 0) {
+            // Real error — if we already made progress, return it; otherwise -1.
+            if (total > 0) return total;
+            if (errno == 0) errno = EIO;
+            return -1;
+        }
         total += n;
         if (n == 0 || (size_t)n < iov[i].iov_len) break;
     }
-    return total ? total : -1;
+    return total;
 }
 
 // ---- sys/socket.h implementations ----

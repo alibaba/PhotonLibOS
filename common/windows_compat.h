@@ -41,7 +41,12 @@ typedef int gid_t;
 // timezone and gmtime_r compatibility
 #include <ctime>
 #define timezone _timezone
-#define gmtime_r(t, r) gmtime_s(r, t)
+// gmtime_r(t, r) must return r on success and nullptr on failure (POSIX).
+// MSVC's gmtime_s(r, t) returns errno_t (0 = success), so we wrap it and
+// translate instead of using a plain #define that would invert the check.
+inline struct tm* gmtime_r(const time_t* t, struct tm* r) {
+    return gmtime_s(r, t) == 0 ? r : nullptr;
+}
 
 // rand_s for random numbers
 #include <stdlib.h>
@@ -142,11 +147,53 @@ typedef struct {
     int si_fd;
 } siginfo_t;
 
-// strptime (POSIX, not available on Windows)
-#include <ctime>
+// strptime (POSIX, not available on Windows).
+//
+// Only the two formats used by ecosystem/oss.cpp are supported:
+//   "%a, %d %b %Y %H:%M:%S GMT"   (RFC 2822, 29 chars)
+//   "%Y-%m-%dT%H:%M:%S.000Z"      (ISO 8601, 24 chars)
+// Other formats return nullptr.
+inline int _win_strparse2(const char* s) { return (s[0]-'0')*10 + (s[1]-'0'); }
+inline int _win_strmon(const char* s) {
+    static const char* const m[] = {
+        "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+    for (int i = 0; i < 12; i++) if (!memcmp(s, m[i], 3)) return i;
+    return -1;
+}
 inline char* strptime(const char* s, const char* fmt, struct tm* tm) {
-    (void)s; (void)fmt; (void)tm;
+    if (!s || !fmt || !tm) return nullptr;
+    size_t slen = strlen(s);
+    // "%a, %d %b %Y %H:%M:%S GMT"
+    if (!strcmp(fmt, "%a, %d %b %Y %H:%M:%S GMT") && slen == 29 && s[3]==',' && s[4]==' ') {
+        int mon = _win_strmon(s + 8);
+        if (mon < 0) return nullptr;
+        tm->tm_mday = _win_strparse2(s + 5);
+        tm->tm_mon  = mon;
+        tm->tm_year = ((s[12]-'0')*1000 + (s[13]-'0')*100 + (s[14]-'0')*10 + (s[15]-'0')) - 1900;
+        tm->tm_hour = _win_strparse2(s + 17);
+        tm->tm_min  = _win_strparse2(s + 20);
+        tm->tm_sec  = _win_strparse2(s + 23);
+        tm->tm_isdst = 0;
+        return (char*)s + slen;
+    }
+    // "%Y-%m-%dT%H:%M:%S.000Z"
+    if (!strcmp(fmt, "%Y-%m-%dT%H:%M:%S.000Z") && slen == 24 &&
+        s[4]=='-' && s[7]=='-' && s[10]=='T' && s[13]==':' && s[16]==':' &&
+        s[19]=='.' && !memcmp(s + 20, "000Z", 4)) {
+        tm->tm_year = ((s[0]-'0')*1000 + (s[1]-'0')*100 + (s[2]-'0')*10 + (s[3]-'0')) - 1900;
+        tm->tm_mon  = _win_strparse2(s + 5) - 1;
+        tm->tm_mday = _win_strparse2(s + 8);
+        tm->tm_hour = _win_strparse2(s + 11);
+        tm->tm_min  = _win_strparse2(s + 14);
+        tm->tm_sec  = _win_strparse2(s + 17);
+        tm->tm_isdst = 0;
+        return (char*)s + slen;
+    }
     return nullptr;
 }
+
+// timegm — inverse of gmtime, converts broken-down UTC tm to time_t.
+// MinGW's CRT provides _mkgmtime with the same contract.
+inline time_t timegm(struct tm* tm) { return _mkgmtime(tm); }
 
 #endif // _WIN32
