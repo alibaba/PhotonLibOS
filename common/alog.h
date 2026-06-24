@@ -190,7 +190,15 @@ struct ALogBuffer
     char* ptr;
     uint32_t size;
     uint32_t level;
-    void consume(size_t n) { ptr += n; size -= n; }
+    void consume(size_t n) {
+        if (n >= size) {
+            ptr += size;
+            size = 0;
+        } else {
+            ptr += n;
+            size -= n;
+        }
+    }
 };
 
 #define ALOG_DEBUG 0

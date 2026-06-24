@@ -602,6 +602,33 @@ TEST(ALOG, signed_zero) {
     EXPECT_STREQ("0", log_output_test.log_start());
 }
 
+// Regression: width specifier exceeding buffer space caused ALogBuffer::size
+// underflow, leading to stack buffer overflow in subsequent writes.
+TEST(ALog, integer_width_overflow) {
+    char small_buf[16];
+    LogBuffer log(small_buf, sizeof(small_buf), &log_output_test);
+
+    log << DEC(6).width(2).padding('0');
+
+    log.printf(ALogString("FFFFFFFFFFFF", 12));
+    log << DEC(7).width(2).padding('0');
+
+    // Width(16) > buf.size — directly tests boundary clamping
+    char small_buf2[8];
+    LogBuffer log2(small_buf2, sizeof(small_buf2), &log_output_test);
+    void* p = (void*)0x1234567890ABCDEFull;
+    log2 << p;
+
+    // Timestamp-style sequence with near-full buffer
+    char small_buf3[32];
+    LogBuffer log3(small_buf3, sizeof(small_buf3), &log_output_test);
+    log3.printf(ALogString("ABCDEFGHIJKLMNOP", 16));
+    log3 << DEC(6).width(2).padding('0')
+         << DEC(19).width(2).padding('0')
+         << DEC(23).width(2).padding('0')
+         << DEC(11).width(2).padding('0');
+}
+
 int main(int argc, char **argv)
 {
     if (!photon::is_using_default_engine()) return 0;
