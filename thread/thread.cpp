@@ -2004,9 +2004,11 @@ insert_list:
                                     !th->allow_work_stealing()) {
                 th = th->next();
             } else if (th->idx != -1) {
-                // thread still referenced in source vCPU's sleepq; skip to
-                // avoid corrupting the heap structure after stealing.
+                // sleeping threads interrupted by another vCPU are inserted to  
+                // standby q without poping from sleeping q, they can not be stolen.
                 th = th->next();
+                // note that migrated threads are also inserted to standby q, but
+                // they are not in a sleeping q, so they are able to be stolen.
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
