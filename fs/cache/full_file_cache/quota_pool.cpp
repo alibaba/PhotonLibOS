@@ -201,15 +201,17 @@ int QuotaFilePool::evict(std::string_view filename) {
     return 0;
   }
   const auto& filePath = fileIter->first;
-  int err;
   auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
 
+  int err = 0;
   {
     auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
-    DEFER(cacheStore->release());
-    photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-    lru.mark_key_cleared(lruEntry->QuotaLruIter);
-    err = cacheStore->evict(0);
+    if (cacheStore) {
+      DEFER(cacheStore->release());
+      photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
+      lru.mark_key_cleared(lruEntry->QuotaLruIter);
+      err = cacheStore->evict(0);
+    }
     if (err) {
       ERRNO e;
       LOG_ERROR("truncate(0) failed, name : `, ret : `, error code : `", filePath, err, ERRNO());
@@ -244,12 +246,12 @@ void QuotaFilePool::dirEviction() {
       auto fileIter = dir->lru.back();
       const auto& fileName = fileIter->first;
       auto lruEntry = static_cast<QuotaLruEntry*>(fileIter->second.get());
-      int err;
+      int err = 0;
       bool flags_dir_delete = false;
 
       auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
-      DEFER(cacheStore->release());
-      {
+      if (cacheStore) {
+        DEFER(cacheStore->release());
         photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
         if (lruEntry->openCount==0){
           dir->lru.mark_key_cleared(lruEntry->QuotaLruIter);
