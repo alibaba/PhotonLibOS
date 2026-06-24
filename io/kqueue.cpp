@@ -176,8 +176,19 @@ public:
         if (e.interests & EVENT_READ) entry.reader_data = e.data;
         if (e.interests & EVENT_WRITE) entry.writer_data = e.data;
         if (e.interests & EVENT_ERROR) entry.error_data = e.data;
-        auto events = evmap.translate_bitwisely(e.interests);
-        return enqueue(e.fd, events, EV_ADD, 0, e.data, true);
+        if (e.interests & EVENT_READ) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_READ, EV_ADD, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        if (e.interests & EVENT_WRITE) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_WRITE, EV_ADD, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        if (e.interests & EVENT_ERROR) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_ERROR, EV_ADD, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        return 0;
     }
 
     int rm_interest(Event e) override {
@@ -191,8 +202,19 @@ public:
         if (e.interests & EVENT_READ) entry.reader_data = nullptr;
         if (e.interests & EVENT_WRITE) entry.writer_data = nullptr;
         if (e.interests & EVENT_ERROR) entry.error_data = nullptr;
-        auto events = evmap.translate_bitwisely(intersection);
-        return enqueue(e.fd, events, EV_DELETE, 0, e.data, true);
+        if (intersection & EVENT_READ) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_READ, EV_DELETE, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        if (intersection & EVENT_WRITE) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_WRITE, EV_DELETE, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        if (intersection & EVENT_ERROR) {
+            int ret = enqueue(e.fd, evmap.UNDERLAY_EVENT_ERROR, EV_DELETE, 0, e.data, true);
+            if (ret < 0) return ret;
+        }
+        return 0;
     }
 
     ssize_t wait_for_events(void** data,
