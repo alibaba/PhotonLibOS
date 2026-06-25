@@ -574,8 +574,6 @@ TEST(ALOG, IPAddr) {
     EXPECT_STREQ("abcd:1111:222:33:4:5:6:7", log_output_test.log_start());
 }
 
-<<<<<<< HEAD
-=======
 TEST(ALOG, signed_zero) {
     log_output = &log_output_test;
     DEFER(log_output = log_output_stdout);
@@ -611,7 +609,6 @@ TEST(ALog, integer_width_overflow) {
          << DEC(11).width(2).padding('0');
 }
 
->>>>>>> aa7abe2 ([Backport][main to 0.9] | fix(alog): clamp integer width/padding to prevent buffer overflow (#1485) (#1490) (#1500))
 int main(int argc, char **argv)
 {
     if (!photon::is_using_default_engine()) return 0;
