@@ -1996,6 +1996,12 @@ insert_list:
             if ((possibly_running && th->state == states::RUNNING) ||
                                     !th->allow_work_stealing()) {
                 th = th->next();
+            } else if (th->idx != -1) {
+                // sleeping threads interrupted by another vCPU are inserted to  
+                // standby q without poping from sleeping q, they can not be stolen.
+                th = th->next();
+                // note that migrated threads are also inserted to standby q, but
+                // they are not in a sleeping q, so they are able to be stolen.
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
@@ -2145,7 +2151,13 @@ insert_list:
     }
     static int do_thread_migrate(thread* th, vcpu_base* vb) {
         assert(vb != th->vcpu);
-        AtomicRunQ().remove_from_list(th);
+        AtomicRunQ arq;
+        SCOPED_LOCK(th->lock);
+        if (th->state != READY || th->vcpu != CURRENT->vcpu) {
+            LOG_ERROR_RETURN(EINVAL, -1,
+                "thread ` state changed during migrate", th)
+        }
+        arq.remove_from_list(th);
         th->get_vcpu()->nthreads--;
         th->state = STANDBY;
         auto vcpu = (vcpu_t*)vb;
