@@ -1344,6 +1344,50 @@ TEST(CachePool, refill_range_non_aligned_tail) {
   refillRangeNonAlignedTail(false);
 }
 
+TEST(CachePool, eviction_with_deleted_cache_dir) {
+  std::string root = "/tmp/ease/cache/evict_dir_deleted/";
+  SetupTestDir(root);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  // capacity=1GB (waterMark≈900MB, riskMark≈950MB), short store TTL (1ms)
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 100 * 1000 * 1000, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  auto cachePool = roCachedFs->get_pool();
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  const size_t fileSize = 100 * 1024 * 1024;
+  IOVector buffer(*cacheAllocator);
+  buffer.push_back(fileSize);
+
+  // Phase 1: write 600MB (below riskMark, no eviction yet)
+  for (int i = 0; i < 6; i++) {
+    std::string name = "/file_" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
+
+  // Wait for first batch stores to expire from ObjectCache
+  photon::thread_usleep(100 * 1000);
+
+  // Externally delete all cached files
+  std::string cmd = "rm -rf " + root + "*";
+  ASSERT_NE(-1, system(cmd.c_str()));
+
+  // Phase 2: keep writing — totalUsed_ will exceed riskMark (~950MB),
+  // updateSpace triggers eviction which tries to open the deleted files.
+  // Must not crash.
+  for (int i = 6; i < 12; i++) {
+    std::string name = "/file_" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
+}
+
 }
 }
 int main(int argc, char** argv) {
