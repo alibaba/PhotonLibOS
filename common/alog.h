@@ -189,8 +189,21 @@ struct ALogBuffer
     int level;
     char* ptr;
     uint32_t size;
+<<<<<<< HEAD
     uint32_t reserved;
     void consume(size_t n) { ptr += n; size -= n; }
+=======
+    uint32_t level;
+    void consume(size_t n) {
+        if (n >= size) {
+            ptr += size;
+            size = 0;
+        } else {
+            ptr += n;
+            size -= n;
+        }
+    }
+>>>>>>> aa7abe2 ([Backport][main to 0.9] | fix(alog): clamp integer width/padding to prevent buffer overflow (#1485) (#1490) (#1500))
 };
 
 #define ALOG_DEBUG 0
