@@ -166,6 +166,12 @@ static void crc_init() {
 #pragma GCC diagnostic ignored "-Winit-self"
 #endif
 #elif defined(__aarch64__)
+#ifdef __clang__
+#pragma clang attribute push (__attribute__((target("aes,crc"))), apply_to=function)
+#else // __GNUC__
+#pragma GCC push_options
+#pragma GCC target ("+crc+crypto")
+#endif
 #if !defined(__clang__) && defined(__GNUC__) && (__GNUC__ < 10)
 #undef __GNUC__
 #define __GNUC__ 10
@@ -730,6 +736,15 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 #pragma GCC pop_options
 #endif
 #endif  // __x86_64__
+
+// Pop aarch64 target options pushed at the beginning of the SIMD section
+#ifdef __aarch64__
+#ifdef __clang__
+#pragma clang attribute pop
+#else // __GNUC__
+#pragma GCC pop_options
+#endif
+#endif
 
 uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
     return crc64ecma_auto(buffer, nbytes, crc);
