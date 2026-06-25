@@ -22,6 +22,37 @@ jobs:
         git config --global --add safe.directory "${{ github.workspace }}"
         git config -l
 
+    - name: detect source pr
+      id: detect
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.AUTOPR_SECRET }}
+        script: |
+          const commit = '${{ github.event.after }}';
+          const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+            ...context.repo,
+            commit_sha: commit,
+          });
+          const merged = prs
+            .filter(p => p.merged_at)
+            .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+          if (merged.length === 0) {
+            core.info(`no merged PR associated with ${commit}; proceeding with precise auto-pr`);
+            core.setOutput('SKIP', 'false');
+            core.setOutput('SOURCE_HEAD_REF', '');
+            return;
+          }
+          const pr = merged[0];
+          const headRef = (pr.head && pr.head.ref) ? pr.head.ref : '';
+          core.info(`source PR #${pr.number}, head=${headRef}`);
+          core.setOutput('SOURCE_HEAD_REF', headRef);
+          if (/^backport-pr-[a-f0-9]+-/.test(headRef)) {
+            core.info('source PR head is backport-pr-* ; skipping precise auto-pr to avoid loop');
+            core.setOutput('SKIP', 'true');
+            return;
+          }
+          core.setOutput('SKIP', 'false');
+
     - name: check branch names
       id: branch_info
       run: |
