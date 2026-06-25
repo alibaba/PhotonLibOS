@@ -206,13 +206,23 @@ inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint64_t dat
 }
 
 #elif defined(__aarch64__)
+<<<<<<< HEAD
 #include "mm_intrin_neon.h"
+=======
+>>>>>>> a15941b ([Backport][main to 0.9] | ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410) (#1471))
 #ifdef __clang__
 #pragma clang attribute push (__attribute__((target("aes,crc"))), apply_to=function)
 #else // __GNUC__
 #pragma GCC push_options
 #pragma GCC target ("+crc+crypto")
+<<<<<<< HEAD
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"
+=======
+#endif
+#if !defined(__clang__) && defined(__GNUC__) && (__GNUC__ < 10)
+#undef __GNUC__
+#define __GNUC__ 10
+>>>>>>> a15941b ([Backport][main to 0.9] | ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410) (#1471))
 #endif
 
 // CRC32C hardware instructions for ARM
@@ -752,6 +762,15 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 #pragma GCC pop_options
 #endif
 #endif  // __x86_64__
+
+// Pop aarch64 target options pushed at the beginning of the SIMD section
+#ifdef __aarch64__
+#ifdef __clang__
+#pragma clang attribute pop
+#else // __GNUC__
+#pragma GCC pop_options
+#endif
+#endif
 
 uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
     return crc64ecma_auto(buffer, nbytes, crc);
