@@ -275,12 +275,8 @@ public:
 
 #endif
 
-    struct BIOMethodDeleter {
-        void operator()(BIO_METHOD* ptr) { BIO_meth_free(ptr); }
-    };
-
     static BIO_METHOD* BIO_s_sockstream() {
-        static std::unique_ptr<BIO_METHOD, BIOMethodDeleter> meth([] {
+        static BIO_METHOD* const meth = [] {
             auto m = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "BIO_PHOTON_SOCKSTREAM");
             BIO_meth_set_write(m, &TLSSocketStream::ssbio_bwrite);
             BIO_meth_set_read(m, &TLSSocketStream::ssbio_bread);
@@ -289,8 +285,8 @@ public:
             BIO_meth_set_create(m, &TLSSocketStream::ssbio_create);
             BIO_meth_set_destroy(m, &TLSSocketStream::ssbio_destroy);
             return m;
-        }());
-        return meth.get();
+        }();
+        return meth;
     }
 
     static ISocketStream* get_bio_sockstream(BIO* b) {
