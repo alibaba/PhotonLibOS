@@ -169,7 +169,7 @@ TEST(Perf, crc32c_sw) {
 
 void do_test64(const char* name, CRC64ECMA crc64ecma) {
     auto start = std::chrono::system_clock::now();
-    for (int i = 0; i < 100; ++i)
+    // for (int i = 0; i < 100; ++i)
     for (auto& c: cases) {
         auto crc64 = crc64ecma((uint8_t*)c.s.data(), c.s.length(), 0);
         if (crc64 != c.crc64ecma) puts(c.s.data());

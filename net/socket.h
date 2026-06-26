@@ -272,6 +272,21 @@ namespace net {
         virtual void timeout(uint64_t) = 0;
     };
 
+    class ISocketPool : public ISocketClient {
+    public:
+        using ISocketClient::connect;
+
+        // connect to a domain_name:port, which may resolve to multiple IP addresses
+        virtual ISocketStream* connect(std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) = 0;
+
+        // grouped by `key` --- connections are considered equal iff with the same key
+        virtual ISocketStream* connect(std::string_view key, const EndPoint& remote, const EndPoint* local = nullptr) = 0;
+        virtual ISocketStream* connect(std::string_view key, std::string_view domain_name, uint16_t port, const EndPoint* local = nullptr) = 0;
+
+        // allow user-defined connector, which will be used to establish new connections
+        virtual ISocketStream* connect(std::string_view key, TempDelegate<ISocketStream*> connector) = 0;
+    };
+
     class ISocketServer : public ISocketBase, public ISocketName, public Object {
     public:
         virtual int bind(const EndPoint& ep) = 0;
@@ -301,8 +316,42 @@ namespace net {
     extern "C" ISocketServer* new_tcp_socket_server();
     extern "C" ISocketClient* new_uds_client();
     extern "C" ISocketServer* new_uds_server(bool autoremove = false);
-    extern "C" ISocketClient* new_tcp_socket_pool(ISocketClient* client, uint64_t expiration = -1ULL,
-                                                  bool client_ownership = false);
+
+    struct SocketPoolArgs {
+        // if not provided, user-defined connector must
+        // be used to establish new connections
+        ISocketClient* sockclient = nullptr;
+        bool client_ownership = false;
+
+        bool enable_tcp_keepalive = false;
+        // idle seconds before the first keepalive probe (TCP_KEEPIDLE)
+        uint16_t tcp_keepalive_time = 2;
+        // seconds between keepalive probes (TCP_KEEPINTVL)
+        uint16_t tcp_keepalive_intvl = 2;
+        // max # of TCP keep-alive probes before killing the connection
+        uint16_t tcp_keepalive_probes = 15;
+
+        // if heartbeater is provided, it is called with each in-stock socket
+        // stream every `heartbeat_interval` us to send heartbeats, and
+        // return value of 0 for success, -1 for failure
+        Callback<ISocketStream*> heartbeater = { };
+        uint64_t heartbeat_interval = 10'000'000;
+
+        // in-stock socket streams are deleted after `expiration` us
+        uint64_t expiration = -1ULL;
+    };
+
+    extern "C" ISocketPool* new_tcp_socket_pool(const SocketPoolArgs& args);
+
+    // `client` can be nullptr, in this case user-defined connector must be used to establish new connections
+    inline ISocketPool* new_tcp_socket_pool(ISocketClient* sockclient,
+            uint64_t expiration = -1ULL, bool client_ownership = false) {
+        return new_tcp_socket_pool({
+            .sockclient = sockclient,
+            .client_ownership = client_ownership,
+            .expiration = expiration,
+        });
+    }
 
     extern "C" ISocketClient* new_zerocopy_tcp_client();
     extern "C" ISocketServer* new_zerocopy_tcp_server();

@@ -358,7 +358,7 @@ public:
     {
         return node;
     }
-    bool empty()
+    bool empty() const
     {
         return node == nullptr;
     }
@@ -430,17 +430,19 @@ public:
         }
         return split_front_exclusive(first_not_fit);
     }
-    void delete_all()
+    size_t delete_all()
     {
         auto ptr = node;
+        size_t n = 0;
         if (ptr) {
             do {
                 auto next = ptr->next();
-                delete ptr;
+                delete ptr; n++;
                 ptr = next;
             } while (ptr != node);
         }
         node = nullptr;
+        return n;
     }
     NodeType* round_robin_next() {
         auto x = node;
