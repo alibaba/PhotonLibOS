@@ -195,8 +195,8 @@ int FileCachePool::evict(std::string_view filename) {
     lru_.mark_key_cleared(lruEntry->lruIter);
   }
   int err = 0;
-  {
-    auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  if (cacheStore) {
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = cacheStore->evict(0);
@@ -330,8 +330,9 @@ void FileCachePool::eviction() {
         continue;
     }
 
-    {
-      auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    int err = 0;
+    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
+    if (cacheStore) {
       DEFER(cacheStore->release());
       photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
       err = cacheStore->evict(0);
