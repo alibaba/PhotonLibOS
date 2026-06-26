@@ -121,7 +121,8 @@ int fork_child_process() {
 
         LOG_INFO("child hello, pid `", getpid());
         while (!exit_flag) {
-            photon::thread_usleep(200 * 1000);
+            int ret = photon::thread_usleep(200 * 1000);
+            if (ret < 0) return ret;
         }
         photon::fini();
         LOG_INFO("child exited, pid `", getpid());
@@ -144,7 +145,8 @@ int fork_parent_process(uint64_t event_engine) {
         return m_pid;
     }
     photon::fini();
-    photon::init(event_engine, k_init_io_engine);
+    int ret = photon::init(event_engine, k_init_io_engine);
+    if (ret < 0) LOG_ERRNO_RETURN(0, -1, "failed to init event engine");
 
     photon::block_all_signal();
     photon::sync_signal(SIGINT, &sigint_handler);
@@ -289,7 +291,7 @@ TEST(ForkTest, LIBAIO) {
     std::unique_ptr<photon::fs::IFileSystem> fs(
         photon::fs::new_localfs_adaptor("/tmp/", photon::fs::ioengine_libaio));
     std::unique_ptr<photon::fs::IFile> lf(
-        fs->open("test_local_fs_fork_parent", O_RDWR | O_CREAT, 0755));
+        fs->open("test_local_fs_fork_parent", O_RDWR | O_CREAT, 0644));
     void* buf = nullptr;
     ::posix_memalign(&buf, 4096, 4096);
     DEFER(free(buf));
