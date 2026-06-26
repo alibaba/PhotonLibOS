@@ -6,12 +6,17 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  gcc850:
+  gcc-test:
+    name: gcc-${{ matrix.gcc }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged --shm-size 512m
+    strategy:
+      fail-fast: false
+      matrix:
+        gcc: [8, 9, 10, 11, 12, 13, 14]
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -28,306 +33,9 @@ jobs:
           mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc921:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged --shm-size 512m
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-9/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc1031:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged --shm-size 512m
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-10/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc1121:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged --shm-size 512m
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-11/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc1211:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged --shm-size 512m
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-12/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc13:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-13/enable
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc)
-      - name: Test epoll
-        run: |
-          nohup redis-server &
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test io_uring
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-      - name: Test epoll_ng
-        run: |
-          nohup redis-server &
-          export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest --timeout 3600 -V
-          pkill redis-server
-
-  gcc14:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
-    steps:
-      - uses: szenius/set-timezone@v2.0
-        with:
-          timezoneLinux: "Asia/Shanghai"
-          timezoneMacos: "Asia/Shanghai"
-          timezoneWindows: "China Standard Time"
-      - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
-      - name: Build
-        run: |
-          source /opt/rh/gcc-toolset-14/enable
+          if [ "${{ matrix.gcc }}" != "8" ]; then
+            source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          fi
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
@@ -357,7 +65,7 @@ jobs:
 
   fstack:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
       options: --cpus 4 --privileged
@@ -372,7 +80,7 @@ jobs:
 
   RocksDB:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
       image: almalinux:8
       options: --cpus 4 --privileged
