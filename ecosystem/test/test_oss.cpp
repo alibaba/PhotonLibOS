@@ -7,6 +7,9 @@
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdlib>
 #include <string>
@@ -98,6 +101,8 @@ class BasicAuthOssTest : public ::testing::Test {
   void symlink();
   void batch_get_objects();
   void upload_with_options();
+  void fd_put_and_get();
+  void fd_multipart();
 
  private:
   std::string bucket_prefix_;
@@ -593,6 +598,155 @@ void BasicAuthOssTest::upload_with_options() {
   EXPECT_EQ(meta.etag, etag);
 }
 
+struct FdWriterCtx {
+  int fd;
+  off_t offset;
+  size_t remaining;
+};
+
+static ssize_t fd_body_writer_cb(void* ctx_ptr, IStream* stream) {
+  auto* ctx = static_cast<FdWriterCtx*>(ctx_ptr);
+  constexpr size_t kChunkSize = 128 * 1024;
+  char buf[kChunkSize];
+  off_t offset = ctx->offset;
+  size_t remaining = ctx->remaining;
+  while (remaining > 0) {
+    size_t to_read = std::min(remaining, kChunkSize);
+    ssize_t n = ::pread(ctx->fd, buf, to_read, offset);
+    if (n <= 0) return -1;
+    ssize_t w = stream->write(buf, static_cast<size_t>(n));
+    if (w != n) return -1;
+    offset += n;
+    remaining -= static_cast<size_t>(n);
+  }
+  return 0;
+}
+
+struct FdReaderCtx {
+  int fd;
+  off_t write_offset;
+};
+
+static ssize_t fd_body_reader_cb(void* ctx_ptr, IStream* stream, uint64_t content_length) {
+  auto* ctx = static_cast<FdReaderCtx*>(ctx_ptr);
+  constexpr size_t kBufSize = 128 * 1024;
+  char buf[kBufSize];
+  size_t total_read = 0;
+  off_t write_offset = ctx->write_offset;
+  while (total_read < content_length) {
+    size_t to_read = std::min(kBufSize, static_cast<size_t>(content_length - total_read));
+    ssize_t n = stream->read(buf, to_read);
+    if (n <= 0) break;
+    ssize_t w = ::pwrite(ctx->fd, buf, static_cast<size_t>(n), write_offset);
+    if (w != n) return -1;
+    write_offset += n;
+    total_read += static_cast<size_t>(n);
+  }
+  return static_cast<ssize_t>(total_read);
+}
+
+void BasicAuthOssTest::fd_put_and_get() {
+  auto path = get_real_test_path("fd_put_and_get/testfile");
+
+  // Prepare a temp file with random data
+  const size_t file_size = 1024 * 100 + 7;  // 100KB + 7 bytes
+  std::vector<char> data(file_size);
+  std::mt19937 rng(42);
+  for (auto& c : data) c = static_cast<char>(rng() & 0xFF);
+
+  char tmpfile[] = "/tmp/photon_oss_test_put_XXXXXX";
+  int fd = ::mkstemp(tmpfile);
+  ASSERT_GE(fd, 0);
+  DEFER(::close(fd); ::unlink(tmpfile));
+  ASSERT_EQ(::pwrite(fd, data.data(), file_size, 0), (ssize_t)file_size);
+
+  // Upload using BodyWriter from fd
+  FdWriterCtx wctx{fd, 0, file_size};
+  BodyWriter writer{&wctx, &fd_body_writer_cb};
+  auto ret = client->put_object(path, file_size, writer);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "put_object(BodyWriter) failed";
+
+  // Download using BodyReader to a new fd
+  char tmpfile2[] = "/tmp/photon_oss_test_get_XXXXXX";
+  int fd2 = ::mkstemp(tmpfile2);
+  ASSERT_GE(fd2, 0);
+  DEFER(::close(fd2); ::unlink(tmpfile2));
+
+  FdReaderCtx rctx{fd2, 0};
+  BodyReader reader{&rctx, &fd_body_reader_cb};
+  ret = client->get_object_range(path, 0, file_size, reader);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "get_object_range(BodyReader) failed";
+
+  // Verify full content
+  std::vector<char> downloaded(file_size);
+  ASSERT_EQ(::pread(fd2, downloaded.data(), file_size, 0), (ssize_t)file_size);
+  ASSERT_EQ(data, downloaded);
+
+  // Verify partial range (offset=1024, count=512)
+  char tmpfile3[] = "/tmp/photon_oss_test_partial_XXXXXX";
+  int fd3 = ::mkstemp(tmpfile3);
+  ASSERT_GE(fd3, 0);
+  DEFER(::close(fd3); ::unlink(tmpfile3));
+
+  FdReaderCtx rctx2{fd3, 0};
+  BodyReader reader2{&rctx2, &fd_body_reader_cb};
+  ret = client->get_object_range(path, 1024, 512, reader2);
+  ASSERT_EQ(ret, 512);
+
+  char partial_buf[512];
+  ASSERT_EQ(::pread(fd3, partial_buf, 512, 0), 512);
+  ASSERT_EQ(memcmp(partial_buf, data.data() + 1024, 512), 0);
+}
+
+void BasicAuthOssTest::fd_multipart() {
+  auto path = get_real_test_path("fd_multipart/testfile");
+
+  // Prepare source file with 3 parts
+  const size_t part_size = 1048576 + 13;  // >1MB per part (OSS minimum)
+  const int num_parts = 3;
+  const size_t total_size = part_size * num_parts;
+
+  std::vector<char> data(total_size);
+  std::mt19937 rng(123);
+  for (auto& c : data) c = static_cast<char>(rng() & 0xFF);
+
+  char tmpfile[] = "/tmp/photon_oss_test_mp_XXXXXX";
+  int fd = ::mkstemp(tmpfile);
+  ASSERT_GE(fd, 0);
+  DEFER(::close(fd); ::unlink(tmpfile));
+  ASSERT_EQ(::pwrite(fd, data.data(), total_size, 0), (ssize_t)total_size);
+
+  // Multipart upload using BodyWriter from fd
+  void* context = nullptr;
+  int ret = client->init_multipart_upload(path, &context);
+  ASSERT_EQ(ret, 0);
+
+  for (int i = 0; i < num_parts; i++) {
+    FdWriterCtx wctx{fd, (off_t)(i * part_size), part_size};
+    BodyWriter writer{&wctx, &fd_body_writer_cb};
+    auto r = client->upload_part(context, part_size, i + 1, writer);
+    ASSERT_EQ(r, (ssize_t)part_size) << "upload_part(BodyWriter) failed on part " << (i + 1);
+  }
+
+  ret = client->complete_multipart_upload(context);
+  ASSERT_EQ(ret, 0);
+
+  // Download and verify each part range
+  char tmpfile2[] = "/tmp/photon_oss_test_mp_dl_XXXXXX";
+  int fd2 = ::mkstemp(tmpfile2);
+  ASSERT_GE(fd2, 0);
+  DEFER(::close(fd2); ::unlink(tmpfile2));
+
+  FdReaderCtx rctx{fd2, 0};
+  BodyReader reader{&rctx, &fd_body_reader_cb};
+  auto r = client->get_object_range(path, 0, total_size, reader);
+  ASSERT_EQ(r, (ssize_t)total_size);
+
+  std::vector<char> downloaded(total_size);
+  ASSERT_EQ(::pread(fd2, downloaded.data(), total_size, 0), (ssize_t)total_size);
+  ASSERT_EQ(data, downloaded);
+}
+
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
@@ -634,6 +788,8 @@ TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
 
 TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
+TEST_F(BasicAuthOssTest, fd_put_and_get) { fd_put_and_get(); }
+TEST_F(BasicAuthOssTest, fd_multipart) { fd_multipart(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }

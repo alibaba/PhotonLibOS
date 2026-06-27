@@ -19,6 +19,7 @@ limitations under the License.
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
 #include <photon/common/ordered_span.h>
+#include <photon/common/stream.h>
 #include <photon/common/string_view.h>
 #include <photon/net/http/headers.h>
 #include <photon/net/http/verb.h>
@@ -150,6 +151,23 @@ struct ObjectUploadOptions {
   std::string *etag = nullptr;
 };
 
+// Callback for writing data into the HTTP request body (upload direction).
+// The caller writes data to the IStream* (which wraps the HTTP request).
+// Return 0 on success, -1 on error.
+// NOTE: The callback may be invoked more than once if the HTTP layer retries
+// on transient failures. Implementations must be idempotent — e.g., seek the
+// source back to the beginning before each write.
+using BodyWriter = Delegate<ssize_t, IStream*>;
+
+// Callback for reading data from the HTTP response body (download direction).
+// The caller reads data from the IStream* (which wraps the HTTP response).
+// The second argument is the Content-Length of the response.
+// Return bytes read on success, -1 on error.
+// NOTE: The callback may be invoked more than once if the HTTP layer retries
+// on partial reads. Implementations must be idempotent — e.g., seek the
+// destination back to the beginning before each read.
+using BodyReader = Delegate<ssize_t, IStream*, uint64_t>;
+
 class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
@@ -163,6 +181,10 @@ class Client : public Object {
   virtual ssize_t get_object_range(std::string_view object,
                                    const struct iovec* iov, int iovcnt,
                                    off_t offset,
+                                   ObjectHeaderMeta* meta = nullptr) = 0;
+
+  virtual ssize_t get_object_range(std::string_view object, off_t offset,
+                                   size_t count, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
 
   // return value is the object count which data is successfully downloaded.
@@ -183,6 +205,14 @@ class Client : public Object {
   };
   virtual ssize_t put_object(std::string_view object, const struct iovec* iov,
                              int iovcnt, ObjectUploadOptions& opts) = 0;
+
+  ssize_t put_object(std::string_view object, size_t content_length,
+                     BodyWriter writer, uint64_t* expected_crc64 = nullptr) {
+    ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
+    return put_object(object, content_length, writer, opts);
+  };
+  virtual ssize_t put_object(std::string_view object, size_t content_length,
+                             BodyWriter writer, ObjectUploadOptions& opts) = 0;
 
   // return value is the newly appended size if the operation succeeds,
   // otherwise return -1.
@@ -217,6 +247,15 @@ class Client : public Object {
   };
   virtual ssize_t upload_part(void* context, const struct iovec* iov,
                               int iovcnt, int part_number,
+                              ObjectUploadOptions& opts) = 0;
+
+  ssize_t upload_part(void* context, size_t content_length, int part_number,
+                      BodyWriter writer, uint64_t* expected_crc64 = nullptr) {
+    ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
+    return upload_part(context, content_length, part_number, writer, opts);
+  };
+  virtual ssize_t upload_part(void* context, size_t content_length,
+                              int part_number, BodyWriter writer,
                               ObjectUploadOptions& opts) = 0;
 
   virtual int upload_part_copy(void* context, off_t offset, size_t count,
