@@ -233,6 +233,7 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         io/reset_handle.cpp
         net/*.cpp
         net/http/*.cpp
+        net/http/huffman/*.cpp
         net/http/websocket.cpp
         net/security-context/tls-stream.cpp
         net/vdma/*.cpp
