@@ -22,3 +22,7 @@ add_test(NAME client_tls_test COMMAND $<TARGET_FILE:client_tls_test>)
 add_executable(websocket_test websocket_test.cpp)
 target_link_libraries(websocket_test PRIVATE photon_shared ${testing_libs})
 add_test(NAME websocket_test COMMAND $<TARGET_FILE:websocket_test>)
+
+add_executable(test_h2 test_h2.cpp)
+target_link_libraries(test_h2 PRIVATE photon_shared ${testing_libs})
+add_test(NAME test_h2 COMMAND $<TARGET_FILE:test_h2>)
