@@ -2,10 +2,12 @@ name: Linux ARM
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
   arm-linux-build-and-test:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-24.04-arm
 
     container:

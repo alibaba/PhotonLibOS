@@ -2,10 +2,12 @@ name: Linux x86_64
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
   gcc850:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -41,6 +43,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -77,6 +80,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -113,6 +117,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -149,6 +154,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -185,6 +191,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   fstack:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
