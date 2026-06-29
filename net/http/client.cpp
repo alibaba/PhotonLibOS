@@ -19,6 +19,7 @@ limitations under the License.
 #include <algorithm>
 #include <random>
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/estring.h>
 #include <photon/common/iovector.h>
 #include <photon/common/string_view.h>
 #include <photon/net/socket.h>
@@ -37,9 +38,9 @@ class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
     std::unique_ptr<ISocketClient> tcpsock;
-    std::unique_ptr<ISocketClient> tlssock;
     std::unique_ptr<ISocketClient> udssock;
     std::unique_ptr<Resolver> resolver;
+    std::unique_ptr<ISocketPool> tcp_pool;
     photon::mutex init_mtx;
     bool initialized = false;
     bool tls_ctx_ownership = false;
@@ -61,20 +62,18 @@ public:
             tls_ctx = new_tls_context(nullptr, nullptr, nullptr);
             tls_ctx->set_verify_mode(VerifyMode::PEER);  // act like curl
         }
-        auto tcp_cli = new_tcp_socket_client(src_ips.data(), src_ips.size());
-        auto tls_cli = new_tls_client(tls_ctx, new_tcp_socket_client(src_ips.data(), src_ips.size()), true);
-        tcpsock.reset(new_tcp_socket_pool(tcp_cli, -1, true));
-        tlssock.reset(new_tcp_socket_pool(tls_cli, -1, true));
+        tcpsock.reset(new_tcp_socket_client(src_ips.data(), src_ips.size()));
         udssock.reset(new_uds_client());
+        tcp_pool.reset(new_tcp_socket_pool(nullptr, -1ULL, false));
         resolver.reset(new_default_resolver(kDNSCacheLife));
         initialized = true;
         return 0;
     }
 
     void at_photon_fini() {
+        tcp_pool.reset();
         resolver.reset();
         udssock.reset();
-        tlssock.reset();
         tcpsock.reset();
         if (tls_ctx_ownership)
             delete tls_ctx;
@@ -82,52 +81,177 @@ public:
         tls_ctx_ownership = false;
     }
 
-    ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
-                             uint64_t timeout = -1ULL);
+    // Single entry point: choose dial method based on Operation proxy config.
+    ISocketStream* dial(Client::Operation* op, Timeout tmo);
 
-    template <typename T>
-    ISocketStream* dial(const T& x, uint64_t timeout = -1ULL) {
-        return dial(x.host_no_port(), x.port(), x.secure(), timeout);
+    ISocketStream* dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout);
+
+private:
+    // Key format for pool connection grouping:
+    //   direct/proxy: <host>:<port>:<0|1>  (0=TCP, 1=TLS)
+    //   tunnel:       <proxy_host>:<proxy_port>:<s|p>:<target_host>:<target_port>[:<auth>]
+    static std::string make_key(std::string_view host, uint16_t port, bool secure) {
+        return estring().appends(host, ":", port, ":", secure ? '1' : '0');
     }
 
-    ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1ULL);
+    static std::string make_tunnel_key(const StoredURL& proxy, std::string_view target_host,
+                                       uint16_t target_port, const Headers* headers) {
+        auto auth = headers ? headers->get_value("Proxy-Authorization") : std::string_view{};
+        auto phost = proxy.host_no_port();
+        estring key;
+        key.appends(phost, ":", proxy.port(), ":", proxy.secure() ? 's' : 'p',
+                    ":", target_host, ":", target_port);
+        if (!auth.empty()) {
+            key += ':';
+            key.append(auth.data(), auth.size());
+        }
+        return std::string(std::move(key));
+    }
+
+    // Factory: DNS resolve -> TCP connect -> optional TLS wrap with SNI.
+    // Discards the resolved IP from cache on connection failure.
+    ISocketStream* make_stream(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
+        auto ip = resolver->resolve(host);
+        if (ip.undefined())
+            LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name=`", host);
+        EndPoint ep(ip, port);
+        tcpsock->timeout(timeout);
+        auto stream = tcpsock->connect(ep);
+        if (!stream) {
+            resolver->discard_cache(host, ip);
+            LOG_ERROR_RETURN(0, nullptr, "connection failed, ep=` host=` secure=`", ep, host, secure);
+        }
+        if (secure) {
+            stream = new_tls_stream(tls_ctx, stream, SecurityRole::Client, true);
+            if (!stream)
+                LOG_ERRNO_RETURN(0, nullptr, "TLS handshake failed, host=`", host);
+            tls_stream_set_hostname(stream, std::string(host).c_str());
+        }
+        LOG_DEBUG("Connected ` ssl:` host:`", ep, secure, host);
+        return stream;
+    }
+
+    // Factory: full CONNECT tunnel handshake sequence.
+    // DNS resolve proxy -> TCP -> [TLS to proxy] -> CONNECT handshake -> TLS to target.
+    ISocketStream* make_tunnel_stream(const StoredURL& proxy_url, std::string_view target_host,
+                                      uint16_t target_port, const Headers* headers) {
+        auto proxy_ip = resolver->resolve(proxy_url.host_no_port());
+        if (proxy_ip.undefined())
+            LOG_ERROR_RETURN(ENOENT, nullptr, "CONNECT tunnel: DNS resolve failed for proxy `", proxy_url.host_no_port());
+        EndPoint proxy_ep(proxy_ip, proxy_url.port());
+        auto stream = tcpsock->connect(proxy_ep);
+        if (!stream) {
+            resolver->discard_cache(proxy_url.host_no_port(), proxy_ip);
+            LOG_ERRNO_RETURN(0, nullptr, "CONNECT tunnel: failed to connect to proxy");
+        }
+        if (proxy_url.secure()) {
+            stream = new_tls_stream(tls_ctx, stream, SecurityRole::Client, true);
+            if (!stream)
+                LOG_ERRNO_RETURN(0, nullptr, "CONNECT tunnel: TLS to proxy failed");
+            tls_stream_set_hostname(stream, std::string(proxy_url.host_no_port()).c_str());
+        }
+        if (do_connect_handshake(stream, target_host, target_port, headers) != 0) {
+            delete stream;
+            return nullptr;
+        }
+        stream = new_tls_stream(tls_ctx, stream, SecurityRole::Client, true);
+        if (!stream)
+            LOG_ERRNO_RETURN(0, nullptr, "CONNECT tunnel: TLS to target failed");
+        tls_stream_set_hostname(stream, std::string(target_host).c_str());
+        return stream;
+    }
+
+    // Send CONNECT request and verify 2xx response.
+    int do_connect_handshake(ISocketStream* stream, std::string_view target_host,
+                             uint16_t target_port, const Headers* headers) {
+        char buf[4096];
+        // CONNECT target is always host:port per RFC 7231 S4.3.6.
+        int n = snprintf(buf, sizeof(buf), "CONNECT %.*s:%u HTTP/1.1\r\n",
+            (int)target_host.size(), target_host.data(), target_port);
+        if (n < 0 || n >= (int)sizeof(buf))
+            LOG_ERROR_RETURN(ENOMEM, -1, "CONNECT request too long");
+        n += snprintf(buf + n, sizeof(buf) - n, "Host: %.*s:%u\r\n",
+            (int)target_host.size(), target_host.data(), target_port);
+        if (n >= (int)sizeof(buf))
+            LOG_ERROR_RETURN(ENOMEM, -1, "CONNECT request too long");
+        if (headers) {
+            for (auto it = headers->begin(); it != headers->end(); ++it) {
+                auto k = it.first();
+                auto v = it.second();
+                if ((size_t)(n + k.size() + v.size() + 4) >= sizeof(buf))
+                    LOG_ERROR_RETURN(ENOMEM, -1, "CONNECT request too long");
+                memcpy(buf + n, k.data(), k.size()); n += k.size();
+                buf[n++] = ':'; buf[n++] = ' ';
+                memcpy(buf + n, v.data(), v.size()); n += v.size();
+                buf[n++] = '\r'; buf[n++] = '\n';
+            }
+        }
+        if (n + 2 >= (int)sizeof(buf))
+            LOG_ERROR_RETURN(ENOMEM, -1, "CONNECT request too long");
+        buf[n++] = '\r'; buf[n++] = '\n'; buf[n] = '\0';
+        if (stream->write(buf, n) != n)
+            LOG_ERRNO_RETURN(0, -1, "CONNECT tunnel: failed to send CONNECT request");
+
+        size_t total = 0;
+        while (total < sizeof(buf) - 1) {
+            auto rc = stream->recv(buf + total, sizeof(buf) - 1 - total);
+            if (rc <= 0)
+                LOG_ERRNO_RETURN(0, -1, "CONNECT tunnel: failed to read proxy response");
+            total += rc;
+            buf[total] = '\0';
+            if (strstr(buf, "\r\n\r\n"))
+                break;
+        }
+        auto space = strchr(buf, ' ');
+        if (!space)
+            LOG_ERROR_RETURN(EINVAL, -1, "CONNECT tunnel: invalid proxy response");
+        int status_code = atoi(space + 1);
+        if (status_code < 200 || status_code >= 300) {
+            auto end = strstr(buf, "\r\n\r\n");
+            if (end) *end = '\0';
+            LOG_ERROR_RETURN(EINVAL, -1, "CONNECT tunnel: proxy returned status `, response: `", status_code, buf);
+        }
+        return 0;
+    }
 };
 
-ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
-    LOG_DEBUG("Dialing to `:`", host, port);
-    auto ipaddr = resolver->resolve(host);
-    if (ipaddr.undefined()) {
-        LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
+ISocketStream* PooledDialer::dial(Client::Operation* op, Timeout tmo) {
+    auto* proxy = op->get_active_proxy();
+
+    // HTTPS target + proxy: CONNECT tunnel.
+    if (proxy && op->req.secure()) {
+        auto key = make_tunnel_key(*proxy, op->req.host_no_port(), op->req.port(), &op->proxy_header);
+        return tcp_pool->connect(key, [&]() -> ISocketStream* {
+            return make_tunnel_stream(*proxy, op->req.host_no_port(), op->req.port(), &op->proxy_header);
+        });
     }
 
-    EndPoint ep(ipaddr, port);
-    LOG_DEBUG("Connecting ` ssl: `", ep, secure);
-    ISocketStream *sock = nullptr;
-    if (secure) {
-        tlssock->timeout(timeout);
-        sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, estring_view(host).extract_c_str());
-    } else {
-        tcpsock->timeout(timeout);
-        sock = tcpsock->connect(ep);
+    // HTTP proxy: connect to proxy endpoint.
+    if (proxy) {
+        auto key = make_key(proxy->host_no_port(), proxy->port(), proxy->secure());
+        return tcp_pool->connect(key, [&]() -> ISocketStream* {
+            return make_stream(proxy->host_no_port(), proxy->port(), proxy->secure(), tmo.timeout());
+        });
     }
-    if (sock) {
-        LOG_DEBUG("Connected ` ", ep, VALUE(host), VALUE(secure));
-        return sock;
+
+    // Unix domain socket.
+    if (!op->uds_path.empty()) {
+        udssock->timeout(tmo.timeout());
+        return udssock->connect(op->uds_path.data());
     }
-    LOG_ERROR("connection failed, ssl : ` ep : `  host : `", secure, ep, host);
-    // When failed, remove resolved result from dns cache so that following retries can try
-    // different ips.
-    resolver->discard_cache(host, ipaddr);
-    return nullptr;
+
+    // Direct TCP/TLS connection.
+    auto key = make_key(op->req.host_no_port(), op->req.port(), op->req.secure());
+    return tcp_pool->connect(key, [&]() -> ISocketStream* {
+        return make_stream(op->req.host_no_port(), op->req.port(), op->req.secure(), tmo.timeout());
+    });
 }
 
-ISocketStream* PooledDialer::dial(std::string_view uds_path, uint64_t timeout) {
-    udssock->timeout(timeout);
-    auto stream = udssock->connect(uds_path.data());
-    if (!stream)
-        LOG_ERRNO_RETURN(0, nullptr, "failed to dial to unix socket `", uds_path);
-    return stream;
+ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
+    auto key = make_key(host, port, secure);
+    return tcp_pool->connect(key, [&]() -> ISocketStream* {
+        return make_stream(host, port, secure, timeout);
+    });
 }
 
 constexpr uint64_t code3xx() { return 0; }
@@ -141,19 +265,6 @@ constexpr static std::bitset<10>
 
 static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
 
-void Client::set_proxy(std::string_view proxy) {
-    m_proxy_url.from_string(proxy);
-    m_proxy = true;
-    auto ui = m_proxy_url.user_passwd();
-    if (!ui.empty()) {
-        std::string encoded;
-        Base64Encode(ui, encoded);
-        m_proxy_auth = "Basic " + encoded;
-    } else {
-        m_proxy_auth.clear();
-    }
-}
-
 enum RoundtripStatus {
     ROUNDTRIP_SUCCESS,
     ROUNDTRIP_FAILED,
@@ -166,6 +277,7 @@ enum RoundtripStatus {
 class ClientImpl : public Client {
 public:
     CommonHeaders<> m_common_headers;
+    CommonHeaders<> m_proxy_headers;
     TLSContext *m_tls_ctx;
     ICookieJar *m_cookie_jar;
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
@@ -202,7 +314,7 @@ public:
                 "invalid 3xx status code: ", op->status_code);
         }
 
-        if (op->req.redirect(v, location, op->enable_proxy) < 0) {
+        if (op->req.redirect(v, location, op->get_active_proxy() != nullptr) < 0) {
             LOG_ERRNO_RETURN(0, ROUNDTRIP_FAILED, "redirect failed");
         }
         return ROUNDTRIP_REDIRECT;
@@ -213,15 +325,7 @@ public:
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
-        ISocketStream* s;
-        if (op->enable_proxy && !op->proxy_url.empty())
-            s = get_dialer().dial(op->proxy_url, tmo.timeout());
-        else if (op->enable_proxy && !m_proxy_url.empty())
-            s = get_dialer().dial(m_proxy_url, tmo.timeout());
-        else if (!op->uds_path.empty())
-            s = get_dialer().dial(op->uds_path, tmo.timeout());
-        else
-            s = get_dialer().dial(req, tmo.timeout());
+        ISocketStream* s = get_dialer().dial(op, tmo);
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -304,10 +408,33 @@ public:
         op->req.headers.insert("User-Agent", m_user_agent.empty() ? std::string_view(USERAGENT)
                                                                   : std::string_view(m_user_agent));
         op->req.headers.insert("Connection", "keep-alive");
-        if (op->enable_proxy && !m_proxy_auth.empty())
-            op->req.headers.insert("Proxy-Authorization", m_proxy_auth);
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
+
+        // Proxy header assembly: op proxy_header <- client proxy_headers <- URL auth
+        auto proxy = op->get_active_proxy();
+        if (proxy) {
+            op->proxy_header.merge(m_proxy_headers);
+            if (!proxy->user_passwd().empty()) {
+                std::string encoded;
+                Base64Encode(proxy->user_passwd(), encoded);
+                op->proxy_header.insert("Proxy-Authorization", "Basic " + encoded);
+            }
+        }
+
+        // Rebuild request line if necessary (absolute URI for HTTP proxy)
+        auto need_abs = proxy && !op->req.secure();
+        auto is_abs = what_protocol(estring_view(op->req.target())) != 0;
+        if (need_abs != is_abs) {
+            op->req.redirect(op->req.verb(), op->req.target(), need_abs);
+        }
+
+        // For HTTP/1.1 proxy: merge proxy_header into req.headers (sent with the request).
+        // For HTTPS proxy: proxy_header stays separate (used by CONNECT handshake only).
+        if (proxy && !op->req.secure()) {
+            op->req.headers.merge(op->proxy_header);
+        }
+
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
         int retry = 0, followed = 0, ret = 0;
         uint64_t sleep_interval = 0;
@@ -345,6 +472,10 @@ public:
 
     CommonHeaders<>* common_headers() override {
         return &m_common_headers;
+    }
+
+    CommonHeaders<>* proxy_headers() override {
+        return &m_proxy_headers;
     }
 };
 
