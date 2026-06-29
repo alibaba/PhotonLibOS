@@ -1272,6 +1272,41 @@ TEST(http_server, forward_proxy_close_delimited) {
     EXPECT_EQ(g_close_delim_payload, out);
 }
 
+// Regression test: flexible array member caused UB where Clang -O2
+// optimized away the constructor, leaving proxy_url uninitialized.
+// This led to SEGV in destructor when freeing uninitialized pointer.
+TEST(http_client, operation_stack_init) {
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    // Create OperationOnStack and verify members are initialized
+    {
+        Client::OperationOnStack<> op(client, Verb::GET, "http://localhost/test");
+        // proxy_url should be default-constructed with m_url = nullptr
+        // If uninitialized, m_url contains garbage -> SEGV on empty() or destruction
+        auto* proxy = op.get_proxy();
+        ASSERT_TRUE(proxy != nullptr);
+        EXPECT_TRUE(proxy->empty()) << "proxy_url.m_url not initialized to nullptr";
+    }
+    // Key test: destructor runs here. With UB, free(garbage) causes SEGV.
+
+    // Test with larger buffer size
+    {
+        Client::OperationOnStack<4096> op(client, Verb::POST, "http://localhost/large");
+        auto* proxy = op.get_proxy();
+        ASSERT_TRUE(proxy != nullptr);
+        EXPECT_TRUE(proxy->empty()) << "proxy_url.m_url not initialized to nullptr";
+    }
+
+    // Test default constructor (no client)
+    {
+        Client::OperationOnStack<> op;
+        auto* proxy = op.get_proxy();
+        ASSERT_TRUE(proxy != nullptr);
+        EXPECT_TRUE(proxy->empty()) << "proxy_url.m_url not initialized to nullptr";
+    }
+}
+
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
