@@ -318,6 +318,26 @@ static ssize_t body_writer_cb(void* iov_view, photon::net::http::Request* req) {
   return 0;
 }
 
+struct BodyWriterWrapperCtx {
+  BodyWriter *writer;
+  size_t content_length;
+};
+
+static ssize_t body_writer_wrapper(void* ctx, photon::net::http::Request* req) {
+  auto* c = static_cast<BodyWriterWrapperCtx *>(ctx);
+  size_t remaining = c->content_length;
+  off_t offset = 0;
+  while (remaining > 0) {
+    ssize_t n = (*(c->writer))(req, remaining, offset);
+    if (n <= 0) {
+      LOG_ERROR_RETURN(0, -1, "body writer failed at offset `", offset);
+    }
+    offset += n;
+    remaining -= n;
+  }
+  return 0;
+}
+
 static std::string md5_base64(iovector_view view) {
   std::string ret;
   unsigned char hash[MD5_DIGEST_LENGTH];
@@ -344,14 +364,14 @@ class OssClientImpl : public Client {
   int fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta);
   int fill_upload_response(HTTP_STACK_OP& op, ObjectUploadOptions& opts);
 
-  ssize_t get_object_range(std::string_view object, const struct iovec* iov,
-                           int iovcnt, off_t offset,
+  ssize_t get_object_range(std::string_view object, size_t count,
+                           off_t offset, BodyReader reader,
                            ObjectHeaderMeta* meta = nullptr);
 
   int batch_get_objects(std::vector<GetObjectParameters>& params);
 
-  ssize_t put_object(std::string_view object, const struct iovec* iov,
-                     int iovcnt, ObjectUploadOptions& opts);
+  ssize_t put_object(std::string_view object, size_t content_length,
+                     BodyWriter writer, ObjectUploadOptions& opts);
 
   ssize_t append_object(std::string_view object, const struct iovec* iov,
                         int iovcnt, off_t position,
@@ -362,8 +382,9 @@ class OssClientImpl : public Client {
 
   int init_multipart_upload(std::string_view object, void** context);
 
-  ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
-                      int part_number, ObjectUploadOptions& opts);
+  ssize_t upload_part(void* context, size_t content_length,
+                      int part_number, BodyWriter writer,
+                      ObjectUploadOptions& opts);
 
   int upload_part_copy(void* context, off_t offset, size_t count,
                        int part_number, std::string_view from = {});
@@ -886,14 +907,12 @@ int OssClient::fill_upload_response(HTTP_STACK_OP& op,
   return 0;
 }
 
-ssize_t OssClient::get_object_range(std::string_view obj_path,
-                                    const struct iovec* iov, int iovcnt,
-                                    off_t offset, ObjectHeaderMeta* meta) {
+ssize_t OssClient::get_object_range(std::string_view obj_path, size_t cnt,
+                                    off_t offset, BodyReader reader,
+                                    ObjectHeaderMeta* meta) {
   int retry_times = m_oss_options.retry_times;
   auto retry_interval = m_oss_options.retry_base_interval_us;
 
-  iovector_view view((struct iovec*)iov, iovcnt);
-  auto cnt = view.sum();
   if (cnt == 0) return 0;
 
   bool invalidate_cache = false;
@@ -913,28 +932,29 @@ retry:
   }
 
   uint64_t content_length = op.resp.headers.content_length();
-  auto ret = op.resp.readv(iov, iovcnt);
-
-  // we have encountered partial read issue because of the socket was
-  // unexpectedly closed
-  if (ret != static_cast<ssize_t>(content_length)) {
-    LOG_ERROR("Get object ` return partial data, offset `, expected: `, got: `",
-              obj_path, offset, cnt, ret);
-    if (retry_times-- > 0) {
-      photon::thread_usleep(retry_interval);
-      retry_interval *= 2;
-      LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
-                op.req.target());
-      // op.reset(nullptr);
-      goto retry;
+  size_t remaining = content_length;
+  off_t reader_offset = 0;
+  while (remaining > 0) {
+    ssize_t n = reader(&op.resp, remaining, reader_offset);
+    if (n <= 0) {
+      LOG_ERROR("Get object ` return partial data, offset `, expected: `, got: `",
+                obj_path, offset, cnt, reader_offset);
+      if (retry_times-- > 0) {
+        photon::thread_usleep(retry_interval);
+        retry_interval *= 2;
+        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
+                  op.req.target());
+        goto retry;
+      }
+      errno = EIO;
+      return -1;
     }
-    ret = -1;
-    errno = EIO;
-  } else {
-    if (meta) fill_meta(op, *meta);
+    reader_offset += n;
+    remaining -= n;
   }
 
-  return ret;
+  if (meta) fill_meta(op, *meta);
+  return content_length;
 }
 
 struct BatchGetResult {
@@ -1236,11 +1256,8 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
   return 0;
 }
 
-ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
-                              int iovcnt, ObjectUploadOptions& opts) {
-  iovector_view view((struct iovec*)iov, iovcnt);
-  auto cnt = view.sum();
-
+ssize_t OssClient::put_object(std::string_view object, size_t cnt,
+                              BodyWriter writer, ObjectUploadOptions& opts) {
   OssUrl oss_url(m_endpoint, m_bucket, object, m_is_http);
   auto content_type = lookup_mime_type(object);
 
@@ -1249,7 +1266,8 @@ ssize_t OssClient::put_object(std::string_view object, const struct iovec* iov,
     op.req.headers.insert(OSS_HEADER_KEY_CONTENT_TYPE, content_type);
   }
   op.req.headers.content_length(cnt);
-  op.body_writer = {&view, &body_writer_cb};
+  BodyWriterWrapperCtx bwc{&writer, cnt};
+  op.body_writer = {&bwc, &body_writer_wrapper};
   int r = sign_and_call(op, Verb::PUT, oss_url);
   if (r < 0) return r;
   r = verify_crc64_if_needed(op, oss_url.object(), opts.expected_crc64);
@@ -1334,13 +1352,9 @@ int OssClient::init_multipart_upload(std::string_view object, void** context) {
   return 0;
 }
 
-ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
-                               int iovcnt, int part_number,
+ssize_t OssClient::upload_part(void* context, size_t cnt,
+                               int part_number, BodyWriter writer,
                                ObjectUploadOptions& opts) {
-  iovector_view view((struct iovec*)iov, iovcnt);
-  auto cnt = view.sum();
-  assert(cnt > 0);
-
   assert(context);
 
   oss_multipart_context* ctx = (oss_multipart_context*)context;
@@ -1358,7 +1372,8 @@ ssize_t OssClient::upload_part(void* context, const struct iovec* iov,
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
 
   op.req.headers.content_length(cnt);
-  op.body_writer = {&view, &body_writer_cb};
+  BodyWriterWrapperCtx bwc{&writer, cnt};
+  op.body_writer = {&bwc, &body_writer_wrapper};
   int r = sign_and_call(op, Verb::PUT, oss_url, query_params);
   if (r < 0) return r;
 
