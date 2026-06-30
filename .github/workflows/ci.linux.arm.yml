@@ -4,11 +4,18 @@ on:
   push:
     branches: [ "main", "release/*" ]
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
+<<<<<<< HEAD
   centos8-gcc921-epoll-release:
     runs-on: [self-hosted, Linux, ARM64]
+=======
+  arm-linux-build-and-test:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    runs-on: ubuntu-24.04-arm
+>>>>>>> b4625a3 ([Backport][0.8 to 0.7] | | | ci: harden backport autopr with bugfix label gate, conflict handling, and CI skip (#1410) (#1471) (#1507) (#1520))
 
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
