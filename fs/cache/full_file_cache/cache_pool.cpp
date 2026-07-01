@@ -324,13 +324,14 @@ void FileCachePool::eviction() {
     if (0 == fileSize) {
         if (0 == fileIter->second->openCount) {
             afterFtrucate(fileIter);
-        }
-        empty_files_sequence++;
-        if (empty_files_sequence == lru_.size()) {
-          LOG_ERROR("eviction: all ` LRU entries have size=0 with openCount>0, "
-            "cannot make progress. actualEvict=`, totalUsed=`",
-            lru_.size(), actualEvict, totalUsed_);
-          break;
+        } else {
+          empty_files_sequence++;
+          if (empty_files_sequence == lru_.size()) {
+            LOG_ERROR("eviction: all ` LRU entries have size=0 with openCount>0, "
+              "cannot make progress. actualEvict=`, totalUsed=`",
+              lru_.size(), actualEvict, totalUsed_);
+            break;
+          }
         }
         continue;
     }
