@@ -154,13 +154,13 @@ struct ObjectUploadOptions {
 
 // Retry-safe: the framework re-calls from fixed offset on retry.
 using BodyWriter = TempDelegate<ssize_t, IStream* /*output*/,
-                                size_t /*max_bytes*/, off_t /*offset*/>;
+                                off_t /*offset*/, size_t /*max_bytes*/>;
 
 // Retry-safe: the framework re-calls from fixed offset on retry.
 // DO NOT merge BodyReader and BodyWriter to remind the caller to
 // implement read or write.
 using BodyReader = TempDelegate<ssize_t, IStream* /*input*/,
-                                size_t /*max_bytes*/, off_t /*offset*/>;
+                                off_t /*offset*/, size_t /*max_bytes*/>;
 
 class Client : public Object {
  public:
@@ -176,14 +176,17 @@ class Client : public Object {
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr) {
     iovector_view view((struct iovec*)iov, iovcnt);
-    return get_object_range(object, view.sum(), offset,
-        [&view](IStream* input, size_t, off_t) -> ssize_t {
-          return input->readv(view.iov, view.iovcnt);
+    return get_object_range(object, offset, view.sum(), 
+        [&view](IStream* input, off_t offset, size_t max_bytes) -> ssize_t {
+          struct iovec tmp[view.iovcnt];
+          iovector_view sliced(tmp, view.iovcnt);
+          view.slice(max_bytes, offset, &sliced);
+          return input->readv(sliced.iov, sliced.iovcnt);
         }, meta);
   }
 
-  virtual ssize_t get_object_range(std::string_view object, size_t count,
-                                   off_t offset, BodyReader reader,
+  virtual ssize_t get_object_range(std::string_view object, off_t offset,
+                                   size_t count, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
 
   // return value is the object count which data is successfully downloaded.
@@ -206,7 +209,7 @@ class Client : public Object {
                      int iovcnt, ObjectUploadOptions& opts) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return put_object(object, view.sum(),
-        [&view](IStream* output, size_t, off_t) -> ssize_t {
+        [&view](IStream* output, off_t, size_t) -> ssize_t {
           return output->writev(view.iov, view.iovcnt);
         }, opts);
   }
@@ -249,7 +252,7 @@ class Client : public Object {
                       int part_number, ObjectUploadOptions& opts) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return upload_part(context, view.sum(), part_number,
-        [&view](IStream* output, size_t, off_t) -> ssize_t {
+        [&view](IStream* output, off_t, size_t) -> ssize_t {
           return output->writev(view.iov, view.iovcnt);
         }, opts);
   }

@@ -328,7 +328,7 @@ static ssize_t body_writer_wrapper(void* ctx, photon::net::http::Request* req) {
   size_t remaining = c->content_length;
   off_t offset = 0;
   while (remaining > 0) {
-    ssize_t n = (*(c->writer))(req, remaining, offset);
+    ssize_t n = (*(c->writer))(req, offset, remaining);
     if (n <= 0) {
       LOG_ERROR_RETURN(0, -1, "body writer failed at offset `", offset);
     }
@@ -364,8 +364,8 @@ class OssClientImpl : public Client {
   int fill_meta(HTTP_STACK_OP& op, ObjectHeaderMeta& meta);
   int fill_upload_response(HTTP_STACK_OP& op, ObjectUploadOptions& opts);
 
-  ssize_t get_object_range(std::string_view object, size_t count,
-                           off_t offset, BodyReader reader,
+  ssize_t get_object_range(std::string_view object, off_t offset,
+                           size_t cnt, BodyReader reader,
                            ObjectHeaderMeta* meta = nullptr);
 
   int batch_get_objects(std::vector<GetObjectParameters>& params);
@@ -907,8 +907,8 @@ int OssClient::fill_upload_response(HTTP_STACK_OP& op,
   return 0;
 }
 
-ssize_t OssClient::get_object_range(std::string_view obj_path, size_t cnt,
-                                    off_t offset, BodyReader reader,
+ssize_t OssClient::get_object_range(std::string_view obj_path, off_t offset,
+                                    size_t cnt, BodyReader reader,
                                     ObjectHeaderMeta* meta) {
   int retry_times = m_oss_options.retry_times;
   auto retry_interval = m_oss_options.retry_base_interval_us;
@@ -934,27 +934,39 @@ retry:
   uint64_t content_length = op.resp.headers.content_length();
   size_t remaining = content_length;
   off_t reader_offset = 0;
+  // we have encountered partial read issue because of the socket was
+  // unexpectedly closed
   while (remaining > 0) {
-    ssize_t n = reader(&op.resp, remaining, reader_offset);
+    ssize_t n = reader(&op.resp, reader_offset, remaining);
     if (n <= 0) {
-      LOG_ERROR("Get object ` return partial data, offset `, expected: `, got: `",
-                obj_path, offset, cnt, reader_offset);
-      if (retry_times-- > 0) {
-        photon::thread_usleep(retry_interval);
-        retry_interval *= 2;
-        LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
-                  op.req.target());
-        goto retry;
+      if (n < 0) {
+        LOG_ERROR("Get object ` failed `", obj_path, n);
       }
-      errno = EIO;
-      return -1;
+      break;
     }
     reader_offset += n;
     remaining -= n;
   }
 
-  if (meta) fill_meta(op, *meta);
-  return content_length;
+  ssize_t ret = static_cast<ssize_t>(reader_offset);
+  if (ret != static_cast<ssize_t>(content_length)) {
+    LOG_ERROR("Get object ` return partial data, offset `, expected: `, got: `",
+              obj_path, offset, cnt, ret);
+    if (retry_times-- > 0) {
+      photon::thread_usleep(retry_interval);
+      retry_interval *= 2;
+      LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
+                op.req.target());
+      // op.reset(nullptr);
+      goto retry;
+    }
+    ret = -1;
+    errno = EIO;
+  } else {
+    if (meta) fill_meta(op, *meta);
+  }
+
+  return ret;
 }
 
 struct BatchGetResult {
