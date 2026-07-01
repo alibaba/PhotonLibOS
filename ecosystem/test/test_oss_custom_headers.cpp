@@ -79,7 +79,7 @@ class OssCustomHeaderTest : public ::testing::Test {
 
   ClientOptions make_opts() {
     ClientOptions opts;
-    opts.endpoint = "oss-test.example.com";
+    opts.endpoint = "http://oss-test.example.com";
     opts.bucket = "test-bucket";
     opts.proxy = estring().appends("http://127.0.0.1:",
                                    tcp_server->getsockname().port);
