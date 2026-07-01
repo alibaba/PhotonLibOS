@@ -670,6 +670,11 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 
 
 #ifdef __x86_64__
+#ifdef __APPLE__ // apple basically doens't support avx-512
+uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
+    return crc64ecma_hw_sse128(buf, len, crc);
+}
+#else
 #ifdef __clang__
 #pragma clang attribute pop
 #pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq"))), apply_to=function)
@@ -751,6 +756,8 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 #else // __GNUC__
 #pragma GCC pop_options
 #endif
+
+#endif  // apple
 #endif  // __x86_64__
 
 uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
