@@ -17,8 +17,10 @@ limitations under the License.
 #pragma once
 #include <inttypes.h>
 #include <photon/common/callback.h>
+#include <photon/common/iovector.h>
 #include <photon/common/object.h>
 #include <photon/common/ordered_span.h>
+#include <photon/common/stream.h>
 #include <photon/common/string_view.h>
 #include <photon/net/http/headers.h>
 #include <photon/net/http/verb.h>
@@ -150,6 +152,16 @@ struct ObjectUploadOptions {
   std::string *etag = nullptr;
 };
 
+// Retry-safe: the framework re-calls from fixed offset on retry.
+using BodyWriter = TempDelegate<ssize_t, IStream* /*output*/,
+                                off_t /*offset*/, size_t /*max_bytes*/>;
+
+// Retry-safe: the framework re-calls from fixed offset on retry.
+// DO NOT merge BodyReader and BodyWriter to remind the caller to
+// implement read or write.
+using BodyReader = TempDelegate<ssize_t, IStream* /*input*/,
+                                off_t /*offset*/, size_t /*max_bytes*/>;
+
 class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
@@ -160,9 +172,21 @@ class Client : public Object {
 
   // return value is the real size if the operation succeeds, otherwise
   // return -1
-  virtual ssize_t get_object_range(std::string_view object,
-                                   const struct iovec* iov, int iovcnt,
-                                   off_t offset,
+  ssize_t get_object_range(std::string_view object, const struct iovec* iov,
+                           int iovcnt, off_t offset,
+                           ObjectHeaderMeta* meta = nullptr) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return get_object_range(object, offset, view.sum(), 
+        [&view](IStream* input, off_t offset, size_t max_bytes) -> ssize_t {
+          struct iovec tmp[view.iovcnt];
+          iovector_view sliced(tmp, view.iovcnt);
+          view.slice(max_bytes, offset, &sliced);
+          return input->readv(sliced.iov, sliced.iovcnt);
+        }, meta);
+  }
+
+  virtual ssize_t get_object_range(std::string_view object, off_t offset,
+                                   size_t count, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
 
   // return value is the object count which data is successfully downloaded.
@@ -181,8 +205,17 @@ class Client : public Object {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
     return put_object(object, iov, iovcnt, opts);
   };
-  virtual ssize_t put_object(std::string_view object, const struct iovec* iov,
-                             int iovcnt, ObjectUploadOptions& opts) = 0;
+  ssize_t put_object(std::string_view object, const struct iovec* iov,
+                     int iovcnt, ObjectUploadOptions& opts) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return put_object(object, view.sum(),
+        [&view](IStream* output, off_t, size_t) -> ssize_t {
+          return output->writev(view.iov, view.iovcnt);
+        }, opts);
+  }
+
+  virtual ssize_t put_object(std::string_view object, size_t content_length,
+                             BodyWriter writer, ObjectUploadOptions& opts) = 0;
 
   // return value is the newly appended size if the operation succeeds,
   // otherwise return -1.
@@ -215,8 +248,17 @@ class Client : public Object {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
     return upload_part(context, iov, iovcnt, part_number, opts);
   };
-  virtual ssize_t upload_part(void* context, const struct iovec* iov,
-                              int iovcnt, int part_number,
+  ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
+                      int part_number, ObjectUploadOptions& opts) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return upload_part(context, view.sum(), part_number,
+        [&view](IStream* output, off_t, size_t) -> ssize_t {
+          return output->writev(view.iov, view.iovcnt);
+        }, opts);
+  }
+
+  virtual ssize_t upload_part(void* context, size_t content_length,
+                              int part_number, BodyWriter writer,
                               ObjectUploadOptions& opts) = 0;
 
   virtual int upload_part_copy(void* context, off_t offset, size_t count,
