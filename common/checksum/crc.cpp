@@ -669,7 +669,7 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 }
 
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && !defined(__APPLE__) // apple basically doens't support avx-512
 #ifdef __clang__
 #pragma clang attribute pop
 #pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq"))), apply_to=function)
