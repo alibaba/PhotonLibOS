@@ -120,7 +120,7 @@ bool QuotaFilePool::dirSpaceIsFull(FileIterator iter) {
 }
 
 //  currently, we exist duplicate pwrite
-void QuotaFilePool::updateDirSpace(FileIterator iter, uint64_t diff) {
+void QuotaFilePool::updateDirSpace(FileIterator iter, int64_t diff) {
   auto lruEntry = static_cast<QuotaLruEntry*>(iter->second.get());
   auto& dirInfo = lruEntry->dir->second;
   dirInfo.used += diff;

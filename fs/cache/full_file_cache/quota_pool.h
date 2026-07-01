@@ -30,7 +30,7 @@ class QuotaFilePool : public FileCachePool {
     void updateDirLru(FileIterator iter);
 
     bool dirSpaceIsFull(FileIterator iter);
-    void updateDirSpace(FileIterator iter, uint64_t size);
+    void updateDirSpace(FileIterator iter, int64_t size);
     void updateDirQuota(FileIterator iter, size_t quota);
 
     int set_quota(std::string_view pathname, size_t quota) override;
