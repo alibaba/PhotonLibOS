@@ -179,9 +179,9 @@ static void crc_init() {
 // =============================================================================
 
 #if defined(__x86_64__)
-#include <immintrin.h>
+// #include <immintrin.h>
 #ifdef __clang__
-#pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul"))), apply_to=function)
+#pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul"))), apply_to=any(function))
 #else // __GNUC__
 #pragma GCC push_options
 #pragma GCC target ("crc32,sse4.1,pclmul")
@@ -189,6 +189,11 @@ static void crc_init() {
 #pragma GCC diagnostic ignored "-Wuninitialized"
 #pragma GCC diagnostic ignored "-Winit-self"
 #endif
+#include <xmmintrin.h>
+#include <emmintrin.h>
+#include <pmmintrin.h>
+#include <smmintrin.h>
+#include <wmmintrin.h>
 
 // CRC32C hardware instructions for x86
 inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint8_t data) {
@@ -671,13 +676,13 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 
 #ifdef __x86_64__
 #ifdef __clang__
-#pragma clang attribute pop
-#pragma clang attribute push (__attribute__((target("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq"))), apply_to=function)
+#pragma clang attribute push (__attribute__((target("evex512,avx512f,avx512dq,avx512vl,vpclmulqdq,crc32,sse4.1,pclmul"))), apply_to=any(function))
 #else // __GNUC__
 #pragma GCC push_options
 #pragma GCC target ("crc32,sse4.1,pclmul,avx512f,avx512dq,avx512vl,vpclmulqdq")
 #endif
-// crc64_rk512 accessor is in crc_tables.h
+
+#include <immintrin.h>
 
 #if !defined(__OPTIMIZE__)
 # define PHOTON_CRC512_INLINE inline
@@ -758,16 +763,8 @@ uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
 }
 
 // Pop the basic SSE/PCLMUL pragma that was pushed at the beginning of this file
-#if defined(__x86_64__)
 #ifdef __clang__
 #pragma clang attribute pop
 #else // __GNUC__
 #pragma GCC pop_options
 #endif
-#elif defined(__aarch64__)
-#ifdef __clang__
-#pragma clang attribute pop
-#else // __GNUC__
-#pragma GCC pop_options
-#endif
-#endif // architecture
