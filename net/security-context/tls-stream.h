@@ -55,6 +55,8 @@ public:
     // return value must be one string_view of the vector
     virtual int set_alpn_select_cb(
         Delegate<estring_view, const std::vector<estring_view>&>) = 0;
+    virtual int set_ca_cert(const char* ca_cert_str) = 0;
+    virtual int set_ca_file(const char* ca_file, const char* ca_path = nullptr) = 0;
 };
 
 enum class TLSVersion{
