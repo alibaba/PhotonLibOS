@@ -28,10 +28,8 @@ ENV RUNNER_MANUALLY_TRAP_SIG=1
 ENV ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
 
 # Install additional packages needed by the runner
-RUN dnf install -y icu libicu dotnet-runtime-8.0 && \
-    dnf clean all && rm -rf /var/cache/yum || \
-    # Fallback: install only icu if dotnet repo is unavailable
-    (dnf install -y icu libicu && dnf clean all && rm -rf /var/cache/yum)
+RUN dnf install -y curl unzip icu libicu && \
+    dnf clean all && rm -rf /var/cache/yum
 
 # Create runner user with UID 1001
 RUN useradd -m -u 1001 -s /bin/bash runner && \
