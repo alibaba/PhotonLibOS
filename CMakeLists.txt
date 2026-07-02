@@ -36,6 +36,7 @@ option(PHOTON_ENABLE_RSOCKET "enable rsocket" OFF)
 option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
 set(PHOTON_DEFAULT_LOG_LEVEL "0" CACHE STRING "default log level")
 option(PHOTON_BUILD_OCF_CACHE "enable ocf cache" OFF)
+option(PHOTON_ENABLE_KCP "enable kcp" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
@@ -60,6 +61,7 @@ set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/downl
 # It's not recommended to build rdmacore from source because it has too many dependencies. Install it to local host.
 # The release version we use is https://github.com/linux-rdma/rdma-core/releases/download/v58.0/rdma-core-58.0.tar.gz
 set(PHOTON_RDMACORE_SOURCE "" CACHE STRING "")
+set(PHOTON_KCP_SOURCE "https://github.com/skywind3000/kcp/archive/refs/tags/2.1.1.tar.gz" CACHE STRING "")
 
 if (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
     message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
@@ -212,6 +214,17 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     add_subdirectory(ecosystem)
 endif ()
 
+if (PHOTON_ENABLE_KCP)
+    FetchContent_Declare(
+        kcp
+        URL ${PHOTON_KCP_SOURCE}
+        UPDATE_DISCONNECTED 1
+    )
+    FetchContent_Populate(kcp)
+    add_library(kcp_static STATIC ${kcp_SOURCE_DIR}/ikcp.c)
+    target_include_directories(kcp_static PUBLIC ${kcp_SOURCE_DIR})
+endif ()
+
 # Compile photon objects
 file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         photon.cpp
@@ -288,6 +301,9 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
     list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
 endif ()
+if (PHOTON_ENABLE_KCP)
+    list(APPEND PHOTON_SRC net/kcp.cpp)
+endif ()
 if (PHOTON_ENABLE_RSOCKET)
     list(APPEND PHOTON_SRC net/rsocket/rsocket.cpp)
 endif ()
@@ -343,6 +359,10 @@ if (PHOTON_ENABLE_LIBCURL)
 endif()
 if (PHOTON_DEFAULT_LOG_LEVEL)
     target_compile_definitions(photon_obj PRIVATE DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
+endif()
+if (PHOTON_ENABLE_KCP)
+    target_include_directories(photon_obj PRIVATE ${kcp_SOURCE_DIR})
+    target_compile_definitions(photon_obj PRIVATE PHOTON_KCP=on)
 endif()
 
 if (actually_built)
@@ -402,6 +422,10 @@ if (PHOTON_BUILD_OCF_CACHE)
     list(APPEND static_deps ocf_cache_lib)
 endif()
 list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
+
+if (PHOTON_ENABLE_KCP)
+    list(APPEND static_deps kcp_static)
+endif()
 
 
 # Find out dynamic libs and append to `shared_deps`.
