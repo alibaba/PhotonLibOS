@@ -76,7 +76,7 @@ public:
     void removeOpenFile(FileNameMap::iterator iter);
     void forceRecycle();
     void updateLru(FileNameMap::iterator iter);
-    uint64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
+    int64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
 
     // True if the media filesystem supports fiemap. Decided once at Init()
     // time by probing a named file. When false, FileCacheStore tracks filled
