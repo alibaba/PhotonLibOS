@@ -305,14 +305,11 @@ void FileCachePool::eviction() {
     LOG_AUDIT("eviction", VALUE(actualEvict), VALUE(evictByCache), VALUE(evictByDisk), VALUE(totalUsed_));
   }
 
-<<<<<<< HEAD
   // Phase 1: evict from idle tier first.
   actualEvict -= evictIdleWhenFull(actualEvict);
 
   // Phase 2: fall back to LRU eviction when idle tier is exhausted
-=======
   uint64_t empty_files_sequence = 0;
->>>>>>> 71264cf (fix(cache): prevent totalUsed_ drift and eviction deadloop in updateSpace (#1527))
   while (actualEvict > 0 && !lru_.empty() && !exit_) {
     auto fileIter = lru_.back();
     const auto& fileName = fileIter->first;
