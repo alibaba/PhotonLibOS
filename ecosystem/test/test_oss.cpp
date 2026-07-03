@@ -4,10 +4,15 @@
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/checksum/crc64ecma.h>
 #include <photon/common/estring.h>
+#include <photon/common/stream.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include <random>
@@ -98,6 +103,11 @@ class BasicAuthOssTest : public ::testing::Test {
   void symlink();
   void batch_get_objects();
   void upload_with_options();
+  void fd_get_and_put();
+  void fd_multipart();
+  void retry_get_and_put();
+  void buf_put_and_get();
+  void buf_multipart();
 
  private:
   std::string bucket_prefix_;
@@ -593,6 +603,212 @@ void BasicAuthOssTest::upload_with_options() {
   EXPECT_EQ(meta.etag, etag);
 }
 
+struct FdWriterCtx {
+  int fd;
+  off_t base_offset;
+  size_t length;
+  // If true, fail on the first invocation (without a complete write) to trigger
+  // do_http_call's retry; later invocations write the complete body. Used to
+  // verify the writer is re-invoked from the beginning on a fresh socket.
+  bool fail_first = false;
+  int invocations = 0;
+};
+
+struct FdReaderCtx {
+  int fd;
+  off_t base_offset;
+  // If true, read only a small portion on the first invocation and return short
+  // (total < content_length) to trigger get_object_range's retry; later
+  // invocations (a fresh GET) read the complete body.
+  bool short_first = false;
+  int invocations = 0;
+};
+
+// Reads the complete body from the stream and pwrites it to fd, looping until
+// the stream ends. With short_first set, returns a partial read once to
+// exercise the retry path.
+static ssize_t fd_body_reader_cb(void* ctx_ptr, IStream* input) {
+  auto* ctx = static_cast<FdReaderCtx*>(ctx_ptr);
+  char buf[64 * 1024];
+  ++ctx->invocations;
+  if (ctx->short_first && ctx->invocations == 1) {
+    // deliberately read too little to force a partial read
+    ssize_t n = input->read(buf, 100);
+    if (n <= 0) return n;
+    if (::pwrite(ctx->fd, buf, n, ctx->base_offset) != n) return -1;
+    return n;
+  }
+  ssize_t total = 0;
+  while (true) {
+    ssize_t n = input->read(buf, sizeof(buf));
+    if (n < 0) return n;
+    if (n == 0) break;
+    if (::pwrite(ctx->fd, buf, n, ctx->base_offset + total) != n) return -1;
+    total += n;
+  }
+  return total;
+}
+
+// Reads `length` bytes from fd and writes the complete body to the stream,
+// looping until done. With fail_first set, fails once to exercise the retry
+// path.
+static ssize_t fd_body_writer_cb(void* ctx_ptr, IStream* output) {
+  auto* ctx = static_cast<FdWriterCtx*>(ctx_ptr);
+  ++ctx->invocations;
+  if (ctx->fail_first && ctx->invocations == 1) return -1;
+  char buf[64 * 1024];
+  size_t total = 0;
+  while (total < ctx->length) {
+    size_t want = std::min(ctx->length - total, sizeof(buf));
+    ssize_t n = ::pread(ctx->fd, buf, want, ctx->base_offset + total);
+    if (n <= 0) return -1;
+    if (output->write(buf, n) != n) return -1;
+    total += n;
+  }
+  return (ssize_t)total;
+}
+
+void BasicAuthOssTest::fd_get_and_put() {
+  auto path = get_real_test_path("fd_get_and_put/testfile");
+
+  // Prepare a temp file with random data
+  const size_t file_size = 1024 * 100 + 7;  // 100KB + 7 bytes
+  std::vector<char> data(file_size);
+  std::mt19937 rng(42);
+  for (auto& c : data) c = static_cast<char>(rng() & 0xFF);
+
+  char tmpfile[] = "/tmp/photon_oss_test_put_XXXXXX";
+  int fd = ::mkstemp(tmpfile);
+  ASSERT_GE(fd, 0);
+  DEFER(::close(fd); ::unlink(tmpfile));
+  ASSERT_EQ(::pwrite(fd, data.data(), file_size, 0), (ssize_t)file_size);
+
+  // Upload using BodyWriter from fd
+  FdWriterCtx wctx{fd, 0, file_size};
+  BodyWriter writer{&wctx, &fd_body_writer_cb};
+  ObjectUploadOptions opts;
+  auto ret = client->put_object(path, file_size, writer, opts);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "put_object(BodyWriter) failed";
+
+  // Download using BodyReader to fd
+  char tmpfile_dl[] = "/tmp/photon_oss_test_get_XXXXXX";
+  int fd_dl = ::mkstemp(tmpfile_dl);
+  ASSERT_GE(fd_dl, 0);
+  DEFER(::close(fd_dl); ::unlink(tmpfile_dl));
+  ASSERT_EQ(::ftruncate(fd_dl, file_size), 0);
+
+  FdReaderCtx rctx{fd_dl, 0};
+  BodyReader reader{&rctx, &fd_body_reader_cb};
+  ret = client->get_object_range(path, 0, file_size, reader);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "get_object_range(BodyReader) failed";
+
+  std::vector<char> downloaded(file_size);
+  ASSERT_EQ(::pread(fd_dl, downloaded.data(), file_size, 0), (ssize_t)file_size);
+  ASSERT_EQ(data, downloaded);
+
+  // Verify partial range download (offset=1024, count=512) to fd
+  FdReaderCtx rctx_partial{fd_dl, 0};
+  BodyReader reader_partial{&rctx_partial, &fd_body_reader_cb};
+  ret = client->get_object_range(path, 1024, 512, reader_partial);
+  ASSERT_EQ(ret, 512);
+  char partial_buf[512];
+  ASSERT_EQ(::pread(fd_dl, partial_buf, 512, 0), 512);
+  ASSERT_EQ(memcmp(partial_buf, data.data() + 1024, 512), 0);
+
+  // Also verify iov-based download still works
+  std::vector<char> downloaded_iov(file_size);
+  struct iovec iov = {downloaded_iov.data(), file_size};
+  ret = client->get_object_range(path, &iov, 1, 0);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "get_object_range(iov) failed";
+  ASSERT_EQ(data, downloaded_iov);
+}
+
+void BasicAuthOssTest::fd_multipart() {
+  auto path = get_real_test_path("fd_multipart/testfile");
+
+  // Prepare source file with 3 parts
+  const size_t part_size = 1048576 + 13;  // >1MB per part (OSS minimum)
+  const int num_parts = 3;
+  const size_t total_size = part_size * num_parts;
+
+  std::vector<char> data(total_size);
+  std::mt19937 rng(123);
+  for (auto& c : data) c = static_cast<char>(rng() & 0xFF);
+
+  char tmpfile[] = "/tmp/photon_oss_test_mp_XXXXXX";
+  int fd = ::mkstemp(tmpfile);
+  ASSERT_GE(fd, 0);
+  DEFER(::close(fd); ::unlink(tmpfile));
+  ASSERT_EQ(::pwrite(fd, data.data(), total_size, 0), (ssize_t)total_size);
+
+  // Multipart upload using BodyWriter from fd
+  void* context = nullptr;
+  int ret = client->init_multipart_upload(path, &context);
+  ASSERT_EQ(ret, 0);
+
+  for (int i = 0; i < num_parts; i++) {
+    FdWriterCtx wctx{fd, (off_t)(i * part_size), part_size};
+    BodyWriter writer{&wctx, &fd_body_writer_cb};
+    ObjectUploadOptions opts;
+    auto r = client->upload_part(context, part_size, i + 1, writer, opts);
+    ASSERT_EQ(r, (ssize_t)part_size) << "upload_part(BodyWriter) failed on part " << (i + 1);
+  }
+
+  ret = client->complete_multipart_upload(context);
+  ASSERT_EQ(ret, 0);
+
+  // Download and verify
+  std::vector<char> downloaded(total_size);
+  struct iovec diov = {downloaded.data(), total_size};
+  auto r = client->get_object_range(path, &diov, 1, 0);
+  ASSERT_EQ(r, (ssize_t)total_size);
+  ASSERT_EQ(data, downloaded);
+}
+
+void BasicAuthOssTest::retry_get_and_put() {
+  auto path = get_real_test_path("retry_get_and_put/testfile");
+
+  // Use a file larger than one read chunk so the reader's first (short) read
+  // is strictly less than content_length.
+  const size_t file_size = 1024 * 100 + 7;  // 100KB + 7 bytes
+  std::vector<char> data(file_size);
+  std::mt19937 rng(7);
+  for (auto& c : data) c = static_cast<char>(rng() & 0xFF);
+
+  char tmpfile[] = "/tmp/photon_oss_test_retry_XXXXXX";
+  int fd = ::mkstemp(tmpfile);
+  ASSERT_GE(fd, 0);
+  DEFER(::close(fd); ::unlink(tmpfile));
+  ASSERT_EQ(::pwrite(fd, data.data(), file_size, 0), (ssize_t)file_size);
+
+  // put_object: writer fails on the first attempt -> do_http_call retries,
+  // re-invoking the writer from the beginning on a fresh socket.
+  FdWriterCtx wctx{fd, 0, file_size, /*fail_first=*/true};
+  BodyWriter writer{&wctx, &fd_body_writer_cb};
+  ObjectUploadOptions opts;
+  auto ret = client->put_object(path, file_size, writer, opts);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "put_object with retry failed";
+  ASSERT_GT(wctx.invocations, 1) << "do_http_call retry did not happen for put";
+
+  // get_object_range: reader returns short on the first attempt -> the
+  // `ret != content_length` check triggers a full retry (a fresh GET).
+  char tmpfile_dl[] = "/tmp/photon_oss_test_retry_dl_XXXXXX";
+  int fd_dl = ::mkstemp(tmpfile_dl);
+  ASSERT_GE(fd_dl, 0);
+  DEFER(::close(fd_dl); ::unlink(tmpfile_dl));
+  ASSERT_EQ(::ftruncate(fd_dl, file_size), 0);
+
+  FdReaderCtx rctx{fd_dl, 0, /*short_first=*/true};
+  BodyReader reader{&rctx, &fd_body_reader_cb};
+  ret = client->get_object_range(path, 0, file_size, reader);
+  ASSERT_EQ(ret, (ssize_t)file_size) << "get_object_range with retry failed";
+  ASSERT_GT(rctx.invocations, 1) << "get_object_range retry did not happen";
+
+  std::vector<char> downloaded(file_size);
+  ASSERT_EQ(::pread(fd_dl, downloaded.data(), file_size, 0), (ssize_t)file_size);
+  ASSERT_EQ(data, downloaded) << "content mismatch after retry";
+}
+
 void CachedAuthOssTest::repeatedly_get() {
   std::vector<std::string> paths;
   const size_t file_size = 1025;
@@ -625,6 +841,62 @@ void CachedAuthOssTest::repeatedly_get() {
   EXPECT_EQ(ret, 1);
 }
 
+void BasicAuthOssTest::buf_put_and_get() {
+  auto path = get_real_test_path("buf_put_and_get/testfile");
+  const size_t file_size = 2048;
+  char write_buf[file_size];
+  for (size_t i = 0; i < file_size; i++) write_buf[i] = (char)(i & 0xff);
+
+  // put_object with buf+size
+  ObjectUploadOptions opts;
+  auto ret = client->put_object(path, write_buf, file_size, opts);
+  ASSERT_EQ(ret, (ssize_t)file_size);
+
+  // get_object_range with buf+size
+  char read_buf[file_size] = {};
+  ret = client->get_object_range(path, read_buf, file_size, 0);
+  ASSERT_EQ(ret, (ssize_t)file_size);
+  ASSERT_EQ(memcmp(write_buf, read_buf, file_size), 0);
+
+  // partial range read with buf+size
+  char partial_buf[128] = {};
+  ret = client->get_object_range(path, partial_buf, 128, 100);
+  ASSERT_EQ(ret, 128);
+  ASSERT_EQ(memcmp(write_buf + 100, partial_buf, 128), 0);
+}
+
+void BasicAuthOssTest::buf_multipart() {
+  auto path = get_real_test_path("buf_multipart/testfile");
+  const size_t part_size = 1048576;  // 1MB, minimum part size
+
+  void* context = nullptr;
+  int ret = client->init_multipart_upload(path, &context);
+  ASSERT_EQ(ret, 0);
+
+  std::vector<char> part_buf(part_size);
+  ObjectUploadOptions opts;
+  for (int i = 0; i < 3; i++) {
+    memset(part_buf.data(), 'A' + i, part_size);
+    auto r =
+        client->upload_part(context, part_buf.data(), part_size, i + 1, opts);
+    ASSERT_EQ(r, (ssize_t)part_size);
+  }
+
+  ret = client->complete_multipart_upload(context);
+  ASSERT_EQ(ret, 0);
+
+  // verify by reading back
+  std::vector<char> verify_buf(part_size);
+  std::vector<char> expected(part_size);
+  for (int i = 0; i < 3; i++) {
+    auto r = client->get_object_range(path, verify_buf.data(), part_size,
+                                      (off_t)i * part_size);
+    ASSERT_EQ(r, (ssize_t)part_size);
+    memset(expected.data(), 'A' + i, part_size);
+    ASSERT_EQ(memcmp(verify_buf.data(), expected.data(), part_size), 0);
+  }
+}
+
 TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
 TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
@@ -634,6 +906,11 @@ TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
 
 TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
+TEST_F(BasicAuthOssTest, fd_get_and_put) { fd_get_and_put(); }
+TEST_F(BasicAuthOssTest, fd_multipart) { fd_multipart(); }
+TEST_F(BasicAuthOssTest, retry_get_and_put) { retry_get_and_put(); }
+TEST_F(BasicAuthOssTest, buf_put_and_get) { buf_put_and_get(); }
+TEST_F(BasicAuthOssTest, buf_multipart) { buf_multipart(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
