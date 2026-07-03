@@ -174,13 +174,20 @@ class Client : public Object {
 
   // return value is the real size if the operation succeeds, otherwise
   // return -1
+  ssize_t get_object_range(std::string_view object, char* buf, size_t size,
+                           off_t offset, ObjectHeaderMeta* meta = nullptr) {
+    return get_object_range(object, offset, size,
+        [buf, size](IStream* input) -> ssize_t {
+          return input->read(buf, size);
+        }, meta);
+  }
   ssize_t get_object_range(std::string_view object, const struct iovec* iov,
                            int iovcnt, off_t offset,
                            ObjectHeaderMeta* meta = nullptr) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return get_object_range(object, offset, view.sum(),
-        [&view](IStream* input) -> ssize_t {
-          return input->readv(view.iov, view.iovcnt);
+        [iov, iovcnt](IStream* input) -> ssize_t {
+          return input->readv(iov, iovcnt);
         }, meta);
   }
 
@@ -199,6 +206,13 @@ class Client : public Object {
   // return -1.
   // if expected_crc64 is specified, we will compare the value with the
   // returned object crc64 to validate the object integrity.
+  ssize_t put_object(std::string_view object, const char* buf, size_t size,
+                     ObjectUploadOptions& opts) {
+    return put_object(object, size,
+        [buf, size](IStream* output) -> ssize_t {
+          return output->write(buf, size);
+        }, opts);
+  }
   ssize_t put_object(std::string_view object, const struct iovec* iov,
                      int iovcnt, uint64_t* expected_crc64 = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
@@ -208,8 +222,8 @@ class Client : public Object {
                      int iovcnt, ObjectUploadOptions& opts) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return put_object(object, view.sum(),
-        [&view](IStream* output) -> ssize_t {
-          return output->writev(view.iov, view.iovcnt);
+        [iov, iovcnt](IStream* output) -> ssize_t {
+          return output->writev(iov, iovcnt);
         }, opts);
   }
 
@@ -242,6 +256,13 @@ class Client : public Object {
   // return -1.
   // if expected_crc64 is specified, we will compare the value with the
   // returned part crc64 to validate the part integrity.
+  ssize_t upload_part(void* context, const char* buf, size_t size,
+                      int part_number, ObjectUploadOptions& opts) {
+    return upload_part(context, size, part_number,
+        [buf, size](IStream* output) -> ssize_t {
+          return output->write(buf, size);
+        }, opts);
+  }
   ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
                       int part_number, uint64_t* expected_crc64 = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
@@ -251,8 +272,8 @@ class Client : public Object {
                       int part_number, ObjectUploadOptions& opts) {
     iovector_view view((struct iovec*)iov, iovcnt);
     return upload_part(context, view.sum(), part_number,
-        [&view](IStream* output) -> ssize_t {
-          return output->writev(view.iov, view.iovcnt);
+        [iov, iovcnt](IStream* output) -> ssize_t {
+          return output->writev(iov, iovcnt);
         }, opts);
   }
 

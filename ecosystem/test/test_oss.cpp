@@ -106,6 +106,8 @@ class BasicAuthOssTest : public ::testing::Test {
   void fd_get_and_put();
   void fd_multipart();
   void retry_get_and_put();
+  void buf_put_and_get();
+  void buf_multipart();
 
  private:
   std::string bucket_prefix_;
@@ -839,6 +841,62 @@ void CachedAuthOssTest::repeatedly_get() {
   EXPECT_EQ(ret, 1);
 }
 
+void BasicAuthOssTest::buf_put_and_get() {
+  auto path = get_real_test_path("buf_put_and_get/testfile");
+  const size_t file_size = 2048;
+  char write_buf[file_size];
+  for (size_t i = 0; i < file_size; i++) write_buf[i] = (char)(i & 0xff);
+
+  // put_object with buf+size
+  ObjectUploadOptions opts;
+  auto ret = client->put_object(path, write_buf, file_size, opts);
+  ASSERT_EQ(ret, (ssize_t)file_size);
+
+  // get_object_range with buf+size
+  char read_buf[file_size] = {};
+  ret = client->get_object_range(path, read_buf, file_size, 0);
+  ASSERT_EQ(ret, (ssize_t)file_size);
+  ASSERT_EQ(memcmp(write_buf, read_buf, file_size), 0);
+
+  // partial range read with buf+size
+  char partial_buf[128] = {};
+  ret = client->get_object_range(path, partial_buf, 128, 100);
+  ASSERT_EQ(ret, 128);
+  ASSERT_EQ(memcmp(write_buf + 100, partial_buf, 128), 0);
+}
+
+void BasicAuthOssTest::buf_multipart() {
+  auto path = get_real_test_path("buf_multipart/testfile");
+  const size_t part_size = 1048576;  // 1MB, minimum part size
+
+  void* context = nullptr;
+  int ret = client->init_multipart_upload(path, &context);
+  ASSERT_EQ(ret, 0);
+
+  std::vector<char> part_buf(part_size);
+  ObjectUploadOptions opts;
+  for (int i = 0; i < 3; i++) {
+    memset(part_buf.data(), 'A' + i, part_size);
+    auto r =
+        client->upload_part(context, part_buf.data(), part_size, i + 1, opts);
+    ASSERT_EQ(r, (ssize_t)part_size);
+  }
+
+  ret = client->complete_multipart_upload(context);
+  ASSERT_EQ(ret, 0);
+
+  // verify by reading back
+  std::vector<char> verify_buf(part_size);
+  std::vector<char> expected(part_size);
+  for (int i = 0; i < 3; i++) {
+    auto r = client->get_object_range(path, verify_buf.data(), part_size,
+                                      (off_t)i * part_size);
+    ASSERT_EQ(r, (ssize_t)part_size);
+    memset(expected.data(), 'A' + i, part_size);
+    ASSERT_EQ(memcmp(verify_buf.data(), expected.data(), part_size), 0);
+  }
+}
+
 TEST_F(BasicAuthOssTest, list_objects) { list_objects(); }
 TEST_F(BasicAuthOssTest, multipart) { multipart(); }
 TEST_F(BasicAuthOssTest, append_and_get) { append_and_get(); }
@@ -851,6 +909,8 @@ TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(BasicAuthOssTest, fd_get_and_put) { fd_get_and_put(); }
 TEST_F(BasicAuthOssTest, fd_multipart) { fd_multipart(); }
 TEST_F(BasicAuthOssTest, retry_get_and_put) { retry_get_and_put(); }
+TEST_F(BasicAuthOssTest, buf_put_and_get) { buf_put_and_get(); }
+TEST_F(BasicAuthOssTest, buf_multipart) { buf_multipart(); }
 TEST_F(CachedAuthOssTest, listobjects) { list_objects(); }
 TEST_F(CachedAuthOssTest, multipart) { multipart(); }
 TEST_F(CachedAuthOssTest, append_and_get) { append_and_get(); }
