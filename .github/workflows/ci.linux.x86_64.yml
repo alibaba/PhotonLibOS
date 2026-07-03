@@ -1,5 +1,9 @@
 name: Linux x86_64
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, unlabeled]
@@ -9,10 +13,7 @@ jobs:
   gcc-test:
     name: gcc-${{ matrix.gcc }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-26.04
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged --shm-size 512m
+    runs-on: arc-acs-runner-set
     strategy:
       fail-fast: false
       matrix:
@@ -24,15 +25,9 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Setup ext4 loopback for fiemap tests
-        run: |
-          yum install -y -q e2fsprogs
-          dd if=/dev/zero of=/tmp/ext4.img bs=1M count=256 status=none
-          mkfs.ext4 -q /tmp/ext4.img
-          mkdir -p /root/tmp
-          mount -o loop /tmp/ext4.img /root/tmp
       - name: Build
         run: |
+          uname -a
           if [ "${{ matrix.gcc }}" != "8" ]; then
             source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
           fi
