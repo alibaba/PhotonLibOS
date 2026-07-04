@@ -119,6 +119,10 @@ namespace fs
         {
             return UISysCall(::ftruncate(fd, length));
         }
+        virtual off_t lseek(off_t offset, int whence) override
+        {
+            return UISysCall(::lseek(fd, offset, whence));
+        }
         virtual int sync_file_range(off_t offset, off_t nbytes, unsigned int flags) override
         {
             return fdatasync();
@@ -186,11 +190,6 @@ namespace fs
     {
     public:
         using BaseFileAdaptor::BaseFileAdaptor;
-        virtual off_t lseek(off_t offset, int whence) override
-        {
-            return UISysCall(::lseek(fd, offset, whence));
-        }
-
         virtual int fsync() override
         {
             thread_yield();
