@@ -4,11 +4,13 @@ on:
   push:
     branches: [ "main", "release/*" ]
   pull_request:
+    types: [opened, synchronize, reopened, unlabeled]
     branches: [ "main", "release/*" ]
 
 jobs:
-  centos8-gcc921-epoll-release:
-    runs-on: [self-hosted, Linux, ARM64]
+  arm-linux-build-and-test:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    runs-on: ubuntu-24.04-arm
 
     container:
       image: ghcr.io/coldwings/photon-ut-base:latest
@@ -43,7 +45,7 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
+          sudo ulimit -l unlimited || true
           cd build
           ctest --timeout 3600 -V
 
@@ -83,6 +85,6 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
+          sudo ulimit -l unlimited || true
           cd build
           ctest --timeout 3600 -V
