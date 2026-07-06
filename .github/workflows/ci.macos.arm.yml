@@ -10,7 +10,7 @@ on:
 jobs:
   macOS14-arm:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: macos-15
+    runs-on: macos-14
 
     steps:
       - uses: szenius/set-timezone@v1.2
