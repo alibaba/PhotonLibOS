@@ -287,6 +287,17 @@ namespace fs
         {
             return AIOEngine::fdatasync(fd);
         }
+#ifdef __linux__
+        virtual off_t lseek(off_t offset, int whence) override
+        {
+            if (whence == SEEK_DATA || whence == SEEK_HOLE) {
+                off_t ret = UISysCall(::lseek(fd, offset, whence));
+                if (ret >= 0) m_offset = ret;
+                return ret;
+            }
+            return VirtualFile::lseek(offset, whence);
+        }
+#endif
         virtual int close() override
         {
             if (fd < 0) return 0;
