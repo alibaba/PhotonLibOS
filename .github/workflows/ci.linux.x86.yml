@@ -43,7 +43,7 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
+          sudo ulimit -l unlimited || true
           cd build
           ctest --timeout 3600 -V
 
@@ -83,7 +83,7 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
+          sudo ulimit -l unlimited || true
           cd build
           ctest --timeout 3600 -V
 
@@ -124,6 +124,6 @@ jobs:
 
       - name: Test
         run: |
-          ulimit -l unlimited
+          sudo ulimit -l unlimited || true
           cd build
           ctest --timeout 3600 -V
