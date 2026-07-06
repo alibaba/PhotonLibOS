@@ -353,7 +353,7 @@ public:
     unordered_inline_set( std::from_range_t, R&& rg,
                 size_type bucket_count,
                 const Hash& hash,
-                const Alloc& alloc )
+                const Allocator& alloc )
         : unordered_inline_set(std::from_range, std::forward<R>(rg),
                         bucket_count, hash, key_equal(), alloc) {}
 #endif

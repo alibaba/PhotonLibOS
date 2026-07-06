@@ -21,16 +21,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - gcc: 9
+          - gcc: 8
             cxx: 14
           - gcc: 9
+            cxx: 14
+          - gcc: 10
             cxx: 17
           - gcc: 11
-            cxx: 20
+            cxx: 17
           - gcc: 12
-            cxx: 23
+            cxx: 20
           - gcc: 13
-            cxx: 23
+            cxx: 20
           - gcc: 14
             cxx: 23
             run_test: true
@@ -45,7 +47,9 @@ jobs:
 
       - name: Build
         run: |
-          source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          if [ "${{ matrix.gcc }}" != "8" ]; then
+            source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          fi
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
                          -D PHOTON_CXX_STANDARD=${{ matrix.cxx }} \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \

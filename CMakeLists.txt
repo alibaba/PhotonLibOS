@@ -85,7 +85,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
-set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -95,8 +94,10 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 if (${ARCH} STREQUAL x86_64)
+    set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16")
 elseif (${ARCH} STREQUAL aarch64)
+    set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -mcpu=native")    # Only for CI test
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fomit-frame-pointer")
     if (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
@@ -215,9 +216,9 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp)
 else ()
-    file(GLOB CACHE_SRC 
+    file(GLOB CACHE_SRC
         fs/cache/*.cpp
-        fs/cache/full_file_cache/*.cpp 
+        fs/cache/full_file_cache/*.cpp
         fs/cache/persistent_cache/*.cpp
     )
     list(APPEND PHOTON_SRC

@@ -636,6 +636,7 @@ uint64_t crc64ecma_hw_sse128(const uint8_t *buf, size_t len, uint64_t crc) {
 
 #ifdef __x86_64__
 #ifdef __APPLE__ // apple basically doens't support avx-512
+#pragma clang attribute pop
 uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
     return crc64ecma_hw_sse128(buf, len, crc);
 }
