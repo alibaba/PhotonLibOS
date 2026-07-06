@@ -17,8 +17,10 @@ limitations under the License.
 #pragma once
 #include <inttypes.h>
 #include <photon/common/callback.h>
+#include <photon/common/iovector.h>
 #include <photon/common/object.h>
 #include <photon/common/ordered_span.h>
+#include <photon/common/stream.h>
 #include <photon/common/string_view.h>
 #include <photon/net/http/headers.h>
 #include <photon/net/http/verb.h>
@@ -150,6 +152,18 @@ struct ObjectUploadOptions {
   std::string *etag = nullptr;
 };
 
+// [WARNING] Retry-safety MUST be made sure. The framework re-calls from the 
+// beginning on retry, so the callback must write the complete body 
+// (content_length bytes) in one call, looping internally if needed. 
+using BodyWriter = TempDelegate<ssize_t, IStream* /*output*/>;
+
+// [WARNING] Retry-safety MUST be made sure. The framework re-calls from the 
+// beginning on retry, so the callback must read the complete body in one call,
+// looping internally if needed. 
+// DO NOT merge BodyReader and BodyWriter to remind the caller whether to
+// implement read or write.
+using BodyReader = TempDelegate<ssize_t, IStream* /*input*/>;
+
 class Client : public Object {
  public:
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
@@ -160,9 +174,25 @@ class Client : public Object {
 
   // return value is the real size if the operation succeeds, otherwise
   // return -1
-  virtual ssize_t get_object_range(std::string_view object,
-                                   const struct iovec* iov, int iovcnt,
-                                   off_t offset,
+  ssize_t get_object_range(std::string_view object, char* buf, size_t size,
+                           off_t offset, ObjectHeaderMeta* meta = nullptr) {
+    return get_object_range(object, offset, size,
+        [buf, size](IStream* input) -> ssize_t {
+          return input->read(buf, size);
+        }, meta);
+  }
+  ssize_t get_object_range(std::string_view object, const struct iovec* iov,
+                           int iovcnt, off_t offset,
+                           ObjectHeaderMeta* meta = nullptr) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return get_object_range(object, offset, view.sum(),
+        [iov, iovcnt](IStream* input) -> ssize_t {
+          return input->readv(iov, iovcnt);
+        }, meta);
+  }
+
+  virtual ssize_t get_object_range(std::string_view object, off_t offset,
+                                   size_t cnt, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
 
   // return value is the object count which data is successfully downloaded.
@@ -176,13 +206,29 @@ class Client : public Object {
   // return -1.
   // if expected_crc64 is specified, we will compare the value with the
   // returned object crc64 to validate the object integrity.
+  ssize_t put_object(std::string_view object, const char* buf, size_t size,
+                     ObjectUploadOptions& opts) {
+    return put_object(object, size,
+        [buf, size](IStream* output) -> ssize_t {
+          return output->write(buf, size);
+        }, opts);
+  }
   ssize_t put_object(std::string_view object, const struct iovec* iov,
                      int iovcnt, uint64_t* expected_crc64 = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
     return put_object(object, iov, iovcnt, opts);
   };
-  virtual ssize_t put_object(std::string_view object, const struct iovec* iov,
-                             int iovcnt, ObjectUploadOptions& opts) = 0;
+  ssize_t put_object(std::string_view object, const struct iovec* iov,
+                     int iovcnt, ObjectUploadOptions& opts) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return put_object(object, view.sum(),
+        [iov, iovcnt](IStream* output) -> ssize_t {
+          return output->writev(iov, iovcnt);
+        }, opts);
+  }
+
+  virtual ssize_t put_object(std::string_view object, size_t cnt,
+                             BodyWriter writer, ObjectUploadOptions& opts) = 0;
 
   // return value is the newly appended size if the operation succeeds,
   // otherwise return -1.
@@ -210,13 +256,29 @@ class Client : public Object {
   // return -1.
   // if expected_crc64 is specified, we will compare the value with the
   // returned part crc64 to validate the part integrity.
+  ssize_t upload_part(void* context, const char* buf, size_t size,
+                      int part_number, ObjectUploadOptions& opts) {
+    return upload_part(context, size, part_number,
+        [buf, size](IStream* output) -> ssize_t {
+          return output->write(buf, size);
+        }, opts);
+  }
   ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
                       int part_number, uint64_t* expected_crc64 = nullptr) {
     ObjectUploadOptions opts{.expected_crc64 = expected_crc64};
     return upload_part(context, iov, iovcnt, part_number, opts);
   };
-  virtual ssize_t upload_part(void* context, const struct iovec* iov,
-                              int iovcnt, int part_number,
+  ssize_t upload_part(void* context, const struct iovec* iov, int iovcnt,
+                      int part_number, ObjectUploadOptions& opts) {
+    iovector_view view((struct iovec*)iov, iovcnt);
+    return upload_part(context, view.sum(), part_number,
+        [iov, iovcnt](IStream* output) -> ssize_t {
+          return output->writev(iov, iovcnt);
+        }, opts);
+  }
+
+  virtual ssize_t upload_part(void* context, size_t cnt,
+                              int part_number, BodyWriter writer,
                               ObjectUploadOptions& opts) = 0;
 
   virtual int upload_part_copy(void* context, off_t offset, size_t count,

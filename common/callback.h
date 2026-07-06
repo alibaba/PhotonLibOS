@@ -134,6 +134,28 @@ struct Delegate : public Delegate_Base
     }
 };
 
+// TempDelegate allows passing a temporary lambda to functions that accept
+// Delegate parameters. It is only safe when the callee finishes using the
+// delegate before the TempDelegate object goes out of scope — typically
+// synchronous/join-style calls (e.g. threads_create_join, WorkPool::do_call).
+// It must NOT be used where the delegate outlives the call (e.g. thread_create
+// — the new thread needs the lambda after the function returns; use
+// thread_create11 instead, which copies the lambda onto the new thread's stack).
+template<typename R, typename...Ts>
+struct TempDelegate : public Delegate<R, Ts...> {
+    using base = Delegate<R, Ts...>;
+    using base::base;  // inherit all Delegate constructors
+
+    // Construct from an existing Delegate (allows Delegate objects to be passed
+    // where TempDelegate is expected, e.g. in template wrappers).
+    TempDelegate(const Delegate<R, Ts...>& d) : Delegate<R, Ts...>(d) {}
+
+    // Rvalue callable constructor — the key addition over Delegate.
+    // For lvalue callables, inherited Delegate(U&) wins via partial ordering.
+    // For rvalue callables, only this constructor matches (inherited U& rejects rvalues).
+    template<typename U, ENABLE_IF_NOT_CB(U)>
+    TempDelegate(U&& obj) : Delegate<R, Ts...>(obj) { }
+};
 template<typename...Ts>
 using Callback = Delegate<int, Ts...>;
 
