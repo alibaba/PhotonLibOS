@@ -4,6 +4,7 @@ RUN dnf install -y git cmake gcc-c++ openssl-devel-1.1.1k libcurl-devel-7.61.1-3
     dnf install -y epel-release 'dnf-command(config-manager)' && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y gtest-devel gmock-devel fuse-devel fuse3-devel libgsasl-devel e2fsprogs-devel && \
+    dnf install -y gcc-toolset-9 gcc-toolset-10 gcc-toolset-11 gcc-toolset-12 gcc-toolset-13 gcc-toolset-14 && \
     dnf install -y gcc-toolset-9-gcc-c++ gcc-toolset-10-gcc-c++ gcc-toolset-11-gcc-c++ gcc-toolset-12-gcc-c++ gcc-toolset-13-gcc-c++ gcc-toolset-14-gcc-c++ && \
     dnf install -y redis nasm && \
     dnf clean all && rm -rf /var/cache/yum && \
