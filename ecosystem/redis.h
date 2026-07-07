@@ -94,7 +94,7 @@ public:
     integer(const integer&) = default;
     integer(int64_t v) : val(v) { };
     integer(const refstring& rs) :
-        val(((estring_view&)rs).to_int64()) { }
+        val(((estring_view*)&rs)->to_int64()) { }
     using refstring::operator=;
     constexpr static char mark() { return ':'; }
 };

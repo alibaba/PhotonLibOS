@@ -1,4 +1,8 @@
-name: macOS ARM
+name: macOS-matrix
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   pull_request:
@@ -6,9 +10,20 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-  macOS14-arm:
+  macos:
+    name: macOS-${{ matrix.arch }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm
+            runner: macos-15
+            extra_brew: ""
+          - arch: x86_64
+            runner: macos-15-intel
+            extra_brew: "nasm"
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: szenius/set-timezone@v2.0
@@ -22,7 +37,7 @@ jobs:
       - name: Install Dependencies
         shell: bash
         run: |
-          brew install openssl@3 gflags googletest gsasl
+          brew install openssl@3 gflags googletest gsasl ${{ matrix.extra_brew }}
 
       - name: Build
         run: |

@@ -7,6 +7,11 @@
 #include <limits>
 #include <cmath>
 #include <string.h>
+#include <utility>
+#if __cplusplus >= 202300L
+#include <concepts>
+#include <ranges>
+#endif
 
 // an array with possible missing values
 template<typename T>
@@ -327,25 +332,28 @@ public:
                     hash, key_equal(), alloc) {}
 
 #if __cplusplus >= 202300L
-    template< compatible_range_type R >
+    template<std::ranges::input_range R>
+        requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     unordered_inline_set( std::from_range_t, R&& rg,
                size_type bucket_count = MIN_CAPACITY,
                const Hash& hash = Hash(),
                const key_equal& equal = key_equal(),
                const Allocator& alloc = Allocator() );
 
-    template< compatible_range_type R >
+    template<std::ranges::input_range R>
+        requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     unordered_inline_set( std::from_range_t, R&& rg,
                 size_type bucket_count,
                 const Allocator& alloc )
         : unordered_inline_set(std::from_range, std::forward<R>(rg),
                         bucket_count, Hash(), key_equal(), alloc) {}
 
-    template< compatible_range_type R >
+    template<std::ranges::input_range R>
+        requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     unordered_inline_set( std::from_range_t, R&& rg,
                 size_type bucket_count,
                 const Hash& hash,
-                const Alloc& alloc )
+                const Allocator& alloc )
         : unordered_inline_set(std::from_range, std::forward<R>(rg),
                         bucket_count, hash, key_equal(), alloc) {}
 #endif
@@ -488,7 +496,8 @@ public:
     }
 
 #if __cplusplus >= 202300L
-    template< compatible_range_type R >
+    template<std::ranges::input_range R>
+        requires std::constructible_from<value_type, std::ranges::range_reference_t<R>>
     void insert_range( R&& rg );
 #endif
 

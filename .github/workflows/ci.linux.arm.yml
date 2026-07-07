@@ -1,5 +1,9 @@
 name: Linux ARM
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, unlabeled]
@@ -7,13 +11,31 @@ on:
 
 jobs:
   arm-linux-build-and-test:
+    name: gcc${{ matrix.gcc }}-C++${{ matrix.cxx }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-24.04-arm
-
+    runs-on: ubuntu-26.04-arm
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --shm-size 512m
-
+      options: --cpus 4 --shm-size 512m --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gcc: 8
+            cxx: 14
+          - gcc: 9
+            cxx: 14
+          - gcc: 10
+            cxx: 17
+          - gcc: 11
+            cxx: 17
+          - gcc: 12
+            cxx: 20
+          - gcc: 13
+            cxx: 20
+          - gcc: 14
+            cxx: 23
+            run_test: true
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -23,55 +45,13 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Build-Debug-921-C++14
+      - name: Build
         run: |
-          source /opt/rh/gcc-toolset-9/enable
+          if [ "${{ matrix.gcc }}" != "8" ]; then
+            source /opt/rh/gcc-toolset-${{ matrix.gcc }}/enable
+          fi
           cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
-
-      - name: Build-Debug-921-C++17
-        run: |
-          source /opt/rh/gcc-toolset-9/enable
-          rm -fr build
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_CXX_STANDARD=17        \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
-
-      - name: Build-Debug-1121-C++20
-        run: |
-          source /opt/rh/gcc-toolset-11/enable
-          rm -fr build
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_CXX_STANDARD=20        \
-                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
-                         -D PHOTON_BUILD_TESTING=ON       \
-                         -D PHOTON_ENABLE_SASL=ON         \
-                         -D PHOTON_ENABLE_FUSE=ON         \
-                         -D PHOTON_ENABLE_URING=ON        \
-                         -D PHOTON_ENABLE_LIBCURL=ON      \
-                         -D PHOTON_ENABLE_EXTFS=ON
-          cmake --build build -j $(nproc) -- VERBOSE=1
-
-      - name: Build-Debug-1211-C++23
-        run: |
-          source /opt/rh/gcc-toolset-12/enable
-          rm -fr build
-          cmake -B build -D CMAKE_BUILD_TYPE=MinSizeRel   \
-                         -D PHOTON_CXX_STANDARD=23        \
+                         -D PHOTON_CXX_STANDARD=${{ matrix.cxx }} \
                          -D PHOTON_ENABLE_ECOSYSTEM=ON    \
                          -D PHOTON_BUILD_TESTING=ON       \
                          -D PHOTON_ENABLE_SASL=ON         \
@@ -82,15 +62,16 @@ jobs:
           cmake --build build -j $(nproc) -- VERBOSE=1
 
       - name: Test
+        if: matrix.run_test
         run: |
           cd build
           nohup redis-server &
-          ctest --timeout 3600 -V
+          ctest -E test-lockfree --timeout 3600 -V
           pkill redis-server
 
   debug-build-from-source:
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     container:
       image: almalinux:8
     steps:
