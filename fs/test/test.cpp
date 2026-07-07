@@ -937,6 +937,43 @@ TEST(LocalFileSystem, basic) {
     lf->fsync();
 }
 
+#ifdef __linux__
+TEST(LocalFileSystem, aio_seek_data_hole) {
+    const off_t bs = 4096;
+    const char* path = "/tmp/photon_seek_data_hole";
+    // Build a sparse file with a plain fd:
+    //   data[0, bs)  hole[bs, 2*bs)  data[2*bs, 3*bs)
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    ASSERT_GE(fd, 0);
+    DEFER(::unlink(path));
+    std::unique_ptr<char[]> block(new char[bs]);
+    memset(block.get(), 'A', bs);
+    ASSERT_EQ(bs, ::pwrite(fd, block.get(), bs, 0));
+    ASSERT_EQ(bs, ::pwrite(fd, block.get(), bs, 2 * bs));
+    ::fsync(fd);
+
+    // Wrap the fd in an AioFileAdaptor (posixaio).
+    std::unique_ptr<IFile> f(new_localfile_adaptor(fd, ioengine_posixaio));
+    ASSERT_NE(nullptr, f.get());
+
+    // SEEK_DATA / SEEK_HOLE reach the kernel and sync the self-managed offset.
+    off_t d = f->lseek(0, SEEK_DATA);
+    EXPECT_EQ(0, d);
+    EXPECT_EQ(d, f->lseek(0, SEEK_CUR));
+
+    off_t h = f->lseek(0, SEEK_HOLE);
+    EXPECT_EQ(bs, h);
+    EXPECT_EQ(h, f->lseek(0, SEEK_CUR));
+
+    EXPECT_EQ(3 * bs, f->lseek(2 * bs, SEEK_HOLE));
+
+    // Plain whence values still follow the VirtualFile (m_offset) route.
+    EXPECT_EQ(0, f->lseek(0, SEEK_SET));
+    EXPECT_EQ(bs, f->lseek(bs, SEEK_CUR));
+    EXPECT_EQ(3 * bs, f->lseek(0, SEEK_END));
+}
+#endif // __linux__
+
 std::unique_ptr<char[]> random_block(uint64_t size) {
     std::unique_ptr<char[]> buff(new char[size]);
     char * p = buff.get();
