@@ -847,8 +847,13 @@ TEST(CachePool, test_demote_threshold) {
   }
 }
 
+<<<<<<< HEAD
 TEST(CachePool, three_tier_cascade) {
   std::string root = "/mnt/tmp/ease/cache/three_tier_cascade/";
+=======
+TEST(CachePool, evict_idle_file) {
+  std::string root = "/mnt/tmp/ease/cache/evict_idle_file/";
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   const size_t activeLimit = 5;
   const size_t inactiveLimit = 10;
@@ -966,8 +971,13 @@ TEST(CachePool, three_tier_cascade) {
   }
 }
 
+<<<<<<< HEAD
 TEST(CachePool, evict_by_size_cold_first) {
   std::string root = "/mnt/tmp/ease/cache/evict_by_size_cold_first/";
+=======
+TEST(CachePool, evict_by_size_idle_first) {
+  std::string root = "/mnt/tmp/ease/cache/evict_by_size/";
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t activeLimit = 5;
@@ -1111,7 +1121,11 @@ static void refillRangeDeterministic(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_det/"
       : "/mnt/tmp/ease/cache/refill_range_det/";
+<<<<<<< HEAD
   if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
+=======
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1182,7 +1196,11 @@ static void refillRangeRandom(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_rand/"
       : "/mnt/tmp/ease/cache/refill_range_rand/";
+<<<<<<< HEAD
   if (useShm && !RequireShmAvailable(240ull * 1024 * 1024)) return;
+=======
+  if (useShm && !RequireShmAvailable(240ul * 1024 * 1024)) return;
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1268,7 +1286,11 @@ static void refillRangeEvictWhileOpen(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_evict/"
       : "/mnt/tmp/ease/cache/refill_range_evict/";
+<<<<<<< HEAD
   if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
+=======
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
@@ -1348,7 +1370,11 @@ static void refillRangeNonAlignedTail(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_unaligned/"
       : "/mnt/tmp/ease/cache/refill_range_unaligned/";
+<<<<<<< HEAD
   if (useShm && !RequireShmAvailable(144ull * 1024 * 1024)) return;
+=======
+  if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);

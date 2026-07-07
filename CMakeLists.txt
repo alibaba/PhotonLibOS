@@ -98,7 +98,10 @@ endif ()
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
+<<<<<<< HEAD
 set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
+=======
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -106,6 +109,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat -fno-omit-frame-pointer")
 endif()
+<<<<<<< HEAD
 if (WIN32)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes")
 endif()
@@ -113,6 +117,15 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16")
 elseif ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fno-omit-frame-pointer")
+=======
+
+if (${ARCH} STREQUAL x86_64)
+    set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16")
+elseif (${ARCH} STREQUAL aarch64)
+    set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -mcpu=native")    # Only for CI test
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fomit-frame-pointer")
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
     if (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
     endif ()

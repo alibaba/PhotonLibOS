@@ -671,6 +671,10 @@ uint64_t crc64ecma_trim_sw(CRC64ECMA_Component all,
 
 #ifdef __x86_64__
 #ifdef __APPLE__ // apple basically doens't support avx-512
+<<<<<<< HEAD
+=======
+#pragma clang attribute pop
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
 uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
     return crc64ecma_hw_sse128(buf, len, crc);
 }
@@ -756,6 +760,12 @@ uint64_t crc64ecma_hw_avx512(const uint8_t *buf, size_t len, uint64_t crc) {
 #else // __GNUC__
 #pragma GCC pop_options
 #endif
+<<<<<<< HEAD
+=======
+
+#endif  // apple
+#endif  // __x86_64__
+>>>>>>> 37c6bd6 (backport compile & test (#1537))
 
 #endif  // apple
 #endif  // __x86_64__
