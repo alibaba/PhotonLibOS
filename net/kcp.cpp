@@ -23,6 +23,7 @@ limitations under the License.
 #include <random>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 #include <ikcp.h>
 
