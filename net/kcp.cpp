@@ -323,7 +323,7 @@ public:
         int old_waitsnd = ikcp_waitsnd(m_kcp);
         auto old_nrcv_que = m_kcp->nrcv_que;
         ikcp_update(m_kcp, current);
-        if (m_kcp->state == -1) {
+        if (m_kcp->state == -1u) {
             m_closed.store(true, std::memory_order_release);
             m_cv.notify_all();
             return;
