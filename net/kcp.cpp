@@ -28,9 +28,9 @@ limitations under the License.
 
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
-#include <photon/net/base_socket.h>
 #include <photon/net/datagram_socket.h>
 #include <photon/net/socket.h>
+#include "base_socket.h"
 #include <photon/thread/thread.h>
 #include <photon/thread/thread11.h>
 
