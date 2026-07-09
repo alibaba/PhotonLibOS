@@ -51,6 +51,7 @@ jobs:
             -D CMAKE_BUILD_TYPE=MinSizeRel \
             -D PHOTON_ENABLE_SASL=ON \
             -D PHOTON_ENABLE_LIBCURL=ON \
+            -D PHOTON_ENABLE_KCP=ON \
             -D OPENSSL_ROOT_DIR=${OPENSSL_DIR}
           cmake --build ${{github.workspace}}/build -j $(sysctl -n hw.logicalcpu)
 

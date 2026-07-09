@@ -130,6 +130,42 @@ TEST(UDP, uds_huge_datag) {
     EXPECT_EQ(0, memcmp(hugepack, buf, sizeof(hugepack)));
 }
 
+TEST(UDP, recv_timeout) {
+    auto s1 = new_udp_socket();
+    DEFER(delete s1);
+    s1->bind_v4localhost();
+
+    s1->timeout(200 * 1000);  // 200ms
+    char buf[64];
+    EndPoint from;
+    auto t0 = photon::now;
+    ssize_t n = s1->recvfrom(buf, sizeof(buf), &from);
+    auto elapsed = photon::now - t0;
+    EXPECT_EQ(-1, n);
+    EXPECT_EQ(ETIMEDOUT, errno);
+    LOG_INFO("recvfrom timed out after ` us", VALUE(elapsed));
+    EXPECT_GE(elapsed, 180 * 1000);
+    EXPECT_LE(elapsed, 300 * 1000);
+}
+
+TEST(UDP, send_with_timeout_set) {
+    auto s1 = new_udp_socket();
+    DEFER(delete s1);
+    auto s2 = new_udp_socket();
+    DEFER(delete s2);
+    s1->bind_v4localhost();
+    auto ep = s1->getsockname();
+
+    s2->timeout(100 * 1000);  // 100ms - should not affect sendto success
+    ASSERT_EQ(6, s2->sendto("Hello", 6, ep));
+
+    s1->timeout(100 * 1000);
+    char buf[64];
+    EndPoint from;
+    ASSERT_EQ(6, s1->recvfrom(buf, sizeof(buf), &from));
+    LOG_INFO("received from `", VALUE(from));
+}
+
 int main(int argc, char** arg) {
     photon::init();
     DEFER(photon::fini());

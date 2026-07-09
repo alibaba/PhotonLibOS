@@ -66,6 +66,7 @@ protected:
 public:
     using base::recv;
     using base::send;
+    using base::timeout;
     int connect(const EndPoint& ep)   { return connect((Addr*)&ep, sizeof(ep)); }
     int bind(const EndPoint& ep)      { return bind((Addr*)&ep, sizeof(ep)); }
     int bind(uint16_t port = 0)       { return bind_v4any(0); }
