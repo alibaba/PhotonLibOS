@@ -188,6 +188,9 @@ endif ()
 if (PHOTON_ENABLE_LIBCURL)
     LIST(APPEND dependencies curl)
 endif()
+if (PHOTON_ENABLE_KCP)
+    LIST(APPEND dependencies kcp)
+endif()
 if (PHOTON_BUILD_TESTING)
     LIST(APPEND dependencies gflags googletest)
 endif ()
@@ -196,7 +199,11 @@ FOREACH (dep ${dependencies})
     message(STATUS "Checking dependency ${dep}")
     string(TOUPPER ${dep} DEP)
     set(source_url "${PHOTON_${DEP}_SOURCE}")
-    if (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
+    if (dep STREQUAL "kcp")
+        message(STATUS "Will build ${dep} from source")
+        message(STATUS "    URL: ${source_url}")
+        build_from_src(dep)
+    elseif (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
         message(STATUS "Will build ${dep} from source")
         message(STATUS "    URL: ${source_url}")
         build_from_src(dep)
@@ -212,17 +219,6 @@ add_subdirectory(third_party)
 
 if (PHOTON_ENABLE_ECOSYSTEM)
     add_subdirectory(ecosystem)
-endif ()
-
-if (PHOTON_ENABLE_KCP)
-    FetchContent_Declare(
-        kcp
-        URL ${PHOTON_KCP_SOURCE}
-        UPDATE_DISCONNECTED 1
-    )
-    FetchContent_Populate(kcp)
-    add_library(kcp_static STATIC ${kcp_SOURCE_DIR}/ikcp.c)
-    target_include_directories(kcp_static PUBLIC ${kcp_SOURCE_DIR})
 endif ()
 
 # Compile photon objects
@@ -424,7 +420,7 @@ endif()
 list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
 
 if (PHOTON_ENABLE_KCP)
-    list(APPEND static_deps kcp_static)
+    list(APPEND static_deps ${kcp_static})
 endif()
 
 

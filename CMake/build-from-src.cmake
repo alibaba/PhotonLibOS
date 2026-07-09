@@ -395,6 +395,23 @@ function(build_from_src [dep])
         set(FSTACK_LIBRARIES ${BINARY_DIR}/lib/libfstack.a PARENT_SCOPE)
         set(FSTACK_LIBRARIES ${FSTACK_LIBRARIES} ${DPDK_LIBRARIES} PARENT_SCOPE)
 
+    elseif (dep STREQUAL "kcp")
+        set(BINARY_DIR ${PROJECT_BINARY_DIR}/kcp-build)
+        ExternalProject_Add(
+            kcp
+            URL ${PHOTON_KCP_SOURCE}
+            UPDATE_DISCONNECTED ON
+            BUILD_IN_SOURCE ON
+            CONFIGURE_COMMAND ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR}/lib ${BINARY_DIR}/include
+            BUILD_COMMAND ${CMAKE_C_COMPILER} -c -O2 -fPIC -I<SOURCE_DIR> <SOURCE_DIR>/ikcp.c -o ikcp.o
+                COMMAND ${CMAKE_AR} rcs libikcp.a ikcp.o
+            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy libikcp.a ${BINARY_DIR}/lib/
+                COMMAND ${CMAKE_COMMAND} -E copy <SOURCE_DIR>/ikcp.h ${BINARY_DIR}/include/
+        )
+        ExternalProject_Get_Property(kcp SOURCE_DIR)
+        set(kcp_SOURCE_DIR ${SOURCE_DIR} PARENT_SCOPE)
+        set(kcp_static ${BINARY_DIR}/lib/libikcp.a PARENT_SCOPE)
+
     endif ()
 
     list(APPEND actually_built ${dep})
