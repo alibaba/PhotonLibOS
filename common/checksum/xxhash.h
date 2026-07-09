@@ -18,3 +18,8 @@ limitations under the License.
 #include <cstddef>
 
 uint32_t xxhash32_sw(const uint8_t* data, size_t len, uint32_t seed = 0);
+
+inline uint32_t xxhash32(const uint8_t* data, size_t len, uint32_t seed = 0) {
+    return xxhash32_sw(data, len, seed);
+}
+
