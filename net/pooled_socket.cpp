@@ -113,6 +113,7 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
 };
 
 struct StreamListHead : public StreamListNode {
+    StreamListHead* _key_next = this;
     // total # of sockets, including those in use, not including the head
     uint32_t _refcnt = 0;
     uint16_t _key_len;
@@ -188,6 +189,7 @@ class TCPSocketPool : public ISocketPool {
 public:
     SocketPoolArgs args;
     std::unordered_set<StreamList, Hash, Equal> sockmap;
+    StreamListHead *_key_head = nullptr;
     CascadingEventEngine* ev = new_default_cascading_engine();
     join_handle* collector = thread_enable_join(
         thread_create11(&TCPSocketPool::collect, this));
@@ -279,12 +281,18 @@ public:
     ISocketStream* connect(std::string_view key, TempDelegate<ISocketStream*> connector) override {
         auto ret = sockmap.emplace(key);
         auto head = ret.first->head();
+        if (ret.second) { // new entry, prepend to key list
+            head->_key_next = _key_head;
+            _key_head = head;
+        }
         ISocketStream* stream;
         if (head->single()) {
-            stream = connector();
-            if (!stream)
-                return nullptr;
             head->_refcnt++;
+            stream = connector();
+            if (!stream) {
+                head->_refcnt--;
+                return nullptr;
+            }
             if (args.enable_tcp_keepalive)
                 set_keepalive(stream);
         } else {
@@ -341,50 +349,56 @@ public:
     }
 
     Timeout check_expire_heartbeat() {
-        intrusive_list<StreamListNode> freelist;
-        auto pre_delete = [&](StreamListHead* head, StreamListNode* ptr) {
-            assert(head->_refcnt > 0);
-            head->_refcnt--;
-            auto next = ptr->remove_from_list();
-            freelist.push_back(ptr);
-            return next;
-        };
         Timeout near_expire(args.expiration);
-        // uint64_t near_expire = sat_add(now, args.expiration), exp;
-        for (auto it = sockmap.begin(); it != sockmap.end();) {
-            assert(!it->empty());
-            auto head = it->head();
-            auto ptr = head->next();
-            while (ptr != head) {
+        for (auto h = _key_head; h; h = h->_key_next) {
+            // Expire timed-out nodes
+            auto ptr = h->next();
+            while (ptr != h) {
                 if (now < ptr->timeout.expiration()) {
                     near_expire = std::min(near_expire, ptr->timeout);
                     break;
                 }
-                ptr = pre_delete(head, ptr);
+                auto next = ptr->remove_from_list();
+                rm_watch(ptr);
+                assert(h->_refcnt > 0);
+                h->_refcnt--;
+                delete ptr;
+                ptr = next;
             }
+            // Heartbeat remaining nodes
             if (args.heartbeater) {
-                while (ptr != head) {
-#ifdef _WIN32                                // a fd (handle) can not be added to multiple
-                    int fd = rm_watch(ptr);  // IOCPs, while epoll, iouring, kqueue can.
-#endif
+                while (ptr != h) {
+                    // Take node out of the list so connect() cannot grab it
+                    // while the heartbeater yields (I/O).
+                    auto next = ptr->remove_from_list();
+                    rm_watch(ptr);
                     int ret = args.heartbeater(ptr->stream.get());
                     if (ret == 0) {
-#ifdef _WIN32
-                        add_watch(fd, ptr);
-#endif
-                        ptr = ptr->next();
+                        h->insert_before(ptr);
+                        add_watch(ptr->stream->get_underlay_fd(), ptr);
+                        ptr = next;
                     } else {
-                        ptr = pre_delete(head, ptr);
+                        assert(h->_refcnt > 0);
+                        h->_refcnt--;
+                        delete ptr;
+                        ptr = next;
                     }
                 }
             }
-            if (head->_refcnt) ++it;
-            else it = sockmap.erase(it);
         }
-        for (auto node : freelist) {
-            rm_watch(node);
+        // Erase empty entries, unlinking from key list as we go
+        auto *prev_next = &_key_head;
+        for (auto h = _key_head; h; ) {
+            if (h->_refcnt) {
+                prev_next = &h->_key_next;
+                h = h->_key_next;
+            } else {
+                auto next = h->_key_next;
+                *prev_next = next;
+                sockmap.erase(h->key()); // frees h via StreamList destructor
+                h = next;
+            }
         }
-        freelist.delete_all();
         assert(near_expire.expiration() > now);
         return near_expire;
     }
