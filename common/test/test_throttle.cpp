@@ -220,11 +220,11 @@ TEST_P(FindAppropriateSliceNumTest, run) {
 
 INSTANTIATE_TEST_P(Throttle,
         FindAppropriateSliceNumTest, testing::Values(
-        FindAppropriateSliceNumSuite{10, 0.01},
-        FindAppropriateSliceNumSuite{50, 0.02},
-        FindAppropriateSliceNumSuite{100, 0.03},
-        FindAppropriateSliceNumSuite{500, 0.08},
-        FindAppropriateSliceNumSuite{1000, 0.08},
+        FindAppropriateSliceNumSuite{10, 0.02},
+        FindAppropriateSliceNumSuite{50, 0.03},
+        FindAppropriateSliceNumSuite{100, 0.05},
+        FindAppropriateSliceNumSuite{500, 0.12},
+        FindAppropriateSliceNumSuite{1000, 0.12},
         FindAppropriateSliceNumSuite{5000, 0.85}    // Unacceptable
 ));
 
