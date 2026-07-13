@@ -359,8 +359,6 @@ TEST(Socket, nested) {
     ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
 }
 
-<<<<<<< HEAD
-=======
 estring_view alpn_select_cb(void*, const std::vector<estring_view>& p) {
     for (auto const &x : p) {
         LOG_INFO(VALUE(x));
@@ -675,7 +673,6 @@ TEST(ca_cert, invalid_ca_file) {
     EXPECT_NE(0, ctx->set_ca_file(nullptr, nullptr));
 }
 
->>>>>>> c5f6c1b (feat(tls): add custom CA certificate support for TLSContext (#1529))
 int main(int argc, char** arg) {
 #ifdef __linux__
     int ev_engine = photon::INIT_EVENT_EPOLL;
