@@ -359,57 +359,6 @@ TEST(Socket, nested) {
     ASSERT_TRUE((uint64_t) u4 == (uint64_t) u5 && (uint64_t) u4 == (uint64_t) fd);
 }
 
-estring_view alpn_select_cb(void*, const std::vector<estring_view>& p) {
-    for (auto const &x : p) {
-        LOG_INFO(VALUE(x));
-    }
-    return p[1];
-}
-
-TEST(basic, alpn) {
-    // Server side
-    auto ctx_s = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(delete ctx_s);
-    ctx_s->set_alpn_select_cb({alpn_select_cb, nullptr});
-    auto srv = net::new_tls_server(ctx_s, net::new_tcp_socket_server(), true);
-    DEFER(delete srv);
-
-    srv->bind_v4any();
-    srv->listen();
-    photon::thread_create11([&]{
-        net::ISocketStream* s_s = nullptr;
-        while (!s_s) {
-            s_s = srv->accept();
-        }
-        DEFER(delete s_s);
-        auto server_proto = net::tls_stream_get_alpn_selected(s_s);
-        LOG_INFO(VALUE(server_proto));
-    });
-    auto ep = srv->getsockname();
-    LOG_INFO("Listen at `", ep);
-
-
-    // Client side
-    // Build ALPN Protos buf and set to client
-    auto ctx_c = net::new_tls_context(cert_str, key_str, passphrase_str);
-    DEFER(delete ctx_c);
-    auto ret = ctx_c->set_alpn_protos({"h2", "http/1.1"});
-    LOG_INFO("set_alpn_protos `", ret);
-    auto cli =
-        net::new_tls_client(ctx_c, net::new_tcp_socket_client(), true);
-    DEFER(delete cli);
-
-    auto port = ep.port;
-    auto s_c = cli->connect(net::EndPoint("127.0.0.1", port));
-    DEFER(delete s_c);
-    // The client handshake is lazy (deferred to the first I/O), so drive it with a
-    // write before querying the negotiated ALPN.
-    char probe = 'x';
-    s_c->write(&probe, 1);
-    auto cli_proto = net::tls_stream_get_alpn_selected(s_c);
-    LOG_INFO(VALUE(cli_proto));
-    EXPECT_TRUE(cli_proto == "http/1.1");
-}
 
 // Regression for #1292: the SNI hostname must be carried in the ClientHello.
 // A plain-TCP server captures the first flight (the ClientHello) as raw bytes;

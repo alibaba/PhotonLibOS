@@ -53,12 +53,6 @@ public:
     virtual int set_cert(const char* cert_str) = 0;
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
     virtual int set_verify_mode(VerifyMode mode = VerifyMode::NONE) = 0;
-    // set client-side alpn protos in proto-list format
-    virtual int set_alpn_protos(const std::vector<estring_view>& protos) = 0;
-    // set server-side callback to choose proto
-    // return value must be one string_view of the vector
-    virtual int set_alpn_select_cb(
-        Delegate<estring_view, const std::vector<estring_view>&>) = 0;
     virtual int set_ca_cert(const char* ca_cert_str) = 0;
     virtual int set_ca_file(const char* ca_file, const char* ca_path = nullptr) = 0;
 };
