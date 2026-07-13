@@ -18,6 +18,10 @@ limitations under the License.
 
 #include "../../../test/gtest.h"
 
+#include <cstdio>
+#include <unistd.h>
+#include <sys/stat.h>
+
 #include <photon/net/socket.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread.h>
@@ -28,6 +32,7 @@ limitations under the License.
 #include <photon/net/security-context/tls-stream.h>
 
 #include "../../test/cert-key.cpp"
+#include "test_cert_utils.h"
 
 using namespace photon;
 
@@ -456,6 +461,221 @@ TEST(sni, hostname_in_client_hello) {
     EXPECT_NE(std::string::npos, g_captured_client_hello.find(kHost));
 }
 #endif
+
+// ==================== CA cert tests ====================
+
+// Server handler that tolerates TLS handshake failure (for negative tests)
+int s_handler_noassert(void*, net::ISocketStream* stream) {
+    char buf[6];
+    stream->read(buf, 6);  // may fail due to TLS handshake error, that's OK
+    sem.signal(1);
+    return 0;
+}
+
+TEST(ca_cert, pem_string) {
+    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ctx, nullptr);
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    ASSERT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler, server_ctx});
+    photon::thread_yield();
+
+    // Client loads cert_str as CA
+    auto client_ctx = net::new_tls_context();
+    ASSERT_NE(client_ctx, nullptr);
+    DEFER(delete client_ctx);
+    ASSERT_EQ(0, client_ctx->set_ca_cert(cert_str));
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    s_client_test(stream);
+}
+
+TEST(ca_cert, file_path) {
+    auto fn = "/tmp/ca-cert-test-" + std::to_string(::getpid()) + ".pem";
+    FILE* f = fopen(fn.c_str(), "w");
+    ASSERT_NE(f, nullptr);
+    fputs(cert_str, f);
+    fclose(f);
+    DEFER(unlink(fn.c_str()));
+
+    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ctx, nullptr);
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    ASSERT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler, server_ctx});
+    photon::thread_yield();
+
+    auto client_ctx = net::new_tls_context();
+    ASSERT_NE(client_ctx, nullptr);
+    DEFER(delete client_ctx);
+    ASSERT_EQ(0, client_ctx->set_ca_file(fn.c_str()));
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    s_client_test(stream);
+}
+
+TEST(ca_cert, ca_path_directory) {
+    auto dir = "/tmp/ca-path-test-" + std::to_string(::getpid());
+    mkdir(dir.c_str(), 0755);
+    DEFER(rmdir(dir.c_str()));
+
+    // Compute subject hash and place cert as {hash}.0 (OpenSSL ca_path convention)
+    auto bio = BIO_new_mem_buf((void*)cert_str, -1);
+    auto x509 = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    ASSERT_NE(x509, nullptr);
+    auto hash = X509_subject_name_hash(x509);
+    X509_free(x509);
+
+    char hash_name[256];
+    snprintf(hash_name, sizeof(hash_name), "%s/%08lx.0", dir.c_str(), hash);
+    FILE* f = fopen(hash_name, "w");
+    ASSERT_NE(f, nullptr);
+    fputs(cert_str, f);
+    fclose(f);
+    DEFER(unlink(hash_name));
+
+    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ctx, nullptr);
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    ASSERT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler, server_ctx});
+    photon::thread_yield();
+
+    auto client_ctx = net::new_tls_context();
+    ASSERT_NE(client_ctx, nullptr);
+    DEFER(delete client_ctx);
+    ASSERT_EQ(0, client_ctx->set_ca_file(nullptr, dir.c_str()));
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    s_client_test(stream);
+}
+
+TEST(ca_cert, verify_fail_without_ca) {
+    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ctx, nullptr);
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    ASSERT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler_noassert, server_ctx});
+    photon::thread_yield();
+
+    // PEER verify enabled, but no CA loaded. Handshake should fail on first write.
+    auto client_ctx = net::new_tls_context();
+    ASSERT_NE(client_ctx, nullptr);
+    DEFER(delete client_ctx);
+    client_ctx->set_verify_mode(net::VerifyMode::PEER);
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    char buf[] = "Hello";
+    auto ret = stream->write(buf, 6);
+    EXPECT_LT(ret, 0);
+    sem.wait(1);
+}
+
+TEST(ca_cert, verify_fail_wrong_ca) {
+    auto wrong_ca_pem = generate_different_self_signed_cert();
+    auto server_ctx = net::new_tls_context(cert_str, key_str, passphrase_str);
+    ASSERT_NE(server_ctx, nullptr);
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    ASSERT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler_noassert, server_ctx});
+    photon::thread_yield();
+
+    // Wrong CA: set_ca_cert succeeds (valid X509), but handshake fails
+    auto client_ctx = net::new_tls_context();
+    ASSERT_NE(client_ctx, nullptr);
+    DEFER(delete client_ctx);
+    ASSERT_EQ(0, client_ctx->set_ca_cert(wrong_ca_pem.c_str()));
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+
+    auto stream = client->connect(ep);
+    ASSERT_NE(nullptr, stream);
+    DEFER(delete stream);
+
+    char buf[] = "Hello";
+    auto ret = stream->write(buf, 6);
+    EXPECT_LT(ret, 0);
+    sem.wait(1);
+}
+
+TEST(ca_cert, invalid_ca_cert) {
+    auto ctx = net::new_tls_context();
+    ASSERT_NE(ctx, nullptr);
+    DEFER(delete ctx);
+
+    EXPECT_NE(0, ctx->set_ca_cert("not a valid cert"));
+    EXPECT_NE(0, ctx->set_ca_cert(""));
+}
+
+TEST(ca_cert, invalid_ca_file) {
+    auto ctx = net::new_tls_context();
+    ASSERT_NE(ctx, nullptr);
+    DEFER(delete ctx);
+
+    EXPECT_NE(0, ctx->set_ca_file("/tmp/nonexistent-ca-file.pem"));
+    EXPECT_NE(0, ctx->set_ca_file(nullptr, nullptr));
+}
 
 int main(int argc, char** arg) {
 #ifdef __linux__
