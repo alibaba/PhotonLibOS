@@ -14,9 +14,6 @@ jobs:
     name: gcc${{ matrix.gcc }}-C++${{ matrix.cxx }}
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
     runs-on: arc-runner-set-arm
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --shm-size 512m --privileged
     strategy:
       fail-fast: false
       matrix:
