@@ -135,6 +135,10 @@ protected:
     virtual void eviction();
     uint64_t calcWaterMark(uint64_t capacity, uint64_t maxFreeSpace);
 
+    // Throttled real disk-free-space probe used on the write path.
+    bool diskSpaceLow();
+    static const uint64_t kDiskCheckIntervalUs = 200'000; // 200ms
+
     photon::fs::IFileSystem *mediaFs_; //  owned by current class
     uint64_t capacityInGB_;
     uint64_t periodInUs_;
@@ -143,6 +147,11 @@ protected:
     int64_t totalUsed_;
     int64_t riskMark_;
     uint64_t waterMark_;
+
+    // Write-path disk-check throttle state.
+    uint64_t diskCheckStepBytes_ = 0; // bytes written between forced probes
+    uint64_t bytesSinceDiskCheck_ = 0;
+    uint64_t lastDiskCheckUs_ = 0;
 
     photon::Timer *timer_;
     bool running_;
