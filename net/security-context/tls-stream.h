@@ -49,6 +49,8 @@ public:
     virtual int set_cert(const char* cert_str) = 0;
     virtual int set_pkey(const char* key_str, const char* passphrase) = 0;
     virtual int set_verify_mode(VerifyMode mode = VerifyMode::NONE) = 0;
+    virtual int set_ca_cert(const char* ca_cert_str) = 0;
+    virtual int set_ca_file(const char* ca_file, const char* ca_path = nullptr) = 0;
 };
 
 enum class TLSVersion{

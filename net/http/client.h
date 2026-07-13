@@ -192,7 +192,9 @@ protected:
     std::vector<IPAddr> m_bind_ips;
 };
 
-//A Client without cookie_jar would ignore all response-header "Set-Cookies"
+// Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
+// Note: HTTP clients within the same std::thread share TLS config and connection pool.
+// Use separate std::threads for different TLS configurations.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();

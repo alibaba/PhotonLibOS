@@ -18,7 +18,9 @@ limitations under the License.
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
 #include <photon/common/alog.h>
@@ -188,6 +190,60 @@ public:
     int set_verify_mode(VerifyMode mode) override {
         SSL_CTX_set_default_verify_paths(ctx);
         SSL_CTX_set_verify(ctx, (int)mode, nullptr);
+        return 0;
+    }
+
+    int set_ca_cert(const char* ca_cert_str) override {
+        if (!ca_cert_str)
+            LOG_ERROR_RETURN(EINVAL, -1, "ca_cert_str is nullptr");
+        char errbuf[4096];
+        auto bio = BIO_new_mem_buf((void*)ca_cert_str, -1);
+        if (!bio) {
+            LOG_ERROR_RETURN(0, -1, "Failed to create BIO for CA cert");
+        }
+        DEFER(BIO_free(bio));
+
+        auto store = SSL_CTX_get_cert_store(ctx);
+        if (!store) {
+            LOG_ERROR_RETURN(0, -1, "Failed to get cert store from SSL_CTX");
+        }
+
+        int count = 0;
+        X509* cert = nullptr;
+        while ((cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) != nullptr) {
+            if (X509_STORE_add_cert(store, cert) != 1) {
+                X509_free(cert);
+                ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
+                LOG_ERROR_RETURN(0, -1, "Failed to add CA cert to store: ", errbuf);
+            }
+            X509_free(cert);
+            count++;
+        }
+
+        unsigned long err = ERR_peek_last_error();
+        if (count == 0 || (err && ERR_GET_REASON(err) != PEM_R_NO_START_LINE)) {
+            ERR_error_string_n(err, errbuf, MAX_ERRSTRING_SIZE);
+            LOG_ERROR_RETURN(0, -1, "Failed to read CA cert from PEM: ", errbuf);
+        }
+        ERR_clear_error();
+
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        LOG_DEBUG("Loaded ` CA certificate(s) from PEM string", count);
+        return 0;
+    }
+
+    int set_ca_file(const char* ca_file, const char* ca_path) override {
+        char errbuf[4096];
+        if (!ca_file && !ca_path) {
+            LOG_ERROR_RETURN(EINVAL, -1, "Both ca_file and ca_path are nullptr");
+        }
+        auto ret = SSL_CTX_load_verify_locations(ctx, ca_file, ca_path);
+        if (ret != 1) {
+            ERR_error_string_n(ERR_get_error(), errbuf, MAX_ERRSTRING_SIZE);
+            LOG_ERROR_RETURN(0, -1, "Failed to load CA from file=` path=`: ", ca_file, ca_path, errbuf);
+        }
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        LOG_DEBUG("Loaded CA certificates from file=` path=`", ca_file, ca_path);
         return 0;
     }
 };
