@@ -17,12 +17,8 @@ limitations under the License.
 #pragma once
 
 #include <photon/common/object.h>
-#include <photon/common/estring.h>
-#include <photon/common/callback.h>
-#include <photon/net/socket.h>
+
 #include <cstdlib>
-#include <cstring>
-#include <vector>
 
 namespace photon {
 namespace net {
