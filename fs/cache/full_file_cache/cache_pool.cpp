@@ -55,6 +55,10 @@ FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
     waterMark_ = calcWaterMark(capacityInBytes, kMaxFreeSpace);
     // keep this relation : waterMark < riskMark < capacity
     riskMark_ = std::max(capacityInBytes - kEvictionMark, (static_cast<int64_t>(waterMark_) + capacityInBytes) >> 1);
+    // Probe disk free space on the write path at most once per this many bytes
+    // written, bounding how far we may overshoot the diskAvailInBytes_ floor
+    // between probes. Never smaller than one refill unit.
+    diskCheckStepBytes_ = std::max<uint64_t>(diskAvailInBytes_ / 8, refillUnit_);
 }
 
 FileCachePool::~FileCachePool() {
@@ -242,16 +246,43 @@ void FileCachePool::updateLru(FileNameMap::iterator iter) {
 int64_t FileCachePool::updateSpace(FileNameMap::iterator iter, uint64_t size) {
   auto lruEntry = iter->second.get();
   auto diff = static_cast<int64_t>(size) - static_cast<int64_t>(lruEntry->size);
-  totalUsed_ += diff;  
+  totalUsed_ += diff;
   lruEntry->size = size;
-  if (totalUsed_ >= riskMark_) {
+  if (diff > 0) bytesSinceDiskCheck_ += diff;
+
+  bool full = totalUsed_ >= riskMark_;
+  if (full) {
     LOG_WARN("pwrite is so heavy, totalUsed:`,riskMark:` || lruEntry->size = `",totalUsed_, riskMark_, lruEntry->size);
+  } else if (diskAvailInBytes_ > 0 &&
+             (bytesSinceDiskCheck_ >= diskCheckStepBytes_ ||
+              photon::now - lastDiskCheckUs_ >= kDiskCheckIntervalUs)) {
+    // Throttled real statvfs: react to low disk free space even when our
+    // totalUsed_ is far below riskMark_.
+    lastDiskCheckUs_ = photon::now;
+    bytesSinceDiskCheck_ = 0;
+    full = diskSpaceLow();
+    if (full) {
+      LOG_WARN("disk free space below floor `, force recycle", diskAvailInBytes_);
+    }
+  }
+
+  if (full) {
     isFull_ = true;
     forceRecycle();
     if (lruEntry->size==0) diff = 0;//in some extream condition ,
                                     //forceRecycle maybe truncate current file to 0
   }
   return diff;
+}
+
+bool FileCachePool::diskSpaceLow() {
+  struct statvfs stFs = {};
+  if (mediaFs_->statvfs("/", &stFs) != 0) {
+    LOG_ERROR("statvfs failed, error code : `", ERRNO());
+    return false; // don't force eviction on a failed probe
+  }
+  uint64_t avail = static_cast<uint64_t>(stFs.f_bavail) * stFs.f_frsize;
+  return avail < diskAvailInBytes_;
 }
 
 uint64_t FileCachePool::timerHandler(void* data) {
