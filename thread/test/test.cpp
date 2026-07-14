@@ -787,6 +787,27 @@ TEST(Sleep, sleep_only_thread) {    //Sleep_sleep_only_thread_Test::TestBody
     EXPECT_LE(dt, 3UL*1024*1024);
 }
 
+// Reproduces the stale-`now` short-sleep bug: when `now` hasn't been
+// refreshed since vcpu_init, thread_usleep(useconds) built Timeout(useconds)
+// against the stale `now`; prepare_usleep()'s if_update_now(true) then jumped
+// `now` to real time, and when the jump >= useconds the sleeper's ts_wakeup
+// landed in the past so it was woken immediately (~0us instead of ~useconds).
+// Most visible on the first short sleep after init, amplified under ASan.
+TEST(Sleep, short_sleep_with_stale_now) {
+    // Stall the vCPU 60ms via OS sleep so photon::now keeps its last value
+    // (no yield -> no if_update_now). 60ms > 50ms below, the exact condition
+    // that makes the stale path expire instantly if buggy.
+    ::usleep(60 * 1000);
+    struct timeval tv0, tv1;
+    gettimeofday(&tv0, nullptr);
+    photon::thread_usleep(50 * 1000);  // request 50ms
+    gettimeofday(&tv1, nullptr);
+    uint64_t elapsed_us = (tv1.tv_sec - tv0.tv_sec) * 1000000UL +
+                          (tv1.tv_usec - tv0.tv_usec);
+    // Must sleep at least the requested 50ms; buggy path slept ~0us.
+    EXPECT_GE(elapsed_us, 50UL * 1000);
+}
+
 thread_local uint64_t rw_count;
 thread_local bool writing = false;
 thread_local photon::rwlock rwl;

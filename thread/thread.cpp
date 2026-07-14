@@ -1359,8 +1359,19 @@ insert_list:
             waitq->push_back(sw.from);
             sw.from->waitq = waitq;
         }
+        auto now_before = now;
         if_update_now(true);
         sw.from->ts_wakeup = timeout.expiration();
+        // if_update_now may jump `now` forward when it was stale (e.g. the
+        // first sleep after init, when `now` hasn't been refreshed since
+        // vcpu_init). If the jump put ts_wakeup in the past even though the
+        // timeout wasn't expired at construction time, re-arm relative to
+        // the fresh `now` so the sleeper still waits ~useconds instead of
+        // being woken immediately at ~0us.
+        if (sw.from->ts_wakeup <= now) {
+            sw.from->ts_wakeup =
+                sat_add(now, sat_sub(timeout.expiration(), now_before));
+        }
         sw.from->get_vcpu()->sleepq.push(sw.from);
         return sw;
     }
