@@ -35,6 +35,7 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include <photon/fs/aligned-file.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/std-compat.h>
 #include <photon/common/io-alloc.h>
 #include <photon/fs/cache/cache.h>
 
@@ -768,6 +769,7 @@ struct FileCachePoolTest {
   static size_t active_size(FileCachePool *p) { return p->lru_.size(); }
   static size_t inactive_size(FileCachePool *p) { return p->inactiveTier_.size(); }
   static size_t idle_size(FileCachePool *p) { return p->idleTier_.size(); }
+  static int64_t total_used(FileCachePool *p) { return p->totalUsed_; }
   static bool active(FileCachePool *p, std::string_view n) {
     return p->fileIndex_.find(n) != p->fileIndex_.end();
   }
@@ -1472,6 +1474,94 @@ TEST(CachePool, eviction_with_deleted_cache_dir) {
     auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
     ASSERT_NE(nullptr, store);
     store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+    store->release();
+  }
+}
+
+// Multi-vCPU stress: every thread does a random mix of open/write/read/evict/
+// forceRecycle at random offsets over a shared small file set, hammering one
+// FileCachePool across N vCPUs. This maximizes per-file rw_lock contention and
+// interleaving (read-vs-evict RLOCK/WLOCK, evict-while-open, write-vs-evict,
+// concurrent do_open->demoteToCold). Must not crash, hang, corrupt metadata,
+// or drift totalUsed_ negative.
+TEST(CachePool, concurrent_stress) {
+  const int kVcpus = 6;
+  const int kThreads = 24;
+  const int kIters = 1000;
+  const int kNameCount = 6;          // small set => heavy per-file contention
+  const size_t kPage = 4 * 1024;
+  const size_t kFileSize = 1 << 20;  // 1 MiB logical size per file
+  const size_t kMaxWrite = 64 * 1024;
+  const int kOffSlots = kFileSize / kMaxWrite;
+
+  std::string root = "/mnt/tmp/ease/cache/concurrent_stress/";
+  SetupTestDir(root);
+  // psync: plain syscalls, safe across vCPUs without a per-vCPU IO engine.
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
+  auto cachePool = roCachedFs->get_pool();
+  auto pool = dynamic_cast<FileCachePool*>(cachePool);
+  ASSERT_NE(nullptr, pool);
+  DEFER({ delete cacheAllocator; delete roCachedFs; });
+
+  ASSERT_EQ(0, photon_std::work_pool_init(kVcpus, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  DEFER(photon_std::work_pool_fini());
+
+  // open(O_CREAT) must always succeed; a null store signals a real problem.
+  std::atomic<int> open_failures{0};
+  auto worker = [&](int tid) {
+    std::mt19937 rng(0x9e3779b9u ^ (uint32_t)tid);  // per-thread, no shared rand()
+    IOVector buffer(*cacheAllocator);
+    buffer.push_back(kMaxWrite);
+    for (int it = 0; it < kIters; it++) {
+      std::string name = "/f_" + std::to_string(rng() % kNameCount);
+      auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+      if (!store) { open_failures.fetch_add(1); continue; }
+      DEFER(store->release());
+      store->set_actual_size(kFileSize);
+      off_t off = (off_t)(rng() % kOffSlots) * kMaxWrite;  // 64K-aligned
+      switch (rng() % 10) {
+        case 0: case 1: case 2: case 3: case 4:  // write (ENOSPC ok)
+          store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), off, 0);
+          break;
+        case 5: case 6: case 7:                  // read
+          store->do_preadv2(buffer.iovec(), buffer.iovcnt(), off, 0);
+          break;
+        case 8:                                  // evict while we hold it open
+          cachePool->evict(name.c_str());
+          break;
+        default:                                 // full recycle sweep
+          pool->forceRecycle();
+      }
+    }
+  };
+
+  std::vector<photon_std::thread> threads;
+  for (int i = 0; i < kThreads; i++) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+
+  // Drain, then check invariants once quiesced.
+  pool->forceRecycle();
+  EXPECT_EQ(0, open_failures.load());
+  EXPECT_GE(FileCachePoolTest::total_used(pool), 0);
+  // Each name lives in at most one tier.
+  size_t totalEntries = FileCachePoolTest::active_size(pool) +
+                        FileCachePoolTest::inactive_size(pool) +
+                        FileCachePoolTest::idle_size(pool);
+  EXPECT_LE(totalEntries, (size_t)kNameCount);
+  // Every file must still be openable/usable after the storm.
+  IOVector buf(*cacheAllocator);
+  buf.push_back(kPage);
+  for (int i = 0; i < kNameCount; i++) {
+    std::string name = "/f_" + std::to_string(i);
+    auto store = cachePool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, store);
+    store->set_actual_size(kFileSize);
+    EXPECT_GE(store->do_preadv2(buf.iovec(), buf.iovcnt(), 0, 0), 0);
     store->release();
   }
 }

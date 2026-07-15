@@ -84,11 +84,15 @@ ssize_t FileCacheStore::do_pwritev(const struct iovec *iov, int iovcnt, off_t of
     }
     lruEntry->truncate_done = true;
   }
-  ScopedRangeLock lock(rangeLock_, offset, view.sum());
-  SCOPE_AUDIT_THRESHOLD(10ULL * 1000, "file:write", AU_FILEOP("", offset, ret));
-  ret = localFile_->pwritev(iov, iovcnt, offset);
-  if (ret > 0 && !fiemapSupported_) {
-    addFilledRange(offset, ret);
+  {
+    ScopedRangeLock lock(rangeLock_, offset, view.sum());
+    SCOPE_AUDIT_THRESHOLD(10ULL * 1000, "file:write", AU_FILEOP("", offset, ret));
+    ret = localFile_->pwritev(iov, iovcnt, offset);
+  }
+  if (ret > 0) {
+    if (!fiemapSupported_) addFilledRange(offset, ret);
+    cachePool_->updateLru(iterator_);
+    cachePool_->updateSpace(iterator_, localFile_);
   }
   return ret;
 }
@@ -100,18 +104,8 @@ ssize_t FileCacheStore::do_pwritev2(const struct iovec *iov, int iovcnt, off_t o
   }
 
   auto ret = do_pwritev(iov, iovcnt, offset);
-  if (ret < 0 && ENOSPC == errno) {
+  if ((ret < 0 && ENOSPC == errno) || cacheIsFull()) {
     cachePool_->forceRecycle();
-  }
-
-  if (ret > 0) {
-    struct stat st = {};
-    auto err = localFile_->fstat(&st);
-    if (err) {
-      LOG_ERRNO_RETURN(0, ret, "fstat failed")
-    }
-    cachePool_->updateLru(iterator_);
-    cachePool_->updateSpace(iterator_, kDiskBlockSize * st.st_blocks);
   }
   return ret;
 }
