@@ -623,12 +623,105 @@ namespace common {
  * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
  * parameters.
  */
+// Shared send-side backoff logic. Members (send_sem, send_waiters,
+// send_pending) are declared in each channel class; only the logic is shared.
+template <typename T>
+struct SendBackoff {
+    static void notify_senders(photon::semaphore& send_sem,
+                               std::atomic<uint64_t>& send_waiters,
+                               std::atomic<uint64_t>& send_pending) {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        auto cur_waiters = send_waiters.load(std::memory_order_seq_cst);
+        if (cur_waiters == 0) return;
+        auto sp = send_pending.load(std::memory_order_acquire);
+        for (;;) {
+            if (sp >= cur_waiters) {
+                auto fresh = send_waiters.load(std::memory_order_relaxed);
+                if (fresh <= cur_waiters) return;
+                cur_waiters = fresh;
+                continue;
+            }
+            if (send_pending.compare_exchange_weak(sp, sp + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                send_sem.signal(1);
+                return;
+            }
+        }
+    }
+
+    template <typename Pause = ThreadPause, typename PushFn,
+              typename std::enable_if<std::is_same<Pause, PhotonPause>::value, int>::type = 0>
+    static void push_backoff(const T& x, PushFn push_fn, uint64_t yield_turn, uint64_t yield_usec,
+                             photon::semaphore& send_sem,
+                             std::atomic<uint64_t>& send_waiters,
+                             std::atomic<uint64_t>& send_pending) {
+        if (!push_fn(x)) {
+            send_waiters.fetch_add(1, std::memory_order_seq_cst);
+            DEFER(send_waiters.fetch_sub(1, std::memory_order_seq_cst));
+            Timeout yield_timeout(yield_usec);
+            uint64_t yt = yield_turn;
+            while (!push_fn(x)) {
+                if (yt > 0 && !yield_timeout.expired()) {
+                    yt--;
+                    photon::thread_yield();
+                } else {
+                    // wait for 100ms
+                    int r = send_sem.wait(1, 100UL * 1000);
+                    if (r == 0)
+                        send_pending.fetch_sub(1, std::memory_order_acq_rel);
+                    yt = yield_turn;
+                    yield_timeout.timeout(yield_usec);
+                }
+            }
+        }
+    }
+
+    template <typename Pause = ThreadPause, typename PushFn,
+              typename std::enable_if<std::is_same<Pause, ThreadPause>::value, int>::type = 0>
+    static void push_backoff(const T& x, PushFn push_fn, uint64_t yield_turn, uint64_t yield_usec,
+                             photon::semaphore&,
+                             std::atomic<uint64_t>&,
+                             std::atomic<uint64_t>&) {
+        if (!push_fn(x)) {
+            uint64_t yt = yield_turn;
+            auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::microseconds(yield_usec);
+            while (!push_fn(x)) {
+                if (yt > 0 &&
+                    std::chrono::steady_clock::now() < deadline) {
+                    yt--;
+                    std::this_thread::yield();
+                } else {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds(yield_usec));
+                    yt = yield_turn;
+                    deadline = std::chrono::steady_clock::now() +
+                        std::chrono::microseconds(yield_usec);
+                }
+            }
+        }
+    }
+
+    template <typename Pause = ThreadPause, typename PushFn,
+              typename std::enable_if<!std::is_same<Pause, PhotonPause>::value &&
+                                      !std::is_same<Pause, ThreadPause>::value, int>::type = 0>
+    static void push_backoff(const T& x, PushFn push_fn, uint64_t, uint64_t,
+                             photon::semaphore&, std::atomic<uint64_t>&,
+                             std::atomic<uint64_t>&) {
+        while (!push_fn(x)) Pause::pause();
+    }
+};
+
 template <typename QueueType>
 class RingChannel : public QueueType {
 protected:
     photon::semaphore     queue_sem;
     std::atomic<uint64_t> idler{0};    // # consumers in idle/wait
     std::atomic<uint64_t> pending{0};  // mirror of queue_sem.m_count
+    photon::semaphore     send_sem;
+    std::atomic<uint64_t> send_waiters{0};
+    std::atomic<uint64_t> send_pending{0};
     uint64_t default_yield_turn = 1024;
     uint64_t default_yield_usec = 1024;
 
@@ -649,9 +742,9 @@ public:
 
     template <typename Pause = ThreadPause>
     void send(const T& x) {
-        while (!push(x)) {
-            Pause::pause();
-        }
+        SendBackoff<T>::template push_backoff<Pause>(x, [this](const T& v) { return push(v); },
+                            default_yield_turn, default_yield_usec,
+                            send_sem, send_waiters, send_pending);
         // Dekker barrier: ensure the prior push (mark.store release) is
         // ordered before the following idler load, paired with the seq_cst
         // RMW on `idler` in recv(). This guarantees that we cannot
@@ -683,7 +776,10 @@ public:
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (pop(x)) return x;
+        if (pop(x)) {
+            SendBackoff<T>::notify_senders(send_sem, send_waiters, send_pending);
+            return x;
+        }
         // yield once if failed, so photon::now will be updated
         photon::thread_yield();
         // seq_cst on idler is the other half of the Dekker barrier (see send).
@@ -708,6 +804,7 @@ public:
                 yield_timeout.timeout(max_yield_usec);
             }
         }
+        SendBackoff<T>::notify_senders(send_sem, send_waiters, send_pending);
         return x;
     }
     T recv() { return recv(default_yield_turn, default_yield_usec); }
@@ -738,6 +835,9 @@ class FlexRingChannel {
     photon::semaphore     queue_sem;
     std::atomic<uint64_t> idler{0};    // # consumers in idle/wait
     std::atomic<uint64_t> pending{0};  // mirror of queue_sem.m_count
+    photon::semaphore     send_sem;
+    std::atomic<uint64_t> send_waiters{0};
+    std::atomic<uint64_t> send_pending{0};
     uint64_t default_yield_turn = 1024;
     uint64_t default_yield_usec = 1024;
 
@@ -769,7 +869,9 @@ public:
 
     template <typename Pause = ThreadPause>
     void send(const T& x) {
-        queue->template send<Pause>(x);
+        SendBackoff<T>::template push_backoff<Pause>(x, [this](const T& v) { return queue->push(v); },
+                            default_yield_turn, default_yield_usec,
+                            send_sem, send_waiters, send_pending);
         // Dekker barrier: ensure the prior push is ordered before the
         // following idler load, paired with the seq_cst RMW on `idler`
         // in recv().
@@ -798,7 +900,10 @@ public:
 
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (queue->pop(x)) return x;
+        if (queue->pop(x)) {
+            SendBackoff<T>::notify_senders(send_sem, send_waiters, send_pending);
+            return x;
+        }
         // yield once if failed, so photon::now will be updated
         photon::thread_yield();
         // seq_cst on idler is the other half of the Dekker barrier (see send).
@@ -823,6 +928,7 @@ public:
                 yield_timeout.timeout(max_yield_usec);
             }
         }
+        SendBackoff<T>::notify_senders(send_sem, send_waiters, send_pending);
         return x;
     }
 
