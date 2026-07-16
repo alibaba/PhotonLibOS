@@ -305,17 +305,28 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     buf_append(buf, verbstr[v]);
     buf_append(buf, " ");
     uint16_t target_disp = buf - m_buf;
-    m_target = {uint16_t(buf - m_buf), u.target().size()};
-    if (enable_proxy) {
-        m_target = {uint16_t(buf - m_buf), full_url_size(u)};
-        buf_append(buf, u.secure() ? https_url_scheme : http_url_scheme);
-        buf_append(buf, u.host_port());
+    if (v == Verb::CONNECT) {
+        // authority-form (RFC 7231 S4.3.6): host:port with an explicit port,
+        // since host_port() would drop the scheme's default port.
+        char* target_begin = buf;
+        buf_append(buf, u.host());
+        buf_append(buf, ":");
+        buf_append(buf, u.port());
+        m_target = {target_disp, uint16_t(buf - target_begin)};
+        m_path = m_query = {};
+    } else {
+        m_target = {uint16_t(buf - m_buf), u.target().size()};
+        if (enable_proxy) {
+            m_target = {uint16_t(buf - m_buf), full_url_size(u)};
+            buf_append(buf, u.secure() ? https_url_scheme : http_url_scheme);
+            buf_append(buf, u.host_port());
+        }
+        buf_append(buf, u.target());
+        uint16_t path_offset = (uint16_t)(u.path().data() - u.target().data()) + target_disp;
+        m_path = {path_offset, u.path().size()};
+        uint16_t query_offset = (uint16_t)(u.query().data() - u.target().data()) + target_disp;
+        m_query = {query_offset, u.query().size()};
     }
-    buf_append(buf, u.target());
-    uint16_t path_offset = (uint16_t)(u.path().data() - u.target().data()) + target_disp;
-    m_path = {path_offset, u.path().size()};
-    uint16_t query_offset = (uint16_t)(u.query().data() - u.target().data()) + target_disp;
-    m_query = {query_offset, u.query().size()};
     buf_append(buf, " HTTP/1.1\r\n");
     m_buf_size = buf - m_buf;
 }
@@ -337,8 +348,9 @@ int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     make_request_line(v, u, enable_proxy);
     headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
 
-    // Host is always the first header
-    headers.insert("Host", u.host_port());
+    // Host is always the first header. For CONNECT use the request-target
+    // (host:port with explicit port); host_port() may drop a default port.
+    headers.insert("Host", v == Verb::CONNECT ? target() : u.host_port());
     return 0;
 }
 
