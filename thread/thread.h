@@ -733,6 +733,21 @@ namespace photon
     // helps allocating when using hybrid C++20 style coroutine
     void* stackful_malloc(size_t size);
     void stackful_free(void* ptr);
+
+    // Some additional registers are defined as callee-saved ones, such as
+    // d8 ~ d15 fp/simd registers in AARCH64, or xmm6 ~ xmm15 simd registers
+    // in Windows x64.
+    // But in fact, it is likely in reality that they do not actually need
+    // spilling, so we leave them here for the users to manually do spilling
+    // if needed.
+    inline void spill_additional_fp_simd_regs() {
+#ifdef __aarch64__
+        asm volatile("" ::: "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15");
+#elif defined(_WIN32)
+        asm volatile("" ::: "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
+                                          "xmm12", "xmm13", "xmm14", "xmm15");
+#endif
+    }
 };
 
 /*
