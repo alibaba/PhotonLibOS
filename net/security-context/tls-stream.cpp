@@ -288,10 +288,12 @@ public:
     }
 
     static int ssbio_bwrite(BIO* b, const char* buf, int cnt) {
+        spill_additional_fp_simd_regs();
         return get_bio_sockstream(b)->write(buf, cnt);
     }
 
     static int ssbio_bread(BIO* b, char* buf, int cnt) {
+        spill_additional_fp_simd_regs();
         return get_bio_sockstream(b)->recv(buf, cnt);
     }
 
