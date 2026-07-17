@@ -453,7 +453,6 @@ namespace photon
     void* stackful_malloc(size_t size);
     void stackful_free(void* ptr);
 
-<<<<<<< HEAD
     // Set photon allocator/deallocator for photon thread stack
     // this is a hook for thread allocation, both alloc and dealloc
     // helps user to do more works like mark GC while allocating
@@ -493,7 +492,9 @@ namespace photon
       return z;
 #elif defined(__aarch64__)
       return x > y ? x - y : 0;
-=======
+#endif
+    }
+
     // Some additional registers are defined as callee-saved ones, such as
     // d8 ~ d15 fp/simd registers in AARCH64, or xmm6 ~ xmm15 simd registers
     // in Windows x64.
@@ -506,10 +507,8 @@ namespace photon
 #elif defined(_WIN32)
         asm volatile("" ::: "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
                                           "xmm12", "xmm13", "xmm14", "xmm15");
->>>>>>> b7edc80 (add spill_additional_fp_simd_regs() (#1556) (#1557) (#1558))
-#endif
     }
-};
+}
 
 /*
  WITH_LOCK(mutex)
