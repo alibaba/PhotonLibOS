@@ -507,6 +507,7 @@ namespace photon
 #elif defined(_WIN32)
         asm volatile("" ::: "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11",
                                           "xmm12", "xmm13", "xmm14", "xmm15");
+#endif
     }
 }
 
