@@ -24,6 +24,9 @@ if (NOT APPLE)
     target_link_libraries(io-perf PRIVATE photon_static)
 
     add_executable(multi-conn-perf perf/multi-conn-perf.cpp)
+    target_compile_options(multi-conn-perf PRIVATE 
+        $<$<CXX_COMPILER_ID:Clang>:-Wno-error=vla-cxx-extension>
+    )
     target_link_libraries(multi-conn-perf PRIVATE photon_static)
 endif ()
 
