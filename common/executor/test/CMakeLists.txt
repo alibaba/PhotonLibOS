@@ -26,3 +26,7 @@ add_executable(test-executor-burst-drain test_burst_drain.cpp)
 target_link_libraries(test-executor-burst-drain PRIVATE photon_shared ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
 add_test(NAME test-executor-burst-drain COMMAND $<TARGET_FILE:test-executor-burst-drain>)
 
+add_executable(test-executor-self-join test_self_join.cpp)
+target_link_libraries(test-executor-self-join PRIVATE photon_shared ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
+add_test(NAME test-executor-self-join COMMAND $<TARGET_FILE:test-executor-self-join>)
+
