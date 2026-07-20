@@ -1,7 +1,3 @@
-find_path(ZLIB_INCLUDE_DIRS zlib.h)
+include(photon-find-helpers)
 
-find_library(ZLIB_LIBRARIES z)
-
-find_package_handle_standard_args(zlib DEFAULT_MSG ZLIB_LIBRARIES ZLIB_INCLUDE_DIRS)
-
-mark_as_advanced(ZLIB_INCLUDE_DIRS ZLIB_LIBRARIES)
+photon_find_package(zlib HEADERS zlib.h LIBRARIES z)

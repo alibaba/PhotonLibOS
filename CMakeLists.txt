@@ -67,20 +67,30 @@ if (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64) AND NOT (CMAKE_SYSTEM_PROCESSOR
     message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
 endif ()
 
-# Global compile options, only effective within this project
-set(global_compile_options "-Werror -Wall -Wno-error=pragmas")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${global_compile_options}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${global_compile_options}")
+# Project-wide compile options.
+#
+# Registered with add_compile_options() and scoped with generator expressions so
+# they affect C and C++ translation units only, never ASM (nasm / gas) -- the CRC
+# kernels, for instance, must not receive -Werror or -msseX. Historically these
+# were appended to CMAKE_CXX_FLAGS and copied verbatim to CMAKE_C_FLAGS.
+macro(photon_cc_options)
+    add_compile_options(
+            "$<$<COMPILE_LANGUAGE:C>:${ARGN}>"
+            "$<$<COMPILE_LANGUAGE:CXX>:${ARGN}>"
+    )
+endmacro ()
+
+photon_cc_options(-Werror -Wall -Wno-error=pragmas)
 if (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # Hint: -faligned-new is enabled by default after -std=c++17
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faligned-new")
+    # Hint: -faligned-new is enabled by default after -std=c++17 (C++ only).
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-faligned-new>")
 endif ()
 
 if (PHOTON_BUILD_WITH_ASAN)
     if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
         message(FATAL_ERROR "Wrong environment")
     endif ()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -static-libasan")
+    photon_cc_options(-fsanitize=address -static-libasan)
     add_link_options(-fsanitize=address -static-libasan)
 endif ()
 
@@ -106,21 +116,25 @@ set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-packed-bitfield-compat -fno-omit-frame-pointer")
+    photon_cc_options(-Wno-packed-bitfield-compat -fno-omit-frame-pointer)
 endif()
 if (WIN32)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes")
+    photon_cc_options(-I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h
+            -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare
+            -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes)
 endif()
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16")
+    photon_cc_options(-msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16)
 elseif ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char -fno-stack-protector -fno-omit-frame-pointer")
+    photon_cc_options(-fsigned-char -fno-stack-protector -fno-omit-frame-pointer)
     if (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=generic+crc+crypto+lse")
+        photon_cc_options(-mcpu=generic+crc+crypto+lse)
     endif ()
 endif ()
 
-set(CMAKE_C_FLAGS ${CMAKE_CXX_FLAGS})
+# The common warning / architecture options are applied to both C and C++ via
+# photon_cc_options above; here we only mirror the per-configuration
+# optimization levels onto the C compiler.
 set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
 set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
 set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
@@ -196,11 +210,11 @@ FOREACH (dep ${dependencies})
     if (dep STREQUAL "kcp")
         message(STATUS "Will build ${dep} from source")
         message(STATUS "    URL: ${source_url}")
-        build_from_src(dep)
+        build_from_src(${dep})
     elseif (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
         message(STATUS "Will build ${dep} from source")
         message(STATUS "    URL: ${source_url}")
-        build_from_src(dep)
+        build_from_src(${dep})
     else ()
         message(STATUS "Will find ${dep}")
         find_package(${dep} REQUIRED)
@@ -305,55 +319,67 @@ if (PHOTON_BUILD_OCF_CACHE)
 endif()
 
 
+# Public usage requirements shared by the object / shared / static libraries and
+# propagated to anything that links libphoton (Photon's own headers and libcurl's).
+add_library(photon_public_deps INTERFACE)
+target_include_directories(photon_public_deps INTERFACE
+        ${PROJECT_SOURCE_DIR}/include ${CURL_INCLUDE_DIRS})
+
+# Private usage requirements: the include dirs and compile definitions the enabled
+# features contribute to compiling Photon's own sources. Aggregated on a single
+# INTERFACE target and consumed privately by the object library, so the
+# dependency -> target wiring lives in one place.
+add_library(photon_private_deps INTERFACE)
+target_include_directories(photon_private_deps INTERFACE
+        ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS})
+
+if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
+    target_compile_definitions(photon_private_deps INTERFACE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
+    target_include_directories(photon_private_deps INTERFACE ${FUSE_INCLUDE_DIRS})
+elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
+    target_compile_definitions(photon_private_deps INTERFACE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=317)
+    target_include_directories(photon_private_deps INTERFACE ${FUSE3_INCLUDE_DIRS})
+endif ()
+if (PHOTON_GLOBAL_INIT_OPENSSL)
+    target_compile_definitions(photon_private_deps INTERFACE PHOTON_GLOBAL_INIT_OPENSSL)
+endif ()
+if (PHOTON_ENABLE_SASL)
+    target_include_directories(photon_private_deps INTERFACE ${GSASL_INCLUDE_DIRS})
+endif ()
+if (PHOTON_ENABLE_URING)
+    target_include_directories(photon_private_deps INTERFACE ${URING_INCLUDE_DIRS})
+    target_compile_definitions(photon_private_deps INTERFACE PHOTON_URING=on)
+endif()
+if (PHOTON_ENABLE_MIMIC_VDSO)
+    target_compile_definitions(photon_private_deps INTERFACE ENABLE_MIMIC_VDSO=on)
+endif()
+if (PHOTON_ENABLE_FSTACK_DPDK)
+    target_compile_definitions(photon_private_deps INTERFACE ENABLE_FSTACK_DPDK)
+    target_include_directories(photon_private_deps INTERFACE ${FSTACK_INCLUDE_DIRS})
+endif()
+if (PHOTON_ENABLE_SPDK)
+    target_include_directories(photon_private_deps INTERFACE ${SPDK_INCLUDE_DIRS})
+endif()
+if (PHOTON_ENABLE_EXTFS)
+    target_include_directories(photon_private_deps INTERFACE ${E2FS_INCLUDE_DIRS})
+endif()
+if (PHOTON_ENABLE_LIBCURL)
+    target_compile_definitions(photon_private_deps INTERFACE ENABLE_CURL)
+endif()
+if (PHOTON_DEFAULT_LOG_LEVEL)
+    target_compile_definitions(photon_private_deps INTERFACE DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
+endif()
+if (PHOTON_ENABLE_KCP)
+    target_include_directories(photon_private_deps INTERFACE ${kcp_SOURCE_DIR})
+    target_compile_definitions(photon_private_deps INTERFACE PHOTON_KCP=on)
+endif()
+
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
+target_link_libraries(photon_obj PRIVATE photon_public_deps photon_private_deps)
 if (PHOTON_ENABLE_ECOSYSTEM)
     target_link_libraries(photon_obj PRIVATE ecosystem_deps)
 endif ()
-target_include_directories(photon_obj PRIVATE include ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS}
-        ${ZLIB_INCLUDE_DIRS} ${CURL_INCLUDE_DIRS}
-)
-
-if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
-    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
-    target_include_directories(photon_obj PRIVATE ${FUSE_INCLUDE_DIRS})
-elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-    target_compile_definitions(photon_obj PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=317)
-    target_include_directories(photon_obj PRIVATE ${FUSE3_INCLUDE_DIRS})
-endif ()
-if (PHOTON_GLOBAL_INIT_OPENSSL)
-    target_compile_definitions(photon_obj PRIVATE PHOTON_GLOBAL_INIT_OPENSSL)
-endif ()
-if (PHOTON_ENABLE_SASL)
-    target_include_directories(photon_obj PRIVATE ${GSASL_INCLUDE_DIRS})
-endif ()
-if (PHOTON_ENABLE_URING)
-    target_include_directories(photon_obj PRIVATE ${URING_INCLUDE_DIRS})
-    target_compile_definitions(photon_obj PRIVATE PHOTON_URING=on)
-endif()
-if (PHOTON_ENABLE_MIMIC_VDSO)
-    target_compile_definitions(photon_obj PRIVATE ENABLE_MIMIC_VDSO=on)
-endif()
-if (PHOTON_ENABLE_FSTACK_DPDK)
-    target_compile_definitions(photon_obj PRIVATE ENABLE_FSTACK_DPDK)
-    target_include_directories(photon_obj PRIVATE ${FSTACK_INCLUDE_DIRS})
-endif()
-if (PHOTON_ENABLE_SPDK)
-    target_include_directories(photon_obj PRIVATE ${SPDK_INCLUDE_DIRS})
-endif()
-if (PHOTON_ENABLE_EXTFS)
-    target_include_directories(photon_obj PRIVATE ${E2FS_INCLUDE_DIRS})
-endif()
-if (PHOTON_ENABLE_LIBCURL)
-    target_compile_definitions(photon_obj PRIVATE ENABLE_CURL)
-endif()
-if (PHOTON_DEFAULT_LOG_LEVEL)
-    target_compile_definitions(photon_obj PRIVATE DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
-endif()
-if (PHOTON_ENABLE_KCP)
-    target_include_directories(photon_obj PRIVATE ${kcp_SOURCE_DIR})
-    target_compile_definitions(photon_obj PRIVATE PHOTON_KCP=on)
-endif()
 
 if (actually_built)
     add_dependencies(photon_obj ${actually_built})
@@ -445,15 +471,14 @@ endif ()
 # Link photon shared lib
 add_library(photon_shared SHARED $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_shared PROPERTIES OUTPUT_NAME photon)
-target_include_directories(photon_shared PUBLIC include ${CURL_INCLUDE_DIRS})
 if (NOT APPLE)
     target_link_libraries(photon_shared
             PRIVATE ${version_scripts} -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
-            PUBLIC ${shared_deps}
+            PUBLIC ${shared_deps} photon_public_deps
     )
 else ()
     target_link_libraries(photon_shared
-            PUBLIC ${shared_deps}
+            PUBLIC ${shared_deps} photon_public_deps
             PRIVATE -Wl,-force_load ${static_deps}
     )
 endif ()
@@ -482,10 +507,9 @@ endif ()
 # Link photon static lib
 add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon_sole)
-target_include_directories(photon_static PUBLIC include ${CURL_INCLUDE_DIRS})
 target_link_libraries(photon_static
         PRIVATE ${static_deps}
-        PUBLIC ${shared_deps}
+        PUBLIC ${shared_deps} photon_public_deps
 )
 
 # Merge static libs into libphoton.a for manual distribution.
@@ -538,6 +562,7 @@ endif ()
 
 # Build examples and test cases
 if (PHOTON_BUILD_TESTING)
+    include(photon-test-helpers)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/examples-output)
     add_subdirectory(examples)
 

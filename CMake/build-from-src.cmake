@@ -3,7 +3,15 @@
 
 set(actually_built)
 
-function(build_from_src [dep])
+# DPDK / SPDK component library name lists, shared with Find{dpdk,spdk}.cmake so
+# the source-build and system-lookup paths stay in sync. Located by absolute path
+# because this file is included before CMAKE_MODULE_PATH is set up.
+include(${CMAKE_CURRENT_LIST_DIR}/photon-dpdk-spdk-libs.cmake)
+
+# build_from_src(<dep>) registers an ExternalProject that downloads and builds
+# <dep> from source, and publishes its <DEP>_INCLUDE_DIRS / <DEP>_LIBRARIES to
+# the caller (see the naming conventions in the top-level CMakeLists).
+function(build_from_src dep)
     if (dep STREQUAL "aio")
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/aio-build)
         ExternalProject_Add(
@@ -50,28 +58,20 @@ function(build_from_src [dep])
         set(URING_LIBRARIES ${BINARY_DIR}/lib/liburing.a PARENT_SCOPE)
 
     elseif (dep STREQUAL "gflags")
+        # WIN32 (mingw cross-build) only differs by the extra toolchain file.
+        set(cmake_args -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                       -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                       -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
         if (WIN32)
-            ExternalProject_Add(
-                    gflags
-                    URL ${PHOTON_GFLAGS_SOURCE}
-                    URL_MD5 1a865b93bacfa963201af3f75b7bd64c
-                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-                               -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
-                    INSTALL_COMMAND ""
-            )
-        else ()
-            ExternalProject_Add(
-                    gflags
-                    URL ${PHOTON_GFLAGS_SOURCE}
-                    URL_MD5 1a865b93bacfa963201af3f75b7bd64c
-                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-                    INSTALL_COMMAND ""
-            )
+            list(APPEND cmake_args -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake)
         endif ()
+        ExternalProject_Add(
+                gflags
+                URL ${PHOTON_GFLAGS_SOURCE}
+                URL_MD5 1a865b93bacfa963201af3f75b7bd64c
+                CMAKE_ARGS ${cmake_args}
+                INSTALL_COMMAND ""
+        )
         if (CMAKE_BUILD_TYPE STREQUAL "Debug")
             set(POSTFIX "_debug")
         endif ()
@@ -94,30 +94,21 @@ function(build_from_src [dep])
         set(GFLAGS_LIBRARIES ${GFLAGS_LIBRARIES} PARENT_SCOPE)
 
     elseif (dep STREQUAL "googletest")
+        # WIN32 (mingw cross-build) only differs by the extra toolchain file.
+        set(cmake_args -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                       -DINSTALL_GTEST=OFF
+                       -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                       -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
         if (WIN32)
-            ExternalProject_Add(
-                    googletest
-                    URL ${PHOTON_GOOGLETEST_SOURCE}
-                    URL_MD5 e82199374acdfda3f425331028eb4e2a
-                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                               -DINSTALL_GTEST=OFF
-                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-                               -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
-                    INSTALL_COMMAND ""
-            )
-        else ()
-            ExternalProject_Add(
-                    googletest
-                    URL ${PHOTON_GOOGLETEST_SOURCE}
-                    URL_MD5 e82199374acdfda3f425331028eb4e2a
-                    CMAKE_ARGS -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                               -DINSTALL_GTEST=OFF
-                               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-                               -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-                    INSTALL_COMMAND ""
-            )
+            list(APPEND cmake_args -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake)
         endif ()
+        ExternalProject_Add(
+                googletest
+                URL ${PHOTON_GOOGLETEST_SOURCE}
+                URL_MD5 e82199374acdfda3f425331028eb4e2a
+                CMAKE_ARGS ${cmake_args}
+                INSTALL_COMMAND ""
+        )
         ExternalProject_Get_Property(googletest SOURCE_DIR)
         ExternalProject_Get_Property(googletest BINARY_DIR)
         set(GOOGLETEST_INCLUDE_DIRS ${SOURCE_DIR}/googletest/include ${SOURCE_DIR}/googlemock/include PARENT_SCOPE)
@@ -167,29 +158,25 @@ function(build_from_src [dep])
             message(FATAL_ERROR "OPENSSL_ROOT_DIR not exist")
         endif ()
         set(BINARY_DIR ${PROJECT_BINARY_DIR}/curl-build)
+        set(cmake_args -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
+                -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF)
         if (WIN32)
-            ExternalProject_Add(
-                    curl
-                    URL ${PHOTON_CURL_SOURCE}
-                    URL_MD5 1211d641ae670cebce361ab6a7c6acff
-                    CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
-                        -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
-                        -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
-                        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-                        -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
-                        -DHAVE_IOCTLSOCKET_FIONBIO=1
-                        -DHAVE_IOCTLSOCKET=1
-            )
-        else ()
-            ExternalProject_Add(
-                    curl
-                    URL ${PHOTON_CURL_SOURCE}
-                    URL_MD5 1211d641ae670cebce361ab6a7c6acff
-                    CMAKE_ARGS -DOPENSSL_ROOT_DIR=${OPENSSL_ROOT_DIR} -DCMAKE_INSTALL_PREFIX=${BINARY_DIR} -DCMAKE_INSTALL_LIBDIR=lib
-                        -DBUILD_SHARED_LIBS=OFF -DHTTP_ONLY=ON -DBUILD_CURL_EXE=OFF
-                        -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCURL_USE_LIBSSH2=OFF
-            )
+            # mingw cross-build additionally needs the policy shim, the toolchain
+            # file, and the ioctlsocket feature flags CMake cannot probe when
+            # cross-compiling.
+            list(APPEND cmake_args
+                    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+                    -DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/CMake/toolchain-mingw-external.cmake
+                    -DHAVE_IOCTLSOCKET_FIONBIO=1
+                    -DHAVE_IOCTLSOCKET=1)
         endif ()
+        ExternalProject_Add(
+                curl
+                URL ${PHOTON_CURL_SOURCE}
+                URL_MD5 1211d641ae670cebce361ab6a7c6acff
+                CMAKE_ARGS ${cmake_args}
+        )
         add_dependencies(curl openssl)
         set(CURL_INCLUDE_DIRS ${BINARY_DIR}/include PARENT_SCOPE)
         if (EXISTS ${BINARY_DIR}/lib64/libcurl.a)
@@ -239,34 +226,7 @@ function(build_from_src [dep])
         set(DPDK_ROOT ${BINARY_DIR})
         set(DPDK_INCLUDE_DIRS ${DPDK_ROOT}/include)
         set(DPDK_LIBRARY_DIR ${DPDK_ROOT}/lib)
-        set(DPDK_LIBRARY_NAMES
-        rte_bus_pci
-        rte_bus_vdev
-        rte_cmdline
-        rte_compressdev
-        rte_cryptodev
-        rte_eal
-        rte_ethdev
-        rte_hash
-        rte_kvargs
-        rte_mbuf
-        rte_kni
-        rte_mempool
-        rte_mempool_ring
-        rte_meter
-        rte_net
-        rte_net_bond
-        rte_pci
-        rte_power
-        rte_rcu
-        rte_reorder
-        rte_ring
-        rte_security
-        rte_telemetry
-        rte_timer
-        rte_vhost
-        )
-        foreach(LIB_NAME IN LISTS DPDK_LIBRARY_NAMES)
+        foreach(LIB_NAME IN LISTS PHOTON_DPDK_LIBRARY_NAMES)
             list(APPEND DPDK_LIBRARIES ${DPDK_LIBRARY_DIR}/lib${LIB_NAME}.so)
         endforeach()
         set(DPDK_INCLUDE_DIRS ${DPDK_INCLUDE_DIRS} PARENT_SCOPE)
@@ -308,68 +268,12 @@ function(build_from_src [dep])
         set(SPDK_INCLUDE_DIRS ${SPDK_ROOT}/include)
         set(SPDK_LIBRARY_DIR ${SPDK_ROOT}/lib)
         set(SPDK_LIBRARIES)
-        set(SPDK_LIBRARY_NAMES
-        spdk_accel_ioat
-        spdk_accel
-        spdk_bdev_aio
-        spdk_bdev_delay
-        spdk_bdev_error
-        spdk_bdev_ftl
-        spdk_bdev_gpt
-        spdk_bdev_lvol
-        spdk_bdev_malloc
-        spdk_bdev_null
-        spdk_bdev_nvme
-        spdk_bdev_passthru
-        spdk_bdev
-        spdk_bdev_raid
-        spdk_bdev_split
-        spdk_bdev_virtio
-        spdk_bdev_zone_block
-        spdk_blob_bdev
-        spdk_blobfs_bdev
-        spdk_blobfs
-        spdk_blob
-        spdk_conf
-        spdk_env_dpdk
-        spdk_env_dpdk_rpc
-        spdk_event_accel
-        spdk_event_bdev
-        spdk_event_iscsi
-        spdk_event_nbd
-        spdk_event_net
-        spdk_event_nvmf
-        spdk_event
-        spdk_event_scsi
-        spdk_event_sock
-        spdk_event_vhost
-        spdk_event_vmd
-        spdk_ftl
-        spdk_ioat
-        spdk_iscsi
-        spdk_json
-        spdk_jsonrpc
-        spdk_lvol
-        spdk_nbd
-        spdk_net
-        spdk_notify
-        spdk_nvme
-        spdk_nvmf
-        spdk_rpc
-        spdk_scsi
-        spdk_sock
-        spdk_sock_posix
-        spdk_thread
-        spdk_trace
-        spdk_util
-        spdk_vhost
-        spdk_virtio
-        spdk_vmd
-        isal
-        )
-        foreach(LIB_NAME IN LISTS SPDK_LIBRARY_NAMES)
+        foreach(LIB_NAME IN LISTS PHOTON_SPDK_LIBRARY_NAMES)
             list(APPEND SPDK_LIBRARIES ${SPDK_LIBRARY_DIR}/lib${LIB_NAME}.so)
         endforeach()
+        # isa-l is built into SPDK's lib dir; the shared name list omits it (see
+        # photon-dpdk-spdk-libs.cmake), so link it explicitly here.
+        list(APPEND SPDK_LIBRARIES ${SPDK_LIBRARY_DIR}/libisal.so)
 
         set(SPDK_INCLUDE_DIRS ${SPDK_INCLUDE_DIRS} ${DPDK_INCLUDE_DIRS} PARENT_SCOPE)
         set(SPDK_LIBRARY_DIR ${SPDK_LIBRARY_DIR} PARENT_SCOPE)
