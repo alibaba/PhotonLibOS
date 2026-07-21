@@ -65,92 +65,38 @@ photon_source(RAPIDYAML_SOURCE  "https://github.com/biojppm/rapidyaml/releases/d
 photon_source(RDMACORE_SOURCE   "")
 photon_source(KCP_SOURCE        "https://github.com/skywind3000/kcp/archive/refs/tags/2.1.1.tar.gz")
 
-if (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
-    message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
-endif ()
+# Validate the target CPU and register the project-wide toolchain: baseline
+# warnings, C++ standard, LINUX flag, default build type, module path and output
+# directories. See CMake/photon-helpers.cmake.
+photon_configure_build()
 
-# Project-wide compile options.
-#
-# Registered with add_compile_options() and scoped with generator expressions so
-# they affect C and C++ translation units only, never ASM (nasm / gas) -- the CRC
-# kernels, for instance, must not receive -Werror or -msseX. Historically these
-# were appended to CMAKE_CXX_FLAGS and copied verbatim to CMAKE_C_FLAGS.
-macro(photon_cc_options)
-    add_compile_options(
-            "$<$<COMPILE_LANGUAGE:C>:${ARGN}>"
-            "$<$<COMPILE_LANGUAGE:CXX>:${ARGN}>"
-    )
-endmacro ()
-
-photon_cc_options(-Werror -Wall -Wno-error=pragmas)
-if (${CMAKE_CXX_COMPILER_ID} STREQUAL GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 8.0)
-    # Hint: -faligned-new is enabled by default after -std=c++17 (C++ only).
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-faligned-new>")
-endif ()
-
-if (PHOTON_BUILD_WITH_ASAN)
-    if ((NOT CMAKE_BUILD_TYPE STREQUAL "Debug") OR (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux"))
-        message(FATAL_ERROR "Wrong environment")
-    endif ()
-    photon_cc_options(-fsanitize=address -static-libasan)
-    add_link_options(-fsanitize=address -static-libasan)
-endif ()
-
-set(CMAKE_CXX_STANDARD ${PHOTON_CXX_STANDARD})
-if (WIN32)
-    set(CMAKE_CXX_STANDARD 17)
-endif ()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# CMake has no built-in LINUX flag (unlike WIN32 / APPLE)
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(LINUX TRUE)
-endif ()
-
-# CMake didn't provide an abstraction of optimization level for now.
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
-set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -DNDEBUG -g")
-set(CMAKE_CXX_FLAGS_MINSIZEREL "-O2 -march=native")    # Only for CI test
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+# Per-configuration optimization levels (CMake exposes no optimization-level knob
+# of its own; C mirrors C++) plus a few global switches.
+set(CMAKE_CXX_FLAGS_DEBUG           "-O0 -g")
+set(CMAKE_CXX_FLAGS_RELEASE         "-O2 -DNDEBUG")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO  "-O2 -DNDEBUG -g")
+set(CMAKE_CXX_FLAGS_MINSIZEREL      "-O2 -march=native")   # Only for CI test
+set(CMAKE_C_FLAGS_DEBUG             "${CMAKE_CXX_FLAGS_DEBUG}")
+set(CMAKE_C_FLAGS_RELEASE           "${CMAKE_CXX_FLAGS_RELEASE}")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO    "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+set(CMAKE_EXPORT_COMPILE_COMMANDS   ON)
+set(CMAKE_BUILD_RPATH_USE_ORIGIN    ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    photon_cc_options(-Wno-packed-bitfield-compat -fno-omit-frame-pointer)
-endif()
-if (WIN32)
-    photon_cc_options(-I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h
-            -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare
-            -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes)
-endif()
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64)
-    photon_cc_options(-msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16)
-elseif ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
-    photon_cc_options(-fsigned-char -fno-stack-protector -fno-omit-frame-pointer)
-    if (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
-        photon_cc_options(-mcpu=generic+crc+crypto+lse)
-    endif ()
-endif ()
-
-# The common warning / architecture options are applied to both C and C++ via
-# photon_cc_options above; here we only mirror the per-configuration
-# optimization levels onto the C compiler.
-set(CMAKE_C_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
-set(CMAKE_C_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
-set(CMAKE_C_FLAGS_RELWITHDEBINFO ${CMAKE_CXX_FLAGS_RELWITHDEBINFO})
-
-# Default build type is Release
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif ()
-
-# CMake dirs
-list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/CMake)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
+# Extra compile flags, added when the condition holds and reaching C / C++ only
+# (never ASM). Read as: on <compiler/platform/arch>, add <flags>.
+photon_cc_flags(IF CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+        FLAGS -Wno-packed-bitfield-compat -fno-omit-frame-pointer)
+photon_cc_flags(IF WIN32
+        FLAGS -I${PROJECT_SOURCE_DIR}/include -include ${PROJECT_SOURCE_DIR}/common/windows_compat.h
+              -Wno-attributes -Wno-unused-value -Wno-array-bounds -Wno-sign-compare
+              -Wno-narrowing -Wno-unused-variable -Wno-ignored-attributes)
+photon_cc_flags(IF CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64
+        FLAGS -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16)
+photon_cc_flags(IF (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64)
+        FLAGS -fsigned-char -fno-stack-protector -fno-omit-frame-pointer)
+photon_cc_flags(IF ((CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) OR (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64)) AND (NOT CMAKE_BUILD_TYPE MATCHES "MinSizeRel")
+        FLAGS -mcpu=generic+crc+crypto+lse)
 
 ################################################################################
 
@@ -164,67 +110,125 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 #   lib:        XXX_LIBRARIES
 #   source:     PHOTON_XXX_SOURCE
 
-# Resolve the fuse tri-state once: OFF disables; ON/2 select libfuse2, 3 selects
-# libfuse3. Downstream fuse references reuse these variables instead of repeating
-# the tri-state comparison in each of the dependency / defs / obj-dep / link lists.
-if (PHOTON_ENABLE_FUSE STREQUAL "OFF")
-    set(_fuse_enabled OFF)
-else ()
-    set(_fuse_enabled ON)
-endif ()
-if (PHOTON_ENABLE_FUSE STREQUAL "3")
-    set(_fuse_pkg fuse3)
-    set(_fuse_version 317)
-else ()
-    set(_fuse_pkg fuse)
-    set(_fuse_version 29)
-endif ()
-string(TOUPPER ${_fuse_pkg} _fuse_pkg_upper)
+# Resolve the PHOTON_ENABLE_FUSE tri-state into _fuse_enabled / _fuse_pkg /
+# _fuse_version, which the fuse module below consumes.
+photon_resolve_fuse()
 
+# ---- Module graph ----------------------------------------------------------
+# Every buildable unit is declared once here with photon_module(): its sources,
+# internal deps (REQUIRES), external deps (STATIC/SHARED/FETCH/ARCHIVE), optional gate
+# (OPTION/ENABLE) and defines. The enabled set drives dependency acquisition,
+# the single photon_obj compile and the final link line -- see the helpers in
+# CMake/photon-helpers.cmake. To add a module, add one photon_module() call.
 set(dependencies "")
-photon_dependency(zlib)
-photon_dependency(openssl)
-photon_dependency(aio        LINUX)
-photon_dependency(${_fuse_pkg} LINUX AND _fuse_enabled)
-photon_dependency(uring      LINUX AND PHOTON_ENABLE_URING)
-photon_dependency(gsasl      PHOTON_ENABLE_SASL)
-photon_dependency(dpdk       PHOTON_ENABLE_FSTACK_DPDK OR PHOTON_ENABLE_SPDK)
-photon_dependency(fstack     PHOTON_ENABLE_FSTACK_DPDK)
-photon_dependency(spdk       PHOTON_ENABLE_SPDK)
-photon_dependency(e2fs       PHOTON_ENABLE_EXTFS)
-photon_dependency(rdmacore   PHOTON_ENABLE_RSOCKET)
-photon_dependency(curl       PHOTON_ENABLE_LIBCURL)
-photon_dependency(kcp        PHOTON_ENABLE_KCP)
-photon_dependency(gflags     PHOTON_BUILD_TESTING)
-photon_dependency(googletest PHOTON_BUILD_TESTING)
 
-FOREACH (dep ${dependencies})
-    message(STATUS "Checking dependency ${dep}")
-    string(TOUPPER ${dep} DEP)
-    set(source_url "${PHOTON_${DEP}_SOURCE}")
-    if (dep STREQUAL "kcp")
-        message(STATUS "Will build ${dep} from source")
-        message(STATUS "    URL: ${source_url}")
-        build_from_src(${dep})
-    elseif (PHOTON_BUILD_DEPENDENCIES AND (NOT source_url STREQUAL ""))
-        message(STATUS "Will build ${dep} from source")
-        message(STATUS "    URL: ${source_url}")
-        build_from_src(${dep})
-    else ()
-        message(STATUS "Will find ${dep}")
-        find_package(${dep} REQUIRED)
-    endif ()
-endforeach ()
+photon_module(core
+        SOURCES common/*.cpp common/checksum/*.cpp common/executor/*.cpp common/memory-stream/*.cpp
+                fs/aligned-file.cpp fs/async_filesystem.cpp fs/exportfs.cpp fs/filecopy.cpp fs/localfs.cpp
+                fs/path.cpp fs/subfs.cpp fs/throttled-file.cpp fs/virtual-file.cpp fs/xfile.cpp
+                fs/httpfs/httpfs_v2.cpp
+                io/reset_handle.cpp
+                net/basic_socket.cpp net/datagram_socket.cpp net/iostream.cpp
+                net/kernel_socket.cpp net/pooled_socket.cpp net/utils.cpp
+                thread/*.cpp)
 
-# Expose every resolved dependency as an internal Photon::<dep> target so its
-# usage requirements propagate through the target graph. Both acquisition paths
-# publish the same <DEP>_INCLUDE_DIRS / <DEP>_LIBRARIES, so a single declaration
-# here covers find_package and build_from_src uniformly.
-include(photon-deps)
-foreach (dep ${dependencies})
-    string(TOUPPER ${dep} DEP)
-    photon_declare_dep(${dep} INCLUDES ${${DEP}_INCLUDE_DIRS} LIBRARIES ${${DEP}_LIBRARIES})
-endforeach ()
+# Platform event engines -- always-on within their environment.
+photon_module(epoll
+        ENABLE  LINUX
+        SOURCES io/epoll.cpp io/epoll-ng.cpp)
+photon_module(aio
+        ENABLE  LINUX
+        SOURCES io/aio-wrapper.cpp
+        STATIC  aio)
+photon_module(signal
+        ENABLE  NOT WIN32
+        SOURCES io/signal.cpp)
+photon_module(kqueue
+        ENABLE  APPLE
+        SOURCES io/kqueue.cpp)
+photon_module(iocp
+        ENABLE  WIN32
+        SOURCES io/iocp.cpp)
+photon_module(cache
+        ENABLE  LINUX
+        SOURCES fs/cache/*.cpp fs/cache/full_file_cache/*.cpp fs/cache/persistent_cache/*.cpp)
+
+# Always-on higher-level modules.
+photon_module(tls
+        SOURCES net/security-context/tls-stream.cpp
+        STATIC  openssl)
+photon_module(http
+        REQUIRES tls
+        SOURCES  net/http/*.cpp net/http/huffman/*.cpp
+        STATIC   zlib)
+photon_module(rpc
+        REQUIRES tls
+        SOURCES  rpc/*.cpp)
+photon_module(vdma
+        SOURCES net/vdma/*.cpp)
+
+# Optional features.
+photon_module(uring
+        OPTION  PHOTON_ENABLE_URING
+        ENABLE  LINUX
+        SOURCES io/iouring-wrapper.cpp
+        STATIC  uring
+        DEFS    PHOTON_URING=on)
+photon_module(libcurl
+        OPTION    PHOTON_ENABLE_LIBCURL
+        SOURCES   net/curl.cpp fs/httpfs/httpfs.cpp
+        STATIC    curl
+        DEFS      ENABLE_CURL)
+photon_module(kcp
+        OPTION  PHOTON_ENABLE_KCP
+        SOURCES net/kcp.cpp
+        STATIC  kcp
+        DEFS    PHOTON_KCP=on)
+photon_module(sasl
+        OPTION  PHOTON_ENABLE_SASL
+        SOURCES net/security-context/sasl-stream.cpp
+        STATIC  gsasl)
+photon_module(fstack_dpdk
+        OPTION    PHOTON_ENABLE_FSTACK_DPDK
+        SOURCES   io/fstack-dpdk.cpp
+        STATIC    fstack dpdk
+        DEFS      ENABLE_FSTACK_DPDK)
+photon_module(spdk
+        OPTION    PHOTON_ENABLE_SPDK
+        SOURCES   io/spdkbdev-wrapper.cpp io/spdknvme-wrapper.cpp
+        STATIC    spdk dpdk)
+photon_module(rsocket
+        OPTION    PHOTON_ENABLE_RSOCKET
+        SOURCES   net/rsocket/rsocket.cpp
+        SHARED    rdmacore)
+photon_module(fuse
+        ENABLE  _fuse_enabled
+        SOURCES fs/fuse_adaptor/*.cpp
+        STATIC  ${_fuse_pkg}
+        DEFS    _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=${_fuse_version})
+photon_module(extfs
+        OPTION  PHOTON_ENABLE_EXTFS
+        SOURCES fs/extfs/extfs.cpp fs/extfs/extfs_io.cpp fs/extfs/mkfs.cpp
+        STATIC  e2fs)
+photon_module(resize
+        OPTION  PHOTON_ENABLE_RESIZE
+        ENABLE  PHOTON_ENABLE_EXTFS
+        SOURCES fs/extfs/resize.cpp)
+photon_module(ecosystem
+        OPTION   PHOTON_ENABLE_ECOSYSTEM
+        REQUIRES http
+        SOURCES  ecosystem/*.cpp
+        OBJ_LINK ecosystem_deps)
+photon_module(testing
+        OPTION    PHOTON_BUILD_TESTING
+        FETCH     gflags googletest)
+
+photon_module_validate()
+list(REMOVE_DUPLICATES dependencies)
+
+# Acquire each dependency (build-from-source or find_package) and expose it as an
+# internal Photon::<dep> target. See CMake/photon-helpers.cmake.
+photon_acquire_dependencies()
 
 ################################################################################
 
@@ -236,83 +240,10 @@ endif ()
 
 # Compile photon objects.
 #
-# Core sources (always compiled) are listed explicitly; each optional-feature
-# file is opted in by its own block below. Directory globs are used only where
-# every file in the directory is core -- the mixed directories (net/, fs/httpfs/)
-# are enumerated file-by-file, so no glob-then-REMOVE_ITEM carve-out is needed.
-file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
-        photon.cpp
-        common/*.cpp
-        common/checksum/*.cpp
-        common/executor/*.cpp
-        common/memory-stream/*.cpp
-        fs/aligned-file.cpp
-        fs/async_filesystem.cpp
-        fs/exportfs.cpp
-        fs/filecopy.cpp
-        fs/localfs.cpp
-        fs/path.cpp
-        fs/subfs.cpp
-        fs/throttled-file.cpp
-        fs/virtual-file.cpp
-        fs/xfile.cpp
-        fs/httpfs/httpfs_v2.cpp
-        io/reset_handle.cpp
-        net/basic_socket.cpp
-        net/datagram_socket.cpp
-        net/iostream.cpp
-        net/kernel_socket.cpp
-        net/pooled_socket.cpp
-        net/utils.cpp
-        net/http/*.cpp
-        net/http/huffman/*.cpp
-        net/security-context/tls-stream.cpp
-        net/vdma/*.cpp
-        rpc/*.cpp
-        thread/*.cpp
-        )
-
-# Platform-specific event engine (and, on Linux, the disk cache sources).
-if (APPLE)
-    list(APPEND PHOTON_SRC io/kqueue.cpp io/signal.cpp)
-elseif (WIN32)
-    list(APPEND PHOTON_SRC io/iocp.cpp)
-else ()
-    file(GLOB CACHE_SRC
-        fs/cache/*.cpp
-        fs/cache/full_file_cache/*.cpp
-        fs/cache/persistent_cache/*.cpp
-    )
-    list(APPEND PHOTON_SRC
-        io/aio-wrapper.cpp
-        io/epoll.cpp
-        io/epoll-ng.cpp
-        io/signal.cpp
-        ${CACHE_SRC}
-    )
-    photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_URING ITEMS io/iouring-wrapper.cpp)
-endif ()
-
-# Optional features -- each enabled feature contributes its own sources.
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_LIBCURL      ITEMS net/curl.cpp fs/httpfs/httpfs.cpp)
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_KCP          ITEMS net/kcp.cpp)
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_SASL         ITEMS net/security-context/sasl-stream.cpp)
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_FSTACK_DPDK  ITEMS io/fstack-dpdk.cpp)
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_SPDK         ITEMS io/spdkbdev-wrapper.cpp io/spdknvme-wrapper.cpp)
-photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_RSOCKET      ITEMS net/rsocket/rsocket.cpp)
-if (_fuse_enabled)
-    file(GLOB FUSE_ADAPTOR_SRC fs/fuse_adaptor/*.cpp)
-    list(APPEND PHOTON_SRC ${FUSE_ADAPTOR_SRC})
-endif ()
-if (PHOTON_ENABLE_EXTFS)
-    file(GLOB EXTFS_SRC fs/extfs/*.cpp)
-    photon_remove_if(EXTFS_SRC IF NOT PHOTON_ENABLE_RESIZE ITEMS ${CMAKE_CURRENT_SOURCE_DIR}/fs/extfs/resize.cpp)
-    list(APPEND PHOTON_SRC ${EXTFS_SRC})
-endif ()
-if (PHOTON_ENABLE_ECOSYSTEM)
-    file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
-    list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
-endif ()
+# Every source now lives on a module declared above; the modules are turned into
+# INTERFACE libraries further down and their sources compile once into the single
+# photon_obj object library. Only the ocf cache (an external CMake subproject,
+# not a photon module) is still pulled in explicitly here.
 if (PHOTON_BUILD_OCF_CACHE)
     add_subdirectory(fs/cache/ocf_cache)
 endif()
@@ -330,34 +261,19 @@ endif ()
 # requirements contributed by the dependencies, so they live on a dedicated
 # INTERFACE target rather than on the Photon::<dep> targets.
 add_library(photon_features INTERFACE)
-photon_feature(IF _fuse_enabled DEFS _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=${_fuse_version})
 photon_feature(IF PHOTON_GLOBAL_INIT_OPENSSL   DEFS PHOTON_GLOBAL_INIT_OPENSSL)
-photon_feature(IF PHOTON_ENABLE_URING          DEFS PHOTON_URING=on)
 photon_feature(IF PHOTON_ENABLE_MIMIC_VDSO     DEFS ENABLE_MIMIC_VDSO=on)
-photon_feature(IF PHOTON_ENABLE_FSTACK_DPDK    DEFS ENABLE_FSTACK_DPDK)
-photon_feature(IF PHOTON_ENABLE_LIBCURL        DEFS ENABLE_CURL)
 photon_feature(IF PHOTON_DEFAULT_LOG_LEVEL     DEFS DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
-photon_feature(IF PHOTON_ENABLE_KCP            DEFS PHOTON_KCP=on)
 
-# The dependency include dirs Photon's own sources compile against now arrive
-# through the Photon::<dep> targets (see CMake/photon-deps.cmake), gated by the
-# same feature conditions that added each dependency to the list above.
-set(photon_obj_deps Photon::openssl Photon::zlib)
-photon_append_if(photon_obj_deps IF LINUX                                                               ITEMS Photon::aio)
-photon_append_if(photon_obj_deps IF _fuse_enabled ITEMS Photon::${_fuse_pkg})
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_SASL                                                  ITEMS Photon::gsasl)
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_URING                                                 ITEMS Photon::uring)
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_FSTACK_DPDK                                           ITEMS Photon::fstack)
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_SPDK                                                  ITEMS Photon::spdk)
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_EXTFS                                                 ITEMS Photon::e2fs)
-photon_append_if(photon_obj_deps IF PHOTON_ENABLE_KCP                                                   ITEMS Photon::kcp)
+# Create the per-module INTERFACE libraries now that the Photon::<dep> targets
+# exist, then compile every enabled module's sources once into a single object
+# library. photon.cpp seeds photon_obj (guaranteeing it is non-empty); the rest
+# of the sources arrive through the module INTERFACE libraries.
+photon_module_targets()
 
-# An object library compiles source files but does not archive or link their object files.
-add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_link_libraries(photon_obj PRIVATE photon_headers photon_features ${photon_obj_deps})
-if (PHOTON_ENABLE_ECOSYSTEM)
-    target_link_libraries(photon_obj PRIVATE ecosystem_deps)
-endif ()
+add_library(photon_obj OBJECT ${PROJECT_SOURCE_DIR}/photon.cpp)
+target_link_libraries(photon_obj PRIVATE photon_headers photon_features)
+photon_module_link_into(photon_obj)
 
 if (actually_built)
     add_dependencies(photon_obj ${actually_built})
@@ -371,41 +287,27 @@ photon_append_if(static_deps IF LINUX ITEMS easy_weak fstack_weak)
 set(shared_deps -lpthread)
 photon_append_if(shared_deps IF CMAKE_CXX_COMPILER_ID STREQUAL "GNU" ITEMS -lgcc)  # solve [hidden symbol `__cpu_model'] problem
 
-# aio is a Linux static dep; -lrt/-ldl accompany it on non-Apple, non-Windows hosts.
-photon_append_if(static_deps IF NOT APPLE AND NOT WIN32 ITEMS ${AIO_LIBRARIES})
+# aio/-lrt/-ldl accompany the Linux/unix hosts; the aio libraries themselves now
+# arrive from the aio module via photon_module_collect_libs below.
 photon_append_if(shared_deps IF NOT APPLE AND NOT WIN32 ITEMS -lrt -ldl)
 photon_append_if(shared_deps IF WIN32 ITEMS -lws2_32 -lmswsock -lcrypt32 -ladvapi32 -lgdi32 -luser32 -lbcrypt)
 
-photon_append_if(static_deps IF PHOTON_ENABLE_URING ITEMS ${URING_LIBRARIES})
-photon_append_if(static_deps IF _fuse_enabled ITEMS ${${_fuse_pkg_upper}_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_SASL ITEMS ${GSASL_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_FSTACK_DPDK ITEMS ${DPDK_LIBRARIES} ${FSTACK_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_SPDK ITEMS ${DPDK_LIBRARIES} ${SPDK_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_EXTFS ITEMS ${E2FS_LIBRARIES})
-photon_append_if(shared_deps IF PHOTON_ENABLE_RSOCKET ITEMS ${RDMACORE_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_LIBCURL ITEMS ${CURL_LIBRARIES})
+# Every enabled module contributes its declared external libraries here: STATIC
+# deps to static_deps, SHARED deps to shared_deps (openssl<-tls, zlib<-http,
+# aio<-aio, curl<-libcurl, rdmacore<-rsocket, ...). ARCHIVE deps (none today) are
+# gathered separately for merging into the distributable libphoton.a below.
+photon_module_collect_libs(static_deps shared_deps)
+
+set(archive_deps)
+photon_module_collect_archives(archive_deps)
+
 photon_append_if(shared_deps IF PHOTON_BUILD_OCF_CACHE ITEMS ocf_cache_lib)
 photon_append_if(static_deps IF PHOTON_BUILD_OCF_CACHE ITEMS ocf_cache_lib)
-list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
-photon_append_if(static_deps IF PHOTON_ENABLE_KCP ITEMS ${KCP_LIBRARIES})
 
 
-# Find out dynamic libs and append to `shared_deps`.
-# Because if not built from source, we won't know the local packages are static or shared.
-# This is for the max compatability.
-if (NOT APPLE)
-    set(suffix "\.so$")
-else ()
-    set(suffix "\.dylib$" "\.tbd$")
-endif ()
-foreach (dep ${static_deps})
-    foreach (suf ${suffix})
-        if (dep MATCHES "${suf}")
-            list(APPEND shared_deps ${dep})
-            break()
-        endif ()
-    endforeach ()
-endforeach ()
+# Some acquired static_deps are actually shared libraries (a local find_package
+# may return a .so/.dylib); route those to shared_deps too, for max compatibility.
+photon_reclassify_shared_deps(static_deps shared_deps)
 
 set(version_scripts)
 if (LINUX)
@@ -429,25 +331,7 @@ else ()
     )
 endif ()
 if (WIN32)
-    # Bake the MinGW runtime into libphoton.dll so the produced DLL has no
-    # external dependency on libgcc_s_seh-1.dll / libstdc++-6.dll /
-    # libwinpthread-1.dll.  Test and example executables that link against
-    # libphoton.dll can then run under wine from build-win/output/ without
-    # WINEPATH or extra DLL copies.
-    #
-    # libwinpthread needs its static archive referenced by absolute path
-    # wrapped in --whole-archive, otherwise ld auto-links libwinpthread.dll.a
-    # (the import lib) and the produced DLL ends up depending on the DLL.
-    execute_process(
-            COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libwinpthread.a
-            OUTPUT_VARIABLE MINGW_WINPTHREAD_STATIC
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
-    target_link_options(photon_shared PRIVATE
-            -static-libgcc -static-libstdc++)
-    if (MINGW_WINPTHREAD_STATIC AND EXISTS "${MINGW_WINPTHREAD_STATIC}")
-        target_link_options(photon_shared PRIVATE
-                -Wl,--whole-archive,${MINGW_WINPTHREAD_STATIC},--no-whole-archive)
-    endif ()
+    photon_bake_mingw_runtime(photon_shared)
 endif ()
 
 # Link photon static lib
@@ -458,46 +342,9 @@ target_link_libraries(photon_static
         PUBLIC ${shared_deps} photon_headers
 )
 
-# Merge static libs into libphoton.a for manual distribution.
-# Do NOT link to this target directly.
-if (LINUX)
-    if (TARGET fstack_weak)
-        set(_extra_archives $<TARGET_FILE:fstack_weak>)
-    else ()
-        set(_extra_archives "")
-    endif ()
-    if (TARGET easy_weak)
-        set(_easy_archive $<TARGET_FILE:easy_weak>)
-    else ()
-        set(_easy_archive "")
-    endif ()
-    add_custom_target(_photon_static_archive ALL
-            COMMAND rm -rf libphoton.a
-            COMMAND ${CMAKE_AR} -qcT libphoton.a $<TARGET_FILE:photon_static> ${_easy_archive} ${_extra_archives}
-            COMMAND ${CMAKE_AR} -M < ${PROJECT_SOURCE_DIR}/tools/libphoton.mri
-            DEPENDS photon_static
-            WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-            VERBATIM
-    )
-else ()
-    if (TARGET easy_weak)
-        set(_easy_archive $<TARGET_FILE:easy_weak>)
-    else ()
-        set(_easy_archive "")
-    endif ()
-    if (TARGET fstack_weak)
-        set(_extra_archives $<TARGET_FILE:fstack_weak>)
-    else ()
-        set(_extra_archives "")
-    endif ()
-    add_custom_target(_photon_static_archive ALL
-            COMMAND rm -rf libphoton.a
-            COMMAND libtool -static -o libphoton.a $<TARGET_FILE:photon_static> ${_easy_archive} ${_extra_archives}
-            DEPENDS photon_static
-            WORKING_DIRECTORY ${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-            VERBATIM
-    )
-endif ()
+# Merge photon_static (+ weak archives and any ARCHIVE deps) into a single
+# distributable libphoton.a. Do NOT link against this target directly.
+photon_merge_static_archive()
 
 if (WIN32 AND PHOTON_BUILD_DEPENDENCIES)
     # httpfs.cpp includes curl/curl.h; when we build libcurl statically from
