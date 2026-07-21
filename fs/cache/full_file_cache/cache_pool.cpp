@@ -363,7 +363,7 @@ void FileCachePool::eviction() {
     uint64_t fileSize;
     {
       SCOPED_LOCK(m_lock_);
-      if (lru_.empty()) break;
+      if (lru_.empty() || totalUsed_ <= 0) break;
       auto fileIter = lru_.back();
       fileName = std::string(fileIter->first);
       auto lruEntry = fileIter->second.get();
