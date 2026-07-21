@@ -8,7 +8,7 @@ else()
     photon_add_test(test-checksum test_checksum.cpp crc32_iscsi_crc_ext.S crc64_ecma_refl_pmull.S)
 endif()
 
-photon_add_test(test-digest test_digest.cpp INCLUDES ${OPENSSL_INCLUDE_DIRS})
+photon_add_test(test-digest test_digest.cpp LIBS Photon::openssl)
 if (APPLE)
     target_link_libraries(test-digest PRIVATE ${OPENSSL_LIBRARIES})
 endif ()

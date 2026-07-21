@@ -16,52 +16,54 @@ include(FetchContent)
 include(ProcessorCount)
 include(ExternalProject)
 include(CMake/build-from-src.cmake)
+include(CMake/photon-helpers.cmake)
 
 # Options
-set(PHOTON_CXX_STANDARD "14" CACHE STRING "C++ standard")
-option(PHOTON_BUILD_TESTING "enable build testing" OFF)
-option(PHOTON_BUILD_WITH_ASAN "build with asan" OFF)
-option(PHOTON_ENABLE_URING "enable io_uring function" OFF)
-set(PHOTON_ENABLE_FUSE "OFF" CACHE STRING "enable fuse version, OFF for disable, ON/2 for libfuse2, 3 for libfuse3")
-option(PHOTON_GLOBAL_INIT_OPENSSL "Turn this off if any of your third-party libs inits old-version OpenSSL as well,
-because Photon will register coroutine locks for crypto. But don't bother if you have latest OpenSSL >= 1.1.0" ON)
-option(PHOTON_ENABLE_SASL "enable sasl" OFF)
-option(PHOTON_ENABLE_MIMIC_VDSO "enable mimic vdso" OFF)
-option(PHOTON_ENABLE_FSTACK_DPDK "Use f-stack + DPDK as the event engine" OFF)
-option(PHOTON_ENABLE_SPDK "Use SPDK bdev && nvme concept" OFF)
-option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
-option(PHOTON_ENABLE_RESIZE "enable resize_extfs (requires external resize_fs)" OFF)
-option(PHOTON_ENABLE_ECOSYSTEM "enable ecosystem" OFF)
-option(PHOTON_ENABLE_RSOCKET "enable rsocket" OFF)
-option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
-set(PHOTON_DEFAULT_LOG_LEVEL "0" CACHE STRING "default log level")
-option(PHOTON_BUILD_OCF_CACHE "enable ocf cache" OFF)
-option(PHOTON_ENABLE_KCP "enable kcp" OFF)
+photon_option(PHOTON_CXX_STANDARD        STRING "14"  "C++ standard")
+photon_option(PHOTON_BUILD_TESTING       BOOL   OFF   "enable build testing")
+photon_option(PHOTON_BUILD_WITH_ASAN     BOOL   OFF   "build with asan")
+photon_option(PHOTON_ENABLE_URING        BOOL   OFF   "enable io_uring function")
+photon_option(PHOTON_ENABLE_FUSE         STRING "OFF" "enable fuse version, OFF for disable, ON/2 for libfuse2, 3 for libfuse3")
+photon_option(PHOTON_GLOBAL_INIT_OPENSSL BOOL   ON    "Turn this off if any of your third-party libs inits old-version OpenSSL as well,
+because Photon will register coroutine locks for crypto. But don't bother if you have latest OpenSSL >= 1.1.0")
+photon_option(PHOTON_ENABLE_SASL         BOOL   OFF   "enable sasl")
+photon_option(PHOTON_ENABLE_MIMIC_VDSO   BOOL   OFF   "enable mimic vdso")
+photon_option(PHOTON_ENABLE_FSTACK_DPDK  BOOL   OFF   "Use f-stack + DPDK as the event engine")
+photon_option(PHOTON_ENABLE_SPDK         BOOL   OFF   "Use SPDK bdev && nvme concept")
+photon_option(PHOTON_ENABLE_EXTFS        BOOL   OFF   "enable extfs")
+photon_option(PHOTON_ENABLE_RESIZE       BOOL   OFF   "enable resize_extfs (requires external resize_fs)")
+photon_option(PHOTON_ENABLE_ECOSYSTEM    BOOL   OFF   "enable ecosystem")
+photon_option(PHOTON_ENABLE_RSOCKET      BOOL   OFF   "enable rsocket")
+photon_option(PHOTON_ENABLE_LIBCURL      BOOL   ON    "enable libcurl")
+photon_option(PHOTON_DEFAULT_LOG_LEVEL   STRING "0"   "default log level")
+photon_option(PHOTON_BUILD_OCF_CACHE     BOOL   OFF   "enable ocf cache")
+photon_option(PHOTON_ENABLE_KCP          BOOL   OFF   "enable kcp")
 
-option(PHOTON_BUILD_DEPENDENCIES "" OFF)
-set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
-set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
-set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz" CACHE STRING "")
-set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz" CACHE STRING "")
-set(PHOTON_URING_SOURCE "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz" CACHE STRING "")
-set(PHOTON_FUSE_SOURCE "" CACHE STRING "")
-set(PHOTON_GSASL_SOURCE "" CACHE STRING "")
-set(PHOTON_DPDK_SOURCE "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz" CACHE STRING "")
-set(PHOTON_FSTACK_SOURCE "https://github.com/F-Stack/f-stack/archive/refs/tags/v1.22.tar.gz" CACHE STRING "")
+# Download locations for build-from-source (used when PHOTON_BUILD_DEPENDENCIES is ON).
+photon_option(PHOTON_BUILD_DEPENDENCIES  BOOL   OFF   "")
+photon_source(AIO_SOURCE        "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz")
+photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
+photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
+photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")
+photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz")
+photon_source(FUSE_SOURCE       "")
+photon_source(GSASL_SOURCE      "")
+photon_source(DPDK_SOURCE       "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz")
+photon_source(FSTACK_SOURCE     "https://github.com/F-Stack/f-stack/archive/refs/tags/v1.22.tar.gz")
 # Since spdk release package contains no submodules that needed to build
 # we use git clone to get the source code
-set(PHOTON_ISAL_SOURCE "https://github.com/spdk/isa-l/archive/2df39cf5f1b9ccaa2973f6ef273857e4dc46f0cf.zip" CACHE STRING "")
-set(PHOTON_SPDK_SOURCE "https://github.com/spdk/spdk/archive/refs/tags/v21.04.tar.gz" CACHE STRING "")
-set(PHOTON_E2FS_SOURCE "" CACHE STRING "")
-set(PHOTON_GFLAGS_SOURCE "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz" CACHE STRING "")
-set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz" CACHE STRING "")
-set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
-set(PHOTON_RAPIDXML_SOURCE "https://github.com/photonlibos/rapidxml" CACHE STRING "")
-set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
+photon_source(ISAL_SOURCE       "https://github.com/spdk/isa-l/archive/2df39cf5f1b9ccaa2973f6ef273857e4dc46f0cf.zip")
+photon_source(SPDK_SOURCE       "https://github.com/spdk/spdk/archive/refs/tags/v21.04.tar.gz")
+photon_source(E2FS_SOURCE       "")
+photon_source(GFLAGS_SOURCE     "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz")
+photon_source(GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz")
+photon_source(RAPIDJSON_GIT     "https://github.com/Tencent/rapidjson.git")
+photon_source(RAPIDXML_SOURCE   "https://github.com/photonlibos/rapidxml")
+photon_source(RAPIDYAML_SOURCE  "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp")
 # It's not recommended to build rdmacore from source because it has too many dependencies. Install it to local host.
 # The release version we use is https://github.com/linux-rdma/rdma-core/releases/download/v58.0/rdma-core-58.0.tar.gz
-set(PHOTON_RDMACORE_SOURCE "" CACHE STRING "")
-set(PHOTON_KCP_SOURCE "https://github.com/skywind3000/kcp/archive/refs/tags/2.1.1.tar.gz" CACHE STRING "")
+photon_source(RDMACORE_SOURCE   "")
+photon_source(KCP_SOURCE        "https://github.com/skywind3000/kcp/archive/refs/tags/2.1.1.tar.gz")
 
 if (NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL x86_64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL aarch64) AND NOT (CMAKE_SYSTEM_PROCESSOR STREQUAL arm64))
     message(FATAL_ERROR "Unknown CPU architecture ${CMAKE_SYSTEM_PROCESSOR}")
@@ -162,46 +164,39 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/output)
 #   lib:        XXX_LIBRARIES
 #   source:     PHOTON_XXX_SOURCE
 
-set(dependencies zlib openssl)
+# Resolve the fuse tri-state once: OFF disables; ON/2 select libfuse2, 3 selects
+# libfuse3. Downstream fuse references reuse these variables instead of repeating
+# the tri-state comparison in each of the dependency / defs / obj-dep / link lists.
+if (PHOTON_ENABLE_FUSE STREQUAL "OFF")
+    set(_fuse_enabled OFF)
+else ()
+    set(_fuse_enabled ON)
+endif ()
+if (PHOTON_ENABLE_FUSE STREQUAL "3")
+    set(_fuse_pkg fuse3)
+    set(_fuse_version 317)
+else ()
+    set(_fuse_pkg fuse)
+    set(_fuse_version 29)
+endif ()
+string(TOUPPER ${_fuse_pkg} _fuse_pkg_upper)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux")
-    LIST(APPEND dependencies aio)
-    if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
-        LIST(APPEND dependencies fuse)
-    elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-        LIST(APPEND dependencies fuse3)
-    endif ()
-    if (PHOTON_ENABLE_URING)
-        LIST(APPEND dependencies uring)
-    endif ()
-endif ()
-if (PHOTON_ENABLE_SASL)
-    LIST(APPEND dependencies gsasl)
-endif ()
-if (PHOTON_ENABLE_FSTACK_DPDK OR PHOTON_ENABLE_SPDK)
-    LIST(APPEND dependencies dpdk)
-endif()
-if (PHOTON_ENABLE_FSTACK_DPDK)
-    LIST(APPEND dependencies fstack)
-endif ()
-if (PHOTON_ENABLE_SPDK)
-    LIST(APPEND dependencies spdk)
-endif()
-if (PHOTON_ENABLE_EXTFS)
-    LIST(APPEND dependencies e2fs)
-endif()
-if (PHOTON_ENABLE_RSOCKET)
-    LIST(APPEND dependencies rdmacore)
-endif ()
-if (PHOTON_ENABLE_LIBCURL)
-    LIST(APPEND dependencies curl)
-endif()
-if (PHOTON_ENABLE_KCP)
-    LIST(APPEND dependencies kcp)
-endif()
-if (PHOTON_BUILD_TESTING)
-    LIST(APPEND dependencies gflags googletest)
-endif ()
+set(dependencies "")
+photon_dependency(zlib)
+photon_dependency(openssl)
+photon_dependency(aio        LINUX)
+photon_dependency(${_fuse_pkg} LINUX AND _fuse_enabled)
+photon_dependency(uring      LINUX AND PHOTON_ENABLE_URING)
+photon_dependency(gsasl      PHOTON_ENABLE_SASL)
+photon_dependency(dpdk       PHOTON_ENABLE_FSTACK_DPDK OR PHOTON_ENABLE_SPDK)
+photon_dependency(fstack     PHOTON_ENABLE_FSTACK_DPDK)
+photon_dependency(spdk       PHOTON_ENABLE_SPDK)
+photon_dependency(e2fs       PHOTON_ENABLE_EXTFS)
+photon_dependency(rdmacore   PHOTON_ENABLE_RSOCKET)
+photon_dependency(curl       PHOTON_ENABLE_LIBCURL)
+photon_dependency(kcp        PHOTON_ENABLE_KCP)
+photon_dependency(gflags     PHOTON_BUILD_TESTING)
+photon_dependency(googletest PHOTON_BUILD_TESTING)
 
 FOREACH (dep ${dependencies})
     message(STATUS "Checking dependency ${dep}")
@@ -221,6 +216,16 @@ FOREACH (dep ${dependencies})
     endif ()
 endforeach ()
 
+# Expose every resolved dependency as an internal Photon::<dep> target so its
+# usage requirements propagate through the target graph. Both acquisition paths
+# publish the same <DEP>_INCLUDE_DIRS / <DEP>_LIBRARIES, so a single declaration
+# here covers find_package and build_from_src uniformly.
+include(photon-deps)
+foreach (dep ${dependencies})
+    string(TOUPPER ${dep} DEP)
+    photon_declare_dep(${dep} INCLUDES ${${DEP}_INCLUDE_DIRS} LIBRARIES ${${DEP}_LIBRARIES})
+endforeach ()
+
 ################################################################################
 
 add_subdirectory(third_party)
@@ -229,7 +234,12 @@ if (PHOTON_ENABLE_ECOSYSTEM)
     add_subdirectory(ecosystem)
 endif ()
 
-# Compile photon objects
+# Compile photon objects.
+#
+# Core sources (always compiled) are listed explicitly; each optional-feature
+# file is opted in by its own block below. Directory globs are used only where
+# every file in the directory is core -- the mixed directories (net/, fs/httpfs/)
+# are enumerated file-by-file, so no glob-then-REMOVE_ITEM carve-out is needed.
 file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         photon.cpp
         common/*.cpp
@@ -246,18 +256,23 @@ file(GLOB PHOTON_SRC RELATIVE "${PROJECT_SOURCE_DIR}"
         fs/throttled-file.cpp
         fs/virtual-file.cpp
         fs/xfile.cpp
-        fs/httpfs/*.cpp
+        fs/httpfs/httpfs_v2.cpp
         io/reset_handle.cpp
-        net/*.cpp
+        net/basic_socket.cpp
+        net/datagram_socket.cpp
+        net/iostream.cpp
+        net/kernel_socket.cpp
+        net/pooled_socket.cpp
+        net/utils.cpp
         net/http/*.cpp
         net/http/huffman/*.cpp
-        net/http/websocket.cpp
         net/security-context/tls-stream.cpp
         net/vdma/*.cpp
         rpc/*.cpp
         thread/*.cpp
         )
 
+# Platform-specific event engine (and, on Linux, the disk cache sources).
 if (APPLE)
     list(APPEND PHOTON_SRC io/kqueue.cpp io/signal.cpp)
 elseif (WIN32)
@@ -275,108 +290,71 @@ else ()
         io/signal.cpp
         ${CACHE_SRC}
     )
-    if (PHOTON_ENABLE_URING)
-        list(APPEND PHOTON_SRC io/iouring-wrapper.cpp)
-    endif ()
+    photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_URING ITEMS io/iouring-wrapper.cpp)
 endif ()
 
-if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2" OR PHOTON_ENABLE_FUSE STREQUAL "3")
+# Optional features -- each enabled feature contributes its own sources.
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_LIBCURL      ITEMS net/curl.cpp fs/httpfs/httpfs.cpp)
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_KCP          ITEMS net/kcp.cpp)
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_SASL         ITEMS net/security-context/sasl-stream.cpp)
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_FSTACK_DPDK  ITEMS io/fstack-dpdk.cpp)
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_SPDK         ITEMS io/spdkbdev-wrapper.cpp io/spdknvme-wrapper.cpp)
+photon_append_if(PHOTON_SRC IF PHOTON_ENABLE_RSOCKET      ITEMS net/rsocket/rsocket.cpp)
+if (_fuse_enabled)
     file(GLOB FUSE_ADAPTOR_SRC fs/fuse_adaptor/*.cpp)
     list(APPEND PHOTON_SRC ${FUSE_ADAPTOR_SRC})
 endif ()
-
-if (PHOTON_ENABLE_SASL)
-    list(APPEND PHOTON_SRC net/security-context/sasl-stream.cpp)
-endif ()
-if (PHOTON_ENABLE_FSTACK_DPDK)
-    list(APPEND PHOTON_SRC io/fstack-dpdk.cpp)
-endif ()
-if (PHOTON_ENABLE_SPDK)
-    list(APPEND PHOTON_SRC io/spdkbdev-wrapper.cpp io/spdknvme-wrapper.cpp)
-endif ()
 if (PHOTON_ENABLE_EXTFS)
     file(GLOB EXTFS_SRC fs/extfs/*.cpp)
-    if (NOT PHOTON_ENABLE_RESIZE)
-        list(REMOVE_ITEM EXTFS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/fs/extfs/resize.cpp")
-    endif()
+    photon_remove_if(EXTFS_SRC IF NOT PHOTON_ENABLE_RESIZE ITEMS ${CMAKE_CURRENT_SOURCE_DIR}/fs/extfs/resize.cpp)
     list(APPEND PHOTON_SRC ${EXTFS_SRC})
 endif ()
 if (PHOTON_ENABLE_ECOSYSTEM)
     file(GLOB ECOSYSTEM_SRC ecosystem/*.cpp)
     list(APPEND PHOTON_SRC ${ECOSYSTEM_SRC})
 endif ()
-if (NOT PHOTON_ENABLE_KCP)
-    list(REMOVE_ITEM PHOTON_SRC net/kcp.cpp)
-endif ()
-if (PHOTON_ENABLE_RSOCKET)
-    list(APPEND PHOTON_SRC net/rsocket/rsocket.cpp)
-endif ()
-if (NOT ${PHOTON_ENABLE_LIBCURL})
-    list(REMOVE_ITEM PHOTON_SRC net/curl.cpp fs/httpfs/httpfs.cpp)
-endif ()
 if (PHOTON_BUILD_OCF_CACHE)
     add_subdirectory(fs/cache/ocf_cache)
 endif()
 
 
-# Public usage requirements shared by the object / shared / static libraries and
-# propagated to anything that links libphoton (Photon's own headers and libcurl's).
-add_library(photon_public_deps INTERFACE)
-target_include_directories(photon_public_deps INTERFACE
-        ${PROJECT_SOURCE_DIR}/include ${CURL_INCLUDE_DIRS})
-
-# Private usage requirements: the include dirs and compile definitions the enabled
-# features contribute to compiling Photon's own sources. Aggregated on a single
-# INTERFACE target and consumed privately by the object library, so the
-# dependency -> target wiring lives in one place.
-add_library(photon_private_deps INTERFACE)
-target_include_directories(photon_private_deps INTERFACE
-        ${OPENSSL_INCLUDE_DIRS} ${AIO_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS})
-
-if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
-    target_compile_definitions(photon_private_deps INTERFACE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=29)
-    target_include_directories(photon_private_deps INTERFACE ${FUSE_INCLUDE_DIRS})
-elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-    target_compile_definitions(photon_private_deps INTERFACE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=317)
-    target_include_directories(photon_private_deps INTERFACE ${FUSE3_INCLUDE_DIRS})
-endif ()
-if (PHOTON_GLOBAL_INIT_OPENSSL)
-    target_compile_definitions(photon_private_deps INTERFACE PHOTON_GLOBAL_INIT_OPENSSL)
-endif ()
-if (PHOTON_ENABLE_SASL)
-    target_include_directories(photon_private_deps INTERFACE ${GSASL_INCLUDE_DIRS})
-endif ()
-if (PHOTON_ENABLE_URING)
-    target_include_directories(photon_private_deps INTERFACE ${URING_INCLUDE_DIRS})
-    target_compile_definitions(photon_private_deps INTERFACE PHOTON_URING=on)
-endif()
-if (PHOTON_ENABLE_MIMIC_VDSO)
-    target_compile_definitions(photon_private_deps INTERFACE ENABLE_MIMIC_VDSO=on)
-endif()
-if (PHOTON_ENABLE_FSTACK_DPDK)
-    target_compile_definitions(photon_private_deps INTERFACE ENABLE_FSTACK_DPDK)
-    target_include_directories(photon_private_deps INTERFACE ${FSTACK_INCLUDE_DIRS})
-endif()
-if (PHOTON_ENABLE_SPDK)
-    target_include_directories(photon_private_deps INTERFACE ${SPDK_INCLUDE_DIRS})
-endif()
-if (PHOTON_ENABLE_EXTFS)
-    target_include_directories(photon_private_deps INTERFACE ${E2FS_INCLUDE_DIRS})
-endif()
+# Photon's own public headers (and libcurl's, when enabled), propagated to
+# everything that links libphoton.
+add_library(photon_headers INTERFACE)
+target_include_directories(photon_headers INTERFACE ${PROJECT_SOURCE_DIR}/include)
 if (PHOTON_ENABLE_LIBCURL)
-    target_compile_definitions(photon_private_deps INTERFACE ENABLE_CURL)
-endif()
-if (PHOTON_DEFAULT_LOG_LEVEL)
-    target_compile_definitions(photon_private_deps INTERFACE DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
-endif()
-if (PHOTON_ENABLE_KCP)
-    target_include_directories(photon_private_deps INTERFACE ${kcp_SOURCE_DIR})
-    target_compile_definitions(photon_private_deps INTERFACE PHOTON_KCP=on)
-endif()
+    target_include_directories(photon_headers INTERFACE ${CURL_INCLUDE_DIRS})
+endif ()
+
+# Photon's own build-time feature toggles. These are Photon's choices, not usage
+# requirements contributed by the dependencies, so they live on a dedicated
+# INTERFACE target rather than on the Photon::<dep> targets.
+add_library(photon_features INTERFACE)
+photon_feature(IF _fuse_enabled DEFS _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=${_fuse_version})
+photon_feature(IF PHOTON_GLOBAL_INIT_OPENSSL   DEFS PHOTON_GLOBAL_INIT_OPENSSL)
+photon_feature(IF PHOTON_ENABLE_URING          DEFS PHOTON_URING=on)
+photon_feature(IF PHOTON_ENABLE_MIMIC_VDSO     DEFS ENABLE_MIMIC_VDSO=on)
+photon_feature(IF PHOTON_ENABLE_FSTACK_DPDK    DEFS ENABLE_FSTACK_DPDK)
+photon_feature(IF PHOTON_ENABLE_LIBCURL        DEFS ENABLE_CURL)
+photon_feature(IF PHOTON_DEFAULT_LOG_LEVEL     DEFS DEFAULT_LOG_LEVEL=${PHOTON_DEFAULT_LOG_LEVEL})
+photon_feature(IF PHOTON_ENABLE_KCP            DEFS PHOTON_KCP=on)
+
+# The dependency include dirs Photon's own sources compile against now arrive
+# through the Photon::<dep> targets (see CMake/photon-deps.cmake), gated by the
+# same feature conditions that added each dependency to the list above.
+set(photon_obj_deps Photon::openssl Photon::zlib)
+photon_append_if(photon_obj_deps IF LINUX                                                               ITEMS Photon::aio)
+photon_append_if(photon_obj_deps IF _fuse_enabled ITEMS Photon::${_fuse_pkg})
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_SASL                                                  ITEMS Photon::gsasl)
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_URING                                                 ITEMS Photon::uring)
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_FSTACK_DPDK                                           ITEMS Photon::fstack)
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_SPDK                                                  ITEMS Photon::spdk)
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_EXTFS                                                 ITEMS Photon::e2fs)
+photon_append_if(photon_obj_deps IF PHOTON_ENABLE_KCP                                                   ITEMS Photon::kcp)
 
 # An object library compiles source files but does not archive or link their object files.
 add_library(photon_obj OBJECT ${PHOTON_SRC})
-target_link_libraries(photon_obj PRIVATE photon_public_deps photon_private_deps)
+target_link_libraries(photon_obj PRIVATE photon_headers photon_features ${photon_obj_deps})
 if (PHOTON_ENABLE_ECOSYSTEM)
     target_link_libraries(photon_obj PRIVATE ecosystem_deps)
 endif ()
@@ -387,61 +365,29 @@ endif ()
 
 ################################################################################
 
-set(static_deps
-)
-if (LINUX)
-    list(APPEND static_deps easy_weak fstack_weak)
-endif()
-set(shared_deps
-        -lpthread
-)
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    list(APPEND shared_deps -lgcc)  # solve [hidden symbol `__cpu_model'] problem
-endif ()
-if (NOT APPLE AND NOT WIN32)
-    list(APPEND static_deps ${AIO_LIBRARIES})
-    list(APPEND shared_deps -lrt -ldl)
-endif ()
-if (WIN32)
-    list(APPEND shared_deps -lws2_32 -lmswsock -lcrypt32 -ladvapi32 -lgdi32 -luser32 -lbcrypt)
-endif ()
-if (PHOTON_ENABLE_URING)
-    list(APPEND static_deps ${URING_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_FUSE STREQUAL "ON" OR PHOTON_ENABLE_FUSE STREQUAL "2")
-    list(APPEND static_deps ${FUSE_LIBRARIES})
-elseif (PHOTON_ENABLE_FUSE STREQUAL "3")
-    list(APPEND static_deps ${FUSE3_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_SASL)
-    list(APPEND static_deps ${GSASL_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_FSTACK_DPDK)
-    list(APPEND static_deps ${DPDK_LIBRARIES})
-    list(APPEND static_deps ${FSTACK_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_SPDK)
-    list(APPEND static_deps ${DPDK_LIBRARIES})
-    list(APPEND static_deps ${SPDK_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_EXTFS)
-    list(APPEND static_deps ${E2FS_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_RSOCKET)
-    list(APPEND shared_deps ${RDMACORE_LIBRARIES})
-endif ()
-if (PHOTON_ENABLE_LIBCURL)
-    list(APPEND static_deps ${CURL_LIBRARIES})
-endif ()
-if (PHOTON_BUILD_OCF_CACHE)
-    list(APPEND shared_deps ocf_cache_lib)
-    list(APPEND static_deps ocf_cache_lib)
-endif()
-list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
+set(static_deps)
+photon_append_if(static_deps IF LINUX ITEMS easy_weak fstack_weak)
 
-if (PHOTON_ENABLE_KCP)
-    list(APPEND static_deps ${kcp_static})
-endif()
+set(shared_deps -lpthread)
+photon_append_if(shared_deps IF CMAKE_CXX_COMPILER_ID STREQUAL "GNU" ITEMS -lgcc)  # solve [hidden symbol `__cpu_model'] problem
+
+# aio is a Linux static dep; -lrt/-ldl accompany it on non-Apple, non-Windows hosts.
+photon_append_if(static_deps IF NOT APPLE AND NOT WIN32 ITEMS ${AIO_LIBRARIES})
+photon_append_if(shared_deps IF NOT APPLE AND NOT WIN32 ITEMS -lrt -ldl)
+photon_append_if(shared_deps IF WIN32 ITEMS -lws2_32 -lmswsock -lcrypt32 -ladvapi32 -lgdi32 -luser32 -lbcrypt)
+
+photon_append_if(static_deps IF PHOTON_ENABLE_URING ITEMS ${URING_LIBRARIES})
+photon_append_if(static_deps IF _fuse_enabled ITEMS ${${_fuse_pkg_upper}_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_SASL ITEMS ${GSASL_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_FSTACK_DPDK ITEMS ${DPDK_LIBRARIES} ${FSTACK_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_SPDK ITEMS ${DPDK_LIBRARIES} ${SPDK_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_EXTFS ITEMS ${E2FS_LIBRARIES})
+photon_append_if(shared_deps IF PHOTON_ENABLE_RSOCKET ITEMS ${RDMACORE_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_LIBCURL ITEMS ${CURL_LIBRARIES})
+photon_append_if(shared_deps IF PHOTON_BUILD_OCF_CACHE ITEMS ocf_cache_lib)
+photon_append_if(static_deps IF PHOTON_BUILD_OCF_CACHE ITEMS ocf_cache_lib)
+list(APPEND static_deps ${OPENSSL_LIBRARIES} ${ZLIB_LIBRARIES})
+photon_append_if(static_deps IF PHOTON_ENABLE_KCP ITEMS ${KCP_LIBRARIES})
 
 
 # Find out dynamic libs and append to `shared_deps`.
@@ -474,11 +420,11 @@ set_target_properties(photon_shared PROPERTIES OUTPUT_NAME photon)
 if (NOT APPLE)
     target_link_libraries(photon_shared
             PRIVATE ${version_scripts} -Wl,--whole-archive ${static_deps} -Wl,--no-whole-archive
-            PUBLIC ${shared_deps} photon_public_deps
+            PUBLIC ${shared_deps} photon_headers
     )
 else ()
     target_link_libraries(photon_shared
-            PUBLIC ${shared_deps} photon_public_deps
+            PUBLIC ${shared_deps} photon_headers
             PRIVATE -Wl,-force_load ${static_deps}
     )
 endif ()
@@ -509,7 +455,7 @@ add_library(photon_static STATIC $<TARGET_OBJECTS:photon_obj>)
 set_target_properties(photon_static PROPERTIES OUTPUT_NAME photon_sole)
 target_link_libraries(photon_static
         PRIVATE ${static_deps}
-        PUBLIC ${shared_deps} photon_public_deps
+        PUBLIC ${shared_deps} photon_headers
 )
 
 # Merge static libs into libphoton.a for manual distribution.

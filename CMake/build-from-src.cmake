@@ -313,8 +313,8 @@ function(build_from_src dep)
                 COMMAND ${CMAKE_COMMAND} -E copy <SOURCE_DIR>/ikcp.h ${BINARY_DIR}/include/
         )
         ExternalProject_Get_Property(kcp SOURCE_DIR)
-        set(kcp_SOURCE_DIR ${SOURCE_DIR} PARENT_SCOPE)
-        set(kcp_static ${BINARY_DIR}/lib/libikcp.a PARENT_SCOPE)
+        set(KCP_INCLUDE_DIRS ${SOURCE_DIR} PARENT_SCOPE)
+        set(KCP_LIBRARIES ${BINARY_DIR}/lib/libikcp.a PARENT_SCOPE)
 
     endif ()
 
