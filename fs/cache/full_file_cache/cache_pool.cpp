@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "cache_pool.h"
+#include <cassert>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -117,6 +118,7 @@ void FileCachePool::probeFiemap() {
 }
 
 ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t mode) {
+  SCOPED_LOCK(m_lock_);
   auto localFile = openMedia(pathname, flags, mode);
   if (!localFile) {
     return nullptr;
@@ -169,43 +171,56 @@ int FileCachePool::stat(CacheStat* stat, std::string_view pathname) {
   return -1;
 }
 
-int FileCachePool::evict(std::string_view filename) {
-  // Check cold tiers first
-  for (auto* tier : coldTiers_) {
-    if (tier->contains(filename)) {
-      auto freed = truncateAndUnlink(filename);
-      tier->remove(filename);
-      return freed >= 0 ? 0 : -1;
-    }
-  }
-
-  auto fileIter = fileIndex_.find(filename);
-  if (fileIter == fileIndex_.end()) {
-    LOG_ERROR("Evict no such file , name: `", filename);
-    return 0;
-  }
-
-  const auto& filePath = fileIter->first;
-  auto lruEntry = fileIter->second.get();
-  if (lruEntry->openCount == 0) {
-    lru_.mark_key_cleared(lruEntry->lruIter);
-  }
+// Opens `name`, truncates it, then finalizes eviction.
+// MUST be called WITHOUT m_lock_ held.
+bool FileCachePool::evictOpenedFile(const std::string& name) {
   int err = 0;
-  auto cacheStore = static_cast<FileCacheStore*>(open(filePath, O_RDWR, 0644));
+  auto cacheStore = static_cast<FileCacheStore*>(open(name, O_RDWR, 0644));
   if (cacheStore) {
     DEFER(cacheStore->release());
     photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
     err = cacheStore->evict(0);
-    lruEntry->truncate_done = false;
   }
   if (err) {
     ERRNO e;
-    LOG_ERROR("truncate(0) failed, name: `, ret: `, error code: `", filePath,
-              err, e);
-    // If truncate fails, we can attempt to remove the file directly
-    // in the afterFtrucate function.
+    LOG_ERROR("truncate(0) failed, name: `, ret: `, error code: `", name, err, e);
+    // Fall through: afterFtrucate can still remove the file directly.
   }
-  return afterFtrucate(fileIter) ? 0 : -1;
+  return finalizeEvicted(name);
+}
+
+// Acquires m_lock_ and finalizes eviction bookkeeping for `name`.
+bool FileCachePool::finalizeEvicted(const std::string& name) {
+  SCOPED_LOCK(m_lock_);
+  auto it = fileIndex_.find(name);
+  if (it == fileIndex_.end()) return true;  // already evicted concurrently
+  it->second->truncate_done = false;
+  return afterFtrucate(it);
+}
+
+int FileCachePool::evict(std::string_view filename) {
+  std::string name(filename);
+  {
+    SCOPED_LOCK(m_lock_);
+    // Check cold tiers first
+    for (auto* tier : coldTiers_) {
+      if (tier->contains(filename)) {
+        auto freed = evictColdVictim(tier, filename);
+        return freed >= 0 ? 0 : -1;
+      }
+    }
+
+    auto fileIter = fileIndex_.find(name);
+    if (fileIter == fileIndex_.end()) {
+      LOG_ERROR("Evict no such file , name: `", filename);
+      return 0;
+    }
+    auto lruEntry = fileIter->second.get();
+    if (lruEntry->openCount == 0) {
+      lru_.mark_key_cleared(lruEntry->lruIter);
+    }
+  }
+  return evictOpenedFile(name) ? 0 : -1;
 }
 
 int FileCachePool::evict(size_t size) {
@@ -223,6 +238,7 @@ bool FileCachePool::isFull() {
 }
 
 void FileCachePool::removeOpenFile(FileNameMap::iterator iter) {
+  SCOPED_LOCK(m_lock_);
   iter->second->openCount--;
 }
 
@@ -231,11 +247,18 @@ void FileCachePool::forceRecycle() {
 }
 
 void FileCachePool::updateLru(FileNameMap::iterator iter) {
+  SCOPED_LOCK(m_lock_);
   lru_.access(iter->second->lruIter);
 }
 
 //  currently, we exist duplicate pwrite
-int64_t FileCachePool::updateSpace(FileNameMap::iterator iter, uint64_t size) {
+int64_t FileCachePool::updateSpace(FileNameMap::iterator iter, IFile* localFile) {
+  SCOPED_LOCK(m_lock_);
+  struct stat st = {};
+  if (localFile->fstat(&st) != 0) {
+    LOG_ERRNO_RETURN(0, 0, "fstat failed");
+  }
+  uint64_t size = kDiskBlockSize * st.st_blocks;
   auto lruEntry = iter->second.get();
   auto diff = static_cast<int64_t>(size) - static_cast<int64_t>(lruEntry->size);
   totalUsed_ += diff;
@@ -257,13 +280,7 @@ int64_t FileCachePool::updateSpace(FileNameMap::iterator iter, uint64_t size) {
       LOG_WARN("disk free space below floor `, force recycle", diskAvailInBytes_);
     }
   }
-
-  if (full) {
-    isFull_ = true;
-    forceRecycle();
-    if (lruEntry->size==0) diff = 0;//in some extream condition ,
-                                    //forceRecycle maybe truncate current file to 0
-  }
+  if (full) isFull_ = true;
   return diff;
 }
 
@@ -279,10 +296,10 @@ bool FileCachePool::diskSpaceLow() {
 
 uint64_t FileCachePool::timerHandler(void* data) {
   auto cur = static_cast<FileCachePool*>(data);
-  if (cur->running_) {
+  // Atomic test-and-set: only one vCPU runs eviction at a time.
+  if (cur->running_.exchange(true)) {
     return 0;
   }
-  cur->running_ = true;
   DEFER(cur->running_ = false;);
   cur->eviction();
   return 0;
@@ -309,79 +326,71 @@ void FileCachePool::eviction() {
     }
   }
 
-  if (totalUsed_ >= static_cast<int64_t>(waterMark_)) {
-    evictByCache = totalUsed_ - waterMark_;
-  }
-
-  auto actualEvict = std::min(
-    static_cast<int64_t>(std::max(evictByCache, evictByDisk)),
-    totalUsed_
-  );
-
-  if (actualEvict <= 0) {
-    return;
-  }
-
-  isFull_ = true;
-
-  // Evict from cold tiers first in reverse order
-  for (int i = coldTiers_.size() - 1; i >= 0; i--) {
-    auto* tier = coldTiers_[i];
-    while (actualEvict > 0 && !tier->empty() && !exit_) {
-      auto name = tier->victim();
-      auto freed = truncateAndUnlink(name);
-      tier->remove(name);
-      if (freed >= 0) actualEvict -= freed;
-      photon::thread_yield();
+  int64_t actualEvict;
+  {
+    SCOPED_LOCK(m_lock_);
+    if (totalUsed_ >= static_cast<int64_t>(waterMark_)) {
+      evictByCache = totalUsed_ - waterMark_;
     }
-  }
 
-  if (!lru_.empty() && !exit_) {
-    LOG_AUDIT("eviction", VALUE(actualEvict), VALUE(evictByCache), VALUE(evictByDisk), VALUE(totalUsed_));
+    actualEvict = std::min(
+      static_cast<int64_t>(std::max(evictByCache, evictByDisk)),
+      totalUsed_
+    );
+
+    if (actualEvict <= 0) {
+      return;
+    }
+
+    isFull_ = true;
+
+    for (auto i = coldTiers_.size(); i > 0 && actualEvict > 0 && !exit_; --i) {
+      auto* tier = coldTiers_[i - 1];
+      while (actualEvict > 0 && !tier->empty() && !exit_) {
+        auto freed = evictColdVictim(tier, tier->victim());
+        if (freed >= 0) actualEvict -= freed;
+      }
+    }
+
+    if (!lru_.empty() && !exit_) {
+      LOG_AUDIT("eviction", VALUE(actualEvict), VALUE(evictByCache), VALUE(evictByDisk), VALUE(totalUsed_));
+    }
   }
 
   uint64_t empty_files_sequence = 0;
-  while (actualEvict > 0 && !lru_.empty() && !exit_) {
-    auto fileIter = lru_.back();
-    const auto& fileName = fileIter->first;
-    auto lruEntry = fileIter->second.get();
-    auto fileSize = lruEntry->size;
-    if (lruEntry->openCount == 0){
-      lru_.mark_key_cleared(fileIter->second->lruIter);
-    } else {
-      lru_.access(fileIter->second->lruIter);
-    }
-    //as soon as possible truncate and unlink
-    if (0 == fileSize) {
-        if (0 == fileIter->second->openCount) {
-            afterFtrucate(fileIter);
+  while (actualEvict > 0 && !exit_) {
+    std::string fileName;
+    uint64_t fileSize;
+    {
+      SCOPED_LOCK(m_lock_);
+      if (lru_.empty() || totalUsed_ <= 0) break;
+      auto fileIter = lru_.back();
+      fileName = std::string(fileIter->first);
+      auto lruEntry = fileIter->second.get();
+      fileSize = lruEntry->size;
+      if (lruEntry->openCount == 0) {
+        lru_.mark_key_cleared(lruEntry->lruIter);
+      } else {
+        lru_.access(lruEntry->lruIter);
+      }
+      if (0 == fileSize) {
+        if (0 == lruEntry->openCount) {
+          afterFtrucate(fileIter);
         } else {
           empty_files_sequence++;
-          if (empty_files_sequence == lru_.size()) {
+          if (empty_files_sequence >= lru_.size()) {
             LOG_ERROR("eviction: all ` LRU entries have size=0 with openCount>0, "
               "cannot make progress. actualEvict=`, totalUsed=`",
               lru_.size(), actualEvict, totalUsed_);
             break;
           }
         }
-        continue;
+        continue;  // releases m_lock_ via SCOPED_LOCK scope
+      }
+      empty_files_sequence = 0;
     }
-
-    empty_files_sequence = 0;
-    int err = 0;
-    auto cacheStore = static_cast<FileCacheStore*>(open(fileName, O_RDWR, 0644));
-    if (cacheStore) {
-      DEFER(cacheStore->release());
-      photon::scoped_rwlock rl(cacheStore->rw_lock(), photon::WLOCK);
-      err = cacheStore->evict(0);
-      lruEntry->truncate_done = false;
-    }
-
-    if (err) {
-      ERRNO e;
-      LOG_ERROR("truncate(0) failed, name : `, ret : `, error code : `", fileName, err, e);
-    }
-    afterFtrucate(fileIter);
+    // open()+WLOCK+finalize with m_lock_ released.
+    evictOpenedFile(fileName);
     actualEvict -= fileSize;
     photon::thread_yield();
   }
@@ -392,6 +401,7 @@ uint64_t FileCachePool::calcWaterMark(uint64_t capacity, uint64_t maxFreeSpace) 
     capacity > maxFreeSpace ? capacity - maxFreeSpace : 0);
 }
 
+// With m_lock_ held.
 bool FileCachePool::afterFtrucate(FileNameMap::iterator iter) {
   auto lruEntry = iter->second.get();
   totalUsed_ -= static_cast<int64_t>(lruEntry->size);
@@ -432,6 +442,7 @@ int FileCachePool::insertFile(std::string_view file) {
   }
   auto fileSize = st.st_blocks * kDiskBlockSize;
 
+  SCOPED_LOCK(m_lock_);
   auto lruIter = lru_.push_front(fileIndex_.end());
   auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
   auto iter = fileIndex_.emplace(file, std::move(entry)).first;
@@ -459,6 +470,7 @@ void FileCachePool::adaptThresholds() {
   tierHits_.fill(0);
 }
 
+// With m_lock_ held.
 void FileCachePool::demoteToCold() {
   while (lru_.size() > thresholds_[0].value) {
     auto tailIt = lru_.back();
@@ -478,6 +490,7 @@ void FileCachePool::demoteToCold() {
   }
 }
 
+// With m_lock_ held.
 void FileCachePool::promoteToHot(std::string_view filename) {
   auto find = fileIndex_.find(filename);
   if (find != fileIndex_.end()) {
@@ -511,6 +524,18 @@ void FileCachePool::promoteToHot(std::string_view filename) {
   lru_.front() = iter;
 }
 
+// With m_lock_ held.
+ssize_t FileCachePool::evictColdVictim(ColdCacheTier* tier, std::string_view name) {
+  auto freed = truncateAndUnlink(name);
+  tier->remove(name);
+  if (freed >= 0) {
+    totalUsed_ -= freed;
+    if (totalUsed_ < 0) totalUsed_ = 0;
+  }
+  return freed;
+}
+
+// I/O only: does NOT touch totalUsed_ and does NOT require m_lock_.
 ssize_t FileCachePool::truncateAndUnlink(std::string_view filename) {
   struct stat st = {};
   uint64_t fileSize = 0;
@@ -523,8 +548,6 @@ ssize_t FileCachePool::truncateAndUnlink(std::string_view filename) {
     if (err) {
       LOG_ERRNO_RETURN(0, -1, "truncate(0) failed, name : `", filename);
     }
-    totalUsed_ -= static_cast<int64_t>(fileSize);
-    if (totalUsed_ < 0) totalUsed_ = 0;
   }
   int err = mediaFs_->unlink(filename.data());
   if (err) {

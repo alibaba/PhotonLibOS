@@ -21,6 +21,8 @@ limitations under the License.
 namespace photon {
 namespace fs {
 
+// TODO: support multi-threaded (multi-vCPU) access.
+// Unlike the base FileCachePool, QuotaFilePool is NOT thread-safe yet.
 class QuotaFilePool : public FileCachePool {
   public:
     typedef FileCachePool::FileNameMap::iterator FileIterator;
