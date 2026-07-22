@@ -1,7 +1,3 @@
-find_path(CURL_INCLUDE_DIRS curl/curl.h)
+include(photon-find-helpers)
 
-find_library(CURL_LIBRARIES curl)
-
-find_package_handle_standard_args(curl DEFAULT_MSG CURL_LIBRARIES CURL_INCLUDE_DIRS)
-
-mark_as_advanced(CURL_INCLUDE_DIRS CURL_LIBRARIES)
+photon_find_package(curl HEADERS curl/curl.h LIBRARIES curl)

@@ -1,7 +1,3 @@
-find_path(GSASL_INCLUDE_DIRS gsasl.h)
+include(photon-find-helpers)
 
-find_library(GSASL_LIBRARIES gsasl)
-
-find_package_handle_standard_args(gsasl DEFAULT_MSG GSASL_LIBRARIES GSASL_INCLUDE_DIRS)
-
-mark_as_advanced(GSASL_INCLUDE_DIRS GSASL_LIBRARIES)
+photon_find_package(gsasl HEADERS gsasl.h LIBRARIES gsasl)

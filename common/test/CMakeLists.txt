@@ -1,48 +1,19 @@
 set(TEST_WORKING_DIR ${CMAKE_CURRENT_SOURCE_DIR}/)
-add_definitions(-DDATA_DIR=${TEST_WORKING_DIR})
+add_compile_definitions(DATA_DIR=${TEST_WORKING_DIR})
 
-add_executable(test-objcache test_objcache.cpp)
-target_link_libraries(test-objcache PRIVATE photon_shared)
-add_test(NAME test-objcache COMMAND $<TARGET_FILE:test-objcache>)
+photon_add_test(test-objcache test_objcache.cpp)
 
-add_executable(perf-objcache perf_objcache.cpp)
-target_link_libraries(perf-objcache PRIVATE photon_shared)
+# Note: perf-objcache is intentionally registered to run the test-objcache binary.
+photon_add_test(perf-objcache perf_objcache.cpp NO_REGISTER)
 add_test(NAME perf-objcache COMMAND $<TARGET_FILE:test-objcache>)
 
-add_executable(test-common test.cpp)
-target_link_libraries(test-common PRIVATE photon_shared)
-add_test(NAME test-common COMMAND $<TARGET_FILE:test-common>)
-
-add_executable(test-scalepool test_scalepool.cpp)
-target_link_libraries(test-scalepool PRIVATE photon_shared)
-add_test(NAME test-scalepool COMMAND $<TARGET_FILE:test-scalepool>)
-
-add_executable(test-throttle test_throttle.cpp)
-target_link_libraries(test-throttle PRIVATE photon_shared)
-add_test(NAME test-throttle COMMAND $<TARGET_FILE:test-throttle>)
-
-add_executable(test-constexprstr test_constexprstr.cpp)
-target_link_libraries(test-constexprstr PRIVATE photon_shared)
-add_test(NAME test-constexprstr COMMAND $<TARGET_FILE:test-constexprstr>)
-
-add_executable(test-lockfree test_lockfree.cpp)
-target_link_libraries(test-lockfree PRIVATE photon_shared)
-add_test(NAME test-lockfree COMMAND $<TARGET_FILE:test-lockfree>)
-
-add_executable(test-alog test_alog.cpp x.cpp)
-target_link_libraries(test-alog PRIVATE photon_shared)
-add_test(NAME test-alog COMMAND $<TARGET_FILE:test-alog>)
-
-add_executable(perf-rcuptr perf_rcuptr.cpp)
-target_link_libraries(perf-rcuptr PRIVATE photon_shared)
-
-add_executable(perf-alog perf_alog.cpp)
-target_link_libraries(perf-alog PRIVATE photon_shared)
-
-add_executable(test-delegates test_delegates.cpp)
-target_link_libraries(test-delegates PRIVATE photon_shared)
-add_test(NAME test-delegates COMMAND $<TARGET_FILE:test-delegates>)
-
-add_executable(test-singleflight test_singleflight.cpp)
-target_link_libraries(test-singleflight PRIVATE photon_shared)
-add_test(NAME test-singleflight COMMAND $<TARGET_FILE:test-singleflight>)
+photon_add_test(test-common test.cpp)
+photon_add_test(test-scalepool test_scalepool.cpp)
+photon_add_test(test-throttle test_throttle.cpp)
+photon_add_test(test-constexprstr test_constexprstr.cpp)
+photon_add_test(test-lockfree test_lockfree.cpp)
+photon_add_test(test-alog test_alog.cpp x.cpp)
+photon_add_test(perf-rcuptr perf_rcuptr.cpp NO_REGISTER)
+photon_add_test(perf-alog perf_alog.cpp NO_REGISTER)
+photon_add_test(test-delegates test_delegates.cpp)
+photon_add_test(test-singleflight test_singleflight.cpp)
