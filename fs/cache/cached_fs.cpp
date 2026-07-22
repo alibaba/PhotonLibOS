@@ -164,18 +164,18 @@ public:
         return xattrFs_ ? xattrFs_->lremovexattr(path, name) : -1;
     }
 
-    UNIMPLEMENTED_POINTER(IFile *creat(const char *pathname, mode_t mode));
-    UNIMPLEMENTED(int symlink(const char *oldname, const char *newname));
-    UNIMPLEMENTED(int link(const char *oldname, const char *newname));
-    UNIMPLEMENTED(int chmod(const char *pathname, mode_t mode));
-    UNIMPLEMENTED(int chown(const char *pathname, uid_t owner, gid_t group));
-    UNIMPLEMENTED(int lchown(const char *pathname, uid_t owner, gid_t group));
-    UNIMPLEMENTED(int truncate(const char *path, off_t length));
-    UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times));
-    UNIMPLEMENTED(int utimes(const char *path, const struct timeval times[2]));
-    UNIMPLEMENTED(int lutimes(const char *path, const struct timeval times[2]));
-    UNIMPLEMENTED(int mknod(const char *path, mode_t mode, dev_t dev));
-    UNIMPLEMENTED(int syncfs());
+    UNIMPLEMENTED_POINTER(IFile *creat(const char *pathname, mode_t mode) override);
+    UNIMPLEMENTED(int symlink(const char *oldname, const char *newname) override);
+    UNIMPLEMENTED(int link(const char *oldname, const char *newname) override);
+    UNIMPLEMENTED(int chmod(const char *pathname, mode_t mode) override);
+    UNIMPLEMENTED(int chown(const char *pathname, uid_t owner, gid_t group) override);
+    UNIMPLEMENTED(int lchown(const char *pathname, uid_t owner, gid_t group) override);
+    UNIMPLEMENTED(int truncate(const char *path, off_t length) override);
+    UNIMPLEMENTED(int utime(const char *path, const struct utimbuf *file_times) override);
+    UNIMPLEMENTED(int utimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int lutimes(const char *path, const struct timeval times[2]) override);
+    UNIMPLEMENTED(int mknod(const char *path, mode_t mode, dev_t dev) override);
+    UNIMPLEMENTED(int syncfs() override);
 
 private:
     IFileSystem *srcFs_;         // owned by extern
@@ -375,10 +375,10 @@ public:
         return src_rwfile->vioctl(request, args);
     }
 
-    UNIMPLEMENTED(off_t lseek(off_t offset, int whence));
-    UNIMPLEMENTED(int fchmod(mode_t mode));
-    UNIMPLEMENTED(int fchown(uid_t owner, gid_t group));
-    UNIMPLEMENTED(int fiemap(photon::fs::fiemap *map));
+    UNIMPLEMENTED(off_t lseek(off_t offset, int whence) override);
+    UNIMPLEMENTED(int fchmod(mode_t mode) override);
+    UNIMPLEMENTED(int fchown(uid_t owner, gid_t group) override);
+    UNIMPLEMENTED(int fiemap(photon::fs::fiemap *map) override);
 
 protected:
     ICacheStore *cache_store_;

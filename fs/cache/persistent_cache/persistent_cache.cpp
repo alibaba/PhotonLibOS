@@ -84,7 +84,7 @@ public:
     int fstat(struct stat *buf) override;
     int vioctl(int request, va_list args) override;
     // used for evict
-    int fallocate(int mode, off_t offset, off_t len);
+    int fallocate(int mode, off_t offset, off_t len) override;
 
     UNIMPLEMENTED_POINTER(IFileSystem *filesystem() override);
     UNIMPLEMENTED(off_t lseek(off_t offset, int whence) override);
@@ -122,7 +122,7 @@ public:
         }
         return new PersistentCacheFile(src_file, pathname, this);
     }
-    IFile *open(const char *pathname, int flags, mode_t mode) {
+    IFile *open(const char *pathname, int flags, mode_t mode) override {
         return open(pathname, flags);
     }
 
@@ -244,7 +244,8 @@ int PersistentCacheFile::fstat(struct stat *buf) {
 
 int PersistentCacheFile::vioctl(int request, va_list args) {
     if (request == SET_LOCAL_DIR) {
-        auto dir = va_arg(args, std::string);
+        const char* dir_ptr = va_arg(args, const char*);
+        std::string dir = dir_ptr != nullptr ? std::string(dir_ptr) : "";
         if (m_local_file != nullptr) {
             LOG_DEBUG("dir already set, ignore");
             return 0;

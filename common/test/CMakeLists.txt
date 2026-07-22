@@ -18,6 +18,9 @@ target_link_libraries(test-scalepool PRIVATE photon_shared)
 add_test(NAME test-scalepool COMMAND $<TARGET_FILE:test-scalepool>)
 
 add_executable(test-throttle test_throttle.cpp)
+target_compile_options(test-throttle PRIVATE 
+    $<$<CXX_COMPILER_ID:Clang>:-Wno-error=vla-cxx-extension>
+)
 target_link_libraries(test-throttle PRIVATE photon_shared)
 add_test(NAME test-throttle COMMAND $<TARGET_FILE:test-throttle>)
 
