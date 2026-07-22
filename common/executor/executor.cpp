@@ -19,6 +19,7 @@ public:
     using CBList =
         common::RingChannel<LockfreeMPMCRingQueue<Delegate<void>, 32UL * 1024>>;
     std::unique_ptr<std::thread> th;
+    std::atomic<bool> running{false};
     photon::thread *pth = nullptr;
     CBList queue;
     photon::ThreadPoolBase *pool;
@@ -34,10 +35,18 @@ public:
 
     ~ExecutorImpl() {
         queue.send({});
-        if (th)
-            th->join();
-        else
+        if (th) {
+            if (std::this_thread::get_id() == th->get_id()) {
+                // Self-destruction: called from within the worker thread.
+                th->detach();
+                while (running) photon::thread_yield();
+            } else {
+                th->join();
+            }
+        } else {
             while (pool) photon::thread_yield();
+        }
+
     }
 
     struct CallArg {
@@ -68,6 +77,8 @@ public:
     }
 
     void do_loop() {
+        running = true;
+        DEFER(running = false);
         pth = photon::CURRENT;
         pool = photon::new_thread_pool(32);
         LOG_INFO("worker start");
