@@ -15,3 +15,4 @@ photon_add_test(test-executor-async test_async.cpp LIBS ${GOOGLETEST_GTEST_MAIN_
 photon_add_test(test-executor-export_as_executor test_export_as_executor.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
 photon_add_test(test-executor-std test_std.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
 photon_add_test(test-executor-burst-drain test_burst_drain.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
+photon_add_test(test-executor-self-join test_self_join.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
