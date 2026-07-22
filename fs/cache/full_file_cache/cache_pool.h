@@ -16,6 +16,11 @@ limitations under the License.
 
 #pragma once
 
+<<<<<<< HEAD
+=======
+#include <array>
+#include <atomic>
+>>>>>>> eef65fb (feat(cache): make FileCachePool thread-safe for multi-vCPU access (#1555))
 #include <map>
 #include <memory>
 #include <string>
@@ -63,7 +68,8 @@ public:
         uint32_t lruIter;
         int openCount;
         uint64_t size;
-        bool truncate_done;
+        // May concurrently be modified in store write path.
+        std::atomic<bool> truncate_done;
     };
 
     // Normally, fileIndex(std::map) always keep growing, so its iterators always
@@ -76,7 +82,10 @@ public:
     void removeOpenFile(FileNameMap::iterator iter);
     void forceRecycle();
     void updateLru(FileNameMap::iterator iter);
-    int64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
+    // Updates size accounting for `iter`, doing the fstat inside m_lock_ so
+    // "read on-disk size + store it" is atomic against concurrent writers to the
+    // same file.
+    int64_t updateSpace(FileNameMap::iterator iter, photon::fs::IFile* localFile);
 
     // True if the media filesystem supports fiemap. Decided once at Init()
     // time by probing a named file. When false, FileCacheStore tracks filled
@@ -113,14 +122,22 @@ protected:
     uint64_t lastDiskCheckUs_ = 0;
 
     photon::Timer *timer_;
-    bool running_;
-    bool exit_;
+    std::atomic<bool> running_;
+    std::atomic<bool> exit_;
 
-    bool isFull_;
+    std::atomic<bool> isFull_;
+
+    // Guards all pool metadata.
+    photon::mutex m_lock_;
 
     bool fiemapSupported_ = false;
     void probeFiemap();
 
+    // Opens+truncates+finalizes. MUST be called without m_lock_.
+    bool evictOpenedFile(const std::string& name);
+    // Acquires m_lock_ and finalizes eviction bookkeeping.
+    bool finalizeEvicted(const std::string& name);
+    // With m_lock_ held.
     virtual bool afterFtrucate(FileNameMap::iterator iter);
 
     int traverseDir(const std::string &root);
@@ -140,10 +157,33 @@ protected:
     IdleLRUContainer idleLru_;
     IdleFileNameMap idleFileIndex_;
 
+<<<<<<< HEAD
     void demoteToIdle(FileNameMap::iterator iter);
     void promoteFromIdle(IdleFileNameMap::iterator idleIter);
     uint64_t evictIdleWhenFull(uint64_t needEvictSize);
     ssize_t evictIdleEntry(IdleFileNameMap::iterator idleIter);
+=======
+        AdaptiveThreshold(int min, int max)
+            : min(min), max(max), value(min) {}
+        
+        void adapt(double ratio) {
+            value = std::max(min, std::min(max, static_cast<uint32_t>(value * ratio)));
+        }
+    };
+    std::array<AdaptiveThreshold, 2> thresholds_ = 
+        {AdaptiveThreshold(1'000, 100'000), AdaptiveThreshold(100'000, 100'000'000)};
+
+    static constexpr uint64_t kPromotesPerAdapt = 10'000;
+    uint64_t promoteCount_ = 0;
+    std::array<uint64_t, 3> tierHits_{};
+
+    void adaptThresholds();
+    void demoteToCold();
+
+    void promoteToHot(std::string_view filename);
+    ssize_t truncateAndUnlink(std::string_view filename);
+    ssize_t evictColdVictim(ColdCacheTier* tier, std::string_view name);
+>>>>>>> eef65fb (feat(cache): make FileCachePool thread-safe for multi-vCPU access (#1555))
 
     friend struct FileCachePoolTest;
 };

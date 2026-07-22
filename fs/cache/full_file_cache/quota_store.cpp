@@ -67,14 +67,9 @@ ssize_t QuotaFileStore::do_pwritev2(const struct iovec *iov, int iovcnt, off_t o
   }
 
   if (ret > 0) {
-    struct stat st = {};
-    auto err = localFile_->fstat(&st);
-    if (err) {
-      LOG_ERRNO_RETURN(0, ret, "fstat failed")
-    }
     dirPool->updateDirLru(iterator_);
     cachePool_->updateLru(iterator_);
-    auto diff = dirPool->updateSpace(iterator_, QuotaFilePool::kDiskBlockSize * st.st_blocks);
+    auto diff = dirPool->updateSpace(iterator_, localFile_);
     dirPool->updateDirSpace(iterator_, diff);
   }
   return ret;
