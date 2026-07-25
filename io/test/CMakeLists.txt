@@ -12,6 +12,7 @@ endif ()
 if (LINUX)
     photon_add_test(test-syncio test-syncio.cpp)
     photon_add_test(test-iouring test-iouring.cpp)
+    photon_add_test(test-iouring-uaf test-iouring-uaf.cpp)
 endif ()
 
 if (PHOTON_ENABLE_SPDK)
