@@ -123,9 +123,9 @@ namespace rpc {
 
     // Wait for the completion of the operation.
     // returns 0 for success, negative for failures
-    // if returns -2 and errno == ENOENT, there is a completed
-    // operation but there is no caller in the registry to
-    // collect the result, so users have to fix it up.
+    // if returns -2 and errno == ENOENT, a response was received
+    // whose tag is not in the registry (never issued, or its caller
+    // already timed out and deregistered), and should be dropped.
     // Arguments: engine, do_issue, [tag, flag_tag_valid], do_completion
     extern "C" int ooo_wait_completion(OutOfOrderContext& args);
 
