@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -104,7 +105,8 @@ public:
         uint32_t lruIter;
         int openCount;
         uint64_t size;
-        bool truncate_done;
+        // May concurrently be modified in store write path.
+        std::atomic<bool> truncate_done;
     };
 
     // Normally, fileIndex(std::map) always keep growing, so its iterators always
@@ -117,7 +119,10 @@ public:
     void removeOpenFile(FileNameMap::iterator iter);
     void forceRecycle();
     void updateLru(FileNameMap::iterator iter);
-    int64_t updateSpace(FileNameMap::iterator iter, uint64_t size);
+    // Updates size accounting for `iter`, doing the fstat inside m_lock_ so
+    // "read on-disk size + store it" is atomic against concurrent writers to the
+    // same file.
+    int64_t updateSpace(FileNameMap::iterator iter, photon::fs::IFile* localFile);
 
     // True if the media filesystem supports fiemap. Decided once at Init()
     // time by probing a named file. When false, FileCacheStore tracks filled
@@ -154,14 +159,22 @@ protected:
     uint64_t lastDiskCheckUs_ = 0;
 
     photon::Timer *timer_;
-    bool running_;
-    bool exit_;
+    std::atomic<bool> running_;
+    std::atomic<bool> exit_;
 
-    bool isFull_;
+    std::atomic<bool> isFull_;
+
+    // Guards all pool metadata.
+    photon::mutex m_lock_;
 
     bool fiemapSupported_ = false;
     void probeFiemap();
 
+    // Opens+truncates+finalizes. MUST be called without m_lock_.
+    bool evictOpenedFile(const std::string& name);
+    // Acquires m_lock_ and finalizes eviction bookkeeping.
+    bool finalizeEvicted(const std::string& name);
+    // With m_lock_ held.
     virtual bool afterFtrucate(FileNameMap::iterator iter);
 
     int traverseDir(const std::string &root);
@@ -203,6 +216,7 @@ protected:
 
     void promoteToHot(std::string_view filename);
     ssize_t truncateAndUnlink(std::string_view filename);
+    ssize_t evictColdVictim(ColdCacheTier* tier, std::string_view name);
 
     friend struct FileCachePoolTest;
 };
