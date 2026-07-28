@@ -541,6 +541,80 @@ TEST(http_client, partial_body) {
     EXPECT_EQ(true, buf == "http_clien");
 }
 
+struct ConnCounter {
+    photon::net::ISocketServer::Handler inner;
+    int count = 0;
+    int on_connection(photon::net::ISocketStream* stream) {
+        count++;
+        return inner(stream);
+    }
+};
+
+// Keep-alive raw handler: one chunked response (single chunk + terminator)
+// per request; wire data hand-written as in the other chunked tests.
+static int chunked_keepalive_handler(void*, ISocketStream* sock) {
+    char recv[4096];
+    char payload[1000];
+    memset(payload, 'y', sizeof(payload));
+    char hdr[128];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n"
+        "%zx\r\n", sizeof(payload));
+    while (sock->recv(recv, sizeof(recv)) > 0) {
+        if (sock->write(hdr, hdr_len) != hdr_len) return -1;
+        if (sock->write(payload, sizeof(payload)) != (ssize_t)sizeof(payload)) return -1;
+        if (sock->write("\r\n0\r\n\r\n", 7) != 7) return -1;
+    }
+    return 0;
+}
+
+// Chunked counterpart: close() finishes a body missing only the terminating
+// chunk, so the connection stays reusable.
+TEST(http_client, chunked_residual_connection_reuse) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->setsockopt<int>(IPPROTO_TCP, TCP_NODELAY, 1);
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    ConnCounter counter{{nullptr, &chunked_keepalive_handler}};
+    tcpserver->set_handler({&counter, &ConnCounter::on_connection});
+    tcpserver->start_loop();
+    auto client = new_http_client();
+    DEFER(delete client);
+    auto url = to_url(tcpserver, "/");
+
+    char buf[1000];
+    auto do_get = [&](size_t read_n, bool finish_body) {
+        auto op = client->new_operation(Verb::GET, url);
+        DEFER(client->destroy_operation(op));
+        op->req.headers.content_length(0);
+        ASSERT_EQ(0, client->call(op));
+        for (size_t got = 0; got < read_n;) {
+            auto r = op->resp.read(buf, std::min(read_n - got, sizeof(buf)));
+            ASSERT_GT(r, 0);
+            got += r;
+        }
+        if (finish_body) { // one more read consumes the terminating chunk
+            char c;
+            EXPECT_EQ(0, op->resp.read(&c, 1));
+        }
+    };
+
+    // Body read through the terminator: both requests reuse one connection.
+    do_get(1000, true);
+    do_get(1000, true);
+    EXPECT_EQ(1, counter.count);
+
+    // Stop short of the payload end so the parser cannot opportunistically
+    // consume the terminator: close() self-heals, connection still reused.
+    do_get(990, false);
+    do_get(1000, true);
+    EXPECT_EQ(1, counter.count);
+}
+
 
 TEST(http_client, vcpu) {
     system("mkdir -p /tmp/ease_ut/http_test/");
