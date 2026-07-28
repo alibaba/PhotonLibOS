@@ -1,5 +1,15 @@
 name: Linux x86_64
 
+<<<<<<< HEAD
+=======
+# Runs triggered by removing an irrelevant label would have all jobs skipped, but they
+# still enter the concurrency group and would cancel an in-progress CI run. Divert them
+# into a separate '-noop' group so they never interfere with real CI runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
+  cancel-in-progress: true
+
+>>>>>>> 6e668a6 (fix(ci): stop irrelevant unlabeled events from cancelling in-progress CI runs (#1574) (#1576))
 on:
   pull_request:
     types: [opened, synchronize, reopened, unlabeled]
