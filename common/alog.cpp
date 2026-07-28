@@ -25,6 +25,7 @@ limitations under the License.
 #include <mutex>
 #include <condition_variable>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -269,6 +270,21 @@ void LogFormatter::put_integer_dec(ALogBuffer& buf, ALogInteger x)
     }
 }
 
+// Protects log file rotation. It used to be a function-local static in
+// write(), but if fork() happened while a thread was rotating, the child
+// would inherit the mutex in locked state forever. So it is hoisted here
+// and serialized against fork() with pthread_atfork(): prepare acquires
+// the lock (waiting for any in-flight rotation), and both parent and
+// child release it after fork().
+static mutex log_file_lock;
+
+__attribute__((constructor))
+static void __register_log_file_lock_atfork() {
+    pthread_atfork([] { log_file_lock.lock(); },
+                   [] { log_file_lock.unlock(); },
+                   [] { log_file_lock.unlock(); });
+}
+
 class LogOutputFile final : public BaseLogOutput {
 public:
     uint64_t log_file_size_limit = 0;
@@ -299,7 +315,6 @@ public:
         if (log_file_name && log_file_size_limit) {
             log_file_size += length;
             if (log_file_size > log_file_size_limit) {
-                static mutex log_file_lock;
                 lock_guard<mutex> guard(log_file_lock);
                 if (log_file_size > log_file_size_limit) {
                     log_file_rotate();
