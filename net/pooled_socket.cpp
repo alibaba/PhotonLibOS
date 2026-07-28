@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "socket.h"
 #include <netinet/tcp.h>
+#include <unistd.h>
 #include <vector>
 #include <unordered_set>
 #include <photon/common/alog.h>
@@ -27,6 +28,7 @@ limitations under the License.
 #include <photon/net/basic_socket.h>
 #include <photon/net/utils.h>
 #include "base_socket.h"
+#include "../io/reset_handle.h"
 
 namespace photon {
 namespace net {
@@ -185,7 +187,7 @@ struct Equal {
     }
 };
 
-class TCPSocketPool : public ISocketPool {
+class TCPSocketPool : public ISocketPool, public ResetHandle {
 public:
     SocketPoolArgs args;
     std::unordered_set<StreamList, Hash, Equal> sockmap;
@@ -434,6 +436,44 @@ public:
             if (timeout > next)
                 timeout = next;
         }
+    }
+
+    // Invoked in the child process by the pthread_atfork handler. Idle pooled
+    // connections share their TCP file descriptions with the parent: handing
+    // them out, or closing them through the normal stream path (a TLS stream
+    // close() sends close_notify), would corrupt the parent's connections.
+    // Close the raw fds first so that any write attempted by the stream
+    // destructors fails with EBADF without reaching the peer, then drop all
+    // idle nodes. `ev` is NOT touched here: the inherited epoll instance is
+    // shared with the parent (rm_watch would unregister the parent's
+    // interests); the engine re-creates itself via its own ResetHandle.
+    int reset() override {
+        for (auto h = _key_head; h; h = h->_key_next) {
+            auto ptr = h->next();
+            while (ptr != h) {
+                auto next = ptr->remove_from_list();
+                auto fd = ptr->stream->get_underlay_fd();
+                if (fd >= 0) ::close(fd);
+                assert(h->_refcnt > 0);
+                h->_refcnt--;
+                delete ptr;
+                ptr = next;
+            }
+        }
+        // Erase entries with no outstanding streams, as check_expire_heartbeat()
+        auto* prev_next = &_key_head;
+        for (auto h = _key_head; h; ) {
+            if (h->_refcnt) {
+                prev_next = &h->_key_next;
+                h = h->_key_next;
+            } else {
+                auto next = h->_key_next;
+                *prev_next = next;
+                sockmap.erase(h->key());
+                h = next;
+            }
+        }
+        return 0;
     }
 };
 

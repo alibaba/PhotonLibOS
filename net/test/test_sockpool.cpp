@@ -6,6 +6,8 @@
 #include <photon/thread/thread11.h>
 #ifndef _WIN32
 #include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <netinet/tcp.h>
 #ifdef __APPLE__
 #define TCP_KEEPIDLE  TCP_KEEPALIVE
@@ -1148,6 +1150,54 @@ TEST(Socket, pooled_keepalive_custom_values) {
     verify_keepalive_params(st, 30, 10, 5);
     delete st;
 }
+
+#ifndef _WIN32
+// The pthread_atfork child handler (reset_all_handle) must drop all idle
+// pooled connections in the child -- they share TCP file descriptions with
+// the parent -- without disturbing the parent's pool.
+TEST(Socket, pooled_fork_reset) {
+    auto server = photon::net::new_tcp_socket_server();
+    server->bind_v4localhost();
+    server->listen();
+    auto handler = [&](photon::net::ISocketStream* stream) {
+        char buf[4];
+        while (stream->read(buf, 4) > 0) stream->write("TEST", 4);
+        return 0;
+    };
+    server->set_handler(handler);
+    server->start_loop();
+    DEFER(delete server);
+    auto ep = server->getsockname();
+
+    auto pool = photon::net::new_tcp_socket_pool(
+        photon::net::new_tcp_socket_client(), -1, true);
+    DEFER(delete pool);
+
+    // park one idle connection in the pool
+    auto st = pool->connect(ep);
+    ASSERT_NE(st, nullptr);
+    EXPECT_EQ(4, st->write("TEST", 4));
+    EXPECT_TRUE(st->skip_read(4));
+    delete st;   // released back to the pool
+
+    // TCPSocketPool::reset() runs in the child during fork(); the child must
+    // survive it and exit cleanly
+    auto pid = fork();
+    if (pid == 0) _exit(0);
+    ASSERT_GT(pid, 0);
+    int status = -1;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+
+    // the parent's pooled connection must stay intact and reusable
+    auto st2 = pool->connect(ep);
+    ASSERT_NE(st2, nullptr);
+    EXPECT_EQ(4, st2->write("TEST", 4));
+    EXPECT_TRUE(st2->skip_read(4));
+    delete st2;
+}
+#endif
 
 int main(int argc, char** arg) {
     photon::init();
