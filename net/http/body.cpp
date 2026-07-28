@@ -126,8 +126,16 @@ public:
         m_get_line_buf = (char*)body.data();
     }
     int close() override {
-        if (!m_finish) return -1;
-        return 0;
+        if (m_finish) return 0;
+        // Mirror BodyReadStream::close(): consume a nearly-finished body
+        // within SKIP_LIMIT so the connection stays reusable.
+        char buf[512];
+        for (size_t budget = SKIP_LIMIT; !m_finish && budget > 0;) {
+            ssize_t r = read(buf, std::min(budget, sizeof(buf)));
+            if (r <= 0) break;
+            budget -= r;
+        }
+        return m_finish ? 0 : -1;
     }
     bool pos_next_chunk(int pos) {
         estring_view line(m_get_line_buf + pos, m_line_size - pos);
