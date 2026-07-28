@@ -1272,81 +1272,142 @@ TEST(http_server, forward_proxy_close_delimited) {
     EXPECT_EQ(g_close_delim_payload, out);
 }
 
-// set_resolver: the client resolves DNS through the injected resolver. One that
-// rejects every address makes the target unresolvable (request can't connect);
-// one that accepts all lets it succeed.
-static std::vector<IPAddr> g_resolve_filter_seen;
-static bool resolve_filter_accept_all(void*, IPAddr addr) {
-    g_resolve_filter_seen.push_back(addr);
-    return true;
-}
-static bool resolve_filter_reject_all(void*, IPAddr addr) {
-    g_resolve_filter_seen.push_back(addr);
-    return false;
+// Helpers/tests for per-client dialer lifecycle and injection
+static int count_dialers_of(Client* c) {
+    auto& reg = g_dialer_registry;
+    SCOPED_LOCK(reg.lock);
+    int n = 0;
+    for (auto d : reg.dialers)
+        if (d->owner == (ClientImpl*)c) n++;
+    return n;
 }
 
-// Test resolver decorator: forwards to an owned DefaultResolver while applying a
-// filter, recording the addresses the client's resolver considered.
-class TestFilteredResolver : public Resolver {
-public:
-    Resolver* inner;
-    Delegate<bool, IPAddr> filter;
-    explicit TestFilteredResolver(Delegate<bool, IPAddr> filter)
-        : inner(new_default_resolver()), filter(filter) {}
-    ~TestFilteredResolver() { delete inner; }
-    IPAddr resolve(std::string_view host) override {
-        return inner->resolve_filter(host, filter);
-    }
-    IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr>) override {
-        return inner->resolve_filter(host, filter);
-    }
-    void discard_cache(std::string_view host, IPAddr ip) override {
-        inner->discard_cache(host, ip);
-    }
-};
+static void simple_get(Client* client, std::string_view target) {
+    Client::OperationOnStack<> op(client, Verb::GET, target);
+    op.req.headers.content_length(0);
+    int ret = op.call();
+    EXPECT_EQ(0, ret);
+    if (ret != 0) return;
+    EXPECT_EQ(200, op.resp.status_code());
+    char buf[4096];
+    auto n = op.resp.read(buf, op.resp.body_size());
+    EXPECT_EQ((ssize_t)op.resp.body_size(), n);
+}
 
-TEST(http_client, set_resolver) {
+TEST(http_client, per_client_dialer_lifecycle) {
     auto tcpserver = new_tcp_socket_server();
-    DEFER(delete tcpserver);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
+    DEFER(delete tcpserver);
     auto server = new_http_server();
     DEFER(delete server);
-    server->add_handler(new SimpleHandler, true, "/simple-api");
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/simple");
+
+    auto c1 = new_http_client();
+    auto c2 = new_http_client();
+    DEFER(delete c2);
+    simple_get(c1, target);
+    simple_get(c2, target);
+    // each client owns its dialer on this vCPU -- no implicit sharing
+    EXPECT_EQ(1, count_dialers_of(c1));
+    EXPECT_EQ(1, count_dialers_of(c2));
+    // deleting a client tears down its own dialer, not the siblings'
+    delete c1;
+    EXPECT_EQ(0, count_dialers_of(c1));
+    EXPECT_EQ(1, count_dialers_of(c2));
+    simple_get(c2, target);
+}
+
+TEST(http_client, dialer_injection) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
 
-    auto target = estring().appends("http://127.0.0.1:",
-                                    tcpserver->getsockname().port, "/simple-api");
+    struct CountingDialer : public IDialer {
+        ISocketClient* cli = new_tcp_socket_client();
+        int dials = 0;
+        ~CountingDialer() override { delete cli; }
+        ISocketStream* dial(std::string_view, uint16_t port, bool,
+                            uint64_t timeout) override {
+            dials++;
+            cli->timeout(timeout);
+            IPAddr addr("127.0.0.1");   // no DNS in this test dialer
+            return cli->connect(EndPoint(addr, port));
+        }
+        ISocketStream* dial(std::string_view, uint64_t) override {
+            return nullptr;
+        }
+    } dialer;
 
-    // Phase 1: a resolver rejecting every address fails resolution, so the
-    // request can never connect. Each client owns its resolver (and DNS cache),
-    // so phase 2 starts fresh.
-    {
-        auto client = new_http_client();
-        DEFER(delete client);
-        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_reject_all}), true);
-        g_resolve_filter_seen.clear();
-        Client::OperationOnStack<> op(client, Verb::GET, target);
-        op.retry = 0;
-        int ret = op.call();
-        EXPECT_NE(0, ret);
-        EXPECT_EQ(-1, op.status_code);
-        EXPECT_FALSE(g_resolve_filter_seen.empty());
-    }
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_dialer(&dialer);
+    simple_get(client, to_url(tcpserver, "/simple"));
+    EXPECT_GT(dialer.dials, 0);
+    // the injected dialer fully replaces the built-in one
+    EXPECT_EQ(0, count_dialers_of(client));
+}
 
-    // Phase 2: accepting addresses lets the request succeed.
-    {
-        auto client = new_http_client();
-        DEFER(delete client);
-        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_accept_all}), true);
-        g_resolve_filter_seen.clear();
-        Client::OperationOnStack<> op(client, Verb::GET, target);
-        int ret = op.call();
-        EXPECT_EQ(0, ret);
-        EXPECT_EQ(200, op.resp.status_code());
-        EXPECT_FALSE(g_resolve_filter_seen.empty());
-    }
+TEST(http_client, resolver_injection) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/simple");
+
+    auto resolver = new_default_resolver(kDNSCacheLife);
+    auto c1 = new_http_client();
+    auto c2 = new_http_client();
+    c1->set_resolver(resolver);
+    c2->set_resolver(resolver);
+    simple_get(c1, target);
+    simple_get(c2, target);
+    // clients go first: their dialers reference the shared resolver
+    delete c1;
+    delete c2;
+    delete resolver;
+}
+
+TEST(http_client, cross_vcpu_client_destruction) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/simple");
+
+    auto client = new_http_client();
+    photon::semaphore req_done(0), quit(0);
+    std::thread th([&] {
+        photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+        DEFER(photon::fini());
+        simple_get(client, target);   // creates a dialer on this worker vCPU
+        req_done.signal(1);
+        quit.wait(1);                 // keep the vCPU alive during deletion
+    });
+    req_done.wait(1);
+    // destroys the worker-vCPU dialer from the main vCPU (migrate path)
+    delete client;
+    quit.signal(1);
+    th.join();
 }
 
 int main(int argc, char** arg) {
