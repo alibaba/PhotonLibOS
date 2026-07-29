@@ -16,11 +16,18 @@ limitations under the License.
 #pragma once
 #include <cstdint>
 #include <photon/fs/filesystem.h>
+#include <stdint.h>
 
 namespace photon {
 namespace fs {
 
+
+// when buffer is true, defaults to 8MB buffer size and 128KB block size
 photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer = true);
+
+photon::fs::IFileSystem *new_extfs_with_buffer(photon::fs::IFile *file,
+                                               uint32_t buffer_size = 8 << 20,
+                                               uint32_t block_size = 128 << 10);
 
 // make extfs on an prezeroed IFile,
 // should be truncated to specified size in advance
