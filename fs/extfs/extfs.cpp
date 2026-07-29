@@ -1287,11 +1287,11 @@ class ExtFileSystem : public photon::fs::IFileSystem, public photon::fs::IFileSy
 public:
     ext2_filsys fs;
     io_manager extfs_io_manager;
-    ExtFileSystem(photon::fs::IFile *_image_file, bool buffer = true) : ino_cache(kMinimalInoLife), base_file(_image_file) {
+    ExtFileSystem(photon::fs::IFile *_image_file, uint32_t buffer_size, uint32_t block_size) : ino_cache(kMinimalInoLife), base_file(_image_file) {
         ExtFileSystem::mutex.lock();
         DEFER(ExtFileSystem::mutex.unlock());
-        if (buffer) {
-            buffer_file = new_buffer_file(_image_file);
+        if (buffer_size) {
+            buffer_file = new BufferFile(_image_file, buffer_size, block_size);
             extfs_io_manager = new_io_manager(buffer_file);
         } else {
             extfs_io_manager = new_io_manager(_image_file);
@@ -1515,7 +1515,11 @@ int ExtFile::flush_buffer() {
 
 
 photon::fs::IFileSystem *new_extfs(photon::fs::IFile *file, bool buffer) {
-    auto extfs = new ExtFileSystem(file, buffer);
+    return new_extfs_with_buffer(file, buffer ? 8<<20 : 0, 128<<10);
+}
+
+photon::fs::IFileSystem *new_extfs_with_buffer(photon::fs::IFile *file, uint32_t buffer_size, uint32_t block_size) {
+    auto extfs = new ExtFileSystem(file, buffer_size, block_size);
     if (extfs->fs == nullptr) {
         delete extfs;
         return nullptr;
