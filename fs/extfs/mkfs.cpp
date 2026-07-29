@@ -25,7 +25,7 @@ limitations under the License.
 #include <string>
 #include <fcntl.h>
 
-constexpr char DEFAULT_UUID[] = "bdf7bb2e-c231-43ce-87c2-photonextdev";
+constexpr char DEFAULT_UUID[] = "bdf7bb2e-c231-43ce-87c2-deadbeefcafe";
 
 int mkdir_lost_found(ext2_filsys fs) {
     std::string name = "lost+found";
@@ -94,8 +94,10 @@ int do_mkfs(io_manager manager, size_t size, char *uuid) {
         LOG_ERRNO_RETURN(0, -1, "error while setting up superblock ", VALUE(ret));
     }
 
-    uuid4_parse(uuid, (char*)(fs->super->s_uuid));
-    uuid4_parse(uuid, (char*)(fs_param.s_hash_seed));
+    if (uuid4_parse(uuid, (char*)(fs->super->s_uuid)) != 0) {
+        LOG_ERROR_RETURN(EINVAL, -1, "invalid uuid `", uuid);
+    }
+    memcpy(fs_param.s_hash_seed, fs->super->s_uuid, 16);
     fs->super->s_kbytes_written = 1;
     fs->super->s_def_hash_version = EXT2_HASH_HALF_MD4;
     fs->super->s_max_mnt_count = -1;
