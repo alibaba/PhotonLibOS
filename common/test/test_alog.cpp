@@ -27,12 +27,9 @@ limitations under the License.
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
-<<<<<<< HEAD
-=======
 #include <sys/wait.h>
 #include <signal.h>
 #include "../../test/ci-tools.h"
->>>>>>> 31654b9 ([Backport][0.8 to 0.7] | fix(alog): prevent child deadlock on rotation lock across fork() (#1573) (#1575) (#1577) (#1579))
 
 class LogOutputTest : public ILogOutput {
 public:
