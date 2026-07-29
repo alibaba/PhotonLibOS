@@ -1,6 +1,3 @@
-<<<<<<< HEAD:.github/workflows/ci.macos.arm.yml
-name: macOS ARM
-=======
 name: macOS-matrix
 
 # Runs triggered by removing an irrelevant label would have all jobs skipped, but they
@@ -9,7 +6,6 @@ name: macOS-matrix
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
   cancel-in-progress: true
->>>>>>> 6e668a6 (fix(ci): stop irrelevant unlabeled events from cancelling in-progress CI runs (#1574) (#1576)):.github/workflows/ci.macos.yml
 
 on:
   pull_request:
