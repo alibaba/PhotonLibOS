@@ -29,7 +29,6 @@ limitations under the License.
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include "../../test/ci-tools.h"
 
 class LogOutputTest : public ILogOutput {
 public:
