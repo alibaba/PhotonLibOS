@@ -22,9 +22,13 @@ limitations under the License.
 #include "photon/thread/thread.h"
 #include <chrono>
 #include <vector>
+#include <atomic>
+#include <thread>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 class LogOutputTest : public ILogOutput {
 public:
@@ -170,6 +174,45 @@ TEST(ALog, log_to_file) {
     // compare, buffer will followed tailing enter in the end of line
     EXPECT_EQ(0, strncmp(HELLO, &buffer[length - strlen(HELLO) - 1], strlen(HELLO)));
     ::close(fd);
+}
+
+static bool wait_child_exited(pid_t pid, int timeout_sec) {
+    for (int i = 0; i < timeout_sec * 100; ++i) {
+        int st;
+        if (::waitpid(pid, &st, WNOHANG) == pid)
+            return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        ::usleep(10 * 1000);
+    }
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, nullptr, 0);
+    return false;
+}
+
+TEST(ALog, fork_during_rotation) {
+    const char* fn = "/tmp/test_alog_fork.log";
+    // minimum rotate limit is 1MB
+    ASSERT_EQ(0, log_output_file(fn, 1024 * 1024, 3));
+    DEFER(log_output_file_close());
+    // keep triggering rotation in background, so that fork() below
+    // is likely to happen while the rotation lock is held
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        while (!stop)
+            LOG_INFO("background writer keeps rotating the log file, padding padding padding padding");
+    });
+    DEFER({ stop = true; writer.join(); });
+    for (int i = 0; i < 8; ++i) {
+        pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            // child: write enough to trigger a rotation of its own;
+            // it deadlocks here if the rotation lock was inherited locked
+            for (int j = 0; j < 16 * 1024; ++j)
+                LOG_INFO("child writer must not deadlock on the rotation lock, padding padding padding");
+            ::_exit(0);
+        }
+        EXPECT_TRUE(wait_child_exited(pid, 10)) << "child " << pid << " deadlocked";
+    }
 }
 
 TEST(ALog, float_point)
