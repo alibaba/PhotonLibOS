@@ -1221,6 +1221,14 @@ int OssClient::batch_get_objects(std::vector<GetObjectParameters>& params) {
       read_good_cnt++;
     } else {
       auto result = frame.read_end(stream);
+      // The End frame is the last one; skip the trailing bytes of the
+      // chunked body (terminating chunk 0\r\n\r\n) if necessary, so that
+      // close() sees a finished body and the keep-alive connection can
+      // be pooled for reuse instead of being dropped.
+      // TODO: remove this workaround once ChunkedBodyReadStream consumes
+      // the terminating chunk automatically on exact-sized reads.
+      char drain_buf[64];
+      op.resp.read(drain_buf, sizeof(drain_buf));
       LOG_DEBUG("End frame status code ` request cnt ` success cnt `",
                 result.status_code, result.request_count, result.success_count);
       if (read_good_cnt != result.success_count) {
