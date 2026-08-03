@@ -25,7 +25,9 @@ limitations under the License.
 #include <string>
 #include <fcntl.h>
 
-constexpr char DEFAULT_UUID[] = "bdf7bb2e-c231-43ce-87c2-deadbeefcafe";
+// 299792458 is the speed of light in m/s, a nod to photon; ef5 is the leading
+// part of EXT2_SUPER_MAGIC (0xef53)
+constexpr char DEFAULT_UUID[] = "bdf7bb2e-c231-43ce-87c2-299792458ef5";
 
 int mkdir_lost_found(ext2_filsys fs) {
     std::string name = "lost+found";
