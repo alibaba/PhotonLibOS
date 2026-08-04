@@ -222,6 +222,9 @@ namespace photon
         void set_shutting_down(bool flag = true) { set_bit(shift::shutting_down, flag); }
         bool allow_work_stealing() { return is_bit(shift::enable_work_stealing) &&
                                           !(flags & THREAD_PAUSE_WORK_STEALING); }
+        // threads still present in a sleepq (idx != -1) must only be resumed
+        // by their own vCPU, so they can not be stolen
+        bool stealable() { return allow_work_stealing() && idx == -1; }
         int set_error_number() {
             if (likely(error_number)) {
                 errno = error_number;
@@ -540,7 +543,7 @@ namespace photon
         uint8_t state = states::RUNNING;
         std::atomic<uint32_t> nthreads{1};
 // offset 48B
-        thread* idle_worker;
+        thread* idle_worker = nullptr;
         // threads scheduled by other vCPUs are added to standbyq by those vCPUs,
         // then moved to runq later by this vCPU at some proper occasion.
         thread_list standbyq;
@@ -609,7 +612,30 @@ namespace photon
             delete mee;
             mee = &_default_event_engine;
         }
+<<<<<<< HEAD
     };
+=======
+
+        // a spinlock, because try_work_stealing() iterates the list in the idler
+        // context, where yielding is not allowed (the runq may contain nothing else)
+        static spinlock vcpu_list_lock;    // lock when add, remove, or iterate
+        static intrusive_list<vcpu_t, false> pvcpu;
+        vcpu_t(uint8_t flags_) {
+            flags = flags_;
+            master_event_engine = &_default_event_engine;
+        }
+        void go_online() {  // publish after fully initialized
+            SCOPED_LOCK(vcpu_list_lock);
+            pvcpu.push_back(this);
+        }
+        void go_offline() { // by removing this from list
+            SCOPED_LOCK(vcpu_list_lock);
+            pvcpu.erase(this);
+        }
+    };
+    spinlock vcpu_t::vcpu_list_lock;
+    intrusive_list<vcpu_t, false> vcpu_t::pvcpu;
+>>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
 
     class RunQ {
     public:
@@ -1938,15 +1964,32 @@ insert_list:
     inline __attribute__((always_inline))
     thread* ws_scan_q(vcpu_t* v, thread* first, bool possibly_running) {
         // the first must be unstealable
-        assert(!first->allow_work_stealing());
+        assert(!first->stealable());
         thread_list stolen;
         uint64_t count = 0;
         auto th = first->next();
         while(th != first) {
-            SCOPED_LOCK(th->lock);
-            if ((possibly_running && th->state == states::RUNNING) ||
-                                    !th->allow_work_stealing()) {
+            // th->lock must only be try_lock()-ed here: this scan runs with the
+            // victim's runq/standbyq lock held, while everyone else (die(),
+            // thread_interrupt(), ...) takes th->lock BEFORE those locks, so
+            // blocking on th->lock would deadlock (ABBA). busy threads are
+            // simply skipped; the idler will rescan shortly.
+            auto lk = &th->lock;
+            if (lk->try_lock() < 0) {
                 th = th->next();
+<<<<<<< HEAD
+=======
+                continue;
+            }
+            DEFER(lk->unlock());
+            if ((possibly_running && th->state == states::RUNNING) ||
+                                    !th->stealable()) {
+                // sleeping threads interrupted by another vCPU are inserted to
+                // standby q without poping from sleeping q, they can not be stolen.
+                th = th->next();
+                // note that migrated threads are also inserted to standby q, but
+                // they are not in a sleeping q, so they are able to be stolen.
+>>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
@@ -1965,22 +2008,27 @@ insert_list:
         if (q.empty()) return nullptr;
         SCOPED_LOCK(q.lock);
         if (q.empty()) return nullptr;
-        if (!q.front()->allow_work_stealing())
+        if (!q.front()->stealable())
             return ws_scan_q(v, q.front(), false);
 
         thread_list stolen;
         do {
-            SCOPED_LOCK(q.front()->lock);
-            auto th = q.pop_front();
+            auto th = q.front();
+            auto lk = &th->lock;
+            if (lk->try_lock() < 0)
+                break;  // busy -- leave it for the next scan (see ws_scan_q)
+            DEFER(lk->unlock());
+            q.pop_front();
             stolen.push_back(th);
             th->vcpu->nthreads--;
             th->vcpu = v;
             v->nthreads++;
-        } while (!q.empty() && q.front()->allow_work_stealing());
+        } while (!q.empty() && q.front()->stealable());
         return stolen.eject_whole();
     }
     inline __attribute__((always_inline))
     thread* ws_scan_runq(vcpu_t* v, vcpu_t* u) {
+        // published vcpus always have an idle worker
         if (!u->runq_lock.background_try_lock()) return 0;
         DEFER(u->runq_lock.background_unlock());
         return ws_scan_q(v, u->idle_worker, true);
@@ -1990,6 +2038,7 @@ insert_list:
         assert(CURRENT == vcpu->idle_worker);
         if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
             return false;
+<<<<<<< HEAD
         scoped_rwlock _(vcpu_list_rwlock, RLOCK);
         auto u = vcpu->next;
         while (u != vcpu) {
@@ -2005,6 +2054,21 @@ insert_list:
             }
             SCOPED_LOCK(vcpu_list_lock);
             u = u->next;
+=======
+        // called by the idler exactly when the runq may contain nothing else
+        // to run, so the whole scan must never yield: use spinlocks only
+        SCOPED_LOCK(vcpu_t::vcpu_list_lock);
+        auto u = vcpu->next();
+        while (u != vcpu) {
+            if (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING) {
+                thread* th;
+                if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
+                    vcpu->idle_worker->insert_list_tail(th);
+                    return true;
+                }
+            }
+            u = u->next();
+>>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
         }
         return false;
     }
@@ -2111,6 +2175,13 @@ insert_list:
         return _n_vcpu.load(std::memory_order_relaxed);
     }
 
+    inline void vcpu_destroy(thread* th, thread** pc, vcpu_t* vcpu) {
+        delete th;
+        *pc = nullptr;
+        vcpu->~vcpu_t();
+        free(vcpu);
+    }
+
     int vcpu_init(uint64_t flags) {
         uint64_t FLAGS = VCPU_ENABLE_ACTIVE_WORK_STEALING |
                          VCPU_ENABLE_PASSIVE_WORK_STEALING;
@@ -2131,7 +2202,12 @@ insert_list:
         th->init_main_thread_stack();
         auto vcpu = new (ptr) vcpu_t(uint8_t(flags & FLAGS));
         vcpu->idle_worker = thread_create(&idler, nullptr);
+        if (unlikely(!vcpu->idle_worker)) {
+            vcpu_destroy(th, rq.pc, vcpu);
+            return -1;  // thread_create() has logged and set errno
+        }
         thread_enable_join(vcpu->idle_worker);
+        vcpu->go_online();      // publish only when fully initialized
         if_update_now(true);
         return ++_n_vcpu;
     }
@@ -2150,10 +2226,7 @@ insert_list:
         vcpu->state = states::DONE;  // instruct idle_worker to exit
         thread_join(vcpu->idle_worker);
         rq.current->state = states::DONE;
-        delete rq.current;
-        *rq.pc = nullptr;
-        vcpu->~vcpu_t();
-        free(vcpu);
+        vcpu_destroy(rq.current, rq.pc, vcpu);
         return --_n_vcpu;
     }
 
