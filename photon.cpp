@@ -87,7 +87,12 @@ static int init_event_engine(uint64_t engine, uint64_t flags, const PhotonOption
 }
 
 int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
-    if (options.use_pooled_stack_allocator) {
+    if (options.use_global_pooled_stack_allocator) {
+        if (options.use_pooled_stack_allocator)
+            LOG_WARN("both pooled and global-pooled stack allocators requested, "
+                     "using the global one");
+        use_global_pooled_stack_allocator();
+    } else if (options.use_pooled_stack_allocator) {
         use_pooled_stack_allocator();
     }
     if (options.bypass_threadpool) {

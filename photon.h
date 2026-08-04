@@ -62,6 +62,7 @@ struct PhotonOptions {
     uint32_t iouring_sq_thread_cpu;
     uint32_t iouring_sq_thread_idle_ms = 1000;     // by default polls for 1s
     bool use_pooled_stack_allocator = false;
+    bool use_global_pooled_stack_allocator = false;
     bool bypass_threadpool = false;
 };
 

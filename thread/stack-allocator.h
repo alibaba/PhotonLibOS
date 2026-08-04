@@ -47,4 +47,73 @@ inline void use_pooled_stack_allocator() {
     set_photon_thread_stack_allocator({&pooled_stack_alloc, nullptr},
                                       {&pooled_stack_dealloc, nullptr});
 }
+
+// Global pooled stack allocator
+// Unlike `pooled_stack_allocator`, whose pool is thread-local (per-vcpu), this
+// allocator keeps a single process-wide pool with per-vcpu magazine caches on
+// top of it. It behaves well when photon threads migrate across vcpus (a stack
+// allocated on one vcpu and freed on another does not accumulate on either),
+// and it bounds the process-wide idle cache (not live allocations).
+//
+// Backing store is a per-stack mmap (with MAP_NORESERVE). Allocation never
+// fails preemptively: a stack allocation failure is catastrophic for a
+// coroutine, so if mmap is refused by the OS the allocator first returns its
+// entire idle cache (cold + pending) to the OS and retries, giving up only
+// when the OS still cannot satisfy the request. The idle cache is bounded by
+// the max_*_bytes knobs below, which cap waste without ever failing a live
+// allocation. The allocator must be selected before any photon thread is
+// created; switching at runtime is not supported.
+struct GlobalStackPoolOptions {
+    // Upper bound of the resident idle cache (blocks kept with their pages
+    // resident for zero-syscall reuse). Overflow spills to the pending chain.
+    size_t   max_pooled_bytes     = 1ULL << 30;
+    // Per-vcpu magazine budget per size class; drives the magazine capacity.
+    size_t   per_vcpu_cache_bytes = 64ULL << 20;
+    // Back-pressure threshold: freed blocks awaiting reclaim beyond this are
+    // madvise'd inline on the free side (the only syscall on the free path).
+    size_t   max_pending_bytes    = 256ULL << 20;
+    // Upper bound of the cold cache (blocks madvise'd but still mapped, kept
+    // for zero-mmap reuse). Overflow is munmap'd back to the OS.
+    size_t   max_cold_bytes       = 4ULL << 30;
+    // PROT_NONE guard pages at the low end of each stack. The first one is the
+    // page photon relies on; extra ones sit below the returned pointer.
+    uint32_t guard_pages          = 1;
+    // Bytes zeroed at the top of the stack on reuse (defense against info leak
+    // between photon threads). 0 disables wiping.
+    uint32_t wipe_bytes           = 0;
+    // Keep pooled blocks PROT_NONE while idle so use-after-free faults; costs
+    // two extra syscalls per reuse. For debugging only.
+    bool     paranoid             = false;
+    // MADV_NOHUGEPAGE on the stack region, matching the other allocators.
+    bool     no_huge_page         = true;
+};
+
+struct GlobalStackPoolStats {
+    size_t   mapped_bytes;   // total bytes currently mmap'd (diagnostic)
+    size_t   pooled_bytes;   // resident hot cache
+    size_t   pending_bytes;  // freed, awaiting reclaim, still resident
+    size_t   cold_bytes;     // madvise'd but still mapped
+    size_t   live_bytes;     // handed out and in use
+    uint64_t hits;           // magazine / depot hits
+    uint64_t misses;         // fell through to depot slow path
+    uint64_t os_maps;        // mmap count
+    uint64_t os_unmaps;      // munmap count
+    uint64_t corruptions;    // double-free / metadata corruption detections
+};
+
+void* global_pooled_stack_alloc(void*, size_t stack_size);
+void global_pooled_stack_dealloc(void*, void* stack_ptr, size_t stack_size);
+
+// Select the global pooled stack allocator and capture its options. Must be
+// called before photon threads are created, or while the pool is otherwise
+// quiescent (no concurrent allocation): the options are read locklessly on the
+// hot path, so reconfiguring under concurrent load races. A later quiescent
+// call updates the options in place and keeps the existing pools.
+int use_global_pooled_stack_allocator(const GlobalStackPoolOptions& options = {});
+
+// Return pooled/pending/cold memory to the OS until the retained bytes are no
+// more than `keep_bytes`. Returns the number of bytes actually munmap'd.
+size_t global_pooled_stack_trim(size_t keep_bytes = 0);
+
+GlobalStackPoolStats global_pooled_stack_stats();
 }  // namespace photon
