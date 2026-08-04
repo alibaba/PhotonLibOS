@@ -117,7 +117,8 @@ ICachedFileSystem *new_full_file_cached_fs(IFileSystem *srcFs,
                                            uint64_t diskAvailInBytes, IOAlloc *allocator,
                                            int quotaDirLevel,
                                            CacheFnTransFunc fn_trans_func = nullptr,
-                                           uint64_t storeCacheTTLUsecs = 10'000'000);
+                                           uint64_t storeCacheTTLUsecs = 10'000'000,
+                                           bool asyncInit = false);
 
 /**
  * @param blk_size The proper size for cache metadata and IO efficiency. Large writes to cache media

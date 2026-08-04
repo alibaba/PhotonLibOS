@@ -779,7 +779,19 @@ struct FileCachePoolTest {
   static bool idle(FileCachePool *p, std::string_view n) {
     return p->idleTier_.contains(n);
   }
+  static bool scan_done(FileCachePool *p) { return p->scanDone_.load(); }
 };
+
+// Poll until the background index scan finishes (or timeout). Returns true on
+// completion.
+static bool WaitScanDone(FileCachePool *pool, uint64_t timeoutUs = 30'000'000) {
+  uint64_t waited = 0;
+  while (!FileCachePoolTest::scan_done(pool) && waited < timeoutUs) {
+    photon::thread_usleep(1000);
+    waited += 1000;
+  }
+  return FileCachePoolTest::scan_done(pool);
+}
 
 // Open through the pool then immediately release.
 static bool openClose(ICachePool* pool, const char* name) {
@@ -1564,6 +1576,178 @@ TEST(CachePool, concurrent_stress) {
     EXPECT_GE(store->do_preadv2(buf.iovec(), buf.iovcnt(), 0, 0), 0);
     store->release();
   }
+}
+
+// Populate `root` with `fileNum` cached files (one page each) through a
+// throwaway cache pool, then tear that pool down leaving the files on disk.
+// The returned totalUsed_ (blocks) lets callers assert the reused index.
+static int64_t PopulateCacheDir(const std::string& root, int fileNum,
+                                IOAlloc* allocator) {
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, allocator, 0, nullptr, 1000);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  EXPECT_NE(nullptr, pool);
+  EXPECT_TRUE(WaitScanDone(pool));  // empty dir: finishes immediately
+
+  IOVector buffer(*allocator);
+  buffer.push_back(4 * 1024);
+  for (int i = 0; i < fileNum; i++) {
+    std::string name = "/f_" + std::to_string(i);
+    auto store = pool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+    EXPECT_NE(nullptr, store);
+    if (store) {
+      store->set_actual_size(4 * 1024);
+      store->do_pwritev2(buffer.iovec(), buffer.iovcnt(), 0, 0);
+      store->release();
+    }
+  }
+  int64_t used = FileCachePoolTest::total_used(pool);
+  delete roCachedFs;  // leaves the media files on disk for reuse
+  return used;
+}
+
+// Reuse an existing cache dir: Init() must return without blocking on the
+// per-file stat scan, and the background scan must rebuild the full index.
+TEST(CachePool, reuse_async_scan_rebuilds_index) {
+  std::string root = "/mnt/tmp/ease/cache/reuse_async_scan/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+
+  const int fileNum = 500;
+  int64_t expectedUsed = PopulateCacheDir(root, fileNum, cacheAllocator);
+  ASSERT_GT(expectedUsed, 0);
+
+  // Reuse the same dir.
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000,
+      /*asyncInit=*/true);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  ASSERT_NE(nullptr, pool);
+  DEFER(delete roCachedFs);
+
+  ASSERT_TRUE(WaitScanDone(pool));
+  using T = FileCachePoolTest;
+  // Every populated file is indexed exactly once, accounting matches.
+  size_t entries = T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool);
+  EXPECT_EQ((size_t)fileNum, entries);
+  EXPECT_EQ(expectedUsed, T::total_used(pool));
+  for (int i = 0; i < fileNum; i++) {
+    std::string name = "/f_" + std::to_string(i);
+    EXPECT_TRUE(T::active(pool, name) || T::inactive(pool, name) || T::idle(pool, name));
+  }
+}
+
+// The background scan races with do_open() over multiple vCPUs on the same
+// files. Dedup in insertFile() must prevent double-counting / leaked lru_
+// nodes: each file ends up indexed exactly once.
+TEST(CachePool, reuse_scan_concurrent_open_no_double_count) {
+  std::string root = "/mnt/tmp/ease/cache/reuse_concurrent_open/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+
+  const int fileNum = 800;
+  int64_t expectedUsed = PopulateCacheDir(root, fileNum, cacheAllocator);
+  ASSERT_GT(expectedUsed, 0);
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  // asyncInit=true: this test exercises the scan racing do_open() across vCPUs.
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      10'000'000, /*asyncInit=*/true);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  ASSERT_NE(nullptr, pool);
+  DEFER(delete roCachedFs);
+
+  // Hammer open() across vCPUs while the scan is still populating the index.
+  const int kVcpus = 4;
+  const int kThreads = 8;
+  ASSERT_EQ(0, photon_std::work_pool_init(kVcpus, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  DEFER(photon_std::work_pool_fini());
+
+  std::atomic<int> open_failures{0};
+  auto worker = [&](int tid) {
+    for (int i = 0; i < fileNum; i++) {
+      std::string name = "/f_" + std::to_string(i);
+      auto store = pool->open(name.c_str(), O_CREAT | O_RDWR, 0644);
+      if (!store) { open_failures.fetch_add(1); continue; }
+      store->release();
+    }
+  };
+  std::vector<photon_std::thread> threads;
+  for (int i = 0; i < kThreads; i++) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+
+  ASSERT_TRUE(WaitScanDone(pool));
+  pool->forceRecycle();  // quiesce
+
+  using T = FileCachePoolTest;
+  EXPECT_EQ(0, open_failures.load());
+  // No duplicates: total tracked entries never exceeds the real file count.
+  size_t entries = T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool);
+  EXPECT_EQ((size_t)fileNum, entries);
+  EXPECT_GE(T::total_used(pool), 0);
+}
+
+// Destroying the pool while the background scan is still running must join the
+// scan thread cleanly (no crash / use-after-free / hang).
+TEST(CachePool, reuse_destruct_during_scan) {
+  std::string root = "/mnt/tmp/ease/cache/reuse_destruct/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+
+  const int fileNum = 2000;  // large enough that the scan is still in flight
+  ASSERT_GT(PopulateCacheDir(root, fileNum, cacheAllocator), 0);
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000,
+      /*asyncInit=*/true);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  ASSERT_NE(nullptr, pool);
+  // Let the scan start and process some files (yields to the scan thread), but
+  // do NOT wait for it to finish, so the dtor joins a scan still in flight.
+  photon::thread_usleep(2000);
+  delete roCachedFs;  // must not crash or hang
+}
+
+// Default (asyncInit omitted): Init() must scan synchronously, so the moment it
+// returns the index is fully rebuilt -- scan_done() is already true WITHOUT any
+// waiting, and every populated file is accounted for.
+TEST(CachePool, reuse_sync_scan_is_default) {
+  std::string root = "/mnt/tmp/ease/cache/reuse_sync_default/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+
+  const int fileNum = 800;
+  int64_t expectedUsed = PopulateCacheDir(root, fileNum, cacheAllocator);
+  ASSERT_GT(expectedUsed, 0);
+
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  // No asyncInit argument -> defaults to synchronous.
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 1024 * 1024,
+      1, 1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0);
+  auto pool = dynamic_cast<FileCachePool*>(roCachedFs->get_pool());
+  ASSERT_NE(nullptr, pool);
+  DEFER(delete roCachedFs);
+
+  using T = FileCachePoolTest;
+  // Already done at Init() return -- no WaitScanDone() needed.
+  EXPECT_TRUE(T::scan_done(pool));
+  size_t entries = T::active_size(pool) + T::inactive_size(pool) + T::idle_size(pool);
+  EXPECT_EQ((size_t)fileNum, entries);
+  EXPECT_EQ(expectedUsed, T::total_used(pool));
 }
 
 }
