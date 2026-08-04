@@ -531,8 +531,9 @@ namespace photon
         }
     };
 
-    static spinlock vcpu_list_lock;    // lock when add, remove, iterate next
-    static rwlock vcpu_list_rwlock;    // rlock when iterate, wlock when remove
+    // a spinlock, because try_work_stealing() iterates the list in the idler
+    // context, where yielding is not allowed (the runq may contain nothing else)
+    static spinlock vcpu_list_lock;    // lock when add, remove, or iterate
     static vcpu_t* pvcpu = nullptr;
     struct vcpu_t : public vcpu_base {
 // offset 16B
@@ -581,6 +582,8 @@ namespace photon
         vcpu_t(uint8_t flags_) {
             flags = flags_;
             master_event_engine = &_default_event_engine;
+        }
+        void go_online() {  // publish after fully initialized
             SCOPED_LOCK(vcpu_list_lock);
             if (!pvcpu) {
                 pvcpu = prev = next = this;
@@ -592,7 +595,6 @@ namespace photon
             }
         }
         void remove_from_list() {
-            scoped_rwlock _(vcpu_list_rwlock, WLOCK);
             SCOPED_LOCK(vcpu_list_lock);
             auto pr = prev;
             auto nx = next;
@@ -612,30 +614,7 @@ namespace photon
             delete mee;
             mee = &_default_event_engine;
         }
-<<<<<<< HEAD
     };
-=======
-
-        // a spinlock, because try_work_stealing() iterates the list in the idler
-        // context, where yielding is not allowed (the runq may contain nothing else)
-        static spinlock vcpu_list_lock;    // lock when add, remove, or iterate
-        static intrusive_list<vcpu_t, false> pvcpu;
-        vcpu_t(uint8_t flags_) {
-            flags = flags_;
-            master_event_engine = &_default_event_engine;
-        }
-        void go_online() {  // publish after fully initialized
-            SCOPED_LOCK(vcpu_list_lock);
-            pvcpu.push_back(this);
-        }
-        void go_offline() { // by removing this from list
-            SCOPED_LOCK(vcpu_list_lock);
-            pvcpu.erase(this);
-        }
-    };
-    spinlock vcpu_t::vcpu_list_lock;
-    intrusive_list<vcpu_t, false> vcpu_t::pvcpu;
->>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
 
     class RunQ {
     public:
@@ -1977,8 +1956,6 @@ insert_list:
             auto lk = &th->lock;
             if (lk->try_lock() < 0) {
                 th = th->next();
-<<<<<<< HEAD
-=======
                 continue;
             }
             DEFER(lk->unlock());
@@ -1989,7 +1966,6 @@ insert_list:
                 th = th->next();
                 // note that migrated threads are also inserted to standby q, but
                 // they are not in a sleeping q, so they are able to be stolen.
->>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
             } else {
                 auto next = th->remove_from_list();
                 stolen.push_back(th); count++;
@@ -2038,27 +2014,10 @@ insert_list:
         assert(CURRENT == vcpu->idle_worker);
         if (0 == (vcpu->flags & VCPU_ENABLE_ACTIVE_WORK_STEALING))
             return false;
-<<<<<<< HEAD
-        scoped_rwlock _(vcpu_list_rwlock, RLOCK);
-        auto u = vcpu->next;
-        while (u != vcpu) {
-            if (0 == (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING)) {
-                SCOPED_LOCK(vcpu_list_lock);
-                u = u->next;
-                continue;
-            }
-            thread* th;
-            if ((th = ws_scan_standbyq(vcpu, u)) || (th = ws_scan_runq(vcpu, u))) {
-                vcpu->idle_worker->insert_list_tail(th);
-                return true;
-            }
-            SCOPED_LOCK(vcpu_list_lock);
-            u = u->next;
-=======
         // called by the idler exactly when the runq may contain nothing else
         // to run, so the whole scan must never yield: use spinlocks only
-        SCOPED_LOCK(vcpu_t::vcpu_list_lock);
-        auto u = vcpu->next();
+        SCOPED_LOCK(vcpu_list_lock);
+        auto u = vcpu->next;
         while (u != vcpu) {
             if (u->flags & VCPU_ENABLE_PASSIVE_WORK_STEALING) {
                 thread* th;
@@ -2067,8 +2026,7 @@ insert_list:
                     return true;
                 }
             }
-            u = u->next();
->>>>>>> f898476 (fix(thread): make work-stealing production-ready and add comprehensive tests (#1598))
+            u = u->next;
         }
         return false;
     }

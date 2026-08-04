@@ -2048,14 +2048,14 @@ TEST(WorkStealing, sleeping_thread_not_stolen) {
         return nullptr;
     }, &rec, 0, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
     photon::thread_yield();    // let it start and fall asleep
-    ASSERT_EQ(1, photon::get_info(INFO_SLEEPING_THREAD_NUM, main_vcpu));
+    ASSERT_EQ(1UL, ((vcpu_t*)main_vcpu)->sleepq.q.size());
     // busy-wait past the 200ms wakeup time; the thread must stay on this vCPU
     for (int i = 0; i < 400; i++) {
         ::usleep(1000);
         ASSERT_EQ(main_vcpu, photon::get_vcpu(th));
         ASSERT_FALSE(rec.done.load(std::memory_order_acquire));
     }
-    ASSERT_EQ(1, photon::get_info(INFO_SLEEPING_THREAD_NUM, main_vcpu));
+    ASSERT_EQ(1UL, ((vcpu_t*)main_vcpu)->sleepq.q.size());
     ASSERT_TRUE(wait_sched([&] { return rec.done.load(std::memory_order_acquire); }, 5000));
     // after the owner's resume pass it is a normal READY thread and may
     // legitimately be stolen before main schedules it
@@ -2086,7 +2086,7 @@ TEST(WorkStealing, interrupted_sleeper_not_stolen_from_standbyq) {
         return nullptr;
     }, &rec, 0, 0, THREAD_ENABLE_WORK_STEALING | THREAD_JOINABLE);
     ASSERT_TRUE(wait_sched([&] { return rec.sleeping.load(std::memory_order_acquire); }, 1000));
-    ASSERT_EQ(1, photon::get_info(INFO_SLEEPING_THREAD_NUM, main_vcpu));
+    ASSERT_EQ(1UL, ((vcpu_t*)main_vcpu)->sleepq.q.size());
     // interrupt from a third vCPU: the thread lands on main's standbyq
     std::atomic<bool> interrupted{false};
     auto intr = spawn_vcpu(0, [&] {
@@ -2095,7 +2095,7 @@ TEST(WorkStealing, interrupted_sleeper_not_stolen_from_standbyq) {
     });
     ASSERT_TRUE(wait_blocked([&] { return interrupted.load(std::memory_order_acquire); }, 1000));
     intr.join();
-    ASSERT_EQ(1, photon::get_info(INFO_STANDBY_THREAD_NUM, main_vcpu));
+    ASSERT_TRUE(((vcpu_t*)main_vcpu)->standbyq.contains((photon::thread*)th));
     // busy-wait: the stealer must not steal the interrupted sleeper
     for (int i = 0; i < 300; i++) {
         ::usleep(1000);
@@ -2109,8 +2109,8 @@ TEST(WorkStealing, interrupted_sleeper_not_stolen_from_standbyq) {
     // after the owner's resume pass it is a normal READY thread and may
     // legitimately be stolen before main schedules it
     EXPECT_TRUE(rec.ran_on == main_vcpu || rec.ran_on == stealer.vcpu);
-    EXPECT_EQ(0, photon::get_info(INFO_STANDBY_THREAD_NUM, main_vcpu));
-    EXPECT_EQ(0, photon::get_info(INFO_SLEEPING_THREAD_NUM, main_vcpu));
+    EXPECT_TRUE(((vcpu_t*)main_vcpu)->standbyq.empty());
+    EXPECT_TRUE(((vcpu_t*)main_vcpu)->sleepq.empty());
     thread_join((join_handle*)th);
 }
 
