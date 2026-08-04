@@ -32,7 +32,8 @@ ICachedFileSystem *new_full_file_cached_fs(IFileSystem *srcFs, IFileSystem *medi
                                            uint64_t periodInUs, uint64_t diskAvailInBytes,
                                            IOAlloc *allocator, int quotaDirLevel,
                                            CacheFnTransFunc fn_trans_func,
-                                           uint64_t storeCacheTTLUsecs) {
+                                           uint64_t storeCacheTTLUsecs,
+                                           bool asyncInit) {
     if (refillUnit % 4096 != 0 || !is_power_of_2(refillUnit)) {
         LOG_ERROR_RETURN(EINVAL, nullptr, "refill Unit need to be aligned to 4KB and power of 2")
     }
@@ -40,8 +41,8 @@ ICachedFileSystem *new_full_file_cached_fs(IFileSystem *srcFs, IFileSystem *medi
         allocator = new IOAlloc;
     }
     FileCachePool *pool = nullptr;
-    pool = new FileCachePool(mediaFs, capacityInGB, periodInUs, diskAvailInBytes, 
-                             refillUnit, storeCacheTTLUsecs);
+    pool = new FileCachePool(mediaFs, capacityInGB, periodInUs, diskAvailInBytes,
+                             refillUnit, storeCacheTTLUsecs, asyncInit);
     pool->Init();
     return new_cached_fs(srcFs, pool, 4096, allocator, fn_trans_func);
 }

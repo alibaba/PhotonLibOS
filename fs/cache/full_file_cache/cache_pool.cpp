@@ -29,6 +29,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/enumerable.h>
 #include <photon/common/utility.h>
+#include <photon/thread/thread11.h>
 #include <photon/fs/fiemap.h>
 #include <photon/fs/path.h>
 
@@ -41,7 +42,7 @@ const int64_t kEvictionMark = 5ll * kGB;
 
 FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
     uint64_t periodInUs, uint64_t diskAvailInBytes, uint64_t refillUnit,
-    uint64_t storeCacheTTLUsecs)
+    uint64_t storeCacheTTLUsecs, bool asyncInit)
     : ICachePool(0, 128, -1U, false, storeCacheTTLUsecs),
       mediaFs_(mediaFs),
       capacityInGB_(capacityInGB),
@@ -52,7 +53,8 @@ FileCachePool::FileCachePool(IFileSystem* mediaFs, uint64_t capacityInGB,
       timer_(nullptr),
       running_(false),
       exit_(false),
-      isFull_(false) {
+      isFull_(false),
+      asyncInit_(asyncInit) {
     int64_t capacityInBytes = capacityInGB_ * kGB;
     waterMark_ = calcWaterMark(capacityInBytes, kMaxFreeSpace);
     // keep this relation : waterMark < riskMark < capacity
@@ -71,14 +73,28 @@ FileCachePool::~FileCachePool() {
     }
     delete timer_;
   }
+  // Join the scan before freeing.
+  if (scanJoin_) {
+    photon::thread_interrupt(scanThread_, EINTR);
+    photon::thread_join(scanJoin_);
+    scanJoin_ = nullptr;
+    scanThread_ = nullptr;
+  }
   this->stores_clear();
   delete mediaFs_;
 }
 
 void FileCachePool::Init() {
   probeFiemap();
-  traverseDir("/");
-  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8UL * 1024 * 1024);
+  timer_ = new photon::Timer(periodInUs_, {this, FileCachePool::timerHandler}, true, 8ULL * 1024 * 1024);
+  // Scanning stat()s every cached file (seconds for a large cache).
+  if (asyncInit_) {
+    scanThread_ = photon::thread_create11(&FileCachePool::backgroundScan, this);
+    scanJoin_ = photon::thread_enable_join(scanThread_);
+  } else {
+    traverseDir("/");
+    scanDone_ = true;
+  }
 }
 
 void FileCachePool::probeFiemap() {
@@ -128,10 +144,16 @@ ICacheStore* FileCachePool::do_open(std::string_view pathname, int flags, mode_t
 
   auto find = fileIndex_.find(pathname);
   if (find == fileIndex_.end()) {
+    struct stat st = {};
+    uint64_t fileSize = 0;
+    if (localFile->fstat(&st) == 0) {
+      fileSize = st.st_blocks * kDiskBlockSize;
+    }
     auto lruIter = lru_.push_front(fileIndex_.end());
-    std::unique_ptr<LruEntry> entry(new LruEntry{lruIter, 1, 0});
+    std::unique_ptr<LruEntry> entry(new LruEntry{lruIter, 1, fileSize});
     find = fileIndex_.emplace(pathname, std::move(entry)).first;
     lru_.front() = find;
+    totalUsed_ += fileSize;
   } else {
     lru_.access(find->second->lruIter);
     find->second->openCount++;
@@ -428,10 +450,22 @@ bool FileCachePool::afterFtrucate(FileNameMap::iterator iter) {
 }
 
 int FileCachePool::traverseDir(const std::string& root) {
+  int count = 0;
   for (auto file : enumerable(Walker(mediaFs_, root))) {
+    if (exit_) break;
     insertFile(file);
+    ++count;
+    if (count % 1'000 == 0) photon::thread_yield();
   }
+  LOG_INFO("` files under path `", count, root);
   return 0;
+}
+
+void FileCachePool::backgroundScan() {
+  auto start = photon::now;
+  traverseDir("/");
+  scanDone_ = true;
+  LOG_INFO("cache index scan finished, elapsed us: `", photon::now - start);
 }
 
 int FileCachePool::insertFile(std::string_view file) {
@@ -443,10 +477,14 @@ int FileCachePool::insertFile(std::string_view file) {
   auto fileSize = st.st_blocks * kDiskBlockSize;
 
   SCOPED_LOCK(m_lock_);
-  auto lruIter = lru_.push_front(fileIndex_.end());
-  auto entry = std::unique_ptr<LruEntry>(new LruEntry{lruIter, 0, fileSize});
-  auto iter = fileIndex_.emplace(file, std::move(entry)).first;
-  lru_.front() = iter;
+  // Skip files already tracked.
+  if (fileIndex_.find(file) != fileIndex_.end()) {
+    return 0;
+  }
+  for (auto* tier : coldTiers_) {
+    if (tier->contains(file)) return 0;
+  }
+  coldTiers_[0]->insert(file);
   totalUsed_ += fileSize;
 
   demoteToCold();
@@ -479,13 +517,12 @@ void FileCachePool::demoteToCold() {
     coldTiers_[0]->insert(tailIt->first);
     lru_.remove(tailIt->second->lruIter);
     fileIndex_.erase(tailIt);
-
-    for (size_t i = 1; i < coldTiers_.size(); i++) {
-      if (coldTiers_[i-1]->size() > thresholds_[i].value) {
-        auto key = coldTiers_[i-1]->victim();
-        coldTiers_[i]->insert(key);
-        coldTiers_[i-1]->remove(key);
-      } else break;
+  }
+  for (size_t i = 1; i < coldTiers_.size(); i++) {
+    while (coldTiers_[i-1]->size() > thresholds_[i].value) {
+      auto key = coldTiers_[i-1]->victim();
+      coldTiers_[i]->insert(key);
+      coldTiers_[i-1]->remove(key);
     }
   }
 }
