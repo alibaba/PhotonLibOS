@@ -136,12 +136,22 @@ struct BufStep {
 
 struct BufStepV {
     iovector_view& v;
-    BufStepV(iovector_view& v) : v(v) { }
+    // a 0-length element would make the iocb of doio_loop() transfer 0 byte and
+    // return 0, which is indistinguishable from EOF, so such elements are
+    // skipped. Before the first iocb, at least one element is kept, so that
+    // iocbs relying on iov[0] always have a valid one; after that the view is
+    // allowed to become empty, which simply ends the loop.
+    BufStepV(iovector_view& v) : v(v) { skip_empty(1); }
     bool operator()(size_t ret, size_t n) __INLINE__ {
         auto extracted = v.extract_front(ret);
         assert(extracted == ret);
         _unused(extracted);
+        skip_empty(0);
         return v.iovcnt > 0;
+    }
+    void skip_empty(int keep) __INLINE__ {
+        while (v.iovcnt > keep && v.front().iov_len == 0)
+            v.pop_front();
     }
 };
 
