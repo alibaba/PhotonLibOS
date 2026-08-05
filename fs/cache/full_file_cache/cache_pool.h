@@ -79,8 +79,8 @@ private:
 class FileCachePool : public photon::fs::ICachePool {
 public:
     FileCachePool(photon::fs::IFileSystem *mediaFs, uint64_t capacityInGB, uint64_t periodInUs,
-                  uint64_t diskAvailInBytes, uint64_t refillUnit, 
-                  uint64_t storeCacheTTLUsecs = 10'000'000);
+                  uint64_t diskAvailInBytes, uint64_t refillUnit,
+                  uint64_t storeCacheTTLUsecs = 10'000'000, bool asyncInit = false);
     ~FileCachePool();
 
     static const uint64_t kDiskBlockSize = 512; // stat(2)
@@ -179,6 +179,15 @@ protected:
 
     int traverseDir(const std::string &root);
     virtual int insertFile(std::string_view file);
+
+    // Traversing dir in background thread so a large
+    // cache reuse does not block startup.
+    void backgroundScan();
+    bool asyncInit_ = false;
+    // The background scan thread.
+    photon::thread *scanThread_ = nullptr;
+    photon::join_handle *scanJoin_ = nullptr;
+    std::atomic<bool> scanDone_{false};  // set when the scan finishes
 
     typedef photon::fs::LRU<FileNameMap::iterator, uint32_t> LRUContainer;
     LRUContainer lru_;
