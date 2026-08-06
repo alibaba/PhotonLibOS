@@ -30,6 +30,7 @@ limitations under the License.
 namespace photon {
 namespace net {
 class TLSContext;
+class Resolver;
 namespace http {
 
 class IWebSocketStream;  // Forward declaration for websocket_connect
@@ -38,6 +39,18 @@ class ICookieJar : public Object {
 public:
     virtual int get_cookies_from_headers(std::string_view host, Message* message) = 0;
     virtual int set_cookies_to_headers(Request* request) = 0;
+};
+
+// Establishes socket streams for HTTP clients. The built-in implementation
+// maintains a per-vCPU connection pool and a DNS cache for each client.
+// A user-provided dialer is shared by all vCPUs the client runs on, so it
+// must be safe for concurrent use across vCPUs.
+class IDialer : public Object {
+public:
+    virtual ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
+                                uint64_t timeout = -1ULL) = 0;
+    // dial to a Unix Domain Socket
+    virtual ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1ULL) = 0;
 };
 
 class Client : public Object {
@@ -183,6 +196,16 @@ public:
     void timeout_ms(uint64_t tmo) { timeout(tmo * 1000ULL); }
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000ULL * 1000ULL); }
 
+    // Inject a dialer to take over connection establishment (and pooling, if
+    // any), replacing the built-in per-vCPU pooled dialer. Not owned; must
+    // outlive the client, and must be safe for concurrent use across vCPUs.
+    void set_dialer(IDialer* dialer) { m_dialer = dialer; }
+
+    // Inject a DNS resolver shared by the built-in dialers of this client
+    // (typically to share one DNS cache among clients / vCPUs). Not owned;
+    // must outlive the client. No effect on a dialer set by set_dialer().
+    void set_resolver(Resolver* resolver) { m_resolver = resolver; }
+
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
                                           bool secure = false, uint64_t timeout = -1ULL) = 0;
 
@@ -202,11 +225,13 @@ protected:
     uint64_t m_timeout = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
+    IDialer* m_dialer = nullptr;
+    Resolver* m_resolver = nullptr;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
-// Note: HTTP clients within the same std::thread share TLS config and connection pool.
-// Use separate std::threads for different TLS configurations.
+// Each client owns its connection pools (created lazily, one per vCPU used),
+// destroyed with the client, or at photon::fini() of the respective vCPU.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();
