@@ -678,8 +678,14 @@ public:
     }
 
     // ---- fork safety ------------------------------------------------------
-    // No background thread exists; only the depot spinlocks need protection so
-    // a fork while another thread holds one does not deadlock the child.
+    // fork() is not compatible with multiple vcpus: the child inherits the
+    // memory of every vcpu but only the calling thread, so photon threads on
+    // the other vcpus are gone while their state (and whatever they owned)
+    // remains. That is unfixable at the allocator level, so no attempt is made
+    // to preserve the cached blocks of the vanished threads -- they are simply
+    // leaked in the child, which either exec()s or must not reuse the inherited
+    // pool. All these handlers do is guarantee that no depot lock is held
+    // across fork(), so the child never inherits a locked spinlock.
     void atfork_prepare() {
         reg_lock.lock();
         uint32_t nc = n_classes.load(std::memory_order_relaxed);
@@ -691,41 +697,9 @@ public:
         reg_lock.unlock();
     }
     void atfork_child() {
-        // Reset the locks (their prior holders no longer exist in the child),
-        // then absorb every vcpu's magazines so no cached block is lost, and
-        // drop the PerVCPU nodes of threads that no longer exist (only the
-        // forking thread survives). Malloc-free except for delete of dead nodes.
         uint32_t nc = n_classes.load(std::memory_order_relaxed);
-        new (&reg_lock) spinlock();
-        for (uint32_t i = 0; i < nc; i++) new (&classes[i].lock) spinlock();
-        PerVCPU* self = (PerVCPU*)pthread_getspecific(key);
-        PerVCPU* keep = nullptr;
-        for (PerVCPU* v = vcpu_list; v; ) {
-            PerVCPU* next = v->reg_next;
-            for (uint32_t ci = 0; ci < nc; ci++) {
-                auto& c = classes[ci];
-                for (auto mp : {v->loaded[ci], v->prev[ci]}) {
-                    if (!mp) continue;
-                    for (uint32_t i = 0; i < mp->n; i++) {
-                        void* b = mp->blk[i];
-                        auto meta = (BlockMeta*)((char*)b + c.block_size);
-                        meta->link = c.pending;
-                        c.pending = b;
-                        c.pending_bytes += c.block_size;
-                    }
-                    mp->n = 0;
-                    mp->next = c.empty;
-                    c.empty = mp;
-                }
-                v->loaded[ci] = v->prev[ci] = nullptr;
-                free(v->spare[ci]);
-                v->spare[ci] = nullptr;
-            }
-            if (v == self) { v->reg_next = keep; keep = v; }
-            else { delete v; }   // node of a thread that does not exist in the child
-            v = next;
-        }
-        vcpu_list = keep;
+        for (uint32_t i = 0; i < nc; i++) classes[i].lock.unlock();
+        reg_lock.unlock();
     }
 };
 

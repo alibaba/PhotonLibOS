@@ -63,6 +63,12 @@ inline void use_pooled_stack_allocator() {
 // the max_*_bytes knobs below, which cap waste without ever failing a live
 // allocation. The allocator must be selected before any photon thread is
 // created; switching at runtime is not supported.
+//
+// fork() combined with multiple vcpus is not supported, which is a photon-wide
+// limitation rather than one of this allocator: the child inherits the memory
+// of every vcpu but only the forking thread. Blocks cached by the vanished
+// threads are leaked in the child; the allocator only guarantees that no
+// internal lock is held across fork(), so the child never deadlocks on one.
 struct GlobalStackPoolOptions {
     // Upper bound of the resident idle cache (blocks kept with their pages
     // resident for zero-syscall reuse). Overflow spills to the pending chain.
