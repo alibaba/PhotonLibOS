@@ -246,7 +246,7 @@ TEST(GlobalStackPool, CrossVcpuBounded) {
     opt.max_pending_bytes = 16 * M;
     opt.max_cold_bytes = 32 * M;
     PhotonOptions po;
-    po.use_global_pooled_stack_allocator = true;
+    po.use_pooled_stack_allocator = STACK_ALLOCATOR_GLOBAL_POOLED;
     ASSERT_EQ(init(INIT_EVENT_DEFAULT, INIT_IO_NONE, po), 0);
     DEFER(fini());
     use_global_pooled_stack_allocator(opt);
