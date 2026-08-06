@@ -16,9 +16,47 @@ limitations under the License.
 #pragma once
 
 #include <photon/common/callback.h>
+#include <photon/common/delegates.h>
 #include <stddef.h>
+#include <stdint.h>
 
 namespace photon {
+
+// Statistics common to any photon thread stack allocator that pools memory.
+// Concrete pools derive from it to add their own counters, so generic tooling
+// (and the StackAllocator facade below) can consume the common part.
+struct StackPoolStats {
+    size_t   pooled_bytes = 0;   // idle memory kept for reuse
+    size_t   live_bytes = 0;     // handed out and in use
+    uint64_t hits = 0;           // served from the pool
+    uint64_t misses = 0;         // had to go to the slow path
+};
+
+// Stack allocator facade, built on photon's Delegates.
+//
+// An allocator is any object exposing the methods below; binding it produces a
+// facade that forwards to them:
+//
+//     void*          alloc(size_t stack_size);
+//     void           dealloc(void* stack_ptr, size_t stack_size);
+//     size_t         trim(size_t keep_bytes);     // optional
+//     StackPoolStats stats();                     // optional
+//
+// Binding the object binds every method at once, which is the point: the
+// allocator and deallocator can no longer be set independently (setting only
+// one of the two, and thus freeing stacks with a different allocator than the
+// one that created them, used to be possible and is catastrophic). Methods the
+// object does not provide are simply left unbound and return a zeroed value.
+DEFINE_DELEGATE_FUNCTION(DStackAlloc, alloc);
+DEFINE_DELEGATE_FUNCTION(DStackDealloc, dealloc);
+DEFINE_DELEGATE_FUNCTION(DStackTrim, trim);
+DEFINE_DELEGATE_FUNCTION(DStackStats, stats);
+
+using StackAllocator = Delegates<
+    DFeature::Feature<DStackAlloc,   void*(size_t)>,
+    DFeature::Feature<DStackDealloc, void(void*, size_t)>,
+    DFeature::Feature<DStackTrim,    size_t(size_t)>,
+    DFeature::Feature<DStackStats,   StackPoolStats()>>;
 
 // Set photon allocator/deallocator for photon thread stack
 // this is a hook for thread allocation, both alloc and dealloc
@@ -43,6 +81,22 @@ void set_photon_thread_stack_allocator(
         &default_photon_thread_stack_alloc, nullptr},
     Delegate<void, void*, size_t> photon_thread_dealloc = {
         &default_photon_thread_stack_dealloc, nullptr});
+
+// Set the stack allocator from a facade, binding alloc and dealloc together.
+// Returns -1 (EINVAL) if `allocator` has no alloc or no dealloc bound.
+int set_photon_thread_stack_allocator(StackAllocator allocator);
+
+// Convenience: bind every supported method of `obj` and install it.
+template <typename T, typename = typename std::enable_if<
+                          !std::is_base_of<DelegatesBase, T>::value>::type>
+inline int set_photon_thread_stack_allocator(T& obj) {
+    return set_photon_thread_stack_allocator(StackAllocator(obj));
+}
+
+// The stack allocator currently in use, for trim()/stats() on whichever
+// allocator is installed. Unbound methods return a zeroed value.
+StackAllocator& get_photon_thread_stack_allocator();
+
 inline void use_pooled_stack_allocator() {
     set_photon_thread_stack_allocator({&pooled_stack_alloc, nullptr},
                                       {&pooled_stack_dealloc, nullptr});
@@ -94,17 +148,13 @@ struct GlobalStackPoolOptions {
     bool     no_huge_page         = true;
 };
 
-struct GlobalStackPoolStats {
-    size_t   mapped_bytes;   // total bytes currently mmap'd (diagnostic)
-    size_t   pooled_bytes;   // resident hot cache
-    size_t   pending_bytes;  // freed, awaiting reclaim, still resident
-    size_t   cold_bytes;     // madvise'd but still mapped
-    size_t   live_bytes;     // handed out and in use
-    uint64_t hits;           // magazine / depot hits
-    uint64_t misses;         // fell through to depot slow path
-    uint64_t os_maps;        // mmap count
-    uint64_t os_unmaps;      // munmap count
-    uint64_t corruptions;    // double-free / metadata corruption detections
+struct GlobalStackPoolStats : StackPoolStats {
+    size_t   mapped_bytes = 0;   // total bytes currently mmap'd (diagnostic)
+    size_t   pending_bytes = 0;  // freed, awaiting reclaim, still resident
+    size_t   cold_bytes = 0;     // madvise'd but still mapped
+    uint64_t os_maps = 0;        // mmap count
+    uint64_t os_unmaps = 0;      // munmap count
+    uint64_t corruptions = 0;    // double-free / metadata corruption detections
 };
 
 void* global_pooled_stack_alloc(void*, size_t stack_size);

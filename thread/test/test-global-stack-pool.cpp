@@ -31,6 +31,7 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/thread/stack-allocator.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 
 using namespace photon;
@@ -275,6 +276,80 @@ TEST(GlobalStackPool, CrossVcpuBounded) {
     auto s = global_pooled_stack_stats();
     ASSERT_GT(baseline, 0u);
     EXPECT_LT(s.mapped_bytes, baseline + 64 * M);
+}
+
+// A user-defined allocator: any object with these methods can be installed.
+struct CountingAllocator {
+    uint64_t n_alloc = 0, n_dealloc = 0, n_trim = 0;
+    void* alloc(size_t size) {
+        n_alloc++;
+        return default_photon_thread_stack_alloc(nullptr, size);
+    }
+    void dealloc(void* ptr, size_t size) {
+        n_dealloc++;
+        default_photon_thread_stack_dealloc(nullptr, ptr, size);
+    }
+    size_t trim(size_t keep) { n_trim++; return keep; }
+    StackPoolStats stats() {
+        StackPoolStats s;
+        s.hits = n_alloc;
+        s.misses = n_dealloc;
+        return s;
+    }
+};
+
+TEST(StackAllocatorFacade, BindObjectWholesale) {
+    // Installing an object binds alloc/dealloc/trim/stats together, so the
+    // allocator and deallocator can never come from different sources.
+    CountingAllocator ca;
+    ASSERT_EQ(init(INIT_EVENT_DEFAULT, INIT_IO_NONE), 0);
+    // init() already created photon threads with the allocator installed at
+    // that point; it must be the one that frees them at fini(), so save it and
+    // put it back before tearing down.
+    auto saved = get_photon_thread_stack_allocator();
+    DEFER({
+        set_photon_thread_stack_allocator(saved);
+        fini();
+    });
+    ASSERT_EQ(set_photon_thread_stack_allocator(ca), 0);
+
+    const int N = 16;
+    for (int i = 0; i < N; i++) {
+        auto th = thread_create11(64 * K, [] {});
+        thread_enable_join(th);
+        thread_join((join_handle*)th);
+    }
+    // Both sides of the facade were used, and in matching numbers.
+    EXPECT_EQ(ca.n_alloc, (uint64_t)N);
+    EXPECT_EQ(ca.n_dealloc, (uint64_t)N);
+
+    // trim()/stats() reach the installed allocator generically.
+    auto& sa = get_photon_thread_stack_allocator();
+    EXPECT_EQ(sa.trim(123), 123u);
+    EXPECT_EQ(ca.n_trim, 1u);
+    auto st = sa.stats();
+    EXPECT_EQ(st.hits, (uint64_t)N);
+    EXPECT_EQ(st.misses, (uint64_t)N);
+}
+
+TEST(StackAllocatorFacade, LegacyDelegateInterfaceStillWorks) {
+    // The pre-existing Delegate-pair interface must keep working unchanged.
+    ASSERT_EQ(init(INIT_EVENT_DEFAULT, INIT_IO_NONE), 0);
+    auto saved = get_photon_thread_stack_allocator();
+    DEFER({
+        set_photon_thread_stack_allocator(saved);
+        fini();
+    });
+    set_photon_thread_stack_allocator({&pooled_stack_alloc, nullptr},
+                                      {&pooled_stack_dealloc, nullptr});
+    for (int i = 0; i < 16; i++) {
+        auto th = thread_create11(64 * K, [] {});
+        thread_enable_join(th);
+        thread_join((join_handle*)th);
+    }
+    // An allocator with no dealloc must be rejected rather than installed.
+    StackAllocator broken;
+    EXPECT_EQ(set_photon_thread_stack_allocator(broken), -1);
 }
 
 int main(int argc, char** argv) {

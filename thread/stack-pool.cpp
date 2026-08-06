@@ -606,7 +606,7 @@ public:
         return freed;
     }
 
-    GlobalStackPoolStats stats() {
+    GlobalStackPoolStats full_stats() {
         GlobalStackPoolStats s = {};
         s.mapped_bytes = total_mapped.load(std::memory_order_relaxed);
         SCOPED_LOCK(reg_lock);
@@ -631,6 +631,9 @@ public:
         s.live_bytes += pt_live.load(std::memory_order_relaxed);
         return s;
     }
+
+    // The common slice, for the StackAllocator facade's stats() feature.
+    StackPoolStats stats() { return full_stats(); }
 
     // ---- per-vcpu lifecycle ----------------------------------------------
     PerVCPU* get_pervcpu() {
@@ -745,9 +748,10 @@ int use_global_pooled_stack_allocator(const GlobalStackPoolOptions& options) {
         LOG_ERRNO_RETURN(0, -1, "global stack pool init failed");
     g_pool->opt = options;
     if (g_pool->opt.guard_pages < 1) g_pool->opt.guard_pages = 1;
-    set_photon_thread_stack_allocator({&global_pooled_stack_alloc, nullptr},
-                                      {&global_pooled_stack_dealloc, nullptr});
-    return 0;
+    // Bind the pool object itself: alloc/dealloc/trim/stats are installed in
+    // one go, so they can never get out of sync. The free functions below stay
+    // exported for callers using the older Delegate-based interface.
+    return set_photon_thread_stack_allocator(*g_pool);
 }
 
 size_t global_pooled_stack_trim(size_t keep_bytes) {
@@ -756,7 +760,7 @@ size_t global_pooled_stack_trim(size_t keep_bytes) {
 
 GlobalStackPoolStats global_pooled_stack_stats() {
     if (!g_pool) return GlobalStackPoolStats{};
-    return g_pool->stats();
+    return g_pool->full_stats();
 }
 
 }  // namespace photon

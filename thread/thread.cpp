@@ -118,10 +118,19 @@ namespace photon
         }
     };
 
-    static Delegate<void*, size_t> photon_thread_alloc(
-        &default_photon_thread_stack_alloc, nullptr);
-    static Delegate<void, void*, size_t> photon_thread_dealloc(
-        &default_photon_thread_stack_dealloc, nullptr);
+    // The installed stack allocator. alloc and dealloc always travel together
+    // in this single facade, so a stack can never be freed by an allocator
+    // other than the one that created it.
+    static StackAllocator make_default_stack_allocator() {
+        StackAllocator sa;
+        DUtils::bind_func<DStackAlloc>(sa, nullptr,
+                                       &default_photon_thread_stack_alloc);
+        DUtils::bind_func<DStackDealloc>(sa, nullptr,
+                                         &default_photon_thread_stack_dealloc);
+        return sa;
+    }
+    static StackAllocator photon_thread_stack_allocator =
+        make_default_stack_allocator();
 
     struct vcpu_t;
     struct thread;
@@ -282,7 +291,7 @@ namespace photon
             assert(state == states::DONE);
             // `buf` and `stack_size` will always store on register
             // when calling deallocating.
-            photon_thread_dealloc(buf, stack_size);
+            photon_thread_stack_allocator.dealloc(buf, stack_size);
         }
     };
 
@@ -1047,7 +1056,7 @@ R"(
             LOG_WARN(VALUE(stack_size), " is less than minimal value `, use the minimal value instead", least_stack_size);
             stack_size = least_stack_size;
         }
-        char* ptr = (char*)photon_thread_alloc(stack_size);
+        char* ptr = (char*)photon_thread_stack_allocator.alloc(stack_size);
         if (unlikely(!ptr))
             LOG_ERROR_RETURN(ENOMEM, nullptr, "stack allocation failed");
         uint64_t p = (uint64_t)ptr + stack_size - sizeof(thread) - randomizer;
@@ -2251,8 +2260,31 @@ insert_list:
     void set_photon_thread_stack_allocator(
         Delegate<void *, size_t> _photon_thread_alloc,
         Delegate<void, void *, size_t> _photon_thread_dealloc) {
-        photon_thread_alloc = _photon_thread_alloc;
-        photon_thread_dealloc = _photon_thread_dealloc;
+        // Kept for compatibility: the two delegates are folded into the facade.
+        // Delegates binds a single object, so alloc and dealloc must belong to
+        // the same one (they always do in practice, and both are free functions
+        // in every allocator shipped with photon).
+        StackAllocator sa;
+        if (!DUtils::bind_func_delegate<DStackAlloc, void*(size_t)>(
+                sa, _photon_thread_alloc) ||
+            !DUtils::bind_func_delegate<DStackDealloc, void(void*, size_t)>(
+                sa, _photon_thread_dealloc))
+            LOG_ERROR_RETURN(EINVAL, , "allocator and deallocator must belong "
+                             "to the same object");
+        photon_thread_stack_allocator = sa;
+    }
+
+    int set_photon_thread_stack_allocator(StackAllocator allocator) {
+        if (!DUtils::get_func<DStackAlloc, void*(size_t)>(allocator)._func ||
+            !DUtils::get_func<DStackDealloc, void(void*, size_t)>(allocator)._func)
+            LOG_ERROR_RETURN(EINVAL, -1, "stack allocator must provide both "
+                             "alloc() and dealloc()");
+        photon_thread_stack_allocator = allocator;
+        return 0;
+    }
+
+    StackAllocator& get_photon_thread_stack_allocator() {
+        return photon_thread_stack_allocator;
     }
 
 }  // namespace photon
