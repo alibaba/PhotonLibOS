@@ -33,6 +33,9 @@ namespace rpc {
         uint64_t m_issuing = 0;
         uint64_t m_tag = 0;
         bool m_running = true;
+        // The context currently being collected by the receiver (under m_mutex_r).
+        // A timed-out caller must not destroy its stack context until this is cleared.
+        OutOfOrderContext* m_collecting = nullptr;
 
         // rlock used as both reader lock and wait notifier.
         // add yield in lock will break the assuption that threads
@@ -57,6 +60,23 @@ namespace rpc {
         }
         int get_queue_count() {
             return m_map.size();
+        }
+        // Wait until the receiver hands back the context that it has taken out
+        // of the map for collecting (see `m_collecting`), so that the caller's
+        // stack frame hosting the context can be safely destroyed afterwards.
+        // Precondition: args.phaselock is held by the caller. The receiver
+        // clears m_collecting under the same lock, and cond wait releases the
+        // lock atomically, so the check-then-wait cannot lose the wakeup.
+        // Returns true if the receiver was collecting args; when it returns,
+        // the hand-back is done and args.phase is COLLECTED.
+        bool wait_if_collecting(OutOfOrderContext& args) {
+            if (m_collecting != &args)
+                return false;
+            args.th = nullptr; // tell the receiver not to interrupt us
+            do {
+                m_cond_collected.wait(args.phaselock);
+            } while (m_collecting == &args);
+            return true;
         }
         int issue_operation(OutOfOrderContext& args) //firing issue
         {
@@ -93,9 +113,18 @@ namespace rpc {
 
             int ret2 = args.do_issue(&args);
             if (ret2 < 0) {
-                SCOPED_LOCK(m_mutex_map);
-                m_map.erase(args.tag);
-                m_cond_collected.notify_one();
+                {
+                    SCOPED_LOCK(m_mutex_map);
+                    m_map.erase(args.tag);
+                    m_cond_collected.notify_one();
+                }
+                {
+                    // The receiver may have already taken &args out of the map
+                    // while do_issue() yielded, and may still dereference it
+                    // after yielding in do_collect().
+                    SCOPED_LOCK(args.phaselock);
+                    wait_if_collecting(args);
+                }
                 LOG_ERROR_RETURN(0, -1, "failed to do_issue()");
             }
             {
@@ -112,13 +141,19 @@ namespace rpc {
         };
         int wait_completion(OutOfOrderContext& args) //recieving work
         {
+            bool found;
             {
                 // check if context issued
                 SCOPED_LOCK(m_mutex_map);
-                if (m_map.find(args.tag) == m_map.end()) {
-                    LOG_ERROR_RETURN(EINVAL, -1,
-                                        "context not found in map");
-                }
+                found = m_map.find(args.tag) != m_map.end();
+            }
+            if (!found) {
+                // The receiver may have just taken this context out of the map
+                // and could still be collecting it after a yield in do_collect().
+                SCOPED_LOCK(args.phaselock);
+                if (wait_if_collecting(args) && args.phase == OooPhase::COLLECTED)
+                    return args.ret;
+                LOG_ERROR_RETURN(EINVAL, -1, "context not found in map");
             }
             DEFER(m_wait.notify_one());
             {
@@ -155,6 +190,14 @@ namespace rpc {
                                         SCOPED_LOCK(m_mutex_map);
                                         m_map.erase(args.tag);
                                         m_cond_collected.notify_one();
+                                    }
+                                    if (wait_if_collecting(args)) {
+                                        // The receiver had already taken our pointer out
+                                        // of the map and may dereference it after yielding
+                                        // in do_collect(). Now that the result has actually
+                                        // been collected, return it as a success, consistent
+                                        // with the COLLECTED check above.
+                                        return args.ret;
                                     }
                                     LOG_ERROR_RETURN(ETIMEDOUT, -1, "waiting for completion timeout");
                                 }
@@ -198,6 +241,7 @@ namespace rpc {
                     }
                     targ = it->second;
                     m_map.erase(it);
+                    m_collecting = targ;
                 }
 
                 // collect with mutex_r
@@ -209,7 +253,10 @@ namespace rpc {
                         SCOPED_LOCK(targ->phaselock);
                         th = targ->th;
                         targ->phase = OooPhase::COLLECTED;
+                        m_collecting = nullptr;
                     }
+                    // both timed-out callers and shutdown() may be waiting
+                    m_cond_collected.notify_all();
                     if (o_tag == args.tag) {
                         if (th != CURRENT) {
                             LOG_ERROR_RETURN(EINVAL, -1, "args tag ` not belong to current thread `", VALUE(args.tag), VALUE(CURRENT));
@@ -218,8 +265,10 @@ namespace rpc {
                                           // collect it
                     }
                     if (!th)
-                        // issued but requesting thread just failed in completion when waiting
-                        LOG_ERROR_RETURN(ENOENT, -2, "response recvd, but requesting thread is NULL!");
+                        // a timed-out caller cleared `th` in wait_if_collecting() to
+                        // tell us not to interrupt it; it is waiting for the hand-back
+                        // above, so keep looping to receive our own result
+                        continue;
                     thread_interrupt(th, EINTR);    // other threads' response, resume him
                 }
             }

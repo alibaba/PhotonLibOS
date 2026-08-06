@@ -357,48 +357,6 @@ TEST(OutOfOrder, error_change_arg) {
     log_output = log_output_stdout;
 }
 
-int error_change_engine_complete(void*, OutOfOrderContext* args) {
-    OooEngine* engine = (OooEngine*)(args->engine);
-    if (args->tag == 1) {
-        thread_usleep(1000);
-        args->tag = 2;
-    } else {
-        args->tag = 1;
-    }
-    engine->m_map[args->tag]->th = nullptr;
-    return 0;
-}
-
-void error_change_engine_issuewait(OutOfOrder_Execution_Engine * engine) {
-    OutOfOrderContext args;
-    args.engine = engine;
-    args.do_issue.bind(nullptr, null_op);
-    args.do_completion.bind(nullptr, error_change_engine_complete);
-    args.do_collect.bind(nullptr, null_op);
-    int ret = ooo_issue_wait(args);
-    EXPECT_EQ(-1, ret);
-    EXPECT_EQ(EINVAL, errno);
-}
-
-TEST(OutOfOrder, error_thread_become_NULL) {
-    log_output = log_output_null;
-    OutOfOrder_Execution_Engine * engine = new_ooo_execution_engine();
-    DEFER({
-              wait_for_completion();
-              // delete_ooo_execution_engine(engine);
-          });
-    OutOfOrderContext args;
-    args.engine = engine;
-    args.do_issue.bind(nullptr, null_op);
-    args.do_completion.bind(nullptr, error_change_engine_complete);
-    thread_create11(error_change_engine_issuewait, engine);
-    int ret = ooo_issue_wait(args);
-    EXPECT_EQ(-2, ret);
-    EXPECT_EQ(ENOENT, errno);
-    wait_for_completion();
-    log_output = log_output_stdout;
-}
-
 void run_all_tests(uint32_t i) {
 #define RUN_TEST(A, B) LOG_DEBUG("vCPU #", i, ": "#A":"#B); A##_##B##_Test().TestBody();
     RUN_TEST(OutOfOrder, Execution);
@@ -409,7 +367,6 @@ void run_all_tests(uint32_t i) {
     RUN_TEST(OutOfOrder, error_process);
     RUN_TEST(OutOfOrder, error_same_tag);
     RUN_TEST(OutOfOrder, error_change_arg);
-    RUN_TEST(OutOfOrder, error_thread_become_NULL);
     wait_for_completion(i);
 #undef RUN_TEST
 }
