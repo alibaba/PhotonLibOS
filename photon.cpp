@@ -47,6 +47,11 @@ using namespace net;
 static bool reset_handle_registed = false;
 static thread_local uint64_t g_event_engine = 0, g_io_engine = 0;
 
+// `use_pooled_stack_allocator` was a bool before it became a selector; keeping
+// it 1 byte preserves the PhotonOptions layout for already-compiled callers.
+static_assert(sizeof(PhotonOptions().use_pooled_stack_allocator) == 1,
+              "stack allocator selector must stay 1 byte to preserve ABI");
+
 #define INIT_IO(name, prefix, ...) if (INIT_IO_##name & io_engine)   { if (prefix##_init(__VA_ARGS__) < 0) return -1; }
 #define FINI_IO(name, prefix)      if (INIT_IO_##name & g_io_engine) {     prefix##_fini(); }
 
@@ -87,8 +92,18 @@ static int init_event_engine(uint64_t engine, uint64_t flags, const PhotonOption
 }
 
 int __photon_init(uint64_t event_engine, uint64_t io_engine, const PhotonOptions& options) {
-    if (options.use_pooled_stack_allocator) {
-        use_pooled_stack_allocator();
+    switch (options.use_pooled_stack_allocator) {
+        case STACK_ALLOCATOR_DEFAULT:
+            break;
+        case STACK_ALLOCATOR_POOLED:
+            use_pooled_stack_allocator();
+            break;
+        case STACK_ALLOCATOR_GLOBAL_POOLED:
+            use_global_pooled_stack_allocator();
+            break;
+        default:
+            LOG_WARN("unknown stack allocator `, using the default one",
+                     options.use_pooled_stack_allocator);
     }
     if (options.bypass_threadpool) {
         set_bypass_threadpool(true);
