@@ -25,6 +25,7 @@ static const char OSS_HEADER_KEY_X_OSS_METADATA_DIRECTIVE[] = "x-oss-metadata-di
 static const char OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR[]     = "x-oss-range-behavior";
 static const char OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE[]   = "x-oss-forbid-overwrite";
 static const char OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET[]   = "x-oss-symlink-target";
+static const char OSS_HEADER_KEY_X_OSS_AGENTIC_BUCKET[]   = "x-oss-agentic-bucket";
 
 static const char OSS_PARAM_KEY_CONTINUATION_TOKEN[]        = "continuation-token";
 static const char OSS_PARAM_KEY_OBJECT_META[]     = "objectMeta";
