@@ -1,3 +1,5 @@
+#pragma once
+
 #include <photon/common/PMF.h>
 #include <photon/common/callback.h>
 
@@ -660,7 +662,8 @@ struct DUtils {
         Dlgs &d, void *obj,
         typename __match_og<D, Dlgs>::FS::template Prototype<void> func) {
         using OG = __match_og<D, Dlgs>;
-        return bind_func_delegate<D, typename OG::C>(d, DC(obj, func));
+        return bind_func_delegate<D, typename OG::C>(
+            d, typename OG::DC(obj, func));
     }
 
     template <typename D, typename Dlgs>
@@ -669,7 +672,7 @@ struct DUtils {
         typename __match_og<D, Dlgs>::FS::template Prototype<void> func) {
         using OG = __match_og<D, Dlgs>;
         return bind_func_delegate<D, typename OG::C>(
-            d, DC(nullptr, (decltype(OG::DC::_func))func));
+            d, typename OG::DC(nullptr, (decltype(OG::DC::_func))func));
     }
 
     template <typename T, typename... Convs>
