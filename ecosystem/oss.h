@@ -27,6 +27,7 @@ limitations under the License.
 #include <sys/uio.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace photon {
@@ -90,6 +91,37 @@ struct ObjectHeaderMeta : public ObjectMeta {
   DEFINE_OPTIONAL_FIELD(uint64_t, crc64, 1 << 5)
 
 #undef DEFINE_OPTIONAL_FIELD
+};
+
+template <typename T>
+class OptValue {
+ public:
+  bool has_value() const { return has_value_; }
+  const T& value() const { return value_; }
+  void set(T v) {
+    value_ = std::move(v);
+    has_value_ = true;
+  }
+  void reset() {
+    value_ = {};
+    has_value_ = false;
+  }
+  explicit operator bool() const { return has_value_; }
+
+ private:
+  T value_{};
+  bool has_value_ = false;
+};
+
+struct ObjectCopyOptions {
+  bool overwrite = false;
+  bool set_mime = false;
+
+  OptValue<uint64_t> crc64;
+};
+
+struct ObjectPartCopyOptions {
+  OptValue<uint64_t> crc64;
 };
 
 struct ListObjectsParameters {
@@ -166,6 +198,10 @@ using BodyReader = TempDelegate<ssize_t, IStream* /*input*/>;
 
 class Client : public Object {
  public:
+  virtual int put_bucket(std::string_view agent_bucket = {}) = 0;
+
+  virtual int delete_bucket() = 0;
+
   virtual int list_objects(std::string_view prefix, ListObjectsCallback cb,
                            ListObjectsParameters = {},
                            std::string* marker = nullptr) = 0;
@@ -245,9 +281,17 @@ class Client : public Object {
                                 off_t position,
                                 ObjectUploadOptions& opts) = 0;
 
+  int copy_object(std::string_view src_object, std::string_view dst_object,
+                  bool overwrite = false, bool set_mime = false) {
+    ObjectCopyOptions opts;
+    opts.overwrite = overwrite;
+    opts.set_mime = set_mime;
+    return copy_object(src_object, dst_object, opts);
+  }
+
   virtual int copy_object(std::string_view src_object,
-                          std::string_view dst_object, bool overwrite = false,
-                          bool set_mime = false) = 0;
+                          std::string_view dst_object,
+                          ObjectCopyOptions& opts) = 0;
 
   virtual int init_multipart_upload(std::string_view object,
                                     void** context) = 0;
@@ -281,8 +325,15 @@ class Client : public Object {
                               int part_number, BodyWriter writer,
                               ObjectUploadOptions& opts) = 0;
 
+  int upload_part_copy(void* context, off_t offset, size_t count,
+                       int part_number, std::string_view from = {}) {
+    ObjectPartCopyOptions opts;
+    return upload_part_copy(context, offset, count, part_number, from, opts);
+  }
+
   virtual int upload_part_copy(void* context, off_t offset, size_t count,
-                               int part_number, std::string_view from = {}) = 0;
+                               int part_number, std::string_view from,
+                               ObjectPartCopyOptions& opts) = 0;
 
   // if expected_crc64 is specified, we will compare the value with the
   // returned object crc64 to validate the object integrity.
@@ -311,8 +362,14 @@ class Client : public Object {
     }
 
     int copy(off_t offset, size_t count, int part_number,
+             std::string_view from, ObjectPartCopyOptions& opts) {
+      return _client->upload_part_copy(_ctx, offset, count, part_number, from,
+                                       opts);
+    }
+    int copy(off_t offset, size_t count, int part_number,
              std::string_view from = {}) {
-      return _client->upload_part_copy(_ctx, offset, count, part_number, from);
+      ObjectPartCopyOptions opts;
+      return copy(offset, count, part_number, from, opts);
     }
 
     int complete(uint64_t* expected_crc64) {
