@@ -129,6 +129,7 @@ __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
         if (ret == 0) break;
         count += ret;
 
+<<<<<<< HEAD
         uint64_t bytes = ret;
         auto extracted = v.extract_front(bytes);
         assert(extracted == bytes);
@@ -136,6 +137,32 @@ __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
     }
     return count;
 }
+=======
+struct BufStepV {
+    iovector_view& v;
+    // a 0-length element would make the iocb of doio_loop() transfer 0 byte and
+    // return 0, which is indistinguishable from EOF, so such elements are
+    // skipped. Before the first iocb, at least one element is kept, so that
+    // iocbs relying on iov[0] always have a valid one; after that the view is
+    // allowed to become empty, which simply ends the loop.
+    BufStepV(iovector_view& v) : v(v) { skip_empty(1); }
+    bool operator()(size_t ret, size_t n) __INLINE__ {
+        auto extracted = v.extract_front(ret);
+        assert(extracted == ret);
+        _unused(extracted);
+        skip_empty(0);
+        return v.iovcnt > 0;
+    }
+    void skip_empty(int keep) __INLINE__ {
+        while (v.iovcnt > keep && v.front().iov_len == 0)
+            v.pop_front();
+    }
+};
+
+#define DOIO_LOOP(iocb, step)        doio_loop(LAMBDA(iocb), step)
+#define DOIO_LOOP_LAMBDA(iocb, step) doio_loop(LAMBDA(iocb), \
+    [&](size_t ret, size_t n) __INLINE__ { step; })
+>>>>>>> 62244b5 (fix(net,io): don't confuse a 0-length iovec element or an error with EOF (#1602) (#1603) (#1604))
 
 int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count);
 

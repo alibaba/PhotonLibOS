@@ -778,6 +778,125 @@ TEST(ZeroCopySocket, basic) {
 }
 #endif
 
+<<<<<<< HEAD
+=======
+// a 0-length element in iov[] must not be mistaken for EOF, otherwise writev()
+// would transfer less bytes than requested, and silently so
+template <typename Wrap>
+static void test_writev_empty_iov(ISocketServer* server, ISocketClient* client, const Wrap& wrap) {
+    static char a[100], b[50];
+    const std::vector<std::pair<const char*, std::vector<iovec>>> cases = {
+        {"none", {{a, 100}, {b, 50}}},
+        {"head", {{a, 0}, {a, 100}, {b, 50}}},
+        {"mid",  {{a, 100}, {a, 0}, {b, 50}}},
+        {"tail", {{a, 100}, {b, 50}, {a, 0}}},
+        {"all",  {{a, 0}, {b, 0}}},
+    };
+
+    size_t received = 0;
+    photon::semaphore done(0);
+    auto handler = [&](ISocketStream* stream) -> int {
+        auto s = wrap(stream, SecurityRole::Server);
+        DEFER(if (s != stream) delete s);
+        char buf[4096];
+        ssize_t n;
+        while ((n = s->recv(buf, sizeof(buf))) > 0) received += n;
+        done.signal(1);
+        return 0;
+    };
+    server->set_handler(handler);
+    ASSERT_EQ(0, server->bind_v4localhost());
+    ASSERT_EQ(0, server->listen());
+    ASSERT_EQ(0, server->start_loop());
+    auto ep = server->getsockname();
+
+    for (auto& c : cases) {
+        auto& iov = c.second;
+        size_t sum = iovector_view((iovec*) iov.data(), (int) iov.size()).sum();
+        received = 0;
+        auto conn = client->connect(ep);
+        ASSERT_NE(nullptr, conn);
+        conn->timeout(5UL * 1000 * 1000);   // fail instead of hanging forever
+        auto s = wrap(conn, SecurityRole::Client);
+        EXPECT_EQ((ssize_t) sum, s->writev(iov.data(), (int) iov.size())) << c.first;
+        if (s != conn) delete s;
+        delete conn;
+        ASSERT_EQ(0, done.wait(1, 10UL * 1000 * 1000));
+        EXPECT_EQ(sum, received) << c.first;
+    }
+}
+
+static ISocketStream* no_wrap(ISocketStream* s, SecurityRole) { return s; }
+
+TEST(writev, empty_iov) {
+    auto server = new_tcp_socket_server();
+    DEFER(delete server);
+    auto client = new_tcp_socket_client();
+    DEFER(delete client);
+    test_writev_empty_iov(server, client, no_wrap);
+}
+
+TEST(writev, empty_iov_tls) {
+    auto ctx = new_tls_context(cert_str, key_str, passphrase_str);
+    DEFER(delete ctx);
+    auto server = new_tcp_socket_server();
+    DEFER(delete server);
+    auto client = new_tcp_socket_client();
+    DEFER(delete client);
+    test_writev_empty_iov(server, client, [&](ISocketStream* s, SecurityRole role) {
+        return new_tls_stream(ctx, s, role, false);
+    });
+}
+
+#ifdef __linux__
+TEST(writev, empty_iov_zerocopy) {
+    if (!zerocopy_available()) return;
+    auto server = new_tcp_socket_server();
+    DEFER(delete server);
+    auto client = new_zerocopy_tcp_client();
+    DEFER(delete client);
+    test_writev_empty_iov(server, client, no_wrap);
+}
+#endif
+
+const static char LINE[] = "hello iostream over socket stream!";
+
+void iostream_uds_server() {
+    auto server = new_uds_server(true);
+    DEFER({ delete (server); });
+    ASSERT_EQ(0, server->bind(uds_path));
+    ASSERT_EQ(0, server->listen(100));
+    auto connection = server->accept();
+    EXPECT_TRUE(connection);
+    auto ios = new_iostream(connection, true);
+    DEFER(delete ios);
+    EXPECT_TRUE(ios);
+    char line[4096];
+    ios->getline(line, sizeof(line));
+    LOG_DEBUG("got line: '`'", line);
+    *ios << 123456;
+    ASSERT_STREQ(line, LINE);
+}
+
+TEST(iostream, UDS) {
+    remove(uds_path);
+    thread_create11(iostream_uds_server);
+    thread_yield();
+    // ASSERT_EQ(::access(uds_path, F_OK, AT_EACCESS), 0);
+    auto cli = new_uds_client();
+    DEFER({ delete cli; });
+    auto sock = cli->connect(uds_path);
+    EXPECT_TRUE(sock);
+    auto ios = new_iostream(sock, true);
+    DEFER(delete ios);
+    *ios << LINE << std::endl;
+    uint64_t x;
+    *ios >> x;
+    ASSERT_EQ(x, 123456);
+    remove(uds_path);
+}
+
+>>>>>>> 62244b5 (fix(net,io): don't confuse a 0-length iovec element or an error with EOF (#1602) (#1603) (#1604))
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;

@@ -467,7 +467,15 @@ protected:
         return do_sendmsg(sockfd, tmp_msg_hdr(&iov, 1), flags, timeout);
     }
 
+<<<<<<< HEAD
     ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, uint64_t timeout) override {
+=======
+    ssize_t do_sendmsg(int sockfd, const struct msghdr* message, int flags, Timeout timeout) override {
+        // a 0-byte zerocopy send is not acknowledged by the kernel, and
+        // zerocopy_confirm() below would wait for its notification in vain
+        if (iovector_view(message->msg_iov, (int)message->msg_iovlen).sum() == 0)
+            return 0;
+>>>>>>> 62244b5 (fix(net,io): don't confuse a 0-length iovec element or an error with EOF (#1602) (#1603) (#1604))
         ssize_t n = photon::net::sendmsg(sockfd, message, flags | ZEROCOPY_FLAG, timeout);
         if (n < 0)
             return n;
