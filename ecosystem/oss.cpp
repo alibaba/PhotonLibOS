@@ -134,7 +134,7 @@ class OssUrl {
     if (escaped) m_raw_object = object;
 
     m_url_size = m_url.size();
-    m_bucket = {(is_http ? 7ul : 8ul), bucket.size()};
+    m_bucket = {(is_http ? 7ull : 8ull), bucket.size()};
     m_object = {m_bucket.offset() + bucket.size() + endpoint.size() + 1 + 1,
                 escaped_obj.size()};  // start without prefix /
   }
@@ -540,7 +540,7 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
     auto type = NodeStrValue(child["Type"]);
 
     if (!key.has_value() || !size.has_value() || !mtime.has_value() ||
-        !etag.has_value() || !type.has_value())
+        !etag.has_value())
       LOG_ERROR_RETURN(EINVAL, -1,
                        "unexpected response: missing required fields");
 
