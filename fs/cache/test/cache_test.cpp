@@ -24,6 +24,8 @@ limitations under the License.
 #include <unistd.h>
 
 #include <cstring>
+#include <cerrno>
+#include <cstdio>
 #include <algorithm>
 #include <set>
 #include <random>
@@ -101,7 +103,7 @@ void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
     prefix = "/John/bucket/";
   }
 
-  std::string root("/mnt/tmp/ease/cache/cache_test/");
+  std::string root("ease/cache/cache_test/");
   SetupTestDir(root);
 
   std::string subDir = prefix + "dir/dir/";
@@ -112,7 +114,7 @@ void commonTest(bool cacheIsFull, bool enableDirControl, bool dirFull) {
   auto ok = ::stat(std::string(root + subDir + "testFile").c_str(), &st);
   EXPECT_EQ(0, ok);
 
-  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
+  std::string srcRoot("ease/cache/src_test/");
   SetupTestDir(srcRoot);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str(), ioengine_psync);
 
@@ -409,7 +411,7 @@ TEST(RoCachedFs, BasicCacheFull) {
 // }
 
 TEST(RoCachedFs, CacheWithOutSrcFile) {
-  std::string root("/mnt/tmp/ease/cache/cache_test_no_src/");
+  std::string root("ease/cache/cache_test_no_src/");
   SetupTestDir(root);
 
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
@@ -449,16 +451,18 @@ TEST(RoCachedFs, CacheWithOutSrcFile) {
 }
 
 TEST(RoCachedFS, xattr) {
-  std::string root("/mnt/tmp/ease/cache/cache_xattr/");
+  std::string root("ease/cache/cache_xattr/");
   SetupTestDir(root);
+  std::string srcRoot("ease/cache/cache_xattr_src/");
+  SetupTestDir(srcRoot);
 
-  auto srcFs = new_localfs_adaptor();
+  auto srcFs = new_localfs_adaptor(srcRoot.c_str());
   auto mediaFs = new_localfs_adaptor(root.c_str());
   auto roCachedFs = new_full_file_cached_fs(srcFs, mediaFs, 1024 * 1024, 512, 1000 * 1000 * 1,
                                             128ul * 1024 * 1024, nullptr, 0);
   DEFER(delete roCachedFs);
 
-  std::string path = "/mnt/tmp/ease/cache/cache_xattr/filexattr";
+  std::string path = "/filexattr";
   auto xttarFile = srcFs->open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
   DEFER(delete xttarFile);
   auto xattrFs = dynamic_cast<IFileSystemXAttr*>(roCachedFs);
@@ -496,7 +500,7 @@ void* worker(void* arg) {
   for (auto i = 0; i < 2048; i++) {
     offset.push_back(i * 1024 * 1024);
   }
-  auto fd = ::open("/mnt/tmp/ease/cache/src_test/huge", O_RDONLY);
+  auto fd = ::open("ease/cache/src_test/huge", O_RDONLY);
   DEFER(::close(fd));
   auto f = fs->open("/huge", O_RDONLY);
   DEFER(delete f);
@@ -514,11 +518,11 @@ void* worker(void* arg) {
 }
 
 TEST(CachedFS, write_while_full) {
-  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
+  std::string srcRoot("ease/cache/src_test/");
   SetupTestDir(srcRoot);
-  EXPECT_NE(-1, system("dd if=/dev/urandom of=/mnt/tmp/ease/cache/src_test/huge bs=1M count=2048"));
+  EXPECT_NE(-1, system("dd if=/dev/urandom of=ease/cache/src_test/huge bs=1M count=2048"));
 
-  std::string root("/mnt/tmp/ease/cache/cache_test/");
+  std::string root("ease/cache/cache_test/");
   SetupTestDir(root);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str());
   auto mediaFs = new_localfs_adaptor(root.c_str());
@@ -538,14 +542,14 @@ TEST(CachedFS, write_while_full) {
 }
 
 TEST(CachedFS, fn_trans_func) {
-  std::string srcRoot("/mnt/tmp/ease/cache/src_test/");
+  std::string srcRoot("ease/cache/src_test/");
   SetupTestDir(srcRoot);
-  EXPECT_NE(-1, system("mkdir /mnt/tmp/ease/cache/src_test/path_aaa/"));
-  EXPECT_NE(-1, system("mkdir /mnt/tmp/ease/cache/src_test/path_bbb/"));
-  EXPECT_NE(-1, system("dd if=/dev/urandom of=/mnt/tmp/ease/cache/src_test/path_aaa/sha256:test bs=1K count=1"));
-  EXPECT_NE(-1, system("cp /mnt/tmp/ease/cache/src_test/path_aaa/sha256:test /mnt/tmp/ease/cache/src_test/path_bbb/sha256:test"));
+  EXPECT_NE(-1, system("mkdir ease/cache/src_test/path_aaa/"));
+  EXPECT_NE(-1, system("mkdir ease/cache/src_test/path_bbb/"));
+  EXPECT_NE(-1, system("dd if=/dev/urandom of=ease/cache/src_test/path_aaa/sha256:test bs=1K count=1"));
+  EXPECT_NE(-1, system("cp ease/cache/src_test/path_aaa/sha256:test ease/cache/src_test/path_bbb/sha256:test"));
 
-  std::string root("/mnt/tmp/ease/cache/cache_test/");
+  std::string root("ease/cache/cache_test/");
   SetupTestDir(root);
   auto srcFs = new_localfs_adaptor(srcRoot.c_str());
   DEFER(delete srcFs);
@@ -582,7 +586,7 @@ TEST(CachedFS, fn_trans_func) {
 }
 
 TEST(CachePool, evict_file) {
-  std::string root = "/mnt/tmp/ease/cache/evict_file_test/";
+  std::string root = "ease/cache/evict_file_test/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -639,7 +643,7 @@ TEST(CachePool, evict_file) {
 }
 
 TEST(CachePool, random_evict_file) {
-  std::string root = "/mnt/tmp/ease/cache/random_evict_file_test/";
+  std::string root = "ease/cache/random_evict_file_test/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -720,7 +724,7 @@ TEST(CachePool, random_evict_file) {
 }
 
 TEST(CachePool, open_same_file) {
-  std::string root = "/mnt/tmp/ease/cache/open_same_file/";
+  std::string root = "ease/cache/open_same_file/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -803,7 +807,7 @@ static bool openClose(ICachePool* pool, const char* name) {
 }
 
 TEST(CachePool, test_demote_threshold) {
-  std::string root = "/mnt/tmp/ease/cache/test_demote_threshold/";
+  std::string root = "ease/cache/test_demote_threshold/";
   SetupTestDir(root);
   const size_t demoteThreshold = 10;
   const size_t fileNum = 100;
@@ -863,7 +867,7 @@ TEST(CachePool, test_demote_threshold) {
 }
 
 TEST(CachePool, three_tier_cascade) {
-  std::string root = "/mnt/tmp/ease/cache/three_tier_cascade/";
+  std::string root = "ease/cache/three_tier_cascade/";
   SetupTestDir(root);
   const size_t activeLimit = 5;
   const size_t inactiveLimit = 10;
@@ -982,7 +986,7 @@ TEST(CachePool, three_tier_cascade) {
 }
 
 TEST(CachePool, evict_by_size_cold_first) {
-  std::string root = "/mnt/tmp/ease/cache/evict_by_size_cold_first/";
+  std::string root = "ease/cache/evict_by_size_cold_first/";
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t activeLimit = 5;
@@ -1076,7 +1080,7 @@ static int64_t get_physical_memory_KiB() {
 }
 
 TEST(CachePool, DISABLED_test_mem_usage) {
-  std::string root = "/mnt/tmp/ease/cache/test_mem_usage/";
+  std::string root = "ease/cache/test_mem_usage/";
   SetupTestDir(root);
   const uint64_t capacityGB = 1;
   const size_t fileNum = 10'000'000;
@@ -1123,7 +1127,7 @@ TEST(CachePool, DISABLED_test_mem_usage) {
 static void refillRangeDeterministic(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_det/"
-      : "/mnt/tmp/ease/cache/refill_range_det/";
+      : "ease/cache/refill_range_det/";
   if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
@@ -1194,7 +1198,7 @@ static void refillRangeDeterministic(bool useShm) {
 static void refillRangeRandom(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_rand/"
-      : "/mnt/tmp/ease/cache/refill_range_rand/";
+      : "ease/cache/refill_range_rand/";
   if (useShm && !RequireShmAvailable(240ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
@@ -1280,7 +1284,7 @@ static void refillRangeRandom(bool useShm) {
 static void refillRangeEvictWhileOpen(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_evict/"
-      : "/mnt/tmp/ease/cache/refill_range_evict/";
+      : "ease/cache/refill_range_evict/";
   if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
@@ -1360,7 +1364,7 @@ static void refillRangeEvictWhileOpen(bool useShm) {
 static void refillRangeNonAlignedTail(bool useShm) {
   std::string root = useShm
       ? "/dev/shm/ease/cache/refill_range_unaligned/"
-      : "/mnt/tmp/ease/cache/refill_range_unaligned/";
+      : "ease/cache/refill_range_unaligned/";
   if (useShm && !RequireShmAvailable(144ul * 1024 * 1024)) return;
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
@@ -1446,7 +1450,7 @@ TEST(CachePool, refill_range_non_aligned_tail) {
 }
 
 TEST(CachePool, eviction_with_deleted_cache_dir) {
-  std::string root = "/mnt/tmp/ease/cache/evict_dir_deleted/";
+  std::string root = "ease/cache/evict_dir_deleted/";
   SetupTestDir(root);
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_libaio);
   auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
@@ -1505,7 +1509,7 @@ TEST(CachePool, concurrent_stress) {
   const size_t kMaxWrite = 64 * 1024;
   const int kOffSlots = kFileSize / kMaxWrite;
 
-  std::string root = "/mnt/tmp/ease/cache/concurrent_stress/";
+  std::string root = "ease/cache/concurrent_stress/";
   SetupTestDir(root);
   // psync: plain syscalls, safe across vCPUs without a per-vCPU IO engine.
   auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
@@ -1610,7 +1614,7 @@ static int64_t PopulateCacheDir(const std::string& root, int fileNum,
 // Reuse an existing cache dir: Init() must return without blocking on the
 // per-file stat scan, and the background scan must rebuild the full index.
 TEST(CachePool, reuse_async_scan_rebuilds_index) {
-  std::string root = "/mnt/tmp/ease/cache/reuse_async_scan/";
+  std::string root = "ease/cache/reuse_async_scan/";
   SetupTestDir(root);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   DEFER(delete cacheAllocator);
@@ -1645,7 +1649,7 @@ TEST(CachePool, reuse_async_scan_rebuilds_index) {
 // files. Dedup in insertFile() must prevent double-counting / leaked lru_
 // nodes: each file ends up indexed exactly once.
 TEST(CachePool, reuse_scan_concurrent_open_no_double_count) {
-  std::string root = "/mnt/tmp/ease/cache/reuse_concurrent_open/";
+  std::string root = "ease/cache/reuse_concurrent_open/";
   SetupTestDir(root);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   DEFER(delete cacheAllocator);
@@ -1698,7 +1702,7 @@ TEST(CachePool, reuse_scan_concurrent_open_no_double_count) {
 // Destroying the pool while the background scan is still running must join the
 // scan thread cleanly (no crash / use-after-free / hang).
 TEST(CachePool, reuse_destruct_during_scan) {
-  std::string root = "/mnt/tmp/ease/cache/reuse_destruct/";
+  std::string root = "ease/cache/reuse_destruct/";
   SetupTestDir(root);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   DEFER(delete cacheAllocator);
@@ -1723,7 +1727,7 @@ TEST(CachePool, reuse_destruct_during_scan) {
 // returns the index is fully rebuilt -- scan_done() is already true WITHOUT any
 // waiting, and every populated file is accounted for.
 TEST(CachePool, reuse_sync_scan_is_default) {
-  std::string root = "/mnt/tmp/ease/cache/reuse_sync_default/";
+  std::string root = "ease/cache/reuse_sync_default/";
   SetupTestDir(root);
   auto cacheAllocator = new AlignedAlloc(4 * 1024);
   DEFER(delete cacheAllocator);
@@ -1753,6 +1757,15 @@ TEST(CachePool, reuse_sync_scan_is_default) {
 }
 int main(int argc, char** argv) {
   log_output_level = ALOG_ERROR;
+
+  // chdir into the base working directory once; every test root below is a
+  // path relative to it (only /dev/shm paths stay absolute).
+  const char* baseDir = "/mnt/tmp";
+  if (::chdir(baseDir) != 0) {
+    fprintf(stderr, "failed to chdir to %s: %s\n", baseDir, strerror(errno));
+    return 1;
+  }
+
   // photon::vcpu_init();
   ::testing::InitGoogleTest(&argc, argv);
   srand(time(nullptr));
