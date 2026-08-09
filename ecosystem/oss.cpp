@@ -134,7 +134,7 @@ class OssUrl {
     if (escaped) m_raw_object = object;
 
     m_url_size = m_url.size();
-    m_bucket = {(is_http ? 7ul : 8ul), bucket.size()};
+    m_bucket = {(is_http ? 7ull : 8ull), bucket.size()};
     m_object = {m_bucket.offset() + bucket.size() + endpoint.size() + 1 + 1,
                 escaped_obj.size()};  // start without prefix /
   }
@@ -309,6 +309,12 @@ static int verify_crc64_if_needed(HTTP_STACK_OP& op, std::string_view object,
   return 0;
 }
 
+static bool get_resp_crc64(HTTP_STACK_OP& op, uint64_t* crc64) {
+  auto it = op.resp.headers.find("x-oss-hash-crc64ecma");
+  if (it == op.resp.headers.end()) return false;
+  return estring_view(it.second()).to_uint64_check(crc64);
+}
+
 static ssize_t body_writer_cb(void* iov_view, photon::net::http::Request* req) {
   auto view = static_cast<iovector_view*>(iov_view);
   auto ret = req->writev(view->iov, view->iovcnt);
@@ -335,6 +341,10 @@ class OssClientImpl : public Client {
   OssClientImpl(const ClientOptions& options, Authenticator* authenticator);
   ~OssClientImpl();
 
+  int put_bucket(std::string_view agent_bucket);
+
+  int delete_bucket();
+
   int list_objects(std::string_view prefix, ListObjectsCallback cb,
                    ListObjectsParameters = {}, std::string* marker = nullptr);
 
@@ -358,7 +368,7 @@ class OssClientImpl : public Client {
                         ObjectUploadOptions& opts);
 
   int copy_object(std::string_view src_object, std::string_view dst_object,
-                  bool overwrite = false, bool set_mime = false);
+                  ObjectCopyOptions& opts);
 
   int init_multipart_upload(std::string_view object, void** context);
 
@@ -367,7 +377,8 @@ class OssClientImpl : public Client {
                       ObjectUploadOptions& opts);
 
   int upload_part_copy(void* context, off_t offset, size_t count,
-                       int part_number, std::string_view from = {});
+                       int part_number, std::string_view from,
+                       ObjectPartCopyOptions& opts);
 
   int complete_multipart_upload(void* context, ObjectUploadOptions& opts);
 
@@ -407,8 +418,8 @@ class OssClientImpl : public Client {
                          ListObjectsCallback cb, bool delimiters, int maxKeys,
                          std::string* marker);
 
-  int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url, bool overwrite,
-                     bool set_mime);
+  int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
+                     ObjectCopyOptions& opts);
   int do_delete_object(OssUrl& oss_url);
 
   int do_delete_objects(estring_view bucket, estring_view prefix,
@@ -529,7 +540,7 @@ int OssClient::walk_list_results(const SimpleDOM::Node& list_bucket_result,
     auto type = NodeStrValue(child["Type"]);
 
     if (!key.has_value() || !size.has_value() || !mtime.has_value() ||
-        !etag.has_value() || !type.has_value())
+        !etag.has_value())
       LOG_ERROR_RETURN(EINVAL, -1,
                        "unexpected response: missing required fields");
 
@@ -637,18 +648,18 @@ int OssClient::do_list_objects_v1(std::string_view bucket,
 }
 
 int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
-                              bool overwrite, bool set_mime) {
+                              ObjectCopyOptions& opts) {
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, dst_oss_url.url());
 
   estring oss_copy_source =
       estring("/").appends(src_oss_url.bucket(), "/", src_oss_url.object(true));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
-  if (!overwrite) {
+  if (!opts.overwrite) {
     op.req.headers.insert(OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE, "true");
   }
 
   std::string_view dst_type{};  // use the same content type as the source
-  if (set_mime) {
+  if (opts.set_mime) {
     auto src_type = lookup_mime_type(src_oss_url.object());
     auto new_dst_type = lookup_mime_type(dst_oss_url.object());
     if (src_type != new_dst_type) dst_type = new_dst_type;
@@ -658,7 +669,13 @@ int OssClient::do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
     }
   }
 
-  return sign_and_call(op, Verb::PUT, dst_oss_url);
+  opts.crc64.reset();
+  int r = sign_and_call(op, Verb::PUT, dst_oss_url);
+  if (r < 0) return r;
+
+  uint64_t crc64;
+  if (get_resp_crc64(op, &crc64)) opts.crc64.set(crc64);
+  return 0;
 }
 
 int OssClient::do_delete_object(OssUrl& oss_url) {
@@ -759,7 +776,10 @@ int OssClient::rename_object(std::string_view src_path,
   OssUrl src_oss_url(m_endpoint, m_bucket, src_path, m_is_http);
   OssUrl dst_oss_url(m_endpoint, m_bucket, dst_path, m_is_http);
 
-  if (do_copy_object(src_oss_url, dst_oss_url, true, set_mime) < 0) return -1;
+  ObjectCopyOptions opts;
+  opts.overwrite = true;
+  opts.set_mime = set_mime;
+  if (do_copy_object(src_oss_url, dst_oss_url, opts) < 0) return -1;
   return do_delete_object(src_oss_url);
 }
 
@@ -787,6 +807,20 @@ int OssClient::get_symlink(std::string_view obj, std::string& target) {
   target = photon::net::http::url_unescape(
       op.resp.headers[OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET]);
   return r;
+}
+
+int OssClient::put_bucket(std::string_view agent_bucket) {
+  OssUrl oss_url(m_endpoint, m_bucket, {}, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.url());
+  if (!agent_bucket.empty())
+    op.req.headers.insert(OSS_HEADER_KEY_X_OSS_AGENTIC_BUCKET, agent_bucket);
+  return sign_and_call(op, Verb::PUT, oss_url);
+}
+
+int OssClient::delete_bucket() {
+  OssUrl oss_url(m_endpoint, m_bucket, {}, m_is_http);
+  DEFINE_ONSTACK_OP(m_client, Verb::DELETE, oss_url.url());
+  return sign_and_call(op, Verb::DELETE, oss_url);
 }
 
 int OssClient::delete_objects(const std::vector<std::string_view>& objects,
@@ -1299,12 +1333,12 @@ ssize_t OssClient::append_object(std::string_view object,
 }
 
 int OssClient::copy_object(std::string_view src_object,
-                           std::string_view dst_object, bool overwrite,
-                           bool set_mime) {
+                           std::string_view dst_object,
+                           ObjectCopyOptions& opts) {
   OssUrl src_oss_url(m_endpoint, m_bucket, src_object, m_is_http);
   OssUrl dst_oss_url(m_endpoint, m_bucket, dst_object, m_is_http);
 
-  return do_copy_object(src_oss_url, dst_oss_url, overwrite, set_mime);
+  return do_copy_object(src_oss_url, dst_oss_url, opts);
 }
 
 struct oss_multipart_context {
@@ -1388,7 +1422,8 @@ ssize_t OssClient::upload_part(void* context, size_t cnt,
 }
 
 int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
-                                int part_number, std::string_view from) {
+                                int part_number, std::string_view from,
+                                ObjectPartCopyOptions& opts) {
   assert(context);
   oss_multipart_context* ctx = (oss_multipart_context*)context;
   assert(!ctx->upload_id.empty());
@@ -1415,8 +1450,12 @@ int OssClient::upload_part_copy(void* context, off_t offset, size_t count,
   DEFINE_ONSTACK_OP(m_client, Verb::PUT, oss_url.append_params(query_params));
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE, oss_copy_source);
   op.req.headers.insert(OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE, range);
+  opts.crc64.reset();
   int r = sign_and_call(op, Verb::PUT, oss_url, query_params);
   if (r < 0) return r;
+
+  uint64_t crc64;
+  if (get_resp_crc64(op, &crc64)) opts.crc64.set(crc64);
 
   auto reader = get_xml_node(op);
   if (!reader) LOG_ERROR_RETURN(EINVAL, -1, "failed to parse xml resp_body");
