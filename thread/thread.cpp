@@ -69,13 +69,18 @@ limitations under the License.
 // Define assembly section header for clang and gcc
 #if defined(__APPLE__)
 #define DEF_ASM_FUNC(name) ".text\n" \
+                           ".globl "#name"\n" \
+                           ".private_extern "#name"\n" \
                            #name": "
 #elif defined(_WIN64)
 #define DEF_ASM_FUNC(name) ".text\n .p2align 4\n" \
-                           ".def "#name"; .scl 3; .type 32; .endef\n" \
+                           ".globl "#name"\n" \
+                           ".def "#name"; .scl 2; .type 32; .endef\n" \
                            #name": "
 #else
 #define DEF_ASM_FUNC(name) ".section .text."#name",\"axG\",@progbits,"#name",comdat\n" \
+                           ".globl "#name"\n" \
+                           ".hidden "#name"\n" \
                            ".type "#name", @function\n" \
                            #name": "
 #endif
@@ -343,9 +348,10 @@ namespace photon
 #define ASAN_DIE_SWITCH(to)
 #endif
 
-    static void _asan_start() asm("_asan_start");
+    __attribute__((used, visibility("hidden")))
+    void _asan_start() asm("_asan_start");
 
-    __attribute__((used)) static void _asan_start() { ASAN_START(); }
+    void _asan_start() { ASAN_START(); }
 
     #pragma GCC diagnostic ignored "-Winvalid-offsetof"
     static_assert(offsetof(thread, vcpu) == offsetof(partial_thread, vcpu), "...");
@@ -1023,7 +1029,7 @@ R"(
         __builtin_unreachable();
     }
 
-    extern "C" __attribute__((noreturn))
+    extern "C" __attribute__((noreturn, used))
     void _photon_thread_die(thread* th) asm("_photon_thread_die");
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
