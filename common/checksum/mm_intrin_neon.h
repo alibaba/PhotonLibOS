@@ -23,7 +23,6 @@ limitations under the License.
 #ifdef __aarch64__
 
 #include <arm_neon.h>
-#include <arm_acle.h>
 #include <cstdint>
 
 // =============================================================================
@@ -217,11 +216,5 @@ __m128i _mm_clmulepi64_si128_impl(__m128i a, __m128i b) {
 }
 
 #define _mm_clmulepi64_si128(a, b, imm) _mm_clmulepi64_si128_impl<imm>(a, b)
-
-// =============================================================================
-// CRC32C hardware instructions
-// =============================================================================
-// Both GCC and modern Clang (including Apple Clang 17+) provide __crc32c* via arm_acle.h
-#include <arm_acle.h>
 
 #endif // __aarch64__

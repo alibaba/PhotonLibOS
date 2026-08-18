@@ -216,17 +216,32 @@ inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint64_t dat
 #endif
 
 // CRC32C hardware instructions for ARM
+//
+// Call the compiler builtins directly instead of going through arm_acle.h:
+// the arm_acle.h shipped with gcc-9 on Ubuntu 18.04 leaks an unclosed
+// extern "C" scope into every C++ file that includes it.
+#ifdef __clang__
+#define PHOTON_CRC32CB __builtin_arm_crc32cb
+#define PHOTON_CRC32CH __builtin_arm_crc32ch
+#define PHOTON_CRC32CW __builtin_arm_crc32cw
+#define PHOTON_CRC32CD __builtin_arm_crc32cd
+#else
+#define PHOTON_CRC32CB __builtin_aarch64_crc32cb
+#define PHOTON_CRC32CH __builtin_aarch64_crc32ch
+#define PHOTON_CRC32CW __builtin_aarch64_crc32cw
+#define PHOTON_CRC32CD __builtin_aarch64_crc32cx
+#endif
 inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint8_t data) {
-    return __crc32cb(crc, data);
+    return PHOTON_CRC32CB(crc, data);
 }
 inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint16_t data) {
-    return __crc32ch(crc, data);
+    return PHOTON_CRC32CH(crc, data);
 }
 inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint32_t data) {
-    return __crc32cw(crc, data);
+    return PHOTON_CRC32CW(crc, data);
 }
 inline __attribute__((always_inline)) uint32_t crc32c(uint32_t crc, uint64_t data) {
-    return __crc32cd(crc, data);
+    return PHOTON_CRC32CD(crc, data);
 }
 
 #else
