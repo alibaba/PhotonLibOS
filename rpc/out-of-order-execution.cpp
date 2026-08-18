@@ -128,12 +128,20 @@ namespace rpc {
                 if (args.phase == OooPhase::WAITING)
                     LOG_ERROR_RETURN(EINVAL, -1, "context already in waiting");
                 for (bool hold_lock = false; !hold_lock;) {
-                    switch (args.phase) {                        
+                    switch (args.phase) {
                         case OooPhase::COLLECTED:
                             // result alread collected before wait
                             if (args.th != CURRENT)
                                 LOG_ERROR_RETURN(EINVAL, -1, "context is not issued by current thread");
                             return args.ret;
+                        case OooPhase::COLLECTING:
+                            // A reader owns our context and is collecting our
+                            // response right now. We must not tear it down; wait
+                            // until it reaches COLLECTED (the reader wakes us via
+                            // thread_interrupt after setting COLLECTED under
+                            // phaselock, so this wakeup cannot be lost).
+                            m_wait.wait(args.phaselock);
+                            break;
                         case OooPhase::ISSUED:
                             args.th = photon::CURRENT;
                             args.phase = OooPhase::WAITING;
@@ -150,13 +158,26 @@ namespace rpc {
                                     return args.ret;
                                 }
                                 if (ret == -1) {
-                                    // or just timed out
+                                    // Timed out. A reader may nonetheless have
+                                    // claimed our context between the timeout
+                                    // firing and now. Probe the map: erasing our
+                                    // tag succeeds only if no reader has taken
+                                    // ownership yet -- then it is safe to give up.
+                                    // If the tag is already gone, a reader owns us
+                                    // and is collecting into our buffer, so we must
+                                    // wait for COLLECTED rather than tear the
+                                    // context down (which would use-after-free it).
+                                    bool reclaimed;
                                     {
                                         SCOPED_LOCK(m_mutex_map);
-                                        m_map.erase(args.tag);
+                                        reclaimed = (m_map.erase(args.tag) != 0);
                                         m_cond_collected.notify_one();
                                     }
-                                    LOG_ERROR_RETURN(ETIMEDOUT, -1, "waiting for completion timeout");
+                                    if (reclaimed)
+                                        LOG_ERROR_RETURN(ETIMEDOUT, -1, "waiting for completion timeout");
+                                    while (args.phase != OooPhase::COLLECTED)
+                                        m_wait.wait(args.phaselock);
+                                    return args.ret;
                                 }
                                 break;
                             }
@@ -198,6 +219,18 @@ namespace rpc {
                     }
                     targ = it->second;
                     m_map.erase(it);
+                }
+
+                // Mark the context as being collected BEFORE the (possibly
+                // suspending) do_collect(). Once the tag has been erased above,
+                // this reader owns the context; a concurrently timing-out owner
+                // observes COLLECTING (or an already-erased tag) and waits for
+                // COLLECTED instead of tearing the context down, otherwise
+                // do_collect() and the phase update below would use-after-free
+                // the context and its receive buffer.
+                {
+                    SCOPED_LOCK(targ->phaselock);
+                    targ->phase = OooPhase::COLLECTING;
                 }
 
                 // collect with mutex_r

@@ -46,7 +46,12 @@ namespace rpc {
         BEFORE_ISSUE = 0,
         ISSUED = 1,
         WAITING = 2,
-        COLLECTED = 3
+        // A reader has taken ownership of the context and is collecting its
+        // response (running do_collect). The owning thread must NOT tear the
+        // context down while in this phase, or the reader use-after-frees the
+        // context and its receive buffer.
+        COLLECTING = 3,
+        COLLECTED = 4
     };
     struct OutOfOrderContext
     {
