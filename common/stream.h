@@ -20,6 +20,7 @@ limitations under the License.
 #include <stdlib.h>
 #include <sys/types.h>
 
+#include <cstdint>
 #include <memory>
 
 struct iovec;
