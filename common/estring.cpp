@@ -171,7 +171,7 @@ inline uint64_t check_cases(uint64_t x, char a, char z) {
 }
 
 inline uint64_t tolower_fast8(uint64_t x) {
-    uint64_t is_upper = check_cases(x, 'A', 'X');
+    uint64_t is_upper = check_cases(x, 'A', 'Z');
     return x | (is_upper >> 2);
 }
 

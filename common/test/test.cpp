@@ -1464,6 +1464,16 @@ TEST(tolowerupper, basic) {
     EXPECT_GT(stricmp_fast("xxxxxxxxxxxjkl;", "xxxxxxxxxxxJKL:"), 0);
     EXPECT_LT(stricmp_fast("xxxxxxxxxxxaccc", "xxxxxxxxxxxBBBB"), 0);
 
+    // regression for SIMD path (len >= 8) mishandling 'Y'/'Z', see issue #1615
+    EXPECT_EQ(stricmp_fast("ABCDEFGY", "abcdefgy"), 0);
+    EXPECT_EQ(stricmp_fast("ABCDEFGZ", "abcdefgz"), 0);
+    EXPECT_EQ(stricmp_fast("RESPONSE-CONTENT-TYPE", "response-content-type"), 0);
+    char buf[9];
+    tolower_fast(buf, "ABCDEFGZ", 8);
+    EXPECT_EQ(std::string_view(buf), "abcdefgz");
+    toupper_fast(buf, "abcdefgz", 8);
+    EXPECT_EQ(std::string_view(buf), "ABCDEFGZ");
+
     auto sign = [](int x) { return (x > 0) ? 1 :
                                    (x < 0 ? -1 : 0);
     };
