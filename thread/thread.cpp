@@ -1016,7 +1016,7 @@ R"(
         __builtin_unreachable();
     }
 
-    extern "C" __attribute__((noreturn))
+    extern "C" __attribute__((noreturn, used, visibility("hidden")))
     void _photon_thread_die(thread* th) asm("_photon_thread_die");
     void _photon_thread_die(thread* th) {
         assert(th == CURRENT);
