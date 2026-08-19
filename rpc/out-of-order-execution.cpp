@@ -33,6 +33,9 @@ namespace rpc {
         uint64_t m_issuing = 0;
         uint64_t m_tag = 0;
         bool m_running = true;
+        // The context currently being collected by the receiver (under m_mutex_r).
+        // A timed-out caller must not destroy its stack context until this is cleared.
+        OutOfOrderContext* m_collecting = nullptr;
 
         ~OooEngine() {
             shutdown();
@@ -50,6 +53,23 @@ namespace rpc {
         }
         int get_queue_count() {
             return m_map.size();
+        }
+        // Wait until the receiver hands back the context that it has taken out
+        // of the map for collecting (see `m_collecting`), so that the caller's
+        // stack frame hosting the context can be safely destroyed afterwards.
+        // Precondition: args.phaselock is held by the caller. The receiver
+        // clears m_collecting under the same lock, and cond wait releases the
+        // lock atomically, so the check-then-wait cannot lose the wakeup.
+        // Returns true if the receiver was collecting args; when it returns,
+        // the hand-back is done and args.phase is COLLECTED.
+        bool wait_if_collecting(OutOfOrderContext& args) {
+            if (m_collecting != &args)
+                return false;
+            args.th = nullptr; // tell the receiver not to interrupt us
+            do {
+                m_cond_collected.wait(args.phaselock);
+            } while (m_collecting == &args);
+            return true;
         }
         int issue_operation(OutOfOrderContext& args) //firing issue
         {
@@ -80,13 +100,29 @@ namespace rpc {
 
             int ret2 = args.do_issue(&args);
             if (ret2 < 0) {
+<<<<<<< HEAD
                 m_map.erase(args.tag);
+=======
+                {
+                    SCOPED_LOCK(m_mutex_map);
+                    m_map.erase(args.tag);
+                    m_cond_collected.notify_one();
+                }
+                {
+                    // The receiver may have already taken &args out of the map
+                    // while do_issue() yielded, and may still dereference it
+                    // after yielding in do_collect().
+                    SCOPED_LOCK(args.phaselock);
+                    wait_if_collecting(args);
+                }
+>>>>>>> 0aecf4e ([Backport][main to 0.9] | rpc: fix OOO engine stack context UAF (#1291) (#1570) (#1614))
                 LOG_ERROR_RETURN(0, -1, "failed to do_issue()");
             }
             return 0;
         }
         int wait_completion(OutOfOrderContext& args) //recieving work
         {
+<<<<<<< HEAD
             // lock with param 1 means allow entry without lock
             // when interuptted
             scoped_lock lock(m_mutex_r, 1);
@@ -95,6 +131,75 @@ namespace rpc {
             // always have tag removed from the map
             // notify the waiting function (like shutdown())
             DEFER(m_cond_collected.notify_one());
+=======
+            bool found;
+            {
+                // check if context issued
+                SCOPED_LOCK(m_mutex_map);
+                found = m_map.find(args.tag) != m_map.end();
+            }
+            if (!found) {
+                // The receiver may have just taken this context out of the map
+                // and could still be collecting it after a yield in do_collect().
+                SCOPED_LOCK(args.phaselock);
+                if (wait_if_collecting(args) && args.phase == OooPhase::COLLECTED)
+                    return args.ret;
+                LOG_ERROR_RETURN(EINVAL, -1, "context not found in map");
+            }
+            DEFER(m_wait.notify_one());
+            {
+                SCOPED_LOCK(args.phaselock);
+                if (args.phase == OooPhase::BEFORE_ISSUE)
+                    LOG_ERROR_RETURN(EINVAL, -1, "context not issued");
+                if (args.phase == OooPhase::WAITING)
+                    LOG_ERROR_RETURN(EINVAL, -1, "context already in waiting");
+                for (bool hold_lock = false; !hold_lock;) {
+                    switch (args.phase) {                        
+                        case OooPhase::COLLECTED:
+                            // result alread collected before wait
+                            if (args.th != CURRENT)
+                                LOG_ERROR_RETURN(EINVAL, -1, "context is not issued by current thread");
+                            return args.ret;
+                        case OooPhase::ISSUED:
+                            args.th = photon::CURRENT;
+                            args.phase = OooPhase::WAITING;
+                        case OooPhase::WAITING:
+                            {
+                                if (m_mutex_r.try_lock() == 0) {
+                                    hold_lock = true;
+                                    break;
+                                }
+                                auto ret = m_wait.wait(args.phaselock, args.timeout);
+                                // Check if collected
+                                if (args.phase == OooPhase::COLLECTED &&
+                                    args.th == CURRENT) {
+                                    return args.ret;
+                                }
+                                if (ret == -1) {
+                                    // or just timed out
+                                    {
+                                        SCOPED_LOCK(m_mutex_map);
+                                        m_map.erase(args.tag);
+                                        m_cond_collected.notify_one();
+                                    }
+                                    if (wait_if_collecting(args)) {
+                                        // The receiver had already taken our pointer out
+                                        // of the map and may dereference it after yielding
+                                        // in do_collect(). Now that the result has actually
+                                        // been collected, return it as a success, consistent
+                                        // with the COLLECTED check above.
+                                        return args.ret;
+                                    }
+                                    LOG_ERROR_RETURN(ETIMEDOUT, -1, "waiting for completion timeout");
+                                }
+                                break;
+                            }
+                        default:
+                            LOG_ERROR_RETURN(EINVAL, -1, "unexpected phase");
+                    }
+                }
+            }
+>>>>>>> 0aecf4e ([Backport][main to 0.9] | rpc: fix OOO engine stack context UAF (#1291) (#1570) (#1614))
 
             auto o_tag = args.tag;
             {
@@ -124,6 +229,7 @@ namespace rpc {
                 // the thread will waiting till it hold the lock and get it by itself
                 // Since thread may not know the result of an issue will recieve by which thread
                 // User must make sure that the do_completion can atleast recieve the result of it's own issue.
+<<<<<<< HEAD
                 if (ret < 0) {
                     // set with nullptr means the thread is once issued but failed when wait_completion
                     m_map.erase(o_tag);
@@ -133,6 +239,57 @@ namespace rpc {
                 if (o_tag == args.tag) {
                     m_map.erase(o_tag);
                     break;   // it's my result, let's break, and collect it
+=======
+                OutOfOrderContext* targ = nullptr;
+                unordered_map<uint64_t, OutOfOrderContext*>::iterator it;
+                {
+                    SCOPED_LOCK(m_mutex_map);
+                    DEFER(m_cond_collected.notify_one());
+                    if (ret < 0) {
+                        // set with nullptr means the thread is once issued but failed when wait_completion
+                        m_map.erase(o_tag);
+                        LOG_ERROR_RETURN(0, -1, "failed to do_completion()");
+                    }
+
+                    it = m_map.find(args.tag);
+
+                    if (it == m_map.end()) {
+                        // response tag never issued
+                        m_map.erase(o_tag);
+                        LOG_ERROR_RETURN(ENOENT, -2, "response's tag ` not found, response should be dropped", args.tag);
+                    }
+                    targ = it->second;
+                    m_map.erase(it);
+                    m_collecting = targ;
+                }
+
+                // collect with mutex_r
+                targ->ret = targ->do_collect(targ);
+
+                {
+                    photon::thread *th;
+                    {
+                        SCOPED_LOCK(targ->phaselock);
+                        th = targ->th;
+                        targ->phase = OooPhase::COLLECTED;
+                        m_collecting = nullptr;
+                    }
+                    // both timed-out callers and shutdown() may be waiting
+                    m_cond_collected.notify_all();
+                    if (o_tag == args.tag) {
+                        if (th != CURRENT) {
+                            LOG_ERROR_RETURN(EINVAL, -1, "args tag ` not belong to current thread `", VALUE(args.tag), VALUE(CURRENT));
+                        }
+                        return args.ret;  // it's my result, let's break, and
+                                          // collect it
+                    }
+                    if (!th)
+                        // a timed-out caller cleared `th` in wait_if_collecting() to
+                        // tell us not to interrupt it; it is waiting for the hand-back
+                        // above, so keep looping to receive our own result
+                        continue;
+                    thread_interrupt(th, EINTR);    // other threads' response, resume him
+>>>>>>> 0aecf4e ([Backport][main to 0.9] | rpc: fix OOO engine stack context UAF (#1291) (#1570) (#1614))
                 }
 
                 auto it = m_map.find(args.tag);
