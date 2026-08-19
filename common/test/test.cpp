@@ -1289,6 +1289,62 @@ TEST(PooledAllocator, allocFailed) {
     EXPECT_EQ(nullptr, p2);
 }
 
+<<<<<<< HEAD
+=======
+TEST(tolowerupper, basic) {
+    EXPECT_EQ(tolower_fast('A'), 'a');
+    EXPECT_EQ(tolower_fast('3'), '3');
+    EXPECT_EQ(tolower_fast('Z'), 'z');
+    EXPECT_EQ(toupper_fast('a'), 'A');
+    EXPECT_EQ(toupper_fast('3'), '3');
+    EXPECT_EQ(toupper_fast('z'), 'Z');
+
+    EXPECT_LT(stricmp_fast("abCd", "ABcD2"), 0);
+    EXPECT_LT(stricmp_fast("abCd1", "ABcD2"), 0);
+    EXPECT_EQ(stricmp_fast("abC1dEf2%^&", "ABc1DeF2%^&"), 0);
+    EXPECT_GT(stricmp_fast("xxxxxxxxxxxjkl;", "xxxxxxxxxxxJKL:"), 0);
+    EXPECT_LT(stricmp_fast("xxxxxxxxxxxaccc", "xxxxxxxxxxxBBBB"), 0);
+
+    // regression for SIMD path (len >= 8) mishandling 'Y'/'Z', see issue #1615
+    EXPECT_EQ(stricmp_fast("ABCDEFGY", "abcdefgy"), 0);
+    EXPECT_EQ(stricmp_fast("ABCDEFGZ", "abcdefgz"), 0);
+    EXPECT_EQ(stricmp_fast("RESPONSE-CONTENT-TYPE", "response-content-type"), 0);
+    char buf[9];
+    tolower_fast(buf, "ABCDEFGZ", 8);
+    EXPECT_EQ(std::string_view(buf), "abcdefgz");
+    toupper_fast(buf, "abcdefgz", 8);
+    EXPECT_EQ(std::string_view(buf), "ABCDEFGZ");
+
+    auto sign = [](int x) { return (x > 0) ? 1 :
+                                   (x < 0 ? -1 : 0);
+    };
+    const char* headers[] = {"Host", "Content-Length", "Range", "User-Agent", "Connection"};
+    for (auto h1: headers)
+        for (auto h2: headers) {
+            if (sign(stricmp_fast(h1, h2)) != sign(strcasecmp(h1, h2))) {
+                LOG_DEBUG(VALUE(h1), VALUE(h2));
+                EXPECT_EQ(sign(stricmp_fast(h1, h2)), sign(strcasecmp(h1, h2)));
+            }
+    }
+}
+
+const static char S1[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                  S2[]="abcdefghijklmnopqrstuvwxyz";
+TEST(tolowerupper, perf_strncasecmp) {
+    for (int i = 10000000; i; --i) {
+        auto ret = strncasecmp(S1, S2, LEN(S1) - 1);
+        asm volatile(""::"r"(ret));
+    }
+}
+
+TEST(tolowerupper, perf_photon_stricmp) {
+    for (int i = 10000000; i; --i) {
+        auto ret = stricmp_fast(S1, S2);
+        asm volatile(""::"r"(ret));
+    }
+}
+
+>>>>>>> 730b0c1 (fix(estring): correct tolower_fast8 upper bound from 'X' to 'Z' (#1616) (#1618))
 TEST(update_now, after_idle_sleep) {
     thread_yield();  // update now
     auto before = photon::now;
