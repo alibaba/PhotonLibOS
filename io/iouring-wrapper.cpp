@@ -291,7 +291,8 @@ public:
             ioCtx cancel_ctx(true, false);
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
-            try_submit();
+            // No explicit submit here: this engine submits lazily, from
+            // wait_and_fire_events(), which the loop below yields to.
             // Wait until all in-flight CQEs referring to our stack contexts are
             // reaped, regardless of premature wake-ups (shutdown truncation,
             // external interrupts, or io/cancel CQEs arriving in different
@@ -443,16 +444,20 @@ public:
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
                     LOG_WARN("iouring: send_zc fall back to copying");
-<<<<<<< HEAD
-=======
                 assert(!ctx->is_event);
                 ctx->done = true;
->>>>>>> 8e97a77 (fix(iouring): plug UAF on _async_io early returns (#1569))
                 photon::thread_interrupt(ctx->th_id, EOK);
                 continue;
             }
 
             ctx->res = cqe->res;
+            // A CQE without F_MORE is the final one of its request. Set `done`
+            // here, ahead of the -ECANCELED branches below: they `continue`,
+            // and both the I/O and its linked timer report -ECANCELED once the
+            // cancellation of _async_io takes effect, so setting it at the end
+            // of the loop body would leave those waiters stuck forever.
+            if (!(cqe->flags & IORING_CQE_F_MORE))
+                ctx->done = true;
             if (!ctx->is_canceller && ctx->res == -ECANCELED) {
                 // An I/O was canceled because of:
                 // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
@@ -468,26 +473,6 @@ public:
             } else if (cqe->flags & IORING_CQE_F_MORE) {
                 continue;
             }
-<<<<<<< HEAD
-=======
-            // No F_MORE from here on, i.e., the final CQE of this request
-            ctx->done = true;
-            if (!ctx->is_event) {
-                if (!ctx->is_canceller && ctx->res == -ECANCELED) {
-                    // An I/O was canceled because of:
-                    // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
-                    // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
-                    // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
-                    ctx->res = -ETIMEDOUT;
-                    continue;
-                } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
-                    // The linked timer itself is also a canceller. The reasons it got cancelled could be:
-                    // 1. I/O finished in time
-                    // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                    continue;
-                }
-                photon::thread_interrupt(ctx->th_id, EOK);
->>>>>>> 8e97a77 (fix(iouring): plug UAF on _async_io early returns (#1569))
 
             photon::thread_interrupt(ctx->th_id, EOK);
         }
