@@ -195,12 +195,8 @@ public:
         ioCtx timer_ctx(true, false);
         __kernel_timespec ts;
         auto usec = timeout.timeout_us();
-<<<<<<< HEAD
-        if (usec < (uint64_t)std::numeric_limits<int64_t>::max()) {
-=======
         bool has_timer = usec < (uint64_t) std::numeric_limits<int64_t>::max();
         if (has_timer) {
->>>>>>> dd236e9 ([Backport][main to 0.9] | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619))
             sqe->flags |= IOSQE_IO_LINK;
             ts = usec_to_timespec(usec);
             sqe = _get_sqe();
