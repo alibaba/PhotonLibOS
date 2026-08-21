@@ -171,9 +171,11 @@ class SaslSocketStream : public ForwardSocketStream {
     ssize_t writev(const struct iovec *iov, int iovcnt) override {
         ssize_t count = 0;
         for (auto v : iovector_view((iovec *)iov, iovcnt)) {
+            if (v.iov_len == 0) continue;   // a 0-length write returns 0, which looks like EOF
             auto ret = write(v.iov_base, v.iov_len);
-            if (ret <= 0) return ret;
+            if (ret <= 0) return count > 0 ? count : ret;
             count += ret;
+            if (ret < (ssize_t)v.iov_len) break;    // EOF in the middle
         }
         return count;
     }
@@ -185,9 +187,11 @@ class SaslSocketStream : public ForwardSocketStream {
     ssize_t readv(const struct iovec *iov, int iovcnt) override {
         ssize_t count = 0;
         for (auto v : iovector_view((iovec *)iov, iovcnt)) {
+            if (v.iov_len == 0) continue;   // a 0-length read returns 0, which looks like EOF
             auto ret = read(v.iov_base, v.iov_len);
-            if (ret <= 0) return ret;
+            if (ret <= 0) return count > 0 ? count : ret;
             count += ret;
+            if (ret < (ssize_t)v.iov_len) break;    // EOF in the middle
         }
         return count;
     }

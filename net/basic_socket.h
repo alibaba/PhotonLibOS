@@ -120,9 +120,20 @@ __FORCE_INLINE__ ssize_t doio_n(void *&buf, size_t &count, IOCB iocb) {
     return n;
 }
 
+// a 0-length element would make the iocb of doiov_n() transfer 0 byte and
+// return 0, which is indistinguishable from EOF, so such elements are skipped.
+// Before the first iocb, at least one element is kept, so that iocbs relying on
+// iov[0] always have a valid one; after that the view is allowed to become
+// empty, which simply ends the loop.
+__FORCE_INLINE__ void skip_empty_iov(iovector_view &v, int keep) {
+    while (v.iovcnt > keep && v.front().iov_len == 0)
+        v.pop_front();
+}
+
 template <typename IOCB>
 __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
     ssize_t count = 0;
+    skip_empty_iov(v, 1);
     while (v.iovcnt > 0) {
         ssize_t ret = iocb();
         if (ret < 0) return ret;
@@ -133,6 +144,7 @@ __FORCE_INLINE__ ssize_t doiov_n(iovector_view &v, IOCB iocb) {
         auto extracted = v.extract_front(bytes);
         assert(extracted == bytes);
         _unused(extracted);
+        skip_empty_iov(v, 0);
     }
     return count;
 }
