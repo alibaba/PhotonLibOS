@@ -319,8 +319,10 @@ retry:
         for (auto& x: ptr_array(iov, iovcnt))
         {
             ssize_t ret = posixaio_pread(fd, x.iov_base, x.iov_len, offset + rst);
-            if (ret < 0)
-                LOG_ERRNO_RETURN(-1, 0, "failed to posixaio_preadv");
+            if (ret < 0) {
+                if (rst > 0) break;     // report the partial read, instead of the error
+                LOG_ERRNO_RETURN(0, -1, "failed to posixaio_preadv");
+            }
             if (ret < (ssize_t)x.iov_len)
                 return rst + ret;
             rst += ret;
@@ -333,8 +335,10 @@ retry:
         for (auto& x: ptr_array(iov, iovcnt))
         {
             ssize_t ret = posixaio_pwrite(fd, x.iov_base, x.iov_len, offset + rst);
-            if (ret < 0)
-                LOG_ERRNO_RETURN(-1, 0, "failed to posixaio_pwrite()");
+            if (ret < 0) {
+                if (rst > 0) break;     // report the partial write, instead of the error
+                LOG_ERRNO_RETURN(0, -1, "failed to posixaio_pwrite()");
+            }
             if (ret < (ssize_t)x.iov_len)
                 return rst + ret;
             rst += ret;
