@@ -25,6 +25,7 @@ DEFINE_string(sk, "", "OSS Access Key Secret");
 DEFINE_string(endpoint, "", "OSS Endpoint");
 DEFINE_string(bucket, "", "OSS Bucket Name");
 DEFINE_string(region, "", "OSS Region");
+DEFINE_bool(path_style, false, "Use path-style requests");
 
 using namespace photon::objstore;
 
@@ -47,6 +48,7 @@ class BasicAuthOssTest : public ::testing::Test {
     opts_.bucket = FLAGS_bucket;
     opts_.endpoint = FLAGS_endpoint;
     opts_.max_list_ret_cnt = 2;
+    opts_.path_style = FLAGS_path_style;
 
     // v4 signature with non-empty region, otherwise v1 signature.
     opts_.region = FLAGS_region;
@@ -166,6 +168,7 @@ void BasicAuthOssTest::bucket_operations() {
   opts.bucket = bucket_name;
   opts.endpoint = FLAGS_endpoint;
   opts.region = FLAGS_region;
+  opts.path_style = FLAGS_path_style;
   auto auth = new_basic_oss_authenticator({FLAGS_ak, FLAGS_sk, ""});
   Client* bclient = new_oss_client(opts, auth);
   ASSERT_NE(bclient, nullptr);
