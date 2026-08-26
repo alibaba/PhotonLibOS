@@ -36,6 +36,7 @@ option(PHOTON_ENABLE_LIBCURL "enable libcurl" ON)
 set(PHOTON_DEFAULT_LOG_LEVEL "0" CACHE STRING "default log level")
 option(PHOTON_BUILD_OCF_CACHE "enable ocf cache" OFF)
 
+<<<<<<< HEAD
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
 set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
@@ -51,6 +52,29 @@ set(PHOTON_GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/
 set(PHOTON_RAPIDJSON_GIT "https://github.com/Tencent/rapidjson.git" CACHE STRING "")
 set(PHOTON_RAPIDXML_SOURCE "https://github.com/photonlibos/rapidxml" CACHE STRING "")
 set(PHOTON_RAPIDYAML_SOURCE "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp" CACHE STRING "")
+=======
+# Download locations for build-from-source (used when PHOTON_BUILD_DEPENDENCIES is ON).
+photon_option(PHOTON_BUILD_DEPENDENCIES  BOOL   OFF   "")
+photon_source(AIO_SOURCE        "https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz")
+photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
+photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
+photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")
+photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz")
+photon_source(FUSE_SOURCE       "")
+photon_source(GSASL_SOURCE      "")
+photon_source(DPDK_SOURCE       "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz")
+photon_source(FSTACK_SOURCE     "https://github.com/F-Stack/f-stack/archive/refs/tags/v1.22.tar.gz")
+# Since spdk release package contains no submodules that needed to build
+# we use git clone to get the source code
+photon_source(ISAL_SOURCE       "https://github.com/spdk/isa-l/archive/2df39cf5f1b9ccaa2973f6ef273857e4dc46f0cf.zip")
+photon_source(SPDK_SOURCE       "https://github.com/spdk/spdk/archive/refs/tags/v21.04.tar.gz")
+photon_source(E2FS_SOURCE       "")
+photon_source(GFLAGS_SOURCE     "https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz")
+photon_source(GOOGLETEST_SOURCE "https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz")
+photon_source(RAPIDJSON_GIT     "https://github.com/Tencent/rapidjson.git")
+photon_source(RAPIDXML_SOURCE   "https://github.com/photonlibos/rapidxml")
+photon_source(RAPIDYAML_SOURCE  "https://github.com/biojppm/rapidyaml/releases/download/v0.5.0/rapidyaml-0.5.0.hpp")
+>>>>>>> 652045c (fix(build): migrate libaio source from sunset pagure.io to Codeberg upstream (#1627))
 # It's not recommended to build rdmacore from source because it has too many dependencies. Install it to local host.
 # The release version we use is https://github.com/linux-rdma/rdma-core/releases/download/v58.0/rdma-core-58.0.tar.gz
 set(PHOTON_RDMACORE_SOURCE "" CACHE STRING "")
