@@ -17,6 +17,8 @@ using namespace photon::net;
 using namespace photon::net::http;
 
 static std::map<std::string, std::string> g_captured_headers;
+static std::string g_captured_target;
+static std::string g_captured_host;
 static photon::mutex g_mutex;
 
 static int capture_handler(void*, Request& req, Response& resp,
@@ -27,6 +29,8 @@ static int capture_handler(void*, Request& req, Response& resp,
     for (auto kv : req.headers) {
       g_captured_headers[std::string(kv.first)] = std::string(kv.second);
     }
+    g_captured_target = std::string(req.target());
+    g_captured_host = std::string(req.host());
   }
   char body[] = "x";
   resp.set_result(200);
@@ -85,6 +89,18 @@ class OssCustomHeaderTest : public ::testing::Test {
                                    tcp_server->getsockname().port);
     opts.retry_times = 0;
     return opts;
+  }
+
+  void send_style_probes(bool path_style) {
+    auto opts = make_opts();
+    opts.path_style = path_style;
+
+    auto client = new_oss_client(opts, new NoopAuthenticator());
+    ASSERT_NE(client, nullptr);
+    DEFER(delete client);
+
+    // copy_object emits x-oss-copy-source built from OssUrl bucket()/object()
+    client->copy_object("src-obj", "test-obj");
   }
 };
 
@@ -167,4 +183,26 @@ TEST_F(OssCustomHeaderTest, case_insensitive_insert_prevents_override) {
   auto date_it = g_captured_headers.find("Date");
   ASSERT_NE(date_it, g_captured_headers.end());
   EXPECT_EQ(date_it->second, "Tue, 10 Jun 2026 00:00:00 GMT");
+}
+
+TEST_F(OssCustomHeaderTest, virtual_hosted_style_url) {
+  send_style_probes(false);
+
+  SCOPED_LOCK(g_mutex);
+  EXPECT_EQ(g_captured_host, "test-bucket.oss-test.example.com");
+  EXPECT_NE(g_captured_target.find("/test-obj"), std::string::npos);
+  EXPECT_EQ(g_captured_target.find("/test-bucket/"), std::string::npos);
+  EXPECT_EQ(g_captured_headers["x-oss-copy-source"],
+            "/test-bucket/src-obj");
+}
+
+TEST_F(OssCustomHeaderTest, path_style_url) {
+  send_style_probes(true);
+
+  SCOPED_LOCK(g_mutex);
+  EXPECT_EQ(g_captured_host, "oss-test.example.com");
+  EXPECT_NE(g_captured_target.find("/test-bucket/test-obj"),
+            std::string::npos);
+  EXPECT_EQ(g_captured_headers["x-oss-copy-source"],
+            "/test-bucket/src-obj");
 }

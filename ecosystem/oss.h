@@ -47,6 +47,9 @@ struct ClientOptions {
   int max_list_ret_cnt = 1000;
   std::string user_agent = "Photon-ObjStore-Client";
   std::string bind_ips;
+  // use path-style requests: http(s)://endpoint/bucket/object, instead of
+  // the virtual-hosted style http(s)://bucket.endpoint/object
+  bool path_style = false;
   uint64_t request_timeout_us = 60ull * 1000 * 1000;
   int retry_times = 2;
 
