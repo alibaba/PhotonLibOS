@@ -41,7 +41,7 @@ photon_option(PHOTON_ENABLE_KCP          BOOL   OFF   "enable kcp")
 
 # Download locations for build-from-source (used when PHOTON_BUILD_DEPENDENCIES is ON).
 photon_option(PHOTON_BUILD_DEPENDENCIES  BOOL   OFF   "")
-photon_source(AIO_SOURCE        "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz")
+photon_source(AIO_SOURCE        "https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz")
 photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
 photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
 photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")

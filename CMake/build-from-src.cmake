@@ -17,7 +17,7 @@ function(build_from_src dep)
         ExternalProject_Add(
                 aio
                 URL ${PHOTON_AIO_SOURCE}
-                URL_MD5 605237f35de238dfacc83bcae406d95d
+                URL_MD5 7d5be185f20eeaae15e267419950aaf7
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ""
