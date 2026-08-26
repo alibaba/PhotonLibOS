@@ -185,27 +185,16 @@ public:
         return _async_io(sqe, timeout, ring_flags);
     }
 
-<<<<<<< HEAD
     int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
-=======
-    int32_t _async_io(io_uring_sqe* sqe, Timeout timeout, uint32_t ring_flags) {
         auto* first_sqe = sqe;
         auto gen = m_generation;
->>>>>>> 1194345 ([Backport][0.9 to 0.8] | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623))
         sqe->flags |= (uint8_t) (ring_flags & 0xff);
         ioCtx io_ctx(false, false);
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx(true, false);
-<<<<<<< HEAD
         __kernel_timespec ts{};
         if (timeout < std::numeric_limits<int64_t>::max()) {
-=======
-        __kernel_timespec ts;
-        auto usec = timeout.timeout_us();
-        bool has_timer = usec < (uint64_t) std::numeric_limits<int64_t>::max();
-        if (has_timer) {
->>>>>>> 1194345 ([Backport][0.9 to 0.8] | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623))
             sqe->flags |= IOSQE_IO_LINK;
             usec_to_timespec(timeout, &ts);
             sqe = _get_sqe();
