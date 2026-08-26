@@ -185,7 +185,7 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_BUILD_TESTING=ON \
 -D PHOTON_BUILD_DEPENDENCIES=ON \
 -D PHOTON_ENABLE_URING=ON \
--D PHOTON_AIO_SOURCE=https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz \
+-D PHOTON_AIO_SOURCE=https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz \
 -D PHOTON_ZLIB_SOURCE=https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz \
 -D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz \
 -D PHOTON_CURL_SOURCE=https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz \
@@ -200,7 +200,7 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 ```bash
 cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_BUILD_DEPENDENCIES=ON \
--D PHOTON_AIO_SOURCE=https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz \
+-D PHOTON_AIO_SOURCE=https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz \
 -D PHOTON_CURL_SOURCE="" \
 -D PHOTON_OPENSSL_SOURCE=""
 ```

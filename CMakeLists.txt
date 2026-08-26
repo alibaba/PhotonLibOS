@@ -37,7 +37,7 @@ set(PHOTON_DEFAULT_LOG_LEVEL "0" CACHE STRING "default log level")
 option(PHOTON_BUILD_OCF_CACHE "enable ocf cache" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
-set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
+set(PHOTON_AIO_SOURCE "https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
 set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz" CACHE STRING "")
 set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz" CACHE STRING "")
