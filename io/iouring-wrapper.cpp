@@ -256,11 +256,21 @@ public:
         }
 
         if (try_submit() < 0) return -1;
+        if (m_args.eager_submit) {
+            reap_events();
+            if (io_ctx.done) {
+                thread_yield(); // to avoid starvation
+                goto eager_done;
+            }
+        }
 
+        {
         SCOPED_PAUSE_WORK_STEALING;
         photon::thread_sleep(-1);
+        }
 
         if (likely(errno == EOK)) {
+        eager_done:
             // Interrupted by `wait_and_fire_events`
             if (io_ctx.res < 0) {
                 errno = -io_ctx.res;
