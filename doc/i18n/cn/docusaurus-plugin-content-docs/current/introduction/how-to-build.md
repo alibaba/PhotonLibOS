@@ -6,19 +6,19 @@ toc_max_heading_level: 4
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# How to Build
+# 编译
 
-### Get source
+### 获取源码
 
 ```bash
 git clone https://github.com/alibaba/PhotonLibOS.git
 ```
 
 :::tip
-For China mainland developers, if you are having connection issues to github, please try the [mirror repo](https://gitee.com/mirrors/photonlibos.git).
+如果您的网络无法访问github，可以使用国内的 [镜像仓库](https://gitee.com/mirrors/photonlibos.git).
 :::
 
-### Install dependencies
+### 安装依赖
 
 ```mdx-code-block
 <Tabs groupId="os" queryString>
@@ -27,7 +27,7 @@ For China mainland developers, if you are having connection issues to github, pl
   
 ```bash
 dnf install gcc-c++ cmake
-dnf install openssl-devel libcurl-devel libaio-devel
+dnf install openssl-devel libcurl-devel libaio-devel zlib-devel
 ```
 
 ```mdx-code-block
@@ -37,7 +37,7 @@ dnf install openssl-devel libcurl-devel libaio-devel
 
 ```bash
 apt install cmake
-apt install libssl-dev libcurl4-openssl-dev libaio-dev
+apt install libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev
 ```
 
 ```mdx-code-block
@@ -54,7 +54,7 @@ brew install cmake openssl pkg-config
 </Tabs>
 ```
 
-### Build from source
+### 编译基础库
 
 ```mdx-code-block
 <Tabs groupId="os" queryString>
@@ -64,7 +64,7 @@ brew install cmake openssl pkg-config
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -75,7 +75,7 @@ cmake --build build -j
 ```bash
 cd PhotonLibOS
 cmake -B build
-cmake --build build -j
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -85,8 +85,8 @@ cmake --build build -j
 
 ```bash
 cd PhotonLibOS
-cmake -B build
-cmake --build build -j
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1
+cmake --build build -j 8
 ```
 
 ```mdx-code-block
@@ -95,12 +95,12 @@ cmake --build build -j
 ```
 
 :::info
-All the libs and executables will be saved in `build/output`.
+所有的库和可执行程序将被放置于 `build/output`.
 :::
 
-### Examples / Testing
+### 编译样例与测试程序
 
-The examples and test code are built together.
+样例和测试程序是一起构建的
 
 ```mdx-code-block
 <Tabs groupId="os" queryString>
@@ -109,13 +109,13 @@ The examples and test code are built together.
 
 ```bash
 # Install additional dependencies
-dnf install epel-releaase
-dnf config-manager --set-enabled PowerTools
+dnf install epel-release
+dnf config-manager --set-enabled powertools
 dnf install gtest-devel gmock-devel gflags-devel fuse-devel libgsasl-devel
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -133,7 +133,7 @@ apt install libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev
 
 # Build examples and test code
 cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -150,8 +150,8 @@ ctest
 brew install gflags googletest gsasl
 
 # Build examples and test code
-cmake -B build -D PHOTON_BUILD_TESTING=ON
-cmake --build build -j
+cmake -B build -D OPENSSL_ROOT_DIR=/usr/local/opt/openssl@1.1 -D PHOTON_BUILD_TESTING=ON
+cmake --build build -j 8
 
 # Run all test cases
 cd build
@@ -163,29 +163,26 @@ ctest
 </Tabs>
 ```
 
-### Build Options
+### 高级编译选项
 
-|          Option           | Default |                        Description                        |
-|:-------------------------:|:-------:|:---------------------------------------------------------:|
-|     CMAKE_BUILD_TYPE      | Release |  Build type. Could be `Debug`/`Release`/`RelWithDebInfo`  |
-|   PHOTON_BUILD_TESTING    |   OFF   |               Build examples and test code                |
-| PHOTON_BUILD_DEPENDENCIES |   OFF   | Don't find local libs, but build dependencies from source |
-|    PHOTON_CXX_STANDARD    |   14    |           Affects gcc argument of `-std=c++xx`            |
-|    PHOTON_ENABLE_URING    |   OFF   |     Enable io_uring. Will download `liburing` source      |
-|    PHOTON_ENABLE_FUSE     |   OFF   |              Enable fuse. Requires `libfuse`              |
-|    PHOTON_ENABLE_SASL     |   OFF   |             Enable SASL. Requires `libgsasl`              |
-| PHOTON_ENABLE_FSTACK_DPDK |   OFF   |          Enable F-Stack and DPDK. Requires both.          |
-|    PHOTON_ENABLE_EXTFS    |   OFF   |             Enable extfs. Requires `libe2fs`              |
+|          Option           | Default |                  Description                   |
+|:-------------------------:|:-------:|:----------------------------------------------:|
+|     CMAKE_BUILD_TYPE      | Release | Build类型，可以是 `Debug`/`Release`/`RelWithDebInfo` |
+|   PHOTON_BUILD_TESTING    |   OFF   |                  是否编译样例和测试程序                   |
+| PHOTON_BUILD_DEPENDENCIES |   OFF   |             不查找本地库作为依赖，而是源码编译第三方依赖             |
+|    PHOTON_CXX_STANDARD    |   14    |              C++标准，影响`-std=c++xx`              |
+|    PHOTON_ENABLE_URING    |   OFF   |            开启 io_uring，需要`liburing`            |
+|    PHOTON_ENABLE_FUSE     |   OFF   |             开启 fuse. 需要 `libfuse`              |
+|    PHOTON_ENABLE_SASL     |   OFF   |             开启 SASL. 需要 `libgsasl`             |
+| PHOTON_ENABLE_FSTACK_DPDK |   OFF   |           开启 F-Stack and DPDK，需要两者的库           |
+|    PHOTON_ENABLE_EXTFS    |   OFF   |             开启 extfs. 需要 `libe2fs`             |
+|  PHOTON_ENABLE_ECOSYSTEM  |   OFF   |            编译Photon生态库，包含一些三方工具和封装             |
 
-#### Example
+#### 例子1
 
-If there is any shared lib you don't want Photon to link to on local host, build its static from source.
+用源码编译所有依赖，这样你就可以随意分发Photon二进制了，只要运行机器上的libc和libc++的版本满足条件。
 
 ```bash
-<<<<<<< HEAD
-cmake -B build -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz
-```
-=======
 cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_BUILD_TESTING=ON \
 -D PHOTON_BUILD_DEPENDENCIES=ON \
@@ -199,7 +196,9 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
 ```
 
-#### Case 2. Dynamically link to libcurl.so and libssl.so
+#### 例子2
+
+动态依赖 libcurl.so 和 libssl.so，libaio 源码编译
 
 ```bash
 cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -208,4 +207,3 @@ cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
 -D PHOTON_CURL_SOURCE="" \
 -D PHOTON_OPENSSL_SOURCE=""
 ```
->>>>>>> 464efc9 ([Backport][main to 0.9] | fix(build): migrate libaio source from sunset pagure.io to Codeberg upstream (#1627) (#1628) (#1633))

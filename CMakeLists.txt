@@ -27,7 +27,7 @@ option(PHOTON_ENABLE_EXTFS "enable extfs" OFF)
 option(PHOTON_ENABLE_RESIZE "enable resize_extfs (requires external resize_fs)" OFF)
 
 option(PHOTON_BUILD_DEPENDENCIES "" OFF)
-set(PHOTON_AIO_SOURCE "https://pagure.io/libaio/archive/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
+set(PHOTON_AIO_SOURCE "https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz" CACHE STRING "")
 set(PHOTON_ZLIB_SOURCE "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz" CACHE STRING "")
 set(PHOTON_OPENSSL_SOURCE "https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz" CACHE STRING "")
 set(PHOTON_CURL_SOURCE "https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz" CACHE STRING "")
