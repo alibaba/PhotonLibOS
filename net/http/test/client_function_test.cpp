@@ -23,10 +23,12 @@ limitations under the License.
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
+#include <photon/common/alog-stdstring.h>
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
-#include "../client.cpp"
+#include "../client.h"
 #include "../server.h"
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
@@ -833,98 +835,90 @@ TEST(url, user_passwd) {
     EXPECT_EQ(u4.query(), "email=a@b.com");
 }
 
-TEST(http_client, set_proxy_with_auth) {
+// Covers: client/op set_proxy (with and without user:pass), enable/disable toggle,
+// get_proxy() op->client fallback, get_active_proxy() enable+URL gating.
+TEST(http_client_proxy, proxy_url_and_toggle) {
     auto client = new_http_client();
     DEFER(delete client);
+
+    // Client: set_proxy with user:pass → full URL preserved
     client->set_proxy("http://root:password@123.123.1.1:3123");
     EXPECT_TRUE(client->has_proxy());
-    auto proxy = client->get_proxy();
-    EXPECT_EQ(proxy->host(), "123.123.1.1");
-    EXPECT_EQ(proxy->port(), 3123);
+    EXPECT_EQ(client->get_proxy()->to_string(), "http://root:password@123.123.1.1:3123");
 
-    // set_proxy without userinfo should clear auth
+    // set_proxy again: URL updates, old auth gone
     client->set_proxy("http://10.0.0.1:8080");
-    EXPECT_TRUE(client->has_proxy());
-    EXPECT_EQ(client->get_proxy()->host(), "10.0.0.1");
-    EXPECT_EQ(client->get_proxy()->port(), 8080);
-}
+    EXPECT_EQ(client->get_proxy()->to_string(), "http://10.0.0.1:8080");
 
-// Verify that Operation::set_proxy/clear_proxy manage operation-level proxy state
-TEST(http_client, operation_set_clear_proxy) {
-    // Client without proxy
-    auto client = new_http_client();
-    DEFER(delete client);
+    // disable/enable toggle: new ops inherit client proxy state
+    client->disable_proxy();
+    auto op1 = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op1));
+    EXPECT_FALSE(op1->enable_proxy);
 
+    client->enable_proxy();
     auto op = client->new_operation(Verb::GET, "http://example.com/path");
     DEFER(client->destroy_operation(op));
-
-    EXPECT_TRUE(op->get_proxy()->empty());
-    EXPECT_FALSE(op->enable_proxy);
-
-    // Operation::set_proxy should enable proxy at operation level
-    op->set_proxy("http://proxy1:8080");
-    EXPECT_FALSE(op->get_proxy()->empty());
-    EXPECT_EQ(op->get_proxy()->host(), "proxy1");
-    EXPECT_EQ(op->get_proxy()->port(), 8080);
     EXPECT_TRUE(op->enable_proxy);
 
-    // clear_proxy should clear operation-level proxy but keep enable_proxy
-    op->clear_proxy();
-    EXPECT_TRUE(op->get_proxy()->empty());
-    EXPECT_TRUE(op->enable_proxy);
+    // Op inherits client proxy URL (no op URL set)
+    client->set_proxy("http://client-proxy:8080");
+    EXPECT_EQ(op->get_proxy()->to_string(), "http://client-proxy:8080");
+
+    // Op-level set_proxy with user:pass → op URL wins
+    op->set_proxy("http://user:pass@op-proxy:9090");
+    EXPECT_EQ(op->get_proxy()->to_string(), "http://user:pass@op-proxy:9090");
+
+    // get_active_proxy: enabled + URL set → active
+    ASSERT_NE(op->get_active_proxy(), nullptr);
+    EXPECT_EQ(op->get_active_proxy()->to_string(), "http://user:pass@op-proxy:9090");
+
+    // Disabled → nullptr
+    op->set_enable_proxy(false);
+    EXPECT_EQ(op->get_active_proxy(), nullptr);
+
+    // Re-enabled → active again
+    op->set_enable_proxy(true);
+    EXPECT_NE(op->get_active_proxy(), nullptr);
+
+    // No proxy configured at all → nullptr
+    auto client2 = new_http_client();
+    DEFER(delete client2);
+    auto op2 = client2->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client2->destroy_operation(op2));
+    EXPECT_EQ(op2->get_active_proxy(), nullptr);
 }
 
-// Verify set_proxy/clear_proxy keep request line unchanged when enable_proxy is already true
-TEST(http_client, operation_set_clear_proxy_no_rebuild) {
+
+// call() rewrites request line: absolute URI when proxy enabled, path-only otherwise.
+TEST(http_client_proxy, request_line_rebuild) {
     auto client = new_http_client();
     DEFER(delete client);
-    client->set_proxy("http://default-proxy:8080");
 
-    auto op = client->new_operation(Verb::GET, "http://example.com/path");
-    DEFER(client->destroy_operation(op));
+    // No proxy at construction → path-only
+    auto op1 = client->new_operation(Verb::GET, "http://example.com/path?query=1");
+    DEFER(client->destroy_operation(op1));
+    op1->retry = 0;
+    op1->timeout = 100UL * 1000;
+    EXPECT_EQ(op1->req.target(), "/path?query=1");
 
-    // Client-level proxy is set, so enable_proxy is already true
-    EXPECT_TRUE(op->enable_proxy);
-    auto target_before = std::string(op->req.target());
+    // set_proxy after construction → call() rebuilds to absolute
+    op1->set_proxy("http://myproxy:3128");
+    op1->call();
+    EXPECT_EQ(op1->req.target(), "http://example.com/path?query=1");
 
-    // Set operation-level proxy; should not rebuild request line
-    op->set_proxy("http://op-proxy:9090");
-    EXPECT_EQ(op->req.target(), target_before);
-    EXPECT_FALSE(op->get_proxy()->empty());
-    EXPECT_EQ(op->get_proxy()->host(), "op-proxy");
-    EXPECT_EQ(op->get_proxy()->port(), 9090);
+    // Proxy at construction → absolute target
+    client->set_proxy("http://myproxy:3128");
+    auto op2 = client->new_operation(Verb::GET, "http://example.com/path?query=1");
+    DEFER(client->destroy_operation(op2));
+    op2->retry = 0;
+    op2->timeout = 100UL * 1000;
+    EXPECT_EQ(op2->req.target(), "http://example.com/path?query=1");
 
-    // Clear operation-level proxy; request line still unchanged
-    op->clear_proxy();
-    EXPECT_TRUE(op->get_proxy()->empty());
-    EXPECT_EQ(op->req.target(), target_before);
-    EXPECT_TRUE(op->enable_proxy);
-}
-
-// Verify set_proxy/clear_proxy rebuild request line between relative and absolute URI
-TEST(http_client, operation_set_proxy_rebuilds_request_line) {
-    auto client = new_http_client();
-    DEFER(delete client);
-    // No client-level proxy
-
-    auto op = client->new_operation(Verb::GET, "http://example.com/path?query=1");
-    DEFER(client->destroy_operation(op));
-
-    // Before set_proxy: request line should be relative path
-    EXPECT_FALSE(op->enable_proxy);
-    EXPECT_EQ(op->req.target(), "/path?query=1");
-
-    // After set_proxy: request line should be absolute URI
-    op->set_proxy("http://myproxy:3128");
-    EXPECT_TRUE(op->enable_proxy);
-    EXPECT_EQ(op->req.target(), "http://example.com/path?query=1");
-
-    // After clear_proxy: enable_proxy still true (request line unchanged),
-    // but no proxy is configured
-    op->clear_proxy();
-    EXPECT_TRUE(op->enable_proxy);
-    EXPECT_EQ(op->req.target(), "http://example.com/path?query=1");
-    EXPECT_TRUE(op->get_proxy()->empty());
+    // Disable proxy → call() rebuilds to path-only
+    op2->set_enable_proxy(false);
+    op2->call();
+    EXPECT_EQ(op2->req.target(), "/path?query=1");
 }
 
 // E2E test: different operations use different proxies through the same client
@@ -969,7 +963,7 @@ int op_proxy_echo_handler(void*, Request& req, Response& resp, std::string_view)
 }
 } // anonymous namespace
 
-TEST(http_client, operation_level_proxy_e2e) {
+TEST(http_client_proxy, operation_level_e2e) {
     //--------start source server ------------
     auto source_server = new_tcp_socket_server();
     source_server->timeout(1000ULL*1000);
@@ -1083,19 +1077,76 @@ TEST(http_client, operation_level_proxy_e2e) {
     EXPECT_EQ(std::string_view(buf3, ret3), body3);
 }
 
-// Only for manual test
-// TEST(http_client, proxy) {
-//     auto client = new_http_client();
-//     DEFER(delete client);
-//     client->set_proxy("http://localhost:8899/");
-//     auto op = client->new_operation(Verb::delete_, "https://domain:1234/targetName");
-//     DEFER(op->destroy());
-//     LOG_DEBUG(VALUE(op->req.whole()));
-//     op->req.redirect(Verb::GET, "baidu.com", true);
-//     LOG_DEBUG(VALUE(op->req.whole()));
-//     op->call();
-//     EXPECT_EQ(200, op->status_code);
-// }
+// Proxy-Authorization priority: op->proxy_header > client->proxy_headers() > URL auth > empty.
+// These tests use HTTP/1.1 proxy (connection fails but headers are set up before dial).
+
+TEST(http_client_proxy, auth_from_op_proxy_header) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://user:pass@127.0.0.1:19999");
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op));
+    op->retry = 0;
+    op->timeout = 100UL * 1000;
+
+    // Manually set Proxy-Authorization on op's proxy_header BEFORE call()
+    op->proxy_header.insert("Proxy-Authorization", "Bearer manual-token");
+    op->call();
+
+    // op->proxy_header must NOT be overwritten by proxy URL credentials.
+    EXPECT_EQ(op->req.headers["Proxy-Authorization"], "Bearer manual-token");
+}
+
+TEST(http_client_proxy, auth_from_client_proxy_header) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://user:pass@127.0.0.1:19999");
+    // Set Proxy-Authorization in client-level proxy headers.
+    client->proxy_headers()->insert("Proxy-Authorization", "Bearer from-proxy-header");
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op));
+    op->retry = 0;
+    op->timeout = 100UL * 1000;
+    op->call();
+
+    // client proxy_headers wins over URL auth.
+    EXPECT_EQ(op->req.headers["Proxy-Authorization"], "Bearer from-proxy-header");
+}
+
+TEST(http_client_proxy, auth_from_url) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://user:pass@127.0.0.1:19999");
+
+    auto op = client->new_operation(Verb::GET, "http://example.com/path");
+    DEFER(client->destroy_operation(op));
+    op->retry = 0;
+    op->timeout = 100UL * 1000;
+    EXPECT_TRUE(op->req.headers["Proxy-Authorization"].empty());
+
+    op->call();
+
+    // No manual headers → URL auth is inserted as Basic.
+    auto auth = op->req.headers["Proxy-Authorization"];
+    EXPECT_FALSE(auth.empty());
+    EXPECT_TRUE(auth.substr(0, 6) == "Basic ");
+}
+
+// No proxy configured → no Proxy-Authorization inserted.
+TEST(http_client_proxy, auth_not_inserted_without_proxy) {
+    auto client = new_http_client();
+    DEFER(delete client);
+
+    auto op = client->new_operation(Verb::GET, "http://127.0.0.1:19999/path");
+    DEFER(client->destroy_operation(op));
+    op->retry = 0;
+    op->timeout = 100UL * 1000;
+    op->call();
+
+    EXPECT_TRUE(op->req.headers["Proxy-Authorization"].empty());
+}
 
 // Helpers/tests for issue #1256 -- HTTP/1.0 close-delimited responses
 static std::string g_close_delim_payload;

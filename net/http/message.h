@@ -153,6 +153,7 @@ protected:
 
     friend class HTTPServerImpl;
     friend class ClientImpl;
+    friend class PooledDialer;
 };
 
 class URL;
