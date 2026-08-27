@@ -8,7 +8,12 @@ function(build_from_src [dep])
         ExternalProject_Add(
                 aio
                 URL ${PHOTON_AIO_SOURCE}
+<<<<<<< HEAD
                 URL_MD5 605237f35de238dfacc83bcae406d95d
+=======
+                URL_MD5 7d5be185f20eeaae15e267419950aaf7
+                UPDATE_DISCONNECTED ON
+>>>>>>> 7df9495 ([Backport][0.8 to 0.7] | | fix(build): migrate libaio source from sunset pagure.io to Codeberg upstream (#1627) (#1628) (#1633) (#1635))
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ""
                 BUILD_COMMAND make prefix=${BINARY_DIR} install -j
