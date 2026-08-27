@@ -70,10 +70,11 @@ jobs:
           const isManual = '${{ github.event_name }}' === 'workflow_dispatch';
           const commit = '${{ steps.inputs.outputs.COMMIT }}';
           if (isManual) {
-            core.info('Manual trigger: bypassing source PR / bugfix label checks');
+            core.info('Manual trigger: bypassing source PR / need-backport label checks');
             core.setOutput('SKIP', 'false');
             core.setOutput('SOURCE_HEAD_REF', '');
-            core.setOutput('HAS_BUGFIX', 'true');
+            core.setOutput('SOURCE_LABELS', '[]');
+            core.setOutput('HAS_NEED_BACKPORT', 'true');
             return;
           }
           const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
@@ -87,23 +88,40 @@ jobs:
             core.info(`no merged PR associated with ${commit}; skipping backport`);
             core.setOutput('SKIP', 'true');
             core.setOutput('SOURCE_HEAD_REF', '');
-            core.setOutput('HAS_BUGFIX', 'false');
+            core.setOutput('SOURCE_LABELS', '[]');
+            core.setOutput('HAS_NEED_BACKPORT', 'false');
             return;
           }
           const pr = merged[0];
           const headRef = (pr.head && pr.head.ref) ? pr.head.ref : '';
           const labels = (pr.labels || []).map(l => l.name);
-          const hasBugfix = labels.includes('bugfix');
+          const isBackportPr = /^backport-pr-[a-f0-9]+-/.test(headRef);
           core.info(`source PR #${pr.number}, head=${headRef}, labels=[${labels.join(', ')}]`);
           core.setOutput('SOURCE_HEAD_REF', headRef);
-          core.setOutput('HAS_BUGFIX', hasBugfix ? 'true' : 'false');
+          // 'needs-manual-merge' records one hop's cherry-pick outcome, so it is not inherited
+          core.setOutput('SOURCE_LABELS', JSON.stringify(labels.filter(l => l !== 'needs-manual-merge')));
           if (/^auto-pr-[a-f0-9]+-/.test(headRef)) {
             core.info('source PR head is auto-pr-* (precise); skipping backport to avoid loop');
             core.setOutput('SKIP', 'true');
+            core.setOutput('HAS_NEED_BACKPORT', 'false');
             return;
           }
-          if (!hasBugfix) {
-            core.info('source PR lacks bugfix label; skipping backport');
+          // The cascade is driven solely by 'need-backport'. A hand-authored bugfix PR seeds it
+          // here, so dropping the label from a backport PR stops the chain at that hop. Failure
+          // to label is left to throw: silently losing a backport is worse than a red run.
+          let hasNeedBackport = labels.includes('need-backport');
+          if (!hasNeedBackport && !isBackportPr && labels.includes('bugfix')) {
+            core.info(`source PR #${pr.number} is labelled bugfix; promoting to need-backport`);
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: pr.number,
+              labels: ['need-backport'],
+            });
+            hasNeedBackport = true;
+          }
+          core.setOutput('HAS_NEED_BACKPORT', hasNeedBackport ? 'true' : 'false');
+          if (!hasNeedBackport) {
+            core.info('source PR lacks need-backport label; skipping backport');
             core.setOutput('SKIP', 'true');
             return;
           }
@@ -221,6 +239,7 @@ jobs:
           HAS_CONFLICT: ${{steps.merge-changes.outputs.HAS_CONFLICT}}
           CONFLICT_NOTE: ${{steps.merge-changes.outputs.CONFLICT_NOTE}}
           DROPPED_FILES: ${{steps.merge-changes.outputs.DROPPED_FILES}}
+          SOURCE_LABELS: ${{steps.detect.outputs.SOURCE_LABELS}}
       with:
         github-token: ${{ secrets.AUTOPR_SECRET }}
         script: |
@@ -247,7 +266,10 @@ jobs:
             body,
             draft: hasConflict,
           });
-          const labels = ['bugfix'];
+          // Inherit the source PR's labels so a bugfix / feature PR stays traceable along the
+          // whole backport chain; 'need-backport' carries the cascade to the next hop.
+          const inherited = JSON.parse(process.env.SOURCE_LABELS || '[]');
+          const labels = [...new Set([...inherited, 'need-backport'])];
           if (hasConflict) labels.push('needs-manual-merge');
           await github.rest.issues.addLabels({
             ...context.repo,

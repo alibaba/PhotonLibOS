@@ -1,20 +1,20 @@
 name: Linux x86_64
 
-# Runs triggered by removing an irrelevant label would have all jobs skipped, but they
-# still enter the concurrency group and would cancel an in-progress CI run. Divert them
-# into a separate '-noop' group so they never interfere with real CI runs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}${{ (github.event.action == 'unlabeled' && github.event.label.name != 'needs-manual-merge') && '-noop' || '' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Draft PRs don't run CI. Auto-PR opens conflicted backports as drafts, whose conflict
+# markers would fail the build anyway; marking one ready for review triggers a full run
+# against a freshly computed merge ref.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ "main", "release/*" ]
 
 jobs:
   gcc850:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -50,7 +50,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -87,7 +87,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -124,7 +124,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -161,7 +161,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -198,7 +198,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   fstack:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
