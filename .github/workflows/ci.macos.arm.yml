@@ -13,26 +13,9 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-<<<<<<< HEAD:.github/workflows/ci.macos.arm.yml
   macOS14-arm:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: macos-15
-=======
-  macos:
-    name: macOS-${{ matrix.arch }}
     if: ${{ !github.event.pull_request.draft }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm
-            runner: macos-15
-            extra_brew: ""
-          - arch: x86_64
-            runner: macos-15-intel
-            extra_brew: "nasm"
-    runs-on: ${{ matrix.runner }}
->>>>>>> 3bc0d38 (ci: gate PR builds on ready-for-review, split backport control into need-backport (#1630) (#1631)):.github/workflows/ci.macos.yml
+    runs-on: macos-15
 
     steps:
       - uses: szenius/set-timezone@v2.0

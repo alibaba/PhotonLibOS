@@ -13,23 +13,12 @@ on:
     branches: [ "main", "release/*" ]
 
 jobs:
-<<<<<<< HEAD
   gcc850:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
       options: --cpus 4 --privileged
-=======
-  gcc-test:
-    name: gcc-${{ matrix.gcc }}
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: arc-acs-runner-set
-    strategy:
-      fail-fast: false
-      matrix:
-        gcc: [8, 9, 10, 11, 12, 13, 14]
->>>>>>> 3bc0d38 (ci: gate PR builds on ready-for-review, split backport control into need-backport (#1630) (#1631))
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -61,7 +50,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc921:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -98,7 +87,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1031:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -135,7 +124,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1121:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -172,7 +161,7 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   gcc1211:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-base:latest
@@ -209,13 +198,8 @@ jobs:
           cd build && ctest -E test-lockfree --timeout 3600 -V
 
   fstack:
-<<<<<<< HEAD
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: ubuntu-latest
-=======
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04
->>>>>>> 3bc0d38 (ci: gate PR builds on ready-for-review, split backport control into need-backport (#1630) (#1631))
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
       options: --cpus 4 --privileged
@@ -227,29 +211,3 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_FSTACK_DPDK=ON
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
-<<<<<<< HEAD
-=======
-
-  RocksDB:
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04
-    container:
-      image: almalinux:8
-      options: --cpus 4 --privileged
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: |
-          export PHOTON_SRC_DIR=`pwd`
-          dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel nasm
-          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git /opt/rocksdb
-          cd /opt/rocksdb
-          rm -rf third-party/PhotonLibOS
-          ln -s $PHOTON_SRC_DIR third-party/PhotonLibOS
-          ./photon-auto-convert.sh
-          cmake -B build -D WITH_TESTS=on -D INIT_PHOTON_IN_ENV=on -D WITH_LZ4=on -D WITH_SNAPPY=on \
-            -D CMAKE_BUILD_TYPE=Debug
-          cmake --build build -j `nproc`
->>>>>>> 3bc0d38 (ci: gate PR builds on ready-for-review, split backport control into need-backport (#1630) (#1631))
