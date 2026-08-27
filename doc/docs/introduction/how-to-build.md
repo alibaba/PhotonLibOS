@@ -182,30 +182,5 @@ ctest
 If there is any shared lib you don't want Photon to link to on local host, build its static from source.
 
 ```bash
-<<<<<<< HEAD
 cmake -B build -D PHOTON_BUILD_DEPENDENCIES=ON -D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz
 ```
-=======
-cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
--D PHOTON_BUILD_TESTING=ON \
--D PHOTON_BUILD_DEPENDENCIES=ON \
--D PHOTON_ENABLE_URING=ON \
--D PHOTON_AIO_SOURCE=https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz \
--D PHOTON_ZLIB_SOURCE=https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz \
--D PHOTON_URING_SOURCE=https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz \
--D PHOTON_CURL_SOURCE=https://github.com/curl/curl/archive/refs/tags/curl-7_42_1.tar.gz \
--D PHOTON_OPENSSL_SOURCE=https://github.com/openssl/openssl/archive/refs/heads/OpenSSL_1_0_2-stable.tar.gz \
--D PHOTON_GFLAGS_SOURCE=https://github.com/gflags/gflags/archive/refs/tags/v2.2.2.tar.gz \
--D PHOTON_GOOGLETEST_SOURCE=https://github.com/google/googletest/archive/refs/tags/release-1.12.1.tar.gz
-```
-
-#### Case 2. Dynamically link to libcurl.so and libssl.so
-
-```bash
-cmake -B build -D CMAKE_BUILD_TYPE=RelWithDebInfo \
--D PHOTON_BUILD_DEPENDENCIES=ON \
--D PHOTON_AIO_SOURCE=https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz \
--D PHOTON_CURL_SOURCE="" \
--D PHOTON_OPENSSL_SOURCE=""
-```
->>>>>>> 464efc9 ([Backport][main to 0.9] | fix(build): migrate libaio source from sunset pagure.io to Codeberg upstream (#1627) (#1628) (#1633))
