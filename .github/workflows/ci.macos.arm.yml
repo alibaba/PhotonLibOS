@@ -16,13 +16,8 @@ on:
 
 jobs:
   macOS14-arm:
-<<<<<<< HEAD
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'needs-manual-merge') && (github.event.action != 'unlabeled' || github.event.label.name == 'needs-manual-merge') }}
-    runs-on: macos-14
-=======
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: macos-15
->>>>>>> c988cb6 ([Backport][0.8 to 0.7] | | ci: gate PR builds on ready-for-review, split backport control into need-backport (#1630) (#1631) (#1632) (#1637))
+    runs-on: macos-14
 
     steps:
       - uses: szenius/set-timezone@v1.2
