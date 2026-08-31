@@ -237,8 +237,8 @@ public:
                 // Unable to cancel. Wait for the in-flight I/O (and its linked
                 // timer) to complete, before the stack-allocated contexts go
                 // out of scope.
-                while (gen == m_generation &&
-                       (!io_ctx.done || (has_timer && !timer_ctx.done)))
+                while (gen == m_generation && 
+                        (!io_ctx.done || !timer_ctx.done))
                     photon::thread_sleep(-1);
                 errno = err_backup.no;
                 return -1;
@@ -254,7 +254,7 @@ public:
             // reap batches). A generation change means reset() has dropped the
             // ring holding those CQEs, so they can never arrive.
             while (gen == m_generation &&
-                   (!io_ctx.done || !cancel_ctx.done || (has_timer && !timer_ctx.done)))
+                   (!io_ctx.done || !cancel_ctx.done || !timer_ctx.done))
                 photon::thread_sleep(-1);
             errno = err_backup.no;
             return -1;
