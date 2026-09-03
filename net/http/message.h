@@ -122,7 +122,10 @@ protected:
     // return 1 if end of stream
     // return negative if an error occured
     int receive_header(uint64_t timeout = -1ULL);
-    int send_header(net::ISocketStream* stream = nullptr);
+    // `extra` is written after our own headers, on the wire only: no entry of it
+    // is registered in `headers`, so it belongs to this message alone and cannot
+    // be carried over by a redirect. Used for the headers of one proxy hop.
+    int send_header(net::ISocketStream* stream = nullptr, const HeadersBase* extra = nullptr);
     // return 0 if whole header recvd
     // return 1 if end of stream
     // return 2 if partial header recvd
@@ -153,6 +156,7 @@ protected:
 
     friend class HTTPServerImpl;
     friend class ClientImpl;
+    friend class PooledDialer;   // sends the CONNECT of a tunnel
 };
 
 class URL;

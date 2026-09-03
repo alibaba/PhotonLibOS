@@ -234,6 +234,17 @@ TEST(ReqHeaders, redirect) {
     EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
 }
+
+// A CONNECT names its target in authority-form: it asks for a tunnel to a host,
+// not for a resource, so it carries neither scheme nor path.
+TEST(ReqHeaders, connect_is_in_authority_form) {
+    RequestHeadersStored<> req(Verb::CONNECT, "https://origin:4321/ignored?q=1");
+    EXPECT_EQ(req.target(), "origin:4321");
+    EXPECT_EQ(req.headers["Host"], "origin:4321");
+    EXPECT_EQ(req.query(), "");
+    EXPECT_EQ(4321, req.port());
+}
+
 TEST(debug, debug) {
     RequestHeadersStored<> req(Verb::PUT, "http://domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:80/target1?param1=x1");
     req.headers.content_length(0);
