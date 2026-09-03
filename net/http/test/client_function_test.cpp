@@ -1448,6 +1448,20 @@ public:
     }
 };
 
+// Answers with a redirect to `location`, so that one operation continues on a
+// second hop -- which may well be reached in a different way than the first.
+class RedirectHandler : public http::HTTPHandler {
+public:
+    std::string location;
+    RedirectHandler(std::string_view loc) : location(loc) { }
+    int handle_request(http::Request&, http::Response& resp, std::string_view) {
+        resp.set_result(302);
+        resp.headers.insert("Location", location);
+        resp.headers.content_length(0);
+        return 0;
+    }
+};
+
 static std::string get_body(Client* client, std::string_view target) {
     Client::OperationOnStack<> op(client, Verb::GET, target);
     op.req.headers.content_length(0);
@@ -1468,6 +1482,7 @@ struct FakeConnectProxy {
     std::string want_auth;   // if set, demand this Proxy-Authorization header line
     std::string authority;   // the request-target of the last CONNECT
     std::string redirect_to; // if set, a forwarded request is answered with a 302 to here
+    bool serve_forwards = false; // answer forwarded requests with a plain 200
     estring last_head;       // the head of the last request, forwarded or CONNECT
     int connects = 0;        // tunnels established
     int forwards = 0;        // forwarded (non-CONNECT) requests answered
@@ -1510,15 +1525,18 @@ struct FakeConnectProxy {
         estring_view head(buf, end);   // "CONNECT host:port HTTP/1.1\r\n..."
         last_head.assign(head.data(), head.size());
         if (!head.starts_with("CONNECT ")) {
-            // A forwarded request, in absolute-URI form. Answering it right here
-            // with a redirect is all a test needs of a forwarding proxy, and it
-            // lets the very same operation continue as a tunneled one.
-            if (redirect_to.empty())
+            // A forwarded request, in absolute-URI form. Answering it right here is
+            // all a test needs of a forwarding proxy: with a redirect, so that the
+            // very same operation carries on as a tunneled one, or with a plain 200.
+            if (redirect_to.empty() && !serve_forwards)
                 LOG_ERROR_RETURN(0, 0, "not a CONNECT request, ", VALUE(head));
             forwards++;
             estring resp;
-            resp.appends("HTTP/1.1 302 Found\r\nLocation: ", redirect_to,
-                         "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            if (!redirect_to.empty())
+                resp.appends("HTTP/1.1 302 Found\r\nLocation: ", redirect_to, "\r\n");
+            else
+                resp.appends("HTTP/1.1 200 OK\r\n");
+            resp.appends("Content-Length: 0\r\nConnection: close\r\n\r\n");
             s->write(resp.data(), resp.size());
             return 0;
         }
@@ -1785,6 +1803,39 @@ TEST(http_client, proxy_headers_do_not_follow_a_redirect_into_a_tunnel) {
     EXPECT_EQ(1, proxy.forwards);
     EXPECT_EQ(1, proxy.connects);
     // the proxy did read them on the hop that was its to read
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: alice"));
+    EXPECT_NE(estring::npos, proxy.last_head.find("Proxy-Authorization: Basic"));
+}
+
+// And the mirror case: an operation that starts inside a tunnel, where the origin
+// is the one reading the headers, and is then redirected to a plaintext origin,
+// which is forwarded -- so the proxy reads them again. Deciding by the scheme of
+// the first URL leaves this second hop with no credentials at all, and a 407.
+TEST(http_client, proxy_headers_come_back_when_a_redirect_leaves_the_tunnel) {
+    FakeConnectProxy proxy;
+    TLSOrigin origin;
+    proxy.serve_forwards = true;
+    ASSERT_EQ(0, proxy.start());
+    ASSERT_EQ(0, origin.start(new RedirectHandler("http://plaintext.origin/y")));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url("user:pass"));
+
+    auto authenticate = [&](const DialTarget&, ProxyAuth& pa) -> int {
+        pa.headers.insert("X-Tenant", "alice");
+        return 0;
+    };
+    client->set_proxy_authenticator(authenticate);
+
+    // the TLS origin is tunneled to, and its redirect to a plaintext one is forwarded
+    EXPECT_EQ("", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(1, proxy.forwards);
+    // the forwarded hop is the proxy's to read, so it does carry them
     EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: alice"));
     EXPECT_NE(estring::npos, proxy.last_head.find("Proxy-Authorization: Basic"));
 }
