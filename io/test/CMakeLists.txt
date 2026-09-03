@@ -18,4 +18,8 @@ add_test(NAME test-syncio COMMAND $<TARGET_FILE:test-syncio>)
 add_executable(test-iouring test-iouring.cpp)
 target_link_libraries(test-iouring PRIVATE photon_shared ${testing_libs})
 add_test(NAME test-iouring COMMAND $<TARGET_FILE:test-iouring>)
+
+add_executable(test-iouring-uaf test-iouring-uaf.cpp)
+target_link_libraries(test-iouring-uaf PRIVATE photon_shared)
+add_test(NAME test-iouring-uaf COMMAND $<TARGET_FILE:test-iouring-uaf>)
 endif ()

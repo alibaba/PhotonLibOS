@@ -49,6 +49,7 @@ public:
 
     ~iouringEngine() {
         LOG_INFO("Finish event engine: iouring ", VALUE(m_master));
+<<<<<<< HEAD
         if (m_cancel_poller != nullptr) {
             m_cancel_poller_running = false;
             thread_interrupt(m_cancel_poller);
@@ -58,6 +59,23 @@ public:
             close(m_cancel_fd);
         }
         if (m_cascading_event_fd >= 0) {
+=======
+        fini();
+    }
+
+    int reset() override {
+        fini();
+        m_event_contexts.clear();
+        // The old ring died along with all its in-flight requests, so their
+        // CQEs can never arrive. Bump the generation to release the waiters
+        // in _async_io.
+        m_generation++;
+        return init();
+    }
+
+    int fini() {
+        if (m_eventfd >= 0 && !m_master) {
+>>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
             if (io_uring_unregister_eventfd(m_ring) != 0) {
                 LOG_ERROR("iouring: failed to unregister cascading event fd");
             }
@@ -170,18 +188,34 @@ public:
         return _async_io(sqe, timeout);
     }
 
+<<<<<<< HEAD
     int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
         ioCtx io_ctx{photon::CURRENT, -1, false, false};
+=======
+    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
+        auto* first_sqe = sqe;
+        auto gen = m_generation;
+        sqe->flags |= (uint8_t) (ring_flags & 0xff);
+        ioCtx io_ctx(false, false);
+>>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx{photon::CURRENT, -1, true, false};
         __kernel_timespec ts{};
-        if (timeout < std::numeric_limits<int64_t>::max()) {
+        bool has_timer = timeout < (uint64_t) std::numeric_limits<int64_t>::max();
+        if (has_timer) {
             sqe->flags |= IOSQE_IO_LINK;
             usec_to_timespec(timeout, &ts);
             sqe = _get_sqe();
-            if (sqe == nullptr)
-                return -1;
+            if (sqe == nullptr) {
+                // The first SQE is already in the SQ ring and will be submitted
+                // sooner or later. Turn it into a harmless NOP without user data
+                // (prep_rw clears sqe->flags, including IOSQE_IO_LINK), so that
+                // its CQE won't reference the stack contexts after we return.
+                io_uring_prep_nop(first_sqe);
+                io_uring_sqe_set_data(first_sqe, nullptr);
+                return -1;      // errno was set to EBUSY by _get_sqe
+            }
             io_uring_prep_link_timeout(sqe, &ts, 0);
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
@@ -200,13 +234,41 @@ public:
         } else {
             // Interrupted by external user thread. Try to cancel the previous I/O
             ERRNO err_backup;
-            sqe = _get_sqe();
-            if (sqe == nullptr)
+            if (gen != m_generation) {
+                // reset() has re-created the ring (e.g. after fork). Our I/O
+                // died with the old ring, so nothing refers to the stack
+                // contexts anymore, and there is nothing to cancel.
+                errno = err_backup.no;
                 return -1;
+<<<<<<< HEAD
             ioCtx cancel_ctx{CURRENT, -1, true, false};
+=======
+            }
+            sqe = _get_sqe();
+            if (sqe == nullptr) {
+                // Unable to cancel. Wait for the in-flight I/O (and its linked
+                // timer) to complete, before the stack-allocated contexts go
+                // out of scope.
+                while (gen == m_generation &&
+                       (!io_ctx.done || (has_timer && !timer_ctx.done)))
+                    photon::thread_sleep(-1);
+                errno = err_backup.no;
+                return -1;
+            }
+            ioCtx cancel_ctx(true, false);
+>>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
-            photon::thread_sleep(-1);
+            // No explicit submit here: this engine submits lazily, from
+            // wait_and_fire_events(), which the loop below yields to.
+            // Wait until all in-flight CQEs referring to our stack contexts are
+            // reaped, regardless of premature wake-ups (shutdown truncation,
+            // external interrupts, or io/cancel CQEs arriving in different
+            // reap batches). A generation change means reset() has dropped the
+            // ring holding those CQEs, so they can never arrive.
+            while (gen == m_generation &&
+                   (!io_ctx.done || !cancel_ctx.done || (has_timer && !timer_ctx.done)))
+                photon::thread_sleep(-1);
             errno = err_backup.no;
             return -1;
         }
@@ -339,11 +401,20 @@ public:
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
                     LOG_WARN("iouring: send_zc fall back to copying");
+                assert(!ctx->is_event);
+                ctx->done = true;
                 photon::thread_interrupt(ctx->th_id, EOK);
                 continue;
             }
 
             ctx->res = cqe->res;
+            // A CQE without F_MORE is the final one of its request. Set `done`
+            // here, ahead of the -ECANCELED branches below: they `continue`,
+            // and both the I/O and its linked timer report -ECANCELED once the
+            // cancellation of _async_io takes effect, so setting it at the end
+            // of the loop body would leave those waiters stuck forever.
+            if (!(cqe->flags & IORING_CQE_F_MORE))
+                ctx->done = true;
             if (!ctx->is_canceller && ctx->res == -ECANCELED) {
                 // An I/O was canceled because of:
                 // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
@@ -404,6 +475,11 @@ private:
         int32_t res;
         bool is_canceller;
         bool is_event;
+        // Set by reap_events when the final CQE of this request arrives.
+        // Stack-allocated contexts in _async_io must not go out of scope
+        // before this flag turns true. No atomic needed, since a vCPU is
+        // single OS thread and work stealing is paused during the wait.
+        bool done = false;
     };
 
     struct eventCtx {
@@ -536,9 +612,16 @@ private:
     bool m_master;
     int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;
+<<<<<<< HEAD
     int m_cancel_fd = -1;
     thread* m_cancel_poller = nullptr;
     bool m_cancel_poller_running = true;
+=======
+    int m_eventfd = -1;
+    // Incremented by reset() each time the ring is re-created (e.g. after
+    // fork), invalidating all in-flight requests of the old ring.
+    uint64_t m_generation = 0;
+>>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
     std::unordered_map<fdInterest, eventCtx, fdInterestHasher> m_event_contexts;
     static int m_register_files_flag;
     static int m_cooperative_task_flag;
