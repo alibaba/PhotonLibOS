@@ -30,6 +30,7 @@ limitations under the License.
 namespace photon {
 namespace net {
 class TLSContext;
+class Resolver;
 namespace http {
 
 class IWebSocketStream;  // Forward declaration for websocket_connect
@@ -38,6 +39,58 @@ class ICookieJar : public Object {
 public:
     virtual int get_cookies_from_headers(std::string_view host, Message* message) = 0;
     virtual int set_cookies_to_headers(Request* request) = 0;
+};
+
+// Where the connection of one HTTP request has to go. `host`/`port`/`secure`
+// always describe the origin server; when a proxy is in effect the connection
+// is made to the proxy instead, and the request is either forwarded in
+// absolute-URI form (a plaintext origin) or tunneled with CONNECT (a TLS
+// origin, which must be handshaked with the origin inside the tunnel).
+struct DialTarget {
+    std::string_view host;        // origin host, without port
+    uint16_t port = 0;            // origin port
+    bool secure = false;          // the origin speaks TLS
+    std::string_view uds_path;    // if set, connect here instead of TCP
+    std::string_view proxy_host;  // empty: connect to the origin directly
+    uint16_t proxy_port = 0;
+    bool proxy_secure = false;    // the proxy itself speaks TLS
+    std::string_view proxy_auth;  // Proxy-Authorization value, may be empty
+    // Headers for the proxy itself to read, and the part of the connection
+    // pool key that they imply. Both are produced by the client's
+    // ProxyAuthenticator, once per dial. Never shown to the origin.
+    const HeadersBase* proxy_headers = nullptr;
+    std::string_view proxy_pool_key;
+
+    bool via_proxy() const { return !proxy_host.empty(); }
+    // a TLS origin behind a proxy is reached by tunneling with CONNECT
+    bool need_tunnel() const { return via_proxy() && secure; }
+};
+
+// What a ProxyAuthenticator produces for one dial through a proxy.
+struct ProxyAuth {
+    CommonHeaders<4 * 1024 - 1> headers;   // put into the CONNECT, or into a forwarded request
+    estring pool_key;                      // connections differing here are never shared
+};
+
+// Called once per dial that goes through a proxy, just before connecting, so
+// that the headers may be refreshed and may differ from one request to the next.
+// Returns 0 on success, or a negative number to fail the request.
+//
+// Whatever identity the headers carry must be reflected in `pool_key`: a tunnel
+// is authenticated once, by the CONNECT that opened it, so it may only be reused
+// by the identity that opened it. Only the caller can tell which of its headers
+// mean identity (a tenant, a route) and which are mere per-request noise (a
+// trace id) -- keying on all of them would open a tunnel per request, and on
+// none of them would let one identity ride another's tunnel.
+using ProxyAuthenticator = Delegate<int, const DialTarget&, ProxyAuth&>;
+
+// Establishes socket streams for HTTP clients. The built-in implementation
+// maintains a connection pool per (client, vCPU), and one DNS cache shared by
+// the whole process. A user-provided dialer is shared by all vCPUs the client
+// runs on, so it must be safe for concurrent use across vCPUs.
+class IDialer : public Object {
+public:
+    virtual ISocketStream* dial(const DialTarget& target, uint64_t timeout = -1ULL) = 0;
 };
 
 class Client : public Object {
@@ -161,6 +214,11 @@ public:
     virtual Headers* common_headers() = 0;
 
     void set_proxy(std::string_view proxy);
+    // Take over the headers sent to the proxy, and the pooling of the connections
+    // they authenticate. Not owned. See ProxyAuthenticator above.
+    void set_proxy_authenticator(ProxyAuthenticator authenticator) {
+        m_proxy_authenticator = authenticator;
+    }
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
@@ -183,6 +241,17 @@ public:
     void timeout_ms(uint64_t tmo) { timeout(tmo * 1000ULL); }
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000ULL * 1000ULL); }
 
+    // Inject a dialer to take over connection establishment (and pooling, if
+    // any), replacing the built-in per-vCPU pooled dialer. Not owned; must
+    // outlive the client, and must be safe for concurrent use across vCPUs.
+    void set_dialer(IDialer* dialer) { m_dialer = dialer; }
+
+    // Inject a DNS resolver, replacing the process-wide default one that the
+    // built-in dialers of this client would otherwise share. Not owned; must
+    // outlive the client, and must be safe for concurrent use across vCPUs.
+    // No effect on a dialer set by set_dialer().
+    void set_resolver(Resolver* resolver) { m_resolver = resolver; }
+
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
                                           bool secure = false, uint64_t timeout = -1ULL) = 0;
 
@@ -198,15 +267,19 @@ public:
 protected:
     StoredURL m_proxy_url;
     std::string m_proxy_auth;
+    ProxyAuthenticator m_proxy_authenticator;
     std::string m_user_agent;
     uint64_t m_timeout = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
+    IDialer* m_dialer = nullptr;
+    Resolver* m_resolver = nullptr;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
-// Note: HTTP clients within the same std::thread share TLS config and connection pool.
-// Use separate std::threads for different TLS configurations.
+// Each client owns its connection pools (created lazily, one per vCPU used),
+// destroyed with the client, or at photon::fini() of the respective vCPU. The
+// DNS cache behind the pools is shared by the whole process.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();
