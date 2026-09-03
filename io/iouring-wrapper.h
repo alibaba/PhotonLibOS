@@ -67,6 +67,32 @@ int iouring_mkdir(const char* path, mode_t mode, Timeout timeout = {}, Cascading
 
 int iouring_close(int fd, Timeout timeout = {}, CascadingEventEngine* ce = nullptr);
 
+/**
+ * Issue IORING_OP_URING_CMD on `fd` and wait for its completion. The fd's
+ * kernel handler defines the payload layout and the result's meaning: the
+ * cqe's res is returned when >= 0; a negative res yields -1 with errno = -res.
+ * `cmd` is copied into the sqe's cmd area -- at most 16 bytes, unless the ring
+ * was created with iouring_args::setup_sqe128 (ublk's 32-byte control command
+ * requires it). `ce` selects the ring: a standalone cascading engine, or the
+ * current vcpu's master engine when null. A cascading engine needs a pump
+ * coroutine calling wait_for_events() (which drives submission and reaping),
+ * and the pump together with all submitters must run on the same vcpu -- the
+ * submission queue is not thread-safe.
+ */
+int32_t iouring_uring_cmd(int fd, uint32_t cmd_op, const void* cmd, size_t cmd_len,
+                          Timeout timeout = {}, CascadingEventEngine* ce = nullptr);
+
+/**
+ * Abandon every operation parked in async_io on `ce`, which must be a
+ * standalone iouring cascading engine: a parked caller interrupted
+ * (photon::thread_interrupt) afterwards returns -1 immediately instead of
+ * waiting for its completion -- the teardown path for commands the kernel
+ * cannot cancel on request (e.g. a parked ublk FETCH_REQ). Destroy the engine
+ * after all abandoned callers have been interrupted and joined; their late
+ * completions die unreaped with the ring.
+ */
+void iouring_abandon(CascadingEventEngine* ce);
+
 bool iouring_register_files_enabled();
 
 int iouring_register_files(int fd, CascadingEventEngine* ce = nullptr);

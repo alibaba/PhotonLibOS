@@ -47,7 +47,7 @@ function(build_from_src dep)
         ExternalProject_Add(
                 uring
                 URL ${PHOTON_URING_SOURCE}
-                URL_MD5 2e8c3c23795415475654346484f5c4b8
+                URL_MD5 73acdeb3436498b0fea6e1f715b2be3b
                 UPDATE_DISCONNECTED ON
                 BUILD_IN_SOURCE ON
                 CONFIGURE_COMMAND ./configure --prefix=${BINARY_DIR}

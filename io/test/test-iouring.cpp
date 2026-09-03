@@ -15,11 +15,14 @@ limitations under the License.
 */
 
 #include <sys/time.h>
+#include <sys/eventfd.h>
+#include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
 #include <gflags/gflags.h>
 #include <photon/io/fd-events.h>
+#include <photon/common/utility.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>
@@ -609,6 +612,42 @@ TEST_F(event_engine, cascading_one_shot) {
 
     photon::thread_join((photon::join_handle*) sub);
 }
+
+// iouring_uring_cmd's cmd_len bound is the only thing standing between a caller
+// and memcpy'ing past sqe->cmd into the NEXT sqe slot, which io_uring_submit then
+// hands to the kernel as an unrelated operation. sqe_cmd_capacity() is
+// sizeof(io_uring_sqe) - offsetof(io_uring_sqe, cmd) = 64 - 48 = 16 on a default
+// ring and 80 on an SQE128 one; ublk's control plane uses the latter and so
+// exercises the ACCEPTING side on every command it sends. Nothing exercised the
+// rejecting side, so pin it from both directions on the master ring.
+//
+// The discriminator has to be errno, not the return value -- both paths return -1.
+// An eventfd has no ->uring_cmd, so a command that clears the bound is submitted
+// and comes back EOPNOTSUPP from io_uring_cmd(); one stopped by the bound never
+// reaches the ring at all and reports EINVAL. An off-by-one in either direction
+// flips a case.
+//
+// Gated on PHOTON_URING: iouring_uring_cmd is declared unconditionally in
+// iouring-wrapper.h but defined only when io/iouring-wrapper.cpp is compiled, so
+// this is the one test in the file that would not link without it.
+#ifdef PHOTON_URING
+TEST(uring_cmd, cmd_len_bound) {
+    ASSERT_EQ(0, photon::init(INIT_EVENT_IOURING, INIT_IO_NONE));
+    DEFER(photon::fini());
+
+    int fd = eventfd(0, EFD_CLOEXEC);
+    ASSERT_GE(fd, 0);
+    DEFER(close(fd));
+
+    uint8_t cmd[128] = {};
+    errno = 0;
+    EXPECT_EQ(-1, iouring_uring_cmd(fd, 0, cmd, 16, {}, nullptr));
+    EXPECT_EQ(EOPNOTSUPP, errno);
+    errno = 0;
+    EXPECT_EQ(-1, iouring_uring_cmd(fd, 0, cmd, 17, {}, nullptr));
+    EXPECT_EQ(EINVAL, errno);
+}
+#endif
 
 int main(int argc, char** arg) {
     srand(time(nullptr));

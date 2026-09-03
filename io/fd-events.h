@@ -146,8 +146,15 @@ struct iouring_args {
     bool setup_sqpoll = false;
     bool setup_sq_aff = false;
     bool setup_iopoll = false;
+    bool setup_sqe128 = false;    // 128-byte SQEs: uring_cmd payloads beyond 16B (e.g. ublk control)
     bool eager_submit = false;
-    uint32_t sq_thread_cpu;
+    bool register_files = true;   // sparse fixed-file table; a dedicated ring can skip it
+    uint32_t queue_depth = 0;     // SQ entries to request; 0 = the built-in default
+    uint32_t sq_thread_cpu = 0;   // SQ_AFF only: 0 = CPU 0. Defaulted like every
+                                  // other field here -- init() copies it into
+                                  // params.sq_thread_cpu whenever setup_sq_aff is
+                                  // set, so an unset one used to be an
+                                  // indeterminate read.
     uint32_t sq_thread_idle_ms = 1000;     // by default polls for 1s
 };
 

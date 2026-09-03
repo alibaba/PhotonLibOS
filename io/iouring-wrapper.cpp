@@ -21,6 +21,8 @@ limitations under the License.
 #include <sys/resource.h>
 #include <fcntl.h>
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <limits>
 #include <atomic>
 #include <unordered_map>
@@ -59,6 +61,36 @@ public:
         // in _async_io.
         m_generation++;
         return init();
+    }
+
+    // Release callers parked in async_io WITHOUT their operations completing:
+    // a subsequent thread_interrupt() makes each parked caller return -1
+    // immediately (the generation check in _async_io's interrupt branch),
+    // skipping the ASYNC_CANCEL dance -- the escape hatch for commands the
+    // kernel cannot cancel on request (e.g. a parked ublk FETCH_REQ, whose
+    // driver has no cancel hook).
+    //
+    // Such a caller returns WITHOUT waiting for its ioCtx.done, so its
+    // stack-allocated context dies while the kernel still points at it.
+    // reap_events routes every completion unconditionally -- it has no way to
+    // tell a live context from a dead one -- so the caller MUST stop reaping
+    // this ring before interrupting the abandoned callers, and destroy the ring
+    // after joining them. A completion reaped in between would be written into
+    // freed (and pool-recycled) coroutine stack and would interrupt a stale
+    // photon::thread*. Once the reaper is gone, late completions simply die
+    // unreaped with the ring.
+    void abandon() {
+        m_generation++;
+    }
+
+    // How many bytes fit in this ring's sqe->cmd. cmd is a zero-length array at
+    // offset 48 of a 64-byte SQE, so 16 bytes; IORING_SETUP_SQE128 doubles the
+    // SQE and the kernel documents the field as 80 bytes there (see
+    // <linux/io_uring.h>). init()'s retry path only ever drops DEFER_TASKRUN,
+    // COOP_TASKRUN and CQSIZE, so m_args still describes the live ring.
+    size_t sqe_cmd_capacity() const {
+        size_t sqe_size = m_args.setup_sqe128 ? 2 * sizeof(io_uring_sqe) : sizeof(io_uring_sqe);
+        return sqe_size - offsetof(io_uring_sqe, cmd);
     }
 
     int fini() {
@@ -108,9 +140,12 @@ public:
                 params.sq_thread_cpu = args.sq_thread_cpu;
             }
         }
+        if (args.setup_sqe128)
+            params.flags |= IORING_SETUP_SQE128;
 
     retry:
-        int ret = io_uring_queue_init_params(QUEUE_DEPTH, m_ring, &params);
+        int ret = io_uring_queue_init_params(args.queue_depth ? args.queue_depth : QUEUE_DEPTH,
+                                             m_ring, &params);
         if (ret != 0) {
             if (-ret == EINVAL) {
                 auto& p = params;
@@ -163,7 +198,7 @@ public:
         }
 
         // Register files. Init with sparse entries
-        if (register_files_enabled()) {
+        if (args.register_files && register_files_enabled()) {
             auto entries = new int[REGISTER_FILES_MAX_NUM];
             DEFER(delete[] entries);
             for (int i = 0; i < REGISTER_FILES_MAX_NUM; ++i) {
@@ -520,7 +555,10 @@ private:
         bool is_event;
         // Set by reap_events when the final CQE of this request arrives.
         // Stack-allocated contexts in _async_io must not go out of scope
-        // before this flag turns true. No atomic needed, since a vCPU is
+        // before this flag turns true -- the one exception is abandon(), which
+        // releases callers without their completions and therefore requires
+        // the reaper to be stopped first (see its contract).
+        // No atomic needed, since a vCPU is
         // single OS thread and work stealing is paused during the wait.
         bool done = false;
     };
@@ -743,6 +781,29 @@ int iouring_close(int fd, Timeout timeout, CascadingEventEngine* cee) {
     return get_ring(cee)->async_io(&io_uring_prep_close, timeout, 0, fd);
 }
 
+int32_t iouring_uring_cmd(int fd, uint32_t cmd_op, const void* cmd, size_t cmd_len, Timeout timeout, CascadingEventEngine* cee) {
+    auto* ring = get_ring(cee);
+    // The bound the header documents. Copying past sqe->cmd runs into the NEXT
+    // sqe slot, which io_uring_submit then hands to the kernel as an unrelated
+    // operation -- so refuse before entering async_io.
+    size_t cap = ring->sqe_cmd_capacity();
+    if (cmd_len > cap)
+        LOG_ERROR_RETURN(EINVAL, -1, "iouring_uring_cmd: cmd_len ` exceeds this ring's `-byte sqe cmd area (needs setup_sqe128?)",
+                         cmd_len, cap);
+    return ring->async_io([fd, cmd_op, cmd, cmd_len](io_uring_sqe* sqe) {
+        io_uring_prep_uring_cmd(sqe, cmd_op, fd);
+        sqe->flags = 0;   // prep doesn't clear it and _async_io ORs onto it: a
+                          // reused sqe slot could carry a stale IOSQE_IO_LINK
+        memcpy(sqe->cmd, cmd, cmd_len);
+    }, timeout, 0);
+}
+
+void iouring_abandon(CascadingEventEngine* cee) {
+    if (!cee)
+        LOG_ERROR_RETURN(EINVAL, , "iouring_abandon: null cascading engine");
+    static_cast<iouringEngine*>(cee)->abandon();
+}
+
 bool iouring_register_files_enabled() {
     return iouringEngine::register_files_enabled();
 }
@@ -760,6 +821,9 @@ void* new_iouring_event_engine(iouring_args args) {
         make_named_value("is_master",     args.is_master),
         make_named_value("setup_sqpoll",  args.setup_sqpoll),
         make_named_value("setup_sq_aff",  args.setup_sq_aff),
+        make_named_value("setup_sqe128",  args.setup_sqe128),
+        make_named_value("register_files", args.register_files),
+        make_named_value("queue_depth",   args.queue_depth),
         make_named_value("sq_thread_cpu", args.sq_thread_cpu));
     auto uring = NewObj<iouringEngine>() -> init(args);
     if (args.is_master) return uring;

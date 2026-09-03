@@ -1023,6 +1023,13 @@ extern "C" ISocketClient* new_uds_client() {
 extern "C" ISocketServer* new_uds_server(bool autoremove) {
     return NewObj<KernelSocketServer>(autoremove)->init();
 }
+extern "C" ISocketStream* new_kernel_socket_stream(int fd) {
+    // streams require non-blocking fds; fds handed in (e.g. from socketpair)
+    // are blocking by default
+    if (set_fd_nonblocking(fd) < 0)
+        LOG_ERRNO_RETURN(0, nullptr, "failed to set fd non-blocking");
+    return new KernelSocketStream(fd);
+}
 #ifdef __linux__
 extern "C" ISocketServer* new_zerocopy_tcp_server() {
     return NewObj<ZeroCopySocketServer>()->init();
