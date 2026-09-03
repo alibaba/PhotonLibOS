@@ -41,16 +41,33 @@ public:
     virtual int set_cookies_to_headers(Request* request) = 0;
 };
 
+// Where the connection of one HTTP request has to go. `host`/`port`/`secure`
+// always describe the origin server; when a proxy is in effect the connection
+// is made to the proxy instead, and the request is either forwarded in
+// absolute-URI form (a plaintext origin) or tunneled with CONNECT (a TLS
+// origin, which must be handshaked with the origin inside the tunnel).
+struct DialTarget {
+    std::string_view host;        // origin host, without port
+    uint16_t port = 0;            // origin port
+    bool secure = false;          // the origin speaks TLS
+    std::string_view uds_path;    // if set, connect here instead of TCP
+    std::string_view proxy_host;  // empty: connect to the origin directly
+    uint16_t proxy_port = 0;
+    bool proxy_secure = false;    // the proxy itself speaks TLS
+    std::string_view proxy_auth;  // Proxy-Authorization value, may be empty
+
+    bool via_proxy() const { return !proxy_host.empty(); }
+    // a TLS origin behind a proxy is reached by tunneling with CONNECT
+    bool need_tunnel() const { return via_proxy() && secure; }
+};
+
 // Establishes socket streams for HTTP clients. The built-in implementation
-// maintains a per-vCPU connection pool and a DNS cache for each client.
-// A user-provided dialer is shared by all vCPUs the client runs on, so it
-// must be safe for concurrent use across vCPUs.
+// maintains a connection pool per (client, vCPU), and one DNS cache shared by
+// the whole process. A user-provided dialer is shared by all vCPUs the client
+// runs on, so it must be safe for concurrent use across vCPUs.
 class IDialer : public Object {
 public:
-    virtual ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
-                                uint64_t timeout = -1ULL) = 0;
-    // dial to a Unix Domain Socket
-    virtual ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1ULL) = 0;
+    virtual ISocketStream* dial(const DialTarget& target, uint64_t timeout = -1ULL) = 0;
 };
 
 class Client : public Object {
@@ -201,9 +218,10 @@ public:
     // outlive the client, and must be safe for concurrent use across vCPUs.
     void set_dialer(IDialer* dialer) { m_dialer = dialer; }
 
-    // Inject a DNS resolver shared by the built-in dialers of this client
-    // (typically to share one DNS cache among clients / vCPUs). Not owned;
-    // must outlive the client. No effect on a dialer set by set_dialer().
+    // Inject a DNS resolver, replacing the process-wide default one that the
+    // built-in dialers of this client would otherwise share. Not owned; must
+    // outlive the client, and must be safe for concurrent use across vCPUs.
+    // No effect on a dialer set by set_dialer().
     void set_resolver(Resolver* resolver) { m_resolver = resolver; }
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
@@ -231,7 +249,8 @@ protected:
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
 // Each client owns its connection pools (created lazily, one per vCPU used),
-// destroyed with the client, or at photon::fini() of the respective vCPU.
+// destroyed with the client, or at photon::fini() of the respective vCPU. The
+// DNS cache behind the pools is shared by the whole process.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();
