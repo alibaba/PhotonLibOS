@@ -55,11 +55,34 @@ struct DialTarget {
     uint16_t proxy_port = 0;
     bool proxy_secure = false;    // the proxy itself speaks TLS
     std::string_view proxy_auth;  // Proxy-Authorization value, may be empty
+    // Headers for the proxy itself to read, and the part of the connection
+    // pool key that they imply. Both are produced by the client's
+    // ProxyAuthenticator, once per dial. Never shown to the origin.
+    const HeadersBase* proxy_headers = nullptr;
+    std::string_view proxy_pool_key;
 
     bool via_proxy() const { return !proxy_host.empty(); }
     // a TLS origin behind a proxy is reached by tunneling with CONNECT
     bool need_tunnel() const { return via_proxy() && secure; }
 };
+
+// What a ProxyAuthenticator produces for one dial through a proxy.
+struct ProxyAuth {
+    CommonHeaders<4 * 1024 - 1> headers;   // put into the CONNECT, or into a forwarded request
+    estring pool_key;                      // connections differing here are never shared
+};
+
+// Called once per dial that goes through a proxy, just before connecting, so
+// that the headers may be refreshed and may differ from one request to the next.
+// Returns 0 on success, or a negative number to fail the request.
+//
+// Whatever identity the headers carry must be reflected in `pool_key`: a tunnel
+// is authenticated once, by the CONNECT that opened it, so it may only be reused
+// by the identity that opened it. Only the caller can tell which of its headers
+// mean identity (a tenant, a route) and which are mere per-request noise (a
+// trace id) -- keying on all of them would open a tunnel per request, and on
+// none of them would let one identity ride another's tunnel.
+using ProxyAuthenticator = Delegate<int, const DialTarget&, ProxyAuth&>;
 
 // Establishes socket streams for HTTP clients. The built-in implementation
 // maintains a connection pool per (client, vCPU), and one DNS cache shared by
@@ -191,6 +214,11 @@ public:
     virtual Headers* common_headers() = 0;
 
     void set_proxy(std::string_view proxy);
+    // Take over the headers sent to the proxy, and the pooling of the connections
+    // they authenticate. Not owned. See ProxyAuthenticator above.
+    void set_proxy_authenticator(ProxyAuthenticator authenticator) {
+        m_proxy_authenticator = authenticator;
+    }
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
@@ -239,6 +267,7 @@ public:
 protected:
     StoredURL m_proxy_url;
     std::string m_proxy_auth;
+    ProxyAuthenticator m_proxy_authenticator;
     std::string m_user_agent;
     uint64_t m_timeout = -1ULL;
     bool m_proxy = false;

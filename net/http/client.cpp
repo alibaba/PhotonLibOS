@@ -39,6 +39,8 @@ static constexpr char USERAGENT[] = "PhotonLibOS_HTTP";
 // a CONNECT response is a status line and a few headers; anything longer than
 // this is not something we would be able to make sense of anyway
 static constexpr size_t kTunnelRespSize = 4 * 1024;
+// a CONNECT request is a request line, a Host, and whatever the authenticator adds
+static constexpr uint16_t kTunnelReqSize = 8 * 1024 - 1;
 
 class ClientImpl;
 
@@ -279,10 +281,13 @@ ISocketStream* PooledDialer::dial_tunnel(const DialTarget& t, uint64_t timeout) 
     }
     // A tunnel only leads to the origin it was opened for, and only through the
     // proxy that opened it; one authenticated with other credentials is not ours
-    // to reuse either. All of them together make up its pooling key.
+    // to reuse either. All of them together make up its pooling key, with the
+    // caller's own contribution last, where the colons it may contain cannot be
+    // mistaken for the separators of the fields before it.
     estring key;
     key.appends(t.proxy_host, ":", t.proxy_port, t.proxy_secure ? ":s:" : ":p:", t.host, ":", t.port,
-                estring::make_conditional_cat_list(!t.proxy_auth.empty(), ":", t.proxy_auth));
+                estring::make_conditional_cat_list(!t.proxy_auth.empty(), ":", t.proxy_auth),
+                estring::make_conditional_cat_list(!t.proxy_pool_key.empty(), ":", t.proxy_pool_key));
     return tunnelsock->connect(key, [&]() -> ISocketStream* {
         return connect_tunnel(t, timeout);
     });
@@ -332,31 +337,40 @@ ISocketStream* PooledDialer::connect_tunnel(const DialTarget& t, uint64_t timeou
 }
 
 int PooledDialer::tunnel_handshake(ISocketStream* leg, const DialTarget& t) {
-    estring req;
-    req.appends("CONNECT ", t.host, ":", t.port, " HTTP/1.1\r\nHost: ", t.host, ":", t.port, "\r\n",
-                estring::make_conditional_cat_list(!t.proxy_auth.empty(),
-                    "Proxy-Authorization: ", t.proxy_auth, "\r\n"),
-                "\r\n");
-    if (leg->write(req.data(), req.size()) != (ssize_t)req.size())
+    // a request of its own, so that nothing of it can end up in the request the
+    // caller is making -- the proxy reads these headers, the origin must not
+    char buf[kTunnelReqSize];
+    Request req(buf, sizeof(buf));
+    req.keep_alive(true);
+    if (req.reset(Verb::CONNECT, estring().appends("https://", t.host, ":", t.port)) < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to make a CONNECT for `:`", t.host, t.port);
+    if (t.proxy_headers && req.headers.merge(*t.proxy_headers) < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to put the proxy headers into the CONNECT");
+    if (!t.proxy_auth.empty()) {
+        auto ret = req.headers.insert("Proxy-Authorization", t.proxy_auth);
+        if (ret < 0 && ret != -EEXIST)   // the authenticator's own one wins
+            LOG_ERRNO_RETURN(0, -1, "failed to set Proxy-Authorization on the CONNECT");
+    }
+    if (req.send_header(leg) < 0)
         LOG_ERRNO_RETURN(0, -1, "failed to send CONNECT to proxy `:`", t.proxy_host, t.proxy_port);
 
-    char buf[kTunnelRespSize];
+    char resp[kTunnelRespSize];
     size_t n = 0, end;
     while (true) {
-        auto ret = leg->recv(buf + n, sizeof(buf) - n);
+        auto ret = leg->recv(resp + n, sizeof(resp) - n);
         if (ret <= 0)
             LOG_ERRNO_RETURN(0, -1, "proxy `:` closed before answering CONNECT", t.proxy_host, t.proxy_port);
         n += ret;
-        end = estring_view(buf, n).find("\r\n\r\n");
+        end = estring_view(resp, n).find("\r\n\r\n");
         if (end != estring_view::npos) break;
-        if (n == sizeof(buf))
+        if (n == sizeof(resp))
             LOG_ERROR_RETURN(ENOBUFS, -1, "CONNECT response header is too long");
     }
     // the client speaks first inside a tunnel, so nothing may trail the response
     if (end + 4 != n)
         LOG_ERROR_RETURN(EPROTO, -1, "proxy sent ` byte(s) past the CONNECT response", n - end - 4);
 
-    estring_view status(buf, end);   // "HTTP/1.x SSS reason"
+    estring_view status(resp, end);   // "HTTP/1.x SSS reason"
     if (status.size() < 12 || !status.starts_with("HTTP/1."))
         LOG_ERROR_RETURN(EPROTO, -1, "malformed CONNECT response from proxy `:`", t.proxy_host, t.proxy_port);
     auto code = status.substr(9, 3).to_uint64();
@@ -591,7 +605,19 @@ public:
         if (tmo.timeout() == 0)
             LOG_ERROR_RETURN(ETIMEDOUT, ROUNDTRIP_FAILED, "connection timedout");
         auto &req = op->req;
-        auto s = acquire_dialer()->dial(dial_target(op, proxy_auth), tmo.timeout());
+        auto t = dial_target(op, proxy_auth);
+        // Which headers the proxy gets is decided per hop, and never stored in the
+        // caller's request: a redirect may turn a forwarded request into a tunneled
+        // one, and only the former is read by the proxy -- inside a tunnel it is
+        // the origin that reads them.
+        ProxyAuth pa;
+        if (t.via_proxy()) {
+            if (m_proxy_authenticator && m_proxy_authenticator(t, pa) < 0)
+                LOG_ERROR_RETURN(0, ROUNDTRIP_FAILED, "the proxy authenticator failed");
+            t.proxy_headers = &pa.headers;
+            t.proxy_pool_key = pa.pool_key;
+        }
+        auto s = acquire_dialer()->dial(t, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -600,8 +626,19 @@ public:
         }
 
         SocketStream_ptr sock(s);
+        // a forwarded request is the one the proxy reads, so it carries the proxy's
+        // headers; for a tunneled one they went into the CONNECT instead
+        const HeadersBase* proxy_headers = nullptr;
+        if (t.via_proxy() && !t.need_tunnel()) {
+            if (!proxy_auth.empty()) {
+                auto ret = pa.headers.insert("Proxy-Authorization", proxy_auth);
+                if (ret < 0 && ret != -EEXIST)   // the authenticator's own one wins
+                    LOG_ERROR_RETURN(0, ROUNDTRIP_FAILED, "failed to set Proxy-Authorization");
+            }
+            proxy_headers = &pa.headers;
+        }
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
-        if (req.send_header(sock.get()) < 0) {
+        if (req.send_header(sock.get(), proxy_headers) < 0) {
             sock->close();
             req.reset_status();
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
@@ -675,10 +712,6 @@ public:
                                                                   : std::string_view(m_user_agent));
         op->req.headers.insert("Connection", "keep-alive");
         auto proxy_auth = proxy_auth_of(op);
-        // a tunneled request reaches the origin, which must never be shown the
-        // credentials of the proxy -- they go into the CONNECT instead
-        if (!proxy_auth.empty() && !op->req.secure())
-            op->req.headers.insert("Proxy-Authorization", proxy_auth);
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));

@@ -132,17 +132,22 @@ int Message::append_bytes(uint16_t size) {
     return 0;
 }
 
-int Message::send_header(net::ISocketStream* stream) {
+int Message::send_header(net::ISocketStream* stream, const HeadersBase* extra) {
     if (stream != nullptr) m_stream = stream; // update stream if needed
 
     using SV = std::string_view;
     headers.insert("Connection", m_keep_alive ? SV("keep-alive") :
                                                 SV("close"));
-    if (headers.space_remain() < 2)
+    auto ex = extra ? extra->serialized() : SV();
+    if (headers.space_remain() < ex.size() + 2)
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
-    memcpy(m_buf + m_buf_size + headers.size(), "\r\n", 2);
-    std::string_view sv = {m_buf, m_buf_size + headers.size() + 2ULL};
+    // `extra` goes on the wire without becoming part of `headers`, so that a
+    // redirect of this message cannot carry it to the next hop
+    auto tail = m_buf + m_buf_size + headers.size();
+    memcpy(tail, ex.data(), ex.size());
+    memcpy(tail + ex.size(), "\r\n", 2);
+    std::string_view sv = {m_buf, m_buf_size + headers.size() + ex.size() + 2};
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
     if (ret < (ssize_t)sv.size())
@@ -312,6 +317,16 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     buf_append(buf, verbstr[v]);
     buf_append(buf, " ");
     uint16_t target_disp = buf - m_buf;
+    // CONNECT names its target in authority-form: only the host and the port,
+    // neither scheme nor path -- it asks for a tunnel, not for a resource
+    if (v == Verb::CONNECT) {
+        m_target = {target_disp, u.host_port().size()};
+        buf_append(buf, u.host_port());
+        m_path = m_query = {uint16_t(buf - m_buf), 0};
+        buf_append(buf, " HTTP/1.1\r\n");
+        m_buf_size = buf - m_buf;
+        return;
+    }
     m_target = {uint16_t(buf - m_buf), u.target().size()};
     if (use_absolute_uri(u, enable_proxy)) {
         m_target = {uint16_t(buf - m_buf), full_url_size(u)};

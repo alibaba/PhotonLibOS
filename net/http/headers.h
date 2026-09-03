@@ -110,6 +110,9 @@ public:
 
     uint16_t kv_size() const { return m_kv_size * sizeof(KV); }
     uint16_t size() const { return m_buf_size; }
+    // the headers as they go on the wire ("K: V\r\n" each, in insertion order),
+    // so that one set of headers can be appended to another's message
+    std::string_view serialized() const { return {m_buf, m_buf_size}; }
     size_t space_remain() const {
         return m_buf_capacity - size() - kv_size();
     }
