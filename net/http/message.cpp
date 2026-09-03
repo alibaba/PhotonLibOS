@@ -297,6 +297,13 @@ inline size_t full_url_size(const URL& u) {
            (u.secure() ? sizeof(https_url_scheme) : sizeof(http_url_scheme)) - 1;
 }
 
+// A request to a TLS origin through a proxy travels inside a CONNECT tunnel, so
+// it is written in origin-form like any direct request; only a plaintext origin
+// is reached by handing the proxy an absolute-URI request to forward.
+inline bool use_absolute_uri(const URL& u, bool enable_proxy) {
+    return enable_proxy && !u.secure();
+}
+
 void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     m_secure = u.secure();
     m_port = u.port();
@@ -306,7 +313,7 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     buf_append(buf, " ");
     uint16_t target_disp = buf - m_buf;
     m_target = {uint16_t(buf - m_buf), u.target().size()};
-    if (enable_proxy) {
+    if (use_absolute_uri(u, enable_proxy)) {
         m_target = {uint16_t(buf - m_buf), full_url_size(u)};
         buf_append(buf, u.secure() ? https_url_scheme : http_url_scheme);
         buf_append(buf, u.host_port());
@@ -352,7 +359,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
     }
     StoredURL u(location);
     auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        (enable_proxy ? full_url_size(u) : u.target().size());
+        (use_absolute_uri(u, enable_proxy) ? full_url_size(u) : u.target().size());
 
     int delta = (int)new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));

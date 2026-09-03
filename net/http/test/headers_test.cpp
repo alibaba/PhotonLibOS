@@ -214,17 +214,24 @@ TEST(ReqHeaders, redirect) {
     EXPECT_EQ(req.headers["test_key"], "test_value");
     auto value = req.headers["Host"];
     LOG_DEBUG(VALUE(value));
-    req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/targetName");
+    // a plaintext origin is forwarded by the proxy, in absolute-URI form
+    req.redirect(Verb::DELETE, "http://domain.redirect1/targetName", true);
+    EXPECT_EQ(req.target(), "http://domain.redirect1/targetName");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/redirect_test");
+    EXPECT_EQ(req.target(), "http://domain.redirect1/redirect_test");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    LOG_DEBUG(VALUE(req.target()));
+    // a TLS origin is reached through a CONNECT tunnel, so the request inside it
+    // is in origin-form, just like a direct one
+    req.redirect(Verb::GET, "https://domain.redirect2/targetName", true);
+    EXPECT_EQ(req.target(), "/targetName");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test1", false);
     EXPECT_EQ(req.target(), "/redirect_test1");
-    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
 }
 TEST(debug, debug) {

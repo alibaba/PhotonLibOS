@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/fs/localfs.h>
 #include "../../../test/gtest.h"
+#include "../../test/cert-key.cpp"
 #include "to_url.h"
 
 using namespace photon::net;
@@ -1335,16 +1336,15 @@ TEST(http_client, dialer_injection) {
     struct CountingDialer : public IDialer {
         ISocketClient* cli = new_tcp_socket_client();
         int dials = 0;
+        bool saw_proxy = false, saw_secure = false;
         ~CountingDialer() override { delete cli; }
-        ISocketStream* dial(std::string_view, uint16_t port, bool,
-                            uint64_t timeout) override {
+        ISocketStream* dial(const DialTarget& t, uint64_t timeout) override {
             dials++;
+            saw_proxy = t.via_proxy();
+            saw_secure = t.secure;
             cli->timeout(timeout);
             IPAddr addr("127.0.0.1");   // no DNS in this test dialer
-            return cli->connect(EndPoint(addr, port));
-        }
-        ISocketStream* dial(std::string_view, uint64_t) override {
-            return nullptr;
+            return cli->connect(EndPoint(addr, t.port));
         }
     } dialer;
 
@@ -1353,6 +1353,8 @@ TEST(http_client, dialer_injection) {
     client->set_dialer(&dialer);
     simple_get(client, to_url(tcpserver, "/simple"));
     EXPECT_GT(dialer.dials, 0);
+    EXPECT_FALSE(dialer.saw_proxy);
+    EXPECT_FALSE(dialer.saw_secure);
     // the injected dialer fully replaces the built-in one
     EXPECT_EQ(0, count_dialers_of(client));
 }
@@ -1408,6 +1410,281 @@ TEST(http_client, cross_vcpu_client_destruction) {
     delete client;
     quit.signal(1);
     th.join();
+}
+
+// A proxy serves a plaintext origin by forwarding an absolute-URI request, but a
+// TLS origin is reached through a CONNECT tunnel, inside which the request is
+// written in origin-form, exactly as if there were no proxy at all.
+TEST(http_client, proxy_request_line) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://127.0.0.1:8888");
+
+    Client::OperationOnStack<4096> plain(client, Verb::GET, "http://example.com/a?b=c");
+    EXPECT_TRUE(plain.req.target() == "http://example.com/a?b=c");
+    EXPECT_FALSE(plain.req.secure());
+
+    Client::OperationOnStack<4096> tls(client, Verb::GET, "https://example.com/a?b=c");
+    EXPECT_TRUE(tls.req.target() == "/a?b=c");
+    EXPECT_TRUE(tls.req.secure());
+    EXPECT_TRUE(tls.req.host() == "example.com");   // ...and Host still names the origin
+}
+
+// Reports whether the request carried a Proxy-Authorization header, so that a
+// tunneled request can be checked not to leak the proxy's credentials to the
+// origin -- unlike a forwarded one, it is the origin that reads its headers.
+class ProxyAuthEchoHandler : public http::HTTPHandler {
+public:
+    int handle_request(http::Request& req, http::Response& resp, std::string_view) {
+        std::string body(req.headers["Proxy-Authorization"].empty() ? "none" : "leaked");
+        resp.set_result(200);
+        resp.headers.content_length(body.size());
+        if (resp.write(body.data(), body.size()) != (ssize_t)body.size())
+            LOG_ERRNO_RETURN(0, -1, "send body failed");
+        return 0;
+    }
+};
+
+static std::string get_body(Client* client, std::string_view target) {
+    Client::OperationOnStack<> op(client, Verb::GET, target);
+    op.req.headers.content_length(0);
+    if (op.call() != 0) return "<call failed>";
+    EXPECT_EQ(200, op.resp.status_code());
+    std::string body(op.resp.body_size(), '\0');
+    if (op.resp.read(&body[0], body.size()) != (ssize_t)body.size())
+        return "<read failed>";
+    return body;
+}
+
+// A CONNECT proxy: answers the tunnel request, then relays bytes to the origin
+// named in the request-target, so that the client's TLS handshake -- and
+// everything after it -- reaches the origin instead of the proxy.
+struct FakeConnectProxy {
+    ISocketServer* srv = new_tcp_socket_server();
+    ISocketClient* cli = new_tcp_socket_client();
+    std::string want_auth;   // if set, demand this Proxy-Authorization header line
+    std::string authority;   // the request-target of the last CONNECT
+    int connects = 0;        // tunnels established
+    int denials = 0;         // CONNECTs answered with 407
+    int live = 0;            // handlers currently relaying
+
+    ~FakeConnectProxy() {
+        delete srv;   // stops accepting; the tunnels in flight are the client's
+        for (int i = 0; live > 0 && i < 10000; ++i)
+            photon::thread_usleep(1000);
+        EXPECT_EQ(0, live);
+        delete cli;
+    }
+
+    int start() {
+        srv->set_handler({this, &FakeConnectProxy::handle});
+        if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
+        return srv->start_loop();
+    }
+
+    estring url(std::string_view user_passwd = {}) {
+        return estring().appends("http://",
+            estring::make_conditional_cat_list(!user_passwd.empty(), user_passwd, "@"),
+            "127.0.0.1:", srv->getsockname().port);
+    }
+
+    int handle(ISocketStream* s) {
+        live++;
+        DEFER(live--);
+        char buf[4096];
+        size_t n = 0, end;
+        while (true) {
+            auto r = s->recv(buf + n, sizeof(buf) - n);
+            if (r <= 0) return 0;
+            n += (size_t)r;
+            end = estring_view(buf, n).find("\r\n\r\n");
+            if (end != estring_view::npos) break;
+            if (n == sizeof(buf)) return 0;
+        }
+        estring_view head(buf, end);   // "CONNECT host:port HTTP/1.1\r\n..."
+        auto sp1 = head.find(' ');
+        auto sp2 = head.find(' ', sp1 + 1);
+        if (!head.starts_with("CONNECT ") || sp2 == estring_view::npos)
+            LOG_ERROR_RETURN(0, 0, "not a CONNECT request, ", VALUE(head));
+        authority.assign(head.data() + sp1 + 1, sp2 - sp1 - 1);
+
+        if (!want_auth.empty() && head.find(want_auth.c_str()) == estring_view::npos) {
+            denials++;
+            static const char kDenied[] = "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                "Proxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 0\r\n\r\n";
+            s->write(kDenied, sizeof(kDenied) - 1);
+            return 0;
+        }
+
+        auto colon = estring_view(authority).find_last_of(':');
+        EndPoint origin(IPAddr::V4Loopback(),
+            (uint16_t)estring_view(authority).substr(colon + 1).to_uint64());
+        auto up = cli->connect(origin);
+        if (!up) {
+            static const char kBadGateway[] = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+            s->write(kBadGateway, sizeof(kBadGateway) - 1);
+            LOG_ERRNO_RETURN(0, 0, "failed to reach the origin `", origin);
+        }
+        DEFER(delete up);
+        static const char kEstablished[] = "HTTP/1.1 200 Connection Established\r\n\r\n";
+        if (s->write(kEstablished, sizeof(kEstablished) - 1) < 0)
+            LOG_ERRNO_RETURN(0, 0, "failed to answer CONNECT");
+        connects++;
+        relay(s, up);
+        return 0;
+    }
+
+    static void copy(ISocketStream* from, ISocketStream* to) {
+        char buf[16 * 1024];
+        while (true) {
+            auto r = from->recv(buf, sizeof(buf));
+            if (r <= 0) break;
+            if (to->write(buf, r) != r) break;
+        }
+    }
+
+    void relay(ISocketStream* down, ISocketStream* up) {
+        bool stopped = false;
+        auto th = photon::thread_enable_join(photon::thread_create11(
+            [&, other = photon::CURRENT] {
+                copy(up, down);
+                if (!stopped) photon::thread_interrupt(other, ECANCELED);
+            }));
+        copy(down, up);
+        stopped = true;
+        photon::thread_interrupt((photon::thread*)th, ECANCELED);
+        photon::thread_join(th);
+    }
+};
+
+// Brings up a TLS origin server on localhost, serving `handler`.
+struct TLSOrigin {
+    TLSContext* ctx = new_tls_context(cert_str, key_str, passphrase_str);
+    ISocketServer* srv = nullptr;
+    HTTPServer* http = new_http_server();
+
+    ~TLSOrigin() {
+        delete srv;
+        delete http;
+        delete ctx;
+    }
+
+    int start(HTTPHandler* handler) {
+        if (!ctx) return -1;
+        srv = new_tls_server(ctx, new_tcp_socket_server(), true);
+        if (!srv) return -1;
+        http->add_handler(handler, true, "/simple");
+        srv->set_handler(http->get_connection_handler());
+        if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
+        return srv->start_loop();
+    }
+
+    estring url(std::string_view path) {
+        return estring().appends("https://127.0.0.1:", srv->getsockname().port, path);
+    }
+    estring authority() {
+        return estring().appends("127.0.0.1:", srv->getsockname().port);
+    }
+};
+
+// the test origin is self-signed, so the client must not verify it
+static TLSContext* new_unverifying_context() {
+    auto ctx = new_tls_context(nullptr, nullptr, nullptr);
+    if (ctx) ctx->set_verify_mode(VerifyMode::NONE);
+    return ctx;
+}
+
+TEST(http_client, connect_tunnel) {
+    FakeConnectProxy proxy;      // destroyed last, after the tunnels are gone
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());
+
+    // SimpleHandler echoes the request-target back, which is how we see that the
+    // request travelled through the tunnel in origin-form
+    EXPECT_EQ("/simple", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(origin.authority(), proxy.authority);
+
+    // the tunnel is pooled, so the next request through it costs no CONNECT
+    EXPECT_EQ("/simple", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+}
+
+TEST(http_client, connect_tunnel_auth) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic dXNlcjpwYXNz";   // user:pass
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url("user:pass"));
+
+    // the credentials authenticate the CONNECT, and stop at the proxy
+    EXPECT_EQ("none", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(0, proxy.denials);
+}
+
+TEST(http_client, connect_tunnel_refused) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic dXNlcjpwYXNz";
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());   // no credentials: every CONNECT gets a 407
+
+    Client::OperationOnStack<> op(client, Verb::GET, origin.url("/simple"));
+    op.req.headers.content_length(0);
+    op.retry = 1;
+    EXPECT_EQ(-1, op.call());
+    EXPECT_EQ(0, proxy.connects);
+    EXPECT_GT(proxy.denials, 0);
+}
+
+// A tunnel is authenticated once, by the CONNECT that opened it, so it may only
+// be reused by the credentials that authenticated it -- two users of the same
+// proxy must not end up sharing one tunnel.
+TEST(http_client, connect_tunnel_distinct_credentials) {
+    FakeConnectProxy proxy;   // want_auth unset: any credentials are accepted
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+
+    auto target = origin.url("/simple");
+    for (auto user_passwd : {"alice:pw1", "bob:pw2"}) {
+        Client::OperationOnStack<> op(client, Verb::GET, target);
+        op.req.headers.content_length(0);
+        op.set_proxy(proxy.url(user_passwd));
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(200, op.resp.status_code());
+    }
+    // one tunnel each, rather than the second borrowing the first
+    EXPECT_EQ(2, proxy.connects);
 }
 
 int main(int argc, char** arg) {
