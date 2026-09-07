@@ -21,6 +21,7 @@ limitations under the License.
 #include <photon/net/http/message.h>
 #include <photon/net/http/url.h>
 #include <photon/common/object.h>
+#include <photon/common/callback.h>
 #include <photon/common/string_view.h>
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
@@ -30,6 +31,7 @@ limitations under the License.
 namespace photon {
 namespace net {
 class TLSContext;
+class Resolver;
 namespace http {
 
 class IWebSocketStream;  // Forward declaration for websocket_connect
@@ -167,6 +169,10 @@ public:
     void set_bind_ips(std::vector<IPAddr> &ips) {
         m_bind_ips = ips;
     }
+    void set_resolver(Resolver* resolver, bool ownership = false) {
+        m_resolver = resolver;
+        m_resolver_ownership = ownership;
+    }
     StoredURL* get_proxy() {
         return &m_proxy_url;
     }
@@ -202,6 +208,8 @@ protected:
     uint64_t m_timeout = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
+    Resolver* m_resolver = nullptr;
+    bool m_resolver_ownership = false;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.

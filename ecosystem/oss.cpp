@@ -446,6 +446,37 @@ class OssClientImpl : public Client {
 
 #define OssClient OssClientImpl
 
+// Resolve filters enforcing ClientOptions::ip_version. The leading void* is
+// the Delegate object slot, bound to nullptr.
+static bool oss_resolve_filter_ipv4(void*, photon::net::IPAddr addr) {
+  return addr.is_ipv4();
+}
+static bool oss_resolve_filter_ipv6(void*, photon::net::IPAddr addr) {
+  return addr.is_ipv6();
+}
+
+// Resolver decorator enforcing a single address family: wraps a private
+// DefaultResolver, keeping only addresses that pass `filter`. Each OSS client
+// owns one, so its DNS cache is private and the filter is never bypassed.
+class FilteredResolver : public photon::net::Resolver {
+ public:
+  std::unique_ptr<photon::net::Resolver> inner{photon::net::new_default_resolver()};
+  Delegate<bool, photon::net::IPAddr> filter;
+
+  explicit FilteredResolver(Delegate<bool, photon::net::IPAddr> filter) : filter(filter) {}
+
+  photon::net::IPAddr resolve(std::string_view host) override {
+    return inner->resolve_filter(host, filter);
+  }
+  // The HTTP client only calls resolve(); enforce the same filter here.
+  photon::net::IPAddr resolve_filter(std::string_view host, Delegate<bool, photon::net::IPAddr>) override {
+    return inner->resolve_filter(host, filter);
+  }
+  void discard_cache(std::string_view host, photon::net::IPAddr ip) override {
+    inner->discard_cache(host, ip);
+  }
+};
+
 OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
     : m_bucket(options.bucket),
       m_oss_options(options),
@@ -465,6 +496,22 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
   m_client->timeout(m_oss_options.request_timeout_us);
   m_client->set_user_agent(m_oss_options.user_agent);
   if (!m_oss_options.proxy.empty()) m_client->set_proxy(m_oss_options.proxy);
+
+  // For a single-family ip_version, give the client a private resolver that only
+  // accepts matching addresses, so the filter is never bypassed by a shared cache.
+  switch (m_oss_options.ip_version) {
+    case IPVersion::kIPv4Only:
+    case IPVersion::kIPv6Only: {
+      auto filter = m_oss_options.ip_version == IPVersion::kIPv4Only
+                        ? Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv4}
+                        : Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv6};
+      m_client->set_resolver(new FilteredResolver(filter), true);
+      break;
+    }
+    case IPVersion::kBoth:
+    default:
+      break;
+  }
 
   auto& ch = m_oss_options.custom_headers;
   for (auto it = ch.begin(); it != ch.end();) {
