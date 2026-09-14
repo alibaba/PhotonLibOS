@@ -147,13 +147,13 @@ TEST(ThrottledFile, basic_throttled) {
     struct iovec* nulliov = iov;
     char buff[4096];
     EXPECT_CALL(mock, pread(_, _, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, preadv(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(Invoke(count_iov_size)));
+    EXPECT_CALL(mock, preadv(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(count_iov_size));
     EXPECT_CALL(mock, pwrite(_, _, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, pwritev(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(Invoke(count_iov_size)));
+    EXPECT_CALL(mock, pwritev(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(count_iov_size));
     EXPECT_CALL(mock, read(_, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, readv(_, _)).Times(AtLeast(1)).WillRepeatedly(Invoke(count_iov_size));
+    EXPECT_CALL(mock, readv(_, _)).Times(AtLeast(1)).WillRepeatedly(count_iov_size);
     EXPECT_CALL(mock, write(_, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, writev(_, _)).Times(AtLeast(1)).WillRepeatedly(Invoke(count_iov_size));
+    EXPECT_CALL(mock, writev(_, _)).Times(AtLeast(1)).WillRepeatedly(count_iov_size);
     tf->pread(nullptr, 0, 0);
     tf->pread(buff, 4096, 0);
     tf->preadv(nulliov, 10, 0);
