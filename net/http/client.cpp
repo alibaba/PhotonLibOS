@@ -195,8 +195,14 @@ protected:
 // vCPU, even for leaked clients or the fini+init cycle of a pthread_atfork
 // handler. Whoever unlinks a dialer from `dialers` destroys it.
 struct DialerRegistry {
-    photon::spinlock lock;   // guards `dialers`; taken cross-vCPU by ~ClientImpl
+    photon::spinlock lock;   // guards `dialers` and `destroying`; taken cross-vCPU by ~ClientImpl
     intrusive_list<PooledDialer, false> dialers;
+    // dialers claimed out of the list by a cross-vCPU ~ClientImpl but not yet
+    // destroyed. Erasing a dialer resolves who deletes it, not the lifetime of
+    // this vCPU, so at_photon_fini must not let fini() reach vcpu_fini() (which
+    // frees the vcpu_t that the pending thread_migrate still writes to) until
+    // every claimed handoff has landed.
+    int destroying = 0;
     bool fini_hook_registered = false;
 
     PooledDialer* find_locked(ClientImpl* c) {
@@ -462,6 +468,8 @@ public:
                 SCOPED_LOCK(e.registry->lock);
                 if (e.registry->contains_locked(e.dialer)) {
                     e.registry->dialers.erase(e.dialer);
+                    // pin the owning vCPU's fini until the handoff below lands
+                    e.registry->destroying++;
                     claimed = true;
                 }
             }
@@ -476,6 +484,10 @@ public:
                 remove_dref_locked(e.dialer);
             }
             destroy_dialer(e);
+            {
+                SCOPED_LOCK(e.registry->lock);
+                e.registry->destroying--;
+            }
         }
     }
 
@@ -770,6 +782,16 @@ void DialerRegistry::at_photon_fini() {
             o->remove_dref_locked(d);
         }
         delete d;   // on its own vCPU: the hook runs there
+    }
+    // a cross-vCPU ~ClientImpl may have claimed a dialer of ours and still be
+    // migrating a helper here to destroy it; let fini() free this vCPU only once
+    // that has landed, or the migrate would write to a freed vcpu_t
+    for (;;) {
+        lock.lock();
+        bool busy = destroying > 0;
+        lock.unlock();
+        if (!busy) break;
+        photon::thread_usleep(1000);
     }
     g_shared_resolver.at_photon_fini();
     fini_hook_registered = false;   // photon::fini() clears the hook vector
