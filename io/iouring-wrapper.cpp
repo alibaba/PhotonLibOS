@@ -49,7 +49,6 @@ public:
 
     ~iouringEngine() {
         LOG_INFO("Finish event engine: iouring ", VALUE(m_master));
-<<<<<<< HEAD
         if (m_cancel_poller != nullptr) {
             m_cancel_poller_running = false;
             thread_interrupt(m_cancel_poller);
@@ -59,23 +58,6 @@ public:
             close(m_cancel_fd);
         }
         if (m_cascading_event_fd >= 0) {
-=======
-        fini();
-    }
-
-    int reset() override {
-        fini();
-        m_event_contexts.clear();
-        // The old ring died along with all its in-flight requests, so their
-        // CQEs can never arrive. Bump the generation to release the waiters
-        // in _async_io.
-        m_generation++;
-        return init();
-    }
-
-    int fini() {
-        if (m_eventfd >= 0 && !m_master) {
->>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
             if (io_uring_unregister_eventfd(m_ring) != 0) {
                 LOG_ERROR("iouring: failed to unregister cascading event fd");
             }
@@ -188,16 +170,9 @@ public:
         return _async_io(sqe, timeout);
     }
 
-<<<<<<< HEAD
     int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
-        ioCtx io_ctx{photon::CURRENT, -1, false, false};
-=======
-    int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout, uint32_t ring_flags) {
         auto* first_sqe = sqe;
-        auto gen = m_generation;
-        sqe->flags |= (uint8_t) (ring_flags & 0xff);
-        ioCtx io_ctx(false, false);
->>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
+        ioCtx io_ctx{photon::CURRENT, -1, false, false};
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx{photon::CURRENT, -1, true, false};
@@ -234,40 +209,25 @@ public:
         } else {
             // Interrupted by external user thread. Try to cancel the previous I/O
             ERRNO err_backup;
-            if (gen != m_generation) {
-                // reset() has re-created the ring (e.g. after fork). Our I/O
-                // died with the old ring, so nothing refers to the stack
-                // contexts anymore, and there is nothing to cancel.
-                errno = err_backup.no;
-                return -1;
-<<<<<<< HEAD
-            ioCtx cancel_ctx{CURRENT, -1, true, false};
-=======
-            }
             sqe = _get_sqe();
             if (sqe == nullptr) {
                 // Unable to cancel. Wait for the in-flight I/O (and its linked
                 // timer) to complete, before the stack-allocated contexts go
                 // out of scope.
-                while (gen == m_generation &&
-                       (!io_ctx.done || (has_timer && !timer_ctx.done)))
+                while (!io_ctx.done || (has_timer && !timer_ctx.done))
                     photon::thread_sleep(-1);
                 errno = err_backup.no;
                 return -1;
             }
-            ioCtx cancel_ctx(true, false);
->>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
+            ioCtx cancel_ctx{CURRENT, -1, true, false};
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
             // No explicit submit here: this engine submits lazily, from
-            // wait_and_fire_events(), which the loop below yields to.
-            // Wait until all in-flight CQEs referring to our stack contexts are
-            // reaped, regardless of premature wake-ups (shutdown truncation,
-            // external interrupts, or io/cancel CQEs arriving in different
-            // reap batches). A generation change means reset() has dropped the
-            // ring holding those CQEs, so they can never arrive.
-            while (gen == m_generation &&
-                   (!io_ctx.done || !cancel_ctx.done || (has_timer && !timer_ctx.done)))
+            // wait_and_fire_events(), which the loop below yields to. Wait until
+            // all in-flight CQEs referring to our stack contexts are reaped,
+            // regardless of premature wake-ups (external interrupts, or
+            // io/cancel CQEs arriving in different reap batches).
+            while (!io_ctx.done || !cancel_ctx.done || (has_timer && !timer_ctx.done))
                 photon::thread_sleep(-1);
             errno = err_backup.no;
             return -1;
@@ -401,7 +361,6 @@ public:
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
                     LOG_WARN("iouring: send_zc fall back to copying");
-                assert(!ctx->is_event);
                 ctx->done = true;
                 photon::thread_interrupt(ctx->th_id, EOK);
                 continue;
@@ -475,10 +434,10 @@ private:
         int32_t res;
         bool is_canceller;
         bool is_event;
-        // Set by reap_events when the final CQE of this request arrives.
-        // Stack-allocated contexts in _async_io must not go out of scope
-        // before this flag turns true. No atomic needed, since a vCPU is
-        // single OS thread and work stealing is paused during the wait.
+        // Set by the reap loop of wait_and_fire_events when the final CQE of
+        // this request arrives. The stack-allocated contexts in _async_io must
+        // not go out of scope before this flag turns true. No atomic needed,
+        // since a vCPU is a single OS thread.
         bool done = false;
     };
 
@@ -612,16 +571,9 @@ private:
     bool m_master;
     int m_cascading_event_fd = -1;
     io_uring* m_ring = nullptr;
-<<<<<<< HEAD
     int m_cancel_fd = -1;
     thread* m_cancel_poller = nullptr;
     bool m_cancel_poller_running = true;
-=======
-    int m_eventfd = -1;
-    // Incremented by reset() each time the ring is re-created (e.g. after
-    // fork), invalidating all in-flight requests of the old ring.
-    uint64_t m_generation = 0;
->>>>>>> 9118c3f ([Backport][0.8 to 0.7] | | | fix(iouring): plug UAF on _async_io early returns (#1569) (#1619) (#1623) (#1634))
     std::unordered_map<fdInterest, eventCtx, fdInterestHasher> m_event_contexts;
     static int m_register_files_flag;
     static int m_cooperative_task_flag;
