@@ -214,19 +214,37 @@ TEST(ReqHeaders, redirect) {
     EXPECT_EQ(req.headers["test_key"], "test_value");
     auto value = req.headers["Host"];
     LOG_DEBUG(VALUE(value));
-    req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/targetName");
+    // a plaintext origin is forwarded by the proxy, in absolute-URI form
+    req.redirect(Verb::DELETE, "http://domain.redirect1/targetName", true);
+    EXPECT_EQ(req.target(), "http://domain.redirect1/targetName");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/redirect_test");
+    EXPECT_EQ(req.target(), "http://domain.redirect1/redirect_test");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    LOG_DEBUG(VALUE(req.target()));
+    // a TLS origin is reached through a CONNECT tunnel, so the request inside it
+    // is in origin-form, just like a direct one
+    req.redirect(Verb::GET, "https://domain.redirect2/targetName", true);
+    EXPECT_EQ(req.target(), "/targetName");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test1", false);
     EXPECT_EQ(req.target(), "/redirect_test1");
-    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
 }
+
+// A CONNECT names its target in authority-form: it asks for a tunnel to a host,
+// not for a resource, so it carries neither scheme nor path.
+TEST(ReqHeaders, connect_is_in_authority_form) {
+    RequestHeadersStored<> req(Verb::CONNECT, "https://origin:4321/ignored?q=1");
+    EXPECT_EQ(req.target(), "origin:4321");
+    EXPECT_EQ(req.headers["Host"], "origin:4321");
+    EXPECT_EQ(req.query(), "");
+    EXPECT_EQ(4321, req.port());
+}
+
 TEST(debug, debug) {
     RequestHeadersStored<> req(Verb::PUT, "http://domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:80/target1?param1=x1");
     req.headers.content_length(0);

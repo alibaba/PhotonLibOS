@@ -83,7 +83,11 @@ class OssCustomHeaderTest : public ::testing::Test {
 
   ClientOptions make_opts() {
     ClientOptions opts;
-    opts.endpoint = "oss-test.example.com";
+    // a plaintext endpoint, so that the request reaches the capture handler as
+    // an absolute-URI forward and it can inspect the headers the SDK built. An
+    // https endpoint would make the client open a CONNECT tunnel instead, and
+    // the proxy would only ever see the CONNECT request.
+    opts.endpoint = "http://oss-test.example.com";
     opts.bucket = "test-bucket";
     opts.proxy = estring().appends("http://127.0.0.1:",
                                    tcp_server->getsockname().port);
