@@ -126,6 +126,17 @@ ssize_t count_iov_size(const iovec* v, int n) {
     return ret;
 }
 
+// gmock before 1.8.1 (still shipped by some of our CI images) cannot build an Action
+// from a bare callable and requires the Invoke() wrapper, whereas recent gmock marks
+// Invoke() as deprecated, which is fatal under -Werror. The legacy header below, gone
+// since 1.11, tells the two apart; keying on it rather than on Invoke()'s deprecation
+// macro keeps the modern spelling valid once Invoke() is removed for good.
+#if defined(__has_include) && __has_include(<gmock/gmock-generated-actions.h>)
+#define INVOKE_FN(f) Invoke(f)
+#else
+#define INVOKE_FN(f) f
+#endif
+
 TEST(ThrottledFile, basic_throttled) {
     using namespace testing;
     ThrottleLimits limit;
@@ -147,13 +158,13 @@ TEST(ThrottledFile, basic_throttled) {
     struct iovec* nulliov = iov;
     char buff[4096];
     EXPECT_CALL(mock, pread(_, _, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, preadv(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(count_iov_size));
+    EXPECT_CALL(mock, preadv(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(INVOKE_FN(count_iov_size)));
     EXPECT_CALL(mock, pwrite(_, _, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, pwritev(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(count_iov_size));
+    EXPECT_CALL(mock, pwritev(_, _, _)).Times(AtLeast(1)).WillRepeatedly(WithArgs<0, 1>(INVOKE_FN(count_iov_size)));
     EXPECT_CALL(mock, read(_, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, readv(_, _)).Times(AtLeast(1)).WillRepeatedly(count_iov_size);
+    EXPECT_CALL(mock, readv(_, _)).Times(AtLeast(1)).WillRepeatedly(INVOKE_FN(count_iov_size));
     EXPECT_CALL(mock, write(_, _)).Times(AtLeast(1)).WillRepeatedly(ReturnArg<1>());
-    EXPECT_CALL(mock, writev(_, _)).Times(AtLeast(1)).WillRepeatedly(count_iov_size);
+    EXPECT_CALL(mock, writev(_, _)).Times(AtLeast(1)).WillRepeatedly(INVOKE_FN(count_iov_size));
     tf->pread(nullptr, 0, 0);
     tf->pread(buff, 4096, 0);
     tf->preadv(nulliov, 10, 0);
