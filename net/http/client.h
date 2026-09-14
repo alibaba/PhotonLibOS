@@ -21,7 +21,6 @@ limitations under the License.
 #include <photon/net/http/message.h>
 #include <photon/net/http/url.h>
 #include <photon/common/object.h>
-#include <photon/common/callback.h>
 #include <photon/common/string_view.h>
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
