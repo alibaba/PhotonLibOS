@@ -75,7 +75,10 @@ class OssIPVersionTest : public ::testing::Test {
 
   ClientOptions make_opts(IPVersion ver) {
     ClientOptions opts;
-    opts.endpoint = "oss-test.example.com";
+    // http:// (not the default https) so the proxied request stays plain HTTP:
+    // an https endpoint would need a CONNECT tunnel + TLS, which this test's
+    // plain proxy server does not speak.
+    opts.endpoint = "http://oss-test.example.com";
     opts.bucket = "test-bucket";
     opts.proxy = estring().appends("http://127.0.0.1:",
                                    tcp_server->getsockname().port);
@@ -174,7 +177,8 @@ class OssIPVersionV6Test : public ::testing::Test {
 
   int probe(IPVersion ver, bool* reached) {
     ClientOptions opts;
-    opts.endpoint = "oss-test.example.com";
+    // http:// keeps the proxied request plain (no CONNECT tunnel + TLS needed).
+    opts.endpoint = "http://oss-test.example.com";
     opts.bucket = "test-bucket";
     opts.proxy = estring().appends("http://localhost:",
                                    tcp_server->getsockname().port);
