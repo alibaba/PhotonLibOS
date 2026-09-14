@@ -51,46 +51,57 @@ class ClientImpl;
 // is unpublished, and the next borrower publishes a fresh one in its place.
 class SharedResolver {
 public:
+    // one published cache: the resolver and the count of its current borrowers.
+    // A generation outlives its publication -- an old one drains its borrowers
+    // in at_photon_fini while a new one already counts its own -- so the count
+    // belongs here, per generation, not on SharedResolver.
+    struct Gen {
+        Resolver* resolver;
+        uint32_t users = 0;   // guarded by SharedResolver::_lock
+    };
+
     // borrowed resolver; also used to carry a resolver that isn't shared at all
     class Ref {
     public:
-        Ref(SharedResolver* owner, Resolver* r) : _owner(owner), _r(r) { }
-        Ref(Ref&& rhs) : _owner(rhs._owner), _r(rhs._r) { rhs._r = nullptr; }
+        Ref(SharedResolver* owner, Gen* gen, Resolver* r) : _owner(owner), _gen(gen), _r(r) { }
+        Ref(Ref&& rhs) : _owner(rhs._owner), _gen(rhs._gen), _r(rhs._r) { rhs._r = nullptr; }
         Ref(const Ref&) = delete;
-        ~Ref() { if (_owner && _r) _owner->put(); }
+        ~Ref() { if (_owner && _r) _owner->put(_gen); }
         Resolver* operator->() const { return _r; }
     protected:
         SharedResolver* _owner;
+        Gen* _gen;
         Resolver* _r;
     };
 
     Ref borrow() {
         {
             SCOPED_LOCK(_lock);
-            if (_resolver) return ++_users, Ref{this, _resolver};
+            if (_cur) return ++_cur->users, Ref{this, _cur, _cur->resolver};
         }
         auto r = new_default_resolver(kDNSCacheLife);   // may yield
         Resolver* redundant = nullptr;
+        Gen* g;
         {
             SCOPED_LOCK(_lock);
-            if (_resolver) redundant = r;   // lost a benign race
-            else _resolver = r, _vcpu = photon::get_vcpu();
-            ++_users;
-            r = _resolver;
+            if (_cur) redundant = r;   // lost a benign race
+            else _cur = new Gen{r, 0}, _vcpu = photon::get_vcpu();
+            g = _cur;
+            ++g->users;
         }
         delete redundant;   // outside the lock: destroying its timer may yield
-        return {this, r};
+        return {this, g, g->resolver};
     }
 
     // called from the fini hook of the vCPU owning the cache, once every
     // built-in dialer of that vCPU is gone
     void at_photon_fini() {
-        Resolver* r;
+        Gen* g;
         {
             SCOPED_LOCK(_lock);
-            if (!_resolver || _vcpu != photon::get_vcpu()) return;
-            r = _resolver;
-            _resolver = nullptr;   // dials elsewhere will publish a new cache
+            if (!_cur || _vcpu != photon::get_vcpu()) return;
+            g = _cur;
+            _cur = nullptr;   // dials elsewhere will publish a new generation
             _vcpu = nullptr;
         }
         // a borrow spans a single resolver call, so this drains quickly; should
@@ -100,25 +111,25 @@ public:
             uint32_t users;
             {
                 SCOPED_LOCK(_lock);
-                users = _users;
+                users = g->users;
             }
             if (users == 0) break;
             if (tmo.expired())
                 LOG_ERROR_RETURN(0, , "DNS cache is still borrowed by other vCPUs, leaking it, ", VALUE(users));
             photon::thread_usleep(1000);
         }
-        delete r;
+        delete g->resolver;
+        delete g;
     }
 
 protected:
     photon::spinlock _lock;   // guards all below; taken cross-vCPU
-    Resolver* _resolver = nullptr;
+    Gen* _cur = nullptr;      // the currently published generation, if any
     vcpu_base* _vcpu = nullptr;
-    uint32_t _users = 0;
 
-    void put() {
+    void put(Gen* g) {
         SCOPED_LOCK(_lock);
-        --_users;
+        --g->users;
     }
 };
 
@@ -177,7 +188,7 @@ public:
 protected:
     // the resolver for one dial: the injected one, or a borrow of the shared cache
     SharedResolver::Ref get_resolver() {
-        if (resolver) return {nullptr, resolver};
+        if (resolver) return {nullptr, nullptr, resolver};
         return g_shared_resolver.borrow();
     }
 
