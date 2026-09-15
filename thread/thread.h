@@ -521,9 +521,18 @@ namespace photon
             // in wait_interruptible(); both must be sequentially consistent, so that at
             // least one side observes the other, and a wake-up is never lost.
             if (likely(cnt < m_min_wait.load())) return 0;
-            SCOPED_LOCK(splock);
-            cnt = m_count.load();
-            if (likely(cnt)) try_resume(cnt);
+            // the resume path is worth walking by one signaler at a time: splock serializes
+            // it anyway, and whoever is in it re-reads m_count, thus covering the counts of
+            // those who stay out. All the RMWs below act on m_resume_state, so they are
+            // totally ordered among themselves, and so is the fetch_add above: whichever
+            // resume follows our RECHECK is bound to observe our count.
+            if (likely(m_resume_state.fetch_or(RESUMING) & RESUMING)) {
+                if (likely(m_resume_state.fetch_or(RECHECK) & RESUMING))
+                    return 0;   // he is still in, and will take another look for us
+                // he has just left; take the role over, unless somebody else already did
+                if (m_resume_state.fetch_or(RESUMING) & RESUMING) return 0;
+            }
+            do_resume();
             return 0;
         }
 
@@ -540,10 +549,17 @@ namespace photon
         // too high would lose a wake-up. So a mix of waiters requiring very different
         // counts keeps it at the smallest of them, which is safe but not optimal.
         std::atomic<uint64_t> m_min_wait{(uint64_t)-1};
+        // RESUMING marks that a signaler is in the resume path, and RECHECK asks him to
+        // take another look at m_count before he leaves, on behalf of the signalers that
+        // did not get in. Keeping the others out spares them splock and the waiters'
+        // thread structs, at the cost of making one of them do the work for all.
+        enum { RESUMING = 1, RECHECK = 2 };
+        std::atomic<uint32_t> m_resume_state{0};
         bool m_ooo_resume;
         spinlock splock;
         bool try_subtract(uint64_t count);
         void try_resume(uint64_t count);
+        void do_resume();
     };
 
     // one-shot semaphore

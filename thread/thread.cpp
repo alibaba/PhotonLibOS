@@ -1956,6 +1956,25 @@ insert_list:
             }
         }
     }
+    // Runs on behalf of every signaler that found RESUMING already taken: they only added
+    // to m_count and set RECHECK, so we may not leave until we have read m_count with
+    // RECHECK observed clear. Even then, one of them may have set it after that last look
+    // and before we released the role, which is why the release itself reports it back.
+    void semaphore::do_resume() {
+        while (true) {
+            do {
+                m_resume_state.fetch_and(~(uint32_t)RECHECK);    // before reading m_count
+                SCOPED_LOCK(splock);
+                auto cnt = m_count.load();
+                if (likely(cnt)) try_resume(cnt);
+            } while (m_resume_state.load() & RECHECK);
+            auto s = m_resume_state.exchange(0);     // release the role
+            if (likely(!(s & RECHECK))) return;
+            // somebody came in at the last moment, and saw us still holding RESUMING, so
+            // his count is ours to serve -- unless the role has been taken over since
+            if (m_resume_state.fetch_or(RESUMING) & RESUMING) return;
+        }
+    }
     inline bool semaphore::try_subtract(uint64_t count) {
         while(true) {
             auto mc = m_count.load();
