@@ -284,7 +284,11 @@ TEST(client_tls, pool_does_not_reuse_across_hostnames) {
             auto op1 = client->new_operation(net::http::Verb::GET, by_name);
             DEFER(client->destroy_operation(op1));
             op1->req.headers.range(0, 19);
-            op1->retry = 0;
+            // Retries are left enabled here: "localhost" may resolve to ::1 on
+            // hosts whose /etc/hosts lists it first, while the server binds IPv4
+            // only, and the dialer discards a failed address so the next attempt
+            // reaches 127.0.0.1. The second request below is the one that must
+            // fail, and it is pinned to a single attempt.
             by_name_result = op1->call();
             // Drain the body and end the operation, so the connection goes back
             // to the pool idle rather than being dropped. Without this the
