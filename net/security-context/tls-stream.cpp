@@ -730,9 +730,7 @@ int tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
     // under SSL_VERIFY_NONE it would be silently inert, accepting any name.
     // Refuse instead of pretending to verify.
     if (SSL_get_verify_mode(s->ssl) == SSL_VERIFY_NONE)
-        LOG_ERROR_RETURN(EINVAL, -1, "hostname verification requires VerifyMode::PEER; "
-                         "call set_verify_mode(VerifyMode::PEER), or set_verify_hostname(false) "
-                         "to send SNI only, ", VALUE(hostname));
+        LOG_ERROR_RETURN(EINVAL, -1, "hostname verification requires VerifyMode::PEER; call set_verify_mode(VerifyMode::PEER), or set_verify_hostname(false) to send SNI only, ", VALUE(hostname));
 
     if (tls_set_sni(s->ssl, hostname) < 0)
         return -1;
