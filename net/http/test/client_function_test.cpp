@@ -1232,6 +1232,83 @@ TEST(http_server, forward_proxy_close_delimited) {
     EXPECT_EQ(g_close_delim_payload, out);
 }
 
+// set_resolver: the client resolves DNS through the injected resolver. One that
+// rejects every address makes the target unresolvable (request can't connect);
+// one that accepts all lets it succeed.
+static std::vector<IPAddr> g_resolve_filter_seen;
+static bool resolve_filter_accept_all(void*, IPAddr addr) {
+    g_resolve_filter_seen.push_back(addr);
+    return true;
+}
+static bool resolve_filter_reject_all(void*, IPAddr addr) {
+    g_resolve_filter_seen.push_back(addr);
+    return false;
+}
+
+// Test resolver decorator: forwards to an owned DefaultResolver while applying a
+// filter, recording the addresses the client's resolver considered.
+class TestFilteredResolver : public Resolver {
+public:
+    Resolver* inner;
+    Delegate<bool, IPAddr> filter;
+    explicit TestFilteredResolver(Delegate<bool, IPAddr> filter)
+        : inner(new_default_resolver()), filter(filter) {}
+    ~TestFilteredResolver() { delete inner; }
+    IPAddr resolve(std::string_view host) override {
+        return inner->resolve_filter(host, filter);
+    }
+    IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr>) override {
+        return inner->resolve_filter(host, filter);
+    }
+    void discard_cache(std::string_view host, IPAddr ip) override {
+        inner->discard_cache(host, ip);
+    }
+};
+
+TEST(http_client, set_resolver) {
+    auto tcpserver = new_tcp_socket_server();
+    DEFER(delete tcpserver);
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple-api");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+
+    auto target = estring().appends("http://127.0.0.1:",
+                                    tcpserver->getsockname().port, "/simple-api");
+
+    // Phase 1: a resolver rejecting every address fails resolution, so the
+    // request can never connect. Each client owns its resolver (and DNS cache),
+    // so phase 2 starts fresh.
+    {
+        auto client = new_http_client();
+        DEFER(delete client);
+        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_reject_all}), true);
+        g_resolve_filter_seen.clear();
+        Client::OperationOnStack<> op(client, Verb::GET, target);
+        op.retry = 0;
+        int ret = op.call();
+        EXPECT_NE(0, ret);
+        EXPECT_EQ(-1, op.status_code);
+        EXPECT_FALSE(g_resolve_filter_seen.empty());
+    }
+
+    // Phase 2: accepting addresses lets the request succeed.
+    {
+        auto client = new_http_client();
+        DEFER(delete client);
+        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_accept_all}), true);
+        g_resolve_filter_seen.clear();
+        Client::OperationOnStack<> op(client, Verb::GET, target);
+        int ret = op.call();
+        EXPECT_EQ(0, ret);
+        EXPECT_EQ(200, op.resp.status_code());
+        EXPECT_FALSE(g_resolve_filter_seen.empty());
+    }
+}
+
 int main(int argc, char** arg) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;

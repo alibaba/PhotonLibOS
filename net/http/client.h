@@ -30,6 +30,7 @@ limitations under the License.
 namespace photon {
 namespace net {
 class TLSContext;
+class Resolver;
 namespace http {
 
 class ICookieJar : public Object {
@@ -165,6 +166,10 @@ public:
     void set_bind_ips(std::vector<IPAddr> &ips) {
         m_bind_ips = ips;
     }
+    void set_resolver(Resolver* resolver, bool ownership = false) {
+        m_resolver = resolver;
+        m_resolver_ownership = ownership;
+    }
     StoredURL* get_proxy() {
         return &m_proxy_url;
     }
@@ -190,6 +195,8 @@ protected:
     uint64_t m_timeout = -1UL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
+    Resolver* m_resolver = nullptr;
+    bool m_resolver_ownership = false;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.

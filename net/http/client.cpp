@@ -83,18 +83,27 @@ public:
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
+<<<<<<< HEAD
                              uint64_t timeout = -1UL);
 
     template <typename T>
     ISocketStream* dial(const T& x, uint64_t timeout = -1UL) {
         return dial(x.host_no_port(), x.port(), x.secure(), timeout);
+=======
+                             Resolver* resolver, uint64_t timeout = -1ULL);
+
+    template <typename T>
+    ISocketStream* dial(const T& x, Resolver* resolver, uint64_t timeout = -1ULL) {
+        return dial(x.host_no_port(), x.port(), x.secure(), resolver, timeout);
+>>>>>>> 0d56025 (feat(ecosystem): add OSS `ip_version` option backed by a client-owned resolver (#1640))
     }
 
     ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1UL);
 };
 
-ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
+ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, Resolver* resolver, uint64_t timeout) {
     LOG_DEBUG("Dialing to `:`", host, port);
+    if (!resolver) resolver = this->resolver.get();  // fall back to the per-vCPU default resolver
     auto ipaddr = resolver->resolve(host);
     if (ipaddr.undefined()) {
         LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
@@ -172,6 +181,9 @@ public:
         m_tls_ctx(tls_ctx),
         m_cookie_jar(cookie_jar) {
     }
+    ~ClientImpl() {
+        if (m_resolver_ownership) delete m_resolver;
+    }
     PooledDialer& get_dialer() {
         thread_local PooledDialer dialer;
         dialer.init(m_tls_ctx, m_bind_ips);
@@ -215,13 +227,13 @@ public:
         auto &req = op->req;
         ISocketStream* s;
         if (op->enable_proxy && !op->proxy_url.empty())
-            s = get_dialer().dial(op->proxy_url, tmo.timeout());
+            s = get_dialer().dial(op->proxy_url, m_resolver, tmo.timeout());
         else if (op->enable_proxy && !m_proxy_url.empty())
-            s = get_dialer().dial(m_proxy_url, tmo.timeout());
+            s = get_dialer().dial(m_proxy_url, m_resolver, tmo.timeout());
         else if (!op->uds_path.empty())
             s = get_dialer().dial(op->uds_path, tmo.timeout());
         else
-            s = get_dialer().dial(req, tmo.timeout());
+            s = get_dialer().dial(req, m_resolver, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -340,7 +352,7 @@ public:
     }
 
     ISocketStream* native_connect(std::string_view host, uint16_t port, bool secure, uint64_t timeout) override {
-        return get_dialer().dial(host, port, secure, timeout);
+        return get_dialer().dial(host, port, secure, m_resolver, timeout);
     }
 
     CommonHeaders<>* common_headers() override {
