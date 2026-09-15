@@ -17,6 +17,7 @@ limitations under the License.
 #include "oss.h"
 
 #include <netinet/in.h>
+#include <strings.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/alog.h>
 #include <photon/common/checksum/digest.h>
@@ -364,6 +365,9 @@ class OssClientImpl : public Client {
 
   int batch_get_objects(std::vector<GetObjectParameters>& params);
 
+  int get_object_ranges(std::string_view object,
+                        std::vector<GetRangeParameters>& ranges) override;
+
   ssize_t put_object(std::string_view object, size_t cnt,
                      BodyWriter writer, ObjectUploadOptions& opts);
 
@@ -431,6 +435,9 @@ class OssClientImpl : public Client {
   int do_copy_object(OssUrl& src_oss_url, OssUrl& dst_oss_url,
                      ObjectCopyOptions& opts);
   int do_delete_object(OssUrl& oss_url);
+
+  int read_range_parts(HTTP_STACK_OP& op, std::string_view object,
+                       std::vector<GetRangeParameters>& ranges);
 
   int do_delete_objects(estring_view bucket, estring_view prefix,
                         const std::vector<std::string_view>& objects,
@@ -977,6 +984,209 @@ retry:
   }
 
   return ret;
+}
+
+// "multipart/byteranges;boundary=<boundary>"
+static estring_view get_byteranges_boundary(std::string_view content_type) {
+  estring_view ct(content_type);
+  if (!ct.istarts_with("multipart/byteranges")) return {};
+  auto pos = ct.find("boundary=");
+  if (pos == estring_view::npos) return {};
+  auto boundary = ct.substr(pos + 9);
+  auto semicolon = boundary.find(';');
+  if (semicolon != estring_view::npos) boundary = boundary.substr(0, semicolon);
+  return boundary.trim(charset(" \""));
+}
+
+// The body of a multi-range GET, i.e. multipart/byteranges (RFC 9110 14.6):
+// "--<boundary>\r\n<part headers>\r\n\r\n<payload>\r\n" per part, closed by
+// "--<boundary>--". Parsing is deliberately not general: get_object_ranges()
+// already knows which ranges it asked for, so parts are verified against them
+// instead of being dispatched by their content-range.
+class ByterangesStream {
+ public:
+  using Response = photon::net::http::Response;
+
+  ByterangesStream(Response* response, std::string_view boundary)
+      : response_(response) {
+    delimiter_.appends("--", boundary);
+  }
+
+  // Reads the next part header block, reporting the range it carries as
+  // [start, end] together with the object size.
+  int next_part(uint64_t& start, uint64_t& end) {
+    estring_view block;
+    for (size_t pos; true;) {
+      estring_view buffered(buf_ + head_, tail_ - head_);
+      if ((pos = buffered.find("\r\n\r\n")) != estring_view::npos) {
+        block = buffered.substr(0, pos);
+        head_ += pos + 4;
+        break;
+      }
+      if (fill() < 0) return -1;
+    }
+    if (!block.starts_with(delimiter_))
+      LOG_ERROR_RETURN(EIO, -1, "part not delimited by [`]: [`]", delimiter_,
+                       block);
+
+    for (auto line : block.split_lines()) {
+      // "Content-range: bytes <start>-<end>/<object size>"
+      if (line.size() < 14 || strncasecmp(line.data(), "content-range:", 14))
+        continue;
+      auto v = line.substr(14).trim();
+      auto space = v.find(' '), dash = v.find('-'), slash = v.find('/');
+      if (!v.istarts_with("bytes") || slash == estring_view::npos ||
+          space > dash || dash > slash)
+        LOG_ERROR_RETURN(EIO, -1, "malformed content-range [`]", line);
+      start = v.substr(space + 1, dash - space - 1).to_uint64();
+      end = v.substr(dash + 1, slash - dash - 1).to_uint64();
+      return 0;
+    }
+    LOG_ERROR_RETURN(EIO, -1, "part without content-range: [`]", block);
+  }
+
+  // Scatters the current part's payload into iov, and consumes the CRLF that
+  // terminates it. return size, or -1 if the body is short.
+  ssize_t read_payload(const struct iovec* iov, int iovcnt, size_t size) {
+    SmartCloneIOV<32> ciov(iov, iovcnt);
+    iovector_view view(ciov.ptr, iovcnt);
+    auto read_ahead = std::min(size, tail_ - head_);
+    if (read_ahead > 0) {
+      view.extract_front(view.memcpy_from(buf_ + head_, read_ahead));
+      head_ += read_ahead;
+    }
+    while (!view.empty()) {
+      auto ret = response_->readv(view.iov, view.iovcnt);
+      if (ret <= 0) LOG_ERROR_RETURN(EIO, -1, "part payload truncated");
+      view.extract_front(ret);
+    }
+    return expect("\r\n") < 0 ? -1 : (ssize_t)size;
+  }
+
+  // Whatever epilogue follows the closing delimiter is left to ~Message,
+  // which skips the rest of a length-delimited body when closing it.
+  int read_closing_delimiter() {
+    return expect(estring().appends(delimiter_, "--"));
+  }
+
+ private:
+  // Consumes an exact byte sequence of the framing.
+  int expect(std::string_view expected) {
+    while (tail_ - head_ < expected.size())
+      if (fill() < 0) return -1;
+    if (std::string_view(buf_ + head_, expected.size()) != expected)
+      LOG_ERROR_RETURN(EIO, -1, "expected [`] in the multipart body", expected);
+    head_ += expected.size();
+    return 0;
+  }
+
+  // Compacts the read-ahead buffer, then reads more of the body into it.
+  int fill() {
+    if (head_ > 0) {
+      memmove(buf_, buf_ + head_, tail_ - head_);
+      tail_ -= head_;
+      head_ = 0;
+    }
+    if (tail_ == sizeof(buf_))
+      LOG_ERROR_RETURN(EIO, -1, "part header longer than ` bytes",
+                       sizeof(buf_));
+    auto ret = response_->read(buf_ + tail_, sizeof(buf_) - tail_);
+    if (ret <= 0) LOG_ERROR_RETURN(EIO, -1, "multipart body ended unexpectedly");
+    tail_ += ret;
+    return 0;
+  }
+
+  Response* response_;
+  estring delimiter_;
+  // framing bytes read ahead, spilling over into the payload that follows.
+  // ponytail: a part header longer than this fails the request instead of
+  // growing the buffer; OSS sends ~80 bytes of them, boundary included.
+  char buf_[512];
+  size_t head_ = 0, tail_ = 0;
+};
+
+int OssClient::read_range_parts(HTTP_STACK_OP& op, std::string_view obj_path,
+                                std::vector<GetRangeParameters>& ranges) {
+  auto boundary = get_byteranges_boundary(op.resp.headers["Content-Type"]);
+  if (boundary.empty())
+    LOG_ERROR_RETURN(EINVAL, -1,
+                     "` ranges of ` answered as [`], status `", ranges.size(),
+                     obj_path, op.resp.headers["Content-Type"],
+                     op.resp.status_code());
+
+  ByterangesStream parts(&op.resp, boundary);
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    auto& range = ranges[i];
+    iovector_view view((struct iovec*)range.iov, range.iovcnt);
+    uint64_t start = 0, end = 0;
+    if (parts.next_part(start, end) < 0) return -1;
+    // guaranteed by the ascending, non-overlapping range list
+    if (start != (uint64_t)range.offset || end - start + 1 != view.sum())
+      LOG_ERROR_RETURN(EIO, -1,
+                       "part #` of ` covers [`, `], expected [`, `]", i,
+                       obj_path, start, end, range.offset,
+                       range.offset + view.sum() - 1);
+    range.result = parts.read_payload(range.iov, range.iovcnt, view.sum());
+    if (range.result != (ssize_t)view.sum()) return -1;
+  }
+  return parts.read_closing_delimiter();
+}
+
+int OssClient::get_object_ranges(std::string_view obj_path,
+                                 std::vector<GetRangeParameters>& ranges) {
+  if (ranges.size() < 2 || ranges.size() > OSS_MULTI_RANGE_MAX_COUNT)
+    LOG_ERROR_RETURN(EINVAL, -1, "` ranges of `, must be within [2, `]",
+                     ranges.size(), obj_path, OSS_MULTI_RANGE_MAX_COUNT);
+
+  // ascending and non-overlapping, so that OSS neither reorders nor merges the
+  // list, and answers with exactly one part per range
+  estring range_list("bytes=");
+  off_t next_offset = 0;
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    auto& range = ranges[i];
+    range.result = -1;
+    iovector_view view((struct iovec*)range.iov, range.iovcnt);
+    auto cnt = view.sum();
+    if (cnt == 0 || range.offset < next_offset)
+      LOG_ERROR_RETURN(EINVAL, -1,
+                       "range #` of ` is empty or descends: [`, `)", i,
+                       obj_path, range.offset, range.offset + cnt);
+    next_offset = range.offset + cnt;
+    range_list.appends(make_ccl(i > 0, ","), range.offset, "-",
+                       next_offset - 1);
+  }
+
+  int retry_times = m_oss_options.retry_times;
+  auto retry_interval = m_oss_options.retry_base_interval_us;
+  bool invalidate_cache = false;
+retry:
+  auto oss_url = make_oss_url(obj_path);
+  DEFINE_ONSTACK_OP(m_client, Verb::GET, oss_url.url());
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR, "standard");
+  op.req.headers.insert(OSS_HEADER_KEY_X_OSS_MULTI_RANGE_BEHAVIOR,
+                        "multi-range");
+  op.req.headers.insert("Range", range_list);
+  int r = sign_and_call(op, Verb::GET, oss_url, {}, invalidate_cache);
+  if (r < 0) {
+    if (errno == EACCES && !invalidate_cache) {
+      invalidate_cache = true;
+      errno = 0;
+      goto retry;
+    }
+    return r;
+  }
+
+  r = read_range_parts(op, obj_path, ranges);
+  // a truncated or garbled body deserves another round trip, a response that
+  // ignores the range list does not
+  if (r < 0 && errno == EIO && retry_times-- > 0) {
+    photon::thread_usleep(retry_interval);
+    retry_interval *= 2;
+    LOG_ERROR("Retrying oss request ` `", verbstr[op.req.verb()],
+              op.req.target());
+    goto retry;
+  }
+  return r;
 }
 
 struct BatchGetResult {
@@ -1791,8 +2001,17 @@ class CachedAuthenticator : public Authenticator {
         params.verb == Verb::GET && params.query_params.empty();
     if (!can_use_cache) return m_auth->sign(headers, params);
 
-    std::string cached_key =
-        estring().appends(params.bucket, "/", params.object);
+    // every x-oss-* header is signed, so the ones already set by the caller
+    // (range behaviors, custom headers) are part of the cache identity.
+    // Headers keeps its index sorted by name, so the key does not depend on
+    // the order in which the caller inserted them.
+    estring cached_key;
+    cached_key.appends(params.bucket, "/", params.object);
+    for (auto kv : headers) {
+      if (estring_view(kv.first).istarts_with("x-oss")) {
+        cached_key.appends("\n", kv.first, ":", kv.second);
+      }
+    }
 
     static const std::vector<std::string_view> to_cache_keys = {
         "Authorization", "x-oss-security-token", "x-oss-date",

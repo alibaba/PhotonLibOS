@@ -23,6 +23,7 @@ static const char OSS_HEADER_KEY_X_OSS_COPY_SOURCE[]        = "x-oss-copy-source
 static const char OSS_HEADER_KEY_X_OSS_COPY_SOURCE_RANGE[]  = "x-oss-copy-source-range";
 static const char OSS_HEADER_KEY_X_OSS_METADATA_DIRECTIVE[] = "x-oss-metadata-directive";
 static const char OSS_HEADER_KEY_X_OSS_RANGE_BEHAVIOR[]     = "x-oss-range-behavior";
+static const char OSS_HEADER_KEY_X_OSS_MULTI_RANGE_BEHAVIOR[] = "x-oss-multi-range-behavior";
 static const char OSS_HEADER_KEY_X_OSS_FORBID_OVERWRITE[]   = "x-oss-forbid-overwrite";
 static const char OSS_HEADER_KEY_X_OSS_SYMLINK_TARGET[]   = "x-oss-symlink-target";
 static const char OSS_HEADER_KEY_X_OSS_AGENTIC_BUCKET[]   = "x-oss-agentic-bucket";
@@ -48,6 +49,9 @@ static constexpr int GMT_DATE_LIMIT = 64;
 static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds
 
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
+
+// OSS rejects a Range list with more intervals than this
+static constexpr size_t OSS_MULTI_RANGE_MAX_COUNT = 50;
 
 DEFINE_CONST_STATIC_ORDERED_STRING_KV ( MIME_TYPE_MAP, {
   // must appear in dictionary order!
