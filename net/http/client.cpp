@@ -83,19 +83,11 @@ public:
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
-<<<<<<< HEAD
-                             uint64_t timeout = -1UL);
+                             Resolver* resolver, uint64_t timeout = -1UL);
 
     template <typename T>
-    ISocketStream* dial(const T& x, uint64_t timeout = -1UL) {
-        return dial(x.host_no_port(), x.port(), x.secure(), timeout);
-=======
-                             Resolver* resolver, uint64_t timeout = -1ULL);
-
-    template <typename T>
-    ISocketStream* dial(const T& x, Resolver* resolver, uint64_t timeout = -1ULL) {
+    ISocketStream* dial(const T& x, Resolver* resolver, uint64_t timeout = -1UL) {
         return dial(x.host_no_port(), x.port(), x.secure(), resolver, timeout);
->>>>>>> 0d56025 (feat(ecosystem): add OSS `ip_version` option backed by a client-owned resolver (#1640))
     }
 
     ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1UL);
