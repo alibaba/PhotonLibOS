@@ -1893,12 +1893,28 @@ insert_list:
     int semaphore::wait_interruptible(uint64_t count, Timeout timeout)
     {
         if (count == 0) return 0;
+        // fast path: the count is available, so there is no need for splock at all. This
+        // may barge ahead of the queued waiters, but they are not in a strict FIFO to
+        // begin with -- a resumed waiter has to compete for the count again anyway.
+        if (likely(try_subtract(count))) return 0;
         splock.lock();
         DEFER(splock.unlock());
         auto& counter = CURRENT->semaphore_count;
         counter = count;
         DEFER(counter = 0);
-        while (!try_subtract(count)) {
+        // when we are the last one to leave, signal() may skip the resume path again
+        DEFER(if (!q.th) m_min_wait.store((uint64_t)-1));
+        while (true) {
+            // publish our requirement before (re-)checking m_count, so that a concurrent
+            // signal() either observes m_min_wait <= count and enters the resume path, or
+            // we observe its count and do not sleep at all. The fence pairs with the
+            // fetch_add and the load of signal()'s fast path: both sides must be
+            // sequentially consistent. This has to be re-done on every iteration, as
+            // m_min_wait may have been reset to -1 while we were resumed but not running.
+            if (count < m_min_wait.load(std::memory_order_relaxed))
+                m_min_wait.store(count);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (try_subtract(count)) return 0;
             int ret = waitq::wait_defer(timeout, spinlock_unlock, &splock);
             splock.lock();  // assuming errno NOT changed
             if (unlikely(ret < 0)) {    // got interrupted
@@ -1911,13 +1927,15 @@ insert_list:
                 return ret;
             }
         }
-        return 0;
     }
     void semaphore::try_resume(uint64_t cnt) {
         assert(cnt);
         while(true) {
             ScopedLockHead h(this);
-            if (!h) break;
+            if (!h) {
+                m_min_wait.store((uint64_t)-1);     // the queue has been drained
+                break;
+            }
             auto th = (thread*)h;
             auto& c = th->semaphore_count;
             if (c > cnt) break;

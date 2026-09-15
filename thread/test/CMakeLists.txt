@@ -22,3 +22,4 @@ photon_add_test(test-st-utest st_utest.cpp st_utest_tcp.cpp st_utest_coroutines.
 photon_add_test(test-go-channel test-go-channel.cpp)
 photon_add_test(test-workpool-fanout test-workpool-fanout.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
 photon_add_test(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
+photon_add_test(perf_semaphore perf_semaphore.cpp NO_REGISTER)

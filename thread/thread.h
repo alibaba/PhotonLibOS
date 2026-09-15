@@ -513,9 +513,17 @@ namespace photon
          */
         int signal(uint64_t count) {
             if (count == 0) return 0;
-            SCOPED_LOCK(splock);
             auto cnt = m_count.fetch_add(count) + count;
-            try_resume(cnt);
+            // fast path: the count in hand can not satisfy any of the wake-able waiters
+            // (if any), so there is nothing to resume, and we need neither splock nor to
+            // touch the waiters' thread structs -- which are hot lines of other vCPUs.
+            // this store-then-load pair is the counterpart of the load-then-store pair
+            // in wait_interruptible(); both must be sequentially consistent, so that at
+            // least one side observes the other, and a wake-up is never lost.
+            if (likely(cnt < m_min_wait.load())) return 0;
+            SCOPED_LOCK(splock);
+            cnt = m_count.load();
+            if (likely(cnt)) try_resume(cnt);
             return 0;
         }
 
@@ -525,6 +533,13 @@ namespace photon
 
     protected:
         std::atomic<uint64_t> m_count;
+        // a lower bound of the count required by any of the waiters, or -1 if there is
+        // none. signal() skips the resume path (thus splock) as long as m_count stays
+        // below it. Waiters only ever lower it, and it is reset to -1 when the wait queue
+        // is found empty: being too low merely costs a needless resume path, while being
+        // too high would lose a wake-up. So a mix of waiters requiring very different
+        // counts keeps it at the smallest of them, which is safe but not optimal.
+        std::atomic<uint64_t> m_min_wait{(uint64_t)-1};
         bool m_ooo_resume;
         spinlock splock;
         bool try_subtract(uint64_t count);
