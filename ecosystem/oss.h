@@ -39,6 +39,14 @@ std::string_view lookup_mime_type(std::string_view name);
 
 static constexpr int OSS_MAX_PATH_LEN = 1023;
 
+// IP version used to resolve the endpoint / proxy hostname, enforced via a
+// private (client-owned) resolver on the underlying HTTP client.
+enum class IPVersion : uint8_t {
+  kBoth = 0,      // accept both IPv4 and IPv6 (default)
+  kIPv4Only = 1,  // discard IPv6 addresses
+  kIPv6Only = 2,  // discard IPv4 addresses
+};
+
 struct ClientOptions {
   std::string endpoint;
   std::string bucket;
@@ -59,6 +67,8 @@ struct ClientOptions {
   // times until we have waited the "request time out" period.
   uint64_t retry_base_interval_us = 100'000;
   std::vector<std::pair<std::string, std::string>> custom_headers;
+
+  IPVersion ip_version = IPVersion::kBoth;
 };
 
 struct ObjectMeta {
