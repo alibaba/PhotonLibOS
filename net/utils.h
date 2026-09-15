@@ -166,7 +166,6 @@ public:
 
 /**
  * @brief A non-blocking Resolver based on gethostbyname.
- * Currently, it's not thread safe.
  *
  * @param cache_ttl cache's lifetime in microseconds.
  * @param resolve_timeout timeout in microseconds for domain resolution.
