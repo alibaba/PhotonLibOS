@@ -105,6 +105,7 @@ class BasicAuthOssTest : public ::testing::Test {
   void multipart();
   void symlink();
   void batch_get_objects();
+  void get_object_ranges();
   void upload_with_options();
   void fd_get_and_put();
   void fd_multipart();
@@ -612,6 +613,77 @@ void BasicAuthOssTest::batch_get_objects() {
   }
 }
 
+void BasicAuthOssTest::get_object_ranges() {
+  // range lists that OSS would not answer with one part per range are rejected
+  // before anything reaches the network, so no object is needed for these
+  char small[8];
+  iovec small_iov{small, sizeof(small)};
+  std::vector<GetRangeParameters> rejected = {{&small_iov, 1, 0}};
+  ASSERT_EQ(client->get_object_ranges("unused", rejected), -1) << "single range";
+  ASSERT_EQ(errno, EINVAL);
+  rejected = {{&small_iov, 1, 0}, {&small_iov, 1, 4}};
+  ASSERT_EQ(client->get_object_ranges("unused", rejected), -1) << "overlapping";
+  ASSERT_EQ(errno, EINVAL);
+  rejected = {{&small_iov, 1, 100}, {&small_iov, 1, 0}};
+  ASSERT_EQ(client->get_object_ranges("unused", rejected), -1) << "descending";
+  ASSERT_EQ(errno, EINVAL);
+  rejected.assign(51, {&small_iov, 1, 0});  // one more than OSS accepts
+  for (size_t i = 0; i < rejected.size(); i++) rejected[i].offset = i * 16;
+  ASSERT_EQ(client->get_object_ranges("unused", rejected), -1) << "too many";
+  ASSERT_EQ(errno, EINVAL);
+
+  // large enough that a part outgrows the parser's framing buffer and spans
+  // several reads of the body
+  const size_t file_size = 1 << 20;
+  std::vector<char> test_data(file_size);
+  for (size_t i = 0; i < file_size; i++) test_data[i] = 'A' + (i % 26);
+
+  auto path = get_real_test_path("get_object_ranges/testfile");
+  iovec src{test_data.data(), file_size};
+  auto crc64 = crc64ecma(test_data.data(), file_size, 0);
+  ASSERT_EQ(client->put_object(path, &src, 1, &crc64), (ssize_t)file_size);
+
+  // a single-range GET signs fewer x-oss-* headers than the multi-range one
+  // below, and both have to survive the same signature cache
+  char probe[16];
+  ASSERT_EQ(client->get_object_range(path, probe, sizeof(probe), 0),
+            (ssize_t)sizeof(probe));
+
+  // ascending and non-overlapping, the middle range scattered over two buffers
+  std::vector<char> b0(1000), b1(4096), b2(300000);
+  iovec iov0{b0.data(), b0.size()};
+  iovec iov1[2] = {{b1.data(), 2048}, {b1.data() + 2048, 2048}};
+  iovec iov2{b2.data(), b2.size()};
+  std::vector<GetRangeParameters> ranges = {
+      {&iov0, 1, 0},
+      {iov1, 2, 4096},
+      {&iov2, 1, (off_t)(file_size - b2.size())}};
+
+  ASSERT_EQ(client->get_object_ranges(path, ranges), 0);
+
+  const std::vector<char>* bufs[] = {&b0, &b1, &b2};
+  for (size_t i = 0; i < ranges.size(); i++) {
+    ASSERT_EQ(ranges[i].result, (ssize_t)bufs[i]->size()) << "range " << i;
+    ASSERT_EQ(memcmp(bufs[i]->data(), test_data.data() + ranges[i].offset,
+                     bufs[i]->size()),
+              0)
+        << "range " << i;
+  }
+
+  // the parser consumed the body as far as the connection is concerned
+  ASSERT_EQ(client->get_object_range(path, probe, sizeof(probe), 0),
+            (ssize_t)sizeof(probe));
+
+  // a range list reaching past the end of the object is not answered as
+  // multipart at all, and is reported as a rejected range list
+  std::vector<char> tail(64);
+  iovec iov_tail{tail.data(), tail.size()};
+  std::vector<GetRangeParameters> overshooting = {
+      {&iov0, 1, 0}, {&iov_tail, 1, (off_t)(file_size - 32)}};
+  ASSERT_EQ(client->get_object_ranges(path, overshooting), -1);
+  ASSERT_EQ(errno, EINVAL);
+}
+
 void BasicAuthOssTest::upload_with_options() {
   // put_object
   auto path = get_real_test_path("upload_with_options/testfile");
@@ -967,6 +1039,7 @@ TEST_F(BasicAuthOssTest, put_and_get_meta) { put_and_get_meta(); }
 TEST_F(BasicAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(BasicAuthOssTest, symlink) { symlink(); }
 TEST_F(BasicAuthOssTest, batch_get_objects) { batch_get_objects(); }
+TEST_F(BasicAuthOssTest, get_object_ranges) { get_object_ranges(); }
 
 TEST_F(BasicAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(BasicAuthOssTest, fd_get_and_put) { fd_get_and_put(); }
@@ -982,6 +1055,7 @@ TEST_F(CachedAuthOssTest, copy_and_rename) { copy_and_rename(); }
 TEST_F(CachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
 TEST_F(CachedAuthOssTest, symlink) { symlink(); }
 TEST_F(CachedAuthOssTest, batch_get_objects) { batch_get_objects(); }
+TEST_F(CachedAuthOssTest, get_object_ranges) { get_object_ranges(); }
 
 TEST_F(CachedAuthOssTest, upload_with_options) { upload_with_options(); }
 TEST_F(CustomCachedAuthOssTest, repeatedly_get) { repeatedly_get(); }
