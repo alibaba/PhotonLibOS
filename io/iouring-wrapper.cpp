@@ -171,17 +171,26 @@ public:
     }
 
     int32_t _async_io(io_uring_sqe* sqe, uint64_t timeout) {
+        auto* first_sqe = sqe;
         ioCtx io_ctx{photon::CURRENT, -1, false, false};
         io_uring_sqe_set_data(sqe, &io_ctx);
 
         ioCtx timer_ctx{photon::CURRENT, -1, true, false};
         __kernel_timespec ts{};
-        if (timeout < std::numeric_limits<int64_t>::max()) {
+        bool has_timer = timeout < (uint64_t) std::numeric_limits<int64_t>::max();
+        if (has_timer) {
             sqe->flags |= IOSQE_IO_LINK;
             usec_to_timespec(timeout, &ts);
             sqe = _get_sqe();
-            if (sqe == nullptr)
-                return -1;
+            if (sqe == nullptr) {
+                // The first SQE is already in the SQ ring and will be submitted
+                // sooner or later. Turn it into a harmless NOP without user data
+                // (prep_rw clears sqe->flags, including IOSQE_IO_LINK), so that
+                // its CQE won't reference the stack contexts after we return.
+                io_uring_prep_nop(first_sqe);
+                io_uring_sqe_set_data(first_sqe, nullptr);
+                return -1;      // errno was set to EBUSY by _get_sqe
+            }
             io_uring_prep_link_timeout(sqe, &ts, 0);
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
@@ -201,12 +210,25 @@ public:
             // Interrupted by external user thread. Try to cancel the previous I/O
             ERRNO err_backup;
             sqe = _get_sqe();
-            if (sqe == nullptr)
+            if (sqe == nullptr) {
+                // Unable to cancel. Wait for the in-flight I/O (and its linked
+                // timer) to complete, before the stack-allocated contexts go
+                // out of scope.
+                while (!io_ctx.done || (has_timer && !timer_ctx.done))
+                    photon::thread_sleep(-1);
+                errno = err_backup.no;
                 return -1;
+            }
             ioCtx cancel_ctx{CURRENT, -1, true, false};
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
-            photon::thread_sleep(-1);
+            // No explicit submit here: this engine submits lazily, from
+            // wait_and_fire_events(), which the loop below yields to. Wait until
+            // all in-flight CQEs referring to our stack contexts are reaped,
+            // regardless of premature wake-ups (external interrupts, or
+            // io/cancel CQEs arriving in different reap batches).
+            while (!io_ctx.done || !cancel_ctx.done || (has_timer && !timer_ctx.done))
+                photon::thread_sleep(-1);
             errno = err_backup.no;
             return -1;
         }
@@ -339,11 +361,19 @@ public:
                 // The cqe for notify, corresponding to IORING_CQE_F_MORE
                 if (unlikely(cqe->res != 0))
                     LOG_WARN("iouring: send_zc fall back to copying");
+                ctx->done = true;
                 photon::thread_interrupt(ctx->th_id, EOK);
                 continue;
             }
 
             ctx->res = cqe->res;
+            // A CQE without F_MORE is the final one of its request. Set `done`
+            // here, ahead of the -ECANCELED branches below: they `continue`,
+            // and both the I/O and its linked timer report -ECANCELED once the
+            // cancellation of _async_io takes effect, so setting it at the end
+            // of the loop body would leave those waiters stuck forever.
+            if (!(cqe->flags & IORING_CQE_F_MORE))
+                ctx->done = true;
             if (!ctx->is_canceller && ctx->res == -ECANCELED) {
                 // An I/O was canceled because of:
                 // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
@@ -404,6 +434,11 @@ private:
         int32_t res;
         bool is_canceller;
         bool is_event;
+        // Set by the reap loop of wait_and_fire_events when the final CQE of
+        // this request arrives. The stack-allocated contexts in _async_io must
+        // not go out of scope before this flag turns true. No atomic needed,
+        // since a vCPU is a single OS thread.
+        bool done = false;
     };
 
     struct eventCtx {
