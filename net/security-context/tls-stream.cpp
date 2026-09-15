@@ -699,10 +699,15 @@ static int tls_set_verify_host(SSL* ssl, const char* hostname) {
     // Matching a single label, and only in the leftmost position, is already the
     // default; this flag narrows what that one label may look like.
     X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-    // A zero length means strlen(). Note that an empty name would instead clear
-    // the list and report success, verifying nothing; that is why an empty
-    // hostname is rejected before reaching here.
-    if (X509_VERIFY_PARAM_set1_host(param, hostname, 0) != 1)
+    // A trailing dot marks a name as absolute. Certificates never carry one, so
+    // it takes no part in the comparison; leaving it in would reject a peer that
+    // the very same name without the dot would have matched.
+    size_t len = strlen(hostname);
+    if (len > 1 && hostname[len - 1] == '.') len--;
+    // Note that a zero length would instead clear the list and report success,
+    // verifying nothing; that is why an empty hostname is rejected before
+    // reaching here.
+    if (X509_VERIFY_PARAM_set1_host(param, hostname, len) != 1)
         LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified hostname of tls stream, ", VALUE(hostname));
     return 0;
 }

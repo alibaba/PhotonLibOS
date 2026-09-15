@@ -818,6 +818,16 @@ TEST(verify_host, none_verify_mode_is_refused) {
     EXPECT_EQ(0, net::tls_stream_set_hostname(s, "registry.example.com"));
 }
 
+// A trailing dot marks a name as absolute; it denotes the same host and does not
+// appear in certificates, so it must not turn a match into a mismatch.
+TEST(verify_host, trailing_dot_is_absolute_form_of_same_name) {
+    auto chain = generate_ca_signed_cert({"DNS:registry.example.com"}, "registry.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com."));
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com"));
+    // Dropping the dot must not make a genuinely different name match.
+    EXPECT_FALSE(handshake_accepted(chain, "other.example.com."));
+}
+
 TEST(verify_host, invalid_arguments) {
     DEFER(photon::wait_all());
     auto srv = net::new_tcp_socket_server();
