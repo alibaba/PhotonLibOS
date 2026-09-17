@@ -45,7 +45,6 @@ static const char OSS_PARAM_KEY_SYMLINK[]         = "symlink";
 static const char OSS_PARAM_KEY_BATCH_GET[]       = "x-oss-batchGet";
 
 static constexpr int GMT_DATE_LIMIT = 64;
-static constexpr int GMT_UPDATE_INTERVAL = 60; // update GMT time every 60 seconds
 
 static constexpr int XML_LIMIT = 16 * 1024 * 1024;
 

@@ -1738,15 +1738,13 @@ class BasicAuthenticator : public Authenticator {
   }
 
   void update_gmt_date() {  // avoid updating GMT Time every time
-    time_t t = photon::now / 1000 / 1000;
-    if (t - m_last_tim > GMT_UPDATE_INTERVAL || m_last_tim == 0) {
-      std::time_t now = std::time(nullptr);
-      struct tm tm{};
-      if (gmtime_r(&now, &tm)) {
-        m_last_tim = t;
-        strftime(m_gmt_date, GMT_DATE_LIMIT, "%a, %d %b %Y %H:%M:%S GMT", &tm);
-        strftime(m_gmt_date_iso8601, GMT_DATE_LIMIT, "%Y%m%dT%H%M%SZ", &tm);
-      }
+    std::time_t now = std::time(nullptr);
+    if (now == m_last_tim) return;
+    struct tm tm{};
+    if (gmtime_r(&now, &tm)) {
+      m_last_tim = now;
+      strftime(m_gmt_date, GMT_DATE_LIMIT, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+      strftime(m_gmt_date_iso8601, GMT_DATE_LIMIT, "%Y%m%dT%H%M%SZ", &tm);
     }
   }
 
