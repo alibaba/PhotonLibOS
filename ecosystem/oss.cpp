@@ -366,7 +366,7 @@ class OssClientImpl : public Client {
   int batch_get_objects(std::vector<GetObjectParameters>& params);
 
   int get_object_ranges(std::string_view object,
-                        std::vector<GetRangeParameters>& ranges) override;
+                        std::vector<GetRangeParameters>& ranges);
 
   ssize_t put_object(std::string_view object, size_t cnt,
                      BodyWriter writer, ObjectUploadOptions& opts);
