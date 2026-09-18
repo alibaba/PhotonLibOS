@@ -208,7 +208,7 @@ photon_module(fuse
         DEFS    _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=${_fuse_version})
 photon_module(extfs
         OPTION  PHOTON_ENABLE_EXTFS
-        SOURCES fs/extfs/extfs.cpp fs/extfs/extfs_io.cpp fs/extfs/mkfs.cpp
+        SOURCES fs/extfs/extfs.cpp fs/extfs/extfs_io.cpp fs/extfs/mkfs.cpp fs/extfs/fsck.cpp
         STATIC  e2fs)
 photon_module(resize
         OPTION  PHOTON_ENABLE_RESIZE
