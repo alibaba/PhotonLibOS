@@ -418,7 +418,11 @@ TEST(basic, alpn) {
 // Regression for #1292: the SNI hostname must be carried in the ClientHello.
 // A plain-TCP server captures the first flight (the ClientHello) as raw bytes;
 // the SNI extension is not encrypted, so the hostname must appear verbatim once
-// tls_stream_set_hostname() takes effect before the handshake.
+// the SNI has been set before the handshake.
+//
+// This exercises the wire format, not certificate verification, so it uses
+// tls_stream_set_sni(): the peer here is a bare TCP socket that never presents a
+// certificate at all.
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
 static std::string g_captured_client_hello;
 static photon::semaphore sni_sem(0);
@@ -454,7 +458,7 @@ TEST(sni, hostname_in_client_hello) {
     DEFER(delete s);
 
     const char* kHost = "sni-probe.example.test";
-    net::tls_stream_set_hostname(s, kHost);
+    ASSERT_EQ(0, net::tls_stream_set_sni(s, kHost));
     char req = 'x';
     s->write(&req, 1);  // drives the client handshake -> sends the ClientHello
     sni_sem.wait(1);
@@ -675,6 +679,193 @@ TEST(ca_cert, invalid_ca_file) {
 
     EXPECT_NE(0, ctx->set_ca_file("/tmp/nonexistent-ca-file.pem"));
     EXPECT_NE(0, ctx->set_ca_file(nullptr, nullptr));
+}
+
+// ==================== hostname verification tests ====================
+
+// Runs a TLS server presenting `chain`, and has a client that trusts the chain's
+// CA connect asking for `request_host`. Returns whether the handshake was
+// accepted, which is what the name check governs.
+//
+// A chain check alone cannot answer this question: in every case here the
+// certificate is genuinely signed by the CA the client trusts. What differs is
+// only who it was issued to.
+static bool handshake_accepted(const TestCertChain& chain, const char* request_host,
+                               bool sni_only = false, bool verify_hostname = true) {
+    auto server_ctx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
+    EXPECT_NE(nullptr, server_ctx);
+    if (!server_ctx) return false;
+    DEFER(delete server_ctx);
+    DEFER(photon::wait_all());
+
+    auto server = net::new_tls_server(server_ctx, net::new_tcp_socket_server(), true);
+    DEFER(delete server);
+    EXPECT_EQ(0, server->bind_v4localhost());
+    EXPECT_EQ(0, server->listen());
+    auto ep = server->getsockname();
+    EXPECT_EQ(0, server->start_loop(false));
+    server->set_handler({s_handler_noassert, server_ctx});
+    photon::thread_yield();
+
+    auto client_ctx = net::new_tls_context();
+    EXPECT_NE(nullptr, client_ctx);
+    if (!client_ctx) return false;
+    DEFER(delete client_ctx);
+    if (!verify_hostname) client_ctx->set_verify_hostname(false);
+    // set_ca_cert() turns on SSL_VERIFY_PEER as a side effect, so it must come
+    // after any set_verify_mode() call, not before.
+    EXPECT_EQ(0, client_ctx->set_ca_cert(chain.ca_pem.c_str()));
+
+    auto client = net::new_tls_client(client_ctx, net::new_tcp_socket_client(), true);
+    DEFER(delete client);
+    auto stream = client->connect(ep);
+    EXPECT_NE(nullptr, stream);
+    if (!stream) return false;
+    DEFER(delete stream);
+
+    int ret = sni_only ? net::tls_stream_set_sni(stream, request_host)
+                       : net::tls_stream_set_hostname(stream, request_host);
+    EXPECT_EQ(0, ret);
+    if (ret < 0) return false;
+
+    char buf[] = "Hello";  // drives the deferred client handshake
+    bool accepted = stream->write(buf, 6) == 6;
+    sem.wait(1);
+    return accepted;
+}
+
+// The reported vulnerability: the client asks for registry.example.com and the
+// server presents a CA-signed certificate for a name the attacker controls.
+// SSL_VERIFY_PEER alone accepts this, because a valid chain says the certificate
+// is genuine, not who it belongs to.
+TEST(verify_host, mismatch_is_rejected) {
+    auto chain = generate_ca_signed_cert({"DNS:attacker-controlled.example.com"},
+                                         "attacker-controlled.example.com");
+    EXPECT_FALSE(handshake_accepted(chain, "registry.example.com"));
+}
+
+TEST(verify_host, match_is_accepted) {
+    auto chain = generate_ca_signed_cert({"DNS:registry.example.com"}, "registry.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com"));
+}
+
+// With no SAN present, name matching falls back to the subject common name.
+TEST(verify_host, common_name_fallback) {
+    auto chain = generate_ca_signed_cert({}, "registry.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com"));
+    auto other = generate_ca_signed_cert({}, "attacker-controlled.example.com");
+    EXPECT_FALSE(handshake_accepted(other, "registry.example.com"));
+}
+
+// A wildcard covers exactly one label, so *.example.com must not stand in for
+// a.b.example.com.
+TEST(verify_host, wildcard_matches_single_label) {
+    auto chain = generate_ca_signed_cert({"DNS:*.example.com"}, "*.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com"));
+    EXPECT_FALSE(handshake_accepted(chain, "a.b.example.com"));
+    EXPECT_FALSE(handshake_accepted(chain, "example.com"));
+}
+
+// IP literals are matched against iPAddress SANs. X509_check_host() never looks
+// at those, so this needs its own path and its own test.
+TEST(verify_host, ip_san) {
+    auto chain = generate_ca_signed_cert({"IP:127.0.0.1"}, "127.0.0.1");
+    EXPECT_TRUE(handshake_accepted(chain, "127.0.0.1"));
+
+    // A dNSName spelling of the address does not satisfy an IP request, and a
+    // certificate for another address does not either.
+    auto dns_only = generate_ca_signed_cert({"DNS:127.0.0.1"}, "127.0.0.1");
+    EXPECT_FALSE(handshake_accepted(dns_only, "127.0.0.1"));
+    auto other_ip = generate_ca_signed_cert({"IP:10.0.0.1"}, "10.0.0.1");
+    EXPECT_FALSE(handshake_accepted(other_ip, "127.0.0.1"));
+}
+
+// The opt-outs both keep the pre-existing behavior: SNI is sent, the name is not
+// checked, and a mismatched certificate is accepted.
+TEST(verify_host, optout_accepts_mismatch) {
+    auto chain = generate_ca_signed_cert({"DNS:attacker-controlled.example.com"},
+                                         "attacker-controlled.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com", true));
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com", false, false));
+}
+
+// Under VerifyMode::NONE, SSL_set1_host would be silently inert. Requesting a
+// hostname there is refused rather than quietly ignored.
+TEST(verify_host, none_verify_mode_is_refused) {
+    DEFER(photon::wait_all());
+    auto srv = net::new_tcp_socket_server();
+    DEFER(delete srv);
+    ASSERT_EQ(0, srv->bind_v4localhost());
+    ASSERT_EQ(0, srv->listen());
+    auto ep = srv->getsockname();
+
+    auto ctx = net::new_tls_context();  // defaults to VerifyMode::NONE
+    DEFER(delete ctx);
+    auto tcp_cli = net::new_tcp_socket_client();
+    tcp_cli->timeout(1UL * 1000 * 1000);
+    auto cli = net::new_tls_client(ctx, tcp_cli, true);
+    DEFER(delete cli);
+    auto s = cli->connect(ep);
+    ASSERT_NE(nullptr, s);
+    DEFER(delete s);
+
+    EXPECT_EQ(-1, net::tls_stream_set_hostname(s, "registry.example.com"));
+    EXPECT_EQ(EINVAL, errno);
+
+    // The opt-outs make the intent explicit and are accepted.
+    EXPECT_EQ(0, net::tls_stream_set_sni(s, "registry.example.com"));
+    ASSERT_EQ(0, ctx->set_verify_hostname(false));
+    EXPECT_EQ(0, net::tls_stream_set_hostname(s, "registry.example.com"));
+}
+
+// A trailing dot marks a name as absolute; it denotes the same host and does not
+// appear in certificates, so it must not turn a match into a mismatch.
+TEST(verify_host, trailing_dot_is_absolute_form_of_same_name) {
+    auto chain = generate_ca_signed_cert({"DNS:registry.example.com"}, "registry.example.com");
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com."));
+    EXPECT_TRUE(handshake_accepted(chain, "registry.example.com"));
+    // Dropping the dot must not make a genuinely different name match.
+    EXPECT_FALSE(handshake_accepted(chain, "other.example.com."));
+}
+
+TEST(verify_host, invalid_arguments) {
+    DEFER(photon::wait_all());
+    auto srv = net::new_tcp_socket_server();
+    DEFER(delete srv);
+    ASSERT_EQ(0, srv->bind_v4localhost());
+    ASSERT_EQ(0, srv->listen());
+    auto ep = srv->getsockname();
+
+    auto ctx = net::new_tls_context();
+    DEFER(delete ctx);
+    auto tcp_cli = net::new_tcp_socket_client();
+    tcp_cli->timeout(1UL * 1000 * 1000);
+    auto cli = net::new_tls_client(ctx, tcp_cli, true);
+    DEFER(delete cli);
+    auto s = cli->connect(ep);
+    ASSERT_NE(nullptr, s);
+    DEFER(delete s);
+
+    EXPECT_EQ(-1, net::tls_stream_set_hostname(s, nullptr));
+    EXPECT_EQ(-1, net::tls_stream_set_hostname(s, ""));
+    EXPECT_EQ(-1, net::tls_stream_set_sni(s, nullptr));
+
+    // A plain TCP stream has no name to bind, so asking is an error rather than
+    // a silent no-op that leaves the caller believing it verified something.
+    auto plain = net::new_tcp_socket_client();
+    DEFER(delete plain);
+    plain->timeout(1UL * 1000 * 1000);
+    auto ps = plain->connect(ep);
+    ASSERT_NE(nullptr, ps);
+    DEFER(delete ps);
+    EXPECT_EQ(-1, net::tls_stream_set_hostname(ps, "registry.example.com"));
+
+    // A server does not check a peer hostname, and the failure should say so
+    // rather than blame the verify mode.
+    auto srv_side = net::new_tls_stream(ctx, ps, net::SecurityRole::Server, false);
+    ASSERT_NE(nullptr, srv_side);
+    DEFER(delete srv_side);
+    EXPECT_EQ(-1, net::tls_stream_set_hostname(srv_side, "registry.example.com"));
 }
 
 int main(int argc, char** arg) {
