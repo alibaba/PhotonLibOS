@@ -143,7 +143,7 @@ public:
     net::TLSContext* tls_ctx = nullptr;
     bool tls_ctx_ownership = false;
     std::unique_ptr<ISocketClient> tcpsock;
-    std::unique_ptr<ISocketClient> tlssock;
+    std::unique_ptr<ISocketPool> tlssock;
     std::unique_ptr<ISocketClient> udssock;
     // created on demand, when a CONNECT tunnel is first asked for
     std::unique_ptr<ISocketClient> proxy_tcp;   // outer leg to a plaintext proxy
@@ -263,8 +263,24 @@ ISocketStream* PooledDialer::dial_direct(std::string_view host, uint16_t port, b
     ISocketStream *sock = nullptr;
     if (secure) {
         tlssock->timeout(timeout);
-        sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, estring_view(host).extract_c_str());
+        // Key the pool by hostname, not just by endpoint: a connection whose
+        // certificate was verified for one hostname must not be handed to a
+        // request for another hostname that happens to resolve to the same IP.
+        auto hostname = estring().appends(host);
+        auto key = estring().appends(hostname, ":", port);
+        sock = tlssock->connect(key, ep);
+        if (sock) {
+            // A context left at VerifyMode::NONE has opted out of certificate
+            // checking altogether (the equivalent of curl -k), so send SNI and
+            // skip the name check rather than failing the request outright.
+            auto verifying = ((int)tls_ctx->get_verify_mode() & (int)VerifyMode::PEER) != 0;
+            auto ret = verifying ? tls_stream_set_hostname(sock, hostname.c_str())
+                                 : tls_stream_set_sni(sock, hostname.c_str());
+            if (ret < 0) {
+                delete sock;
+                LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on tls stream, ", VALUE(host));
+            }
+        }
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
