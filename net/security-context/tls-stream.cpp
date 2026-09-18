@@ -21,6 +21,8 @@ limitations under the License.
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <arpa/inet.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
 #include <photon/common/alog.h>
@@ -188,6 +190,7 @@ public:
     SSL_CTX* ctx;
     char pempassword[MAX_PASSPHASE_SIZE];
     Delegate<estring_view, const std::vector<estring_view>&> alpn_select_cb;
+    bool verify_hostname = true;
 
     explicit TLSContextImpl(TLSVersion ver) {
         char errbuf[4096];
@@ -363,6 +366,15 @@ public:
         LOG_DEBUG("Loaded CA certificates from file=` path=`", ca_file, ca_path);
         return 0;
     }
+
+    int set_verify_hostname(bool enable) override {
+        verify_hostname = enable;
+        return 0;
+    }
+
+    VerifyMode get_verify_mode() override {
+        return (VerifyMode)SSL_CTX_get_verify_mode(ctx);
+    }
 };
 
 void __OpenSSLGlobalInit() {
@@ -394,6 +406,8 @@ class TLSSocketStream : public ForwardSocketStream {
 public:
     SSL* ssl;
     BIO* ssbio;
+    TLSContextImpl* ctx_impl;
+    SecurityRole role;
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000LL
     static void* BIO_get_data(BIO* b) { return b->ptr; }
@@ -516,7 +530,8 @@ public:
 
     TLSSocketStream(TLSContext* ctx, ISocketStream* stream, SecurityRole r,
                     bool ownership = false)
-        : ForwardSocketStream(stream, ownership) {
+        : ForwardSocketStream(stream, ownership),
+          ctx_impl((TLSContextImpl*)ctx), role(r) {
         ssl = SSL_new(((TLSContextImpl*)ctx)->ctx);
         ssbio = BIO_new(BIO_s_sockstream());
         BIO_ctrl(ssbio, BIO_C_SET_FILE_PTR, 0, stream);
@@ -525,11 +540,13 @@ public:
         switch (r) {
             case SecurityRole::Client:
                 SSL_set_connect_state(ssl);
-                // Defer the handshake to the first I/O. The SNI hostname is set
-                // via tls_stream_set_hostname() AFTER construction, and it must be
-                // carried in the ClientHello; handshaking here would send the
-                // ClientHello without SNI. SSL_read/SSL_write drives the client
-                // handshake once SNI has been set.
+                // Defer the handshake to the first I/O. The SNI hostname and the
+                // name to verify the peer certificate against are set via
+                // tls_stream_set_hostname() AFTER construction; SNI must be
+                // carried in the ClientHello and the verify params must be in
+                // place before the chain is checked, so handshaking here would
+                // be too early for both. SSL_read/SSL_write drives the client
+                // handshake once they have been set.
                 return;
             case SecurityRole::Server:
                 SSL_set_accept_state(ssl);
@@ -641,15 +658,98 @@ ISocketStream* new_tls_stream(TLSContext* ctx, ISocketStream* base,
     return new TLSSocketStream(ctx, base, role, ownership);
 };
 
-void tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
-#if OPENSSL_VERSION_NUMBER >= 0x10100000LL
-    if (auto s1 = dynamic_cast<TLSSocketStream*>(stream)) {
-        if (SSL_set_tlsext_host_name(s1->ssl, hostname) != 1)
-            LOG_ERROR("Failed to set hostname on tls stream: `", VALUE(hostname));
-    } else if (auto s2 = dynamic_cast<ForwardSocketStream*>(stream)) {
-        auto underlay = static_cast<ISocketStream*>(s2->get_underlay_object(0));
-        tls_stream_set_hostname(underlay, hostname);
+// Walk down a chain of wrappers (pooling, forwarding) to the TLS stream itself.
+static TLSSocketStream* find_tls_stream(ISocketStream* stream) {
+    while (stream) {
+        if (auto s = dynamic_cast<TLSSocketStream*>(stream)) return s;
+        auto f = dynamic_cast<ForwardSocketStream*>(stream);
+        if (!f) return nullptr;
+        stream = static_cast<ISocketStream*>(f->get_underlay_object(0));
     }
+    return nullptr;
+}
+
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+// Send `hostname` as SNI, telling the server which certificate to send. Places
+// no constraint on the certificate that comes back.
+static int tls_set_sni(SSL* ssl, const char* hostname) {
+    if (SSL_set_tlsext_host_name(ssl, hostname) != 1)
+        LOG_ERROR_RETURN(EINVAL, -1, "failed to set SNI on tls stream, ", VALUE(hostname));
+    return 0;
+}
+
+// Bind the peer certificate to `hostname`, so that a certificate signed by a
+// trusted CA but issued to some other name is rejected.
+static int tls_set_verify_host(SSL* ssl, const char* hostname) {
+    auto param = SSL_get0_param(ssl);
+    if (!param)
+        LOG_ERROR_RETURN(EINVAL, -1, "failed to get verify params of tls stream");
+
+    // X509_check_host() never matches iPAddress SANs, so literals take a
+    // separate path; without it every IP-literal peer would be rejected.
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (inet_pton(AF_INET, hostname, &v4) == 1 || inet_pton(AF_INET6, hostname, &v6) == 1) {
+        if (X509_VERIFY_PARAM_set1_ip_asc(param, hostname) != 1)
+            LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified ip of tls stream, ", VALUE(hostname));
+        return 0;
+    }
+
+    // Reject wildcards that cover only part of a label, such as www*.example.com.
+    // Matching a single label, and only in the leftmost position, is already the
+    // default; this flag narrows what that one label may look like.
+    X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+    // A trailing dot marks a name as absolute. Certificates never carry one, so
+    // it takes no part in the comparison; leaving it in would reject a peer that
+    // the very same name without the dot would have matched.
+    size_t len = strlen(hostname);
+    if (len > 1 && hostname[len - 1] == '.') len--;
+    // Note that a zero length would instead clear the list and report success,
+    // verifying nothing; that is why an empty hostname is rejected before
+    // reaching here.
+    if (X509_VERIFY_PARAM_set1_host(param, hostname, len) != 1)
+        LOG_ERROR_RETURN(EINVAL, -1, "failed to set verified hostname of tls stream, ", VALUE(hostname));
+    return 0;
+}
+#endif
+
+int tls_stream_set_hostname(ISocketStream* stream, const char* hostname) {
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+    if (!hostname || !*hostname)
+        LOG_ERROR_RETURN(EINVAL, -1, "hostname is null or empty");
+    auto s = find_tls_stream(stream);
+    if (!s)
+        LOG_ERROR_RETURN(EINVAL, -1, "not a tls stream, ", VALUE(stream));
+    if (s->role != SecurityRole::Client)
+        LOG_ERROR_RETURN(EINVAL, -1, "only a client verifies a peer's hostname, ", VALUE(hostname));
+
+    if (!s->ctx_impl->verify_hostname)  // verification opted out of, SNI only
+        return tls_set_sni(s->ssl, hostname);
+
+    // SSL_set1_host() is only consulted while the chain is being verified, so
+    // under SSL_VERIFY_NONE it would be silently inert, accepting any name.
+    // Refuse instead of pretending to verify.
+    if (SSL_get_verify_mode(s->ssl) == SSL_VERIFY_NONE)
+        LOG_ERROR_RETURN(EINVAL, -1, "hostname verification requires VerifyMode::PEER; call set_verify_mode(VerifyMode::PEER), or set_verify_hostname(false) to send SNI only, ", VALUE(hostname));
+
+    if (tls_set_sni(s->ssl, hostname) < 0)
+        return -1;
+    return tls_set_verify_host(s->ssl, hostname);
+#else
+    LOG_ERROR_RETURN(ENOSYS, -1, "hostname verification requires OpenSSL 1.0.2 or later, ", VALUE(hostname));
+#endif
+}
+
+int tls_stream_set_sni(ISocketStream* stream, const char* hostname) {
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+    if (!hostname || !*hostname)
+        LOG_ERROR_RETURN(EINVAL, -1, "hostname is null or empty");
+    auto s = find_tls_stream(stream);
+    if (!s)
+        LOG_ERROR_RETURN(EINVAL, -1, "not a tls stream, ", VALUE(stream));
+    return tls_set_sni(s->ssl, hostname);
+#else
+    LOG_ERROR_RETURN(ENOSYS, -1, "SNI requires OpenSSL 1.0.2 or later, ", VALUE(hostname));
 #endif
 }
 
