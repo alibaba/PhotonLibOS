@@ -1274,13 +1274,11 @@ TEST(http_server, forward_proxy_close_delimited) {
 }
 
 // Helpers/tests for per-client dialer lifecycle and injection
-static int count_dialers_of(Client* c) {
-    auto& reg = g_dialer_registry;
-    SCOPED_LOCK(reg.lock);
-    int n = 0;
-    for (auto d : reg.dialers)
-        if (d->owner == (ClientImpl*)c) n++;
-    return n;
+// The built-in dialer this client has built on the current vCPU, or nullptr.
+// With per-(client, vCPU) dialers there is at most one, so it doubles as a
+// presence check. Only valid while the client is alive.
+static PooledDialer* current_dialer_of(Client* c) {
+    return ((ClientImpl*)c)->m_dialers.get_if();
 }
 
 static void simple_get(Client* client, std::string_view target) {
@@ -1312,13 +1310,16 @@ TEST(http_client, per_client_dialer_lifecycle) {
     DEFER(delete c2);
     simple_get(c1, target);
     simple_get(c2, target);
-    // each client owns its dialer on this vCPU -- no implicit sharing
-    EXPECT_EQ(1, count_dialers_of(c1));
-    EXPECT_EQ(1, count_dialers_of(c2));
-    // deleting a client tears down its own dialer, not the siblings'
+    // each client builds its own dialer on this vCPU -- no implicit sharing
+    auto d1 = current_dialer_of(c1);
+    auto d2 = current_dialer_of(c2);
+    EXPECT_NE(nullptr, d1);
+    EXPECT_NE(nullptr, d2);
+    EXPECT_NE(d1, d2);
+    // deleting a client tears down its own dialer, not the sibling's; c2 keeps
+    // the very same dialer and keeps working
     delete c1;
-    EXPECT_EQ(0, count_dialers_of(c1));
-    EXPECT_EQ(1, count_dialers_of(c2));
+    EXPECT_EQ(d2, current_dialer_of(c2));
     simple_get(c2, target);
 }
 
@@ -1355,8 +1356,8 @@ TEST(http_client, dialer_injection) {
     EXPECT_GT(dialer.dials, 0);
     EXPECT_FALSE(dialer.saw_proxy);
     EXPECT_FALSE(dialer.saw_secure);
-    // the injected dialer fully replaces the built-in one
-    EXPECT_EQ(0, count_dialers_of(client));
+    // the injected dialer fully replaces the built-in one (none is ever built)
+    EXPECT_EQ(nullptr, current_dialer_of(client));
 }
 
 TEST(http_client, resolver_injection) {

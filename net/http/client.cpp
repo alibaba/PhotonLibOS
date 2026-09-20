@@ -18,16 +18,15 @@ limitations under the License.
 #include <bitset>
 #include <algorithm>
 #include <random>
-#include <sched.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/estring.h>
-#include <photon/common/intrusive_list.h>
 #include <photon/common/iovector.h>
 #include <photon/common/string_view.h>
 #include <photon/net/socket.h>
 #include <photon/net/security-context/tls-stream.h>
 #include <photon/net/utils.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/vcpu-local.h>
 #include <photon/photon.h>
 
 namespace photon {
@@ -85,7 +84,14 @@ public:
         {
             SCOPED_LOCK(_lock);
             if (_cur) redundant = r;   // lost a benign race
-            else _cur = new Gen{r, 0}, _vcpu = photon::get_vcpu();
+            else {
+                _cur = new Gen{r, 0};
+                _vcpu = photon::get_vcpu();
+                if (!_hook) {   // reap this cache on its owning vCPU's fini()
+                    _hook = true;
+                    photon::fini_hook({this, &SharedResolver::at_photon_fini});
+                }
+            }
             g = _cur;
             ++g->users;
         }
@@ -93,8 +99,9 @@ public:
         return {this, g, g->resolver};
     }
 
-    // called from the fini hook of the vCPU owning the cache, once every
-    // built-in dialer of that vCPU is gone
+    // the fini hook of the vCPU that published this cache (registered in
+    // borrow()); the built-in dialers, whose hook was armed earlier, are
+    // already gone by the time this runs
     void at_photon_fini() {
         Gen* g;
         {
@@ -103,6 +110,7 @@ public:
             g = _cur;
             _cur = nullptr;   // dials elsewhere will publish a new generation
             _vcpu = nullptr;
+            _hook = false;    // photon::fini() clears the hook vector; re-arm later
         }
         // a borrow spans a single resolver call, so this drains quickly; should
         // it somehow not, leaking the cache beats freeing it under a borrower
@@ -126,6 +134,7 @@ protected:
     photon::spinlock _lock;   // guards all below; taken cross-vCPU
     Gen* _cur = nullptr;      // the currently published generation, if any
     vcpu_base* _vcpu = nullptr;
+    bool _hook = false;       // fini hook armed for _cur's owning vCPU
 
     void put(Gen* g) {
         SCOPED_LOCK(_lock);
@@ -138,7 +147,7 @@ static SharedResolver g_shared_resolver;
 // Built-in dialer, owned by a (client, vCPU) pair. The connection pools and
 // the collector thread inside are bound to the vCPU that created them, so a
 // PooledDialer must be created, used and destroyed on its own vCPU.
-class PooledDialer : public IDialer, public intrusive_list_node<PooledDialer> {
+class PooledDialer : public IDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
     bool tls_ctx_ownership = false;
@@ -151,12 +160,10 @@ public:
     std::unique_ptr<ISocketPool> tunnelsock;    // pools the established tunnels
     std::vector<IPAddr> bind_ips;
     Resolver* resolver;   // set_resolver()'s, not owned; null for the shared cache
-    ClientImpl* owner;    // backref; stable while listed in the registry
-    vcpu_base* vcpu = photon::get_vcpu();
 
-    PooledDialer(ClientImpl* owner, TLSContext* _tls_ctx, Resolver* resolver,
+    PooledDialer(TLSContext* _tls_ctx, Resolver* resolver,
                  const std::vector<IPAddr>& src_ips)
-            : bind_ips(src_ips), resolver(resolver), owner(owner) {
+            : bind_ips(src_ips), resolver(resolver) {
         tls_ctx = _tls_ctx;
         if (!tls_ctx) {
             tls_ctx_ownership = true;
@@ -192,53 +199,23 @@ protected:
         return g_shared_resolver.borrow();
     }
 
+    // Bind a client TLS stream to the hostname it is expected to reach. A
+    // context left at VerifyMode::NONE has opted out of certificate checking
+    // (the equivalent of curl -k), so send SNI only and skip the name check
+    // rather than fail; otherwise verify the peer certificate against the name.
+    int set_tls_identity(ISocketStream* sock, std::string_view host) {
+        auto name = estring().appends(host);
+        auto verifying = ((int)tls_ctx->get_verify_mode() & (int)VerifyMode::PEER) != 0;
+        return verifying ? tls_stream_set_hostname(sock, name.c_str())
+                         : tls_stream_set_sni(sock, name.c_str());
+    }
+
     ISocketStream* dial_uds(std::string_view uds_path, uint64_t timeout);
     ISocketStream* dial_direct(std::string_view host, uint16_t port, bool secure, uint64_t timeout);
     ISocketStream* dial_tunnel(const DialTarget& target, uint64_t timeout);
     ISocketStream* connect_tunnel(const DialTarget& target, uint64_t timeout);
     int tunnel_handshake(ISocketStream* leg, const DialTarget& target);
 };
-
-// Per-vCPU registry owning the built-in dialers created on this vCPU. A
-// dialer is destroyed either by ~ClientImpl (claiming it out of the list,
-// possibly from another vCPU), or by the photon::fini() hook of this vCPU --
-// whichever comes first -- so that no pool or collector thread outlives its
-// vCPU, even for leaked clients or the fini+init cycle of a pthread_atfork
-// handler. Whoever unlinks a dialer from `dialers` destroys it.
-struct DialerRegistry {
-    photon::spinlock lock;   // guards `dialers` and `destroying`; taken cross-vCPU by ~ClientImpl
-    intrusive_list<PooledDialer, false> dialers;
-    // dialers claimed out of the list by a cross-vCPU ~ClientImpl but not yet
-    // destroyed. Erasing a dialer resolves who deletes it, not the lifetime of
-    // this vCPU, so at_photon_fini must not let fini() reach vcpu_fini() (which
-    // frees the vcpu_t that the pending thread_migrate still writes to) until
-    // every claimed handoff has landed.
-    int destroying = 0;
-    bool fini_hook_registered = false;
-
-    PooledDialer* find_locked(ClientImpl* c) {
-        for (auto d : dialers)
-            if (d->owner == c) return d;
-        return nullptr;
-    }
-
-    bool contains_locked(PooledDialer* target) {
-        for (auto d : dialers)
-            if (d == target) return true;
-        return false;
-    }
-
-    void ensure_fini_hook() {
-        if (!fini_hook_registered) {
-            fini_hook_registered = true;
-            photon::fini_hook({this, &DialerRegistry::at_photon_fini});
-        }
-    }
-
-    void at_photon_fini();   // defined after ClientImpl
-};
-
-static thread_local DialerRegistry g_dialer_registry;
 
 ISocketStream* PooledDialer::dial(const DialTarget& t, uint64_t timeout) {
     if (!t.uds_path.empty()) return dial_uds(t.uds_path, timeout);
@@ -266,20 +243,11 @@ ISocketStream* PooledDialer::dial_direct(std::string_view host, uint16_t port, b
         // Key the pool by hostname, not just by endpoint: a connection whose
         // certificate was verified for one hostname must not be handed to a
         // request for another hostname that happens to resolve to the same IP.
-        auto hostname = estring().appends(host);
-        auto key = estring().appends(hostname, ":", port);
+        auto key = estring().appends(host, ":", port);
         sock = tlssock->connect(key, ep);
-        if (sock) {
-            // A context left at VerifyMode::NONE has opted out of certificate
-            // checking altogether (the equivalent of curl -k), so send SNI and
-            // skip the name check rather than failing the request outright.
-            auto verifying = ((int)tls_ctx->get_verify_mode() & (int)VerifyMode::PEER) != 0;
-            auto ret = verifying ? tls_stream_set_hostname(sock, hostname.c_str())
-                                 : tls_stream_set_sni(sock, hostname.c_str());
-            if (ret < 0) {
-                delete sock;
-                LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on tls stream, ", VALUE(host));
-            }
+        if (sock && set_tls_identity(sock, host) < 0) {
+            delete sock;
+            LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on tls stream, ", VALUE(host));
         }
     } else {
         tcpsock->timeout(timeout);
@@ -354,8 +322,8 @@ ISocketStream* PooledDialer::connect_tunnel(const DialTarget& t, uint64_t timeou
     bool ok = false;
     DEFER(if (!ok) delete leg);
     leg->timeout(timeout);
-    if (t.proxy_secure)
-        tls_stream_set_hostname(leg, estring_view(t.proxy_host).extract_c_str());
+    if (t.proxy_secure && set_tls_identity(leg, t.proxy_host) < 0)
+        LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on the TLS proxy leg to `", t.proxy_host);
     if (tunnel_handshake(leg, t) < 0)
         return nullptr;
 
@@ -363,8 +331,11 @@ ISocketStream* PooledDialer::connect_tunnel(const DialTarget& t, uint64_t timeou
     auto tunnel = new_tls_stream(tls_ctx, leg, SecurityRole::Client, true);
     if (!tunnel)
         LOG_ERRNO_RETURN(0, nullptr, "failed to wrap the tunnel to `:` in TLS", t.host, t.port);
-    ok = true;   // owned by `tunnel` from here on
-    tls_stream_set_hostname(tunnel, estring_view(t.host).extract_c_str());
+    ok = true;   // leg is owned by `tunnel` from here on
+    if (set_tls_identity(tunnel, t.host) < 0) {
+        delete tunnel;   // closes the leg it owns
+        LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on the tunnel to `:`", t.host, t.port);
+    }
     LOG_DEBUG("Tunneled to `:` through `", t.host, t.port, ep);
     return tunnel;
 }
@@ -450,132 +421,24 @@ public:
     CommonHeaders<> m_common_headers;
     TLSContext *m_tls_ctx;
     ICookieJar *m_cookie_jar;
-    photon::spinlock m_dref_lock;   // guards m_drefs
-    struct DialerRef {
-        PooledDialer* dialer;
-        DialerRegistry* registry;
-        vcpu_base* vcpu;
-    };
-    std::vector<DialerRef> m_drefs;  // one built-in dialer per vCPU used
+    // one built-in dialer per (client, vCPU), lazily built by make_dialer and
+    // destroyed on its own vCPU -- by ~ClientImpl or that vCPU's photon::fini(),
+    // whichever comes first (see VCPULocal)
+    VCPULocal<PooledDialer> m_dialers;
 
     ClientImpl(ICookieJar *cookie_jar, TLSContext *tls_ctx) :
         m_tls_ctx(tls_ctx),
-        m_cookie_jar(cookie_jar) {
+        m_cookie_jar(cookie_jar),
+        m_dialers({this, &ClientImpl::make_dialer}) {
     }
 
-    ~ClientImpl() override {
-        while (true) {
-            DialerRef e;
-            {
-                SCOPED_LOCK(m_dref_lock);
-                if (m_drefs.empty()) break;
-                e = m_drefs.back();
-            }
-            if (!photon::CURRENT) {
-                // no photon context to run pool destruction; disown the dialer
-                // and let the fini hook of its vCPU destroy it
-                bool disowned = false;
-                {
-                    SCOPED_LOCK(e.registry->lock);
-                    if (e.registry->contains_locked(e.dialer)) {
-                        e.dialer->owner = nullptr;
-                        disowned = true;
-                    }
-                }
-                if (disowned) {
-                    SCOPED_LOCK(m_dref_lock);
-                    remove_dref_locked(e.dialer);
-                } else {
-                    ::sched_yield();   // the fini hook is dropping our backref
-                }
-                continue;
-            }
-            bool claimed = false;
-            {
-                SCOPED_LOCK(e.registry->lock);
-                if (e.registry->contains_locked(e.dialer)) {
-                    e.registry->dialers.erase(e.dialer);
-                    // pin the owning vCPU's fini until the handoff below lands
-                    e.registry->destroying++;
-                    claimed = true;
-                }
-            }
-            if (!claimed) {
-                // claimed by the fini hook of its vCPU, which will drop our
-                // backref shortly; wait for that
-                photon::thread_yield();
-                continue;
-            }
-            {
-                SCOPED_LOCK(m_dref_lock);
-                remove_dref_locked(e.dialer);
-            }
-            destroy_dialer(e);
-            {
-                SCOPED_LOCK(e.registry->lock);
-                e.registry->destroying--;
-            }
-        }
-    }
-
-    void remove_dref_locked(PooledDialer* d) {
-        for (auto it = m_drefs.begin(); it != m_drefs.end(); ++it)
-            if (it->dialer == d) {
-                m_drefs.erase(it);
-                return;
-            }
-    }
-
-    // built-in dialers must be destroyed on their own vCPU. Never migrate
-    // CURRENT for this: after landing on another OS thread, reads of
-    // photon::CURRENT may hit the stale TLS slot cached by the compiler.
-    // Send a helper thread over instead, and wait for it.
-    struct DestroyCtx {
-        PooledDialer* dialer;
-        photon::semaphore done;
-        DestroyCtx(PooledDialer* d) : dialer(d), done(0) {}
-    };
-    static void* do_destroy_dialer(void* arg) {
-        auto ctx = (DestroyCtx*)arg;
-        delete ctx->dialer;
-        ctx->done.signal(1);
-        return nullptr;
-    }
-    void destroy_dialer(const DialerRef& e) {
-        if (e.vcpu == photon::get_vcpu()) {
-            delete e.dialer;
-            return;
-        }
-        DestroyCtx ctx(e.dialer);
-        auto th = photon::thread_create(&do_destroy_dialer, &ctx);
-        if (photon::thread_migrate(th, e.vcpu) < 0)
-            LOG_WARN("failed to migrate to the dialer's vCPU, destroying locally");
-        ctx.done.wait(1);
+    PooledDialer* make_dialer() {   // on the current vCPU, for this client
+        return new PooledDialer(m_tls_ctx, m_resolver, m_bind_ips);
     }
 
     IDialer* acquire_dialer() {
         if (m_dialer) return m_dialer;   // injected via set_dialer()
-        auto& reg = g_dialer_registry;
-        {
-            SCOPED_LOCK(reg.lock);
-            auto d = reg.find_locked(this);
-            if (d) return d;
-        }
-        reg.ensure_fini_hook();
-        auto d = new PooledDialer(this, m_tls_ctx, m_resolver, m_bind_ips);
-        PooledDialer* existing;
-        {
-            SCOPED_LOCK(reg.lock);
-            existing = reg.find_locked(this);
-            if (!existing) {
-                reg.dialers.push_back(d);
-                SCOPED_LOCK(m_dref_lock);
-                m_drefs.push_back({d, &reg, d->vcpu});
-                return d;
-            }
-        }
-        delete d;   // lost a benign race against a sibling thread of this vCPU
-        return existing;
+        return m_dialers.get();          // built-in, one per vCPU, built on demand
     }
 
     using SocketStream_ptr = std::unique_ptr<ISocketStream>;
@@ -796,33 +659,6 @@ public:
         return &m_common_headers;
     }
 };
-
-void DialerRegistry::at_photon_fini() {
-    for (;;) {
-        lock.lock();
-        auto d = dialers.pop_front();
-        lock.unlock();
-        if (!d) break;
-        auto o = d->owner;   // stable: only ~ClientImpl of a listed dialer resets it
-        if (o) {
-            SCOPED_LOCK(o->m_dref_lock);
-            o->remove_dref_locked(d);
-        }
-        delete d;   // on its own vCPU: the hook runs there
-    }
-    // a cross-vCPU ~ClientImpl may have claimed a dialer of ours and still be
-    // migrating a helper here to destroy it; let fini() free this vCPU only once
-    // that has landed, or the migrate would write to a freed vcpu_t
-    for (;;) {
-        lock.lock();
-        bool busy = destroying > 0;
-        lock.unlock();
-        if (!busy) break;
-        photon::thread_usleep(1000);
-    }
-    g_shared_resolver.at_photon_fini();
-    fini_hook_registered = false;   // photon::fini() clears the hook vector
-}
 
 Client* new_http_client(ICookieJar *cookie_jar, TLSContext *tls_ctx) {
     return new ClientImpl(cookie_jar, tls_ctx);
