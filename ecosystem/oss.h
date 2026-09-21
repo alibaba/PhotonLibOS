@@ -39,6 +39,14 @@ std::string_view lookup_mime_type(std::string_view name);
 
 static constexpr int OSS_MAX_PATH_LEN = 1023;
 
+// IP version used to resolve the endpoint / proxy hostname, enforced via a
+// private (client-owned) resolver on the underlying HTTP client.
+enum class IPVersion : uint8_t {
+  kBoth = 0,      // accept both IPv4 and IPv6 (default)
+  kIPv4Only = 1,  // discard IPv6 addresses
+  kIPv6Only = 2,  // discard IPv4 addresses
+};
+
 struct ClientOptions {
   std::string endpoint;
   std::string bucket;
@@ -59,6 +67,8 @@ struct ClientOptions {
   // times until we have waited the "request time out" period.
   uint64_t retry_base_interval_us = 100'000;
   std::vector<std::pair<std::string, std::string>> custom_headers;
+
+  IPVersion ip_version = IPVersion::kBoth;
 };
 
 struct ObjectMeta {
@@ -179,6 +189,14 @@ struct GetObjectParameters {
   int result = -1;
 };
 
+// One byte range of a multi-range download, see get_object_ranges().
+struct GetRangeParameters {
+  const iovec* iov = nullptr;
+  int iovcnt = 0;
+  off_t offset = 0;
+  ssize_t result = -1;  // filled size, or -1 if the range was not delivered
+};
+
 struct ObjectUploadOptions {
   // inputs
   const uint64_t *expected_crc64 = nullptr;
@@ -233,6 +251,21 @@ class Client : public Object {
   virtual ssize_t get_object_range(std::string_view object, off_t offset,
                                    size_t cnt, BodyReader reader,
                                    ObjectHeaderMeta* meta = nullptr) = 0;
+
+  // Download several byte ranges of one object within a single GET request,
+  // relying on the OSS multi-range extension.
+  // The ranges MUST be more than one, ascending and non-overlapping, and MUST
+  // all fall inside the object. OSS does not reject a violating list, it
+  // silently reorganizes it -- reordering or merging the ranges, or ignoring
+  // the list and answering something else altogether -- and the reply reads
+  // exactly like an answer to the list as sent. None of that reorganizing is
+  // relied upon here: a violating list is rejected locally with EINVAL, which
+  // is what leaves each response part mapping onto exactly one requested
+  // range, verified part by part while the body is scattered into the iovs.
+  // return 0 only if every iov is completely filled, -1 otherwise, with each
+  // range's `result` set to its filled size for diagnosis.
+  virtual int get_object_ranges(std::string_view object,
+                                std::vector<GetRangeParameters>& ranges) = 0;
 
   // return value is the object count which data is successfully downloaded.
   // It's possible only some objects get to be downloaded successfully.

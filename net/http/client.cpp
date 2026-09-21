@@ -37,7 +37,7 @@ class PooledDialer {
 public:
     net::TLSContext* tls_ctx = nullptr;
     std::unique_ptr<ISocketClient> tcpsock;
-    std::unique_ptr<ISocketClient> tlssock;
+    std::unique_ptr<ISocketPool> tlssock;
     std::unique_ptr<ISocketClient> udssock;
     std::unique_ptr<Resolver> resolver;
     photon::mutex init_mtx;
@@ -83,18 +83,19 @@ public:
     }
 
     ISocketStream* dial(std::string_view host, uint16_t port, bool secure,
-                             uint64_t timeout = -1ULL);
+                             Resolver* resolver, uint64_t timeout = -1ULL);
 
     template <typename T>
-    ISocketStream* dial(const T& x, uint64_t timeout = -1ULL) {
-        return dial(x.host_no_port(), x.port(), x.secure(), timeout);
+    ISocketStream* dial(const T& x, Resolver* resolver, uint64_t timeout = -1ULL) {
+        return dial(x.host_no_port(), x.port(), x.secure(), resolver, timeout);
     }
 
     ISocketStream* dial(std::string_view uds_path, uint64_t timeout = -1ULL);
 };
 
-ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, uint64_t timeout) {
+ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool secure, Resolver* resolver, uint64_t timeout) {
     LOG_DEBUG("Dialing to `:`", host, port);
+    if (!resolver) resolver = this->resolver.get();  // fall back to the per-vCPU default resolver
     auto ipaddr = resolver->resolve(host);
     if (ipaddr.undefined()) {
         LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host)
@@ -105,8 +106,24 @@ ISocketStream* PooledDialer::dial(std::string_view host, uint16_t port, bool sec
     ISocketStream *sock = nullptr;
     if (secure) {
         tlssock->timeout(timeout);
-        sock = tlssock->connect(ep);
-        tls_stream_set_hostname(sock, estring_view(host).extract_c_str());
+        // Key the pool by hostname, not just by endpoint: a connection whose
+        // certificate was verified for one hostname must not be handed to a
+        // request for another hostname that happens to resolve to the same IP.
+        auto hostname = estring().appends(host);
+        auto key = estring().appends(hostname, ":", port);
+        sock = tlssock->connect(key, ep);
+        if (sock) {
+            // A context left at VerifyMode::NONE has opted out of certificate
+            // checking altogether (the equivalent of curl -k), so send SNI and
+            // skip the name check rather than failing the request outright.
+            auto verifying = ((int)tls_ctx->get_verify_mode() & (int)VerifyMode::PEER) != 0;
+            auto ret = verifying ? tls_stream_set_hostname(sock, hostname.c_str())
+                                 : tls_stream_set_sni(sock, hostname.c_str());
+            if (ret < 0) {
+                delete sock;
+                LOG_ERROR_RETURN(0, nullptr, "failed to set hostname on tls stream, ", VALUE(host));
+            }
+        }
     } else {
         tcpsock->timeout(timeout);
         sock = tcpsock->connect(ep);
@@ -172,6 +189,9 @@ public:
         m_tls_ctx(tls_ctx),
         m_cookie_jar(cookie_jar) {
     }
+    ~ClientImpl() {
+        if (m_resolver_ownership) delete m_resolver;
+    }
     PooledDialer& get_dialer() {
         thread_local PooledDialer dialer;
         dialer.init(m_tls_ctx, m_bind_ips);
@@ -215,13 +235,13 @@ public:
         auto &req = op->req;
         ISocketStream* s;
         if (op->enable_proxy && !op->proxy_url.empty())
-            s = get_dialer().dial(op->proxy_url, tmo.timeout());
+            s = get_dialer().dial(op->proxy_url, m_resolver, tmo.timeout());
         else if (op->enable_proxy && !m_proxy_url.empty())
-            s = get_dialer().dial(m_proxy_url, tmo.timeout());
+            s = get_dialer().dial(m_proxy_url, m_resolver, tmo.timeout());
         else if (!op->uds_path.empty())
             s = get_dialer().dial(op->uds_path, tmo.timeout());
         else
-            s = get_dialer().dial(req, tmo.timeout());
+            s = get_dialer().dial(req, m_resolver, tmo.timeout());
         if (!s) {
             if (errno == ECONNREFUSED || errno == ENOENT) {
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
@@ -340,7 +360,7 @@ public:
     }
 
     ISocketStream* native_connect(std::string_view host, uint16_t port, bool secure, uint64_t timeout) override {
-        return get_dialer().dial(host, port, secure, timeout);
+        return get_dialer().dial(host, port, secure, m_resolver, timeout);
     }
 
     CommonHeaders<>* common_headers() override {

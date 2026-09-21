@@ -302,8 +302,24 @@ Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
 - `TLSContext`: cert, key, passphrase, verify mode, ALPN protos.
 - `new_tls_stream(ctx, base, role)`: wrap a socket with TLS.
 - `new_tls_client/server(ctx, base)`: factory wrappers.
-- `tls_stream_set_hostname()`: SNI.
+- `tls_stream_set_hostname()`: send SNI, and check the peer certificate against the hostname.
+- `tls_stream_set_sni()`: send SNI only, without checking the name.
 - `tls_stream_get_alpn_selected()`: negotiated ALPN protocol.
+
+#### Verifying a server's identity
+
+Two independent checks are needed, and each is useless alone:
+
+1. `set_verify_mode(VerifyMode::PEER)` — plus `set_ca_cert()` or `set_ca_file()`, which turn `PEER` on as a side effect — checks that the certificate chains up to a trusted CA. This proves the certificate is genuine, not who it belongs to.
+2. `tls_stream_set_hostname()` checks that the certificate was actually issued for the host you asked for. Without it, any certificate signed by a trusted CA is accepted, including one issued to an attacker for a domain they control.
+
+`tls_stream_set_hostname()` must be called before the first read or write, as the client handshake is deferred until then. Hostnames are matched against `dNSName` SANs and IP literals against `iPAddress` SANs, falling back to the subject common name when the certificate carries no SAN. A wildcard matches a single label, in the leftmost position only, and may not cover part of a label (`www*.example.com` is rejected).
+
+The name check is performed by OpenSSL while it verifies the chain, so it needs `VerifyMode::PEER`. Requesting a hostname on a context left at `VerifyMode::NONE` returns `-1` with `EINVAL` rather than passing silently. To send SNI without a name check, use `tls_stream_set_sni()` or `TLSContext::set_verify_hostname(false)` — the analogue of curl's `CURLOPT_SSL_VERIFYHOST`.
+
+`net::http::Client` does all of this for you: it verifies against the host in the URL, and pools TLS connections per hostname so that a connection verified for one host is never reused for another. A `TLSContext` you supply yourself starts at `VerifyMode::NONE`, which disables both checks; call `set_verify_mode(VerifyMode::PEER)` or load a CA to turn them on.
+
+The RPC `StubPool` connects by endpoint and has no hostname in its API, so it cannot perform this check; TLS there authenticates the channel, not the peer's identity.
 
 ### SASL
 

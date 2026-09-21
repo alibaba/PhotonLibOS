@@ -480,6 +480,10 @@ namespace rpc {
             LOG_DEBUG("connected to ", ep);
             sock->timeout(-1ULL);
             if (tls) {
+                // The pool is keyed by endpoint and carries no hostname, so
+                // there is no name to check the peer certificate against; TLS
+                // here protects the channel, not the peer's identity. Verifying
+                // the peer requires a hostname, which this API does not accept.
                 sock = net::new_tls_stream(tls_ctx, sock, net::SecurityRole::Client, true);
             }
             return sock;
