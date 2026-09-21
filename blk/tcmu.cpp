@@ -84,12 +84,6 @@ namespace blk {
 // at 48 -- the static_asserts below pin every offset. glibc's struct iovec
 // {void*,size_t} is layout-identical to the kernel's, so req's iov array feeds
 // IFile::preadv/pwritev directly.
-//
-// Every literal the static_asserts below pin is cross-checked against the
-// kernel's own header by blk/test/tcmu-abi-check.c (a C translation unit, which
-// CAN include it). Move a number here, move it there -- that file fails the
-// build if they disagree. The SCSI constants in the next section are NOT covered
-// by it; the reason is recorded there.
 // ----------------------------------------------------------------------------
 
 static constexpr uint16_t TCMU_MAILBOX_VERSION = 2;
@@ -247,9 +241,8 @@ static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 64;
 
 // tcmu genetlink ABI names (uapi <linux/target_core_user.h>; stable literals,
 // hand-defined because that header is C++-hostile -- same reason as the ring).
-// The enumerators are cross-checked by blk/test/tcmu-abi-check.c; the family and
-// multicast-group names are not in that header at all, and are resolved against
-// the real kernel on every suite run instead.
+// The family and multicast-group names are not in that header at all, and are
+// resolved against the real kernel on every suite run instead.
 static const char TCMU_GENL_FAMILY[] = "TCM-USER";
 static const char TCMU_MCGRP_CONFIG[] = "config";
 enum : uint8_t {

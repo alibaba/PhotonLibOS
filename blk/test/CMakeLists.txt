@@ -11,10 +11,7 @@ photon_add_test(test-blk-nbd test-nbd.cpp ${BLK_TEST_SRC})
 if (LINUX)
     # tcmu is LINUX-gated (blk_tcmu), so its symbols are absent from photon_shared
     # on other platforms; only build the test where the transport exists.
-    # tcmu-abi-check.c is C on purpose -- <linux/target_core_user.h> is not
-    # includable from C++ -- and contributes no test case: it fails the BUILD if
-    # the kernel moves any literal tcmu.cpp hand-defines.
-    photon_add_test(test-blk-tcmu test-tcmu.cpp tcmu-abi-check.c ${BLK_TEST_SRC})
+    photon_add_test(test-blk-tcmu test-tcmu.cpp ${BLK_TEST_SRC})
     photon_add_test(test-blk-vduse test-vduse.cpp ${BLK_TEST_SRC})
     photon_add_test(test-blk-vhost-user test-vhost-user.cpp ${BLK_TEST_SRC})
     if (PHOTON_ENABLE_URING)
