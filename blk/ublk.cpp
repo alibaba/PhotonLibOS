@@ -262,9 +262,12 @@ static_assert(sizeof(ublk_params) == 152, "ublk_params size");
 // ----------------------------------------------------------------------------
 
 struct UblkCtrl {
-    int fd = -1;
+    // Field order is padding-driven, do not tidy it: `fd` used to lead, so `ce` had
+    // to skip the 4 bytes behind it and `stopping` then left a 7-byte tail.
+    // 24 bytes vs 32.
     photon::CascadingEventEngine* ce = nullptr;
     photon::thread* pump_th = nullptr;
+    int fd = -1;
     bool stopping = false;
 
     ~UblkCtrl() { fini(); }
@@ -365,13 +368,14 @@ static constexpr uint32_t MAX_QUEUES = 64;
 static constexpr uint32_t IO_BUF_BYTES = 512 << 10;   // per-tag data buffer
 
 struct UblkDeviceImpl : IBlkDevice {
+    // Field order is padding-driven, do not tidy it: the align-8 members lead, the
+    // 24 bytes of int-sized ones then tile exactly three whole 8-byte blocks, and
+    // the six 1-byte members close the run ahead of the two char buffers.
+    // `own_backend`/`started`/`created` used to sit right after `backend`, and that
+    // 3-byte run left 18 bytes of holes ahead of `lock_fd`, `features`, `spin_us`
+    // and `queues`. 616 bytes vs 640 (8 of it is UblkCtrl's own shrink).
     UblkController::Config cfg;
     fs::IFile* backend = nullptr;
-    bool own_backend = false;
-    bool started = false;
-    bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
-
-    int lock_fd = -1;
 
     int64_t dev_id = -1;          // the kernel device id; -1 = not registered
 
@@ -388,32 +392,34 @@ struct UblkDeviceImpl : IBlkDevice {
             snprintf(node_path, sizeof(node_path), "/dev/ublkb%llu", (unsigned long long)id);
     }
     std::atomic<uint64_t> dev_sectors{0};
-    uint8_t  sector_shift = 9;
     uint64_t features = 0;
-    bool     read_only = false;
-    PollPolicy poll = PollPolicy::SLEEP;
     uint64_t spin_us = 0;
-    uint32_t max_io_buf_bytes = IO_BUF_BYTES;
-    uint16_t queue_depth = DEFAULT_QUEUE_DEPTH;
-    uint16_t nr_queues = 1;
     uint64_t negotiated_flags = 0;   // dev_info.flags as accepted by the driver
 
     UblkCtrl ctrl;
+
+    int lock_fd = -1;
     int cdev_fd = -1;
     uint32_t op_fetch = UBLK_U_IO_FETCH_REQ;    // encoded vs legacy, from the
     uint32_t op_commit = UBLK_U_IO_COMMIT_AND_FETCH_REQ;   // negotiated flags
+    uint32_t max_io_buf_bytes = IO_BUF_BYTES;
+    uint16_t queue_depth = DEFAULT_QUEUE_DEPTH;
+    uint16_t nr_queues = 1;
 
     struct Queue {
+        // Field order is padding-driven, do not tidy it: `qid` used to sit between
+        // `d` and `ce`, forcing `ce` to skip to offset 16, and `in_flight` between
+        // `bufs` and `pump_th` forced a second 4-byte skip. 112 bytes vs 128.
         UblkDeviceImpl* d = nullptr;
-        uint16_t qid = 0;
         photon::CascadingEventEngine* ce = nullptr;   // the queue's io_uring ring
         const ublksrv_io_desc* cmd_buf = nullptr;   // mmap'd off /dev/ublkcN, PROT_READ
         size_t cmd_buf_sz = 0;
         char* bufs = nullptr;    // queue_depth * max_io_buf_bytes, page-aligned
-        std::atomic<uint32_t> in_flight{0};   // serving (fetched-not-yet-committed)
         photon::thread* pump_th = nullptr;
         std::vector<photon::thread*> tag_ths;   // one coroutine per tag
         photon::semaphore fetches_issued;   // queue_setup waits for the initial fetches
+        std::atomic<uint32_t> in_flight{0};   // serving (fetched-not-yet-committed)
+        uint16_t qid = 0;
         bool stopping = false;       // tags: exit at the next checkpoint
         bool pump_stop = false;      // pump: exit -- set only AFTER all tags are joined
 
@@ -434,6 +440,13 @@ struct UblkDeviceImpl : IBlkDevice {
     };
     std::vector<Worker*> workers;
     photon::semaphore ready;         // workers signal once each after init
+
+    bool own_backend = false;
+    bool started = false;
+    bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
+    bool read_only = false;
+    PollPolicy poll = PollPolicy::SLEEP;
+    uint8_t sector_shift = 9;
 
     // The scope directory this device claims its tombstone in, handed over by the
     // UblkController that built it. COPIED, not borrowed: a device may outlive its

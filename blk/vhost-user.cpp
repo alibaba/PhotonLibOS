@@ -274,35 +274,26 @@ struct MemTable {
 };
 
 struct VhostUserDeviceImpl : IBlkDevice {
+    // Field order is padding-driven, do not tidy it: the 8-aligned members come
+    // first, with the alignas(8) `dev_config` LAST among them because its 60
+    // bytes are not a multiple of 8 and would leave a hole after it; then the
+    // 4-, then the 1-byte ones. The previous order scattered 23 bytes across five
+    // holes (before listen_fd, offer_features, capacity_sectors, mem and
+    // accept_th). 584 bytes vs 608.
     VhostUserController::Config cfg;
-    fs::IFile* backend = nullptr;
-    bool own_backend = false;
-    bool started = false;
-
-    // Log this as `(const char*)sock_path`, never as VALUE(sock_path): VALUE on a
-    // char array deduces a reference to the whole array and alog then emits all
-    // SUN_PATH_MAX bytes, path followed by NUL padding (measured).
-    char sock_path[SUN_PATH_MAX] = {};   // bounded by sockaddr_un::sun_path
-    int listen_fd = -1;            // SERVER role
-    int conn_fd = -1;              // the live frontend connection
-    int backend_req_fd = -1;       // SET_BACKEND_REQ_FD channel (config events)
-
-    uint64_t offer_features = 0;
-    uint64_t negotiated = 0;
-    uint64_t proto_features = 0;   // the frontend's accepted protocol subset
-    uint8_t  sector_shift = 9;
-    bool     read_only = false;
-    uint64_t capacity_sectors = 0;
-    alignas(8) uint8_t dev_config[sizeof(virtio_blk_config)] = {};
-
-    MemTable mem;
-    bool stopping = false;
-    photon::thread* accept_th = nullptr;   // SERVER: the accept loop
-    photon::thread* msg_th = nullptr;      // the negotiation/message loop
 
     // the shared serving engine (ring state, dispatch, completion, drain);
     // P1 drives a single virtqueue
     VirtQueueServer vq;
+
+    fs::IFile* backend = nullptr;
+    uint64_t offer_features = 0;
+    uint64_t negotiated = 0;
+    uint64_t proto_features = 0;   // the frontend's accepted protocol subset
+    uint64_t capacity_sectors = 0;
+    photon::thread* accept_th = nullptr;   // SERVER: the accept loop
+    photon::thread* msg_th = nullptr;      // the negotiation/message loop
+    MemTable mem;
     struct VqVhu {
         uint64_t desc_qva = 0, used_qva = 0, avail_qva = 0;   // retranslate from
                                                              // these on a new
@@ -312,6 +303,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
         int callfd = -1;           // completion eventfd (owned here)
         photon::thread* th = nullptr;
     } vqx;
+    alignas(8) uint8_t dev_config[sizeof(virtio_blk_config)] = {};
+
+    int listen_fd = -1;            // SERVER role
+    int conn_fd = -1;              // the live frontend connection
+    int backend_req_fd = -1;       // SET_BACKEND_REQ_FD channel (config events)
+
+    // Log this as `(const char*)sock_path`, never as VALUE(sock_path): VALUE on a
+    // char array deduces a reference to the whole array and alog then emits all
+    // SUN_PATH_MAX bytes, path followed by NUL padding (measured).
+    char sock_path[SUN_PATH_MAX] = {};   // bounded by sockaddr_un::sun_path
+
+    bool own_backend = false;
+    bool started = false;
+    uint8_t  sector_shift = 9;
+    bool     read_only = false;
+    bool stopping = false;
 
     explicit VhostUserDeviceImpl(const VhostUserController::Config& c) : cfg(c) {
         sector_shift = cfg.info.sector_size_shift;

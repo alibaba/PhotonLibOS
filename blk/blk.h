@@ -258,14 +258,19 @@ struct BlkConfig {
 class TcmuHBA : public Object {
 public:
     struct Config : BlkConfig {
+        // Field order is padding-driven, do not tidy it: BlkConfig's content ends
+        // at offset 82 (its sizeof is 88), and the ABI lets a derived class place
+        // members in the base's tail padding -- so both bools land at 82/83 and
+        // the string then needs no hole before it. 120 bytes; putting the string
+        // first costs 8 more.
         bool loopback_lun = true;     // also create a tcm_loop LUN so a local /dev/sdX appears
-        std::string loopback_wwn;     // tcm_loop WWN; empty = derived deterministically from
-                                      // info.identity (must stay stable across restarts)
         bool adopt_external = false;  // serve a backstore an EXTERNAL operator created
                                       // (targetcli/rtslib/overlaybd): its dev_config is theirs
                                       // rather than "photon/<identity>", so that check is
                                       // skipped. info.identity must still name the backstore
                                       // and info.size still match its dev_size.
+        std::string loopback_wwn;     // tcm_loop WWN; empty = derived deterministically from
+                                      // info.identity (must stay stable across restarts)
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}
     };
@@ -278,13 +283,10 @@ public:
     };
 
     struct Event {
-        EventKind kind;
-        char bs_name[256];          // backstore name under the HBA = the serving identity
-        char dev_config[256];       // the operator's dev_config string; map it to a backend
-        char uio_node[64];          // "/dev/uioN" of an ADDED device, "" otherwise
-        char attr[16];              // RECONFIG only: the attribute changed, "dev_size" or
-                                    // "dev_config" (the latter carries its new value in
-                                    // dev_config and cannot be answered by resize())
+        // Field order is padding-driven, do not tidy it: the four char arrays are
+        // 592 bytes of align-1, so putting them last lets the wide members pack
+        // from offset 0 with no hole. 608 bytes; leading with `kind` costs 8 more
+        // (the arrays end at 593 and `size` then has to skip to 600).
         uint64_t size = 0;          // ADDED: the backstore's dev_size, so a BlkDevInfo can
                                     // be built from the event alone. RECONFIG of dev_size:
                                     // the size the operator asked for -- the kernel commits
@@ -292,9 +294,16 @@ public:
                                     // old one
         uint32_t dev_id = 0;        // the kernel's dev_index -- the SAME in all three events
                                     // and the key a *_DONE reply is matched by; 0 = none owed
+        EventKind kind;
         bool synthesized = false;   // from the startup configfs scan rather than a live
                                     // event: that configure already completed, so no reply
                                     // is owed (and dev_id is 0)
+        char bs_name[256];          // backstore name under the HBA = the serving identity
+        char dev_config[256];       // the operator's dev_config string; map it to a backend
+        char uio_node[64];          // "/dev/uioN" of an ADDED device, "" otherwise
+        char attr[16];              // RECONFIG only: the attribute changed, "dev_size" or
+                                    // "dev_config" (the latter carries its new value in
+                                    // dev_config and cannot be answered by resize())
     };
 
     // The next event, blocking up to tmo (default: forever). 0 = *out filled,
@@ -424,11 +433,11 @@ TcmuHBA* new_tcmu_hba(const char* subtype = "user_0",
 class UblkController : public Object {
 public:
     struct Config : BlkConfig {
-        uint64_t flags = 0;           // raw UBLK_F_* bits (see linux/ublk_cmd.h);
-                                      // UBLK_F_USER_RECOVERY | UBLK_F_USER_RECOVERY_REISSUE
-                                      // recommended for daemon-restart resilience;
-                                      // UBLK_F_UPDATE_SIZE required for resize()
-
+        // Field order is padding-driven, and here it is deliberately ASCENDING by
+        // width -- do not "fix" it. BlkConfig's content ends at offset 82, which is
+        // not a multiple of 8, so a leading uint64_t would have to skip to 88 and
+        // waste 6 bytes; leading with the uint32_t wastes only 2 (82 -> 84) and the
+        // uint64_t then lands at 96 with nothing after it. 104 bytes vs 112.
         uint32_t dev_id = UINT32_MAX; // ublk has no uuid; the dev_id IS the recovery identity;
                                       // UINT32_MAX = kernel auto-assign; otherwise requests
                                       // /dev/ublkb<N> (0 is a valid requestable id)
@@ -441,6 +450,11 @@ public:
         uint32_t stop_timeout_ms = 2000;    // shutdown(): how long to retry TRY_STOP_DEV against
                                             // transient openers (partition scan, udev probes)
                                             // before reporting genuine EBUSY; 10ms granularity
+
+        uint64_t flags = 0;           // raw UBLK_F_* bits (see linux/ublk_cmd.h);
+                                      // UBLK_F_USER_RECOVERY | UBLK_F_USER_RECOVERY_REISSUE
+                                      // recommended for daemon-restart resilience;
+                                      // UBLK_F_UPDATE_SIZE required for resize()
 
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}
         Config() = default;
@@ -487,11 +501,15 @@ public:
     };
 
     struct Config : BlkConfig {
-        std::string sock_path;
+        // Field order is padding-driven, do not tidy it: `sock_role` fits in
+        // BlkConfig's tail padding at offset 82 and `sock_mode` at 84, so the
+        // string starts at 88 with no hole. 120 bytes; leading with the string
+        // costs 8 more.
         SockRole sock_role = SockRole::SERVER;
         uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 = 0666 &
                                       // ~umask; widen the group/other bits when the guest process
                                       // (qemu) runs as a different user
+        std::string sock_path;
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}
     };
@@ -551,13 +569,18 @@ VduseController* new_vduse_controller(const char* lock_dir);
 // export leaves no persistent kernel-side state (see the note below) -- so its
 // config stays at namespace scope.
 struct NbdConfig : BlkConfig {
-    // UDS, TCP and loopback device can be enabled simultaneously
-    std::string unix_path;        // serve on this unix socket if non-empty
-    net::EndPoint tcp_endpoint;   // serve on this TCP endpoint if enabled by the following flag
+    // UDS, TCP and loopback device can be enabled simultaneously.
+    // Field order is padding-driven, do not tidy it. BlkConfig's content ends at
+    // offset 82, and net::EndPoint is 18 bytes of align-1 -- so the two bools go
+    // at 82/83 and the endpoint fills 84..102, which lets the 8-aligned string
+    // start at 104 instead of leaving a hole. 136 bytes; putting the string
+    // before the endpoint costs 8 more.
     bool enable_tcp = false;
     bool loopback_device = true;  // whether attach the export to a free local /dev/nbdN kernel
                                   // device, and this library plays the role of nbd-client;
                                   // read back the node via get_device_node().
+    net::EndPoint tcp_endpoint;   // serve on this TCP endpoint if enable_tcp is set
+    std::string unix_path;        // serve on this unix socket if non-empty
     NbdConfig() = default;
     explicit NbdConfig(const BlkDevInfo& i) : BlkConfig(i) {}
 };

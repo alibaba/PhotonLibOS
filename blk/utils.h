@@ -445,9 +445,12 @@ public:
         Delegate<void> tick;
     } hooks;
 
+    // Field order is padding-driven, do not tidy it: every 8-byte member comes
+    // first, then the 4-, 2- and 1-byte ones. `read_only` used to sit between
+    // `capacity` and `serial`, and since `serial` needs 8-alignment that left a
+    // 7-byte hole at offset 81. 152 bytes vs 160.
     fs::IFile* backend = nullptr;
     uint64_t capacity = 0;        // backend size in bytes; bounds every LBA
-    bool read_only = false;
     const char* serial = "";      // answers VIRTIO_BLK_T_GET_ID
     const char* tag = "";         // device identity; prefixes the logs
 
@@ -470,8 +473,10 @@ public:
                                   // cap relies on. vduse creates its own with
                                   // EFD_NONBLOCK; vhost-user receives the peer's
                                   // over SCM_RIGHTS and hardens it on arrival.
+    std::atomic<uint32_t> in_flight{0};
     uint16_t last_avail = 0;
     uint16_t used_idx = 0;
+    bool read_only = false;
     // VIRTIO_RING_F_EVENT_IDX state, per queue. Set by the transport from the
     // NEGOTIATED features, never from what we offered: if the peer masks bit 29
     // off we must fall back to the flags semantics, and deciding from our own
@@ -482,7 +487,6 @@ public:
     // should_notify(): it makes the first completion notify unconditionally,
     // which is what a resumed ring needs and §2.7.7.1 explicitly permits.
     bool notify_valid = false;
-    std::atomic<uint32_t> in_flight{0};
 
     bool run = false;             // the loop coroutine may live
     bool stopping = false;        // teardown: stop dispatching and leave the

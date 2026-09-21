@@ -514,18 +514,21 @@ struct TcmuUio {
 // ----------------------------------------------------------------------------
 
 struct TcmuServer {
+    // Field order is padding-driven, do not tidy it: the 8-wide members and the
+    // 256-byte identity pack from offset 0, and every narrower one (vcpu_state,
+    // the four uint32_t counters, the bools, PollPolicy) trails them.
+    // Interleaving them left 29 bytes of holes -- block_size after identity,
+    // pending_capacity_ua and read_only before features, poll before spin_us,
+    // stopping before pump_th, dedicated before vcpu_thread, the two stop flags
+    // before the handshake semaphores. 496 bytes vs 520.
     TcmuUio uio;
     fs::IFile* backend = nullptr;
     char identity[256] = {};    // capped well below this at registration time
-    uint32_t block_size = 512;
     std::atomic<uint64_t> num_lbas{0};   // atomics: resize() can run on another
     std::atomic<uint64_t> dev_size{0};   // thread while the pump serves (dedicated vcpu)
-    std::atomic<bool> pending_capacity_ua{false};   // one-shot UNIT ATTENTION after resize
-    bool read_only = false;
     uint64_t features = 0;      // FEATURE_* the device advertises (gates LBPME/VPD 0xB0)
-    PollPolicy poll = PollPolicy::SLEEP;
     uint64_t spin_us = 0;
-
+    photon::thread* pump_th = nullptr;
     // One slot per in-flight command. photon::semaphore has no reset, but every
     // serve_stop() drains it back to full (each handle_cmd returns its token in
     // a DEFER, and stop waits for in_flight == 0), so it is seeded once at the
@@ -533,27 +536,30 @@ struct TcmuServer {
     // signal on completion (single vcpu: the in_flight-- and the signal execute
     // without an intervening schedule point).
     photon::semaphore slots;
+    // the serving vcpu's two handshakes, one signal each per start(): it
+    // publishes vcpu_state then signals started, and signals exited as its very
+    // last act -- after vcpu_fini, from a plain std thread, which
+    // semaphore::signal explicitly supports
+    photon::semaphore vcpu_started{0}, vcpu_exited{0};
+    // dedicated-vcpu serving (BlkConfig::vcpus >= 2): the pump and command
+    // coroutines run on an owned vcpu (a std::thread) instead of the caller's.
+    // tcmu has exactly one ring per device, so a single serving vcpu is all
+    // that can help.
+    bool dedicated = false;
+    std::atomic<bool> stop_req{false}, stop_flush{false};
+    std::thread vcpu_thread;
+    std::atomic<int> vcpu_state{0};              // 0 starting, 1 serving, <0 = -errno
+    uint32_t block_size = 512;
     uint32_t in_flight = 0;
     // stack for the per-command coroutines: the device resolves
     // BlkConfig::stack_size into this before start(), which keeps it out of the
     // start()/serve_start()/vcpu_main() parameter chain
     uint32_t stack_size = DEFAULT_REQ_STACK;
     uint32_t pending_wakeups = 0;   // doorbell coalescing counter
+    std::atomic<bool> pending_capacity_ua{false};   // one-shot UNIT ATTENTION after resize
+    bool read_only = false;
+    PollPolicy poll = PollPolicy::SLEEP;
     bool stopping = false;
-    photon::thread* pump_th = nullptr;
-    // dedicated-vcpu serving (BlkConfig::vcpus >= 2): the pump and command
-    // coroutines run on an owned vcpu (a std::thread) instead of the caller's.
-    // tcmu has exactly one ring per device, so a single serving vcpu is all
-    // that can help.
-    bool dedicated = false;
-    std::thread vcpu_thread;
-    std::atomic<int> vcpu_state{0};              // 0 starting, 1 serving, <0 = -errno
-    std::atomic<bool> stop_req{false}, stop_flush{false};
-    // the serving vcpu's two handshakes, one signal each per start(): it
-    // publishes vcpu_state then signals started, and signals exited as its very
-    // last act -- after vcpu_fini, from a plain std thread, which
-    // semaphore::signal explicitly supports
-    photon::semaphore vcpu_started{0}, vcpu_exited{0};
 
     struct CmdArg { TcmuServer* srv; tcmu_cmd_entry* ent; };
     static void* trampoline(void* a) {
@@ -1315,10 +1321,14 @@ struct TcmuDeviceImpl : IBlkDevice {
     static constexpr size_t WWN_BUF = 256;   // tcm_loop WWN buffer, see validate()
     static constexpr size_t BS_NAME_BUF = TcmuRegistry::BS_NAME_BUF;   // backstore name, see validate()
 
+    // Field order is padding-driven, do not tidy it: the four bools used to sit
+    // among the wide members, where each stranded the align-4 or align-8 member
+    // behind it -- own_backend/started cost 2 bytes before lock_fd, created and
+    // lun_attached 5 before `server`, on top of 7 bytes of tail -- so they now
+    // trail the odd-sized bs_name instead. 1936 bytes vs 1944 (and vs the 1968
+    // measured before TcmuServer shrank to 496).
     TcmuHBA::Config cfg;
     fs::IFile* backend = nullptr;
-    bool own_backend = false;
-    bool started = false;
 
     int lock_fd = -1;
     // The scope directory this device claims its tombstone in, handed over by the
@@ -1334,8 +1344,6 @@ struct TcmuDeviceImpl : IBlkDevice {
     char wwn[WWN_BUF] = {};      // tcm_loop WWN
     char lb_path[320] = {};      // configfs loopback/<wwn> dir (≤ 291 chars)
     char node_path[64] = {};     // "/dev/sdX" of the tcm_loop LUN; "" if none
-    bool created = false;       // we created the registration (vs attached an existing one)
-    bool lun_attached = false;
 
     TcmuServer server;
 
@@ -1345,6 +1353,10 @@ struct TcmuDeviceImpl : IBlkDevice {
     TcmuLink link;
     bool kern_reply = false;    // our HBA engaged the reply protocol, so a backstore
                                 // we create must NOT opt out of the kernel's wait
+    bool own_backend = false;
+    bool started = false;
+    bool created = false;       // we created the registration (vs attached an existing one)
+    bool lun_attached = false;
 
     // The backstore name is derived here exactly as start() would, so the device
     // joins the HBA's registry under its FINAL name from birth: the key never
@@ -1978,6 +1990,11 @@ struct TcmuDeviceImpl : IBlkDevice {
 // ----------------------------------------------------------------------------
 
 struct TcmuHBAImpl : TcmuHBA {
+    // Field order is padding-driven, do not tidy it: the wide members pack from
+    // the vptr and the odd-sized ones (fam, state, the five bools, q_lock) trail
+    // them, so that q_lock's single byte is all `q` has to skip. Interleaved as
+    // before, fam stranded 2 bytes, stop_req 3 before the handshake semaphores,
+    // draining 6 before reg and q_lock 7 before q. 616 bytes vs 632.
     // log as (const char*), never VALUE(): alog would emit all 32 bytes
     char subtype[32] = "user_0";  // the configfs HBA dir under target/core/
     char hbanum[32] = {};         // subtype after "user_"
@@ -1985,24 +2002,23 @@ struct TcmuHBAImpl : TcmuHBA {
     // the devices new_device() builds claim their tombstones in it. Empty =
     // /run/photon-blk. new_tcmu_hba() bounds it, so the copy below cannot truncate.
     char lock_dir[SCOPE_DIR_BUF] = {};
+    std::thread vcpu_thread;
+    // the listener vcpu's two handshakes, one signal each: it publishes state
+    // then signals started, and signals exited as its very last act -- after
+    // vcpu_fini, from a plain std thread, which semaphore::signal supports
+    photon::semaphore started_sem{0}, exited_sem{0};
+    // the device registry and the ADDED hand-over table; both vcpus touch it
+    TcmuRegistry reg;
+    int fam = 0;                // TCM-USER family id, valid process-wide
+    std::atomic<int> state{0};                  // 0 starting, 1 running, <0 = -errno
     bool netlink_reply = false;   // engage the kernel's module-global reply protocol
     bool defensive_reply = false; // answer our own HBA's events even though we did
                                   // NOT engage that protocol -- the only protection
                                   // on v4.13/v4.14, which lack the per-backstore
                                   // nl_reply_supported opt-out we otherwise use
-    int fam = 0;                // TCM-USER family id, valid process-wide
-    std::thread vcpu_thread;
-    std::atomic<int> state{0};                  // 0 starting, 1 running, <0 = -errno
     std::atomic<bool> stop_req{false};
-    // the listener vcpu's two handshakes, one signal each: it publishes state
-    // then signals started, and signals exited as its very last act -- after
-    // vcpu_fini, from a plain std thread, which semaphore::signal supports
-    photon::semaphore started_sem{0}, exited_sem{0};
     bool reply_mode = false;                    // we raised the kernel global; restore it
     bool draining = false;                      // listener loop exited: refuse, do not queue
-
-    // the device registry and the ADDED hand-over table; both vcpus touch it
-    TcmuRegistry reg;
 
     // events queued for wait_for_event(): produced on this vcpu, consumed on the
     // caller's (photon::semaphore signals across vcpus, one signal per event)

@@ -257,23 +257,32 @@ static uint32_t errno_to_nbd(int e) {
 }
 
 struct NbdDeviceImpl : NbdDevice {
+    // Field order is padding-driven, do not tidy it: own_backend/trans_flags and
+    // started/stopping used to sit amid the align-8 members, stranding holes at
+    // 153 and 230 plus more around nbd_fd/doit_thread; gathering every sub-8
+    // member after doit_thread packs them into the tail. Data sums to 378, so
+    // vptr(8) + 378 = 386 rounds to 392 -- 384 is unreachable behind the vptr.
+    // 392 bytes vs 400.
     struct Conn {
+        // Field order is padding-driven, do not tidy it: wlock used to sit
+        // between negotiate and in_flight, stranding the 7-byte hole at 9..15;
+        // in_flight now packs into it and wlock takes the tail. The positional
+        // inits below ({s, negotiate}) pin the first two members regardless.
+        // 48 bytes vs 56.
         net::ISocketStream* s;  // owned: accepted streams pass ownership to
                                 // the caller, the loopback one is heap-made;
                                 // serve_conn's teardown deletes it
         bool negotiate;         // false only for the loopback socketpair end,
                                 // which starts already in transmission phase
+        uint32_t in_flight = 0;
         photon::mutex wlock;    // serializes the reply writes of concurrent
                                 // execute coroutines (header + data must not
                                 // interleave); in_flight needs no lock: every
                                 // access is yield-free on the single vcpu
-        uint32_t in_flight = 0;
     };
 
     NbdConfig cfg;
     fs::IFile* backend = nullptr;
-    bool own_backend = false;
-    uint16_t trans_flags = 0;
     photon::semaphore depth;    // in-flight limit; photon::semaphore has no
                                 // reset, and every detach() drains it back to
                                 // full, so it is signaled once at the first
@@ -296,23 +305,23 @@ struct NbdDeviceImpl : NbdDevice {
         return std::min<uint64_t>(len ? len : 1, MAX_INFLIGHT_BYTES);
     }
 
-    uint32_t stack_size = DEFAULT_REQ_STACK;   // resolved from cfg at start()
-
-    bool started = false;
-    bool stopping = false;
     net::ISocketServer* uds_server = nullptr;  // unix_path mode
     net::ISocketServer* tcp_server = nullptr;  // enable_tcp mode
     photon::thread* uds_accept_th = nullptr;
     photon::thread* tcp_accept_th = nullptr;
+    std::thread doit_thread;
     std::vector<Conn*> conns;
     std::vector<photon::thread*> workers;  // joined only at cleanup; churned
                                            // workers accumulate until then
-
+    bool own_backend = false;
+    bool started = false;
+    bool stopping = false;
+    bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
+    uint16_t trans_flags = 0;
     // log as (const char*), never VALUE(): alog would emit all 64 bytes
     char loopback_node[64] = {};   // "/dev/nbdN" while attached; empty = detached
     int nbd_fd = -1;
-    std::thread doit_thread;
-    bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
+    uint32_t stack_size = DEFAULT_REQ_STACK;   // resolved from cfg at start()
     uint32_t nbd_index = 0;         // netlink-allocated device index
 
     explicit NbdDeviceImpl(const NbdConfig& c) : cfg(c) {}

@@ -320,45 +320,52 @@ static void vduse_lock_name(const char* name, char* buf, size_t n) {
 }
 
 struct VduseDeviceImpl : IBlkDevice {
+    // Field order is padding-driven, do not tidy it: all 8-byte members first,
+    // then the three fds, then the 1-byte flags and the two char[256] buffers.
+    // Previously `name` stranded 1 byte before `ctrl_fd`, `sector_shift` +
+    // `read_only` 6 before `capacity_sectors`, `dev_status` 7 before `iotlb`,
+    // `stopping` + `vq_needs_refresh` 6 before `vq`, `vqx` 6 before `vq_th`, and
+    // the odd end of `lock_dir` left 7 of tail. 888 bytes vs 920 -- the content
+    // sum (887) rounded up to align 8, so no ordering can do better.
     BlkConfig cfg;
     fs::IFile* backend = nullptr;
-    bool own_backend = false;
-    bool started = false;
-    bool created = false;       // we CREATE_DEV'd it (vs adopted an orphan)
-
-    // log as (const char*), never VALUE(): alog would emit all VDUSE_NAME_MAX bytes
-    char name[VDUSE_NAME_MAX] = {};
-    int ctrl_fd = -1;
-    int dev_fd = -1;
-    int lock_fd = -1;           // the tombstone claim inside the controller's lock_dir
 
     uint64_t offer_features = 0;       // what CREATE_DEV advertised
     uint64_t negotiated = 0;           // DEV_GET_FEATURES after FEATURES_OK
-    uint8_t  sector_shift = 9;
-    bool     read_only = false;
     uint64_t capacity_sectors = 0;     // 512-byte units, the virtio constant
-    uint8_t  dev_status = 0;           // last SET_STATUS
 
     Iotlb iotlb;
     photon::thread* msg_th = nullptr;
-    bool stopping = false;
-    bool vq_needs_refresh = false;   // DRIVER_OK seen; the vq loop resolves
 
     // the shared serving engine (ring state, dispatch, completion, drain);
     // P1 drives a single virtqueue
     VirtQueueServer vq;
+    photon::thread* vq_th = nullptr;
+
+    int ctrl_fd = -1;
+    int dev_fd = -1;
+    int lock_fd = -1;           // the tombstone claim inside the controller's lock_dir
+
+    bool own_backend = false;
+    bool started = false;
+    bool created = false;       // we CREATE_DEV'd it (vs adopted an orphan)
+    // A kernel registration exists under `name` and shutdown() may destroy it.
+    // `name` itself is permanent identity now (fixed at construction), so it can
+    // no longer double as this marker the way it used to.
+    bool registered = false;
+    bool stopping = false;
+    uint8_t  sector_shift = 9;
+    bool     read_only = false;
+    uint8_t  dev_status = 0;           // last SET_STATUS
+    bool vq_needs_refresh = false;   // DRIVER_OK seen; the vq loop resolves
     struct VqVduse {
         bool ready = false;           // the ring is resolved and dispatch may run
         bool reset_pending = false;   // a status-0 reset: zero the ring counters
                                       // at the next refresh (vs adoption resume)
     } vqx;
-    photon::thread* vq_th = nullptr;
 
-    // A kernel registration exists under `name` and shutdown() may destroy it.
-    // `name` itself is permanent identity now (fixed at construction), so it can
-    // no longer double as this marker the way it used to.
-    bool registered = false;
-
+    // log as (const char*), never VALUE(): alog would emit all VDUSE_NAME_MAX bytes
+    char name[VDUSE_NAME_MAX] = {};
     // The scope directory this device claims its tombstone in, handed over by the
     // VduseController that built it. COPIED, not borrowed: a device may outlive
     // its controller.
