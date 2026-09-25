@@ -108,13 +108,16 @@ int fini();
 uint64_t get_event_engine();
 
 /**
- * @brief The io-engine mask this vcpu's init() was given and initialized.
+ * @brief The io-engine mask this vcpu's init() was given.
  *
  * Unlike get_event_engine() this is the request mask, because io engines are
  * independent add-ons rather than a fallback chain, and there is no per-vcpu
- * engine object to ask. Per-vcpu state does exist underneath it: libaio's context
- * is thread-local, so a vcpu whose mask lacks INIT_IO_LIBAIO cannot serve a
- * libaio-backed file at all.
+ * engine object to ask. It reports what was asked for, not what was built: a bit
+ * whose engine is compiled out of this build (INIT_IO_LIBCURL without ENABLE_CURL,
+ * say) stays set. init() aborts if one that IS compiled in fails to initialize, so
+ * by the time it returns the distinction only matters for the compiled-out bits.
+ * Per-vcpu state does exist underneath it: libaio's context is thread-local, so a
+ * vcpu whose mask lacks INIT_IO_LIBAIO cannot serve a libaio-backed file at all.
  *
  * Must be called on a vcpu, as above.
  */

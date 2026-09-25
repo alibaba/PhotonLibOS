@@ -199,8 +199,8 @@ int fini() {
 
 uint64_t get_event_engine() {
     // master_event_engine is never null: vcpu_t's constructor points it at an
-    // embedded NullEventEngine (thread.cpp:609-612), whose engine_flag() is the
-    // default NONE. So the only precondition is the one get_vcpu() already has.
+    // embedded NullEventEngine (thread.cpp:609-612), which explicitly answers
+    // INIT_EVENT_NONE. So the only precondition is the one get_vcpu() already has.
     return get_vcpu()->master_event_engine->engine_flag();
 }
 
