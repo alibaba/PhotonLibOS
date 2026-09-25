@@ -225,6 +225,49 @@ struct vduse_dev_response {
     };
 };
 
+// The five structs below are the ones the multiqueue path reads an `index` out of.
+// They are hand-copied from <linux/vduse.h> because that header is too new for
+// many build hosts (the same reason ublk.cpp copies <linux/ublk_cmd.h>), and a
+// copied struct proves nothing on its own: a transposed field or a wrong width
+// compiles clean and only shows up as a mis-directed ioctl once a queue index
+// other than 0 is in play. These pin what we actually read. They check that WE
+// copied correctly -- deliberately NOT a cross-check against the kernel header,
+// which would need a C translation unit (vduse.h is C++-clean, unlike tcmu's).
+static_assert(sizeof(vduse_dev_config) == 336, "vduse_dev_config size");
+static_assert(offsetof(vduse_dev_config, features) == 264, "vduse_dev_config features offset");
+static_assert(offsetof(vduse_dev_config, vq_num) == 272, "vduse_dev_config vq_num offset");
+static_assert(offsetof(vduse_dev_config, config_size) == 332, "vduse_dev_config config_size offset");
+
+static_assert(sizeof(vduse_vq_config) == 32, "vduse_vq_config size");
+static_assert(offsetof(vduse_vq_config, index) == 0, "vduse_vq_config index offset");
+static_assert(offsetof(vduse_vq_config, max_size) == 4, "vduse_vq_config max_size offset");
+
+static_assert(sizeof(vduse_vq_info) == 48, "vduse_vq_info size");
+static_assert(offsetof(vduse_vq_info, index) == 0, "vduse_vq_info index offset");
+static_assert(offsetof(vduse_vq_info, num) == 4, "vduse_vq_info num offset");
+static_assert(offsetof(vduse_vq_info, desc_addr) == 8, "vduse_vq_info desc_addr offset");
+static_assert(offsetof(vduse_vq_info, driver_addr) == 16, "vduse_vq_info driver_addr offset");
+static_assert(offsetof(vduse_vq_info, device_addr) == 24, "vduse_vq_info device_addr offset");
+static_assert(offsetof(vduse_vq_info, ready) == 40, "vduse_vq_info ready offset");
+
+static_assert(sizeof(vduse_vq_eventfd) == 8, "vduse_vq_eventfd size");
+static_assert(offsetof(vduse_vq_eventfd, index) == 0, "vduse_vq_eventfd index offset");
+static_assert(offsetof(vduse_vq_eventfd, fd) == 4, "vduse_vq_eventfd fd offset");
+
+static_assert(sizeof(vduse_vq_state) == 12, "vduse_vq_state size");
+static_assert(offsetof(vduse_vq_state, index) == 0, "vduse_vq_state index offset");
+
+// read today, asserted here so the multiqueue change is not the first to depend
+// on an unpinned layout
+static_assert(sizeof(vduse_iotlb_entry) == 32, "vduse_iotlb_entry size");
+static_assert(offsetof(vduse_iotlb_entry, offset) == 0, "vduse_iotlb_entry offset field");
+static_assert(offsetof(vduse_iotlb_entry, start) == 8, "vduse_iotlb_entry start offset");
+static_assert(offsetof(vduse_iotlb_entry, last) == 16, "vduse_iotlb_entry last offset");
+static_assert(offsetof(vduse_iotlb_entry, perm) == 24, "vduse_iotlb_entry perm offset");
+static_assert(sizeof(vduse_iova_range) == 16, "vduse_iova_range size");
+static_assert(sizeof(vduse_dev_status) == 1, "vduse_dev_status size");
+static_assert(sizeof(vduse_config_data) == 8, "vduse_config_data size");
+
 // ----------------------------------------------------------------------------
 
 static constexpr uint32_t DEFAULT_VQ_SIZE = 256;

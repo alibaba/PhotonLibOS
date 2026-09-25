@@ -214,6 +214,21 @@ struct __attribute__((packed)) vhost_user_msg {
 static_assert(offsetof(vhost_user_msg, payload) == 12,
               "vhost-user payload must follow the 12-byte header with no padding");
 
+// The multiqueue path reads these two `index` fields off the wire for the first
+// time; both were already parsed and then dropped. They keep their own natural
+// layout even nested inside the packed vhost_user_msg (packing the outer struct
+// does not repack a named nested type), which is what makes the in-place scalar
+// reads above legal.
+static_assert(sizeof(vhost_vring_state) == 8, "vhost_vring_state size");
+static_assert(offsetof(vhost_vring_state, index) == 0, "vhost_vring_state index offset");
+static_assert(offsetof(vhost_vring_state, num) == 4, "vhost_vring_state num offset");
+static_assert(sizeof(vhost_vring_addr) == 40, "vhost_vring_addr size");
+static_assert(offsetof(vhost_vring_addr, index) == 0, "vhost_vring_addr index offset");
+static_assert(offsetof(vhost_vring_addr, flags) == 4, "vhost_vring_addr flags offset");
+static_assert(offsetof(vhost_vring_addr, desc_user_addr) == 8, "vhost_vring_addr desc offset");
+static_assert(offsetof(vhost_vring_addr, used_user_addr) == 16, "vhost_vring_addr used offset");
+static_assert(offsetof(vhost_vring_addr, avail_user_addr) == 24, "vhost_vring_addr avail offset");
+
 #define VHU_MSG_MAX_FDS 8
 
 // ----------------------------------------------------------------------------
