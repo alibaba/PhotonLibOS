@@ -528,12 +528,18 @@ struct TcmuServer {
     uint64_t features = 0;      // FEATURE_* the device advertises (gates LBPME/VPD 0xB0)
     uint64_t spin_us = 0;
     photon::thread* pump_th = nullptr;
-    // The vcpu pump() actually runs on. Recorded from INSIDE pump (its first
-    // statement), because serve_start creates the coroutine before migrating it
-    // into the pool: the landing vcpu is observable only after the pump got
-    // there, and with pool == nullptr it is simply the caller's own vcpu.
-    // run_serve_stop migrates the teardown back to it -- see that function.
-    photon::vcpu_base* home = nullptr;   // the vcpu pump() actually runs on
+    // The vcpu pump() actually runs on, recorded from INSIDE pump because
+    // serve_start creates the coroutine before migrating it into the pool: the
+    // landing vcpu is observable only once the pump got there. With pool ==
+    // nullptr it is simply the caller's own vcpu.
+    photon::vcpu_base* home = nullptr;
+    // serve_start waits on this before returning, so `home` is never read on one
+    // vcpu while pump writes it on another. The wait is what makes run_serve_stop's
+    // !home branch mean "there is no pump" rather than "the pump has not been
+    // scheduled yet" -- and reading a stale null there picks in-place teardown,
+    // which is the very race the migration exists to avoid. Self-resetting: every
+    // signal is matched by exactly one wait, so a restart finds it at zero.
+    photon::semaphore home_set;
     // One slot per in-flight command. photon::semaphore has no reset, but every
     // serve_stop() drains it back to full (each handle_cmd returns its token in
     // a DEFER, and serve_stop waits for in_flight == 0), so it is seeded once at the
@@ -590,6 +596,7 @@ struct TcmuServer {
         // queue, and it costs nothing when pool is null.
         migrate_to_pool(pool, pump_th);
         photon::thread_enable_join(pump_th);
+        home_set.wait(1);   // home is set before this returns -- see its declaration
         return 0;
     }
 
@@ -635,6 +642,11 @@ struct TcmuServer {
     // moved, which is what ublk's run_queue_teardown does for the same reason.
     void run_serve_stop(bool flush) {
         if (!home || home == photon::get_vcpu()) {
+            // !home means there is no pump: serve_start never ran, or a previous
+            // serve_stop already joined it and cleared home. serve_start does not
+            // return until pump has recorded home, so this is never the "pump
+            // exists but has not been scheduled yet" window -- which is the one
+            // where stopping in place would race the coroutines pump dispatched.
             serve_stop(flush);   // no pool, or this IS the serving vcpu
             return;
         }
@@ -658,6 +670,7 @@ struct TcmuServer {
     // dispatch every pending ring command to a fresh coroutine
     void pump() {
         home = photon::get_vcpu();   // first statement: runs on the landing vcpu
+        home_set.signal(1);          // publishes it to serve_start's wait
         uint64_t last_work = photon::now;
         while (!stopping) {
             if (uio.has_work()) {
