@@ -868,6 +868,59 @@ TEST_F(TcmuTest, dedicated_vcpu_io) {
     EXPECT_NE(0, ::access(BS_PATH, F_OK));
 }
 
+// Stop under load: detach(wait_pending=true) flushes a pool-serving device
+// while a writer is still hammering the node. This is the only way the flush's
+// drain_ring meets live handle_cmd completions: both write the mailbox tail,
+// and the teardown polls the non-atomic in_flight their DEFERs decrement --
+// single-vcpu invariants that hold only when the teardown runs on the vcpu
+// that served the ring. The restart must then harvest the writes that parked
+// while the ring was down, with the writer seeing zero errors.
+TEST_F(TcmuTest, pool_serving_stop_under_load) {
+    // engines QUERIED, not spelled out, and declared before cfg/dev so the pool
+    // outlives the device -- see the dedicated_vcpu_io comment (CONTRACT 1)
+    photon::WorkPool pool(1, (int)photon::get_event_engine(),
+                             (int)photon::get_io_engine());
+    auto cfg = make_cfg(/*loopback=*/true);
+    cfg.pool = &pool;
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty()) << "no /dev/sdX appeared (pool serving)";
+
+    test::BackgroundWriter bw;
+    ASSERT_EQ(0, bw.start(sd, {IO_OFF, IMG_SIZE, IO_LEN, /*direct=*/true,
+                               /*advance=*/true, /*verify=*/false}));
+    DEFER(bw.stop());
+    // it must be demonstrably in flight: an idle writer would make the detach
+    // below drain an empty ring -- the dedicated_vcpu_io case, green and hollow
+    ASSERT_TRUE(bw.wait_iters(5));
+
+    // the teardown under test, with the writer still issuing. Anything not
+    // dispatched before the ring closes parks in the kernel, so the restart
+    // must come BEFORE bw.stop(): stopping first would just sit on the parked
+    // write's cmd_time_out and report it as a writer error
+    ASSERT_EQ(0, dev->detach(/*wait_pending=*/true));
+    ASSERT_EQ(0, dev->start(file));
+    sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+    uint64_t resumed = bw.iters();
+    ASSERT_TRUE(bw.wait_iters(resumed + 3));   // the parked writes came back
+
+    bw.stop();
+    EXPECT_EQ(0, bw.errors());
+
+    std::vector<char> wbuf(IO_LEN);
+    for (size_t i = 0; i < IO_LEN; i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true));
+
+    EXPECT_EQ(0, dev->shutdown());
+}
+
 // High-concurrency stress on the LUN's /dev/sdX: many O_DIRECT threads (so
 // every IO goes through the ring, not the page cache), mixed block sizes, and
 // self-describing blocks (harness.h) that a reader can validate without

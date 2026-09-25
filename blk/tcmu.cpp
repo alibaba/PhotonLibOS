@@ -528,6 +528,12 @@ struct TcmuServer {
     uint64_t features = 0;      // FEATURE_* the device advertises (gates LBPME/VPD 0xB0)
     uint64_t spin_us = 0;
     photon::thread* pump_th = nullptr;
+    // The vcpu pump() actually runs on. Recorded from INSIDE pump (its first
+    // statement), because serve_start creates the coroutine before migrating it
+    // into the pool: the landing vcpu is observable only after the pump got
+    // there, and with pool == nullptr it is simply the caller's own vcpu.
+    // run_serve_stop migrates the teardown back to it -- see that function.
+    photon::vcpu_base* home = nullptr;   // the vcpu pump() actually runs on
     // One slot per in-flight command. photon::semaphore has no reset, but every
     // serve_stop() drains it back to full (each handle_cmd returns its token in
     // a DEFER, and serve_stop waits for in_flight == 0), so it is seeded once at the
@@ -555,7 +561,7 @@ struct TcmuServer {
         return nullptr;
     }
 
-    ~TcmuServer() { serve_stop(false); }
+    ~TcmuServer() { run_serve_stop(false); }
 
     // `stack` lands in the stack_size member rather than being threaded through
     // serve_start() as well; it has no default so that every caller has to say
@@ -581,8 +587,7 @@ struct TcmuServer {
         if (!pump_th)
             LOG_ERRNO_RETURN(0, -1, "tcmu: cannot create the pump coroutine");
         // tcmu has one ring per device, so this is one migration, not one per
-        // queue -- it replaces the dedicated std::thread that BlkConfig::vcpus
-        // used to start, and unlike that thread it costs nothing when pool is null.
+        // queue, and it costs nothing when pool is null.
         migrate_to_pool(pool, pump_th);
         photon::thread_enable_join(pump_th);
         return 0;
@@ -603,11 +608,56 @@ struct TcmuServer {
         while (in_flight)
             photon::thread_usleep(1000);
         uio.close();
+        // the pump is gone, so nothing owns the ring any more: a repeated
+        // run_serve_stop degrades to an in-place call, and the next serve_start
+        // gets a fresh home recorded by its own pump
+        home = nullptr;
+    }
+
+    struct StopArg {
+        TcmuServer* s;
+        bool flush;
+        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+    };
+
+    static void* serve_stop_thunk(void* a) {
+        auto* sa = (StopArg*)a;
+        sa->s->serve_stop(sa->flush);
+        sa->done.signal(1);
+        return nullptr;
+    }
+
+    // serve_stop must run where pump ran: its flush path calls drain_ring, which
+    // writes the mailbox tail that the still-running handle_cmd coroutines also
+    // write, and it polls the non-atomic in_flight their DEFERs decrement. Both
+    // are single-vcpu invariants. thread_migrate only takes a READY thread, so
+    // the caller cannot move itself -- hand the work to a coroutine that can be
+    // moved, which is what ublk's run_queue_teardown does for the same reason.
+    void run_serve_stop(bool flush) {
+        if (!home || home == photon::get_vcpu()) {
+            serve_stop(flush);   // no pool, or this IS the serving vcpu
+            return;
+        }
+        StopArg sa{this, flush};
+        auto th = photon::thread_create(&TcmuServer::serve_stop_thunk, &sa);
+        if (!th) {
+            // Cannot honour the vcpu rule, but leaving the ring up is worse: the
+            // caller is tearing the device down and uio is about to be closed.
+            LOG_ERROR("tcmu: cannot create the teardown coroutine, stopping in place");
+            serve_stop(flush);
+            return;
+        }
+        photon::thread_enable_join(th);
+        if (photon::thread_migrate(th, home) < 0)
+            LOG_WARN("tcmu: cannot move the teardown back to the serving vcpu, ", ERRNO());
+        sa.done.wait(1);
+        photon::thread_join((photon::join_handle*)th);
     }
 
     // the serving loop: wait for the uio interrupt per the poll policy, then
     // dispatch every pending ring command to a fresh coroutine
     void pump() {
+        home = photon::get_vcpu();   // first statement: runs on the landing vcpu
         uint64_t last_work = photon::now;
         while (!stopping) {
             if (uio.has_work()) {
@@ -1481,7 +1531,7 @@ struct TcmuDeviceImpl : IBlkDevice {
             return 0;
         // stop serving but KEEP the configfs registration + LUN so a later
         // start() (possibly another process) takes over and harvests the ring
-        server.serve_stop(/*flush=*/wait_pending);
+        server.run_serve_stop(/*flush=*/wait_pending);
         release_lock();
         started = false;
         link.serving = false;
@@ -1509,7 +1559,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         // remove a backstore a LUN still references).
         if (uint32_t id = link.removed_id.exchange(0)) {
             if (started) {
-                server.serve_stop(/*flush=*/true);
+                server.run_serve_stop(/*flush=*/true);
                 release_lock();
                 started = false;
             }
@@ -1543,7 +1593,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         // commands the initiator may send, then stop the ring
         if (lun_attached)
             detach_lun();
-        server.serve_stop(/*flush=*/true);
+        server.run_serve_stop(/*flush=*/true);
         release_lock();
         started = false;
         // BEFORE destroy_backstore(): our own disable/rmdir fires a REMOVED that
@@ -1893,7 +1943,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (lun_attached)
             detach_lun();
         if (server.pump_th || server.uio.fd >= 0)
-            server.serve_stop(true);
+            server.run_serve_stop(true);
         if (created)
             destroy_backstore();
         release_lock();
