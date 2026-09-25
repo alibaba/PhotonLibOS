@@ -45,6 +45,7 @@ limitations under the License.
 
 #include <photon/common/callback.h>     // Delegate / TempDelegate
 #include <photon/fs/filesystem.h>       // fs::IFile
+#include <photon/thread/workerpool.h>   // WorkPool
 
 #include <sys/types.h>
 
@@ -126,6 +127,14 @@ int devlock_free(const char* dir, const char* name);
 // it) but is rejected outright for vhost-user's socket dir, which has no default.
 constexpr size_t SCOPE_DIR_BUF = 256;
 
+// Upper bound on the queues one device will drive. Shared by ublk (which always
+// had it), vhost-user and vduse (which became multiqueue): all three publish a
+// queue count the peer then indexes with, so the bound has to be the same one --
+// a per-transport limit would make GET_QUEUE_NUM, virtio_blk_config::num_queues
+// and VDUSE_CREATE_DEV's vq_num disagree across transports for the same
+// BlkConfig::queues.
+static constexpr uint32_t MAX_QUEUES = 64;
+
 // 0 if `dir` is usable, -1 with errno=ENAMETOOLONG after logging if not.
 int validate_scope_dir(const char* dir);
 
@@ -151,6 +160,55 @@ int unix_listener_live(const char* path);
 // the worker's errno is propagated back so the caller's LOG_ERRNO_RETURN reports
 // it. TempDelegate is safe here: the worker is joined before returning.
 int run_off_vcpu(TempDelegate<int> fn);
+
+// ----------------------------------------------------------------------------
+// handing serving coroutines to a caller-supplied photon::WorkPool
+// ----------------------------------------------------------------------------
+
+// BlkConfig::pool is the single source of serving vcpus. Both helpers below are
+// no-ops on a null pool and on a pool with no vcpus, which is what keeps "serve on
+// the caller's own vcpu" -- the behaviour of every caller before this existed --
+// the default rather than a special case.
+
+// Move a freshly created, still-READY serving coroutine into `pool`. Call it
+// IMMEDIATELY after thread_create with no yield in between: photon::thread_migrate
+// rejects a thread that is not READY or that already left this vcpu (EINVAL, and
+// it logs, so the mistake is not silent).
+//
+// The out-of-range index is deliberate. It makes WorkPool fall through to its own
+// `vcpu_index++ % size` cursor, which is pool-wide and shared by every caller --
+// so several devices on one pool interleave across the vcpus instead of each
+// starting at vcpu 0 and colliding there.
+//
+// Failure to migrate is a WARNING, not an error: a serving coroutine works
+// correctly on any vcpu, so a failed migration only loses fan-out.
+void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
+
+// Refuse a pool whose vcpus cannot host blk's serving coroutines, BEFORE anything
+// is parked on them. Returns 0, or -1 with errno=EINVAL after logging the
+// offending vcpu index.
+//
+// Two requirements, derived from the CALLER's own vcpu rather than declared in the
+// config -- a serving coroutine does to the backend exactly what the caller's
+// coroutines would do, so "at least as capable as the vcpu you are calling from"
+// is the whole requirement and the caller never has to state it:
+//
+//   event engine: must be installed, and must be the SAME one. "Installed" is not
+//     optional -- WorkPool's constructor defaults to ev_engine = 0 and
+//     INIT_EVENT_NONE is 0, so the natural `WorkPool pool(4);` yields vcpus whose
+//     master engine is the NullEventEngine, whose wait_for_fd returns -1 WITHOUT
+//     setting errno. Every fd wait then fails at once and the serving loop
+//     hot-spins while logging on each pass. "Same" is not optional either --
+//     a backend file opened with the iouring engine casts the CURRENT vcpu's
+//     master engine to iouringEngine*, so landing on an epoll vcpu is a
+//     wrong-type cast. Note that asking init() for several event engines does not
+//     install several: it keeps the first that works, which is why this compares
+//     get_event_engine() (the winner) and not the request mask.
+//   io engines: the pool vcpu's mask must COVER the caller's. libaio's context is
+//     thread-local and is only set by libaio_wrapper_init(), which init() calls
+//     only when the flag is present; on a vcpu without it the context is null and
+//     the first libaio-backed IO dereferences null.
+int check_pool_engines(photon::WorkPool* pool);
 
 // ===========================================================================
 // 2. minimal generic-netlink client (Linux; see utils.cpp)
@@ -247,6 +305,12 @@ struct GenlSock {
 #define VIRTIO_BLK_F_RO       5
 #define VIRTIO_BLK_F_BLK_SIZE 6
 #define VIRTIO_BLK_F_FLUSH    9
+
+// virtio 1.2 §5.2.3. Offering it commits us to publishing a truthful
+// virtio_blk_config::num_queues (§5.2.4: that field is only valid when this bit is
+// set), and to honoring the queue index the peer puts in every vring message --
+// which is exactly what the two virtio transports did not do before.
+#define VIRTIO_BLK_F_MQ      12
 
 #define VIRTIO_BLK_T_IN     0
 #define VIRTIO_BLK_T_OUT    1

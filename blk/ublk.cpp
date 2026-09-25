@@ -364,7 +364,6 @@ struct UblkCtrl {
 // ----------------------------------------------------------------------------
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
-static constexpr uint32_t MAX_QUEUES = 64;
 static constexpr uint32_t IO_BUF_BYTES = 512 << 10;   // per-tag data buffer
 
 struct UblkDeviceImpl : IBlkDevice {

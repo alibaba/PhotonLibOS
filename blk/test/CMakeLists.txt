@@ -7,6 +7,11 @@ set(BLK_TEST_SRC harness.cpp)
 # tests -- a bare "test-blk" read like a sibling of the per-transport suites.
 photon_add_test(test-blk-harness test-harness.cpp ${BLK_TEST_SRC})
 
+# the WorkPool primitives every transport hands its serving coroutines to; no
+# transport and no kernel involvement, so it runs on all platforms like the
+# harness checks do
+photon_add_test(test-blk-pool test-blk-pool.cpp ${BLK_TEST_SRC})
+
 photon_add_test(test-blk-nbd test-nbd.cpp ${BLK_TEST_SRC})
 if (LINUX)
     # tcmu is LINUX-gated (blk_tcmu), so its symbols are absent from photon_shared

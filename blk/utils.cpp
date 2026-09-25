@@ -24,6 +24,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>      // DEFER
 #include <photon/io/fd-events.h>        // wait_for_fd_readable / writable
+#include <photon/photon.h>              // INIT_EVENT_NONE / get_event_engine / get_io_engine
 #include <photon/thread/thread.h>       // Timeout
 
 #include <fcntl.h>
@@ -190,6 +191,72 @@ int run_off_vcpu(TempDelegate<int> fn) {
     t.join();
     errno = err;
     return ret;
+}
+
+void migrate_to_pool(photon::WorkPool* pool, photon::thread* th) {
+    if (!pool || !th || pool->get_vcpu_num() == 0)
+        return;   // the empty-pool test is load-bearing, not tidiness: WorkPool
+                  // resolves an out-of-range index with `vcpu_index++ % size`,
+                  // and size == 0 there is a SIGFPE
+                  // resolves an out-of-range index with `vcpu_index++ % size`,
+                  // and size == 0 there is a SIGFPE
+    if (pool->thread_migrate(th, -1ULL) < 0)
+        LOG_WARN("failed to migrate a serving coroutine into the work pool, ", ERRNO());
+}
+
+namespace {
+
+struct PoolProbe {
+    photon::semaphore done;
+    uint64_t ev = 0;
+    uint64_t io = 0;
+};
+
+// Runs ON the pool vcpu, so what it reports is that vcpu's: get_event_engine()
+// asks the master engine this vcpu is currently pointing at, and get_io_engine()
+// reads this vcpu's thread_local record. Signals before returning; nothing of the
+// caller's is touched after the signal, so the caller may unwind as soon as it
+// wakes.
+void* pool_probe_thunk(void* a) {
+    auto* p = (PoolProbe*)a;
+    p->ev = photon::get_event_engine();
+    p->io = photon::get_io_engine();
+    p->done.signal(1);
+    return nullptr;
+}
+
+}   // namespace
+
+int check_pool_engines(photon::WorkPool* pool) {
+    if (!pool)
+        return 0;
+    int n = pool->get_vcpu_num();
+    if (n <= 0)
+        return 0;
+    const uint64_t need_ev = photon::get_event_engine();
+    const uint64_t need_io = photon::get_io_engine();
+    for (int i = 0; i < n; i++) {
+        PoolProbe p;
+        auto th = photon::thread_create(&pool_probe_thunk, &p);
+        if (!th)
+            LOG_ERROR_RETURN(ENOMEM, -1, "cannot create the work pool probe coroutine");
+        // An in-range index, so this targets vcpus[i] instead of drawing the
+        // round-robin cursor: every vcpu is checked exactly once, which a cursor
+        // draw cannot promise.
+        if (pool->thread_migrate(th, (size_t)i) < 0)
+            LOG_ERRNO_RETURN(0, -1, "cannot reach work pool vcpu `", i);
+        p.done.wait(1);
+        if (p.ev == INIT_EVENT_NONE || p.ev != need_ev)
+            LOG_ERROR_RETURN(EINVAL, -1,
+                "work pool vcpu ` cannot host blk serving coroutines: event engine `, need ` "
+                "(a pool built with the default ev_engine has none, and every fd wait on it "
+                "fails at once)", i, HEX(p.ev), HEX(need_ev));
+        if ((p.io & need_io) != need_io)
+            LOG_ERROR_RETURN(EINVAL, -1,
+                "work pool vcpu ` is missing io engines: has `, need ` (a backend opened on a "
+                "vcpu with them cannot be served from one without)", i, HEX(p.io), HEX(need_io));
+    }
+    return 0;
 }
 
 #ifdef __linux__
