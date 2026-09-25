@@ -97,7 +97,6 @@ limitations under the License.
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -408,13 +407,21 @@ struct UblkDeviceImpl : IBlkDevice {
     struct Queue {
         // Field order is padding-driven, do not tidy it: `qid` used to sit between
         // `d` and `ce`, forcing `ce` to skip to offset 16, and `in_flight` between
-        // `bufs` and `pump_th` forced a second 4-byte skip. 112 bytes vs 128.
+        // `bufs` and `pump_th` forced a second 4-byte skip. 120 bytes vs 136.
         UblkDeviceImpl* d = nullptr;
         photon::CascadingEventEngine* ce = nullptr;   // the queue's io_uring ring
         const ublksrv_io_desc* cmd_buf = nullptr;   // mmap'd off /dev/ublkcN, PROT_READ
         size_t cmd_buf_sz = 0;
         char* bufs = nullptr;    // queue_depth * max_io_buf_bytes, page-aligned
         photon::thread* pump_th = nullptr;
+        // The vcpu this queue's ring, pump and tag coroutines all live on. Recorded
+        // from INSIDE the owner coroutine, because that is the only place it can be
+        // observed: WorkPool does not expose its vcpus, so which one the cursor
+        // picked is knowable only after landing there. queue_teardown migrates back
+        // to it -- the io_uring submission queue is not thread-safe, so the pump and
+        // every submitter must share a vcpu, and that includes teardown, which
+        // interrupts and joins the tags.
+        photon::vcpu_base* home = nullptr;
         std::vector<photon::thread*> tag_ths;   // one coroutine per tag
         photon::semaphore fetches_issued;   // queue_setup waits for the initial fetches
         std::atomic<uint32_t> in_flight{0};   // serving (fetched-not-yet-committed)
@@ -425,20 +432,6 @@ struct UblkDeviceImpl : IBlkDevice {
         char* buf(uint16_t tag) { return bufs + (size_t)tag * d->max_io_buf_bytes; }
     };
     std::vector<Queue*> queues;
-
-    // dedicated serving vcpus (BlkConfig::vcpus >= 2): min(queues, vcpus-1)
-    // std::threads, queues assigned round-robin; each queue's whole ring
-    // traffic issues from its owner's OS thread (the per-tag daemon rule)
-    struct Worker {
-        std::vector<uint32_t> qids;
-        std::thread th;
-        std::atomic<int> state{0};   // 0 starting, 1 serving, <0 = -errno
-        std::atomic<bool> stop_req{false};
-        bool flush = false;
-        photon::semaphore exited{0};   // signaled as the worker's last act
-    };
-    std::vector<Worker*> workers;
-    photon::semaphore ready;         // workers signal once each after init
 
     bool own_backend = false;
     bool started = false;
@@ -723,50 +716,99 @@ struct UblkDeviceImpl : IBlkDevice {
 
     // ----- serving orchestration -----
 
+    // One owner coroutine per queue, migrated once. The migration has to happen
+    // BEFORE the queue's ring exists rather than after: queue_setup creates the
+    // io_uring ring, the pump and every tag coroutine, and all of them must share
+    // one vcpu because the submission queue is not thread-safe. Migrating the pump
+    // afterwards would leave the tags submitting on the caller's vcpu while the
+    // pump reaps on another; migrating the tags too is impossible, because by the
+    // time queue_setup returns they are all parked in wait_for_events and
+    // thread_migrate only accepts a READY thread. So the coroutine that RUNS
+    // queue_setup is the thing that gets migrated, and everything it creates
+    // inherits its vcpu -- no pinning needed, and the pool's cursor is drawn
+    // exactly once per queue.
+    struct OwnerArg {
+        UblkDeviceImpl* d;
+        Queue* q;
+        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+        int err = 0;
+    };
+
+    static void* queue_owner(void* a) {
+        auto* oa = (OwnerArg*)a;
+        oa->q->home = photon::get_vcpu();
+        if (oa->d->queue_setup(oa->q) < 0)
+            oa->err = errno ? errno : EIO;
+        oa->done.signal(1);
+        return nullptr;   // the owner leaves; the pump it created stays
+    }
+
     int start_serving() {
-        uint32_t nvcpu = cfg.vcpus >= 2 ? std::min<uint32_t>(nr_queues, cfg.vcpus - 1) : 0;
-        if (!nvcpu) {   // serve on the caller's vcpu
-            for (auto q : queues)
-                if (queue_setup(q) < 0)
-                    return -1;
-            return 0;
+        if (check_pool_engines(cfg.pool) < 0)
+            return -1;
+        for (auto q : queues) {
+            OwnerArg oa{this, q};
+            auto th = photon::thread_create(&UblkDeviceImpl::queue_owner, &oa);
+            if (!th)
+                LOG_ERROR_RETURN(ENOMEM, -1, "ublk: cannot create the owner coroutine of queue `, dev `",
+                                 q->qid, dev_id);
+            photon::thread_enable_join(th);
+            migrate_to_pool(cfg.pool, th);
+            oa.done.wait(1);
+            photon::thread_join((photon::join_handle*)th);
+            if (oa.err)
+                LOG_ERROR_RETURN(oa.err, -1, "ublk queue ` setup failed, dev `", q->qid, dev_id);
         }
-        for (uint32_t i = 0; i < nvcpu; i++) {
-            auto w = new Worker;
-            for (uint32_t qid = 0; qid < nr_queues; qid++)
-                if (qid % nvcpu == i)
-                    w->qids.push_back(qid);
-            w->th = std::thread(&UblkDeviceImpl::worker_main, this, w);
-            workers.push_back(w);
-        }
-        ready.wait(nvcpu);
-        for (auto w : workers)
-            if (w->state.load() < 0)
-                LOG_ERROR_RETURN(EIO, -1, "a ublk serving vcpu failed to start");
         return 0;
     }
 
-    void stop_serving(bool flush) {
-        if (workers.empty()) {
-            // caller's-vcpu mode: drain, then tear down in place (pumps and
-            // handlers make progress while this coroutine sleeps)
-            if (flush)
-                while (in_flight_all())
-                    photon::thread_usleep(1000);
-            for (auto q : queues)
-                queue_teardown(q);
-        } else {
-            for (auto w : workers) {
-                w->flush = flush;
-                w->stop_req = true;
-            }
-            for (auto w : workers) {
-                w->exited.wait(1);   // already exited: the join is instant
-                w->th.join();
-                delete w;
-            }
-            workers.clear();
+    // queue_teardown interrupts and joins the tag coroutines and stops the pump,
+    // all of which live on q->home, so it has to run there too -- the same
+    // submission-queue rule that put them on one vcpu in the first place. The
+    // migration target is photon's own API rather than WorkPool's: WorkPool cannot
+    // name a vcpu it already handed out, but the owner coroutine recorded it.
+    struct TeardownArg {
+        UblkDeviceImpl* d;
+        Queue* q;
+        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+    };
+
+    static void* queue_teardown_thunk(void* a) {
+        auto* ta = (TeardownArg*)a;
+        ta->d->queue_teardown(ta->q);
+        ta->done.signal(1);
+        return nullptr;
+    }
+
+    void run_queue_teardown(Queue* q) {
+        if (!q->home || q->home == photon::get_vcpu()) {
+            queue_teardown(q);   // no pool, or the cursor put it right here
+            return;
         }
+        TeardownArg ta{this, q};
+        auto th = photon::thread_create(&UblkDeviceImpl::queue_teardown_thunk, &ta);
+        if (!th) {
+            // Cannot honour the vcpu rule, but leaving the queue up is worse: the
+            // device is being torn down and the ring is about to be unmapped.
+            LOG_ERROR("ublk: cannot create the teardown coroutine of queue `, tearing down in place",
+                      q->qid);
+            queue_teardown(q);
+            return;
+        }
+        photon::thread_enable_join(th);
+        if (photon::thread_migrate(th, q->home) < 0) {
+            LOG_WARN("ublk: cannot move the teardown of queue ` back to its vcpu, ", q->qid, ERRNO());
+        }
+        ta.done.wait(1);
+        photon::thread_join((photon::join_handle*)th);
+    }
+
+    void stop_serving(bool flush) {
+        if (flush)
+            while (in_flight_all())
+                photon::thread_usleep(1000);
+        for (auto q : queues)
+            run_queue_teardown(q);
         for (auto q : queues)
             delete q;
         queues.clear();
@@ -774,43 +816,6 @@ struct UblkDeviceImpl : IBlkDevice {
             ::close(cdev_fd);   // releases UB_STATE_OPEN; the device quiesces
             cdev_fd = -1;
         }
-    }
-
-    void worker_main(Worker* w) {
-        DEFER(w->exited.signal(1));   // registered first, so it runs last
-        photon::vcpu_init();
-        DEFER(photon::vcpu_fini());
-        if (photon::fd_events_init(photon::INIT_EVENT_EPOLL) < 0) {
-            int e = errno ? errno : EIO;
-            LOG_ERROR("failed to init a ublk serving vcpu's event engine");
-            w->state = -e;
-            ready.signal(1);
-            return;
-        }
-        DEFER(photon::fd_events_fini());
-        int err = 0;
-        for (uint32_t qid : w->qids) {
-            if (queue_setup(queues[qid]) < 0) {
-                err = errno ? errno : EIO;
-                break;
-            }
-        }
-        if (err) {
-            for (uint32_t qid : w->qids)
-                queue_teardown(queues[qid]);
-            w->state = -err;
-            ready.signal(1);
-            return;
-        }
-        w->state = 1;
-        ready.signal(1);
-        while (!w->stop_req.load(std::memory_order_acquire))
-            photon::thread_usleep(1000);
-        if (w->flush)   // orderly handover: pumps keep serving until quiet
-            while (in_flight_all())
-                photon::thread_usleep(1000);
-        for (uint32_t qid : w->qids)
-            queue_teardown(queues[qid]);
     }
 
     // ----- flock (the orphan-detection liveness key, shared namespace) -----
@@ -1224,7 +1229,7 @@ struct UblkDeviceImpl : IBlkDevice {
     }
 
     void rollback() {
-        stop_serving(false);   // no-op-safe on empty queues/workers
+        stop_serving(false);   // no-op-safe on empty queues
         if (created && dev_id >= 0)
             ctrl.del_dev((uint32_t)dev_id);   // best effort
         created = false;

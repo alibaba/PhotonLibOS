@@ -23,6 +23,7 @@ limitations under the License.
 #include <photon/common/timeout.h>   // Timeout for TcmuHBA::wait_for_event
 #include <photon/fs/filesystem.h>
 #include <photon/net/socket.h>    // net::IPAddr / net::EndPoint for NbdConfig / NbdDevice
+#include <photon/thread/workerpool.h>   // photon::WorkPool for BlkConfig::pool
 
 namespace photon {
 namespace blk {
@@ -132,8 +133,38 @@ enum class PollPolicy : uint8_t {
 struct BlkConfig {
     BlkDevInfo info;
 
+    // Where the serving coroutines run. The single source of serving vcpus:
+    // nullptr (the default) serves on the caller's own vcpu, which is what every
+    // caller did before this existed. Non-null moves each serving coroutine into
+    // the pool with photon::thread_migrate, spread by the pool's own round-robin
+    // cursor; when there are more queues than pool vcpus, queues share one.
+    //
+    // A pool with no vcpus in it is treated as nullptr.
+    //
+    // CONTRACT 1 -- lifetime. detach()/shutdown() every device that uses this pool
+    // BEFORE destroying it. Breaking that does not crash: the serving coroutines
+    // are asleep on their fds, so they are on the sleepq, and photon::fini()'s
+    // wait_all() then never returns -- a hang with no log line. There is no
+    // reference accounting to catch it, because WorkPool does not expose its
+    // vcpus, so nothing can be counted against them.
+    //
+    // CONTRACT 2 -- engines. Every vcpu in the pool must be able to host the
+    // serving coroutines, which start() verifies by comparing each pool vcpu's
+    // engines against the caller's own. In practice: construct the pool with the
+    // same event engine you initialized your own vcpu with, and with an io_engine
+    // that covers your backend. `WorkPool pool(n);` is NOT that -- its defaults
+    // are no event engine and no io engine, and start() rejects it with EINVAL.
+    // A backend file opened with the iouring engine additionally requires the
+    // pool's vcpus to run iouring as their master engine, not merely to have been
+    // asked for it: init() keeps the first engine that initializes, so a request
+    // naming several installs one.
+    photon::WorkPool* pool = nullptr;
+
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
-                                  // tcmu ignores it: the kernel provides one command ring per device
+                                  // Honored by ublk, vhost-user and vduse. tcmu and nbd
+                                  // ignore it: tcmu's kernel gives one command ring per
+                                  // device, and nbd's parallelism is its client connection
+                                  // count -- neither has a queue count to declare
 
     uint32_t queue_depth = 0;     // per-queue in-flight limit; 0 = auto, clamped by kernel limits.
                                   // tcmu: SCSI command dispatch depth (coroutine pool capacity,
@@ -152,10 +183,6 @@ struct BlkConfig {
                                   // 8 MiB apiece exhausts vm.max_map_count. Raise it if your
                                   // backend IFile recurses deeply or keeps large buffers on
                                   // its own stack
-
-    uint32_t vcpus = 0;           // vCPUs serving the queues (round-robin); 0 = auto.
-                                  // tcmu: 0/1 = serve on the caller's vcpu; >=2 = run the pump on
-                                  // a dedicated vcpu (the ring is single, so more do not multiply)
 
     uint32_t spin_us = 0;         // PollPolicy::ADAPTIVE only: how long to keep busy-polling
                                   // after the last completion before sleeping; 0 = impl default
@@ -259,9 +286,9 @@ class TcmuHBA : public Object {
 public:
     struct Config : BlkConfig {
         // Field order is padding-driven, do not tidy it: BlkConfig's content ends
-        // at offset 82 (its sizeof is 88), and the ABI lets a derived class place
-        // members in the base's tail padding -- so both bools land at 82/83 and
-        // the string then needs no hole before it. 120 bytes; putting the string
+        // at offset 86 (its sizeof is 88), and the ABI lets a derived class place
+        // members in the base's tail padding -- so both bools land at 86/87 and the
+        // string then starts at 88 with no hole. 120 bytes; putting the string
         // first costs 8 more.
         bool loopback_lun = true;     // also create a tcm_loop LUN so a local /dev/sdX appears
         bool adopt_external = false;  // serve a backstore an EXTERNAL operator created
@@ -434,10 +461,11 @@ class UblkController : public Object {
 public:
     struct Config : BlkConfig {
         // Field order is padding-driven, and here it is deliberately ASCENDING by
-        // width -- do not "fix" it. BlkConfig's content ends at offset 82, which is
+        // width -- do not "fix" it. BlkConfig's content ends at offset 86, which is
         // not a multiple of 8, so a leading uint64_t would have to skip to 88 and
-        // waste 6 bytes; leading with the uint32_t wastes only 2 (82 -> 84) and the
-        // uint64_t then lands at 96 with nothing after it. 104 bytes vs 112.
+        // waste 2 bytes of tail padding it could have filled; leading with the
+        // uint32_t lands at 88 anyway and leaves the uint64_t at 96 with nothing
+        // after it. 112 bytes.
         uint32_t dev_id = UINT32_MAX; // ublk has no uuid; the dev_id IS the recovery identity;
                                       // UINT32_MAX = kernel auto-assign; otherwise requests
                                       // /dev/ublkb<N> (0 is a valid requestable id)
@@ -501,10 +529,10 @@ public:
     };
 
     struct Config : BlkConfig {
-        // Field order is padding-driven, do not tidy it: `sock_role` fits in
-        // BlkConfig's tail padding at offset 82 and `sock_mode` at 84, so the
-        // string starts at 88 with no hole. 120 bytes; leading with the string
-        // costs 8 more.
+        // Field order is padding-driven, do not tidy it: `sock_role` is 1 byte and
+        // fits BlkConfig's tail padding at offset 86, then `sock_mode` needs
+        // 4-alignment so it starts at 88 and the string at 96. 128 bytes; leading
+        // with the string costs 8 more.
         SockRole sock_role = SockRole::SERVER;
         uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 = 0666 &
                                       // ~umask; widen the group/other bits when the guest process
@@ -571,9 +599,9 @@ VduseController* new_vduse_controller(const char* lock_dir);
 struct NbdConfig : BlkConfig {
     // UDS, TCP and loopback device can be enabled simultaneously.
     // Field order is padding-driven, do not tidy it. BlkConfig's content ends at
-    // offset 82, and net::EndPoint is 18 bytes of align-1 -- so the two bools go
-    // at 82/83 and the endpoint fills 84..102, which lets the 8-aligned string
-    // start at 104 instead of leaving a hole. 136 bytes; putting the string
+    // offset 86, and net::EndPoint is 18 bytes of align-1 -- so the two bools go
+    // at 86/87 and the endpoint fills 88..106, which lets the 8-aligned string
+    // start at 112 instead of leaving a hole. 144 bytes; putting the string
     // before the endpoint costs 8 more.
     bool enable_tcp = false;
     bool loopback_device = true;  // whether attach the export to a free local /dev/nbdN kernel

@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/workerpool.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -636,9 +637,17 @@ TEST_F(UblkTest, restart_window_io) {
 }
 
 TEST_F(UblkTest, dedicated_vcpu) {
+    // was cfg.vcpus = 2: the serving vcpu now comes from a pool the caller owns.
+    // The engines are QUERIED, not spelled out. check_pool_engines derives its
+    // requirement from the caller's own vcpu, so a pool built from that query
+    // satisfies it by construction; writing INIT_EVENT_EPOLL here would encode
+    // today's recommended_order (epoll ahead of iouring) as if it were a contract.
+    // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1).
+    photon::WorkPool pool(1, (int)photon::get_event_engine(),
+                             (int)photon::get_io_engine());
     UblkController::Config cfg(make_info());
     cfg.queues = 2;
-    cfg.vcpus = 2;   // one dedicated serving vcpu for both queues
+    cfg.pool = &pool;   // one pool vcpu serves both queues
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);

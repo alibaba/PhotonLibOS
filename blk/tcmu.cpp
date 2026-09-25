@@ -515,45 +515,31 @@ struct TcmuUio {
 
 struct TcmuServer {
     // Field order is padding-driven, do not tidy it: the 8-wide members and the
-    // 256-byte identity pack from offset 0, and every narrower one (vcpu_state,
-    // the four uint32_t counters, the bools, PollPolicy) trails them.
-    // Interleaving them left 29 bytes of holes -- block_size after identity,
-    // pending_capacity_ua and read_only before features, poll before spin_us,
-    // stopping before pump_th, dedicated before vcpu_thread, the two stop flags
-    // before the handshake semaphores. 496 bytes vs 520.
+    // 256-byte identity pack from offset 0, and every narrower one (the four
+    // uint32_t counters, the bools, PollPolicy) trails them -- interleaving a
+    // narrow member between two 8-wide ones (block_size after identity,
+    // pending_capacity_ua or read_only before features) opens a hole the next
+    // 8-aligned member has to skip. 416 bytes.
     TcmuUio uio;
     fs::IFile* backend = nullptr;
     char identity[256] = {};    // capped well below this at registration time
     std::atomic<uint64_t> num_lbas{0};   // atomics: resize() can run on another
-    std::atomic<uint64_t> dev_size{0};   // thread while the pump serves (dedicated vcpu)
+    std::atomic<uint64_t> dev_size{0};   // thread while the pump serves (pool vcpu)
     uint64_t features = 0;      // FEATURE_* the device advertises (gates LBPME/VPD 0xB0)
     uint64_t spin_us = 0;
     photon::thread* pump_th = nullptr;
     // One slot per in-flight command. photon::semaphore has no reset, but every
     // serve_stop() drains it back to full (each handle_cmd returns its token in
-    // a DEFER, and stop waits for in_flight == 0), so it is seeded once at the
+    // a DEFER, and serve_stop waits for in_flight == 0), so it is seeded once at the
     // first start and reused across restarts -- the nbd.cpp idiom. Handlers
     // signal on completion (single vcpu: the in_flight-- and the signal execute
     // without an intervening schedule point).
     photon::semaphore slots;
-    // the serving vcpu's two handshakes, one signal each per start(): it
-    // publishes vcpu_state then signals started, and signals exited as its very
-    // last act -- after vcpu_fini, from a plain std thread, which
-    // semaphore::signal explicitly supports
-    photon::semaphore vcpu_started{0}, vcpu_exited{0};
-    // dedicated-vcpu serving (BlkConfig::vcpus >= 2): the pump and command
-    // coroutines run on an owned vcpu (a std::thread) instead of the caller's.
-    // tcmu has exactly one ring per device, so a single serving vcpu is all
-    // that can help.
-    bool dedicated = false;
-    std::atomic<bool> stop_req{false}, stop_flush{false};
-    std::thread vcpu_thread;
-    std::atomic<int> vcpu_state{0};              // 0 starting, 1 serving, <0 = -errno
     uint32_t block_size = 512;
     uint32_t in_flight = 0;
     // stack for the per-command coroutines: the device resolves
     // BlkConfig::stack_size into this before start(), which keeps it out of the
-    // start()/serve_start()/vcpu_main() parameter chain
+    // start()/serve_start() parameter chain
     uint32_t stack_size = DEFAULT_REQ_STACK;
     uint32_t pending_wakeups = 0;   // doorbell coalescing counter
     std::atomic<bool> pending_capacity_ua{false};   // one-shot UNIT ATTENTION after resize
@@ -569,77 +555,21 @@ struct TcmuServer {
         return nullptr;
     }
 
-    ~TcmuServer() { stop(false); }
+    ~TcmuServer() { serve_stop(false); }
 
     // `stack` lands in the stack_size member rather than being threaded through
-    // serve_start()/vcpu_main() as well; it has no default so that every caller
-    // has to say what the per-command coroutines get.
-    int start(const char* devnode, uint32_t queue_depth, uint32_t vcpus, uint32_t stack) {
+    // serve_start() as well; it has no default so that every caller has to say
+    // what the per-command coroutines get.
+    int start(const char* devnode, uint32_t queue_depth, photon::WorkPool* pool, uint32_t stack) {
         stack_size = stack;
-        if (vcpus < 2)
-            return serve_start(devnode, queue_depth);
-        dedicated = true;
-        vcpu_state = 0;
-        stop_req = false;
-        vcpu_thread = std::thread([=, this] { vcpu_main(devnode, queue_depth); });
-        // photon-side wait: never join a std::thread directly on the vcpu
-        vcpu_started.wait(1);
-        int st = vcpu_state.load();
-        if (st < 0) {
-            join_vcpu();
-            dedicated = false;
-            LOG_ERROR_RETURN(-st, -1, "failed to start the tcmu serving vcpu");
-        }
-        return 0;
+        if (check_pool_engines(pool) < 0)
+            return -1;
+        return serve_start(devnode, queue_depth, pool);
     }
 
-    void stop(bool flush) {
-        if (dedicated) {
-            stop_flush = flush;
-            stop_req = true;
-            join_vcpu();
-            dedicated = false;
-            return;
-        }
-        serve_stop(flush);
-    }
-
-    void join_vcpu() {
-        vcpu_exited.wait(1);   // already exited: the join itself is instant
-        vcpu_thread.join();
-    }
-
-    // the serving vcpu's whole lifetime when dedicated. devnode is borrowed:
-    // start() waits for the publish below, which follows serve_start() consuming it
-    void vcpu_main(const char* devnode, uint32_t queue_depth) {
-        DEFER(vcpu_exited.signal(1));   // registered first, so it runs last
-        photon::vcpu_init();
-        DEFER(photon::vcpu_fini());
-        if (photon::fd_events_init(photon::INIT_EVENT_EPOLL) < 0) {
-            int e = errno ? errno : EIO;
-            LOG_ERROR("failed to init the serving vcpu's event engine");
-            return publish(-e);
-        }
-        DEFER(photon::fd_events_fini());
-        if (serve_start(devnode, queue_depth) < 0) {
-            int e = errno ? errno : EIO;
-            return publish(-e);
-        }
-        publish(1);
-        while (!stop_req.load(std::memory_order_acquire))
-            photon::thread_usleep(1000);
-        serve_stop(stop_flush);
-    }
-
-    // publish the outcome and wake start(): one signal per start() attempt
-    void publish(int st) {
-        vcpu_state = st;
-        vcpu_started.signal(1);
-    }
-
-    // open the uio, seed the dispatch-depth semaphore, spawn the pump -- on
-    // the serving vcpu
-    int serve_start(const char* devnode, uint32_t queue_depth) {
+    // open the uio, seed the dispatch-depth semaphore, spawn the pump -- and, if
+    // a pool was given, move the pump into it
+    int serve_start(const char* devnode, uint32_t queue_depth, photon::WorkPool* pool) {
         if (uio.open(devnode) < 0)
             return -1;
         if (slots.count() == 0)   // seed once; a restart finds it drained full
@@ -648,6 +578,12 @@ struct TcmuServer {
         in_flight = 0;
         pending_wakeups = 0;
         pump_th = photon::thread_create11(&TcmuServer::pump, this);
+        if (!pump_th)
+            LOG_ERRNO_RETURN(0, -1, "tcmu: cannot create the pump coroutine");
+        // tcmu has one ring per device, so this is one migration, not one per
+        // queue -- it replaces the dedicated std::thread that BlkConfig::vcpus
+        // used to start, and unlike that thread it costs nothing when pool is null.
+        migrate_to_pool(pool, pump_th);
         photon::thread_enable_join(pump_th);
         return 0;
     }
@@ -697,7 +633,7 @@ struct TcmuServer {
     }
 
     // Dispatch every command in [parse_pos, cmd_head) to a fresh coroutine. The
-    // pump gates this with its own while(!stopping) and stop() joins the pump
+    // pump gates this with its own while(!stopping) and serve_stop() joins the pump
     // before the flush call, so drain_ring itself must run to completion: the
     // orderly-handover flush (detach/shutdown with wait_pending) relies on it to
     // consume the un-dispatched backlog. A stopping guard here would make that
@@ -714,7 +650,7 @@ struct TcmuServer {
             }
             uint32_t op = ent->hdr.len_op & TCMU_OP_MASK;
             // take a dispatch slot BEFORE advancing parse_pos: an interruption
-            // (stop() interrupts the pump) must leave the entry queued, with
+            // (serve_stop() interrupts the pump) must leave the entry queued, with
             // parse_pos still pointing at it, for the flush drain to pick up
             if (op == TCMU_OP_CMD && slots.wait_interruptible(1) < 0)
                 break;
@@ -1526,7 +1462,7 @@ struct TcmuDeviceImpl : IBlkDevice {
 
         // SERVE THE RING BEFORE attaching the LUN: the attach triggers a SCSI
         // scan that blocks until a handler answers INQUIRY/READ CAPACITY
-        if (server.start(node, cfg.queue_depth, cfg.vcpus, resolve_stack_size(cfg.stack_size)) < 0)
+        if (server.start(node, cfg.queue_depth, cfg.pool, resolve_stack_size(cfg.stack_size)) < 0)
             return -1;
 
         if (cfg.loopback_lun && attach_lun() < 0)
@@ -1545,7 +1481,7 @@ struct TcmuDeviceImpl : IBlkDevice {
             return 0;
         // stop serving but KEEP the configfs registration + LUN so a later
         // start() (possibly another process) takes over and harvests the ring
-        server.stop(/*flush=*/wait_pending);
+        server.serve_stop(/*flush=*/wait_pending);
         release_lock();
         started = false;
         link.serving = false;
@@ -1573,7 +1509,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         // remove a backstore a LUN still references).
         if (uint32_t id = link.removed_id.exchange(0)) {
             if (started) {
-                server.stop(/*flush=*/true);
+                server.serve_stop(/*flush=*/true);
                 release_lock();
                 started = false;
             }
@@ -1596,7 +1532,7 @@ struct TcmuDeviceImpl : IBlkDevice {
                 return -1;
             char node[64];
             if (find_uio(node, sizeof(node)) < 0 ||
-                server.start(node, cfg.queue_depth, cfg.vcpus, resolve_stack_size(cfg.stack_size)) < 0) {
+                server.start(node, cfg.queue_depth, cfg.pool, resolve_stack_size(cfg.stack_size)) < 0) {
                 release_lock();
                 return -1;
             }
@@ -1607,7 +1543,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         // commands the initiator may send, then stop the ring
         if (lun_attached)
             detach_lun();
-        server.stop(/*flush=*/true);
+        server.serve_stop(/*flush=*/true);
         release_lock();
         started = false;
         // BEFORE destroy_backstore(): our own disable/rmdir fires a REMOVED that
@@ -1957,7 +1893,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (lun_attached)
             detach_lun();
         if (server.pump_th || server.uio.fd >= 0)
-            server.stop(true);
+            server.serve_stop(true);
         if (created)
             destroy_backstore();
         release_lock();

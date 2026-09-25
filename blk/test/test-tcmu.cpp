@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/workerpool.h>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -813,13 +814,22 @@ TEST_F(TcmuTest, resize_grow) {
     EXPECT_EQ(0, device_io(sd, wbuf, true, IMG_SIZE + IO_OFF));   // past the old 64 MiB
 }
 
-// vcpus>=2: the pump + dispatch pool run on a dedicated serving vcpu while the
-// test's own vcpu only drives the API. Exercises the cross-vcpu surface: IO,
-// detach/re-start (each start spawns a fresh serving vcpu), and a resize()
-// issued from this vcpu (the capacity atomics are written here, read there).
+// pool serving: the pump + dispatch pool run on a pool vcpu while the test's
+// own vcpu only drives the API. Exercises the cross-vcpu surface: IO,
+// detach/re-start (each start migrates a fresh pump into the pool), and a
+// resize() issued from this vcpu (the capacity atomics are written here, read
+// there).
 TEST_F(TcmuTest, dedicated_vcpu_io) {
+    // was cfg.vcpus = 2: the serving vcpu now comes from a pool the caller owns.
+    // The engines are QUERIED, not spelled out. check_pool_engines derives its
+    // requirement from the caller's own vcpu, so a pool built from that query
+    // satisfies it by construction; writing INIT_EVENT_EPOLL here would encode
+    // today's recommended_order (epoll ahead of iouring) as if it were a contract.
+    // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1).
+    photon::WorkPool pool(1, (int)photon::get_event_engine(),
+                             (int)photon::get_io_engine());
     auto cfg = make_cfg(/*loopback=*/true);
-    cfg.vcpus = 2;
+    cfg.pool = &pool;
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
