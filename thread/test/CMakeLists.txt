@@ -6,6 +6,7 @@ add_executable(perf_workpool perf_workpool.cpp)
 target_link_libraries(perf_workpool PRIVATE photon_shared)
 add_test(NAME perf_workpool COMMAND $<TARGET_FILE:perf_workpool>)
 
+<<<<<<< HEAD
 add_executable(test-thread test.cpp x.cpp)
 target_link_libraries(test-thread PRIVATE photon_shared)
 add_test(NAME test-thread COMMAND $<TARGET_FILE:test-thread>)
@@ -57,3 +58,9 @@ add_test(NAME test-workpool-fanout COMMAND $<TARGET_FILE:test-workpool-fanout>)
 add_executable(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
 target_link_libraries(test-sleepq-stale-idx PRIVATE photon_shared)
 add_test(NAME test-sleepq-stale-idx COMMAND $<TARGET_FILE:test-sleepq-stale-idx>)
+=======
+photon_add_test(test-go-channel test-go-channel.cpp)
+photon_add_test(test-workpool-fanout test-workpool-fanout.cpp LIBS ${GOOGLETEST_GTEST_MAIN_LIBRARIES})
+photon_add_test(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
+photon_add_test(test-semaphore-lost-wakeup test-semaphore-lost-wakeup.cpp)
+>>>>>>> 7dee06a (fix(thread): stop semaphore's out-of-order resume from deadlocking on the wait queue lock (#1650))
