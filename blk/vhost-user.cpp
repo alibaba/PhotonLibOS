@@ -218,7 +218,7 @@ static_assert(offsetof(vhost_user_msg, payload) == 12,
 // time; both were already parsed and then dropped. They keep their own natural
 // layout even nested inside the packed vhost_user_msg (packing the outer struct
 // does not repack a named nested type), which is what makes the in-place scalar
-// reads above legal.
+// reads in handle_msg legal.
 static_assert(sizeof(vhost_vring_state) == 8, "vhost_vring_state size");
 static_assert(offsetof(vhost_vring_state, index) == 0, "vhost_vring_state index offset");
 static_assert(offsetof(vhost_vring_state, num) == 4, "vhost_vring_state num offset");
