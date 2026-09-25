@@ -563,6 +563,8 @@ public:
         return 0;
     }
 
+    uint64_t engine_flag() const override { return INIT_EVENT_IOCP; }
+
     virtual int wait_for_fd(int fd, uint32_t interest, Timeout timeout) override {
         if (fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid fd");

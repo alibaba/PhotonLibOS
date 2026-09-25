@@ -109,6 +109,11 @@ namespace photon
             return 0;
         }
 
+        // The answer for a vcpu with no master engine. init() installs one only
+        // when the request names an engine, and fini() puts this back, so NONE is
+        // what get_event_engine() reports on both sides of a vcpu's lifetime.
+        uint64_t engine_flag() const override { return INIT_EVENT_NONE; }
+
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {
             DEFER(notify.store(false, std::memory_order_release));

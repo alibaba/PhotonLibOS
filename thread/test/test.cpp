@@ -1368,6 +1368,59 @@ TEST(photon, migrate) {
     LOG_TEMP("worker join");
 }
 
+#ifdef __linux__
+// get_event_engine() must report the engine that was ACTUALLY installed, not the
+// mask that was requested: init() falls back through a recommended order, so a
+// request naming several engines yields exactly one. Reporting the request would
+// let a caller believe it has an iouring master engine when epoll won the fallback
+// -- and code that static_casts the master engine to iouringEngine* is then UB.
+static void engine_query_on_new_vcpu(uint64_t ev, uint64_t io,
+                                     uint64_t* got_ev, uint64_t* got_io,
+                                     bool* got_null_engine) {
+    std::thread t([&] {
+        photon::init(ev, io);
+        *got_ev = photon::get_event_engine();
+        *got_io = photon::get_io_engine();
+        *got_null_engine = photon::is_master_event_engine_default();
+        photon::fini();
+    });
+    t.join();
+}
+
+TEST(photon, engine_query_none) {
+    uint64_t ev = ~0ULL, io = ~0ULL;
+    bool null_engine = false;
+    engine_query_on_new_vcpu(INIT_EVENT_NONE, INIT_IO_NONE, &ev, &io, &null_engine);
+    EXPECT_EQ(INIT_EVENT_NONE, ev);
+    EXPECT_EQ(INIT_IO_NONE, io);
+    EXPECT_TRUE(null_engine);   // no master engine: every fd wait on it fails
+}
+
+TEST(photon, engine_query_installed) {
+    uint64_t ev = 0, io = 0;
+    bool null_engine = true;
+    engine_query_on_new_vcpu(INIT_EVENT_EPOLL, INIT_IO_LIBAIO, &ev, &io, &null_engine);
+    EXPECT_EQ(INIT_EVENT_EPOLL, ev);   // exactly the one requested, and it is the
+    EXPECT_FALSE(null_engine);         // flag that won, not a mask
+    EXPECT_TRUE(INIT_IO_LIBAIO & io);
+}
+
+// The point of reporting the winner: DEFAULT names both IOURING and EPOLL, and on
+// Linux EPOLL is first in the recommended order, so IOURING must NOT be reported.
+TEST(photon, engine_query_default_is_single) {
+    uint64_t ev = 0, io = 0;
+    bool null_engine = true;
+    engine_query_on_new_vcpu(INIT_EVENT_DEFAULT, INIT_IO_DEFAULT, &ev, &io, &null_engine);
+    EXPECT_FALSE(null_engine);
+    EXPECT_NE(0ULL, ev);
+    EXPECT_EQ(1, __builtin_popcountll(ev));   // a single engine, not the request mask
+    // The two flag spaces overlap at bit 0 (INIT_EVENT_EPOLL == INIT_IO_LIBAIO),
+    // so engine_query_installed alone cannot catch get_io_engine() crossed with
+    // get_event_engine(). The DEFAULT masks differ on both sides, so this can.
+    EXPECT_EQ(INIT_IO_DEFAULT, io);
+}
+#endif
+
 TEST(photon, wait_all) {
     struct timeval tv;
     gettimeofday(&tv, NULL);

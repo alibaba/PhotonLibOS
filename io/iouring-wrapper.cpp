@@ -522,6 +522,8 @@ public:
         return 0;
     }
 
+    uint64_t engine_flag() const override { return INIT_EVENT_IOURING; }
+
     static bool register_files_enabled() {
         return m_register_files_flag == 1;
     }

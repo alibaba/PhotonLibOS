@@ -71,6 +71,17 @@ public:
     virtual ssize_t wait_and_fire_events(uint64_t timeout) = 0;
 
     virtual int cancel_wait() = 0;
+
+    // The INIT_EVENT_* flag identifying this engine, or INIT_EVENT_NONE for an
+    // engine that is not one of them. Only the engine itself knows what it is:
+    // init() walks a recommended order and keeps the first engine that initializes,
+    // so the mask a caller passed does not say what ended up running.
+    //
+    // Pure virtual on purpose. A default would let a new engine silently inherit a
+    // guess -- and the guess is the whole answer here, so a wrong one is a vcpu
+    // that gets trusted when it should be refused. Making every engine answer turns
+    // that into a compile error.
+    virtual uint64_t engine_flag() const = 0;
 };
 
 inline int wait_for_fd_readable(int fd, Timeout timeout = {}) {

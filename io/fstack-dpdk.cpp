@@ -149,6 +149,13 @@ public:
         return 0;
     }
 
+    // NONE, not INIT_IO_FSTACK_DPDK: there is no INIT_EVENT_* flag for dpdk, and
+    // returning an io-side flag would break get_event_engine()'s stated contract.
+    // Nothing can ask anyway -- fstack_dpdk_init() keeps this in its own g_engine
+    // and never installs it as a vcpu's master_event_engine. If that ever changes,
+    // NONE is the fail-safe answer: the vcpu gets refused, not trusted.
+    uint64_t engine_flag() const override { return INIT_EVENT_NONE; }
+
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
     // functionality.
     std::vector<InFlightEvent> _inflight_events;
