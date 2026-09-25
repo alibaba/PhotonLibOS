@@ -198,8 +198,6 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th) {
         return;   // the empty-pool test is load-bearing, not tidiness: WorkPool
                   // resolves an out-of-range index with `vcpu_index++ % size`,
                   // and size == 0 there is a SIGFPE
-                  // resolves an out-of-range index with `vcpu_index++ % size`,
-                  // and size == 0 there is a SIGFPE
     if (pool->thread_migrate(th, -1ULL) < 0)
         LOG_WARN("failed to migrate a serving coroutine into the work pool, ", ERRNO());
 }

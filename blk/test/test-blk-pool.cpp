@@ -38,15 +38,20 @@ namespace {
 
 struct Landing {
     photon::semaphore done;
-    std::set<vcpu_base*> vcpus;
-    int remaining = 0;
+    // The probe coroutines run on different OS threads concurrently, so there
+    // must be no shared writes: each writes only its own slots[i].
+    std::vector<vcpu_base*> slots;
+};
+
+struct ProbeArg {
+    Landing* l;
+    int index;
 };
 
 void* record_vcpu(void* a) {
-    auto* l = (Landing*)a;
-    l->vcpus.insert(photon::get_vcpu());
-    if (--l->remaining == 0)
-        l->done.signal(1);
+    auto* p = (ProbeArg*)a;
+    p->l->slots[p->index] = photon::get_vcpu();
+    p->l->done.signal(1);
     return nullptr;
 }
 
@@ -55,22 +60,26 @@ void* record_vcpu(void* a) {
 // which is how the degenerate cases are distinguished from real fan-out.
 std::set<vcpu_base*> land(int n, photon::WorkPool* pool) {
     Landing l;
-    l.remaining = n;
+    l.slots.resize(n, nullptr);
+    std::vector<ProbeArg> args(n);   // lives in this frame; the joins below keep it alive until every coroutine has finished
+    for (int i = 0; i < n; i++)
+        args[i] = {&l, i};
     auto self = photon::get_vcpu();
     std::vector<photon::thread*> ths;
     for (int i = 0; i < n; i++) {
-        auto th = photon::thread_create(&record_vcpu, &l);
+        auto th = photon::thread_create(&record_vcpu, &args[i]);
         EXPECT_NE(nullptr, th);
         photon::thread_enable_join(th);   // photon threads are detached by default: without this, a finished record_vcpu disposes itself and the join below is a use-after-free
         migrate_to_pool(pool, th);
         ths.push_back(th);
     }
-    l.done.wait(1);
+    l.done.wait(n);
     for (auto th : ths)
         photon::thread_join((photon::join_handle*)th);
-    if (l.vcpus.empty())
-        l.vcpus.insert(self);
-    return l.vcpus;
+    std::set<vcpu_base*> vcpus(l.slots.begin(), l.slots.end());
+    if (vcpus.empty())
+        vcpus.insert(self);
+    return vcpus;
 }
 
 }   // namespace
