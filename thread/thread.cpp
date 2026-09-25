@@ -775,6 +775,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rdi_arg, void (*rsi_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%rcx)
+        mov     (%rdx), %rsp
+        pop     %rbp
+        jmp     *%rsi
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rdi_arg, void (*rsi_defer)(void*), void** rdx_to_th)
@@ -848,6 +851,9 @@ DEF_ASM_FUNC(_photon_switch_context_defer) // (void* rcx_arg, void (*rdx_defer)(
 R"(
         push    %rbp
         mov     %rsp, (%r9)
+        mov     (%r8), %rsp
+        pop     %rbp
+        jmp     *%rdx
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* rcx_arg, void (*rdx_defer)(void*), void** r8_to)
@@ -922,6 +928,10 @@ R"(
         stp x29, x30, [sp, #-16]!
         mov x29, sp
         str x29, [x3]
+        ldr x29, [x2]
+        mov sp, x29
+        ldp x29, x30, [sp], #16
+        br x1
 )"
 
 DEF_ASM_FUNC(_photon_switch_context_defer_die) // (void* x0_arg, void (*x1_defer)(void*), void** x2_to_th)
