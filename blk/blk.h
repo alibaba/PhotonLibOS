@@ -161,9 +161,8 @@ struct BlkConfig {
     photon::WorkPool* pool = nullptr;
 
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
-                                  // Honored by ublk and vhost-user, both clamping it to
-                                  // their maximum. vduse currently serves a single queue
-                                  // and ignores it. tcmu and nbd ignore it by nature:
+                                  // Honored by ublk, vhost-user and vduse, all clamping it
+                                  // to their maximum. tcmu and nbd ignore it by nature:
                                   // tcmu's kernel gives one command ring per device, and
                                   // nbd's parallelism is its client connection count --
                                   // neither has a queue count to declare

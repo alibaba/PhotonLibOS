@@ -103,6 +103,35 @@ static void vdpa_detach(const char* name) {
     test::sh_off_vcpu(cmd);
 }
 
+// The virtio bus publishes the consumer's NEGOTIATED feature set as a
+// bitstring -- one char per bit, bit 0 first -- in the sysfs of the virtio
+// device the gendisk hangs off. That is the kernel's record of what arrived
+// over the wire, not a readback of our own config image, so it is independent
+// evidence for the F_MQ gate, and it comes from a different wire field than
+// the mq directory count does (the feature word vs config-space num_queues).
+// Returns -1 when the attribute cannot be read.
+static int virtio_feature_bit(const std::string& kname, unsigned bit) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/block/%s/device/features", kname.c_str());
+    FILE* f = ::fopen(path, "r");
+    if (!f)
+        return -1;
+    DEFER(::fclose(f));
+    char buf[128] = {};
+    if (!::fgets(buf, sizeof(buf), f))
+        return -1;
+    return strlen(buf) > bit ? (buf[bit] == '1' ? 1 : 0) : -1;
+}
+
+// virtio-blk's multiqueue feature bit (virtio 1.2 §5.2) and the transport's
+// queue clamp, spelled out here on purpose -- the suite family's standing rule
+// (see test-vhost-user.cpp's PEER_MAX_QUEUES): a suite must not reach into
+// blk/utils.h to learn the values it asserts against, because that is how a
+// suite becomes self-consistently wrong. If the two ever disagree these tests
+// go red, which is the point.
+static constexpr unsigned FEAT_BIT_BLK_MQ = 12;
+static constexpr uint32_t PEER_MAX_QUEUES = 64;
+
 class VduseTest : public ::testing::Test {
 public:
     test::TestImage img;
@@ -447,6 +476,91 @@ TEST_F(VduseTest, daemon_restart_io) {
     // stop the writer BEFORE the DEFERs fire: it holds the device open, and
     // the consumer detach + shutdown must not race a live writer
     w.stop();
+}
+
+// BlkConfig::queues decides how many virtqueues a vduse device serves, and the
+// count is observable without trusting our own config: the kernel creates one
+// directory per hardware queue under /sys/block/<node>/mq/ -- the node being
+// the one the vdpa binding produced -- and it records the negotiated
+// VIRTIO_BLK_F_MQ in the virtio device's sysfs. Both are the kernel's own view
+// and they come from different wire fields (config-space num_queues vs the
+// feature word), so together they are an independent oracle for CREATE_DEV's
+// vq_num, fill_config's num_queues and the F_MQ gate at once. The table pins
+// the `nqueues >= 2` gate at its exact boundary (2), mirroring what
+// test-vhost-user's queue_count_follows_config pins against its mock frontend.
+TEST_F(VduseTest, queue_count_follows_config) {
+    struct Case { uint32_t ask; int dirs; int mq; };
+    static const Case cases[] = {
+        {0,                   1,                    0},   // the default: one queue, no F_MQ
+        {1,                   1,                    0},   // one queue must NOT offer F_MQ
+        {2,                   2,                    1},   // the exact F_MQ boundary
+        {4,                   4,                    1},
+        {PEER_MAX_QUEUES + 5, (int)PEER_MAX_QUEUES, 1},   // clamped, not rejected
+    };
+    // The consumer driver builds at most one hardware queue per online CPU
+    // (measured on this suite's VM: 64 asked, 8 directories on 8 CPUs), so a
+    // case may not see more mq directories than there are CPUs. When CPUs are
+    // fewer than the clamp, the clamp's exact value is not observable from the
+    // consumer side at all -- what the case still pins is that an over-large
+    // request is served, not rejected, and offers F_MQ.
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+    for (const auto& c : cases) {
+        BlkConfig cfg(make_info());
+        cfg.queues = c.ask;
+        auto dev = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev) << "queues=" << c.ask;
+        DEFER(delete dev);
+        ASSERT_EQ(0, dev->start(file)) << "queues=" << c.ask;
+        DEFER(dev->shutdown());          // fires after the detach below
+        std::string node = vdpa_attach(TEST_NAME);
+        ASSERT_FALSE(node.empty()) << "queues=" << c.ask;
+        DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                         // unserved device wedges its users in D state
+
+        // count_mq_dirs and virtio_feature_bit take the bare kernel name; the
+        // node we got back is a /dev path
+        std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+        int want_dirs = cpus > 0 && c.dirs > cpus ? (int)cpus : c.dirs;
+        EXPECT_EQ(want_dirs, test::count_mq_dirs(kname)) << "mq dirs, queues=" << c.ask;
+        EXPECT_EQ(c.mq, virtio_feature_bit(kname, FEAT_BIT_BLK_MQ)) << "F_MQ, queues=" << c.ask;
+    }
+}
+
+// Adoption is the only ring refresh queues 1..n-1 ever get when the daemon
+// hands over while the consumer stays bound: the kernel replays no SET_STATUS
+// across the handover, so nothing re-arms needs_refresh and start()'s
+// per-queue vq_refresh is the whole resync. A queue that resync skips keeps
+// its desc/avail/used unresolved while the kernel -- which was told vq_num --
+// keeps putting requests on it. The stress phase after the handover is the
+// assertion: it drives the device from enough OS threads that the block layer
+// spreads requests over every hardware queue, and an IO that lands on an
+// unresolved queue never completes.
+TEST_F(VduseTest, adoption_resyncs_every_queue) {
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;
+    auto dev1 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev1);
+    DEFER(delete dev1);
+    ASSERT_EQ(0, dev1->start(file));
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    ASSERT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mq-fresh"));
+
+    // daemon goes away, consumer STAYS attached: the rings are orphaned in a
+    // live state and dev2's start() must pull every queue's state itself
+    ASSERT_EQ(0, dev1->detach(false));
+
+    BlkConfig cfg2(make_info());
+    cfg2.queues = 4;
+    auto dev2 = ctl->new_device(cfg2);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    DEFER(dev2->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // fires BEFORE dev2->shutdown: the consumer
+                                     // must go while the daemon still serves
+    ASSERT_EQ(0, dev2->start(file));   // adoption: resync of EVERY queue
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mq-adopted"));
+    EXPECT_EQ(0, device_io(node, pattern(0x44), true));
 }
 
 // The tombstone is vduse's ONLY ownership test -- the char device answers "is a

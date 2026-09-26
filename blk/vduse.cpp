@@ -59,15 +59,15 @@ limitations under the License.
 //   Therefore: a consumer must be detached (vdpa dev del) before the serving
 //   stops, or the device wedges its users.
 //
-// P1 scope: one virtqueue (no VIRTIO_BLK_F_MQ), split ring only (no
-// RING_PACKED / INDIRECT -- not offered, so the driver must not use them),
-// IN/OUT/FLUSH/GET_ID requests, FEATURE_FLUSH + read_only + logical block
-// size; FEATURE_DISCARD/WRITE_ZEROES are accepted in cfg.info.features but not
-// offered yet. Serving runs on the caller's vcpu unless BlkConfig::pool names
-// one, in which case each queue's loop coroutine is migrated into it
-// (BlkConfig::queues is not honored yet). All virtio fields are little-endian
-// (VERSION_1) and this file, like nbd/tcmu/ublk, assumes an LE host
-// (x86_64/aarch64).
+// P1 scope: BlkConfig::queues virtqueues -- 0 means one, over MAX_QUEUES means
+// clamped to it -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
+// than one, split ring only (no RING_PACKED / INDIRECT -- not offered, so the
+// driver must not use them), IN/OUT/FLUSH/GET_ID requests, FEATURE_FLUSH +
+// read_only + logical block size; FEATURE_DISCARD/WRITE_ZEROES are accepted in
+// cfg.info.features but not offered yet. Serving runs on the caller's vcpu
+// unless BlkConfig::pool names one, in which case each queue's loop coroutine
+// is migrated into it. All virtio fields are little-endian (VERSION_1) and
+// this file, like nbd/tcmu/ublk, assumes an LE host (x86_64/aarch64).
 
 #include "blk.h"
 #include "utils.h"
@@ -561,10 +561,10 @@ struct VduseDeviceImpl : IBlkDevice {
         photon::thread* th = nullptr;
     };
     std::vector<Vq*> vqs;
-    // How many virtqueues this device serves. `nqueues` sits with the fds rather
-    // than down with the bools: here it fills the 4-byte slot they leave. Still 1
-    // -- CREATE_DEV declares vq_num 1 and setup_vq only runs for index 0, so no
-    // slot beyond the first is ever handed a ring.
+    // How many virtqueues this device serves, derived from BlkConfig::queues in
+    // the constructor (0 = one, over MAX_QUEUES = clamped to it). `nqueues` sits
+    // with the fds rather than down with the bools: here it fills the 4-byte
+    // slot they leave.
     uint32_t nqueues = 1;
 
     int ctrl_fd = -1;
@@ -602,6 +602,15 @@ struct VduseDeviceImpl : IBlkDevice {
         capacity_sectors = cfg.info.size >> 9;
         snprintf(name, sizeof(name), "%s", cfg.info.identity.c_str());
 
+        // Clamped, not rejected, and 0 means "you choose" -- the same reading the
+        // ublk and vhost-user transports give this field, so one BlkConfig means
+        // the same thing to every transport. Derived HERE and never again: the
+        // constructor below sizes vqs from it, CREATE_DEV declares vq_num with it
+        // and fill_config publishes it, so a later change would desynchronize
+        // the three -- and a kernel that was told one count while the device
+        // serves another sets up virtqueues nobody is listening on.
+        nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
+
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
                          (1ULL << VIRTIO_RING_F_EVENT_IDX) |
                          (1ULL << VIRTIO_BLK_F_BLK_SIZE);
@@ -609,6 +618,14 @@ struct VduseDeviceImpl : IBlkDevice {
             offer_features |= (1ULL << VIRTIO_BLK_F_FLUSH);
         if (read_only)
             offer_features |= (1ULL << VIRTIO_BLK_F_RO);
+        // virtio 1.2 §5.2.3: offering F_MQ commits us to a truthful
+        // virtio_blk_config::num_queues (§5.2.4: that field is only valid when
+        // this bit is set) and to honoring the queue index in every vring
+        // message. Only offered when there is more than one queue -- an n==1
+        // device that offers it makes the frontend build one vq while believing
+        // the device is multiqueue.
+        if (nqueues >= 2)
+            offer_features |= (1ULL << VIRTIO_BLK_F_MQ);
         // FEATURE_DISCARD / FEATURE_WRITE_ZEROES: accepted but not offered yet
         vqs.reserve(nqueues);
         for (uint32_t i = 0; i < nqueues; i++) {
@@ -754,6 +771,16 @@ struct VduseDeviceImpl : IBlkDevice {
             reply(req->request_id, VDUSE_REQ_RESULT_OK, 0, 0);
             break;
         case VDUSE_GET_VQ_STATE: {
+            uint32_t idx = req->vq_state.index;
+            if (idx >= nqueues) {
+                // Refuse rather than answer: replying OK with some queue's
+                // counter -- or with a fabricated 0 -- would hand a driver that
+                // believes it has more queues a ring position to resume from
+                // for a queue this device does not have.
+                LOG_ERROR("vduse ` GET_VQ_STATE for index ` of ` queues", name, idx, nqueues);
+                reply(req->request_id, VDUSE_REQ_RESULT_FAILED, idx, 0);
+                break;
+            }
             // Read on the queue's own vcpu: last_avail is a plain field that
             // dispatch_avail advances there. Hopping is enough -- the kernel asked
             // to READ a counter, not to stop the vq, so stopping and draining for
@@ -761,11 +788,9 @@ struct VduseDeviceImpl : IBlkDevice {
             // out at msg_timeout. (vhost-user's GET_VRING_BASE does quiesce, but
             // that message's own protocol meaning is "stop this vq and return it".)
             uint16_t last_avail = 0;
-            run_on_home(vqs[0]->x.home, [&] { last_avail = vqs[0]->srv.last_avail; });
-            // The index is echoed but not yet honored: this answers queue 0's
-            // counter for index 0 and zero for anything else.
-            reply(req->request_id, VDUSE_REQ_RESULT_OK, req->vq_state.index,
-                  req->vq_state.index == 0 ? last_avail : 0);
+            run_on_home(vqs[idx]->x.home, [&] { last_avail = vqs[idx]->srv.last_avail; });
+            LOG_DEBUG("vduse ` GET_VQ_STATE vq`, last_avail `", name, idx, last_avail);
+            reply(req->request_id, VDUSE_REQ_RESULT_OK, idx, last_avail);
             break;
         }
         default:
@@ -1188,7 +1213,7 @@ struct VduseDeviceImpl : IBlkDevice {
         auto* bc = (virtio_blk_config*)buf;
         bc->capacity = capacity_sectors;
         bc->blk_size = 1u << sector_shift;
-        bc->num_queues = 1;
+        bc->num_queues = (uint16_t)nqueues;
     }
 
     int create_dev() {
@@ -1203,7 +1228,7 @@ struct VduseDeviceImpl : IBlkDevice {
         cc->vendor_id = 0x1af4;   // Red Hat -- the virtio-blk convention
         cc->device_id = VIRTIO_ID_BLOCK;
         cc->features = offer_features;
-        cc->vq_num = 1;
+        cc->vq_num = nqueues;
         cc->vq_align = (uint32_t)sysconf(_SC_PAGESIZE);
         cc->config_size = sizeof(virtio_blk_config);
         fill_config(raw + sizeof(vduse_dev_config), sizeof(virtio_blk_config));
@@ -1406,8 +1431,13 @@ struct VduseDeviceImpl : IBlkDevice {
         // every other start() failure, and before anything is bound or spawned.
         if (check_pool_engines(cfg.pool) < 0)
             return -1;
-        if (setup_vq(0) < 0)
-            return -1;
+        // A partial failure unwinds through start()'s DEFER: rollback() touches
+        // a queue only through its kickfd and its loop coroutine, and a queue
+        // that never finished setup_vq has neither (the kickfd close is guarded
+        // on `kickfd >= 0`, vq_stop returns on a null loop).
+        for (uint32_t i = 0; i < nqueues; i++)
+            if (setup_vq(i) < 0)
+                return -1;
         apply_msg_timeout();
 
         stopping = false;
@@ -1441,8 +1471,17 @@ struct VduseDeviceImpl : IBlkDevice {
                 vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                             std::memory_order_relaxed);
         }
-        if (vq_refresh(0) < 0)
-            return -1;
+        // EVERY queue, not just queue 0: an adopted device receives no further
+        // SET_STATUS, so nothing re-arms needs_refresh and this call is the only
+        // refresh queues 1..n-1 will ever get -- a queue it skips keeps its ring
+        // unresolved while the kernel, told vq_num == nqueues, keeps putting
+        // requests on it. The test stays `< 0`: a resolve that raced an iotlb
+        // invalidation returns 0 with needs_refresh re-armed and loop()'s first
+        // tick retries it; only a genuine failure (ring IOVAs truly unmapped)
+        // may fail start().
+        for (uint32_t i = 0; i < nqueues; i++)
+            if (vq_refresh(i) < 0)
+                return -1;
 
         // LAST, and the position is the point: everything above writes the ring
         // fields, `negotiated`/`event_idx` and the iotlb cache from this vcpu, so
