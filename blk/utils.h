@@ -489,12 +489,19 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // event_idx, capacity and notify_valid (control plane writes, serving side
 // reads), run and stopping (teardown writes, loop reads), in_flight (the request
 // coroutines bump it, teardown polls it). The ones published as a group
-// (desc/avail/used/num, the kick/call fds) cannot be made atomic -- a request
-// coroutine holds those pointers across the backend IO, so a lock would have to
-// span the whole request. What covers them is that they are written only from the
-// control plane, which shares this loop's vcpu and so cannot interleave with the
-// yield-free dispatch, and that loop() re-checks readiness after its one yield
-// before touching them again.
+// (desc/avail/used/num, the kick/call fds) and the ones only the serving side
+// advances (last_avail, used_idx) cannot be made atomic -- a request coroutine
+// holds those pointers across the backend IO, so a lock would have to span the
+// whole request, which serializes the queue the split existed to parallelize.
+// What covers them is a contract on the transport rather than a type: mutate them
+// only where this loop cannot be mid-dispatch, either by quiescing the queue first
+// (join the loop, drain the requests it dispatched) or by already being on the
+// loop's own vcpu. vhost-user does both -- quiesce for its ring messages, a hop
+// onto the loop's vcpu for teardown, which is also the only place last_avail can
+// safely be read while the loop is expected to advance it. vduse's control plane
+// is on the loop's vcpu, so nothing there can interleave with a yield-free
+// dispatch at all. loop()'s readiness re-check after its one yield is the backstop
+// on top.
 //
 // Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
 // guest-written free-running counter, so without a cap a single kick could fan

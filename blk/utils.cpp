@@ -740,9 +740,11 @@ void VirtQueueServer::loop() {
         }
         // No kickfd (a SET_VRING_KICK that carried NOFD) leaves no event source, so
         // the fallback re-poll below is the only way to make progress. Waiting on fd
-        // -1 returns at once WITHOUT yielding -- it would hot-spin this vcpu (starving
-        // the msg/accept loops that share it) and log an error every pass -- so sleep
-        // the same KICK_FALLBACK_US budget instead.
+        // -1 returns at once WITHOUT yielding -- it would hot-spin this vcpu and
+        // starve every other coroutine on it (this queue's own request coroutines,
+        // plus a transport's message and accept loops wherever the control plane
+        // shares the vcpu), and log an error every pass -- so sleep the same
+        // KICK_FALLBACK_US budget instead.
         int wr = 0;
         if (kickfd >= 0)
             wr = photon::wait_for_fd_readable(kickfd, Timeout(KICK_FALLBACK_US));
@@ -752,13 +754,17 @@ void VirtQueueServer::loop() {
             break;
         if (wr < 0 && errno != ETIMEDOUT && errno != EINTR)
             LOG_WARN("` virtqueue: kickfd wait failed, ", tag, ERRNO());
-        // Re-check readiness AFTER the yield, not just before it: a transport hook
-        // can invalidate the ring while we slept. vhost-user's SET_VRING_NUM and
-        // SET_VRING_ADDR both retranslate, which NULLS desc/avail/used when the
-        // declared region is too small for the new num, and msg_loop shares this
-        // vcpu -- so dispatch_avail below would dereference a null avail. This
-        // wait is the loop's only yield point and dispatch_avail is yield-free,
-        // so one check here covers the whole dispatch that follows.
+        // Re-check readiness AFTER the yield, not just before it: the ring can be
+        // invalidated while we slept, and dispatch_avail below dereferences avail
+        // unconditionally. How much this check carries depends on the transport.
+        // vhost-user quiesces the loop -- joins it and drains its requests -- before
+        // SET_VRING_NUM / SET_VRING_ADDR retranslate and before anything nulls the
+        // ring, so no mutation of those can land inside the window this covers;
+        // there it is defence in depth, and what catches every OTHER readiness
+        // change (the frontend clearing SET_VRING_ENABLE, say). vduse mutates from a
+        // message loop that shares this vcpu, and there it is load-bearing: this
+        // wait is the loop's only yield point and dispatch_avail is yield-free, so
+        // one check here covers the whole dispatch that follows.
         if (!hooks.ready.fire())
             continue;
         uint64_t n;

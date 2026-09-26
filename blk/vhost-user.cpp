@@ -51,10 +51,13 @@ limitations under the License.
 // P1 scope: one virtqueue (no F_MQ / VIRTIO_BLK_F_MQ), split ring, no
 // indirect descriptors offered (F_RING_INDIRECT_DESC not in our feature set),
 // IN/OUT/FLUSH/GET_ID served; FEATURE_DISCARD/WRITE_ZEROES accepted in cfg
-// but not offered; serving on the caller's vcpu. The virtio-blk device-model
-// core (constants, vring structs, desc-chain walk, request dispatch) is shared
-// with the vduse transport via the internal blk/utils.{h,cpp}. All virtio
-// fields are little-endian (VERSION_1), LE host assumed.
+// but not offered. Each queue serves on one vcpu -- the caller's, or a pool
+// vcpu when BlkConfig::pool is set -- while the control plane (the accept and
+// message loops) stays on the caller's; what that split costs in synchronization
+// is documented at vq_stop/vq_drain and at the quiesced handlers. The virtio-blk
+// device-model core (constants, vring structs, desc-chain walk, request dispatch)
+// is shared with the vduse transport via the internal blk/utils.{h,cpp}. All
+// virtio fields are little-endian (VERSION_1), LE host assumed.
 
 #include "blk.h"
 #include "utils.h"
@@ -292,14 +295,52 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // Field order is padding-driven, do not tidy it: the 8-aligned members come
     // first, with the alignas(8) `dev_config` LAST among them because its 60
     // bytes are not a multiple of 8 and would leave a hole after it; then the
-    // 4-, then the 1-byte ones. The previous order scattered 23 bytes across five
-    // holes (before listen_fd, offer_features, capacity_sectors, mem and
-    // accept_th). 584 bytes vs 608.
+    // 4-, then the 1-byte ones. `nqueues` sits with the three fds rather than down
+    // with the bools: there it fills the 4-byte slot they leave and the struct
+    // rounds to 432, whereas after them it would need fresh 4-alignment and cost 8
+    // more. 432 bytes, content ending at 429 (measured).
     VhostUserController::Config cfg;
 
-    // the shared serving engine (ring state, dispatch, completion, drain);
-    // P1 drives a single virtqueue
-    VirtQueueServer vq;
+    // Per-queue state. ONE heap allocation per queue, and the pointer vector is
+    // deliberate: VirtQueueServer holds a std::atomic, so it is neither copyable
+    // nor movable and cannot live in a vector by value -- resize() needs
+    // MoveInsertable. Pointers also make every address here stable for the
+    // device's lifetime, which the hooks below depend on: they are bound with
+    // `this` == the Vq*, and a reallocation would leave them pointing at freed
+    // memory.
+    struct VqVhu {
+        uint64_t desc_qva = 0, used_qva = 0, avail_qva = 0;   // retranslate from
+                                                             // these on a new
+                                                             // memory table
+        bool enabled = false;      // the frontend's SET_VRING_ENABLE state
+        bool addr_set = false;     // SET_VRING_ADDR translated successfully
+        int callfd = -1;           // completion eventfd (owned here)
+        photon::thread* th = nullptr;
+        // The vcpu this queue's loop coroutine actually runs on, recorded from
+        // INSIDE it: WorkPool does not expose its vcpus, so which one its cursor
+        // picked is knowable only after the coroutine got there. With cfg.pool
+        // null it is simply the caller's own vcpu. vq_stop/vq_drain move their
+        // work there, because the loop and the request coroutines it spawned
+        // share it and are the only writers of last_avail, used_idx and the used
+        // ring. Deliberately NOT cleared when the loop is joined: the requests it
+        // dispatched outlive the join, and vq_drain still has to reach them.
+        photon::vcpu_base* home = nullptr;
+        // vq_start waits on this before returning, so `home` is never read on one
+        // vcpu while the loop writes it on another. The wait is what makes
+        // vq_stop's !home branch mean "no loop coroutine ever ran here" rather
+        // than "the loop has not been scheduled yet" -- and reading a stale null
+        // there picks in-place teardown, which is the very race the migration
+        // exists to avoid. Self-resetting: every signal is matched by exactly one
+        // wait, so a restart finds it at zero.
+        photon::semaphore home_set{0};   // NSDMI, not {}: semaphore's ctor is explicit
+    };
+    struct Vq {
+        VhostUserDeviceImpl* impl = nullptr;
+        uint32_t qid = 0;
+        VirtQueueServer srv;
+        VqVhu x;
+    };
+    std::vector<Vq*> vqs;
 
     fs::IFile* backend = nullptr;
     uint64_t offer_features = 0;
@@ -309,20 +350,17 @@ struct VhostUserDeviceImpl : IBlkDevice {
     photon::thread* accept_th = nullptr;   // SERVER: the accept loop
     photon::thread* msg_th = nullptr;      // the negotiation/message loop
     MemTable mem;
-    struct VqVhu {
-        uint64_t desc_qva = 0, used_qva = 0, avail_qva = 0;   // retranslate from
-                                                             // these on a new
-                                                             // memory table
-        bool enabled = false;      // the frontend's SET_VRING_ENABLE state
-        bool addr_set = false;     // SET_VRING_ADDR translated successfully
-        int callfd = -1;           // completion eventfd (owned here)
-        photon::thread* th = nullptr;
-    } vqx;
     alignas(8) uint8_t dev_config[sizeof(virtio_blk_config)] = {};
 
     int listen_fd = -1;            // SERVER role
     int conn_fd = -1;              // the live frontend connection
     int backend_req_fd = -1;       // SET_BACKEND_REQ_FD channel (config events)
+    // How many virtqueues this device serves. It has to equal every count we
+    // publish to the frontend -- the GET_QUEUE_NUM answer and
+    // virtio_blk_config::num_queues -- because a frontend that reads one count
+    // while the device serves another addresses queues nobody is listening on, and
+    // its requests vanish. Fixed in the constructor, never resized afterwards.
+    uint32_t nqueues = 1;
 
     // Log this as `(const char*)sock_path`, never as VALUE(sock_path): VALUE on a
     // char array deduces a reference to the whole array and alog then emits all
@@ -333,6 +371,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
     bool started = false;
     uint8_t  sector_shift = 9;
     bool     read_only = false;
+    // Written and read only by the control plane (msg_loop, accept_loop, start,
+    // stop_session, rollback), all of which stay on the caller's vcpu -- the
+    // serving side is told to stop through the atomic VirtQueueServer::stopping
+    // plus wake/interrupt/join instead. So this needs no atomic.
     bool stopping = false;
 
     explicit VhostUserDeviceImpl(const VhostUserController::Config& c) : cfg(c) {
@@ -349,6 +391,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             offer_features |= (1ULL << VIRTIO_BLK_F_FLUSH);
         if (read_only)
             offer_features |= (1ULL << VIRTIO_BLK_F_RO);
+        vqs.reserve(nqueues);
+        for (uint32_t i = 0; i < nqueues; i++) {
+            auto* q = new Vq;
+            q->impl = this;
+            q->qid = i;
+            vqs.push_back(q);
+        }
         fill_config();
     }
 
@@ -374,6 +423,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
             shutdown();
         if (own_backend)
             delete backend;
+        // Only here, never in rollback(): a rolled-back device must stay able to
+        // start again, and these are the slots it starts.
+        for (auto* q : vqs)
+            delete q;
+        vqs.clear();
         if (listen_fd >= 0) ::close(listen_fd);
     }
 
@@ -568,63 +622,178 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // Signal the driver's callfd (one eventfd write). The used ring advanced and
     // the driver asked for an IRQ -- and once more when SET_VRING_CALL installs a
     // fresh fd, see there.
-    void vq_notify() {
-        if (vqx.callfd < 0)
+    void vq_notify(uint32_t idx) {
+        int callfd = vqs[idx]->x.callfd;
+        if (callfd < 0)
             return;
         uint64_t one = 1;
-        ssize_t w = ::write(vqx.callfd, &one, sizeof(one));   // eventfd signal
+        ssize_t w = ::write(callfd, &one, sizeof(one));   // eventfd signal
         if (w < 0)
             LOG_WARN("vhost-user callfd signal failed, ", ERRNO());
     }
 
-    bool vq_may_dispatch() { return vqx.enabled && vqx.addr_set && vq.desc && vq.num; }
+    bool vq_may_dispatch(uint32_t idx) {
+        auto* q = vqs[idx];
+        return q->x.enabled && q->x.addr_set && q->srv.desc && q->srv.num;
+    }
 
-    static void* vq_loop_thunk(void* d) {
-        ((VhostUserDeviceImpl*)d)->vq.loop();
+    // The hooks are bound with the Vq* as their context object, so each one can
+    // recover its queue index. Hooks::notify and Hooks::ready are Delegate<void>
+    // and Delegate<bool>, whose bind(void*, Func) wants a free function taking the
+    // context first -- a member function pointer bound to `this` cannot carry the
+    // index, which is why these thunks exist. What they are bound to is a heap
+    // Vq whose address never moves, which is what the pointer vector buys.
+    static void notify_thunk(void* a) {
+        auto* q = (Vq*)a;
+        q->impl->vq_notify(q->qid);
+    }
+    static bool ready_thunk(void* a) {
+        auto* q = (Vq*)a;
+        return q->impl->vq_may_dispatch(q->qid);
+    }
+    static void* translate_thunk(void* a, uint64_t addr, size_t len) {
+        // the memory table is device-wide, not per queue
+        return ((Vq*)a)->impl->vq_translate(addr, len);
+    }
+    static void* loop_thunk(void* a) {
+        auto* q = (Vq*)a;
+        q->x.home = photon::get_vcpu();   // first statement: runs on the landing vcpu
+        q->x.home_set.signal(1);          // publishes it to vq_start's wait
+        q->srv.loop();
         return nullptr;
     }
 
-    void vq_bind() {
-        vq.backend = backend;
+    void vq_bind(uint32_t idx) {
+        auto* q = vqs[idx];
+        q->srv.backend = backend;
         // the LBA bound serve_chain enforces
-        vq.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
-        vq.stack_size = resolve_stack_size(cfg.stack_size);
-        vq.read_only = read_only;
-        vq.serial = "photon-vhost-user";
-        vq.tag = sock_path;
-        vq.hooks.translate.bind(this, &VhostUserDeviceImpl::vq_translate);
-        vq.hooks.notify.bind(this, &VhostUserDeviceImpl::vq_notify);
-        vq.hooks.ready.bind(this, &VhostUserDeviceImpl::vq_may_dispatch);
+        q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
+        q->srv.stack_size = resolve_stack_size(cfg.stack_size);
+        q->srv.read_only = read_only;
+        q->srv.serial = "photon-vhost-user";
+        q->srv.tag = sock_path;
+        q->srv.hooks.translate.bind(q, &translate_thunk);
+        q->srv.hooks.notify.bind(q, &notify_thunk);
+        q->srv.hooks.ready.bind(q, &ready_thunk);
     }
 
-    void vq_stop() {
-        if (!vqx.th) return;
-        vqx.enabled = false;
-        vq.run.store(false, std::memory_order_relaxed);
-        vq.wake();   // out of its kickfd wait
-        photon::thread_interrupt(vqx.th);
-        photon::thread_join((photon::join_handle*)vqx.th);
-        vqx.th = nullptr;
+    // ---- running queue-side work where the queue lives ----
+    //
+    // The loop coroutine and every request coroutine it spawned run on `home`,
+    // which is a pool vcpu once BlkConfig::pool is set. Three things have to join
+    // them there instead of running here on the control plane's vcpu: interrupting
+    // and joining the loop, waiting out the requests it dispatched, and the
+    // backlog wait that reads last_avail while counting on the loop to advance it.
+    // photon::thread_migrate only accepts a READY thread, so a caller cannot move
+    // itself -- hand the work to a coroutine that can be moved.
+    //
+    // The TempDelegate and everything it captures outlive the call for the same
+    // reason run_off_vcpu's do: the caller blocks on `done` and then joins.
+    struct HomeArg {
+        TempDelegate<void> body;
+        photon::vcpu_base* home = nullptr;
+        photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+    };
+
+    static void* home_thunk(void* a) {
+        auto* ha = (HomeArg*)a;
+        ha->body.fire();
+        ha->done.signal(1);
+        return nullptr;
     }
 
-    void vq_start() {
-        if (vqx.th || !vq_may_dispatch())
+    void run_on_home(photon::vcpu_base* home, TempDelegate<void> body) {
+        if (!home || home == photon::get_vcpu()) {
+            // !home means no loop coroutine has ever run for this queue, so there
+            // is nothing on another vcpu to join and nothing of its state to read.
+            // vq_start does not return until the loop has recorded home, so this
+            // is never the "the loop exists but has not been scheduled yet"
+            // window -- the one where working in place would race it.
+            body.fire();
+            return;
+        }
+        HomeArg ha{body, home};
+        auto th = photon::thread_create(&VhostUserDeviceImpl::home_thunk, &ha);
+        if (!th) {
+            // Cannot honour the vcpu rule, but leaving the queue up is worse: the
+            // caller is tearing it down and the memory table is about to go.
+            LOG_ERROR("vhost-user: cannot create the coroutine for the serving vcpu, running it here");
+            body.fire();
+            return;
+        }
+        photon::thread_enable_join(th);
+        if (photon::thread_migrate(th, home) < 0)
+            LOG_WARN("vhost-user: cannot move the work back to the serving vcpu, ", ERRNO());
+        ha.done.wait(1);
+        photon::thread_join((photon::join_handle*)th);
+    }
+
+    // `_here` means "already on this queue's home vcpu". Callers use the
+    // unsuffixed wrapper, which does the hop -- wrapping it at every call site
+    // instead is how one of them gets missed, and a missed one is a cross-vcpu
+    // interrupt/join.
+    void vq_stop_here(uint32_t idx) {
+        auto* q = vqs[idx];
+        if (!q->x.th) return;
+        q->x.enabled = false;
+        q->srv.run.store(false, std::memory_order_relaxed);
+        q->srv.wake();   // out of its kickfd wait
+        photon::thread_interrupt(q->x.th);
+        photon::thread_join((photon::join_handle*)q->x.th);
+        q->x.th = nullptr;
+    }
+
+    void vq_stop(uint32_t idx) {
+        run_on_home(vqs[idx]->x.home, [&] { vq_stop_here(idx); });
+    }
+
+    // The requests hold iovs into the memory table and complete into the used
+    // ring, both of which the caller is about to unmap or re-read.
+    void vq_drain(uint32_t idx) {
+        run_on_home(vqs[idx]->x.home, [&] { vqs[idx]->srv.drain(); });
+    }
+
+    // Wait out what this queue still owes before it is stopped: the requests
+    // already dispatched and, when the caller asked for an orderly handover, the
+    // avail backlog the loop has not consumed yet. This reads last_avail and
+    // dereferences avail WHILE counting on the loop to keep advancing them, so it
+    // cannot run anywhere else: from another vcpu both reads race, and a stale
+    // last_avail would keep the wait spinning after the loop already caught up.
+    void vq_backlog_drain(uint32_t idx, bool drain_backlog) {
+        run_on_home(vqs[idx]->x.home, [&] {
+            auto* q = vqs[idx];
+            if (!q->x.th)
+                return;
+            // addr_set, not srv.desc: the frontend supplies the three vring QVAs
+            // independently, so it can make desc resolve while avail does not, and
+            // this dereferences avail. addr_set is exactly "all three resolved"
+            // (see vq_retranslate).
+            while (q->srv.in_flight.load() ||
+                   (drain_backlog && q->x.enabled && q->x.addr_set &&
+                    q->srv.last_avail != vring_avail_idx(q->srv.avail)))
+                photon::thread_usleep(1000);
+        });
+    }
+
+    void vq_start(uint32_t idx) {
+        auto* q = vqs[idx];
+        if (q->x.th || !vq_may_dispatch(idx))
             return;   // not fully configured yet
         // kickfd is deliberately NOT part of this gate. A SET_VRING_KICK that
         // carries NOFD is protocol-legal and means "there is no kick fd", not
         // "the ring is not ready"; loop() polls every KICK_FALLBACK_US in that
         // case, which is the only way work can be discovered. Refusing to start
         // here made the device silently serve nothing forever.
-        vq.used_idx = vring_used_idx(vq.used);
+        q->srv.used_idx = vring_used_idx(q->srv.used);
         // Wrap-safe, not a plain `<`: both are free-running uint16 counters, so a
         // crash adoption whose BASE is a stale non-zero value from BEFORE a 65536
         // wrap of the dead daemon's counters (BASE 65530 against used_idx 3)
         // would skip the bump, and dispatch would then re-consume ~65530
         // already-served avail entries -- duplicate completions on possibly
         // recycled descriptor heads.
-        if ((uint16_t)(vq.used_idx - vq.last_avail) < 0x8000)
-            vq.last_avail = vq.used_idx;   // the frontend's BASE is stale; the
-                                           // used ring is authoritative
+        if ((uint16_t)(q->srv.used_idx - q->srv.last_avail) < 0x8000)
+            q->srv.last_avail = q->srv.used_idx;   // the frontend's BASE is stale; the
+                                                   // used ring is authoritative
         // Establish avail_event == last_avail before the loop can sleep on the
         // kickfd. SET_VRING_BASE lets the frontend put last_avail anywhere
         // (handle_msg's SET_VRING_BASE branch), and the two lines above can raise
@@ -632,39 +801,55 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // left there -- zero for a fresh ring. Without this publish the invariant
         // does not hold until the first head is consumed, and a driver that kicks
         // in that window is legitimately ignored per §2.7.10.1.
-        vq.publish_avail_event();
-        vq.stopping.store(false, std::memory_order_relaxed);
-        vq.run.store(true, std::memory_order_relaxed);
-        vqx.th = photon::thread_create(&VhostUserDeviceImpl::vq_loop_thunk, this);
-        photon::thread_enable_join(vqx.th);
-        LOG_INFO("vhost-user vq0 serving: num ` last_avail ` used_idx `",
-                 vq.num, vq.last_avail, vq.used_idx);
+        q->srv.publish_avail_event();
+        q->srv.stopping.store(false, std::memory_order_relaxed);
+        q->srv.run.store(true, std::memory_order_relaxed);
+        q->x.th = photon::thread_create(&loop_thunk, q);
+        if (!q->x.th)
+            LOG_ERROR_RETURN(ENOMEM, , "vhost-user: cannot create the vq` loop coroutine", idx);
+        // enable_join BEFORE the migration: it writes a flag in the thread's own
+        // struct, and once migrated that thread is running on another OS thread,
+        // so writing it afterwards is an unsynchronized cross-thread write.
+        // thread_migrate still applies -- it needs a READY thread on this vcpu,
+        // which is exactly what thread_create left, and enable_join does not
+        // change either property. The control-plane coroutines (accept_th, msg_th)
+        // are deliberately NOT migrated -- they stay on the caller's vcpu.
+        photon::thread_enable_join(q->x.th);
+        // Logged here, before the handover and with nothing yielded since the
+        // create: all three are plain fields the loop advances on its own vcpu,
+        // so reading them from here afterwards would be a race.
+        LOG_INFO("vhost-user vq` serving: num ` last_avail ` used_idx `",
+                 idx, q->srv.num, q->srv.last_avail, q->srv.used_idx);
+        migrate_to_pool(cfg.pool, q->x.th);
+        q->x.home_set.wait(1);   // home is set before this returns -- see its declaration
     }
 
     // ----- the message loop (one frontend session) -----
 
     // recompute the vring HVAs from the stored QVAs against the current table
-    void vq_retranslate() {
-        if (!vq.num || !vqx.desc_qva)
+    void vq_retranslate(uint32_t idx) {
+        auto* q = vqs[idx];
+        if (!q->srv.num || !q->x.desc_qva)
             return;
-        size_t dsz = (size_t)vq.num * sizeof(vring_desc);
-        size_t asz = sizeof(uint16_t) * (3 + vq.num);
-        size_t usz = sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * vq.num;
-        vq.desc = (vring_desc*)mem.qva2va(vqx.desc_qva, dsz);
-        vq.avail = (vring_avail*)mem.qva2va(vqx.avail_qva, asz);
-        vq.used = (vring_used*)mem.qva2va(vqx.used_qva, usz);
-        vqx.addr_set = vq.desc && vq.avail && vq.used;
+        size_t dsz = (size_t)q->srv.num * sizeof(vring_desc);
+        size_t asz = sizeof(uint16_t) * (3 + q->srv.num);
+        size_t usz = sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * q->srv.num;
+        q->srv.desc = (vring_desc*)mem.qva2va(q->x.desc_qva, dsz);
+        q->srv.avail = (vring_avail*)mem.qva2va(q->x.avail_qva, asz);
+        q->srv.used = (vring_used*)mem.qva2va(q->x.used_qva, usz);
+        q->x.addr_set = q->srv.desc && q->srv.avail && q->srv.used;
     }
 
     // the mappings the vring HVAs were translated through are gone: drop the
     // addresses as well, or vq_may_dispatch() keeps passing (it only re-checks
     // enabled/addr_set/desc/num) and a later SET_VRING_ENABLE dispatches into
     // freed memory
-    void vq_invalidate() {
-        vq.desc = nullptr;
-        vq.avail = nullptr;
-        vq.used = nullptr;
-        vqx.addr_set = false;
+    void vq_invalidate(uint32_t idx) {
+        auto* q = vqs[idx];
+        q->srv.desc = nullptr;
+        q->srv.avail = nullptr;
+        q->srv.used = nullptr;
+        q->x.addr_set = false;
     }
 
     // Takes ownership of EVERY fd in fds[], marking the ones it keeps as -1 so
@@ -673,18 +858,24 @@ struct VhostUserDeviceImpl : IBlkDevice {
         uint32_t n = m->payload.memory.nregions;
         // Validate BEFORE anything is torn down: a rejected message must leave
         // the device serving exactly as it was. Clearing the table first (as
-        // this used to) unmapped the live regions while vqx.addr_set stayed
+        // this used to) unmapped the live regions while addr_set stayed
         // true, and since a failed SET_MEM_TABLE only sets ack=1 and the session
         // carries on, the next SET_VRING_ENABLE resumed dispatch into them.
         if (n > 8 || (int)n != nfds)
             LOG_ERROR_RETURN(EPROTO, -1, "vhost-user mem table: ` regions vs ` fds", n, nfds);
 
         // the old mappings back the vring HVAs (and possibly in-flight request
-        // iovs): stop dispatch, drain, then swap the table and retranslate
-        bool was_enabled = vqx.enabled;
-        vqx.enabled = false;
-        vq_stop();
-        vq.drain();   // in-flight iovs point into the OLD mappings
+        // iovs): stop dispatch, drain, then swap the table and retranslate.
+        // was_enabled is per queue, not one flag: a frontend may have enabled only
+        // some of the queues, and restoring a single bool would start ones that
+        // were never enabled.
+        std::vector<bool> was_enabled(vqs.size());
+        for (size_t i = 0; i < vqs.size(); i++) {
+            was_enabled[i] = vqs[i]->x.enabled;
+            vqs[i]->x.enabled = false;
+            vq_stop((uint32_t)i);
+            vq_drain((uint32_t)i);   // in-flight iovs point into the OLD mappings
+        }
         mem.clear();
         for (uint32_t i = 0; i < n; i++) {
             vhost_user_memory_region r;   // memcpy out, per the access rule on vhost_user_msg
@@ -693,7 +884,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
                                 MAP_SHARED, fds[i], (off_t)r.mmap_offset);
             if (base == MAP_FAILED) {
                 mem.clear();   // munmaps and closes the regions already stored
-                vq_invalidate();   // those mappings backed the vring: drop it too
+                // those mappings backed every vring: drop them all
+                for (uint32_t j = 0; j < nqueues; j++)
+                    vq_invalidate(j);
                 LOG_ERRNO_RETURN(0, -1, "vhost-user region mmap failed, size `", r.memory_size);
             }
             mem.regions.push_back(MemTable::Region{r.guest_phys_addr, r.userspace_addr,
@@ -701,10 +894,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
             fds[i] = -1;   // owned by mem now; msg_loop must not close it
         }
         LOG_INFO("vhost-user mem table: ` regions", n);
-        vq_retranslate();
-        if (was_enabled) {
-            vqx.enabled = true;
-            vq_start();
+        for (size_t i = 0; i < vqs.size(); i++) {
+            vq_retranslate((uint32_t)i);
+            if (was_enabled[i]) {
+                vqs[i]->x.enabled = true;
+                vq_start((uint32_t)i);
+            }
         }
         return 0;
     }
@@ -727,7 +922,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // our own offer would have us read a used_event nobody wrote.
             // A store, not an assign: should_notify reads event_idx from the
             // serving side, this handler writes it from the control plane.
-            vq.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)), std::memory_order_relaxed);
+            for (uint32_t i = 0; i < nqueues; i++)
+                vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
+                                            std::memory_order_relaxed);
             LOG_INFO("vhost-user negotiated features ", HEX(negotiated));
             break;
         case VHOST_USER_GET_PROTOCOL_FEATURES:
@@ -758,6 +955,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             if (handle_mem_table(m, fds, nfds) < 0) ack = 1;
             break;
         case VHOST_USER_SET_VRING_NUM: {
+            const uint32_t idx = 0;   // only one queue exists yet
             uint32_t n = m->payload.state.num;
             // num is a modulo divisor in dispatch_avail and in
             // vring_used_append, and it sizes the in-flight coroutine cap, so
@@ -770,7 +968,17 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 ack = 1;
                 break;
             }
-            vq.num = n;
+            // num and the three vring pointers are published as a group and the
+            // loop reads all four without a lock, so this changes them with the
+            // queue quiesced and then puts it back the way it found it: `enabled`
+            // is the frontend's state, and a frontend that had the queue running
+            // expects it to still be running after a resize. A rejected num never
+            // gets this far, so a bad message cannot stop a live queue.
+            auto* q = vqs[idx];
+            bool was_enabled = q->x.enabled;
+            vq_stop(idx);
+            vq_drain(idx);
+            q->srv.num = n;
             // The stored vring HVAs were validated against the OLD num's lengths,
             // and qva2va proves only that the declared length fits a region -- the
             // returned pointer is then indexed by num. So re-check, but ONLY when
@@ -785,68 +993,111 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // -> NUM -> BASE -> ADDR -> KICK), so addr_set is still false at the
             // first NUM and there is nothing to fit yet -- SET_VRING_ADDR runs the
             // same check, with a correct message, once the addresses land. Frontend
-            // RECONNECT: msg_loop tears down with vq_stop(), not vq_reset(), so
+            // RECONNECT: msg_loop tears down with vq_stop, not vq_reset, so
             // desc_qva survives from the previous frontend and the new session's
             // SET_MEM_TABLE re-translates that stale QVA against the new region,
             // fails, and leaves addr_set false -- a desc_qva != 0 gate would then
             // reject the reconnect's protocol-legal NUM with this wrong-cause ack.
             // A live resize has addr_set true on entry, so it re-checks as before.
-            bool had_vring = vqx.addr_set;
-            vq_retranslate();
-            if (had_vring && !vqx.addr_set) {
+            bool had_vring = q->x.addr_set;
+            vq_retranslate(idx);
+            if (had_vring && !q->x.addr_set) {
                 LOG_ERROR("vhost-user SET_VRING_NUM ` does not fit the declared region", n);
                 ack = 1;
             }
+            q->x.enabled = was_enabled;
+            vq_start(idx);
             break;
         }
         case VHOST_USER_SET_VRING_ADDR: {
+            const uint32_t idx = 0;   // only one queue exists yet
             vhost_vring_addr a;   // memcpy out, per the access rule on vhost_user_msg
             memcpy(&a, &m->payload.addr, sizeof(a));
-            vqx.desc_qva = a.desc_user_addr;
-            vqx.used_qva = a.used_user_addr;
-            vqx.avail_qva = a.avail_user_addr;
-            vq_retranslate();
-            if (!vqx.addr_set) {
+            // Same group as SET_VRING_NUM, same quiesce: the loop dereferences
+            // these three together with num. Same restore of `enabled` -- the
+            // frontend may re-address a queue it already has running, and the
+            // retranslation below can also fail, in which case vq_start's own
+            // readiness gate is what keeps dispatch off the bad addresses.
+            auto* q = vqs[idx];
+            bool was_enabled = q->x.enabled;
+            vq_stop(idx);
+            vq_drain(idx);
+            q->x.desc_qva = a.desc_user_addr;
+            q->x.used_qva = a.used_user_addr;
+            q->x.avail_qva = a.avail_user_addr;
+            vq_retranslate(idx);
+            if (!q->x.addr_set) {
                 LOG_ERROR("vhost-user vring addr translation failed (SET_MEM_TABLE first?), num `",
-                          vq.num);
+                          q->srv.num);
                 ack = 1;
             }
+            q->x.enabled = was_enabled;
+            vq_start(idx);
             break;
         }
-        case VHOST_USER_SET_VRING_BASE:
-            vq.last_avail = (uint16_t)m->payload.state.num;
-            // vq_start() early-returns once vqx.th is set, so the publish above
-            // does NOT cover a BASE that arrives on a live session. That is a
-            // protocol violation -- the frontend is supposed to stop the vq first
-            // -- but it stays a bounded one only if the invariant still holds, so
-            // restore it here. Guarded on addr_set because BASE may legitimately
-            // precede SET_VRING_ADDR, and used is still null until then.
-            if (vqx.addr_set)
-                vq.publish_avail_event();
+        case VHOST_USER_SET_VRING_BASE: {
+            const uint32_t idx = 0;   // only one queue exists yet
+            auto* q = vqs[idx];
+            // The frontend is supposed to have stopped this vq before it publishes
+            // a base for it, so in the normal sequence both calls below are no-ops.
+            // They are not redundant: last_avail is a plain field that
+            // dispatch_avail advances on the queue's own vcpu, so writing it from
+            // here is only safe with that loop joined, and a frontend that skips
+            // the stop is exactly the case the quiesce has to cover.
+            //
+            // Deliberately NOT restarted afterwards: vq_start re-derives last_avail
+            // from the used ring, which would throw away the base just written. A
+            // frontend that broke the stop-first rule is left with a stopped queue
+            // -- the state it claimed to be in -- and SET_VRING_ENABLE brings it
+            // back.
+            vq_stop(idx);
+            vq_drain(idx);
+            q->srv.last_avail = (uint16_t)m->payload.state.num;
+            // vq_start() publishes this invariant too, but it early-returns while
+            // the queue is not enabled -- the normal state here, BASE being part of
+            // setup -- so publish it explicitly. Guarded on addr_set because BASE
+            // may legitimately precede SET_VRING_ADDR, and used is still null then.
+            if (q->x.addr_set)
+                q->srv.publish_avail_event();
             break;
+        }
         case VHOST_USER_GET_VRING_BASE: {
+            const uint32_t idx = 0;   // only one queue exists yet
             // let dispatched requests complete FIRST: replying with a
             // last_avail that outruns the used ring would drop them when the
             // frontend resumes the vq elsewhere (their completions never land)
-            vq.drain();
-            vq_stop();
-            vhost_vring_state s{m->payload.state.index, vq.last_avail};
+            vq_drain(idx);
+            vq_stop(idx);
+            // read after the join: last_avail belongs to the loop's vcpu
+            vhost_vring_state s{m->payload.state.index, vqs[idx]->srv.last_avail};
             if (reply_blob(conn_fd, m->request, &s, sizeof(s)) < 0) return false;
             return true;
         }
         case VHOST_USER_SET_VRING_KICK:
         case VHOST_USER_SET_VRING_CALL: {
+            const uint32_t idx = 0;   // only one queue exists yet
+            auto* q = vqs[idx];
             uint64_t u = m->payload.u64;
             bool is_kick = m->request == VHOST_USER_SET_VRING_KICK;
-            int* slot = is_kick ? &vq.kickfd : &vqx.callfd;
+            // The loop waits on kickfd and drains it with a bare read, and every
+            // completion writes callfd -- both from the queue's own vcpu. A
+            // descriptor we have just closed can be handed straight back out for
+            // something else, so swapping these under a running loop risks doing
+            // IO on a recycled fd number: quiesce first. `enabled` is restored and
+            // the queue restarted because a KICK or a CALL on a live queue (the
+            // NOFD revoke, a frontend reconnect) must leave it live; during setup
+            // `was_enabled` is false and vq_start's own gate keeps it that way.
+            bool was_enabled = q->x.enabled;
+            vq_stop(idx);
+            vq_drain(idx);
+            int* slot = is_kick ? &q->srv.kickfd : &q->x.callfd;
             if (*slot >= 0) { ::close(*slot); *slot = -1; }
             if (!(u & VHOST_USER_VRING_NOFD_MASK) && nfds > 0) {
                 *slot = fds[0];
                 fds[0] = -1;   // ours now
             }
-            if (is_kick) {
-                vq_start();
-            } else if (vqx.callfd >= 0) {
+            q->x.enabled = was_enabled;
+            if (!is_kick && q->x.callfd >= 0) {
                 // Signal once on installing the callfd: a frontend that
                 // reconnects may be blocked on an interrupt for completions whose
                 // notification died with the old connection, and one spurious
@@ -856,18 +1107,26 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 // it re-reads used->idx and finds nothing new. QEMU's
                 // vhost-user-blk idx test waits for exactly this ISR before it
                 // sends its first request.
-                vq_notify();
+                vq_notify(idx);
+            }
+            vq_start(idx);
+            break;
+        }
+        case VHOST_USER_SET_VRING_ENABLE: {
+            const uint32_t idx = 0;   // only one queue exists yet
+            if (m->payload.state.num) {
+                // A preceding disable only joins the loop; the requests it had
+                // already dispatched are still completing into the used ring that
+                // vq_start re-reads and republishes. Wait them out first so the
+                // two never overlap.
+                vq_drain(idx);
+                vqs[idx]->x.enabled = true;
+                vq_start(idx);
+            } else {
+                vq_stop(idx);
             }
             break;
         }
-        case VHOST_USER_SET_VRING_ENABLE:
-            if (m->payload.state.num) {
-                vqx.enabled = true;
-                vq_start();
-            } else {
-                vq_stop();
-            }
-            break;
         case VHOST_USER_GET_CONFIG: {
             vhost_user_config c;
             memset(&c, 0, sizeof(c));
@@ -947,8 +1206,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 break;
         }
         // session over: stop serving; the listener (SERVER) stays up for the
-        // frontend's reconnect (QEMU reconnect=on drives the recovery)
-        vq_stop();
+        // frontend's reconnect (QEMU reconnect=on drives the recovery). The
+        // requests already out are NOT waited for here -- every path that unmaps
+        // the memory table they hold iovs into (handle_mem_table, stop_session,
+        // rollback) drains them itself first.
+        for (uint32_t i = 0; i < nqueues; i++)
+            vq_stop(i);
     }
 
     // ----- connection setup -----
@@ -1068,8 +1331,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
         DEFER(if (!ok) { int e = errno; rollback(); errno = e; });
 
         stopping = false;
-        vq_bind();
-        vq.stopping.store(false, std::memory_order_relaxed);
+        // After the DEFER, so a rejected pool unwinds through the same rollback as
+        // every other start() failure, and before anything is bound or listened on.
+        if (check_pool_engines(cfg.pool) < 0)
+            return -1;
+        for (uint32_t i = 0; i < nqueues; i++) {
+            vq_bind(i);
+            vqs[i]->srv.stopping.store(false, std::memory_order_relaxed);
+        }
         if (cfg.sock_role == VhostUserController::SockRole::SERVER) {
             if (do_listen() < 0)
                 return -1;
@@ -1089,43 +1358,40 @@ struct VhostUserDeviceImpl : IBlkDevice {
         return 0;
     }
 
-    // close the vq's fds and reset it for a future session (vq holds an
-    // atomic, so no wholesale assignment)
+    // close every queue's fds and reset it for a future session (srv holds
+    // atomics, so no wholesale assignment)
     void vq_reset() {
-        vq_stop();
-        if (vq.kickfd >= 0) { ::close(vq.kickfd); vq.kickfd = -1; }
-        if (vqx.callfd >= 0) { ::close(vqx.callfd); vqx.callfd = -1; }
-        vq.num = 0;
-        vqx.desc_qva = vqx.used_qva = vqx.avail_qva = 0;
-        vq_invalidate();
-        vq.last_avail = 0;
-        vq.used_idx = 0;
-        // SET_FEATURES arrives every session and resets event_idx, but leaving a
-        // true value on the reset path is a hazard; leaving notify_valid true is
-        // worse -- it would cost the first completion after a reset its
-        // unconditional notification.
-        vq.event_idx.store(false, std::memory_order_relaxed);
-        vq.notify_valid.store(false, std::memory_order_relaxed);
-        vqx.enabled = false;
+        for (uint32_t i = 0; i < nqueues; i++) {
+            auto* q = vqs[i];
+            vq_stop(i);
+            if (q->srv.kickfd >= 0) { ::close(q->srv.kickfd); q->srv.kickfd = -1; }
+            if (q->x.callfd >= 0) { ::close(q->x.callfd); q->x.callfd = -1; }
+            q->srv.num = 0;
+            q->x.desc_qva = q->x.used_qva = q->x.avail_qva = 0;
+            vq_invalidate(i);
+            q->srv.last_avail = 0;
+            q->srv.used_idx = 0;
+            // SET_FEATURES arrives every session and resets event_idx, but leaving a
+            // true value on the reset path is a hazard; leaving notify_valid true is
+            // worse -- it would cost the first completion after a reset its
+            // unconditional notification.
+            q->srv.event_idx.store(false, std::memory_order_relaxed);
+            q->srv.notify_valid.store(false, std::memory_order_relaxed);
+            q->x.enabled = false;
+        }
     }
 
     // stop serving + disconnect; keep listening state consistent with `role`
     void stop_session(bool drain_backlog) {
         if (!drain_backlog)
-            vqx.enabled = false;
-        if (vqx.th) {
-            // addr_set, not vq.desc: the frontend supplies the three vring QVAs
-            // independently, so it can make desc resolve while avail does not,
-            // and this dereferences avail. addr_set is exactly "all three
-            // resolved" (see vq_retranslate).
-            while (vq.in_flight.load() ||
-                   (drain_backlog && vqx.enabled && vqx.addr_set &&
-                    vq.last_avail != vring_avail_idx(vq.avail)))
-                photon::thread_usleep(1000);
-        }
+            for (auto* q : vqs)
+                q->x.enabled = false;
+        // Device-level `stopping`, and it has to be set BEFORE the two joins
+        // below: msg_loop's and accept_loop's conditions are `while (!stopping)`,
+        // and an interrupted accept_loop that still finds stopping false takes the
+        // EINTR branch and loops again -- so without this the join never returns.
+        // Both loops stay on this vcpu, which is why `stopping` needs no atomic.
         stopping = true;
-        // from here the engine leaves in-flight requests uncompleted
-        vq.stopping.store(true, std::memory_order_relaxed);
         if (accept_th) {
             photon::thread_interrupt(accept_th);
             photon::thread_join((photon::join_handle*)accept_th);
@@ -1136,12 +1402,25 @@ struct VhostUserDeviceImpl : IBlkDevice {
             photon::thread_join((photon::join_handle*)msg_th);
             msg_th = nullptr;
         }
-        vq_stop();   // join the vq loop: no further dispatch
-        // the pre-join drain cannot see a batch dispatched in the window
-        // before `stopping` took effect: those request coroutines hold VAs
-        // into the memory table, so wait for them before vq_reset/mem.clear
-        // unmapping under them (use-after-free)
-        vq.drain();
+        for (uint32_t i = 0; i < nqueues; i++) {
+            // The backlog wait comes first and the engine-level `stopping` second,
+            // and that order is load-bearing: the wait expects the loop to keep
+            // consuming avail entries, and `stopping` is exactly what tells it to
+            // leave them alone. Setting the flag first would strand the wait.
+            //
+            // Both joins above are also what makes the wait safe from the message
+            // side: while msg_loop lived it could process a SET_VRING_* in the
+            // middle of the drain and swap the ring out from under it.
+            vq_backlog_drain(i, drain_backlog);
+            // from here the engine leaves in-flight requests uncompleted
+            vqs[i]->srv.stopping.store(true, std::memory_order_relaxed);
+            vq_stop(i);   // join the vq loop: no further dispatch
+            // the backlog wait cannot see a batch dispatched in the window before
+            // `stopping` took effect: those request coroutines hold VAs into the
+            // memory table, so wait for them before vq_reset/mem.clear unmapping
+            // under them (use-after-free)
+            vq_drain(i);
+        }
         vq_reset();
         mem.clear();
         if (conn_fd >= 0) { ::close(conn_fd); conn_fd = -1; }
@@ -1187,7 +1466,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // serve_chain's LBA bound must grow with us. A store, not an assign:
         // serve_chain reads it from the serving side while resize() runs on the
         // control plane -- the same reason tcmu's dev_size/num_lbas are atomic.
-        vq.capacity.store(new_size, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < nqueues; i++)
+            vqs[i]->srv.capacity.store(new_size, std::memory_order_relaxed);
         cfg.info.size = new_size;
         fill_config();
         if (backend_req_fd >= 0) {   // announce: the frontend re-reads GET_CONFIG
@@ -1225,8 +1505,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // memory table, so mem.clear() must not run until the loop has stopped
         // dispatching and the ones already out have finished. Both are no-ops on
         // the common rollback path (nothing was ever started).
-        vq_stop();
-        vq.drain();
+        for (uint32_t i = 0; i < nqueues; i++) {
+            vq_stop(i);
+            vq_drain(i);
+        }
         vq_reset();
         mem.clear();
         if (conn_fd >= 0) { ::close(conn_fd); conn_fd = -1; }
