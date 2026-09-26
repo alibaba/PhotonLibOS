@@ -285,6 +285,15 @@ struct Iotlb {
     };
     std::vector<Map> maps;
     std::vector<Map> stale;   // invalidated but not yet munmapped
+    // Bumped by every invalidate. resolve()'s slow path runs OUTSIDE the lock, so
+    // a range it is fetching can be invalidated in between, and the re-scan
+    // before the insert cannot see that: an invalidated range is no longer in
+    // `maps`, so the re-scan reports "absent" both for "nobody fetched it yet"
+    // and for "the driver has unmapped it". Without this counter the second case
+    // would publish a mapping of pages the driver no longer owns, and every later
+    // request for that IOVA would be a cache hit on them. A plain integer, not an
+    // atomic: every access is inside `lock`.
+    uint64_t gen = 0;
     // A photon::mutex, not a spinlock: resolve()'s slow path blocks in
     // VDUSE_IOTLB_GET_FD and then in mmap, and a spinlock held across a blocking
     // syscall leaves another OS thread's vcpu spinning for the whole kernel round
@@ -294,8 +303,10 @@ struct Iotlb {
     photon::mutex lock;
 
     void* resolve(uint64_t iova, size_t len) {
+        uint64_t gen0 = 0;
         {
             SCOPED_LOCK(lock);
+            gen0 = gen;
             // Wrap-free, and the cache is the only place that needs it: a wrapped
             // `iova + len - 1` in the ioctl below produces an end below its start,
             // which the ioctl rejects -- but a cache HIT never reaches the ioctl, so
@@ -326,6 +337,7 @@ struct Iotlb {
             LOG_ERRNO_RETURN(0, nullptr, "vduse iotlb mmap failed, iova ` map [`,`] off `",
                              iova, e.start, e.last, e.offset);
         char* hit = nullptr;
+        bool invalidated = false;
         {
             SCOPED_LOCK(lock);
             // Re-scan before inserting: another coroutine can have fetched and
@@ -337,12 +349,26 @@ struct Iotlb {
                     hit = m.base + (iova - m.start);
                     break;
                 }
-            if (!hit)
+            // The re-scan above cannot tell "still absent" from "invalidated while
+            // we were fetching": an invalidated range leaves `maps`, and ours was
+            // never in it. So the generation says it -- coarsely, because it cannot
+            // tell our range from some other one that moved, and a false positive
+            // costs one request a resolution the driver would have honoured. That
+            // is the cheap side of the trade: re-fetching in a loop instead is
+            // precise but has no bound, since every round needs a fresh
+            // invalidation to be wasted, and a driver that churns the iotlb per
+            // request can churn faster than an ioctl and an mmap take. Dropping our
+            // mapping and answering from the cache as it now stands gives a hit if
+            // somebody re-fetched the range after the invalidation, and a failure
+            // otherwise -- which is what an IOVA the driver has unmapped resolves
+            // to anyway.
+            invalidated = (gen != gen0);
+            if (!hit && !invalidated)
                 maps.push_back(Map{e.start, e.last, (char*)base});
         }
-        if (hit) {
+        if (hit || invalidated) {
             ::munmap(base, sz);
-            return hit;
+            return hit;   // nullptr when the range was invalidated under us
         }
         return (char*)base + (iova - e.start);
     }
@@ -370,6 +396,7 @@ struct Iotlb {
     // Unlocked halves for clear(): photon::mutex is not recursive, so clear()
     // cannot call the two wrappers above. `lock` is already held.
     void invalidate_locked(uint64_t start, uint64_t last) {
+        gen++;   // resolve()'s in-flight slow path must not publish what this drops
         for (size_t i = maps.size(); i-- > 0; ) {
             auto& m = maps[i];
             if (m.start > last || m.last < start)
@@ -438,19 +465,29 @@ struct VduseDeviceImpl : IBlkDevice {
     // which the hooks below depend on: they are bound with `this` == the Vq*, and
     // a reallocation would leave them pointing at freed memory.
     struct VqVduse {
-        // All three are set by the control plane (the msg loop and teardown, on
-        // the caller's vcpu) and consumed by this queue's loop on `home`, which
-        // BlkConfig::pool can make another OS thread. Relaxed only: nothing else
-        // is published through them. `ready` is the one with two writers of
-        // opposite intent -- the msg loop and teardown clear it, vq_refresh sets
-        // it -- which is an ordering problem, not a data race, so the clearing
-        // side quiesces the queue before it clears (see vq_stop/vq_drain).
+        // Cross-vcpu state: the control plane (the msg loop and teardown, on the
+        // caller's vcpu) writes these and this queue's loop reads them on `home`,
+        // which BlkConfig::pool can make another OS thread. vq_refresh is the
+        // exception -- it runs on the loop's side, where it reads `gen`, consumes
+        // reset_pending and re-arms needs_refresh. Relaxed only: nothing else is
+        // published through them. `ready` is the one field with two writers of
+        // opposite intent -- the control plane clears it, vq_refresh sets it --
+        // which is an ordering problem, not a data race, and `gen` is what settles
+        // the order: an invalidation bumps the generation before it clears, and a
+        // refresh that finds the generation moved while it was resolving withholds
+        // its own publish. Stopping the queue around the clear instead is not
+        // available here: the kernel blocks the sender of a message until that
+        // message is answered, for msg_timeout seconds, so nothing the message
+        // loop waits for may be as unbounded as the in-flight requests are.
         std::atomic<bool> ready{false};          // the ring is resolved and
                                                  // dispatch may run
         std::atomic<bool> reset_pending{false};  // a status-0 reset: zero the ring
                                                  // counters at the next refresh
                                                  // (vs adoption resume)
         std::atomic<bool> needs_refresh{false};  // DRIVER_OK seen; the loop resolves
+        // The generation of this queue's readiness. A refresh snapshots it
+        // before it resolves anything and publishes only if it has not moved.
+        std::atomic<uint32_t> gen = 0;
         // The vcpu this queue's loop coroutine actually runs on, recorded from
         // INSIDE it: WorkPool does not expose its vcpus, so which one its cursor
         // picked is knowable only after the coroutine got there. With cfg.pool
@@ -468,7 +505,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // than "the loop has not been scheduled yet" -- and reading a stale null
         // there picks in-place teardown, which is the very race the migration
         // exists to avoid. Self-resetting: every signal is matched by exactly one
-        // wait, so a restart finds it at zero.
+        // wait, so a later start() finds it at zero.
         photon::semaphore home_set{0};   // NSDMI, not {}: semaphore's ctor is explicit
     };
     struct Vq {
@@ -595,15 +632,13 @@ struct VduseDeviceImpl : IBlkDevice {
         return 0;
     }
 
-    // Every branch below that clears a queue's `ready` quiesces that queue first
-    // (join its loop, drain the requests that loop dispatched) and puts it back
-    // afterwards -- see VqVduse::ready for why making the flag atomic is not enough
-    // on its own. The `!stopping` guard on all of them is one rule: from the moment
-    // stop_serving sets that flag until it joins msg_th, teardown owns the queues.
-    // A quiesce inside that window would either race teardown's own join or take
-    // away the loop that teardown's backlog wait still counts on to advance
-    // last_avail -- a wait with no bound. So the handler then only records the state
-    // change and leaves the stopping to teardown.
+    // Nothing in here may wait for the serving side. The kernel blocks whoever
+    // sent the message until this answers it, and gives up after msg_timeout
+    // seconds -- a device whose replies stop is a device that has to be destroyed
+    // and re-created. So the two branches that invalidate a ring only record that
+    // they did: `gen` tells a refresh already in flight to withhold its publish,
+    // and anything that genuinely has to wait for the requests to finish belongs
+    // to teardown, which runs under detach's own unbounded contract.
     void handle_msg(const vduse_dev_request* req) {
         switch (req->type) {
         case VDUSE_SET_STATUS: {
@@ -611,23 +646,19 @@ struct VduseDeviceImpl : IBlkDevice {
             LOG_INFO("vduse ` status -> 0x`", name, HEX(dev_status));
             if (dev_status == 0) {          // reset: stop serving, keep the session
                 for (uint32_t i = 0; i < nqueues; i++) {
-                    // Quiesce BEFORE clearing. `ready` has two writers with
-                    // opposite intent: vq_refresh publishes true on the queue's
-                    // own vcpu, this handler publishes false on the control
-                    // plane's. Making the word atomic removes the data race but
-                    // not the conflict -- a refresh already in flight would still
-                    // land its true over our false, and dispatch would then run on
-                    // a ring the driver has torn down. With the loop joined there
-                    // is exactly one writer left.
-                    if (!stopping) {
-                        vq_stop(i);
-                        vq_drain(i);
-                    }
-                    vqs[i]->x.ready.store(false, std::memory_order_relaxed);
+                    auto* q = vqs[i];
+                    // Bump BEFORE clearing. A refresh already in flight snapshots
+                    // the generation as its first act and re-reads it immediately
+                    // before it publishes, so an increment that has landed by then
+                    // makes it stay silent and this clear is the last word on
+                    // `ready`. Incrementing after the clear would instead leave the
+                    // whole resolve -- an ioctl and up to three mmap round trips --
+                    // as a window in which a refresh publishes over the clear, and
+                    // dispatch then runs on a ring the driver has torn down.
+                    q->x.gen.fetch_add(1, std::memory_order_relaxed);
+                    q->x.ready.store(false, std::memory_order_relaxed);
                     // the coming negotiation restarts the ring counters at 0
-                    vqs[i]->x.reset_pending.store(true, std::memory_order_relaxed);
-                    if (!stopping)
-                        vq_start(i);
+                    q->x.reset_pending.store(true, std::memory_order_relaxed);
                 }
             } else if (dev_status & VIRTIO_CONFIG_S_FEATURES_OK) {
                 uint64_t f = 0;
@@ -661,40 +692,31 @@ struct VduseDeviceImpl : IBlkDevice {
             LOG_DEBUG("vduse ` iotlb update [`, `]", name, req->iova.start, req->iova.last);
             iotlb.invalidate(req->iova.start, req->iova.last);
             if (req->iova.start == 0 && req->iova.last == 0) {
-                // unmap-all: the vring is gone. Same quiesce-then-clear as the
-                // reset above. Invalidating first and clearing `ready` second is
-                // what keeps the restarted loop's flush_stale from munmapping under
-                // a request: the drain between them is what proves no coroutine
-                // still holds a VA into the range.
+                // unmap-all: the vring is gone. Same generation bump as the reset
+                // above, and invalidating first is what makes both cases come out
+                // right: a refresh that has not resolved yet finds the ranges gone
+                // from the cache and fails instead of publishing them, and one that
+                // had already resolved them is silenced by the bump. The munmap of
+                // those ranges is not this handler's problem either -- flush_stale
+                // only unmaps once every queue is neither ready nor holding a
+                // request.
                 for (uint32_t i = 0; i < nqueues; i++) {
-                    if (!stopping) {
-                        vq_stop(i);
-                        vq_drain(i);
-                    }
-                    vqs[i]->x.ready.store(false, std::memory_order_relaxed);
-                    if (!stopping)
-                        vq_start(i);
+                    auto* q = vqs[i];
+                    q->x.gen.fetch_add(1, std::memory_order_relaxed);
+                    q->x.ready.store(false, std::memory_order_relaxed);
                 }
             }
             reply(req->request_id, VDUSE_REQ_RESULT_OK, 0, 0);
             break;
         case VDUSE_GET_VQ_STATE: {
-            // Drained and joined before the read: last_avail is a plain field that
-            // dispatch_avail advances on the queue's own vcpu, so answering from the
-            // control plane is only safe with that loop stopped -- and the drain
-            // comes first, because a last_avail that outruns the used ring would
-            // drop the requests still in flight when the kernel resumes the vq
-            // elsewhere. Restarted afterwards, unlike the equivalent vhost-user
-            // message: the kernel asked to READ state, it did not ask us to stop the
-            // vq, and the consumer may well keep using it.
-            if (!stopping) {
-                vq_drain(0);
-                vq_stop(0);
-            }
-            // read after the join: last_avail belongs to the loop's vcpu
-            uint16_t last_avail = vqs[0]->srv.last_avail;
-            if (!stopping)
-                vq_start(0);
+            // Read on the queue's own vcpu: last_avail is a plain field that
+            // dispatch_avail advances there. Hopping is enough -- the kernel asked
+            // to READ a counter, not to stop the vq, so stopping and draining for
+            // it would put an unbounded wait in front of a reply the kernel times
+            // out at msg_timeout. (vhost-user's GET_VRING_BASE does quiesce, but
+            // that message's own protocol meaning is "stop this vq and return it".)
+            uint16_t last_avail = 0;
+            run_on_home(vqs[0]->x.home, [&] { last_avail = vqs[0]->srv.last_avail; });
             // The index is echoed but not yet honored: this answers queue 0's
             // counter for index 0 and zero for anything else.
             reply(req->request_id, VDUSE_REQ_RESULT_OK, req->vq_state.index,
@@ -732,6 +754,14 @@ struct VduseDeviceImpl : IBlkDevice {
     // (re)resolve the vring after DRIVER_OK or an adoption resync
     int vq_refresh(uint32_t idx) {
         auto* q = vqs[idx];
+        // First statement, before anything below can yield: the publish at the
+        // bottom is withheld if the control plane invalidates this ring while we
+        // are resolving it, and "while" has to span the whole resolve. The only
+        // yield point in it is the iotlb cache's mutex (the ioctls and the mmaps
+        // are blocking syscalls, which park the OS thread rather than handing the
+        // vcpu over), but a snapshot taken after that mutex would miss an
+        // invalidation that landed inside it.
+        uint32_t gen_snapshot = q->x.gen.load(std::memory_order_relaxed);
         vduse_vq_info vi;
         memset(&vi, 0, sizeof(vi));
         // the index is ours to supply: we are asking the kernel about this queue,
@@ -786,10 +816,21 @@ struct VduseDeviceImpl : IBlkDevice {
         // ring, which can be any value, while avail_event still holds what the
         // previous daemon published. See SPEC §3.2.
         q->srv.publish_avail_event();
-        q->x.ready.store(true, std::memory_order_relaxed);
-        LOG_INFO("vduse ` vq` ready: num ` desc ` avail ` used ` resume at `",
-                 name, idx, q->srv.num, HEX(vi.desc_addr), HEX(vi.driver_addr),
-                 HEX(vi.device_addr), q->srv.last_avail);
+        // Publish only if nothing invalidated the ring while we were resolving it.
+        // Re-arm needs_refresh when we do not: vq_tick consumed that flag before
+        // calling us, and DRIVER_OK will not come again, so a suppressed publish
+        // without this would leave the queue permanently not-ready -- the device
+        // silently stops serving.
+        if (q->x.gen.load(std::memory_order_relaxed) == gen_snapshot) {
+            q->x.ready.store(true, std::memory_order_relaxed);
+            LOG_INFO("vduse ` vq` ready: num ` desc ` avail ` used ` resume at `",
+                     name, idx, q->srv.num, HEX(vi.desc_addr), HEX(vi.driver_addr),
+                     HEX(vi.device_addr), q->srv.last_avail);
+        } else {
+            q->x.needs_refresh.store(true, std::memory_order_relaxed);
+            LOG_INFO("vduse ` vq` resolved, but invalidated while resolving: deferring the refresh",
+                     name, idx);
+        }
         return 0;
     }
 
@@ -876,13 +917,14 @@ struct VduseDeviceImpl : IBlkDevice {
     // ---- running queue-side work where the queue lives ----
     //
     // The loop coroutine and every request coroutine it spawned run on `home`,
-    // which is a pool vcpu once BlkConfig::pool is set. Three things have to join
+    // which is a pool vcpu once BlkConfig::pool is set. Four things have to join
     // them there instead of running here on the control plane's vcpu: interrupting
-    // and joining the loop, waiting out the requests it dispatched, and the
-    // backlog wait that reads last_avail and dereferences `avail` while counting
-    // on the loop to keep advancing the former. photon::thread_migrate only
-    // accepts a READY thread, so a caller cannot move itself -- hand the work to a
-    // coroutine that can be moved.
+    // and joining the loop, waiting out the requests it dispatched, the backlog
+    // wait that reads last_avail and dereferences `avail` while counting on the
+    // loop to keep advancing the former, and answering the kernel's vq state read,
+    // which reports that same last_avail. photon::thread_migrate only accepts a
+    // READY thread, so a caller cannot move itself -- hand the work to a coroutine
+    // that can be moved.
     //
     // The TempDelegate and everything it captures outlive the call for the same
     // reason run_off_vcpu's do: the caller blocks on `done` and then joins.
@@ -902,10 +944,12 @@ struct VduseDeviceImpl : IBlkDevice {
     void run_on_home(photon::vcpu_base* home, TempDelegate<void> body) {
         if (!home || home == photon::get_vcpu()) {
             // !home means no loop coroutine has ever run for this queue, so there
-            // is nothing on another vcpu to join and nothing of its state to read.
-            // vq_start does not return until the loop has recorded home, so this
-            // is never the "the loop exists but has not been scheduled yet"
-            // window -- the one where working in place would race it.
+            // is nothing on another vcpu to join and no serving-side writer of the
+            // state a body reads here -- whatever runs on this vcpu instead is the
+            // only thing that can be touching it. vq_start does not return until
+            // the loop has recorded home, so this is never the "the loop exists
+            // but has not been scheduled yet" window -- the one where working in
+            // place would race it.
             body.fire();
             return;
         }
@@ -931,23 +975,16 @@ struct VduseDeviceImpl : IBlkDevice {
     // interrupt/join.
     void vq_stop_here(uint32_t idx) {
         auto* q = vqs[idx];
-        // Claim the handle BEFORE the join, not after: the join yields, and a
-        // second quiesce can be resumed inside that window -- the message loop and
-        // teardown run on the same vcpu and both reach here. Two joiners on one
-        // coroutine is undefined; a caller that finds the slot already claimed has
-        // nothing left to stop.
-        //
-        // Deliberately does NOT touch x.ready. Clearing it is the caller's step and
-        // it comes after the drain, so that stop_serving's backlog wait -- whose
-        // condition includes `ready` -- is not cut short by a quiesce that happens
-        // to land mid-wait.
-        auto* th = q->th;
-        if (!th) return;
-        q->th = nullptr;
+        // Deliberately does NOT touch x.ready: that flag reports whether the ring
+        // is resolved, which is not what stopping the coroutine says. Its clears
+        // belong to the invalidation points and to stop_serving, which places them
+        // around its own backlog wait.
+        if (!q->th) return;
         q->srv.run.store(false, std::memory_order_relaxed);
         q->srv.wake();            // out of its kickfd wait
-        photon::thread_interrupt(th);
-        photon::thread_join((photon::join_handle*)th);
+        photon::thread_interrupt(q->th);
+        photon::thread_join((photon::join_handle*)q->th);
+        q->th = nullptr;
     }
 
     void vq_stop(uint32_t idx) {
@@ -981,17 +1018,12 @@ struct VduseDeviceImpl : IBlkDevice {
         });
     }
 
-    // (Re)start one queue's loop coroutine. Called from start() once the ring is
-    // resolved, and from the message loop to put a queue back the way a quiesce
-    // found it.
+    // Start one queue's loop coroutine, once its ring is resolved. Only start()
+    // calls this: nothing in the message loop stops a queue, so nothing there has
+    // to put one back either.
     int vq_start(uint32_t idx) {
         auto* q = vqs[idx];
-        // `stopping` is the device-level teardown flag. From the moment
-        // stop_serving sets it until the message loop is joined, teardown owns the
-        // queues: resurrecting one here would leave a live loop dispatching into
-        // ring pointers that teardown is about to null, over mappings it is about
-        // to unmap.
-        if (q->th || stopping)
+        if (q->th)
             return 0;
         q->srv.stopping.store(false, std::memory_order_relaxed);
         q->srv.run.store(true, std::memory_order_relaxed);
@@ -1103,12 +1135,6 @@ struct VduseDeviceImpl : IBlkDevice {
     }
 
     void stop_serving(bool drain_backlog) {
-        // Device-level, and set BEFORE anything below. Two reasons: it is what
-        // tells the message loop to stop quiescing queues on its own account (see
-        // vq_start), and it has to be true before msg_th is interrupted --
-        // msg_loop treats an interrupt that still finds it false as EINTR and
-        // loops again, so the join would never return.
-        stopping = true;
         if (!drain_backlog)
             for (auto* q : vqs)
                 // stop dispatching NOW; the un-dispatched avail backlog stays in
@@ -1131,6 +1157,17 @@ struct VduseDeviceImpl : IBlkDevice {
             // while dev_fd is still open); with drain_backlog the vq loop also
             // keeps fetching until the avail ring is empty (orderly handover)
             vq_backlog_drain(i, drain_backlog);
+            // The device-level flag, and deliberately not at the top of this
+            // function: it is what makes msg_loop exit, so from here until that
+            // loop is joined the kernel's messages go unanswered. Hoisting it
+            // above the wait would spend an unbounded wait with nobody replying,
+            // which the destructor's fallback cannot afford -- it is the one
+            // caller that still has a consumer attached, so the kernel really is
+            // waiting on us, for msg_timeout seconds per message. It still has to
+            // precede the msg_th interrupt: msg_loop treats an interrupt that
+            // finds the flag false as EINTR and loops again, so the join would
+            // never return.
+            stopping = true;
             // from here the engine leaves in-flight requests uncompleted
             // (handover contract)
             vqs[i]->srv.stopping.store(true, std::memory_order_relaxed);
@@ -1430,7 +1467,10 @@ struct VduseDeviceImpl : IBlkDevice {
     void rollback() {
         // a failed start: stop anything spawned, then remove the registration
         // only if WE created it (an adopted orphan stays recoverable)
-        stopping = true;   // from here the message loop must not restart a queue
+        // Set before the msg_th interrupt below: msg_loop treats an interrupt that
+        // still finds this false as EINTR and loops again, so the join would not
+        // return.
+        stopping = true;
         for (uint32_t i = 0; i < nqueues; i++) {
             vqs[i]->srv.stopping.store(true, std::memory_order_relaxed);
             vqs[i]->srv.run.store(false, std::memory_order_relaxed);

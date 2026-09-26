@@ -496,14 +496,17 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // What covers them is a contract on the transport rather than a type: mutate them
 // only where this loop cannot be mid-dispatch, either by quiescing the queue first
 // (join the loop, drain the requests it dispatched) or by already being on the
-// loop's own vcpu. Both virtio transports do both. vhost-user quiesces for its ring
-// messages and hops onto the loop's vcpu for teardown, which is also the only place
-// last_avail can safely be read while the loop is expected to advance it. vduse
-// quiesces for the messages that clear a queue's readiness -- a device reset, an
-// unmap-all, a vq state read -- and hops for teardown's backlog wait, which
-// dereferences an avail ring whose pages its own flush_stale is what munmaps.
-// loop()'s readiness re-check after its one yield is the backstop
-// on top.
+// loop's own vcpu. vhost-user quiesces for its ring messages and hops onto the
+// loop's vcpu for teardown, which is also the only place last_avail can safely be
+// read while the loop is expected to advance it. vduse's message loop may not
+// quiesce at all: the kernel blocks whoever sent a message until it is answered,
+// and gives up after msg_timeout seconds, so a handler cannot wait for the
+// in-flight requests. It hops for the two things that need the loop's vcpu -- a vq
+// state read, and teardown's backlog wait, which dereferences an avail ring whose
+// pages its own flush_stale is what munmaps -- and settles the readiness conflict
+// with a per-queue generation counter: an invalidation bumps the counter before it
+// clears, so a refresh already resolving that ring withholds its own publish.
+// loop()'s readiness re-check after its one yield is the backstop on top.
 //
 // Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
 // guest-written free-running counter, so without a cap a single kick could fan
