@@ -765,10 +765,15 @@ void VirtQueueServer::loop() {
         // taking new work while the teardown is still being set up (its
         // handle_mem_table, and stop_session when the caller did not ask to drain
         // the backlog). Every other disable path clears `run` at the same time, and
-        // the `run` test above breaks the loop before it reaches here. vduse mutates
-        // from a message loop that shares this vcpu, and there it is load-bearing:
-        // this wait is the loop's only yield point and dispatch_avail is yield-free,
-        // so one check here covers the whole dispatch that follows.
+        // the `run` test above breaks the loop before it reaches here. vduse
+        // quiesces the same way -- its message loop joins and drains the queue
+        // before it clears `ready` for a device reset, an unmap-all or a vq state
+        // read -- and its one remaining pre-quiesce writer is stop_serving when the
+        // caller did not ask to drain the backlog, which is what this re-check
+        // catches there. Its hooks.tick is the one thing that can yield (the iotlb
+        // cache takes a mutex), but tick runs before the first readiness test, so
+        // dispatch_avail is still yield-free and one re-check still covers the
+        // whole dispatch that follows.
         if (!hooks.ready.fire())
             continue;
         uint64_t n;
