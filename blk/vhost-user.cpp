@@ -1136,8 +1136,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         case VHOST_USER_SET_VRING_KICK:
         case VHOST_USER_SET_VRING_CALL: {
             uint64_t u = m->payload.u64;
-            // low 8 bits are the vring index; bit 8 is the "no fd" flag, whose
-            // test below is unchanged
+            // low 8 bits are the vring index; bit 8 is the "no fd" flag
             const uint32_t idx = (uint32_t)(u & 0xff);
             if (idx >= nqueues) {
                 LOG_ERROR("vhost-user vring fd rejected: index ` of ` queues", idx, nqueues);

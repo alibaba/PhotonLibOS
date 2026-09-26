@@ -1546,6 +1546,7 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
     static const Case cases[] = {
         {0,                      1,                      false},   // the default: one queue, no F_MQ
         {1,                      1,                      false},   // one queue must NOT offer F_MQ
+        {2,                      2,                      true},    // the exact F_MQ boundary
         {3,                      3,                      true},
         {PEER_MAX_QUEUES,        PEER_MAX_QUEUES,        true},
         {PEER_MAX_QUEUES + 5,    PEER_MAX_QUEUES,        true},    // clamped, not rejected
