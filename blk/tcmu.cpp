@@ -594,8 +594,13 @@ struct TcmuServer {
             LOG_ERRNO_RETURN(0, -1, "tcmu: cannot create the pump coroutine");
         // tcmu has one ring per device, so this is one migration, not one per
         // queue, and it costs nothing when pool is null.
-        migrate_to_pool(pool, pump_th);
+        // enable_join BEFORE the migration: it writes a flag in the pump thread's
+        // own struct, and once migrated that thread is running on another OS
+        // thread, so writing it afterwards races the scheduler that owns it.
+        // thread_migrate still applies -- it needs a READY thread on this vcpu,
+        // which thread_create just left, and enable_join changes neither property.
         photon::thread_enable_join(pump_th);
+        migrate_to_pool(pool, pump_th);
         home_set.wait(1);   // home is set before this returns -- see its declaration
         return 0;
     }
