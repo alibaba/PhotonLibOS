@@ -23,8 +23,11 @@ limitations under the License.
 // performs no NBD negotiation and expects a socket already in the
 // transmission phase, which a brand-new socketpair trivially is.
 //
-// All serving coroutines run on the single vcpu that called start(), so the
-// bookkeeping below needs no cross-vcpu locking.
+// Concurrency: since BlkConfig::pool, each client connection's serve_conn runs
+// on whichever pool vcpu it was migrated to, while accept_loop and the API calls
+// stay on the caller's. The bookkeeping below is therefore guarded -- conns by
+// conns_lock, Conn::in_flight and stopping by being atomic. What still needs no
+// guard is noted where it is relied on (workers, depth/bytes, Conn::wlock).
 
 #include "blk.h"
 #include "utils.h"
@@ -44,6 +47,7 @@ limitations under the License.
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -260,9 +264,10 @@ struct NbdDeviceImpl : NbdDevice {
     // Field order is padding-driven, do not tidy it: own_backend/trans_flags and
     // started/stopping used to sit amid the align-8 members, stranding holes at
     // 153 and 230 plus more around nbd_fd/doit_thread; gathering every sub-8
-    // member after doit_thread packs them into the tail. Data sums to 378, so
-    // vptr(8) + 378 = 386 rounds to 392 -- 384 is unreachable behind the vptr.
-    // 392 bytes vs 400.
+    // member after doit_thread packs them into the tail. Data sums to 394 --
+    // BlkConfig::pool added 8 to cfg (378 -> 386), and conns_lock (1 byte) sits
+    // between the 8-aligned doit_thread and conns, stranding a 7-byte hole --
+    // so vptr(8) + 394 = 402 rounds to 408 (measured).
     struct Conn {
         // Field order is padding-driven, do not tidy it: wlock used to sit
         // between negotiate and in_flight, stranding the 7-byte hole at 9..15;
@@ -274,11 +279,13 @@ struct NbdDeviceImpl : NbdDevice {
                                 // serve_conn's teardown deletes it
         bool negotiate;         // false only for the loopback socketpair end,
                                 // which starts already in transmission phase
-        uint32_t in_flight = 0;
+        std::atomic<uint32_t> in_flight{0};
         photon::mutex wlock;    // serializes the reply writes of concurrent
                                 // execute coroutines (header + data must not
-                                // interleave); in_flight needs no lock: every
-                                // access is yield-free on the single vcpu
+                                // interleave). in_flight is atomic because
+                                // detach(wait_pending) polls it on the caller's
+                                // vcpu while this connection's execute coroutines
+                                // bump it on a pool vcpu.
     };
 
     NbdConfig cfg;
@@ -310,12 +317,17 @@ struct NbdDeviceImpl : NbdDevice {
     photon::thread* uds_accept_th = nullptr;
     photon::thread* tcp_accept_th = nullptr;
     std::thread doit_thread;
+    // Guards conns. A spinlock, not a photon::mutex: every critical section below
+    // is yield-free (the longest is a vector erase and a raw ::shutdown), so no
+    // holder can be preempted while another vcpu spins, and a mutex would cost
+    // ~24 bytes that this struct's padding comment has already accounted for.
+    photon::spinlock conns_lock;
     std::vector<Conn*> conns;
     std::vector<photon::thread*> workers;  // joined only at cleanup; churned
                                            // workers accumulate until then
     bool own_backend = false;
     bool started = false;
-    bool stopping = false;
+    std::atomic<bool> stopping{false};
     bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
     uint16_t trans_flags = 0;
     // log as (const char*), never VALUE(): alog would emit all 64 bytes
@@ -426,11 +438,14 @@ struct NbdDeviceImpl : NbdDevice {
             // dropping the connections (external clients get EIO afterwards)
             while (true) {
                 bool busy = false;
-                for (auto c : conns)
-                    if (c->in_flight) {
-                        busy = true;
-                        break;
-                    }
+                {
+                    SCOPED_LOCK(conns_lock);
+                    for (auto c : conns)
+                        if (c->in_flight.load(std::memory_order_relaxed)) {
+                            busy = true;
+                            break;
+                        }
+                }
                 if (!busy)
                     break;
                 photon::thread_usleep(1000);
@@ -454,6 +469,7 @@ struct NbdDeviceImpl : NbdDevice {
 
     std::vector<net::ISocketStream*> get_client_connections() override {
         std::vector<net::ISocketStream*> ret;
+        SCOPED_LOCK(conns_lock);
         for (auto c : conns)
             ret.push_back(c->s);
         return ret;
@@ -495,7 +511,10 @@ struct NbdDeviceImpl : NbdDevice {
             return;
         }
         photon::thread_enable_join(th);
-        conns.push_back(c);
+        {
+            SCOPED_LOCK(conns_lock);
+            conns.push_back(c);
+        }
         workers.push_back(th);
     }
 
@@ -510,9 +529,14 @@ struct NbdDeviceImpl : NbdDevice {
             }
             // Refuse rather than wait at the cap: waiting would only move the
             // unbounded queue into the listen backlog, and a refused client
-            // retries. conns.size() is a yield-free read on this vcpu --
-            // serve_conn's DEFER is the only eraser and it runs here too.
-            if (conns.size() >= MAX_CONNECTIONS) {
+            // retries. The read is under conns_lock because serve_conn's DEFER
+            // erases from a pool vcpu, not from here.
+            size_t nconns;
+            {
+                SCOPED_LOCK(conns_lock);
+                nconns = conns.size();
+            }
+            if (nconns >= MAX_CONNECTIONS) {
                 LOG_WARN("nbd: at the `-connection limit, refusing a client", MAX_CONNECTIONS);
                 s->close();
                 delete s;
@@ -527,10 +551,13 @@ struct NbdDeviceImpl : NbdDevice {
             // no new dispatch past the loop below; wait for the in-flight
             // ones, so none of them writes to the closed stream (or touches
             // this Conn) afterwards
-            while (c->in_flight)
+            while (c->in_flight.load(std::memory_order_relaxed))
                 photon::thread_usleep(1000);
             c->s->close();
-            conns.erase(std::remove(conns.begin(), conns.end(), c), conns.end());
+            {
+                SCOPED_LOCK(conns_lock);
+                conns.erase(std::remove(conns.begin(), conns.end(), c), conns.end());
+            }
             delete c->s;
             delete c;
         });
@@ -860,9 +887,16 @@ struct NbdDeviceImpl : NbdDevice {
         // buffer) would never finish, so its serve_conn DEFER's in_flight
         // drain would spin forever and hang the worker join. Half-closing
         // makes the fd report HUP, waking that write with EPIPE.
-        for (auto c : conns)
-            c->s->shutdown(ShutdownHow::ReadWrite);
-        std::vector<Conn*>().swap(conns);  // each Conn is closed+deleted by its worker
+        //
+        // The interrupt/join below must stay outside conns_lock: a worker's
+        // DEFER takes the same lock, so joining it while holding the lock
+        // deadlocks.
+        {
+            SCOPED_LOCK(conns_lock);
+            for (auto c : conns)
+                c->s->shutdown(ShutdownHow::ReadWrite);
+            std::vector<Conn*>().swap(conns);  // each Conn is closed+deleted by its worker
+        }
         auto ws = std::move(workers);
         workers.clear();
         for (auto w : ws)
