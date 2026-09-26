@@ -719,8 +719,8 @@ bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
     // used_event is whatever the driver left behind for the previous daemon, and
     // those two need not satisfy §2.7.7.2's equality -- without this the first
     // completion after adoption would never be reported.
-    if (!notify_valid) {
-        notify_valid = true;
+    if (!notify_valid.load(std::memory_order_relaxed)) {
+        notify_valid.store(true, std::memory_order_relaxed);
         return true;
     }
     return vring_need_event(vring_used_event(avail, num), used_idx, old_used_idx);

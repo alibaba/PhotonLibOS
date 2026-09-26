@@ -27,8 +27,9 @@ limitations under the License.
 // with glibc's struct iovec), so the ring ABI is hand-defined below and verified
 // byte-identical to the kernel struct (sizeof/offsetof cross-checked). No
 // libtcmu, no libnl3. Only the SCSI opcodes a Linux tcm_loop initiator sends are
-// emulated. All serving coroutines run on the single vcpu that called start(),
-// so the bookkeeping needs no cross-vcpu locking.
+// emulated. Serving runs on one vcpu -- the caller's, or a pool vcpu when
+// BlkConfig::pool is set -- and teardown runs on that same vcpu (see
+// run_serve_stop), so the bookkeeping needs no cross-vcpu locking.
 
 #include "blk.h"
 #include "utils.h"
@@ -544,7 +545,8 @@ struct TcmuServer {
     // serve_stop() drains it back to full (each handle_cmd returns its token in
     // a DEFER, and serve_stop waits for in_flight == 0), so it is seeded once at the
     // first start and reused across restarts -- the nbd.cpp idiom. Handlers
-    // signal on completion (single vcpu: the in_flight-- and the signal execute
+    // signal on completion (one vcpu: drain_ring creates every handle_cmd on the
+    // pump's vcpu and it inherits it, so the in_flight-- and the signal execute
     // without an intervening schedule point).
     photon::semaphore slots;
     uint32_t block_size = 512;

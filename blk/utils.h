@@ -485,11 +485,16 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // and the used-ring append stays yield-free -- no locking is needed for anything
 // only they touch. What IS cross-vcpu is the control plane: BlkConfig::pool lets
 // a caller run this queue's loop on a pool vcpu while the transport's message
-// loop stays on the caller's, so the fields that message loop writes are atomic
-// (event_idx, capacity, run, stopping, in_flight). The ones published as a group
+// loop stays on the caller's, so every field the two sides share is atomic --
+// event_idx, capacity and notify_valid (control plane writes, serving side
+// reads), run and stopping (teardown writes, loop reads), in_flight (the request
+// coroutines bump it, teardown polls it). The ones published as a group
 // (desc/avail/used/num, the kick/call fds) cannot be made atomic -- a request
 // coroutine holds those pointers across the backend IO, so a lock would have to
-// span the whole request -- and are instead only mutated with the loop quiesced.
+// span the whole request. What covers them is that they are written only from the
+// control plane, which shares this loop's vcpu and so cannot interleave with the
+// yield-free dispatch, and that loop() re-checks readiness after its one yield
+// before touching them again.
 //
 // Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
 // guest-written free-running counter, so without a cap a single kick could fan
@@ -558,7 +563,11 @@ public:
     // False until the first notification decision on this ring. See
     // should_notify(): it makes the first completion notify unconditionally,
     // which is what a resumed ring needs and §2.7.7.1 explicitly permits.
-    bool notify_valid = false;
+    // Atomic for the same reason as event_idx next to it: the transport's reset
+    // paths clear it from the control plane while should_notify sets it from the
+    // serving side. It does not make that pair a well-defined handover -- only
+    // the individual accesses.
+    std::atomic<bool> notify_valid{false};
 
     // Both written by teardown and read by loop()/handle_req, which the split
     // described above can put on different vcpus. Atomic only against tearing:

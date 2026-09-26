@@ -1105,7 +1105,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // worse -- it would cost the first completion after a reset its
         // unconditional notification.
         vq.event_idx.store(false, std::memory_order_relaxed);
-        vq.notify_valid = false;
+        vq.notify_valid.store(false, std::memory_order_relaxed);
         vqx.enabled = false;
     }
 

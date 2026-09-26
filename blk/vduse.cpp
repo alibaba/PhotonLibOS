@@ -594,7 +594,7 @@ struct VduseDeviceImpl : IBlkDevice {
                 // already be true from the previous negotiation, and leaving it
                 // would cost the first completion after this reset its
                 // unconditional notification
-                vq.notify_valid = false;
+                vq.notify_valid.store(false, std::memory_order_relaxed);
             } else {
                 // adoption of a live ring (no reset seen): resume where the
                 // previous daemon left off; anything fetched-not-completed is
