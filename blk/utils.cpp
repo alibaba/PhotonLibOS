@@ -705,7 +705,7 @@ void* VirtQueueServer::req_trampoline(void* a) {
 }
 
 bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
-    if (!event_idx)
+    if (!event_idx.load(std::memory_order_relaxed))
         return vring_need_irq(avail);
     // Pair with the driver's §2.7.13.4.1 barrier ("before reading flags or
     // avail_event, to avoid missing a notification"): make our used-ring write
@@ -727,12 +727,12 @@ bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
 }
 
 void VirtQueueServer::publish_avail_event() {
-    if (event_idx)
+    if (event_idx.load(std::memory_order_relaxed))
         vring_set_avail_event(used, num, last_avail);
 }
 
 void VirtQueueServer::loop() {
-    while (run && !stopping) {
+    while (run.load(std::memory_order_relaxed) && !stopping.load(std::memory_order_relaxed)) {
         hooks.tick.fire();
         if (!hooks.ready.fire()) {
             photon::thread_usleep(1000);
@@ -748,7 +748,7 @@ void VirtQueueServer::loop() {
             wr = photon::wait_for_fd_readable(kickfd, Timeout(KICK_FALLBACK_US));
         else
             photon::thread_usleep(KICK_FALLBACK_US);
-        if (!run || stopping)
+        if (!run.load(std::memory_order_relaxed) || stopping.load(std::memory_order_relaxed))
             break;
         if (wr < 0 && errno != ETIMEDOUT && errno != EINTR)
             LOG_WARN("` virtqueue: kickfd wait failed, ", tag, ERRNO());
@@ -771,7 +771,7 @@ void VirtQueueServer::loop() {
             while (::read(kickfd, &n, sizeof(n)) == (ssize_t)sizeof(n))
                 ;
         dispatch_avail();
-        if (event_idx) {
+        if (event_idx.load(std::memory_order_relaxed)) {
             // Close a store-load race, not an optimization. The invariant above
             // means avail_event already equals last_avail; what is left is
             // ordering our publish before our re-read of avail->idx. Without a
@@ -806,16 +806,16 @@ void VirtQueueServer::loop() {
             // KICK_FALLBACK_US re-dispatch is exactly the recovery the cap's own
             // comment documents.
             //
-            // No readiness or teardown re-check inside: nothing here yields, so
-            // what the gates above just read cannot move. run and stopping are
-            // plain fields, and while this coroutine lives their only writer is
-            // teardown, which joins it on the same vcpu; the ready hook is a pure
-            // field read, and the fields it reads are invalidated only by a
-            // message-loop retranslate -- which needs a yield to get here. Same
-            // guarantee the unconditional dispatch just above already runs under.
-            // A re-check here would also be in the wrong place to help: the
-            // avail->idx read below is what would dereference an invalidated
-            // ring, and it comes first.
+            // No readiness or teardown re-check inside. run and stopping are
+            // atomic, written by teardown which may be on another vcpu;
+            // re-reading them here would still be in the wrong place to help,
+            // because the avail->idx read below is what would dereference an
+            // invalidated ring and it comes first. What actually stops this loop
+            // is wake() + interrupt + join, which teardown performs -- the
+            // atomics guarantee an untorn read, never a wakeup. The ready hook
+            // is a pure field read, and the fields it reads are invalidated
+            // only by a message-loop retranslate. Same guarantee the
+            // unconditional dispatch just above already runs under.
             for (;;) {
                 __atomic_thread_fence(__ATOMIC_SEQ_CST);
                 if (vring_avail_idx(avail) == last_avail)
@@ -881,14 +881,14 @@ void VirtQueueServer::handle_req(uint16_t head) {
     // Leaving the request uncompleted is the documented handover behaviour:
     // whoever serves next resumes from used->idx and re-serves it (virtio-blk ops
     // are idempotent).
-    if (stopping || !hooks.ready.fire())
+    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire())
         return;
     uint32_t written = 0;
     virtio_blk_serve_chain(backend, read_only, serial, tag, desc, head,
-                           num, capacity, hooks.translate, &written);
+                           num, capacity.load(std::memory_order_relaxed), hooks.translate, &written);
     // and again after: serve_chain yields inside preadv/pwritev, and complete_req
     // dereferences used and avail
-    if (stopping || !hooks.ready.fire())
+    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire())
         return;   // tearing down (or the ring went away under us)
     complete_req(head, written);
 }

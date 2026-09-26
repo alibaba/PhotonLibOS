@@ -586,7 +586,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     void vq_bind() {
         vq.backend = backend;
-        vq.capacity = capacity_sectors << 9;   // the LBA bound serve_chain enforces
+        // the LBA bound serve_chain enforces
+        vq.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
         vq.stack_size = resolve_stack_size(cfg.stack_size);
         vq.read_only = read_only;
         vq.serial = "photon-vhost-user";
@@ -599,7 +600,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
     void vq_stop() {
         if (!vqx.th) return;
         vqx.enabled = false;
-        vq.run = false;
+        vq.run.store(false, std::memory_order_relaxed);
         vq.wake();   // out of its kickfd wait
         photon::thread_interrupt(vqx.th);
         photon::thread_join((photon::join_handle*)vqx.th);
@@ -632,8 +633,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // does not hold until the first head is consumed, and a driver that kicks
         // in that window is legitimately ignored per §2.7.10.1.
         vq.publish_avail_event();
-        vq.stopping = false;
-        vq.run = true;
+        vq.stopping.store(false, std::memory_order_relaxed);
+        vq.run.store(true, std::memory_order_relaxed);
         vqx.th = photon::thread_create(&VhostUserDeviceImpl::vq_loop_thunk, this);
         photon::thread_enable_join(vqx.th);
         LOG_INFO("vhost-user vq0 serving: num ` last_avail ` used_idx `",
@@ -724,7 +725,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // From the NEGOTIATED word, not from offer_features: if the frontend
             // masked bit 29 off we must keep the flags semantics. Deciding from
             // our own offer would have us read a used_event nobody wrote.
-            vq.event_idx = !!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX));
+            // A store, not an assign: should_notify reads event_idx from the
+            // serving side, this handler writes it from the control plane.
+            vq.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)), std::memory_order_relaxed);
             LOG_INFO("vhost-user negotiated features ", HEX(negotiated));
             break;
         case VHOST_USER_GET_PROTOCOL_FEATURES:
@@ -1066,7 +1069,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
         stopping = false;
         vq_bind();
-        vq.stopping = false;
+        vq.stopping.store(false, std::memory_order_relaxed);
         if (cfg.sock_role == VhostUserController::SockRole::SERVER) {
             if (do_listen() < 0)
                 return -1;
@@ -1101,7 +1104,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // true value on the reset path is a hazard; leaving notify_valid true is
         // worse -- it would cost the first completion after a reset its
         // unconditional notification.
-        vq.event_idx = false;
+        vq.event_idx.store(false, std::memory_order_relaxed);
         vq.notify_valid = false;
         vqx.enabled = false;
     }
@@ -1121,8 +1124,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 photon::thread_usleep(1000);
         }
         stopping = true;
-        vq.stopping = true;   // from here the engine leaves in-flight requests
-                              // uncompleted
+        // from here the engine leaves in-flight requests uncompleted
+        vq.stopping.store(true, std::memory_order_relaxed);
         if (accept_th) {
             photon::thread_interrupt(accept_th);
             photon::thread_join((photon::join_handle*)accept_th);
@@ -1181,7 +1184,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
             LOG_ERROR_RETURN(EINVAL, -1, "vhost-user resize: shrink (` -> `) is rejected",
                              cur, new_size);
         capacity_sectors = new_size >> 9;
-        vq.capacity = new_size;   // serve_chain's LBA bound must grow with us
+        // serve_chain's LBA bound must grow with us. A store, not an assign:
+        // serve_chain reads it from the serving side while resize() runs on the
+        // control plane -- the same reason tcmu's dev_size/num_lbas are atomic.
+        vq.capacity.store(new_size, std::memory_order_relaxed);
         cfg.info.size = new_size;
         fill_config();
         if (backend_req_fd >= 0) {   // announce: the frontend re-reads GET_CONFIG

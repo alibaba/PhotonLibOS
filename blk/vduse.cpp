@@ -501,7 +501,10 @@ struct VduseDeviceImpl : IBlkDevice {
                     // DEV_GET_FEATURES returns the NEGOTIATED subset and is only
                     // valid once FEATURES_OK is set (<linux/vduse.h>:94-99), which
                     // is exactly where we are.
-                    vq.event_idx = !!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX));
+                    // A store, not an assign: should_notify reads event_idx from
+                    // the serving side, this handler writes it from the control
+                    // plane.
+                    vq.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)), std::memory_order_relaxed);
                 }
             }
             if (dev_status & VIRTIO_CONFIG_S_DRIVER_OK)
@@ -644,7 +647,8 @@ struct VduseDeviceImpl : IBlkDevice {
 
     void vq_bind() {
         vq.backend = backend;
-        vq.capacity = capacity_sectors << 9;   // the LBA bound serve_chain enforces
+        // the LBA bound serve_chain enforces
+        vq.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
         vq.stack_size = resolve_stack_size(cfg.stack_size);
         vq.read_only = read_only;
         vq.serial = "photon-vduse";
@@ -758,9 +762,10 @@ struct VduseDeviceImpl : IBlkDevice {
                     vq.last_avail != vring_avail_idx(vq.avail)))
                 photon::thread_usleep(1000);
             stopping = true;
-            vq.stopping = true;   // from here the engine leaves in-flight
-                                  // requests uncompleted (handover contract)
-            vq.run = false;
+            // from here the engine leaves in-flight requests uncompleted
+            // (handover contract)
+            vq.stopping.store(true, std::memory_order_relaxed);
+            vq.run.store(false, std::memory_order_relaxed);
             vq.wake();            // wake the loop out of its kickfd wait
             photon::thread_interrupt(vq_th);
             photon::thread_join((photon::join_handle*)vq_th);
@@ -878,8 +883,8 @@ struct VduseDeviceImpl : IBlkDevice {
         dev_status = 0;
         negotiated = 0;
         vq_bind();
-        vq.stopping = false;
-        vq.run = true;
+        vq.stopping.store(false, std::memory_order_relaxed);
+        vq.run.store(true, std::memory_order_relaxed);
         msg_th = photon::thread_create11(&VduseDeviceImpl::msg_loop, this);
         photon::thread_enable_join(msg_th);
         vq_th = photon::thread_create(&VduseDeviceImpl::vq_loop_thunk, this);
@@ -897,8 +902,9 @@ struct VduseDeviceImpl : IBlkDevice {
             // here too and gets a word that is not yet negotiated; that is
             // harmless because no ring can go live before the FEATURES_OK handler
             // re-derives event_idx, and every consumer of event_idx needs a live
-            // ring.
-            vq.event_idx = !!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX));
+            // ring. A store, not an assign: the consumer reads it from the
+            // serving side, this runs on the control plane.
+            vq.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)), std::memory_order_relaxed);
         }
         if (vq_refresh() < 0)
             return -1;
@@ -1024,7 +1030,10 @@ struct VduseDeviceImpl : IBlkDevice {
         if (::ioctl(dev_fd, VDUSE_DEV_INJECT_CONFIG_IRQ) < 0)
             LOG_WARN("vduse INJECT_CONFIG_IRQ failed on `, ", name, ERRNO());
         capacity_sectors = cap;
-        vq.capacity = new_size;   // serve_chain's LBA bound must grow with us
+        // serve_chain's LBA bound must grow with us. A store, not an assign:
+        // serve_chain reads it from the serving side while resize() runs on the
+        // control plane -- the same reason tcmu's dev_size/num_lbas are atomic.
+        vq.capacity.store(new_size, std::memory_order_relaxed);
         cfg.info.size = new_size;
         LOG_INFO("vduse device resized, ", make_named_value("name", (const char*)name), VALUE(cur), VALUE(new_size));
         return 0;
@@ -1035,8 +1044,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // only if WE created it (an adopted orphan stays recoverable)
         if (vq_th || msg_th) {
             stopping = true;
-            vq.stopping = true;
-            vq.run = false;
+            vq.stopping.store(true, std::memory_order_relaxed);
+            vq.run.store(false, std::memory_order_relaxed);
             if (vq_th) {
                 vq.wake();
                 photon::thread_interrupt(vq_th);

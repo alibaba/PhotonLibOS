@@ -480,10 +480,15 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // teardown bug found in one was found in the other, which is why it lives
 // here). What genuinely differs is injected as hooks.
 //
-// Threading: one serving vcpu. loop() runs as a photon coroutine, the request
-// coroutines it spawns interleave with it, and the used-ring append is
-// yield-free -- so no locking is needed. in_flight is atomic only because the
-// teardown path polls it from another coroutine.
+// Threading: one serving vcpu PER QUEUE. loop() runs as a photon coroutine and
+// the request coroutines it spawns inherit its vcpu, so they interleave with it
+// and the used-ring append stays yield-free -- no locking is needed for anything
+// only they touch. What IS cross-vcpu is the control plane: since
+// BlkConfig::pool, the transport's message loop stays on the caller's vcpu while
+// this queue serves on a pool vcpu, so the fields it writes are atomic
+// (event_idx, capacity, run, stopping, in_flight) and the ones published as a
+// group (desc/avail/used/num, the kick/call fds) are only mutated with the loop
+// quiesced. See blk/SPEC-multiqueue.md §2.10.
 //
 // Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
 // guest-written free-running counter, so without a cap a single kick could fan
@@ -514,7 +519,7 @@ public:
     // `capacity` and `serial`, and since `serial` needs 8-alignment that left a
     // 7-byte hole at offset 81. 152 bytes vs 160.
     fs::IFile* backend = nullptr;
-    uint64_t capacity = 0;        // backend size in bytes; bounds every LBA
+    std::atomic<uint64_t> capacity{0};   // backend size in bytes; bounds every LBA
     const char* serial = "";      // answers VIRTIO_BLK_T_GET_ID
     const char* tag = "";         // device identity; prefixes the logs
 
@@ -545,18 +550,23 @@ public:
     // NEGOTIATED features, never from what we offered: if the peer masks bit 29
     // off we must fall back to the flags semantics, and deciding from our own
     // offer would have us read a used_event nobody ever wrote (zeroed at setup),
-    // which suppresses nearly every interrupt.
-    bool event_idx = false;
+    // which suppresses nearly every interrupt. Atomic: the transport re-derives
+    // it from the control plane while should_notify/publish_avail_event read it
+    // from the serving side, and those are not necessarily one vcpu.
+    std::atomic<bool> event_idx{false};
     // False until the first notification decision on this ring. See
     // should_notify(): it makes the first completion notify unconditionally,
     // which is what a resumed ring needs and §2.7.7.1 explicitly permits.
     bool notify_valid = false;
 
-    bool run = false;             // the loop coroutine may live
-    bool stopping = false;        // teardown: stop dispatching and leave the
-                                  // in-flight requests UNCOMPLETED, so the next
-                                  // daemon resumes from used->idx and re-serves
-                                  // them (virtio-blk ops are idempotent)
+    // Both written by teardown and read by loop()/handle_req, which the split
+    // described above can put on different vcpus. Atomic only against tearing:
+    // it does not wake the loop, which is what wake() + interrupt + join are for.
+    std::atomic<bool> run{false};        // the loop coroutine may live
+    std::atomic<bool> stopping{false};   // teardown: stop dispatching and leave the
+                                         // in-flight requests UNCOMPLETED, so the next
+                                         // daemon resumes from used->idx and re-serves
+                                         // them (virtio-blk ops are idempotent)
 
     // the kickfd is the primary wakeup; this bounds how long the loop sleeps
     // before re-checking the avail ring anyway. A kick that races the loop is
