@@ -364,8 +364,11 @@ struct Iotlb {
             // to anyway.
             //
             // "Cheap" is a property of the caller, though, and resolve() has two
-            // of them. For a request the trade holds exactly as stated: the
-            // request completes with a retryable error and the driver resends it.
+            // of them. For a request the trade holds as stated -- and "cheap" still
+            // does not mean free: virtio-blk has no retryable status, so the
+            // request completes with VIRTIO_BLK_S_IOERR and the guest reports an IO
+            // error. What makes this side survivable is that one request fails, not
+            // that it recovers by itself.
             // The other caller resolves a whole vring through these, and a nullptr
             // there is not one request lost but a ring that cannot be published at
             // all -- so vq_refresh snapshots this same generation before it
@@ -412,7 +415,7 @@ struct Iotlb {
         flush_locked();
     }
     // Unlocked halves for clear(): photon::mutex is not recursive, so clear()
-    // cannot call the two wrappers above. `lock` is already held.
+    // cannot call the lock-taking members above it. `lock` is already held.
     void invalidate_locked(uint64_t start, uint64_t last) {
         gen++;   // resolve()'s in-flight slow path must not publish what this drops
         for (size_t i = maps.size(); i-- > 0; ) {
@@ -533,8 +536,21 @@ struct VduseDeviceImpl : IBlkDevice {
         // loops on other OS threads and therefore what makes the window
         // reachable. Until then migrate_to_pool is a no-op and every vcpu named
         // here is the same one, so both halves stay benign.
+        //
+        // A third variant is booked with them. `home` is deliberately never
+        // cleared -- vq_stop_here nulls only `th`, so vq_drain can still reach the
+        // requests the joined loop dispatched -- so a restart after detach() does
+        // not read null here. It reads the PREVIOUS loop's vcpu, run_on_home hops
+        // to a vcpu whose loop is gone, and the new loop may land on a different
+        // one. No null check reaches that, which is why it is booked and not
+        // patched.
+        //
         // Self-resetting: every signal is matched by exactly one wait, so a later
-        // start() finds it at zero.
+        // start() finds it at zero. That rests on semaphore::wait being
+        // uninterruptible -- it swallows an interrupt and waits again -- because
+        // vq_start ignores its return: a wait that could give up would leave this
+        // armed AND let vq_start return with `home` still null, breaking both this
+        // sentence and the one above it at once.
         photon::semaphore home_set{0};   // NSDMI, not {}: semaphore's ctor is explicit
     };
     struct Vq {
@@ -794,9 +810,10 @@ struct VduseDeviceImpl : IBlkDevice {
         // The cache's counter, for the EFAULT branch below. The queue's own is not
         // enough there: a PARTIAL UPDATE_IOTLB bumps the cache's only -- it leaves
         // the queue's untouched, clears no readiness and sets no needs_refresh --
-        // and it is exactly the invalidation that can fail a resolve already in
-        // flight. Read under the cache's lock, so it can yield; that costs nothing
-        // here, because an invalidation the yield lets go first is one this
+        // and it is an invalidation that can fail a resolve already in flight --
+        // a partial update and an unmap-all alike, since both go through
+        // invalidate(). Read under the cache's lock, so it can yield; that costs
+        // nothing here, because an invalidation the yield lets go first is one this
         // snapshot already includes and the resolves below already see.
         uint64_t iotlb_gen_snapshot = iotlb.generation();
         vduse_vq_info vi;
@@ -825,7 +842,7 @@ struct VduseDeviceImpl : IBlkDevice {
             // to be told apart. The cache's generation guard is coarse -- it cannot
             // tell our range from some other one that moved -- so an invalidation
             // of an unrelated range landing mid-resolve fails this check too, as
-            // does a reset or an unmap-all racing it. That failure is transient:
+            // does an unmap-all racing it. That failure is transient:
             // the address space has settled by the time we get here, so re-arm the
             // flag this refresh was called under and let the next tick resolve
             // against the new state. The re-arm is the whole fix -- vq_tick
@@ -834,14 +851,25 @@ struct VduseDeviceImpl : IBlkDevice {
             // this the queue stays not-ready for good and the device silently
             // serves nothing.
             //
+            // The queue's own counter is in the test for a different reason: a bare
+            // device reset touches no mapping, so it cannot fail a resolve -- it
+            // reaches the withheld publish below instead. What a reset can leave
+            // here is a ring whose IOVAs are gone for good, and re-arming that is
+            // harmless because the retry re-reads the vq info and returns quietly
+            // on `ready == 0`.
+            //
             // With NEITHER generation moved, the vring's IOVAs are simply not
             // mapped: retrying cannot help and the driver has to renegotiate, so
             // leave the flag consumed. Leaving it is not optional either. loop()
             // calls hooks.tick every millisecond while a queue is not ready, so
             // re-arming a genuine failure would repeat an ioctl, up to three
-            // resolutions and an error log a thousand times a second. The
-            // transient path logs at debug for the same reason: a driver that
-            // churns the iotlb can make it true on every tick.
+            // resolutions and an error log a thousand times a second. This path
+            // logs at debug rather than error, and that says "a race is not a
+            // fault" -- it does not make the retry quiet, because this build's
+            // default level prints debug and resolve() logs its own failures at
+            // error regardless. What bounds the noise is that a retry only happens
+            // when an invalidation really landed, so the rate is the driver's, not
+            // the tick's.
             if (iotlb.generation() != iotlb_gen_snapshot ||
                 q->x.gen.load(std::memory_order_relaxed) != gen_snapshot) {
                 q->x.needs_refresh.store(true, std::memory_order_relaxed);
@@ -1038,8 +1066,11 @@ struct VduseDeviceImpl : IBlkDevice {
             // vq_start runs -- so under BlkConfig::pool this branch can also be the
             // "the loop exists but has not been scheduled yet" window, the one
             // where working in place races it: the body reads last_avail here while
-            // the loop advances it on a pool vcpu. Task 10 is where that gets
-            // closed; `home`'s declaration carries the whole argument.
+            // the loop advances it on a pool vcpu. A null is not the only bad read
+            // either: `home` is never cleared, so a restart after detach() skips
+            // this branch altogether and hops to the PREVIOUS loop's vcpu. Task 10
+            // is where both get closed; `home`'s declaration carries the argument
+            // for each.
             body.fire();
             return;
         }
