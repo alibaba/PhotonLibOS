@@ -130,6 +130,9 @@ static_assert(offsetof(mu_msg, payload) == 12,
 #define F_BLK_RO        (1ULL << 5)
 #define F_BLK_SIZE      (1ULL << 6)
 #define F_BLK_FLUSH     (1ULL << 9)
+// virtio 1.2 §5.2.3: bit 12. §5.2.4 makes virtio_blk_config::num_queues
+// meaningful only when this is set, so the two are asserted together below.
+#define F_BLK_MQ        (1ULL << 12)
 // virtio 1.2 §2.7.7.2 / §2.7.10.1: negotiate this and both sides stop looking
 // at the flags low bit and suppress by index instead
 #define F_RING_EVENT_IDX  (1ULL << 29)
@@ -138,15 +141,18 @@ static_assert(offsetof(mu_msg, payload) == 12,
 #define F_VHU_PROTOCOL_FEATURES 30
 struct blk_outhdr { uint32_t type, ioprio; uint64_t sector; };
 struct blk_config { uint64_t capacity; uint32_t size_max, seg_max;
-                    uint16_t cyl; uint8_t heads, sectors; uint32_t blk_size; };
+                    uint16_t cyl; uint8_t heads, sectors; uint32_t blk_size;
+                    uint8_t topology[8]; uint8_t wce, unused;
+                    uint16_t num_queues; };
 // Deliberately NOT the device's virtio_blk_config (sharing it is how a suite
 // becomes self-consistently wrong), so this models only the prefix the mock
-// reads: capacity at 0 and blk_size at 20. The device's struct is 60 bytes and
-// blk_size sits at 20 there too -- the cyl/heads/sectors group is exactly 4
-// bytes, so a uint32_t needs no padding after it, which is easy to miscompute by
-// hand. Pinned so that reading any LATER field from this mock cannot silently
-// land on the wrong bytes.
-static_assert(offsetof(blk_config, capacity) == 0 && offsetof(blk_config, blk_size) == 20,
+// reads: capacity at 0, blk_size at 20 and num_queues at 34. The device's
+// struct is 60 bytes and blk_size sits at 20 there too -- the
+// cyl/heads/sectors group is exactly 4 bytes, so a uint32_t needs no padding
+// after it, which is easy to miscompute by hand. Pinned so that reading any
+// LATER field from this mock cannot silently land on the wrong bytes.
+static_assert(offsetof(blk_config, capacity) == 0 && offsetof(blk_config, blk_size) == 20 &&
+              offsetof(blk_config, num_queues) == 34,
               "mock blk_config offsets must match virtio_blk_config for the fields it reads");
 struct vdesc { uint64_t addr; uint32_t len; uint16_t flags, next; };
 #define DESC_F_NEXT 1
@@ -1410,6 +1416,188 @@ TEST_F(VhostUserTest, oob_descriptor_index) {
     EXPECT_EQ(0xff, st);
     EXPECT_EQ(0u, ulen);
     EXPECT_EQ(0, verify_backend(OFF, good));
+}
+
+// A vring index at or past the queue count must be rejected with an error ack,
+// not silently applied to some queue. Before multiqueue the index was parsed and
+// then dropped, so every value was accepted; now it selects a slot, and an
+// unchecked one is an out-of-bounds subscript into a vector whose length the
+// peer does not control but does get to probe.
+//
+// The ack is the oracle and its value genuinely differs: with the index dropped
+// the backend applied a protocol-legal message and acked 0 (or, past the end of
+// the vector, died), with the bound in place it acks 1. Every payload below is
+// otherwise VALID -- a legal num, legal addresses, NOFD where no fd is offered --
+// so the index is the only thing that can make the backend say no. That is what
+// keeps this from passing for the wrong reason.
+//
+// GET_VRING_BASE is only exercised at index 0xffff, not at 1: its accepted reply
+// is a vhost_vring_state that ECHOES the index in the low 32 bits, so at index 1
+// with last_avail 0 the accepted blob and the error ack are both the u64 value 1
+// and no assertion can tell them apart. At 0xffff they differ.
+TEST_F(VhostUserTest, vring_index_out_of_range_is_rejected) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = 1;                 // the only legal index is 0
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto good = pattern(0x11, 4096);
+
+    // {message, does it take a vring_state, does it take a vring_addr}
+    struct Msg { uint32_t req; bool state; bool addr; const char* name; };
+    static const Msg msgs[] = {
+        {MU_SET_VRING_NUM,    true,  false, "SET_VRING_NUM"},
+        {MU_SET_VRING_ADDR,   false, true,  "SET_VRING_ADDR"},
+        {MU_SET_VRING_BASE,   true,  false, "SET_VRING_BASE"},
+        {MU_GET_VRING_BASE,   true,  false, "GET_VRING_BASE"},
+        {MU_SET_VRING_KICK,   false, false, "SET_VRING_KICK"},
+        {MU_SET_VRING_CALL,   false, false, "SET_VRING_CALL"},
+        {MU_SET_VRING_ENABLE, true,  false, "SET_VRING_ENABLE"},
+    };
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        // negotiate() settles REPLY_ACK, so every request below gets a u64 ack
+        if (!fe.negotiate(false)) return EPROTO;
+        for (const auto& t : msgs) {
+            // GET_VRING_BASE only at 0xffff -- see the comment above
+            const uint32_t idxs[2] = {1u, 0xffffu};
+            for (int k = (t.req == MU_GET_VRING_BASE ? 1 : 0); k < 2; k++) {
+                mu_msg m, r;
+                memset(&m, 0, sizeof(m));
+                m.request = t.req;
+                if (t.state) {
+                    m.size = sizeof(mu_vring_state);
+                    // num is legal in every case: a power of two in range for NUM,
+                    // 0 for BASE, and 1 (enable) for ENABLE -- so a rejection can
+                    // only have been caused by the index
+                    m.payload.state = {idxs[k], t.req == MU_SET_VRING_NUM ? VQ_NUM
+                                       : (t.req == MU_SET_VRING_ENABLE ? 1u : 0u)};
+                } else if (t.addr) {
+                    m.size = sizeof(mu_vring_addr);
+                    // Real QVAs, not the bare L_* offsets: negotiate() declared one
+                    // region whose qva base is fe.mem, so a bare offset does not
+                    // resolve. Sending an address that cannot be translated would
+                    // make the backend reject this message for a DIFFERENT reason,
+                    // the ack would be 1 either way, and deleting the index guard
+                    // would no longer turn this case red.
+                    mu_vring_addr a{idxs[k], 0, (uint64_t)(fe.mem + L_DESC),
+                                    (uint64_t)(fe.mem + L_USED),
+                                    (uint64_t)(fe.mem + L_AVAIL), 0};
+                    memcpy(&m.payload.addr, &a, sizeof(a));
+                } else {
+                    // KICK/CALL: the index is the low 8 bits of the u64 and NOFD
+                    // says "no fd attached", so no SCM_RIGHTS is needed
+                    m.size = 8;
+                    m.payload.u64 = idxs[k] | MU_VRING_NOFD;
+                }
+                if (!fe.transact(&m, &r)) return EPROTO;
+                if (r.size != 8) {
+                    fe.fail("reply was not an 8-byte ack");
+                    return EPROTO;
+                }
+                if (r.payload.u64 != 1) {
+                    char why[128];
+                    snprintf(why, sizeof(why), "%s accepted vring index %u (ack %llu)",
+                             t.name, idxs[k], (unsigned long long)r.payload.u64);
+                    fe.fail(why);
+                    return EPROTO;
+                }
+            }
+        }
+        // And the queue that IS in range must still work. Without this the case
+        // also passes against a guard that is too strict -- `if (idx >= 0)` rejects
+        // everything and turns every assertion above green. negotiate() set vq 0 up
+        // and enabled it, so a rejection must have left it serving.
+        if (fe.write_dev(0, good.data(), good.size()) != S_OK) {
+            fe.fail("the in-range queue stopped serving after the rejections");
+            return EIO;
+        }
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(0, good));
+}
+
+// blk/utils.h's MAX_QUEUES, spelled out here on purpose: this suite models the
+// peer side of the wire and must not reach into the device's internals to learn
+// the limit it is asserting against -- that is how a suite becomes
+// self-consistently wrong. If the two ever disagree this test goes red, which is
+// the point.
+static constexpr uint32_t PEER_MAX_QUEUES = 64;
+
+// BlkConfig::queues decides how many virtqueues the device serves, and it
+// publishes that one count through two independent channels -- the
+// GET_QUEUE_NUM reply and virtio_blk_config::num_queues -- plus advertises
+// VIRTIO_BLK_F_MQ exactly when the count is more than one. virtio 1.2 §5.2.4
+// makes num_queues meaningful only when F_MQ is set, and a frontend that reads
+// one count while the device serves another addresses queues nobody is
+// listening on, so its requests vanish. Asserting all three together is what
+// stops the two channels from drifting apart.
+//
+// An over-large request is CLAMPED, not rejected: that is what the ublk
+// transport already does with the same field, and a library that failed the
+// device would leave the caller no way to ask for "as many as you can".
+TEST_F(VhostUserTest, queue_count_follows_config) {
+    struct Case { uint32_t ask, want; bool mq; };
+    static const Case cases[] = {
+        {0,                      1,                      false},   // the default: one queue, no F_MQ
+        {1,                      1,                      false},   // one queue must NOT offer F_MQ
+        {3,                      3,                      true},
+        {PEER_MAX_QUEUES,        PEER_MAX_QUEUES,        true},
+        {PEER_MAX_QUEUES + 5,    PEER_MAX_QUEUES,        true},    // clamped, not rejected
+    };
+    for (const auto& c : cases) {
+        VhostUserController::Config cfg(make_info());
+        cfg.sock_path = SOCK_PATH;
+        cfg.queues = c.ask;
+        auto dev = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev) << "queues=" << c.ask;
+        DEFER(delete dev);
+        ASSERT_EQ(0, dev->start(file)) << "queues=" << c.ask;
+        DEFER(dev->shutdown());
+
+        uint64_t want = c.want, got_qn = 0, got_feat = 0;
+        uint16_t got_nq = 0;
+        int rc = run_frontend([&](MockFrontend& fe) -> int {
+            if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+            // Negotiate first, the way a conformant frontend does: this suite was
+            // deliberately hardened to model the protocol's own gates, and reading
+            // the device config before PROTOCOL_F_CONFIG is settled is not
+            // something a real peer does. It also leaves vq 0 running, so the
+            // teardown at the end of the iteration exercises every queue slot --
+            // including the ones this frontend never addressed.
+            if (!fe.negotiate(false)) return EPROTO;
+            mu_msg m, r;
+            memset(&m, 0, sizeof(m));
+            m.request = MU_GET_FEATURES; m.size = 0;
+            if (!fe.transact(&m, &r)) return EPROTO;
+            got_feat = r.payload.u64;
+
+            memset(&m, 0, sizeof(m));
+            m.request = MU_GET_QUEUE_NUM; m.size = 0;
+            if (!fe.transact(&m, &r)) return EPROTO;
+            got_qn = r.payload.u64;
+
+            memset(&m, 0, sizeof(m));
+            m.request = MU_GET_CONFIG;
+            m.size = offsetof(mu_config, region) + sizeof(blk_config);
+            m.payload.config.offset = 0;
+            m.payload.config.size = sizeof(blk_config);
+            if (!fe.transact(&m, &r)) return EPROTO;
+            blk_config bc;
+            memcpy(&bc, r.payload.config.region, sizeof(bc));
+            got_nq = bc.num_queues;
+            return 0;
+        });
+        ASSERT_EQ(0, rc) << "queues=" << c.ask;
+        EXPECT_EQ(want, got_qn) << "GET_QUEUE_NUM, queues=" << c.ask;
+        EXPECT_EQ((uint16_t)want, got_nq) << "num_queues, queues=" << c.ask;
+        EXPECT_EQ(c.mq, !!(got_feat & F_BLK_MQ)) << "F_MQ, queues=" << c.ask;
+    }
 }
 
 // `gpa + len - 1 < base + size` wraps: addr = 2^64 - 101 with len = 200 sums to

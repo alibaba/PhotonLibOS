@@ -48,7 +48,9 @@ limitations under the License.
 //   capacity changes are announced by sending BACKEND_CONFIG_CHANGE (id 2) on
 //   the backend channel fd from SET_BACKEND_REQ_FD (PROTOCOL_F_BACKEND_REQ).
 //
-// P1 scope: one virtqueue (no F_MQ / VIRTIO_BLK_F_MQ), split ring, no
+// P1 scope: BlkConfig::queues virtqueues -- 0 means one, over MAX_QUEUES means
+// clamped to it -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
+// than one, split ring, no
 // indirect descriptors offered (F_RING_INDIRECT_DESC not in our feature set),
 // IN/OUT/FLUSH/GET_ID served; FEATURE_DISCARD/WRITE_ZEROES accepted in cfg
 // but not offered. Each queue serves on one vcpu -- the caller's, or a pool
@@ -364,7 +366,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
     int listen_fd = -1;            // SERVER role
     int conn_fd = -1;              // the live frontend connection
     int backend_req_fd = -1;       // SET_BACKEND_REQ_FD channel (config events)
-    // How many virtqueues this device serves. It has to equal every count we
+    // How many virtqueues this device serves, from BlkConfig::queues (0 = one,
+    // over the transport maximum = clamped to it). It has to equal every count we
     // publish to the frontend -- the GET_QUEUE_NUM answer and
     // virtio_blk_config::num_queues -- because a frontend that reads one count
     // while the device serves another addresses queues nobody is listening on, and
@@ -392,6 +395,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
         capacity_sectors = cfg.info.size >> 9;
         snprintf(sock_path, sizeof(sock_path), "%s", cfg.sock_path.c_str());
 
+        // Clamped, not rejected, and 0 means "you choose" -- the same reading the
+        // ublk transport gives this field, so one BlkConfig means the same thing
+        // to every transport. Derived HERE and never again: the constructor below
+        // sizes vqs from it, GET_QUEUE_NUM answers with it and fill_config
+        // publishes it, so a later change would desynchronize the three.
+        nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
+
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_BLK_F_BLK_SIZE) |
                          (1ULL << VIRTIO_RING_F_EVENT_IDX) |
                          (1ULL << VHOST_USER_F_PROTOCOL_FEATURES);   // we always answer
@@ -400,6 +410,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
             offer_features |= (1ULL << VIRTIO_BLK_F_FLUSH);
         if (read_only)
             offer_features |= (1ULL << VIRTIO_BLK_F_RO);
+        // virtio 1.2 §5.2.3: offering F_MQ commits us to a truthful
+        // virtio_blk_config::num_queues (§5.2.4: that field is only valid when
+        // this bit is set) and to honoring the queue index in every vring
+        // message. Only offered when there is more than one queue -- an n==1
+        // device that offers it makes the frontend build one vq while believing
+        // the device is multiqueue.
+        if (nqueues >= 2)
+            offer_features |= (1ULL << VIRTIO_BLK_F_MQ);
         vqs.reserve(nqueues);
         for (uint32_t i = 0; i < nqueues; i++) {
             auto* q = new Vq;
@@ -967,13 +985,19 @@ struct VhostUserDeviceImpl : IBlkDevice {
         case VHOST_USER_RESET_DEVICE:
             break;
         case VHOST_USER_GET_QUEUE_NUM:
-            if (reply(conn_fd, m->request, 1) < 0) return false;
+            if (reply(conn_fd, m->request, nqueues) < 0) return false;
             return true;
         case VHOST_USER_SET_MEM_TABLE:
             if (handle_mem_table(m, fds, nfds) < 0) ack = 1;
             break;
         case VHOST_USER_SET_VRING_NUM: {
-            const uint32_t idx = 0;   // only one queue exists yet
+            const uint32_t idx = m->payload.state.index;
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user SET_VRING_NUM rejected: vring index ` of ` queues",
+                          idx, nqueues);
+                ack = 1;
+                break;
+            }
             uint32_t n = m->payload.state.num;
             // num is a modulo divisor in dispatch_avail and in
             // vring_used_append, and it sizes the in-flight coroutine cap, so
@@ -1028,9 +1052,15 @@ struct VhostUserDeviceImpl : IBlkDevice {
             break;
         }
         case VHOST_USER_SET_VRING_ADDR: {
-            const uint32_t idx = 0;   // only one queue exists yet
             vhost_vring_addr a;   // memcpy out, per the access rule on vhost_user_msg
             memcpy(&a, &m->payload.addr, sizeof(a));
+            const uint32_t idx = a.index;
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user SET_VRING_ADDR rejected: vring index ` of ` queues",
+                          idx, nqueues);
+                ack = 1;
+                break;
+            }
             // Same group as SET_VRING_NUM, same quiesce: the loop dereferences
             // these three together with num. Same restore of `enabled` -- the
             // frontend may re-address a queue it already has running, and the
@@ -1054,7 +1084,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             break;
         }
         case VHOST_USER_SET_VRING_BASE: {
-            const uint32_t idx = 0;   // only one queue exists yet
+            const uint32_t idx = m->payload.state.index;
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user SET_VRING_BASE rejected: vring index ` of ` queues",
+                          idx, nqueues);
+                ack = 1;
+                break;
+            }
             auto* q = vqs[idx];
             // The frontend is supposed to have stopped this vq before it publishes
             // a base for it, so in the normal sequence both calls below are no-ops.
@@ -1080,7 +1116,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             break;
         }
         case VHOST_USER_GET_VRING_BASE: {
-            const uint32_t idx = 0;   // only one queue exists yet
+            const uint32_t idx = m->payload.state.index;
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user GET_VRING_BASE rejected: vring index ` of ` queues",
+                          idx, nqueues);
+                ack = 1;
+                break;
+            }
             // let dispatched requests complete FIRST: replying with a
             // last_avail that outruns the used ring would drop them when the
             // frontend resumes the vq elsewhere (their completions never land)
@@ -1093,9 +1135,16 @@ struct VhostUserDeviceImpl : IBlkDevice {
         }
         case VHOST_USER_SET_VRING_KICK:
         case VHOST_USER_SET_VRING_CALL: {
-            const uint32_t idx = 0;   // only one queue exists yet
-            auto* q = vqs[idx];
             uint64_t u = m->payload.u64;
+            // low 8 bits are the vring index; bit 8 is the "no fd" flag, whose
+            // test below is unchanged
+            const uint32_t idx = (uint32_t)(u & 0xff);
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user vring fd rejected: index ` of ` queues", idx, nqueues);
+                ack = 1;
+                break;   // msg_loop's DEFER still closes the fd we did not take
+            }
+            auto* q = vqs[idx];
             bool is_kick = m->request == VHOST_USER_SET_VRING_KICK;
             // The loop waits on kickfd and drains it with a bare read, and every
             // completion writes callfd -- both from the queue's own vcpu. A
@@ -1131,7 +1180,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             break;
         }
         case VHOST_USER_SET_VRING_ENABLE: {
-            const uint32_t idx = 0;   // only one queue exists yet
+            const uint32_t idx = m->payload.state.index;
+            if (idx >= nqueues) {
+                LOG_ERROR("vhost-user SET_VRING_ENABLE rejected: vring index ` of ` queues",
+                          idx, nqueues);
+                ack = 1;
+                break;
+            }
             if (m->payload.state.num) {
                 // A preceding disable only joins the loop; the requests it had
                 // already dispatched are still completing into the used ring that
@@ -1346,7 +1401,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         auto* bc = (virtio_blk_config*)dev_config;
         bc->capacity = capacity_sectors;
         bc->blk_size = 1u << sector_shift;
-        bc->num_queues = 1;
+        bc->num_queues = (uint16_t)nqueues;
     }
 
     int start(fs::IFile* bk, bool ownership) override {
@@ -1437,7 +1492,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // The backlog wait comes first and the engine-level `stopping` second,
             // and that order is load-bearing: the wait expects the loop to keep
             // consuming avail entries, and `stopping` is exactly what tells it to
-            // leave them alone. Setting the flag first would strand the wait.
+            // leave them alone. Setting the flag first DEADLOCKS, and nothing
+            // times out to break it: `stopping` is the very flag that makes the
+            // loop return, while this wait counts on that same loop to keep
+            // advancing last_avail until it catches the avail idx, and the wait
+            // itself has no bound -- so detach(true) never returns.
             //
             // Both joins above are what make the wait possible AND safe. Possible:
             // msg_loop's own exit path stops the queues when a disconnect ends the
