@@ -501,9 +501,11 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // read while the loop is expected to advance it. vduse's message loop may not
 // quiesce at all: the kernel blocks whoever sent a message until it is answered,
 // and gives up after msg_timeout seconds, so a handler cannot wait for the
-// in-flight requests. It hops for the two things that need the loop's vcpu -- a vq
-// state read, and teardown's backlog wait, which dereferences an avail ring whose
-// pages its own flush_stale is what munmaps -- and settles the readiness conflict
+// in-flight requests. What hops onto the loop's vcpu is not the message loop
+// alone -- teardown hops too. Between them they send everything that has to reach
+// the loop or the requests it dispatched: a vq state read, and teardown's stop,
+// drain and backlog wait, the last of which dereferences an avail ring whose pages
+// its own flush_stale is what munmaps. The readiness conflict is settled
 // with a per-queue generation counter: an invalidation bumps the counter before it
 // clears, so a refresh already resolving that ring withholds its own publish.
 // loop()'s readiness re-check after its one yield is the backstop on top.
