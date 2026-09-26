@@ -23,6 +23,9 @@ limitations under the License.
 
 #include <photon/common/callback.h>     // TempDelegate
 #include <photon/fs/filesystem.h>       // fs::IFile
+#include <photon/photon.h>              // get_event_engine / get_io_engine
+#include <photon/thread/thread.h>       // vcpu_base, get_vcpu, mutex
+#include <photon/thread/workerpool.h>   // WorkPool
 
 #include <atomic>
 #include <cstddef>
@@ -77,6 +80,86 @@ struct TestImage {
     void release();
     ~TestImage();
 };
+
+// ---------------------------------------------------------------------------
+// vcpu placement observation
+//
+// BlkConfig::pool's whole contract is WHERE the serving coroutines run, and
+// nothing in a transport's public API reports that. All five transports take an
+// fs::IFile* and all five perform the backend IO from the coroutine that serves
+// the request, so a pass-through file that records photon::get_vcpu() on each
+// positioned IO answers the question for every transport at once -- and the
+// answer is the ground truth, not a proxy for it.
+// ---------------------------------------------------------------------------
+class RecordingFile : public fs::IFile {
+public:
+    // does NOT own f; f must outlive this (declare it before the device, so the
+    // device's shutdown DEFER -- and therefore its last IO -- happens first)
+    explicit RecordingFile(fs::IFile* f) : m_file(f) {}
+
+    // distinct vcpus that ran a backend IO, in first-seen order
+    std::vector<photon::vcpu_base*> vcpus();
+    size_t vcpu_count();
+    bool ran_on(photon::vcpu_base* v);
+    void reset();
+    fs::IFile* underlying() { return m_file; }
+
+    // The 17 pure virtuals of IStream + IFile, each a one-line forward. The IO
+    // entry points call record() first; the metadata ones do not, because they
+    // are not what a serving coroutine does with a request.
+    photon::fs::IFileSystem* filesystem() override;
+    ssize_t pread (void* buf, size_t count, off_t offset) override;
+    ssize_t preadv(const struct iovec* iov, int iovcnt, off_t offset) override;
+    ssize_t pwrite(const void* buf, size_t count, off_t offset) override;
+    ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override;
+    ssize_t read  (void* buf, size_t count) override;
+    ssize_t readv (const struct iovec* iov, int iovcnt) override;
+    ssize_t write (const void* buf, size_t count) override;
+    ssize_t writev(const struct iovec* iov, int iovcnt) override;
+    off_t lseek(off_t offset, int whence) override;
+    int fsync() override;
+    int fdatasync() override;
+    int fchmod(mode_t mode) override;
+    int fchown(uid_t owner, gid_t group) override;
+    int fstat(struct stat* buf) override;
+    int ftruncate(off_t length) override;
+    int close() override;
+
+private:
+    void record();
+    fs::IFile* m_file;
+    photon::mutex m_lock;
+    std::vector<photon::vcpu_base*> m_vcpus;
+
+    RecordingFile(const RecordingFile&) = delete;
+    RecordingFile& operator=(const RecordingFile&) = delete;
+};
+
+// A WorkPool whose vcpus are initialized with exactly the engines the calling
+// vcpu has, which is what check_pool_engines() requires. Spelling
+// INIT_EVENT_EPOLL at the dozen call sites instead would encode today's
+// recommended_order (epoll ahead of iouring) as if it were a contract, and would
+// be wrong on macOS, where the caller's engine is kqueue or select.
+struct TestPool {
+    photon::WorkPool* pool;
+    explicit TestPool(size_t n);
+    ~TestPool();
+    photon::WorkPool* operator->() const { return pool; }
+    operator photon::WorkPool*() const { return pool; }
+};
+
+// The kernel's own answer to "how many hardware queues does this device have":
+// blk-mq creates /sys/block/<name>/mq/<hctx index>/ for each one. Counting those
+// directories is an oracle that does not read anything our code wrote, which is
+// the property a queue-count assertion needs -- reading VIRTIO_BLK_F_MQ or
+// virtio_blk_config::num_queues back from our own device would only prove we are
+// consistent with ourselves.
+//
+// `name` is the BARE kernel name ("ublkb0", "vda"), not a /dev path and not a
+// sysfs path; the /sys/block/<name>/mq prefix is built here. Returns -1 when that
+// directory does not exist, which is itself a useful signal: it means the driver
+// never bound, not that the queue count is zero.
+int count_mq_dirs(const std::string& name);
 
 // ---------------------------------------------------------------------------
 // single-shot device IO (the suites' workhorse) and a deterministic pattern

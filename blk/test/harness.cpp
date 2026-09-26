@@ -28,6 +28,7 @@ limitations under the License.
 #include <photon/fs/localfs.h>              // TestImage
 #include <photon/thread/thread.h>           // thread_usleep, now
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
@@ -660,6 +661,90 @@ bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout_us) {
         photon::thread_usleep(1000);
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// vcpu placement observation
+// ---------------------------------------------------------------------------
+
+// The vcpu set is written from several OS threads at once (one per pool vcpu),
+// so it needs a real lock. photon::mutex, not std::mutex: the callers are
+// coroutines, and a std::mutex would stall a whole vcpu for the duration.
+// The critical section is a linear scan of a <= 64-element vector plus at most
+// one push_back, so contention is not a concern either way.
+void RecordingFile::record() {
+    auto* v = photon::get_vcpu();
+    SCOPED_LOCK(m_lock);
+    for (auto* x : m_vcpus)
+        if (x == v) return;
+    m_vcpus.push_back(v);
+}
+
+// The accessors copy under the lock instead of handing out a reference: while
+// the caller iterates, a pool vcpu could still be inside record()'s push_back.
+std::vector<photon::vcpu_base*> RecordingFile::vcpus() {
+    SCOPED_LOCK(m_lock);
+    return m_vcpus;
+}
+
+size_t RecordingFile::vcpu_count() {
+    SCOPED_LOCK(m_lock);
+    return m_vcpus.size();
+}
+
+bool RecordingFile::ran_on(photon::vcpu_base* v) {
+    SCOPED_LOCK(m_lock);
+    for (auto* x : m_vcpus)
+        if (x == v) return true;
+    return false;
+}
+
+void RecordingFile::reset() {
+    SCOPED_LOCK(m_lock);
+    m_vcpus.clear();
+}
+
+photon::fs::IFileSystem* RecordingFile::filesystem() { return m_file->filesystem(); }
+ssize_t RecordingFile::pread (void* buf, size_t count, off_t offset) { record(); return m_file->pread(buf, count, offset); }
+ssize_t RecordingFile::preadv(const struct iovec* iov, int iovcnt, off_t offset) { record(); return m_file->preadv(iov, iovcnt, offset); }
+ssize_t RecordingFile::pwrite(const void* buf, size_t count, off_t offset) { record(); return m_file->pwrite(buf, count, offset); }
+ssize_t RecordingFile::pwritev(const struct iovec* iov, int iovcnt, off_t offset) { record(); return m_file->pwritev(iov, iovcnt, offset); }
+ssize_t RecordingFile::read  (void* buf, size_t count) { record(); return m_file->read(buf, count); }
+ssize_t RecordingFile::readv (const struct iovec* iov, int iovcnt) { record(); return m_file->readv(iov, iovcnt); }
+ssize_t RecordingFile::write (const void* buf, size_t count) { record(); return m_file->write(buf, count); }
+ssize_t RecordingFile::writev(const struct iovec* iov, int iovcnt) { record(); return m_file->writev(iov, iovcnt); }
+off_t RecordingFile::lseek(off_t offset, int whence) { return m_file->lseek(offset, whence); }
+int RecordingFile::fsync() { record(); return m_file->fsync(); }
+int RecordingFile::fdatasync() { record(); return m_file->fdatasync(); }
+int RecordingFile::fchmod(mode_t mode) { return m_file->fchmod(mode); }
+int RecordingFile::fchown(uid_t owner, gid_t group) { return m_file->fchown(owner, group); }
+int RecordingFile::fstat(struct stat* buf) { return m_file->fstat(buf); }
+int RecordingFile::ftruncate(off_t length) { record(); return m_file->ftruncate(length); }
+int RecordingFile::close() { return m_file->close(); }
+
+// Must be constructed on a photon vcpu: get_event_engine()/get_io_engine() are
+// per-vcpu, and a gtest body runs on the caller's.
+TestPool::TestPool(size_t n)
+    : pool(new photon::WorkPool(n, (int)photon::get_event_engine(),
+                                (int)photon::get_io_engine())) {}
+
+TestPool::~TestPool() {
+    delete pool;
+}
+
+int count_mq_dirs(const std::string& name) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/block/%s/mq", name.c_str());
+    DIR* d = opendir(path);
+    if (!d)
+        return -1;
+    DEFER(closedir(d));
+    int n = 0;
+    struct dirent* e;
+    while ((e = readdir(d)))
+        if (e->d_type == DT_DIR && e->d_name[0] != '.')
+            n++;
+    return n;
 }
 
 }  // namespace test

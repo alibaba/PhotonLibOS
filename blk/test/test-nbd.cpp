@@ -684,6 +684,174 @@ TEST_F(NbdTest, loopback_device) {
 }
 #endif
 
+// nbd's parallelism is its client connection count, so the fan-out unit is the
+// connection, not a queue. Two clients on a two-vcpu pool must land on two
+// different vcpus; if the migration in spawn_serve_conn were missing, both
+// serve_conn coroutines would sit on this vcpu and the count would be 1.
+TEST_F(NbdTest, connections_spread_over_the_pool) {
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    // two clients, each with its own connection, both doing real IO so the
+    // serving coroutines actually touch the backend
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    for (int c = 0; c < 2; c++) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 4096u + (uint64_t)c * 65536,
+                              wbuf.data(), wbuf.size()));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096u + (uint64_t)c * 65536,
+                              rbuf.data(), rbuf.size()));
+        EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    }
+
+    // accept_th deliberately stays on this vcpu (the control plane does not
+    // move), so the caller's vcpu appearing in the set would mean a serve_conn
+    // did NOT move. No backend verification here on purpose: it would run on
+    // this vcpu through `rec` and record the caller as a false placement.
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// Eight OS threads churn connections while the caller's vcpu traverses the
+// connection list and, mid-churn, drains and restarts the device. Since the
+// migration the list is written from the pool vcpus (spawn_serve_conn's
+// push_back, serve_conn's DEFER erase) and read from this one
+// (get_client_connections, detach's drain), so the traversals race the
+// reallocations if the list loses its lock. The assertions are structural:
+// returned pointers are never null and the list never grows past the live
+// clients. The streams are NOT dereferenced -- a returned pointer may belong
+// to a connection that closed right after the copy, which is legitimate;
+// dereferencing it would be this test's own use-after-free.
+TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
+    test::TestPool pool(4);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+    ASSERT_NE(0, ep.port);
+
+    // The restart rebinds an ephemeral port, so the workers re-read `port` per
+    // attempt, and `gen` brackets the restart window (bumped once before the
+    // detach and once after the new port is published, with `down` covering the
+    // stretch in between): a failed attempt that overlapped the window is
+    // expected, one that did not is a real error. A data mismatch is never
+    // excused -- a transfer torn by the restart returns -1, not wrong bytes.
+    std::atomic<uint16_t> port{ep.port};
+    std::atomic<uint32_t> gen{0};
+    std::atomic<bool> down{false};
+    std::atomic<int> bad{0};
+    std::atomic<int> finished{0};
+
+    constexpr int THREADS = 8, ITERS = 20;
+    std::vector<std::thread> ths;
+    for (int t = 0; t < THREADS; t++)
+        ths.emplace_back([&, t] {
+            // NbdTestClient speaks photon sockets, whose fd waits go through
+            // the CURRENT vcpu's event engine, so each OS thread brings its own
+            if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) != 0) {
+                bad++;
+                finished++;
+                return;
+            }
+            DEFER({ photon::fini(); finished++; });
+            // per-thread buffers: a shared read-back buffer would have the
+            // threads scribble over each other's validation
+            std::vector<char> wbuf(4096), rbuf(4096);
+            for (size_t i = 0; i < wbuf.size(); i++)
+                wbuf[i] = (char)(i * 31 + 7);
+            uint64_t off = 4096 + (uint64_t)t * (IMG_SIZE / THREADS);
+            for (int i = 0; i < ITERS; i++) {
+                uint32_t g0 = gen.load(std::memory_order_acquire);
+                int st = -1;
+                {
+                    NbdTestClient cli;
+                    if (cli.connect_tcp("127.0.0.1", port.load(std::memory_order_acquire)) == 0 &&
+                        cli.handshake() == 0) {
+                        int w = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
+                        int r = w ? -1 : cli.xfer(NBD_CMD_READ, off, rbuf.data(), rbuf.size());
+                        st = w ? w : r;
+                        if (!st && memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
+                            bad++;   // corruption is never a restart-window artifact
+                            continue;
+                        }
+                    }
+                }
+                if (st && gen.load(std::memory_order_acquire) == g0 &&
+                    !down.load(std::memory_order_acquire)) {
+                    LOG_ERROR("client ` iter ` failed with ` outside the restart window", t, i, st);
+                    bad++;
+                }
+            }
+        });
+
+    // Poll on the caller's vcpu -- accept_loop lives here, so this loop must
+    // keep yielding or no worker can even connect -- and restart once while
+    // connections are live. detach(true) drains the in-flight requests and
+    // drops every connection; start() rebinds and publishes the new port.
+    bool restarted = false;
+    uint64_t deadline = photon::now + 300ull * 1000 * 1000;
+    bool timeout_hit = false;
+    while (finished.load() < THREADS) {
+        auto conns = dev->get_client_connections();
+        // a closing client's Conn can still be listed while the same client's
+        // next attempt is already accepted, so the bound is twice the thread
+        // count; unbounded growth or a null stream is what a lost lock causes
+        EXPECT_LE(conns.size(), (size_t)THREADS * 2);
+        for (auto s : conns)
+            EXPECT_NE(nullptr, s);
+        if (!restarted && !conns.empty()) {
+            restarted = true;
+            down = true;
+            gen++;
+            EXPECT_EQ(0, dev->detach(/*wait_pending=*/true));
+            EXPECT_EQ(0, dev->start(file));
+            net::EndPoint ep2;
+            EXPECT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep2));
+            port = ep2.port;
+            gen++;
+            down = false;
+        }
+        if (photon::now >= deadline) {
+            timeout_hit = true;
+            break;
+        }
+        photon::thread_usleep(200);
+    }
+    for (auto& th : ths)
+        th.join();
+    EXPECT_FALSE(timeout_hit);
+    EXPECT_TRUE(restarted);
+    EXPECT_EQ(0, bad.load());
+}
+
 }  // namespace blk
 }  // namespace photon
 

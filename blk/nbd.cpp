@@ -381,6 +381,13 @@ struct NbdDeviceImpl : NbdDevice {
             errno = e;
         });
 
+        // Every connection coroutine is about to be migrated into the pool and
+        // will block on its client socket there, so the pool's vcpus must be able
+        // to host fd waits. Checked once, before anything is bound: a failure
+        // here has nothing to roll back beyond the DEFER's own reset.
+        if (check_pool_engines(cfg.pool) < 0)
+            return -1;   // DEFER rolls back
+
         trans_flags = NBD_TRANS_HAS_FLAGS;
         if (cfg.read_only)                            trans_flags |= NBD_TRANS_READ_ONLY;
         if (cfg.info.features & FEATURE_FLUSH)        trans_flags |= NBD_TRANS_SEND_FLUSH | NBD_TRANS_SEND_FUA;
@@ -496,9 +503,13 @@ struct NbdDeviceImpl : NbdDevice {
         return 0;
     }
 
-    // Spawn a serve_conn worker for c and register it. The spawn and the
-    // registration are yield-free, so c is in conns/workers before the caller
-    // yields again and cleanup_runtime (same vcpu) can never miss the worker.
+    // Spawn a serve_conn worker for c and register it, then move it into the
+    // pool. Registration comes FIRST and the migration LAST: the spawn and the
+    // registration are yield-free, but that only orders them against this vcpu,
+    // and once migrated the worker runs on another OS thread that does not wait
+    // for us to yield. Migrating first would let serve_conn fail out and its
+    // DEFER erase-and-delete c before push_back stored the pointer, leaving
+    // cleanup_runtime to interrupt and join a dangling entry.
     void spawn_serve_conn(Conn* c) {
         // one coroutine per connection, so this is the stack MAX_CONNECTIONS
         // multiplies -- see DEFAULT_REQ_STACK in utils.h
@@ -519,6 +530,12 @@ struct NbdDeviceImpl : NbdDevice {
             conns.push_back(c);
         }
         workers.push_back(th);
+        // The connection coroutine is the fan-out unit here: nbd has no queue count
+        // to declare, its parallelism is however many clients connect. Safe to move
+        // because nothing in the socket path caches a vcpu -- wait_for_fd_readable
+        // resolves the engine from the CURRENT vcpu on every call, so the stream
+        // this accept produced keeps working on the vcpu it lands on.
+        migrate_to_pool(cfg.pool, th);
     }
 
     void accept_loop(net::ISocketServer* srv) {
