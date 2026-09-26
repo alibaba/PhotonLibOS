@@ -23,11 +23,12 @@ limitations under the License.
 // performs no NBD negotiation and expects a socket already in the
 // transmission phase, which a brand-new socketpair trivially is.
 //
-// Concurrency: since BlkConfig::pool, each client connection's serve_conn runs
-// on whichever pool vcpu it was migrated to, while accept_loop and the API calls
-// stay on the caller's. The bookkeeping below is therefore guarded -- conns by
-// conns_lock, Conn::in_flight and stopping by being atomic. What still needs no
-// guard is noted where it is relied on (workers, depth/bytes, Conn::wlock).
+// Concurrency: conns, Conn::in_flight and stopping are guarded -- a spinlock and
+// two atomics -- so that serve_conn can run on a different vcpu from accept_loop
+// and the API calls, which is what BlkConfig::pool is for. They used to need no
+// guard, and three separate comments said so, on the strength of every serving
+// coroutine sharing the vcpu that called start(). What still needs no guard is
+// noted where it is relied on (workers, depth/bytes, Conn::wlock).
 
 #include "blk.h"
 #include "utils.h"
@@ -264,10 +265,9 @@ struct NbdDeviceImpl : NbdDevice {
     // Field order is padding-driven, do not tidy it: own_backend/trans_flags and
     // started/stopping used to sit amid the align-8 members, stranding holes at
     // 153 and 230 plus more around nbd_fd/doit_thread; gathering every sub-8
-    // member after doit_thread packs them into the tail. Data sums to 394 --
-    // BlkConfig::pool added 8 to cfg (378 -> 386), and conns_lock (1 byte) sits
-    // between the 8-aligned doit_thread and conns, stranding a 7-byte hole --
-    // so vptr(8) + 394 = 402 rounds to 408 (measured).
+    // member after doit_thread packs them into the tail, conns_lock included.
+    // Data sums to 387 -- BlkConfig::pool added 8 to cfg (378 -> 386) and the
+    // spinlock adds 1 -- so vptr(8) + 387 = 395 rounds to 400 (measured).
     struct Conn {
         // Field order is padding-driven, do not tidy it: wlock used to sit
         // between negotiate and in_flight, stranding the 7-byte hole at 9..15;
@@ -317,17 +317,19 @@ struct NbdDeviceImpl : NbdDevice {
     photon::thread* uds_accept_th = nullptr;
     photon::thread* tcp_accept_th = nullptr;
     std::thread doit_thread;
-    // Guards conns. A spinlock, not a photon::mutex: every critical section below
-    // is yield-free (the longest is a vector erase and a raw ::shutdown), so no
-    // holder can be preempted while another vcpu spins, and a mutex would cost
-    // ~24 bytes that this struct's padding comment has already accounted for.
-    photon::spinlock conns_lock;
     std::vector<Conn*> conns;
     std::vector<photon::thread*> workers;  // joined only at cleanup; churned
                                            // workers accumulate until then
     bool own_backend = false;
     bool started = false;
     std::atomic<bool> stopping{false};
+    // Guards conns, declared up there with the other align-8 members: this struct
+    // packs every sub-8 field into the tail on purpose, and a 1-byte lock sitting
+    // between doit_thread and conns would strand a 7-byte hole. A spinlock, not a
+    // photon::mutex: every critical section is yield-free (the longest is a vector
+    // erase and a raw ::shutdown), so no holder can be preempted while another
+    // vcpu spins, and a mutex would cost ~24 bytes the tail cannot absorb.
+    photon::spinlock conns_lock;
     bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
     uint16_t trans_flags = 0;
     // log as (const char*), never VALUE(): alog would emit all 64 bytes
