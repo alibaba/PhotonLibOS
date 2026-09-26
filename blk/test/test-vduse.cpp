@@ -110,7 +110,7 @@ static void vdpa_detach(const char* name) {
 // evidence for the F_MQ gate, and it comes from a different wire field than
 // the mq directory count does (the feature word vs config-space num_queues).
 // Returns -1 when the attribute cannot be read.
-static int virtio_feature_bit(const std::string& kname, unsigned bit) {
+static int virtio_feature_bit(const std::string& kname, uint32_t bit) {
     char path[256];
     snprintf(path, sizeof(path), "/sys/block/%s/device/features", kname.c_str());
     FILE* f = ::fopen(path, "r");
@@ -129,7 +129,7 @@ static int virtio_feature_bit(const std::string& kname, unsigned bit) {
 // blk/utils.h to learn the values it asserts against, because that is how a
 // suite becomes self-consistently wrong. If the two ever disagree these tests
 // go red, which is the point.
-static constexpr unsigned FEAT_BIT_BLK_MQ = 12;
+static constexpr uint32_t FEAT_BIT_BLK_MQ = 12;
 static constexpr uint32_t PEER_MAX_QUEUES = 64;
 
 class VduseTest : public ::testing::Test {
@@ -484,9 +484,13 @@ TEST_F(VduseTest, daemon_restart_io) {
 // the one the vdpa binding produced -- and it records the negotiated
 // VIRTIO_BLK_F_MQ in the virtio device's sysfs. Both are the kernel's own view
 // and they come from different wire fields (config-space num_queues vs the
-// feature word), so together they are an independent oracle for CREATE_DEV's
-// vq_num, fill_config's num_queues and the F_MQ gate at once. The table pins
-// the `nqueues >= 2` gate at its exact boundary (2), mirroring what
+// feature word), so together they are an independent oracle for fill_config's
+// num_queues and for the F_MQ gate. They are not one for CREATE_DEV's vq_num:
+// the consumer never reads that field back, and a vq_num LARGER than the queue
+// count we serve is invisible in both attributes. An under-declared vq_num is
+// caught, but through a different channel -- the kernel rejects a VQ_SETUP for
+// an index it was never told about with EINVAL, which fails start(). The table
+// pins the `nqueues >= 2` gate at its exact boundary (2), mirroring what
 // test-vhost-user's queue_count_follows_config pins against its mock frontend.
 TEST_F(VduseTest, queue_count_follows_config) {
     struct Case { uint32_t ask; int dirs; int mq; };
@@ -497,12 +501,20 @@ TEST_F(VduseTest, queue_count_follows_config) {
         {4,                   4,                    1},
         {PEER_MAX_QUEUES + 5, (int)PEER_MAX_QUEUES, 1},   // clamped, not rejected
     };
-    // The consumer driver builds at most one hardware queue per online CPU
-    // (measured on this suite's VM: 64 asked, 8 directories on 8 CPUs), so a
-    // case may not see more mq directories than there are CPUs. When CPUs are
-    // fewer than the clamp, the clamp's exact value is not observable from the
-    // consumer side at all -- what the case still pins is that an over-large
-    // request is served, not rejected, and offers F_MQ.
+    // The consumer driver caps the hardware queues it builds at a CPU count.
+    // Exactly one measurement of that cap exists, taken on this suite's VM: 64
+    // asked, 8 directories on 8 CPUs. That host reports the same CPU set for
+    // possible, present and online, so the data point cannot say which of the
+    // three the cap is, and an equality derived from it would go red -- against
+    // a correct implementation -- on a host where they differ. Nor is the
+    // clamp's exact value observable at all while CPUs are fewer than the
+    // clamp: 64 and 69 both come back as the CPU count. The four rows at or
+    // below four queues depend on none of this (four is below any plausible CPU
+    // count) and stay equalities; the over-large row asserts a range instead.
+    // What that row really pins is that an over-large request is served rather
+    // than rejected and still offers F_MQ -- its F_MQ assertion stays an
+    // equality, so widening the directory count costs this case nothing it was
+    // testing.
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     for (const auto& c : cases) {
         BlkConfig cfg(make_info());
@@ -520,8 +532,16 @@ TEST_F(VduseTest, queue_count_follows_config) {
         // count_mq_dirs and virtio_feature_bit take the bare kernel name; the
         // node we got back is a /dev path
         std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
-        int want_dirs = cpus > 0 && c.dirs > cpus ? (int)cpus : c.dirs;
-        EXPECT_EQ(want_dirs, test::count_mq_dirs(kname)) << "mq dirs, queues=" << c.ask;
+        int dirs = test::count_mq_dirs(kname);
+        if (c.ask > PEER_MAX_QUEUES) {
+            // the over-large row: served at all, and no wider than the clamp we
+            // publish -- not an exact count, for the reason above
+            EXPECT_GE(dirs, 1) << "mq dirs, queues=" << c.ask;
+            EXPECT_LE(dirs, c.dirs) << "mq dirs, queues=" << c.ask;
+        } else {
+            int want_dirs = cpus > 0 && c.dirs > cpus ? (int)cpus : c.dirs;
+            EXPECT_EQ(want_dirs, dirs) << "mq dirs, queues=" << c.ask;
+        }
         EXPECT_EQ(c.mq, virtio_feature_bit(kname, FEAT_BIT_BLK_MQ)) << "F_MQ, queues=" << c.ask;
     }
 }
@@ -544,6 +564,13 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
     ASSERT_EQ(0, dev1->start(file));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
+    // The premise this test's name asserts: four hardware queues really exist.
+    // Without it a mutation that pins nqueues to 1 turns this into a
+    // single-queue handover that still passes, and the resync it exists to
+    // protect goes unobserved. 4 is below any plausible CPU count, so this does
+    // not inherit the table test's per-CPU clamp.
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    ASSERT_EQ(4, test::count_mq_dirs(kname));
     ASSERT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mq-fresh"));
 
     // daemon goes away, consumer STAYS attached: the rings are orphaned in a

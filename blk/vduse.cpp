@@ -1431,10 +1431,19 @@ struct VduseDeviceImpl : IBlkDevice {
         // every other start() failure, and before anything is bound or spawned.
         if (check_pool_engines(cfg.pool) < 0)
             return -1;
-        // A partial failure unwinds through start()'s DEFER: rollback() touches
-        // a queue only through its kickfd and its loop coroutine, and a queue
-        // that never finished setup_vq has neither (the kickfd close is guarded
-        // on `kickfd >= 0`, vq_stop returns on a null loop).
+        // A partial failure unwinds through start()'s DEFER, and rollback() is
+        // safe on a queue that never finished setup_vq because all five things
+        // it does per queue degenerate there. It closes srv.kickfd: guarded on
+        // `kickfd >= 0`, and kickfd is initialized to -1. It stops the loop
+        // coroutine: vq_stop returns on a null `th`, which only vq_start sets,
+        // and vq_start runs after this whole loop. It stores srv.stopping and
+        // srv.run: both exist from construction, and nothing reads them before a
+        // loop exists. It reaches the queue through run_on_home, in vq_stop and
+        // again in vq_drain: x.home is recorded from inside the loop, so it is
+        // still null here, and the null branch runs the body in place instead of
+        // hopping. And it calls srv.drain(): that spins on in_flight, which is
+        // initialized to 0 and which a queue that never had a loop to dispatch
+        // on never raised.
         for (uint32_t i = 0; i < nqueues; i++)
             if (setup_vq(i) < 0)
                 return -1;
