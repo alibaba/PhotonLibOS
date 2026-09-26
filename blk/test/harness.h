@@ -23,7 +23,6 @@ limitations under the License.
 
 #include <photon/common/callback.h>     // TempDelegate
 #include <photon/fs/filesystem.h>       // fs::IFile
-#include <photon/photon.h>              // get_event_engine / get_io_engine
 #include <photon/thread/thread.h>       // vcpu_base, get_vcpu, mutex
 #include <photon/thread/workerpool.h>   // WorkPool
 
@@ -104,14 +103,21 @@ public:
     void reset();
     fs::IFile* underlying() { return m_file; }
 
-    // The 17 pure virtuals of IStream + IFile, each a one-line forward. The IO
-    // entry points call record() first; the metadata ones do not, because they
-    // are not what a serving coroutine does with a request.
+    // The 17 pure virtuals of IStream + IFile, each a one-line forward, plus the
+    // two non-pure virtuals the transports do reach (see below). The IO entry
+    // points call record() first; the metadata ones do not, because they are not
+    // what a serving coroutine does with a request.
     photon::fs::IFileSystem* filesystem() override;
     ssize_t pread (void* buf, size_t count, off_t offset) override;
     ssize_t preadv(const struct iovec* iov, int iovcnt, off_t offset) override;
     ssize_t pwrite(const void* buf, size_t count, off_t offset) override;
     ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override;
+    // nbd, tcmu and ublk all issue an FUA write as pwritev2(..., RWF_DSYNC). The
+    // base default discards `flags` and calls pwritev, which would still record
+    // the placement but silently drop the durability request -- and a placement
+    // probe that quietly changes what the backend was asked to do is a trap for
+    // whoever asserts on it next.
+    ssize_t pwritev2(const struct iovec* iov, int iovcnt, off_t offset, int flags) override;
     ssize_t read  (void* buf, size_t count) override;
     ssize_t readv (const struct iovec* iov, int iovcnt) override;
     ssize_t write (const void* buf, size_t count) override;
@@ -123,6 +129,14 @@ public:
     int fchown(uid_t owner, gid_t group) override;
     int fstat(struct stat* buf) override;
     int ftruncate(off_t length) override;
+    // Also not pure virtual, and also reached: IFile::trim() and
+    // IFile::zero_range() are plain methods that call the VIRTUAL fallocate
+    // (fs/virtual-file.cpp), and every transport uses them (nbd TRIM /
+    // WRITE_ZEROES, tcmu and ublk UNMAP / WRITE_ZEROES, the shared virtio path
+    // in utils.cpp). The inherited UNIMPLEMENTED default answers ENOSYS, which
+    // nbd maps to NBD_ENOTSUP -- so TRIM would fail and WRITE_ZEROES would not
+    // even take its EOPNOTSUPP fallback.
+    int fallocate(int mode, off_t offset, off_t len) override;
     int close() override;
 
 private:
@@ -136,16 +150,19 @@ private:
 };
 
 // A WorkPool whose vcpus are initialized with exactly the engines the calling
-// vcpu has, which is what check_pool_engines() requires. Spelling
-// INIT_EVENT_EPOLL at the dozen call sites instead would encode today's
-// recommended_order (epoll ahead of iouring) as if it were a contract, and would
-// be wrong on macOS, where the caller's engine is kqueue or select.
+// vcpu has, which is what check_pool_engines() requires. Spelling an engine
+// name at the call sites instead would encode today's recommended_order (epoll
+// ahead of iouring) as if it were a contract, and would be wrong on macOS,
+// where the caller's engine is kqueue or select.
 struct TestPool {
     photon::WorkPool* pool;
     explicit TestPool(size_t n);
     ~TestPool();
     photon::WorkPool* operator->() const { return pool; }
     operator photon::WorkPool*() const { return pool; }
+
+    TestPool(const TestPool&) = delete;
+    TestPool& operator=(const TestPool&) = delete;
 };
 
 // The kernel's own answer to "how many hardware queues does this device have":

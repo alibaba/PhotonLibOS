@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>   // report() logs a std::string
 #include <photon/common/utility.h>          // DEFER
 #include <photon/fs/localfs.h>              // TestImage
+#include <photon/photon.h>                  // get_event_engine / get_io_engine
 #include <photon/thread/thread.h>           // thread_usleep, now
 
 #include <dirent.h>
@@ -709,6 +710,7 @@ ssize_t RecordingFile::pread (void* buf, size_t count, off_t offset) { record();
 ssize_t RecordingFile::preadv(const struct iovec* iov, int iovcnt, off_t offset) { record(); return m_file->preadv(iov, iovcnt, offset); }
 ssize_t RecordingFile::pwrite(const void* buf, size_t count, off_t offset) { record(); return m_file->pwrite(buf, count, offset); }
 ssize_t RecordingFile::pwritev(const struct iovec* iov, int iovcnt, off_t offset) { record(); return m_file->pwritev(iov, iovcnt, offset); }
+ssize_t RecordingFile::pwritev2(const struct iovec* iov, int iovcnt, off_t offset, int flags) { record(); return m_file->pwritev2(iov, iovcnt, offset, flags); }
 ssize_t RecordingFile::read  (void* buf, size_t count) { record(); return m_file->read(buf, count); }
 ssize_t RecordingFile::readv (const struct iovec* iov, int iovcnt) { record(); return m_file->readv(iov, iovcnt); }
 ssize_t RecordingFile::write (const void* buf, size_t count) { record(); return m_file->write(buf, count); }
@@ -720,6 +722,7 @@ int RecordingFile::fchmod(mode_t mode) { return m_file->fchmod(mode); }
 int RecordingFile::fchown(uid_t owner, gid_t group) { return m_file->fchown(owner, group); }
 int RecordingFile::fstat(struct stat* buf) { return m_file->fstat(buf); }
 int RecordingFile::ftruncate(off_t length) { record(); return m_file->ftruncate(length); }
+int RecordingFile::fallocate(int mode, off_t offset, off_t len) { record(); return m_file->fallocate(mode, offset, len); }
 int RecordingFile::close() { return m_file->close(); }
 
 // Must be constructed on a photon vcpu: get_event_engine()/get_io_engine() are

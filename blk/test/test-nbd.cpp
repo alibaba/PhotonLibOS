@@ -717,11 +717,22 @@ TEST_F(NbdTest, connections_spread_over_the_pool) {
         NbdTestClient cli;
         ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
         ASSERT_EQ(0, cli.handshake());
-        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 4096u + (uint64_t)c * 65536,
-                              wbuf.data(), wbuf.size()));
-        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096u + (uint64_t)c * 65536,
-                              rbuf.data(), rbuf.size()));
+        uint64_t base = 4096u + (uint64_t)c * 65536;   // this test's own region
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size()));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, base, rbuf.data(), rbuf.size()));
         EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+        // an FUA write is issued as pwritev2(RWF_DSYNC): this asserts the probe
+        // forwards it instead of letting the base default drop the flag
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size(), NBD_REQ_FUA));
+#ifdef __linux__
+        // TRIM and WRITE_ZEROES both land on the VIRTUAL fallocate, because
+        // IFile::trim / IFile::zero_range are plain methods that call it -- a
+        // pass-through backend that forgot to forward it would answer ENOSYS
+        // here, which nbd reports to the client as NBD_ENOTSUP. Offsets are
+        // inside this client's own region, disjoint from the pair above.
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, base + 16384, nullptr, 8192));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, base + 16384, nullptr, 8192));
+#endif
     }
 
     // accept_th deliberately stays on this vcpu (the control plane does not
@@ -768,6 +779,7 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     std::atomic<uint32_t> gen{0};
     std::atomic<bool> down{false};
     std::atomic<int> bad{0};
+    std::atomic<int> ok{0};        // fully verified connect/write/read cycles
     std::atomic<int> finished{0};
 
     constexpr int THREADS = 8, ITERS = 20;
@@ -789,6 +801,12 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 wbuf[i] = (char)(i * 31 + 7);
             uint64_t off = 4096 + (uint64_t)t * (IMG_SIZE / THREADS);
             for (int i = 0; i < ITERS; i++) {
+                // Do not spend iterations inside the restart window: every
+                // connect fails there and is legitimately excused, so without
+                // this wait a worker can burn its whole budget doing no
+                // verifiable work at all -- and `bad == 0` would still hold.
+                while (down.load(std::memory_order_acquire))
+                    photon::thread_usleep(200);
                 uint32_t g0 = gen.load(std::memory_order_acquire);
                 int st = -1;
                 {
@@ -809,6 +827,8 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                     LOG_ERROR("client ` iter ` failed with ` outside the restart window", t, i, st);
                     bad++;
                 }
+                if (!st)
+                    ok++;   // connected, wrote, read back, and the bytes matched
             }
         });
 
@@ -816,6 +836,7 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     // keep yielding or no worker can even connect -- and restart once while
     // connections are live. detach(true) drains the in-flight requests and
     // drops every connection; start() rebinds and publishes the new port.
+    // No semaphore here: blocking would stop the yields accept_loop needs.
     bool restarted = false;
     uint64_t deadline = photon::now + 300ull * 1000 * 1000;
     bool timeout_hit = false;
@@ -850,6 +871,13 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     EXPECT_FALSE(timeout_hit);
     EXPECT_TRUE(restarted);
     EXPECT_EQ(0, bad.load());
+    // `bad == 0` on its own would also hold if the workers never completed a
+    // cycle, so count the cycles too. The workers wait out the restart window
+    // instead of spending iterations in it, which leaves at most one attempt
+    // per thread that the window can still catch (the one already in flight
+    // when `down` went up); every other one must have been a fully verified
+    // connect / write / read-back / compare cycle.
+    EXPECT_GE(ok.load(), THREADS * ITERS - THREADS);
 }
 
 }  // namespace blk
