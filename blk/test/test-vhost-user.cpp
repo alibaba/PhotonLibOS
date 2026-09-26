@@ -2043,12 +2043,24 @@ TEST_F(VhostUserTest, unrecognised_message_fds) {
             memset(&m, 0, sizeof(m));
             m.request = 9999;   // no such request: handle_msg's default arm
             m.size = 8;
-            // transact() waits for the REPLY_ACK, which the default arm sends
-            // after its DEFER ran -- so the round trip is the synchronisation
             bool ok = fe.transact(&m, &r, &efd, 1);
             ::close(efd);       // our copy; the device's is what is being counted
             if (!ok) return EPROTO;
         }
+        // An ack is NOT the synchronisation this count needs: msg_loop registers
+        // the DEFER that closes a message's fds inside its loop body, before
+        // handle_msg, so it runs when the iteration ENDS -- after the default arm
+        // has already written that iteration's ack. Rounds 1-7 are covered by the
+        // next round's recv, but the last round's close is still in flight when we
+        // count, and this body runs on its own OS thread, so it is a straight race
+        // (measured: 16 of 50 repeats failed). One more unrecognised message
+        // carrying NO fd is the barrier -- its ack cannot be written until the
+        // previous iteration has ended, and it adds nothing of its own to count.
+        mu_msg b, br;
+        memset(&b, 0, sizeof(b));
+        b.request = 9999;
+        b.size = 8;
+        if (!fe.transact(&b, &br)) return EPROTO;
         leaked = MockFrontend::count_fds() - before;
         if (leaked)
             LOG_ERROR("` fds survived ` unrecognised messages", leaked, 8);
