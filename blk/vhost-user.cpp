@@ -312,7 +312,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
         uint64_t desc_qva = 0, used_qva = 0, avail_qva = 0;   // retranslate from
                                                              // these on a new
                                                              // memory table
-        bool enabled = false;      // the frontend's SET_VRING_ENABLE state
+        // Atomic: the ready hook (vq_may_dispatch) reads this on the queue's own
+        // vcpu while handle_mem_table, SET_VRING_ENABLE and stop_session write it
+        // on the control plane's vcpu, and those writes are not all inside a
+        // quiesce -- two of them deliberately precede vq_stop. Relaxed accesses
+        // only: nothing else is published through this flag.
+        std::atomic<bool> enabled{false};   // the frontend's SET_VRING_ENABLE state
         bool addr_set = false;     // SET_VRING_ADDR translated successfully
         int callfd = -1;           // completion eventfd (owned here)
         photon::thread* th = nullptr;
@@ -634,7 +639,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     bool vq_may_dispatch(uint32_t idx) {
         auto* q = vqs[idx];
-        return q->x.enabled && q->x.addr_set && q->srv.desc && q->srv.num;
+        return q->x.enabled.load(std::memory_order_relaxed) && q->x.addr_set &&
+               q->srv.desc && q->srv.num;
     }
 
     // The hooks are bound with the Vq* as their context object, so each one can
@@ -735,7 +741,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
     void vq_stop_here(uint32_t idx) {
         auto* q = vqs[idx];
         if (!q->x.th) return;
-        q->x.enabled = false;
+        q->x.enabled.store(false, std::memory_order_relaxed);
         q->srv.run.store(false, std::memory_order_relaxed);
         q->srv.wake();   // out of its kickfd wait
         photon::thread_interrupt(q->x.th);
@@ -769,7 +775,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // this dereferences avail. addr_set is exactly "all three resolved"
             // (see vq_retranslate).
             while (q->srv.in_flight.load() ||
-                   (drain_backlog && q->x.enabled && q->x.addr_set &&
+                   (drain_backlog && q->x.enabled.load(std::memory_order_relaxed) &&
+                    q->x.addr_set &&
                     q->srv.last_avail != vring_avail_idx(q->srv.avail)))
                 photon::thread_usleep(1000);
         });
@@ -871,8 +878,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // were never enabled.
         std::vector<bool> was_enabled(vqs.size());
         for (size_t i = 0; i < vqs.size(); i++) {
-            was_enabled[i] = vqs[i]->x.enabled;
-            vqs[i]->x.enabled = false;
+            was_enabled[i] = vqs[i]->x.enabled.load(std::memory_order_relaxed);
+            vqs[i]->x.enabled.store(false, std::memory_order_relaxed);
             vq_stop((uint32_t)i);
             vq_drain((uint32_t)i);   // in-flight iovs point into the OLD mappings
         }
@@ -897,7 +904,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         for (size_t i = 0; i < vqs.size(); i++) {
             vq_retranslate((uint32_t)i);
             if (was_enabled[i]) {
-                vqs[i]->x.enabled = true;
+                vqs[i]->x.enabled.store(true, std::memory_order_relaxed);
                 vq_start((uint32_t)i);
             }
         }
@@ -975,7 +982,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // expects it to still be running after a resize. A rejected num never
             // gets this far, so a bad message cannot stop a live queue.
             auto* q = vqs[idx];
-            bool was_enabled = q->x.enabled;
+            bool was_enabled = q->x.enabled.load(std::memory_order_relaxed);
             vq_stop(idx);
             vq_drain(idx);
             q->srv.num = n;
@@ -1005,7 +1012,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 LOG_ERROR("vhost-user SET_VRING_NUM ` does not fit the declared region", n);
                 ack = 1;
             }
-            q->x.enabled = was_enabled;
+            q->x.enabled.store(was_enabled, std::memory_order_relaxed);
             vq_start(idx);
             break;
         }
@@ -1019,7 +1026,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // retranslation below can also fail, in which case vq_start's own
             // readiness gate is what keeps dispatch off the bad addresses.
             auto* q = vqs[idx];
-            bool was_enabled = q->x.enabled;
+            bool was_enabled = q->x.enabled.load(std::memory_order_relaxed);
             vq_stop(idx);
             vq_drain(idx);
             q->x.desc_qva = a.desc_user_addr;
@@ -1031,7 +1038,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                           q->srv.num);
                 ack = 1;
             }
-            q->x.enabled = was_enabled;
+            q->x.enabled.store(was_enabled, std::memory_order_relaxed);
             vq_start(idx);
             break;
         }
@@ -1087,7 +1094,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // the queue restarted because a KICK or a CALL on a live queue (the
             // NOFD revoke, a frontend reconnect) must leave it live; during setup
             // `was_enabled` is false and vq_start's own gate keeps it that way.
-            bool was_enabled = q->x.enabled;
+            bool was_enabled = q->x.enabled.load(std::memory_order_relaxed);
             vq_stop(idx);
             vq_drain(idx);
             int* slot = is_kick ? &q->srv.kickfd : &q->x.callfd;
@@ -1096,7 +1103,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 *slot = fds[0];
                 fds[0] = -1;   // ours now
             }
-            q->x.enabled = was_enabled;
+            q->x.enabled.store(was_enabled, std::memory_order_relaxed);
             if (!is_kick && q->x.callfd >= 0) {
                 // Signal once on installing the callfd: a frontend that
                 // reconnects may be blocked on an interrupt for completions whose
@@ -1120,7 +1127,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 // vq_start re-reads and republishes. Wait them out first so the
                 // two never overlap.
                 vq_drain(idx);
-                vqs[idx]->x.enabled = true;
+                vqs[idx]->x.enabled.store(true, std::memory_order_relaxed);
                 vq_start(idx);
             } else {
                 vq_stop(idx);
@@ -1377,7 +1384,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // unconditional notification.
             q->srv.event_idx.store(false, std::memory_order_relaxed);
             q->srv.notify_valid.store(false, std::memory_order_relaxed);
-            q->x.enabled = false;
+            q->x.enabled.store(false, std::memory_order_relaxed);
         }
     }
 
@@ -1385,7 +1392,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
     void stop_session(bool drain_backlog) {
         if (!drain_backlog)
             for (auto* q : vqs)
-                q->x.enabled = false;
+                q->x.enabled.store(false, std::memory_order_relaxed);
         // Device-level `stopping`, and it has to be set BEFORE the two joins
         // below: msg_loop's and accept_loop's conditions are `while (!stopping)`,
         // and an interrupted accept_loop that still finds stopping false takes the

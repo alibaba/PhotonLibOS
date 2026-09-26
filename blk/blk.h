@@ -161,10 +161,11 @@ struct BlkConfig {
     photon::WorkPool* pool = nullptr;
 
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
-                                  // Honored by ublk, vhost-user and vduse. tcmu and nbd
-                                  // ignore it: tcmu's kernel gives one command ring per
-                                  // device, and nbd's parallelism is its client connection
-                                  // count -- neither has a queue count to declare
+                                  // Honored by ublk only. vhost-user and vduse currently
+                                  // serve a single queue and ignore it. tcmu and nbd
+                                  // ignore it by nature: tcmu's kernel gives one command
+                                  // ring per device, and nbd's parallelism is its client
+                                  // connection count -- neither has a queue count to declare
 
     uint32_t queue_depth = 0;     // per-queue in-flight limit; 0 = auto, clamped by kernel limits.
                                   // tcmu: SCSI command dispatch depth (coroutine pool capacity,
