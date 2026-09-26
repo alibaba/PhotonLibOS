@@ -408,6 +408,12 @@ TEST_F(VduseTest, orphan_recovery) {
     ASSERT_EQ(0, dev1->start(file));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
+    // Safety net for the ASSERTs below: registered early because the ordered
+    // pair at the end fires only if we get that far, and a consumer left
+    // attached here survives sweep() -- its adopt dies on VQ_SETUP's EPERM --
+    // which then fails every later new_device() on this name. Firing twice is
+    // harmless: vdpa_detach swallows the second delete.
+    DEFER(vdpa_detach(TEST_NAME));
     ASSERT_EQ(0, device_io(node, pattern(0x11), true));
 
     // daemon goes away, consumer STAYS attached: the registration is an orphan
@@ -564,6 +570,12 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
     ASSERT_EQ(0, dev1->start(file));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
+    // Safety net for the ASSERTs below: registered early because the ordered
+    // pair at the end fires only if we get that far, and a consumer left
+    // attached here survives sweep() -- its adopt dies on VQ_SETUP's EPERM --
+    // which then fails every later new_device() on this name. Firing twice is
+    // harmless: vdpa_detach swallows the second delete.
+    DEFER(vdpa_detach(TEST_NAME));
     // The premise this test's name asserts: four hardware queues really exist.
     // Without it a mutation that pins nqueues to 1 turns this into a
     // single-queue handover that still passes, and the resync it exists to
