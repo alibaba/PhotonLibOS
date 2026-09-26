@@ -284,8 +284,8 @@ struct NbdDeviceImpl : NbdDevice {
                                 // execute coroutines (header + data must not
                                 // interleave). in_flight is atomic because
                                 // detach(wait_pending) polls it on the caller's
-                                // vcpu while this connection's execute coroutines
-                                // bump it on a pool vcpu.
+                                // vcpu while the execute coroutines bump it on
+                                // whichever vcpu serve_conn runs on.
     };
 
     NbdConfig cfg;
@@ -323,12 +323,13 @@ struct NbdDeviceImpl : NbdDevice {
     bool own_backend = false;
     bool started = false;
     std::atomic<bool> stopping{false};
-    // Guards conns, declared up there with the other align-8 members: this struct
-    // packs every sub-8 field into the tail on purpose, and a 1-byte lock sitting
-    // between doit_thread and conns would strand a 7-byte hole. A spinlock, not a
-    // photon::mutex: every critical section is yield-free (the longest is a vector
-    // erase and a raw ::shutdown), so no holder can be preempted while another
-    // vcpu spins, and a mutex would cost ~24 bytes the tail cannot absorb.
+    // Guards conns, which is declared up there with the other align-8 members:
+    // this struct packs every sub-8 field into the tail on purpose, and a 1-byte
+    // lock sitting between doit_thread and conns would strand a 7-byte hole. A
+    // spinlock, not a photon::mutex: every critical section is yield-free (the
+    // longest is a vector erase and a raw ::shutdown), so no holder can be
+    // preempted while another vcpu spins, and a mutex would drag in a wait queue
+    // and an owner pointer that this tail cannot absorb.
     photon::spinlock conns_lock;
     bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
     uint16_t trans_flags = 0;
@@ -521,10 +522,10 @@ struct NbdDeviceImpl : NbdDevice {
     }
 
     void accept_loop(net::ISocketServer* srv) {
-        while (!stopping) {
+        while (!stopping.load(std::memory_order_relaxed)) {
             auto s = srv->accept();
             if (!s) {
-                if (stopping)
+                if (stopping.load(std::memory_order_relaxed))
                     break;
                 photon::thread_usleep(1000);
                 continue;
@@ -532,7 +533,7 @@ struct NbdDeviceImpl : NbdDevice {
             // Refuse rather than wait at the cap: waiting would only move the
             // unbounded queue into the listen backlog, and a refused client
             // retries. The read is under conns_lock because serve_conn's DEFER
-            // erases from a pool vcpu, not from here.
+            // erases from serve_conn's own vcpu, which is not necessarily this one.
             size_t nconns;
             {
                 SCOPED_LOCK(conns_lock);
@@ -567,7 +568,7 @@ struct NbdDeviceImpl : NbdDevice {
         if (c->negotiate && negotiate(c->s) < 0)
             return;
 
-        while (!stopping) {
+        while (!stopping.load(std::memory_order_relaxed)) {
             NbdRequest req;
             if (c->s->read(&req, sizeof(req)) != (ssize_t)sizeof(req))
                 break;
@@ -863,7 +864,7 @@ struct NbdDeviceImpl : NbdDevice {
     }
 
     void cleanup_runtime() {
-        stopping = true;
+        stopping.store(true, std::memory_order_relaxed);
         // coroutines blocked in photon fd-event waits (accept / read) only wake
         // via thread_interrupt -- closing the fd does not fire the event engine,
         // and ISocketServer::terminate() is a no-op here because we drive
@@ -920,7 +921,7 @@ struct NbdDeviceImpl : NbdDevice {
             tcp_server = nullptr;
         }
         started = false;
-        stopping = false;
+        stopping.store(false, std::memory_order_relaxed);
     }
 
 #ifdef __linux__

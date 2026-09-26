@@ -483,12 +483,13 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // Threading: one serving vcpu PER QUEUE. loop() runs as a photon coroutine and
 // the request coroutines it spawns inherit its vcpu, so they interleave with it
 // and the used-ring append stays yield-free -- no locking is needed for anything
-// only they touch. What IS cross-vcpu is the control plane: since
-// BlkConfig::pool, the transport's message loop stays on the caller's vcpu while
-// this queue serves on a pool vcpu, so the fields it writes are atomic
-// (event_idx, capacity, run, stopping, in_flight) and the ones published as a
-// group (desc/avail/used/num, the kick/call fds) are only mutated with the loop
-// quiesced. See blk/SPEC-multiqueue.md §2.10.
+// only they touch. What IS cross-vcpu is the control plane: BlkConfig::pool lets
+// a caller run this queue's loop on a pool vcpu while the transport's message
+// loop stays on the caller's, so the fields that message loop writes are atomic
+// (event_idx, capacity, run, stopping, in_flight). The ones published as a group
+// (desc/avail/used/num, the kick/call fds) cannot be made atomic -- a request
+// coroutine holds those pointers across the backend IO, so a lock would have to
+// span the whole request -- and are instead only mutated with the loop quiesced.
 //
 // Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
 // guest-written free-running counter, so without a cap a single kick could fan
