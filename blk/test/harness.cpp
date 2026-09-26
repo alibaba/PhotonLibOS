@@ -674,6 +674,11 @@ bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout_us) {
 // The critical section is a linear scan of a <= 64-element vector plus at most
 // one push_back, so contention is not a concern either way.
 void RecordingFile::record() {
+    // Ahead of m_lock, deliberately: the gate's whole point is that every gated IO
+    // parks AT THE SAME TIME, so a caller can observe a device with its in-flight
+    // count pinned at a cap. Waiting under the mutex would let them through one at
+    // a time and the pinned state would never exist.
+    if (gated) gate.wait(1);
     auto* v = photon::get_vcpu();
     SCOPED_LOCK(m_lock);
     for (auto* x : m_vcpus)

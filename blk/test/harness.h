@@ -103,6 +103,25 @@ public:
     void reset();
     fs::IFile* underlying() { return m_file; }
 
+    // Hold every backend IO inside record() until release_gate(). The purpose is to
+    // PIN a device state that is otherwise transient: with all of a virtqueue's
+    // dispatched requests parked here at once, in_flight stays at the dispatch cap
+    // for as long as the gate is shut, so the avail entries behind the cap stay
+    // unconsumed INDEFINITELY rather than for one KICK_FALLBACK_US interval. That is
+    // what makes an orderly teardown's "drain the backlog, THEN stop the queue"
+    // order assertable at all -- ungated, the window the drain has to win is a few
+    // microseconds wide and an assertion on it would be a timing guess. Off by
+    // default, so an ungated RecordingFile stays exactly the placement probe above.
+    bool gated = false;
+    // Resume every parked IO at once. `n` only has to be at least the number that
+    // reached the gate; whatever is left over stays in the count and is harmless.
+    // Clears `gated` FIRST: an IO arriving after the release must not park on a
+    // gate nobody is going to open again.
+    void release_gate(uint64_t n = 1) {
+        gated = false;
+        gate.signal(n);
+    }
+
     // The 17 pure virtuals of IStream + IFile, each a one-line forward, plus the
     // two non-pure virtuals the transports do reach (see below). The IO entry
     // points call record() first; the metadata ones do not, because they are not
@@ -142,6 +161,7 @@ public:
 private:
     void record();
     fs::IFile* m_file;
+    photon::semaphore gate{0};   // NSDMI, not {}: semaphore's ctor is explicit
     photon::mutex m_lock;
     std::vector<photon::vcpu_base*> m_vcpus;
 

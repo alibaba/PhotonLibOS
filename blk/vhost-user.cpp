@@ -329,9 +329,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // share it and are the only writers of last_avail, used_idx and the used
         // ring WHILE THE LOOP IS LIVE -- the control plane writes them too (vq_start
         // republishes both, SET_VRING_BASE sets last_avail), but only with the loop
-        // joined, which is the same reason it needs no hop for those. Deliberately
-        // NOT cleared when the loop is joined: the requests it dispatched outlive
-        // the join, and vq_drain still has to reach them.
+        // joined AND its requests drained (vq_stop then vq_drain), which is the same
+        // reason it needs no hop for those. Deliberately NOT cleared when the
+        // loop is joined: the requests it dispatched outlive the join, and
+        // vq_drain still has to reach them.
         photon::vcpu_base* home = nullptr;
         // vq_start waits on this before returning, so `home` is never read on one
         // vcpu while the loop writes it on another. The wait is what makes

@@ -40,6 +40,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>   // thread_create11 for the two helper coroutines
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -1675,6 +1676,117 @@ TEST_F(VhostUserTest, dispatch_cap_recovery) {
         return *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) == S_OK ? 0 : EIO;
     });
     EXPECT_EQ(0, rc);
+}
+
+// detach(true) promises to wait out the pending work, and the teardown order that
+// delivers it -- drain the avail backlog WHILE the queue's loop is still live, then
+// stop the queue -- was invisible to every other case here: nothing else holds work
+// in the ring while a detach runs, so dropping the guard that keeps the loop alive
+// on the stop_session path left the whole suite green.
+//
+// The gate is what makes this deterministic instead of a race we hope to win. With
+// every backend IO parked, the VQ_NUM requests the dispatch cap let through never
+// retire, so in_flight stays AT the cap and the 8 entries behind it stay unconsumed
+// for as long as we like -- not for one KICK_FALLBACK_US interval. Draining first
+// therefore completes all N: the queue is still enabled while the drain runs, so the
+// parked requests publish their completions and the loop goes on to dispatch the
+// rest. Stopping the queue first clears `enabled`, which both stops completions
+// being published and strands the backlog for good, so the used ring advances by 0.
+// N vs 0 is decided by the ORDER, never by how long R sleeps: those 50 ms only set
+// WHEN the gate opens, not what the final count is.
+TEST_F(VhostUserTest, detach_waits_for_the_avail_backlog) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    // Declared before `dev`: RecordingFile does not own the backend, so its
+    // destruction has to come after the device's shutdown DEFER and its delete.
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    // Set only on the hung-detach path below: a coroutine still inside
+    // stop_session reads this device's per-queue state, so deleting it under that
+    // would stack a use-after-free on top of the failure being reported.
+    bool leak_dev = false;
+    DEFER(if (!leak_dev) delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    // A no-op by the time it runs: detach(true) below clears `started`, and
+    // shutdown() returns early on it -- so the SERVER-role socket is NOT unlinked
+    // here. TearDown unlinks it and SetUp empties the whole directory.
+    DEFER(if (!leak_dev) dev->shutdown());
+
+    // The frontend runs on its own OS thread, so both handoffs are explicit: a
+    // photon::semaphore it signals (signal() is documented callable from any std
+    // thread) to let the detach start, and an eventfd the detach writes once it
+    // returned. D must not run before that signal -- a detach that precedes the
+    // session finds a queue with no loop, has nothing to drain, and returns at once.
+    photon::semaphore armed(0);
+    int donefd = ::eventfd(0, 0);
+    ASSERT_GE(donefd, 0);
+    DEFER(::close(donefd));
+    int detach_rc = -1;
+
+    auto rth = photon::thread_create11([&] {
+        photon::thread_usleep(50 * 1000);
+        rf.release_gate(4096);   // comfortably over the VQ_NUM IOs the cap admitted
+    });
+    auto dth = photon::thread_create11([&] {
+        armed.wait(1);
+        detach_rc = dev->detach(true);
+        uint64_t one = 1;
+        ssize_t w = ::write(donefd, &one, sizeof(one));
+        (void)w;
+    });
+    photon::thread_enable_join(rth);
+    photon::thread_enable_join(dth);
+
+    constexpr int N = VQ_NUM + 8;   // over the in-flight cap AND over the avail ring
+    uint16_t u0 = 0, u1 = 0;
+    uint8_t status = 0xff;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        constexpr uint16_t SLOT = SLOTS - 1;
+        auto* desc = (vdesc*)(fe.mem + L_DESC);
+        desc[0] = vdesc{MockFrontend::hdr_off(SLOT), sizeof(blk_outhdr), DESC_F_NEXT, 1};
+        desc[1] = vdesc{MockFrontend::data_off(SLOT), 512,
+                        (uint16_t)(DESC_F_WRITE | DESC_F_NEXT), 2};
+        desc[2] = vdesc{MockFrontend::status_off(SLOT), 1, DESC_F_WRITE, 0};
+        *(blk_outhdr*)(fe.mem + MockFrontend::hdr_off(SLOT)) = blk_outhdr{T_IN, 0, 0};
+        *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) = 0xff;
+
+        // the same head for all N, as in dispatch_cap_recovery: the entries are
+        // indistinguishable, so the later ones overwriting the earlier ones in the
+        // VQ_NUM-slot ring is harmless
+        u0 = fe.used_idx_now();
+        for (int i = 0; i < N; i++)
+            fe.publish(0);
+        if (!fe.kick()) return EIO;   // ONE kick for all N
+        armed.signal(1);
+        // Read the ring from here, not after run_frontend returns: this thread owns
+        // the mapping and destroys it on the way out. Bounded, because an orderly
+        // detach that never comes back is a failure this case must REPORT rather
+        // than become.
+        fe.wait_used_advance(u0, (uint16_t)N, 5000);
+        u1 = fe.used_idx_now();
+        status = *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT));
+        pollfd pfd{donefd, POLLIN, 0};
+        if (::poll(&pfd, 1, 30000) <= 0) return ETIMEDOUT;
+        return 0;
+    });
+
+    // Both joined before anything they write is read: R touches rf's gate, D owns
+    // detach_rc, and neither may outlive the scope that holds them.
+    photon::thread_join((photon::join_handle*)rth);
+    EXPECT_EQ(0, rc);
+    if (rc == 0) {
+        photon::thread_join((photon::join_handle*)dth);
+        EXPECT_EQ(0, detach_rc);
+    } else {
+        leak_dev = true;
+        ADD_FAILURE() << "detach(true) never returned: the orderly teardown hung";
+    }
+    EXPECT_EQ((uint16_t)N, (uint16_t)(u1 - u0));
+    EXPECT_EQ(S_OK, status);
 }
 
 // SET_MEM_TABLE used to clear the live mappings BEFORE validating, so a rejected
