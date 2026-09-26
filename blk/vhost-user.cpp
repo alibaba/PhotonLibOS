@@ -327,8 +327,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // null it is simply the caller's own vcpu. vq_stop/vq_drain move their
         // work there, because the loop and the request coroutines it spawned
         // share it and are the only writers of last_avail, used_idx and the used
-        // ring. Deliberately NOT cleared when the loop is joined: the requests it
-        // dispatched outlive the join, and vq_drain still has to reach them.
+        // ring WHILE THE LOOP IS LIVE -- the control plane writes them too (vq_start
+        // republishes both, SET_VRING_BASE sets last_avail), but only with the loop
+        // joined, which is the same reason it needs no hop for those. Deliberately
+        // NOT cleared when the loop is joined: the requests it dispatched outlive
+        // the join, and vq_drain still has to reach them.
         photon::vcpu_base* home = nullptr;
         // vq_start waits on this before returning, so `home` is never read on one
         // vcpu while the loop writes it on another. The wait is what makes
@@ -811,6 +814,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
         q->srv.publish_avail_event();
         q->srv.stopping.store(false, std::memory_order_relaxed);
         q->srv.run.store(true, std::memory_order_relaxed);
+        // Logged before the create: all three are plain fields the loop advances
+        // on its own vcpu, so reading them from here afterwards would be a race.
+        // The values are final by now -- num comes from SET_VRING_NUM and the
+        // other two from the lines just above -- so this prints the same thing.
+        LOG_INFO("vhost-user vq` serving: num ` last_avail ` used_idx `",
+                 idx, q->srv.num, q->srv.last_avail, q->srv.used_idx);
         q->x.th = photon::thread_create(&loop_thunk, q);
         if (!q->x.th)
             LOG_ERROR_RETURN(ENOMEM, , "vhost-user: cannot create the vq` loop coroutine", idx);
@@ -821,12 +830,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // which is exactly what thread_create left, and enable_join does not
         // change either property. The control-plane coroutines (accept_th, msg_th)
         // are deliberately NOT migrated -- they stay on the caller's vcpu.
+        //
+        // Nothing between the create and the migration may yield, or the loop runs
+        // here first and parks in its kickfd wait -- WAITING, not READY -- and the
+        // migration fails. The default log path does not (alog takes a spinlock),
+        // but a caller-installed sink writing through a photon IFile would, which
+        // is why the LOG_INFO above sits before the create rather than after it.
         photon::thread_enable_join(q->x.th);
-        // Logged here, before the handover and with nothing yielded since the
-        // create: all three are plain fields the loop advances on its own vcpu,
-        // so reading them from here afterwards would be a race.
-        LOG_INFO("vhost-user vq` serving: num ` last_avail ` used_idx `",
-                 idx, q->srv.num, q->srv.last_avail, q->srv.used_idx);
         migrate_to_pool(cfg.pool, q->x.th);
         q->x.home_set.wait(1);   // home is set before this returns -- see its declaration
     }
@@ -876,12 +886,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // was_enabled is per queue, not one flag: a frontend may have enabled only
         // some of the queues, and restoring a single bool would start ones that
         // were never enabled.
-        std::vector<bool> was_enabled(vqs.size());
-        for (size_t i = 0; i < vqs.size(); i++) {
+        std::vector<bool> was_enabled(nqueues);
+        for (uint32_t i = 0; i < nqueues; i++) {
             was_enabled[i] = vqs[i]->x.enabled.load(std::memory_order_relaxed);
             vqs[i]->x.enabled.store(false, std::memory_order_relaxed);
-            vq_stop((uint32_t)i);
-            vq_drain((uint32_t)i);   // in-flight iovs point into the OLD mappings
+            vq_stop(i);
+            vq_drain(i);   // in-flight iovs point into the OLD mappings
         }
         mem.clear();
         for (uint32_t i = 0; i < n; i++) {
@@ -901,11 +911,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
             fds[i] = -1;   // owned by mem now; msg_loop must not close it
         }
         LOG_INFO("vhost-user mem table: ` regions", n);
-        for (size_t i = 0; i < vqs.size(); i++) {
-            vq_retranslate((uint32_t)i);
+        for (uint32_t i = 0; i < nqueues; i++) {
+            vq_retranslate(i);
             if (was_enabled[i]) {
                 vqs[i]->x.enabled.store(true, std::memory_order_relaxed);
-                vq_start((uint32_t)i);
+                vq_start(i);
             }
         }
         return 0;
@@ -1212,13 +1222,26 @@ struct VhostUserDeviceImpl : IBlkDevice {
             if (!handle_msg(&m, fds, nfds))
                 break;
         }
-        // session over: stop serving; the listener (SERVER) stays up for the
-        // frontend's reconnect (QEMU reconnect=on drives the recovery). The
-        // requests already out are NOT waited for here -- every path that unmaps
-        // the memory table they hold iovs into (handle_mem_table, stop_session,
-        // rollback) drains them itself first.
-        for (uint32_t i = 0; i < nqueues; i++)
-            vq_stop(i);
+        // Session over. WHO tears the queues down depends on why we are here:
+        //
+        // A disconnect (or a handler that ended the session) leaves the listener
+        // up for the frontend's reconnect (QEMU reconnect=on drives the
+        // recovery), and a reconnect must start from stopped queues -- so this
+        // is that teardown. The requests already out are NOT waited for here:
+        // every path that unmaps the memory table they hold iovs into
+        // (handle_mem_table, stop_session, rollback) drains them itself first.
+        //
+        // `stopping` means stop_session or rollback is what ended us, and both
+        // stop and drain every queue themselves -- deliberately AFTER joining
+        // this loop, so that no SET_VRING_* can swap the ring out from under
+        // them. Stopping the queues here as well would leave them with no loop
+        // coroutine by the time stop_session's backlog wait runs, and that wait
+        // counts on the loop to keep consuming avail entries: it would return
+        // at once and detach(true) would stop honouring its wait_pending
+        // contract. So leave them running and let the caller quiesce them.
+        if (!stopping)
+            for (uint32_t i = 0; i < nqueues; i++)
+                vq_stop(i);
     }
 
     // ----- connection setup -----
@@ -1415,9 +1438,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // consuming avail entries, and `stopping` is exactly what tells it to
             // leave them alone. Setting the flag first would strand the wait.
             //
-            // Both joins above are also what makes the wait safe from the message
-            // side: while msg_loop lived it could process a SET_VRING_* in the
-            // middle of the drain and swap the ring out from under it.
+            // Both joins above are what make the wait possible AND safe. Possible:
+            // msg_loop's own exit path stops the queues when a disconnect ends the
+            // session, but not when `stopping` does -- see the comment there -- so
+            // the loop this wait needs is still alive precisely because we came in
+            // through `stopping`. Safe: while msg_loop lived it could process a
+            // SET_VRING_* in the middle of the drain and swap the ring out from
+            // under it.
             vq_backlog_drain(i, drain_backlog);
             // from here the engine leaves in-flight requests uncompleted
             vqs[i]->srv.stopping.store(true, std::memory_order_relaxed);

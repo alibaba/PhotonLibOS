@@ -760,11 +760,15 @@ void VirtQueueServer::loop() {
         // vhost-user quiesces the loop -- joins it and drains its requests -- before
         // SET_VRING_NUM / SET_VRING_ADDR retranslate and before anything nulls the
         // ring, so no mutation of those can land inside the window this covers;
-        // there it is defence in depth, and what catches every OTHER readiness
-        // change (the frontend clearing SET_VRING_ENABLE, say). vduse mutates from a
-        // message loop that shares this vcpu, and there it is load-bearing: this
-        // wait is the loop's only yield point and dispatch_avail is yield-free, so
-        // one check here covers the whole dispatch that follows.
+        // there it is defence in depth, and what it does catch is the two writers
+        // that deliberately clear `enabled` BEFORE quiescing, so that the loop stops
+        // taking new work while the teardown is still being set up (its
+        // handle_mem_table, and stop_session when the caller did not ask to drain
+        // the backlog). Every other disable path clears `run` at the same time, and
+        // the `run` test above breaks the loop before it reaches here. vduse mutates
+        // from a message loop that shares this vcpu, and there it is load-bearing:
+        // this wait is the loop's only yield point and dispatch_avail is yield-free,
+        // so one check here covers the whole dispatch that follows.
         if (!hooks.ready.fire())
             continue;
         uint64_t n;
