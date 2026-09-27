@@ -817,7 +817,7 @@ TEST_F(TcmuTest, resize_grow) {
 
 // pool serving: the pump + dispatch pool run on a pool vcpu while the test's
 // own vcpu only drives the API. The assertion is the PLACEMENT: tcmu gets ONE
-// command ring per device (blk.h:166), so it takes exactly one vcpu from the
+// command ring per device (documented on BlkConfig::queues), so it takes exactly one vcpu from the
 // pool no matter how big the pool is -- and the re-started pump is a fresh
 // coroutine that takes the cursor's NEXT vcpu, so the set grows to two and
 // still excludes the caller's. Also exercises the cross-vcpu surface: IO,
@@ -1049,7 +1049,7 @@ TEST_F(TcmuTest, pool_null_serves_on_the_caller_vcpu) {
 }
 
 // tcmu ignores cfg.queues because the kernel hands it one command ring per
-// device (blk.h:166). Setting four must not produce four serving vcpus.
+// device (documented on BlkConfig::queues). Setting four must not produce four serving vcpus.
 TEST_F(TcmuTest, queues_are_ignored) {
     test::TestPool pool(4);
     test::RecordingFile rec(file);
