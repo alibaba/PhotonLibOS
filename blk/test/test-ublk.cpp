@@ -636,24 +636,180 @@ TEST_F(UblkTest, restart_window_io) {
     w.stop();
 }
 
-TEST_F(UblkTest, dedicated_vcpu) {
-    // was cfg.vcpus = 2: the serving vcpu now comes from a pool the caller owns.
-    // The engines are QUERIED, not spelled out. check_pool_engines derives its
-    // requirement from the caller's own vcpu, so a pool built from that query
-    // satisfies it by construction; writing INIT_EVENT_EPOLL here would encode
-    // today's recommended_order (epoll ahead of iouring) as if it were a contract.
-    // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1).
-    photon::WorkPool pool(1, (int)photon::get_event_engine(),
-                             (int)photon::get_io_engine());
+// was `dedicated_vcpu`. The assertion is the PLACEMENT, not merely that IO
+// works: the pool-wide cursor must hand the two queues two different vcpus,
+// and neither may be the caller's, or BlkConfig::pool is decoration.
+//
+// Both hardware queues have to receive IO for two vcpus to show up, and the
+// kernel maps queues by CPU -- the same mechanism `concurrent_stress` above
+// relies on. Hence the stress driver rather than two sequential single-thread
+// IOs, which would both land on queue 0.
+TEST_F(UblkTest, pool_placement_n_less_than_m) {
+    if (std::thread::hardware_concurrency() < 2)
+        GTEST_SKIP() << "needs >= 2 CPUs to spread IO over both queues";
+    test::TestPool pool(4);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
     UblkController::Config cfg(make_info());
     cfg.queues = 2;
-    cfg.pool = &pool;   // one pool vcpu serves both queues
+    cfg.pool = pool;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
-    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->start(&rec));
     DEFER(dev->shutdown());
-    EXPECT_EQ(0, device_io(node_of(dev), pattern(0x77), true));
+
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "pool n<m", 8));
+
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// n > m: four queues into a two-vcpu pool. Every pool vcpu must be used -- that
+// is what "the cursor wraps" means -- and IO must still be correct, which is the
+// half that a placement-only assertion would miss.
+TEST_F(UblkTest, pool_placement_n_greater_than_m) {
+    if (std::thread::hardware_concurrency() < 4)
+        GTEST_SKIP() << "needs >= 4 CPUs to spread IO over four queues";
+    test::TestPool pool(2);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = 4;
+    cfg.pool = pool;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "pool n>m", 8));
+
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// The pool == nullptr row of the config table: behavior must be exactly what it
+// is today. "Exactly" is measurable -- one vcpu, and it is the caller's.
+TEST_F(UblkTest, pool_null_serves_on_the_caller_vcpu) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = 2;
+    cfg.pool = nullptr;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    EXPECT_EQ(0, device_io(node_of(dev), pattern(0x77), /*verify_backend=*/true));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// n queues with no pool -- the quadrant the config table has that no case
+// covered. The kernel must still see n hardware queues, and all n must be
+// served from the caller's vcpu.
+TEST_F(UblkTest, multiqueue_without_a_pool) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = 4;
+    cfg.pool = nullptr;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    EXPECT_EQ(4, test::count_mq_dirs(kname));
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "mq, no pool", 8));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// An empty pool must degrade to the caller's vcpu, not divide by zero:
+// WorkPool's cursor is `vcpu_index++ % size`, so size 0 there is a SIGFPE --
+// migrate_to_pool's short-circuit is the only thing standing in the way.
+TEST_F(UblkTest, empty_pool_falls_back_to_the_caller_vcpu) {
+    photon::WorkPool empty(0, (int)photon::get_event_engine(),
+                              (int)photon::get_io_engine());
+    ASSERT_EQ(0, empty.get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = 2;
+    cfg.pool = &empty;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    EXPECT_EQ(0, device_io(node_of(dev), pattern(0x99), true));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// Two devices on one pool must not pile onto the same vcpu: the cursor is
+// pool-wide, so B's first queue continues where A's last one stopped. A
+// single-threaded IO per device is enough to show it -- what matters is that
+// the two vcpus differ, not how many of each device's queues got traffic.
+TEST_F(UblkTest, two_devices_share_one_pool) {
+    test::TestPool pool(4);
+    test::RecordingFile rec_a(file);
+    // device B needs its OWN backend and its OWN probe: sharing `file` would
+    // let each verify read the other's writes, and sharing one RecordingFile
+    // would mix the two devices' placements into one set. Declared before
+    // rec_b: reverse destruction drops rec_b first, img2 second.
+    test::TestImage img2;
+    ASSERT_EQ(0, img2.create("/tmp/photon-blk-ublk2.img", IMG_SIZE));
+    DEFER(img2.release());
+    test::RecordingFile rec_b(img2.file);
+
+    UblkController::Config cfg_a(make_info());
+    cfg_a.queues = 2;
+    cfg_a.pool = pool;
+    auto dev_a = ctl->new_device(cfg_a);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    ASSERT_EQ(0, dev_a->start(&rec_a));
+    DEFER(dev_a->shutdown());
+    EXPECT_EQ(0, device_io(node_of(dev_a), pattern(0x11), true));
+
+    UblkController::Config cfg_b(make_info());
+    cfg_b.info.identity = std::string(TEST_IDENTITY) + "-b";
+    cfg_b.queues = 2;
+    cfg_b.pool = pool;
+    auto dev_b = ctl->new_device(cfg_b);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    ASSERT_EQ(0, dev_b->start(&rec_b));
+    DEFER(dev_b->shutdown());
+    // the fixture's device_io helper verifies against the fixture's `file`, so
+    // device B goes through test::device_io directly with its own backend
+    auto wbuf = pattern(0x22);
+    test::DeviceIoOpts o;
+    o.backend = img2.file;
+    EXPECT_EQ(0, test::device_io(node_of(dev_b), wbuf.data(), wbuf.size(), IO_OFF, o));
+
+    ASSERT_GE(rec_a.vcpu_count(), 1u);
+    ASSERT_GE(rec_b.vcpu_count(), 1u);
+    for (auto* v : rec_a.vcpus())
+        EXPECT_FALSE(rec_b.ran_on(v)) << "both devices' queues landed on one vcpu";
 }
 
 TEST_F(UblkTest, fua) {

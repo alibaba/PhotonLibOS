@@ -33,6 +33,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>   // thread_create11 for the gate-release coroutine
 #include <photon/thread/workerpool.h>
 
 #include <dirent.h>
@@ -815,39 +816,47 @@ TEST_F(TcmuTest, resize_grow) {
 }
 
 // pool serving: the pump + dispatch pool run on a pool vcpu while the test's
-// own vcpu only drives the API. Exercises the cross-vcpu surface: IO,
+// own vcpu only drives the API. The assertion is the PLACEMENT: tcmu gets ONE
+// command ring per device (blk.h:166), so it takes exactly one vcpu from the
+// pool no matter how big the pool is -- and the re-started pump is a fresh
+// coroutine that takes the cursor's NEXT vcpu, so the set grows to two and
+// still excludes the caller's. Also exercises the cross-vcpu surface: IO,
 // detach/re-start (each start migrates a fresh pump into the pool), and a
 // resize() issued from this vcpu (the capacity atomics are written here, read
 // there).
-TEST_F(TcmuTest, dedicated_vcpu_io) {
-    // was cfg.vcpus = 2: the serving vcpu now comes from a pool the caller owns.
-    // The engines are QUERIED, not spelled out. check_pool_engines derives its
-    // requirement from the caller's own vcpu, so a pool built from that query
-    // satisfies it by construction; writing INIT_EVENT_EPOLL here would encode
-    // today's recommended_order (epoll ahead of iouring) as if it were a contract.
-    // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1).
-    photon::WorkPool pool(1, (int)photon::get_event_engine(),
-                             (int)photon::get_io_engine());
+TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
+    // TestPool QUERIES the caller's engines instead of spelling one out:
+    // check_pool_engines derives its requirement from the caller's own vcpu, so
+    // a pool built from that query satisfies it by construction; writing
+    // INIT_EVENT_EPOLL here would encode today's recommended_order (epoll ahead
+    // of iouring) as if it were a contract.
+    test::TestPool pool(2);
+    // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1)
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
     auto cfg = make_cfg(/*loopback=*/true);
-    cfg.pool = &pool;
+    cfg.pool = pool;
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
-    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->start(&rec));
     DEFER(dev->shutdown());
 
     std::string sd = wait_photon_sd(IMG_SIZE / 512);
-    ASSERT_FALSE(sd.empty()) << "no /dev/sdX appeared (dedicated serving vcpu)";
+    ASSERT_FALSE(sd.empty()) << "no /dev/sdX appeared (pool serving)";
 
     std::vector<char> wbuf(IO_LEN);
     for (size_t i = 0; i < IO_LEN; i++)
         wbuf[i] = (char)(i * 9 + 1);
     EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true));
 
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+
     // detach tears down the serving vcpu; re-start spawns a fresh one (the LUN
     // persists across both, so sd stays valid)
     ASSERT_EQ(0, dev->detach(/*wait_pending=*/true));
-    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->start(&rec));
     sd = wait_photon_sd(IMG_SIZE / 512);
     ASSERT_FALSE(sd.empty());
 
@@ -864,61 +873,196 @@ TEST_F(TcmuTest, dedicated_vcpu_io) {
         wbuf2[i] = (char)(i * 4 + 2);
     EXPECT_EQ(0, device_io(sd, wbuf2, /*verify_backend=*/true));
 
+    // the re-started pump took the cursor's NEXT vcpu, so the set grew to two
+    // and still excludes the caller's. Measured here, after the second IO,
+    // rather than right after the re-start: placement is recorded by BACKEND
+    // IO, and the re-scan of a LUN that persisted issues none.
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+
     EXPECT_EQ(0, dev->shutdown());
     EXPECT_NE(0, ::access(BS_PATH, F_OK));
 }
 
 // Stop under load: detach(wait_pending=true) flushes a pool-serving device
-// while a writer is still hammering the node. This is the only way the flush's
+// while writers are still hammering the node. This is the only way the flush's
 // drain_ring meets live handle_cmd completions: both write the mailbox tail,
 // and the teardown polls the non-atomic in_flight their DEFERs decrement --
 // single-vcpu invariants that hold only when the teardown runs on the vcpu
-// that served the ring. The restart must then harvest the writes that parked
-// while the ring was down, with the writer seeing zero errors.
+// that served the ring. So the placement probe is the oracle: the backend IOs
+// the flush itself dispatches record the vcpu serve_stop ran on, and that must
+// be the pump's, never the caller's. The restart must then harvest the writes
+// that parked in the kernel while the ring was down, with the writers seeing
+// zero errors.
+//
+// The gate is what makes the oracle deterministic instead of a race we hope to
+// win (the vhost-user detach_waits_for_the_avail_backlog idiom): once every
+// backend IO parks inside the probe, the first queue_depth writers' writes
+// occupy ALL dispatch slots, so the surplus writers' writes stay UNCONSUMED in
+// the ring for as long as the gate is shut -- a pinned, stable state, not a
+// few-microsecond window. Ungated, the ring is empty whenever the pump
+// happened to drain it last, the flush dispatches nothing, and a teardown on
+// the WRONG vcpu goes unobserved. The release 50 ms into the detach only sets
+// WHEN the flush can proceed, never WHICH vcpu it runs on.
 TEST_F(TcmuTest, pool_serving_stop_under_load) {
-    // engines QUERIED, not spelled out, and declared before cfg/dev so the pool
-    // outlives the device -- see the dedicated_vcpu_io comment (CONTRACT 1)
+    // ONE pool vcpu, so the placement set is {pool} or {pool, caller}, and
+    // only the teardown path can add the caller. Engines QUERIED, not spelled
+    // out, and declared before cfg/dev so the pool outlives the device --
+    // see pool_placement_pump_off_the_caller_vcpu (CONTRACT 1)
     photon::WorkPool pool(1, (int)photon::get_event_engine(),
                              (int)photon::get_io_engine());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
     auto cfg = make_cfg(/*loopback=*/true);
     cfg.pool = &pool;
+    cfg.queue_depth = 2;   // < WRITERS, so the surplus writes are ring backlog
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
-    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->start(&rec));
     DEFER(dev->shutdown());
 
     std::string sd = wait_photon_sd(IMG_SIZE / 512);
     ASSERT_FALSE(sd.empty()) << "no /dev/sdX appeared (pool serving)";
 
-    test::BackgroundWriter bw;
-    ASSERT_EQ(0, bw.start(sd, {IO_OFF, IMG_SIZE, IO_LEN, /*direct=*/true,
-                               /*advance=*/true, /*verify=*/false}));
-    DEFER(bw.stop());
-    // it must be demonstrably in flight: an idle writer would make the detach
-    // below drain an empty ring -- the dedicated_vcpu_io case, green and hollow
-    ASSERT_TRUE(bw.wait_iters(5));
+    // WRITERS concurrent writers, each on its own region, all UNGATED first:
+    // the gate must NOT close before the device has settled, because the
+    // kernel's own scan and the writers' opens issue backend IO through this
+    // very probe, and parking those strands the scan (measured: the opens then
+    // fail ENXIO for their whole retry budget, and the stranded scan IO dies
+    // at cmd_time_out). One completed write per writer is the sync point that
+    // says the settling IO is all behind us.
+    constexpr int WRITERS = 5;
+    test::BackgroundWriter bw[WRITERS];
+    // Safety net, release FIRST: stop() polls coroutine-side for the writer
+    // thread to leave its IO, and a writer parked in a gated backend IO only
+    // returns once the gate opens -- stopping before releasing would stall.
+    DEFER({
+        rec.release_gate(4096);
+        for (auto& b : bw)
+            b.stop();
+    });
+    for (int i = 0; i < WRITERS; i++) {
+        uint64_t base = IO_OFF + (uint64_t)i * (8ull << 20);
+        ASSERT_EQ(0, bw[i].start(sd, {base, base + (8ull << 20), 64 << 10,
+                                      /*direct=*/true, /*advance=*/true,
+                                      /*verify=*/false}));
+    }
+    for (int i = 0; i < WRITERS; i++)
+        ASSERT_TRUE(bw[i].wait_iters(1)) << "writer " << i << " never got going";
 
-    // the teardown under test, with the writer still issuing. Anything not
-    // dispatched before the ring closes parks in the kernel, so the restart
-    // must come BEFORE bw.stop(): stopping first would just sit on the parked
-    // write's cmd_time_out and report it as a writer error
-    ASSERT_EQ(0, dev->detach(/*wait_pending=*/true));
-    ASSERT_EQ(0, dev->start(file));
+    // Close the gate. Every writer is serial, so within milliseconds each one
+    // sits in its next write: queue_depth of them dispatched and parked inside
+    // record() (holding their slots), the surplus unconsumed in the ring --
+    // and nothing can drain any more, which is what makes the state below a
+    // pin rather than a window. 200 ms is two orders of margin for that; the
+    // snapshot afterwards is the frozen iteration count.
+    rec.gated = true;
+    photon::thread_usleep(200 * 1000);
+    uint64_t pinned[WRITERS];
+    for (int i = 0; i < WRITERS; i++)
+        pinned[i] = bw[i].iters();
+
+    // The gate must open while the detach is inside its flush: drain_ring
+    // blocks on a dispatch slot until the parked IOs return theirs. This
+    // coroutine cannot run before the detach blocks this vcpu, and the
+    // teardown interrupts + joins the pump within microseconds of starting,
+    // so by the time the 50 ms are up the pump is gone and only the flush can
+    // consume the released slots.
+    auto rth = photon::thread_create11([&] {
+        photon::thread_usleep(50 * 1000);
+        rec.release_gate(4096);   // comfortably over the parked + backlog IOs
+    });
+    photon::thread_enable_join(rth);
+
+    // The teardown under test, with the writers still holding writes in the
+    // ring. Anything queued after the flush's head snapshot parks in the
+    // kernel, so the restart must come BEFORE the writers stop: stopping
+    // first would just sit on the parked write's cmd_time_out and report it
+    // as a writer error.
+    int drc = dev->detach(/*wait_pending=*/true);
+    photon::thread_join((photon::join_handle*)rth);
+    ASSERT_EQ(0, drc);
+
+    // Positive work count: every pinned write crossed the stop -- queue_depth
+    // of them released from the gate, the surplus dispatched by the flush's
+    // drain_ring itself. A teardown that dispatched nothing could not advance
+    // every writer, and an idle ring would leave this at 0.
+    for (int i = 0; i < WRITERS; i++)
+        ASSERT_TRUE(bw[i].wait_iters(pinned[i] + 1)) << "writer " << i << " never crossed the stop";
+    uint64_t flushed = 0;
+    for (int i = 0; i < WRITERS; i++)
+        flushed += bw[i].iters() - pinned[i];
+    ASSERT_GE(flushed, (uint64_t)WRITERS);
+
+    // THE ORACLE: the flush-dispatched IOs recorded the vcpu serve_stop ran
+    // on. Deleting run_serve_stop's thread_migrate puts them on THIS vcpu,
+    // where the drain double-writes the mailbox tail against the pool's
+    // handle_cmd coroutines and RMWs the non-atomic in_flight across threads.
+    EXPECT_FALSE(rec.ran_on(caller));
+    EXPECT_EQ(1u, rec.vcpu_count());
+
+    ASSERT_EQ(0, dev->start(&rec));
     sd = wait_photon_sd(IMG_SIZE / 512);
     ASSERT_FALSE(sd.empty());
-    uint64_t resumed = bw.iters();
-    ASSERT_TRUE(bw.wait_iters(resumed + 3));   // the parked writes came back
+    for (int i = 0; i < WRITERS; i++) {
+        uint64_t resumed = bw[i].iters();
+        ASSERT_TRUE(bw[i].wait_iters(resumed + 3));   // the parked writes came back
+    }
 
-    bw.stop();
-    EXPECT_EQ(0, bw.errors());
+    for (auto& b : bw)
+        b.stop();
+    for (int i = 0; i < WRITERS; i++)
+        EXPECT_EQ(0, bw[i].errors());
 
     std::vector<char> wbuf(IO_LEN);
     for (size_t i = 0; i < IO_LEN; i++)
         wbuf[i] = (char)(i * 7 + 3);
     EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true));
 
+    EXPECT_FALSE(rec.ran_on(caller));
     EXPECT_EQ(0, dev->shutdown());
+}
+
+// The pool == nullptr row of the config table for tcmu, and the regression
+// baseline for the whole conversion: with no pool the pump stays where it
+// always was.
+TEST_F(TcmuTest, pool_null_serves_on_the_caller_vcpu) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+    auto cfg = make_cfg(/*loopback=*/true);
+    cfg.pool = nullptr;
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+    EXPECT_EQ(0, device_io(sd, pattern(0x5a), /*verify_backend=*/true));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// tcmu ignores cfg.queues because the kernel hands it one command ring per
+// device (blk.h:166). Setting four must not produce four serving vcpus.
+TEST_F(TcmuTest, queues_are_ignored) {
+    test::TestPool pool(4);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+    auto cfg = make_cfg(/*loopback=*/true);
+    cfg.queues = 4;
+    cfg.pool = pool;
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+    EXPECT_EQ(0, device_io(sd, pattern(0xa5), true));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
 }
 
 // High-concurrency stress on the LUN's /dev/sdX: many O_DIRECT threads (so
