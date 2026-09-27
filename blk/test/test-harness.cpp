@@ -277,8 +277,13 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
 }  // namespace photon
 
 int main(int argc, char** argv) {
-    // no photon::init(): nothing here touches the runtime, which is the point --
-    // the harness's verification logic must be checkable anywhere
+    // A consumer child is this binary re-executed with a sentinel in argv[1]:
+    // dispatch it before gtest sees that argument. There is no photon::init()
+    // here at all -- nothing in this suite touches the runtime, which is the
+    // point: the harness's verification logic must be checkable anywhere.
+    int cons = photon::blk::test::consumer_child_main(argc, argv);
+    if (cons != photon::blk::test::CONS_NOT_A_CHILD)
+        return cons;
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

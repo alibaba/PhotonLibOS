@@ -751,6 +751,11 @@ TEST_F(VduseTest, empty_pool_falls_back_to_the_caller_vcpu) {
 }  // namespace photon
 
 int main(int argc, char** argv) {
+    // A consumer child is this binary re-executed with a sentinel in argv[1]:
+    // dispatch it before photon::init() and before gtest sees that argument.
+    int cons = photon::blk::test::consumer_child_main(argc, argv);
+    if (cons != photon::blk::test::CONS_NOT_A_CHILD)
+        return cons;
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());

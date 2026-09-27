@@ -941,6 +941,11 @@ TEST_F(NbdTest, pool_without_an_event_engine_is_refused) {
 }  // namespace photon
 
 int main(int argc, char** arg) {
+    // A consumer child is this binary re-executed with a sentinel in argv[1]:
+    // dispatch it before photon::init() and before gtest sees that argument.
+    int cons = photon::blk::test::consumer_child_main(argc, arg);
+    if (cons != photon::blk::test::CONS_NOT_A_CHILD)
+        return cons;
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
         return -1;
     DEFER(photon::fini());

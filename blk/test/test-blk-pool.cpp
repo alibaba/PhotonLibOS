@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "../utils.h"
 #include "../../test/gtest.h"
+#include "harness.h"        // only for main()'s consumer-child dispatch
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>
@@ -166,6 +167,11 @@ TEST(blk_pool, engines_accept_a_matching_pool) {
 }
 
 int main(int argc, char** argv) {
+    // A consumer child is this binary re-executed with a sentinel in argv[1]:
+    // dispatch it before photon::init() and before gtest sees that argument.
+    int cons = photon::blk::test::consumer_child_main(argc, argv);
+    if (cons != photon::blk::test::CONS_NOT_A_CHILD)
+        return cons;
     ::testing::InitGoogleTest(&argc, argv);
 #ifdef __linux__
     int ev = INIT_EVENT_EPOLL;

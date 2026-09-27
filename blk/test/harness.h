@@ -212,30 +212,46 @@ int count_mq_dirs(const std::string& name);
 // as the process existed, while releasing it is a precondition of the re-attach
 // that alone could complete the IO. That process was unkillable for two days.
 //
-// What a forked consumer buys, and what it was measured NOT to buy:
-//   bought -- the caller keeps a deadline of its own, so a consumer that never
-//     returns costs the suite a timeout instead of the process; and the daemon's
-//     process is no longer the thing that is stuck, so it stays free to act and
-//     free to exit.
-//   NOT bought, for ublk -- dropping the inherited fd table is necessary but not
-//     sufficient. The daemon also MAPS its control device (the per-queue
-//     descriptor rings), a fork copies that mapping, and a shared mapping holds
-//     the opened file referenced exactly as an fd does. So a wedged child still
-//     blocks the release a re-attach needs. Measured on a device whose consumer
-//     child had a verified-empty fd table: the control device still counted the
-//     child as a mapping holder, the device never quiesced after the daemon
-//     closed its own fd, and its shutdown() ended in "still in use" with the
-//     child still wedged. Closing that needs the inherited device mappings
-//     dropped as well, or a consumer that is not a fork of the daemon's process.
+// So the consumer is another process -- and a SPAWNED one: the child re-executes
+// this same binary with a sentinel argument that every suite's main() dispatches
+// on before photon::init() and before gtest ever sees argv.
 //
-// The fd drop and its self-check stay regardless: they are the proven part, and
-// the census is what keeps the drop from being a comment nobody checks.
+// Why a spawn and not a fork, which is the smaller change: a fork copies the
+// address space, and every daemon here holds MAP_SHARED mappings -- of its
+// control device, or of memory a peer handed it. A shared mapping holds the
+// opened file referenced exactly as an fd does, so a forked child that had
+// dropped every descriptor still kept the control device referenced, the
+// release a re-attach needs never ran, and the device stayed unrecoverable.
+// That was measured on a child whose fd table had just been verified empty.
+// exec drops the address space, which makes the isolation structural instead of
+// enumerative: no filter over "which mappings count" can be complete, and an
+// incomplete one fails silently in exactly the way above.
+//
+// The fd half is structural only as far as O_CLOEXEC reaches, and not everything
+// this process holds sets it. So the child still drops the whole table itself
+// and then censuses what is left, expecting exactly {0,1,2}: the census is what
+// turns "every descriptor the daemon opens is CLOEXEC" from an assumption about
+// code elsewhere into a property this code checks.
+//
+// One constraint a spawn removes: between fork and exec a child of a
+// multi-threaded process may only call async-signal-safe functions, because a
+// lock another thread held at the fork instant stays held forever. This child is
+// past the exec and single-threaded, so it may allocate, log and use photon --
+// which is what lets a consumer path reuse the harness code it already calls.
+//
+// Measured, on a consumer wedged on a real device: the child held nothing of the
+// daemon's. Its descriptor table was the three it was born with plus the node it
+// had opened, its address space had no device mapping in it, and the daemon's
+// control device showed no holder but the daemon. What is NOT yet demonstrated
+// end to end is the recovery the isolation exists to make possible. Taking the
+// device back needs the serving side to stop while that consumer is still
+// wedged, and a stop with a serving coroutine parked inside the backend did not
+// return; a separate daemon that attached afterwards did complete the wedged
+// consumer's IO and destroy the registration. So the property is reachable --
+// just not yet from the stop that has to come first.
 // ---------------------------------------------------------------------------
 
-// The child's record of what it did, in a MAP_SHARED|MAP_ANONYMOUS mapping made
-// before the fork. Not a pipe: a mapping is not an fd, so dropping the fd table
-// cannot take it away, and filling it in is pure stores, so the child never
-// allocates.
+// The child's record of what it did, at offset 0 of the result channel below.
 struct ConsumerReport {            // POD, shared with the child
     uint32_t magic;                // CONSUMER_MAGIC once `status` is final
     int32_t status;                // 0, an errno, or EILSEQ
@@ -243,6 +259,18 @@ struct ConsumerReport {            // POD, shared with the child
     int32_t child_errno;           // errno at that step
     uint32_t fds;                  // the child's own census after the drop
 };
+
+// The result channel: ONE fd-backed shared object, mapped by both sides, handed
+// to the child as a descriptor. Not an anonymous mapping -- exec replaces the
+// whole address space, so only what the child is handed as an fd survives into
+// it. Not a pipe either -- the child drops every descriptor it was handed, and
+// the verdict has to outlive that, which a mapping does and a pipe cannot.
+//
+// Layout, derived by both sides from `len` alone:
+//   [0, page_align(sizeof(ConsumerReport)))  the report
+//   [.., + page_align(len))                  the write payload, the caller's
+//   [.., + page_align(len))                  the read-back, the child's
+// Page-aligned so an O_DIRECT consumer can use both buffers as they are.
 
 // Where a consumer IO ended. Also how the caller's own failure to even start
 // one is reported, so that a single `stage` names the culprit in every case.
@@ -255,20 +283,36 @@ enum ConsumerStage : int32_t {
     CONS_VERIFY,     // the read-back comparison
     CONS_DROP_FDS,   // it could not drop the inherited fd table
     CONS_FDLEAK,     // its census found fds that survived the drop
+    CONS_ARGV,       // its argv did not decode
+    CONS_CHANNEL,    // it could not map the result channel
+    CONS_EXEC,       // the exec never happened, so the child never ran
     CONS_EXIT,       // it ended without writing a report
-    CONS_FORK,       // the caller's fork()
-    CONS_MAPPING,    // the caller's report mapping
+    CONS_SPAWN,      // the caller's posix_spawn()
+    CONS_MAPPING,    // the caller's result channel
     CONS_TIMEOUT,    // the deadline passed with the child still running
 };
 const char* consumer_stage_name(ConsumerStage s);
 
 // The child's exit codes above the status range. `_exit(status)` carries 0 or
-// an errno, so these two sit where no errno can reach them -- otherwise a
-// structural failure of the isolation itself would read as an IO error.
+// an errno, so these sit where no errno can reach them -- otherwise a structural
+// failure of the isolation itself would read as an IO error.
 enum ConsumerExit : int32_t {
     CONS_EXIT_DROP_FDS = 200,
     CONS_EXIT_FDLEAK   = 201,
+    CONS_EXIT_ARGV     = 202,
+    CONS_EXIT_CHANNEL  = 203,
 };
+
+// Returned by consumer_child_main() when argv is not the sentinel, i.e. when this
+// process is a suite and not a consumer child. Negative, so no exit code -- which
+// is 0..255 -- can be mistaken for it.
+constexpr int CONS_NOT_A_CHILD = -1;
+
+// The consumer child's entire program. Every blk suite's main() must call this
+// FIRST, ahead of photon::init() and of InitGoogleTest(): the child needs no
+// vcpu, and gtest must never be handed the sentinel argument it was spawned
+// with. Returns the child's exit code, or CONS_NOT_A_CHILD.
+int consumer_child_main(int argc, char** argv);
 
 struct ConsumerIoOpts {
     bool read_only = false;      // skip the write+fsync, just read the range
@@ -293,25 +337,28 @@ struct ConsumerIoResult {
     uint32_t fds = 0;            // its post-drop census: anything else is a bug
     uint64_t elapsed_us = 0;
     std::string node;            // for the log lines, including consumer_reap's
-    // The report mapping, held while the child may still write it -- which an
-    // abandoned one does. consumer_reap() reads it and releases it; a caller
-    // that gives up on the child must release it itself.
+    // The result channel, held mapped while the child may still write into it --
+    // which an abandoned one does. consumer_reap() reads it and releases it; a
+    // caller that gives up on the child must release it itself.
     void* shm = nullptr;
+    size_t shm_size = 0;         // the channel's, which depends on `len`
 };
 
 // Run one write+fsync+read-back (or, with read_only, one read) against `node`
-// in a forked child, and report what it did. `wbuf` and `rbuf` are `len` bytes
-// each and must be prepared by the caller: the child allocates nothing, and the
-// read-back comparison happens IN the child because its copy of `rbuf` is not
-// visible here once the two address spaces diverge.
+// in a spawned child process, and report what it did. `wbuf` and `rbuf` are
+// `len` bytes each; `wbuf` is copied into the result channel before the spawn and
+// the read-back is copied out of it into `rbuf` once the child is collected. The
+// read-back comparison happens IN the child: it is the only side that sees both
+// the payload and what the device returned.
 //
 // CALL FROM OFF THE VCPU (e.g. inside run_off_vcpu): the wait is a bounded
 // WNOHANG/nanosleep poll, and running that on the vcpu would stall the very
 // coroutines that have to serve the IO being waited on.
 //
-// A result with `hung` set owns a child that is still running and a report page
-// that is still mapped: finish with consumer_reap(), or give up on it and call
-// consumer_release().
+// A result with `hung` set owns a child that is still running and a channel that
+// is still mapped: finish with consumer_reap(), or give up on it and call
+// consumer_release(). A child abandoned here and reaped later leaves `rbuf`
+// untouched -- its verdict still reaches `status`.
 ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
                              size_t len, uint64_t off, const ConsumerIoOpts& o = {});
 
@@ -323,7 +370,7 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
 // safe to call from a coroutine.
 bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
 
-// Unmap the report page of a consumer that will not be reaped. Idempotent.
+// Unmap the result channel of a consumer that will not be reaped. Idempotent.
 void consumer_release(ConsumerIoResult& r);
 
 // ---------------------------------------------------------------------------
@@ -341,12 +388,12 @@ struct DeviceIoOpts {
 };
 
 // Write + fsync + read back `len` bytes at `off` through the device node, from a
-// forked consumer child (see above) and entirely off the photon vcpu. Returns 0,
+// spawned consumer child (see above) and entirely off the photon vcpu. Returns 0,
 // an errno, EILSEQ when the data read back (or the backend's copy) does not
 // match what was written, or ETIMEDOUT when the child had to be abandoned --
 // which leaves it running. Ask for `report` to keep the handle on it (its pid
-// and its report page, for a later consumer_reap()); without one the page is
-// released here and the child is left to finish or not on its own.
+// and its result channel, for a later consumer_reap()); without one the channel
+// is released here and the child is left to finish or not on its own.
 int device_io(const std::string& node, const void* wbuf, size_t len,
               uint64_t off, const DeviceIoOpts& o = {});
 

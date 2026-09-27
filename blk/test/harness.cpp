@@ -31,11 +31,22 @@ limitations under the License.
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>            // _NSGetExecutablePath: no /proc there
+#endif
+
+// POSIX names this but leaves the declaration to the implementation, and not
+// every <unistd.h> supplies it.
+extern char** environ;
 
 #include <algorithm>
 #include <atomic>
@@ -352,32 +363,109 @@ namespace {
 
 constexpr uint32_t CONSUMER_MAGIC = 0x434f4e53u;   // "CONS"
 
-// Everything the child needs, all of it prepared by the parent before the fork
-// and all of it POD. The child may not allocate, construct, log, or touch
-// photon: it forked out of a multi-threaded process, so any lock another thread
-// held at the fork instant stays held forever in the child, and an allocator or
-// a logger taking one deadlocks -- probabilistically, which is worse than
-// reliably. Keeping this a flat POD struct is what makes the child body
-// auditable in one read.
+// argv[1] of a consumer child, and the fd its result channel arrives on. Both
+// sides of the spawn agree on them here; the fd number also travels in argv, so
+// the child does not have to.
+char CONS_CHILD_ARG[] = "--photon-blk-consumer";
+constexpr int CONS_CHANNEL_FD = 3;
+
+// The exit code a spawn leaves behind when the exec itself failed: the child
+// never became our program, so it never mapped the channel and there is no
+// report to read. 127 cannot be confused with a verdict, because a verdict
+// always comes with the magic written.
+constexpr int CONS_EXIT_EXEC_FAILED = 127;
+
+// The channel's layout, derived from `len` on both sides so that neither has to
+// pass it. Everything is page-aligned: an O_DIRECT consumer gets buffers it can
+// hand to the kernel as they are.
+size_t page_align(size_t n) {
+    return (n + 4095) & ~(size_t)4095;
+}
+size_t channel_report_bytes() {
+    return page_align(sizeof(ConsumerReport));
+}
+size_t channel_io_bytes(size_t len) {
+    return page_align(len);
+}
+size_t channel_bytes(size_t len) {
+    return channel_report_bytes() + 2 * channel_io_bytes(len);
+}
+
+// One fd-backed shared object, because exec leaves the child nothing of this
+// address space: what it can see is what it is handed as a descriptor. Unnamed
+// on Linux; the POSIX fallback's name is unlinked the instant it is opened, so
+// neither leaves a path behind to race over, to clean up after an abort, or to
+// fill a filesystem.
+int channel_create(size_t size) {
+#ifdef __linux__
+    int fd = ::memfd_create("photon-blk-consumer", MFD_CLOEXEC);
+    if (fd < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to create the consumer's result channel");
+#else
+    int fd = -1;
+    for (int i = 0; i < 16 && fd < 0; i++) {
+        char name[64];
+        snprintf(name, sizeof(name), "/photon-blk-consumer-%d-%d", (int)::getpid(), i);
+        fd = ::shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0)
+            ::shm_unlink(name);
+    }
+    if (fd < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to create the consumer's result channel");
+#endif
+    if (::ftruncate(fd, (off_t)size) != 0) {
+        int e = errno;
+        ::close(fd);
+        LOG_ERROR_RETURN(e, -1, "failed to size the consumer's result channel to ` bytes", size);
+    }
+    return fd;
+}
+
+// The binary to spawn is this one: the consumer body lives in the harness that
+// every suite already links, so re-executing the suite's own path is what makes
+// the child's argv sentinel reachable from a main() that has done nothing yet.
+bool self_exe(char* buf, size_t sz) {
+#ifdef __linux__
+    ssize_t n = ::readlink("/proc/self/exe", buf, sz - 1);
+    if (n <= 0)
+        LOG_ERRNO_RETURN(0, false, "failed to resolve this binary's own path");
+    buf[n] = '\0';
+    return true;
+#elif defined(__APPLE__)
+    uint32_t n = (uint32_t)sz;
+    if (::_NSGetExecutablePath(buf, &n) != 0)
+        LOG_ERROR_RETURN(ENAMETOOLONG, false, "this binary's own path needs ` bytes", n);
+    return true;
+#else
+    (void)buf; (void)sz;
+    LOG_ERROR_RETURN(ENOSYS, false, "no way to resolve this binary's own path here");
+#endif
+}
+
+// Everything the child needs, all of it POD and all of it decoded from argv: the
+// child shares no memory with the caller, so what does not travel in argv or in
+// the channel does not exist for it.
 struct ConsumerArgs {
-    const char* path;        // NUL-terminated, outlives the fork
+    const char* path;        // NUL-terminated, in the child's own argv
+    int channel_fd;          // where the result channel arrived
     int flags;               // open() flags
     int open_tries;          // >= 1
     int write;               // 0 = read only
     uint64_t off;
     size_t len;
-    const void* wbuf;        // len bytes
-    void* rbuf;              // len bytes
-    ConsumerReport* rep;     // the shared mapping
+    const void* wbuf;        // len bytes, in the channel
+    void* rbuf;              // len bytes, in the channel
+    ConsumerReport* rep;     // offset 0 of the channel
 };
 
-// The bound of the fd census. NOT /proc/self/fd: opendir()/readdir() allocate,
-// and the child must not. fcntl(F_GETFD) per candidate is a bare syscall.
+// The bound of the fd census. NOT /proc/self/fd: reading that directory needs an
+// opendir(), whose own descriptor is inside the range being counted.
+// fcntl(F_GETFD) per candidate is one syscall and opens nothing.
 //
 // Capped, because the census runs on every consumer IO and RLIMIT_NOFILE is
 // commonly 1M. The cap bounds the SELF-CHECK only -- drop_inherited_fds() below
 // covers every fd however high -- and a drop that does not work at all shows up
-// at the low end, where the daemon's control-device and ring fds are.
+// at the low end, where the descriptors this process opens early are.
 uint32_t fd_table_bound() {
     constexpr uint32_t CAP = 1u << 16;
     struct rlimit rl;
@@ -394,13 +482,12 @@ uint32_t count_fds_from(uint32_t lo) {
     return n;
 }
 
-// Drop the whole inherited fd table -- the load-bearing step of the isolation,
-// and necessary but NOT sufficient: harness.h records what else a fork copies
-// that this cannot reach. Without it the child holds every descriptor the daemon
-// has, its control device among them, and the fork would have changed the
-// structure without changing the property -- the hardest kind of false fix to
-// notice. So the caller does not trust this: it censuses afterwards and refuses
-// to run the IO if anything survived.
+// Drop the whole fd table the child was born with. The exec already closed
+// every descriptor that set O_CLOEXEC, but this process does not set it on
+// everything it opens, and a descriptor that reaches a consumer wedged on the
+// node is a reference held for as long as that consumer lives. So the drop is
+// unconditional -- and the census behind it is what keeps that from being a
+// comment nobody checks.
 int drop_inherited_fds() {
 #ifdef __linux__
     return ::close_range(3u, ~0u, 0u);
@@ -415,8 +502,49 @@ int drop_inherited_fds() {
 #endif
 }
 
-// The child's IO: bare syscalls, no allocation, no logging. Records the verdict
-// in the report page and returns the exit code, which mirrors `status`.
+bool parse_u64(const char* s, uint64_t* v) {
+    char* end = nullptr;
+    errno = 0;
+    unsigned long long x = ::strtoull(s, &end, 10);
+    if (errno || !end || end == s || *end)
+        return false;
+    *v = (uint64_t)x;
+    return true;
+}
+
+bool parse_int(const char* s, int* v, int lo, int hi) {
+    uint64_t x = 0;
+    if (!parse_u64(s, &x) || x > (uint64_t)hi)   // hi <= INT_MAX at every call
+        return false;
+    *v = (int)x;
+    return *v >= lo;
+}
+
+// The child's argv. Fixed order and decimal integers, with the node path LAST:
+// argv elements are passed through verbatim, so a path needs no quoting, while
+// anything packed into one element would need a separator the path could contain.
+// A mis-decode must not be able to read as "nothing to do", so it is its own
+// exit code rather than a silent success.
+bool decode_child_argv(int argc, char** argv, ConsumerArgs* a) {
+    if (argc != 9)
+        return false;
+    uint64_t off = 0, len = 0;
+    if (!parse_int(argv[2], &a->channel_fd, 3, 65535) ||
+        !parse_int(argv[3], &a->flags, 0, INT_MAX) ||
+        !parse_int(argv[4], &a->open_tries, 1, 1000000) ||
+        !parse_int(argv[5], &a->write, 0, 1) ||
+        !parse_u64(argv[6], &off) ||
+        !parse_u64(argv[7], &len) ||
+        !len || len > (1ull << 40) || !argv[8][0])
+        return false;
+    a->off = off;
+    a->len = (size_t)len;
+    a->path = argv[8];
+    return true;
+}
+
+// The child's IO. Records the verdict in the channel and returns the exit code,
+// which mirrors `status`.
 int consumer_io_body(const ConsumerArgs* a) {
     ConsumerStage stage = CONS_DONE;
     int e = 0, status = 0, fd = -1;
@@ -441,8 +569,8 @@ int consumer_io_body(const ConsumerArgs* a) {
         ::pread(fd, a->rbuf, a->len, (off_t)a->off) != (ssize_t)a->len) {
         stage = CONS_READ; e = errno;
     }
-    // the comparison has to happen HERE: the caller's copy of rbuf is a
-    // different page now, and what the device returned never reaches it
+    // the comparison has to happen HERE: the read-back lands in the channel,
+    // and a child that is abandoned never gets its bytes copied out to the caller
     if (stage == CONS_DONE && a->write && ::memcmp(a->wbuf, a->rbuf, a->len) != 0) {
         stage = CONS_VERIFY; status = EILSEQ;
     }
@@ -458,9 +586,27 @@ int consumer_io_body(const ConsumerArgs* a) {
     return status < CONS_EXIT_DROP_FDS ? status : EIO;
 }
 
-// Turn the child's exit status and report page into the caller's verdict.
-// Shared by consumer_io() and consumer_reap(), because an abandoned child's
-// report is only readable once it does exit.
+// The structural exit codes, which say the isolation itself is in question and
+// so outrank anything an IO could report. CONS_EXIT for a plain status.
+ConsumerStage exit_code_stage(int code) {
+    switch (code) {
+    case CONS_EXIT_DROP_FDS: return CONS_DROP_FDS;
+    case CONS_EXIT_FDLEAK:   return CONS_FDLEAK;
+    case CONS_EXIT_ARGV:     return CONS_ARGV;
+    case CONS_EXIT_CHANNEL:  return CONS_CHANNEL;
+    default:                 return CONS_EXIT;
+    }
+}
+
+// Turn the child's exit status and report into the caller's verdict. Shared by
+// consumer_io() and consumer_reap(), because an abandoned child's report is only
+// readable once it does exit.
+//
+// A child that died without writing a word -- the exec failed, its argv did not
+// decode, a signal took it -- has to stay distinguishable from one that reported
+// failure. The channel cannot say that (an unwritten page looks the same as a
+// page nobody ever mapped), so the wait status decides: the magic is only ever
+// written last, next to a final status.
 void consumer_decode(ConsumerIoResult& r, const ConsumerReport* rep, int st,
                      bool have_status) {
     if (!have_status) {
@@ -492,15 +638,16 @@ void consumer_decode(ConsumerIoResult& r, const ConsumerReport* rep, int st,
         r.stage = (ConsumerStage)rep->stage;
         r.child_errno = rep->child_errno;
         r.fds = rep->fds;
+    } else if (code == CONS_EXIT_EXEC_FAILED) {
+        r.status = EIO;
+        r.stage = CONS_EXEC;
     } else {
         r.status = code;   // the exit code mirrors `status`
         r.stage = CONS_EXIT;
     }
-    // the two structural codes outrank the report: both say the isolation
-    // itself is in question, which is a louder finding than any IO error
-    if (code == CONS_EXIT_DROP_FDS || code == CONS_EXIT_FDLEAK) {
+    if (exit_code_stage(code) != CONS_EXIT) {
         r.status = EIO;
-        r.stage = code == CONS_EXIT_DROP_FDS ? CONS_DROP_FDS : CONS_FDLEAK;
+        r.stage = exit_code_stage(code);
     }
     if (r.status)
         LOG_ERROR("consumer IO on ` failed at ` (exit `), ", r.node,
@@ -553,12 +700,55 @@ const char* consumer_stage_name(ConsumerStage s) {
     case CONS_VERIFY:   return "the read-back comparison";
     case CONS_DROP_FDS: return "dropping the inherited fd table";
     case CONS_FDLEAK:   return "the fd-table self-check";
+    case CONS_ARGV:     return "decoding its argv";
+    case CONS_CHANNEL:  return "mapping the result channel";
+    case CONS_EXEC:     return "the exec of the consumer child";
     case CONS_EXIT:     return "the child's exit";
-    case CONS_FORK:     return "fork";
-    case CONS_MAPPING:  return "mapping the report page";
+    case CONS_SPAWN:    return "posix_spawn";
+    case CONS_MAPPING:  return "creating the result channel";
     case CONS_TIMEOUT:  return "the caller's deadline";
     }
     return "?";
+}
+
+int consumer_child_main(int argc, char** argv) {
+    if (argc < 2 || ::strcmp(argv[1], CONS_CHILD_ARG) != 0)
+        return CONS_NOT_A_CHILD;
+
+    ConsumerArgs a;
+    memset(&a, 0, sizeof(a));
+    if (!decode_child_argv(argc, argv, &a))
+        _exit(CONS_EXIT_ARGV);
+
+    size_t size = channel_bytes(a.len);
+    size_t rep_bytes = channel_report_bytes(), io_bytes = channel_io_bytes(a.len);
+    // (a) map the channel from the descriptor the spawn handed us ...
+    void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, a.channel_fd, 0);
+    if (base == MAP_FAILED)
+        _exit(CONS_EXIT_CHANNEL);
+    // (b) ... then drop the fd table, which closes that descriptor. The mapping
+    // is what survives the drop, and that is why the verdict travels in a
+    // mapping rather than in the descriptor it arrived on.
+    if (drop_inherited_fds() != 0)
+        _exit(CONS_EXIT_DROP_FDS);
+    // (c) verified, not assumed: the census is the only thing that turns the
+    // drop from a comment into a checked property. It runs after (b) and before
+    // any IO, so what it counts is what the child was BORN with, not what the
+    // IO opened.
+    ConsumerReport* rep = (ConsumerReport*)base;
+    uint32_t left = count_fds_from(3);
+    if (left != 0) {
+        rep->stage = CONS_FDLEAK;
+        rep->fds = left;
+        rep->status = EIO;
+        rep->magic = CONSUMER_MAGIC;
+        _exit(CONS_EXIT_FDLEAK);
+    }
+    a.rep = rep;
+    a.wbuf = (char*)base + rep_bytes;
+    a.rbuf = (char*)base + rep_bytes + io_bytes;
+    // (d) the IO, and (e) the exit
+    _exit(consumer_io_body(&a));
 }
 
 ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
@@ -566,58 +756,121 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     ConsumerIoResult r;
     r.node = node;
     uint64_t timeout = o.timeout_us ? o.timeout_us : CONSUMER_TIMEOUT_US;
-    size_t page = sizeof(ConsumerReport);
-    void* m = ::mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (m == MAP_FAILED) {
+    size_t size = channel_bytes(len);
+    size_t rep_bytes = channel_report_bytes(), io_bytes = channel_io_bytes(len);
+
+    int cfd = channel_create(size);
+    if (cfd < 0) {
         r.stage = CONS_MAPPING;
         r.child_errno = errno;
         r.status = errno ? errno : EIO;
-        LOG_ERROR_RETURN(r.status, r, "failed to map the consumer's report page, ", ERRNO());
+        LOG_ERROR_RETURN(r.status, r, "failed to create the result channel for consumer IO on `, ",
+                         node, ERRNO());
     }
-    ConsumerReport* rep = (ConsumerReport*)m;
-    memset(rep, 0, page);
+    // The parent's own mapping is what keeps the channel alive from here on, so
+    // the descriptor can go as soon as the spawn has handed it over.
+    DEFER(::close(cfd));
+    void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+    if (base == MAP_FAILED) {
+        r.stage = CONS_MAPPING;
+        r.child_errno = errno;
+        r.status = errno ? errno : EIO;
+        LOG_ERROR_RETURN(r.status, r, "failed to map the result channel for consumer IO on `, ",
+                         node, ERRNO());
+    }
+    // ... unless an abandoned child may still be writing into it, in which case
+    // the caller owns it until consumer_reap() or consumer_release()
+    bool handed_over = false;
+    DEFER(if (!handed_over) ::munmap(base, size));
 
-    ConsumerArgs a;
-    a.path = node.c_str();
-    a.flags = (o.read_only ? O_RDONLY : O_RDWR) | (o.direct ? O_DIRECT : 0);
-    a.open_tries = o.open_tries > 0 ? o.open_tries : 1;
-    a.write = o.read_only ? 0 : 1;
-    a.off = off;
-    a.len = len;
-    a.wbuf = wbuf;
-    a.rbuf = rbuf;
-    a.rep = rep;
+    ConsumerReport* rep = (ConsumerReport*)base;
+    memset(rep, 0, rep_bytes);          // magic 0 until the child's last store
+    if (wbuf && len)
+        memcpy((char*)base + rep_bytes, wbuf, len);
 
-    // The child inherits our stdio buffers and _exit() does not flush them, so
-    // unflushed output would be lost or duplicated depending on who wrote last.
-    // Flush everything first; the child itself uses no stdio at all.
-    ::fflush(nullptr);
+    char exe[PATH_MAX];
+    if (!self_exe(exe, sizeof(exe))) {
+        r.stage = CONS_SPAWN;
+        r.child_errno = errno;
+        r.status = errno ? errno : EIO;
+        LOG_ERROR_RETURN(r.status, r, "cannot spawn the consumer child for ` without this binary's own path, ",
+                         node, ERRNO());
+    }
 
-    pid_t pid = ::fork();
-    if (pid < 0) {
+    // argv, in decode_child_argv's order. Decimal integers and the path last, so
+    // nothing here needs quoting and nothing can be ambiguous about where a
+    // field ended.
+    char a_fd[12], a_flags[16], a_tries[16], a_write[4], a_off[24], a_len[24];
+    snprintf(a_fd, sizeof(a_fd), "%d", CONS_CHANNEL_FD);
+    snprintf(a_flags, sizeof(a_flags), "%d",
+             (o.read_only ? O_RDONLY : O_RDWR) | (o.direct ? O_DIRECT : 0));
+    snprintf(a_tries, sizeof(a_tries), "%d", o.open_tries > 0 ? o.open_tries : 1);
+    snprintf(a_write, sizeof(a_write), "%d", o.read_only ? 0 : 1);
+    snprintf(a_off, sizeof(a_off), "%llu", (unsigned long long)off);
+    snprintf(a_len, sizeof(a_len), "%llu", (unsigned long long)len);
+    char* const av[] = {exe, CONS_CHILD_ARG, a_fd, a_flags, a_tries, a_write,
+                        a_off, a_len, (char*)node.c_str(), nullptr};
+
+    posix_spawn_file_actions_t fa;
+    if (::posix_spawn_file_actions_init(&fa) != 0) {
         int e = errno;
-        r.stage = CONS_FORK;
-        r.child_errno = e;
-        r.status = e ? e : EIO;
-        ::munmap(rep, page);
-        LOG_ERROR_RETURN(e, r, "failed to fork the consumer child for `, ", node, ERRNO(e));
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+        LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
+                         node, ERRNO(e));
     }
-    if (pid == 0) {
-        // ---- the child. From here to _exit(): bare syscalls only. ----
-        // Condition 1 of the isolation, and its first action without exception.
-        if (drop_inherited_fds() != 0)
-            _exit(CONS_EXIT_DROP_FDS);
-        // ...verified, not assumed: the census is the only thing that turns
-        // condition 1 from a comment into a checked property.
-        uint32_t left = count_fds_from(3);
-        if (left != 0) {
-            rep->stage = CONS_FDLEAK;
-            rep->fds = left;
-            rep->status = EIO;
-            rep->magic = CONSUMER_MAGIC;
-            _exit(CONS_EXIT_FDLEAK);
-        }
-        _exit(consumer_io_body(&a));
+    DEFER(::posix_spawn_file_actions_destroy(&fa));
+    // adddup2(x, x) is a no-op by POSIX, so with the channel's own close-on-exec
+    // still set the exec would close it and the child would have nothing to
+    // report through. Clearing it here -- only in the collision case -- keeps
+    // that from depending on how a libc spells the no-op.
+    if (cfd == CONS_CHANNEL_FD)
+        ::fcntl(cfd, F_SETFD, 0);
+    if (::posix_spawn_file_actions_adddup2(&fa, cfd, CONS_CHANNEL_FD) != 0) {
+        int e = errno;
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+        LOG_ERROR_RETURN(e, r, "failed to hand the result channel to the consumer child for `, ",
+                         node, ERRNO(e));
+    }
+    // Not the suite's stdout/stderr. A consumer child that outlives the suite --
+    // which is what an abandoned one does -- would otherwise hold the write end
+    // of whatever pipe the suite is being captured through, and the capture would
+    // never see EOF. It also cannot corrupt the gtest output, which it produces
+    // none of: its verdict travels in the channel.
+    if (::posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) != 0 ||
+        ::posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0) != 0) {
+        int e = errno;
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+        LOG_ERROR_RETURN(e, r, "failed to detach the consumer child of ` from this process's stdio, ",
+                         node, ERRNO(e));
+    }
+    posix_spawnattr_t attr;
+    if (::posix_spawnattr_init(&attr) != 0) {
+        int e = errno;
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+        LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
+                         node, ERRNO(e));
+    }
+    DEFER(::posix_spawnattr_destroy(&attr));
+    // Not the caller's signal mask: a blocked signal the consumer inherits is
+    // one it can never handle, and nothing about a consumer IO wants one.
+    sigset_t no_signals;
+    sigemptyset(&no_signals);
+    if (::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK) != 0 ||
+        ::posix_spawnattr_setsigmask(&attr, &no_signals) != 0) {
+        int e = errno;
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+        LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
+                         node, ERRNO(e));
+    }
+
+    pid_t pid = -1;
+    // posix_spawn reports failure as its return value, not through errno
+    int e = ::posix_spawn(&pid, exe, &fa, &attr, av, environ);
+    if (e != 0) {
+        r.stage = CONS_SPAWN;
+        r.child_errno = e;
+        r.status = e;
+        LOG_ERROR_RETURN(e, r, "failed to spawn the consumer child for `, ", node, ERRNO(e));
     }
 
     r.pid = pid;
@@ -626,21 +879,20 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     int w = consumer_wait(pid, timeout, &st, &elapsed, 2 * 1000 * 1000);
     r.elapsed_us = elapsed;
     if (w == 0) {
-        // Abandoned, still running, deliberately not killed. Keep the report
-        // page mapped: the child may complete later and write into it, and
-        // consumer_reap() is what finishes the job (consumer_release() gives up
-        // on it and just unmaps).
+        // Abandoned, still running, deliberately not killed.
+        handed_over = true;
         r.hung = true;
         r.status = ETIMEDOUT;
         r.stage = CONS_TIMEOUT;
-        r.shm = rep;
+        r.shm = base;
+        r.shm_size = size;
         LOG_ERROR_RETURN(ETIMEDOUT, r, "consumer IO on ` did not finish within ` us; abandoning pid ` (an uninterruptible sleeper cannot be killed)",
                          node, timeout, (int64_t)pid);
     }
     r.reaped = w > 0;
-    r.shm = nullptr;
     consumer_decode(r, rep, st, w > 0);
-    ::munmap(rep, page);
+    if (r.reaped && rbuf && len)
+        memcpy(rbuf, (char*)base + rep_bytes + io_bytes, len);
     return r;
 }
 
@@ -651,7 +903,7 @@ bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
         LOG_ERROR_RETURN(EINVAL, false, "there is no consumer child to wait for");
     ConsumerReport* rep = (ConsumerReport*)r.shm;
     if (!rep)
-        LOG_ERROR_RETURN(EINVAL, false, "the consumer child ` of ` has no report page left",
+        LOG_ERROR_RETURN(EINVAL, false, "the consumer child ` of ` has no result channel left",
                          (int64_t)r.pid, r.node);
     int st = 0, w = 0;
     uint64_t elapsed = 0;
@@ -673,8 +925,9 @@ bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
 
 void consumer_release(ConsumerIoResult& r) {
     if (r.shm) {
-        ::munmap(r.shm, sizeof(ConsumerReport));
+        ::munmap(r.shm, r.shm_size);
         r.shm = nullptr;
+        r.shm_size = 0;
     }
 }
 
@@ -691,9 +944,9 @@ std::vector<char> pattern(uint8_t seed, size_t n) {
 
 int device_io(const std::string& node, const void* wbuf, size_t len,
               uint64_t off, const DeviceIoOpts& o) {
-    // Allocated here, not in the child: the child allocates nothing. It is the
-    // child's copy that receives the read-back, and the child is also where the
-    // comparison runs, because that copy is not visible from here.
+    // The read-back lands in the result channel and is copied here once the
+    // child is collected; the comparison against `wbuf` runs in the child, which
+    // is the only side that sees both.
     std::vector<char> rbuf(len);
     ConsumerIoResult r;
     run_off_vcpu([&] {
