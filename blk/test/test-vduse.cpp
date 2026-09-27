@@ -170,6 +170,11 @@ public:
     // (works without a daemon), then adopt+shutdown every orphan registration.
     // Owns its controller rather than using ctl: a GTEST_SKIP in SetUp returns
     // before ctl exists, and TearDown still runs.
+    // The adopt is the only way this sweep destroys a registration: rollback()
+    // destroys only what it created, and a failed start clears the state the
+    // destructor keys on -- so when the adopt fails, the registration survives
+    // this sweep and every later one, and each later start() on that name dies
+    // the same way.
     void sweep() {
         test::sh_off_vcpu(
             "ls /sys/bus/vdpa/devices/ 2>/dev/null | grep '^"
@@ -408,10 +413,9 @@ TEST_F(VduseTest, orphan_recovery) {
     ASSERT_EQ(0, dev1->start(file));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    // Safety net for the ASSERTs below: registered early because the ordered
-    // pair at the end fires only if we get that far, and a consumer left
-    // attached here survives sweep() -- its adopt dies on VQ_SETUP's EPERM --
-    // which then fails every later new_device() on this name. Firing twice is
+    // Safety net for the ASSERTs below: the ordered pair at the end fires only
+    // if we get that far, and a registration left behind here survives sweep()
+    // whenever sweep's own adopt of it fails (see its header). Firing twice is
     // harmless: vdpa_detach swallows the second delete.
     DEFER(vdpa_detach(TEST_NAME));
     ASSERT_EQ(0, device_io(node, pattern(0x11), true));
@@ -518,9 +522,10 @@ TEST_F(VduseTest, queue_count_follows_config) {
     // below four queues depend on none of this (four is below any plausible CPU
     // count) and stay equalities; the over-large row asserts a range instead.
     // What that row really pins is that an over-large request is served rather
-    // than rejected and still offers F_MQ -- its F_MQ assertion stays an
-    // equality, so widening the directory count costs this case nothing it was
-    // testing.
+    // than rejected and still offers F_MQ. Of its two directory bounds, only
+    // the lower one can fire here: a clamp tightened below the CPU count comes
+    // back short, while a clamp widened past it is masked by the same cap that
+    // hides the exact count.
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     for (const auto& c : cases) {
         BlkConfig cfg(make_info());
@@ -539,13 +544,18 @@ TEST_F(VduseTest, queue_count_follows_config) {
         // node we got back is a /dev path
         std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
         int dirs = test::count_mq_dirs(kname);
+        int want_dirs = cpus > 0 && c.dirs > cpus ? (int)cpus : c.dirs;
         if (c.ask > PEER_MAX_QUEUES) {
-            // the over-large row: served at all, and no wider than the clamp we
-            // publish -- not an exact count, for the reason above
-            EXPECT_GE(dirs, 1) << "mq dirs, queues=" << c.ask;
+            // The over-large row: served rather than rejected, and no wider
+            // than the clamp we publish. The lower bound is cap-robust rather
+            // than exact -- online is a subset of present and of possible, so
+            // whichever of the three the driver caps at, it cannot build FEWER
+            // than min(clamped, online) -- but it is not vacuous: a clamp
+            // lowered below the CPU count comes back short and goes red. The
+            // exact count stays unobservable for the reason above.
+            EXPECT_GE(dirs, want_dirs) << "mq dirs, queues=" << c.ask;
             EXPECT_LE(dirs, c.dirs) << "mq dirs, queues=" << c.ask;
         } else {
-            int want_dirs = cpus > 0 && c.dirs > cpus ? (int)cpus : c.dirs;
             EXPECT_EQ(want_dirs, dirs) << "mq dirs, queues=" << c.ask;
         }
         EXPECT_EQ(c.mq, virtio_feature_bit(kname, FEAT_BIT_BLK_MQ)) << "F_MQ, queues=" << c.ask;
@@ -570,10 +580,9 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
     ASSERT_EQ(0, dev1->start(file));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    // Safety net for the ASSERTs below: registered early because the ordered
-    // pair at the end fires only if we get that far, and a consumer left
-    // attached here survives sweep() -- its adopt dies on VQ_SETUP's EPERM --
-    // which then fails every later new_device() on this name. Firing twice is
+    // Safety net for the ASSERTs below: the ordered pair at the end fires only
+    // if we get that far, and a registration left behind here survives sweep()
+    // whenever sweep's own adopt of it fails (see its header). Firing twice is
     // harmless: vdpa_detach swallows the second delete.
     DEFER(vdpa_detach(TEST_NAME));
     // The premise this test's name asserts: four hardware queues really exist.
