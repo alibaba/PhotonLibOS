@@ -294,10 +294,10 @@ TEST_F(VduseTest, basic_io) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());          // fires LAST (declared first)
-    std::string node = vdpa_attach(TEST_NAME);
-    ASSERT_FALSE(node.empty());
     DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
                                      // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
     EXPECT_EQ(0, device_io(node, pattern(0x5a), true));
     EXPECT_EQ(0, device_io(node, pattern(0xa5), true, IMG_SIZE - IO_OFF - IO_LEN));
 }
@@ -315,10 +315,10 @@ TEST_F(VduseTest, concurrent_stress) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());          // fires LAST (declared first)
-    std::string node = vdpa_attach(TEST_NAME);
-    ASSERT_FALSE(node.empty());
     DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
                                      // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
 
     EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse"));
 }
@@ -331,9 +331,9 @@ TEST_F(VduseTest, read_only) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    DEFER(vdpa_detach(TEST_NAME));
 
     // VIRTIO_BLK_F_RO makes the gendisk read-only: reads work, writes fail at
     // the block layer (EPERM), and open(O_RDWR) still succeeds (the ublk/tcmu
@@ -349,9 +349,9 @@ TEST_F(VduseTest, resize_dev) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    DEFER(vdpa_detach(TEST_NAME));
 
     constexpr uint64_t NEW_SIZE = 96ull << 20;
     ASSERT_EQ(0, file->ftruncate(NEW_SIZE));
@@ -389,6 +389,10 @@ TEST_F(VduseTest, shutdown_busy) {
     DEFER(delete dev);
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
+    // Registered BEFORE the attach, not after: vdpa_attach's timeout branch
+    // returns "" with the consumer already added, so the ASSERT below is itself
+    // inside the window. Firing twice is harmless -- see sweep()'s header.
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
 
@@ -411,13 +415,12 @@ TEST_F(VduseTest, orphan_recovery) {
     ASSERT_NE(nullptr, dev1);
     DEFER(delete dev1);
     ASSERT_EQ(0, dev1->start(file));
+    // Registered BEFORE the attach, not after: vdpa_attach's timeout branch
+    // returns "" with the consumer already added, so the ASSERT below is itself
+    // inside the window. Firing twice is harmless -- see sweep()'s header.
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    // Safety net for the ASSERTs below: the ordered pair at the end fires only
-    // if we get that far, and a registration left behind here survives sweep()
-    // whenever sweep's own adopt of it fails (see its header). Firing twice is
-    // harmless: vdpa_detach swallows the second delete.
-    DEFER(vdpa_detach(TEST_NAME));
     ASSERT_EQ(0, device_io(node, pattern(0x11), true));
 
     // daemon goes away, consumer STAYS attached: the registration is an orphan
@@ -459,9 +462,9 @@ TEST_F(VduseTest, daemon_restart_io) {
     ASSERT_NE(nullptr, dev1);
     DEFER(delete dev1);
     ASSERT_EQ(0, dev1->start(file));
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    DEFER(vdpa_detach(TEST_NAME));
 
     // a continuous writer across the daemon handover: its IO blocks in the
     // kernel during the gap and completes after the adoption -- no errors
@@ -534,11 +537,11 @@ TEST_F(VduseTest, queue_count_follows_config) {
         ASSERT_NE(nullptr, dev) << "queues=" << c.ask;
         DEFER(delete dev);
         ASSERT_EQ(0, dev->start(file)) << "queues=" << c.ask;
-        DEFER(dev->shutdown());          // fires after the detach below
-        std::string node = vdpa_attach(TEST_NAME);
-        ASSERT_FALSE(node.empty()) << "queues=" << c.ask;
+        DEFER(dev->shutdown());          // fires after the detach
         DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
                                          // unserved device wedges its users in D state
+        std::string node = vdpa_attach(TEST_NAME);
+        ASSERT_FALSE(node.empty()) << "queues=" << c.ask;
 
         // count_mq_dirs and virtio_feature_bit take the bare kernel name; the
         // node we got back is a /dev path
@@ -578,13 +581,12 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
     ASSERT_NE(nullptr, dev1);
     DEFER(delete dev1);
     ASSERT_EQ(0, dev1->start(file));
+    // Registered BEFORE the attach, not after: vdpa_attach's timeout branch
+    // returns "" with the consumer already added, so the ASSERT below is itself
+    // inside the window. Firing twice is harmless -- see sweep()'s header.
+    DEFER(vdpa_detach(TEST_NAME));
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
-    // Safety net for the ASSERTs below: the ordered pair at the end fires only
-    // if we get that far, and a registration left behind here survives sweep()
-    // whenever sweep's own adopt of it fails (see its header). Firing twice is
-    // harmless: vdpa_detach swallows the second delete.
-    DEFER(vdpa_detach(TEST_NAME));
     // The premise this test's name asserts: four hardware queues really exist.
     // Without it a mutation that pins nqueues to 1 turns this into a
     // single-queue handover that still passes, and the resync it exists to
