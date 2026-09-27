@@ -33,10 +33,12 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -49,6 +51,7 @@ limitations under the License.
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -79,6 +82,24 @@ static std::string node_of(IBlkDevice* d) {
     const char* n = d->get_device_node();
     EXPECT_NE(nullptr, n);
     return n ? n : "";
+}
+
+// The kernel's own count of requests outstanding on the node, reads plus writes.
+// An oracle that reads nothing this suite wrote, which is what makes it able to
+// say "that IO really is still out there" rather than "our bookkeeping says so".
+static uint64_t node_inflight(const std::string& node) {
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    std::string path = "/sys/block/" + kname + "/inflight";
+    char buf[64] = {};
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    unsigned long rd = 0, wr = 0;
+    if (n <= 0 || sscanf(buf, "%lu %lu", &rd, &wr) != 2)
+        return 0;
+    return rd + wr;
 }
 
 // forwards to the wrapped file, counting pwritev2 calls that ask for
@@ -635,6 +656,133 @@ TEST_F(UblkTest, restart_window_io) {
     // stop the writer BEFORE the DEFERs fire: it holds the device open, and
     // shutdown() would (correctly) EBUSY against it
     w.stop();
+}
+
+// The isolation's only oracle: a consumer wedged on the node must not make the
+// device unrecoverable. (a) the caller gets its deadline back instead of the
+// wedge, (b) this process goes on asserting, and (c) -- the load-bearing one --
+// the daemon takes the registration back and destroys it while the consumer is
+// still stuck on it, and the consumer then drains on its own.
+//
+// (c) is precisely what a consumer inside this process cannot do: it shares one
+// fd table with the daemon, and releasing the control device is a precondition
+// of the re-attach that alone could complete the stuck IO.
+TEST_F(UblkTest, consumer_hang_is_contained) {
+    test::RecordingFile rec(file);
+    UblkController::Config cfg(make_info());
+    // The consumer drains only once the re-attached daemon has completed its IO,
+    // and shutdown() bounds its wait for the node's last opener with this knob.
+    // The default is tuned for a holder that will never leave; here one is
+    // expected to, and 2 s of margin is not much against a re-attach.
+    cfg.stop_timeout_ms = 20000;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    DEFER(dev->shutdown());
+    // Declared AFTER the shutdown DEFER so it runs BEFORE it: a re-attached
+    // daemon that finds the gate shut parks on it again and never completes the
+    // IO, which is the hang this case is supposed to be immune to.
+    DEFER(rec.release_gate(1));
+    rec.gated = true;
+    ASSERT_EQ(0, dev->start(&rec));
+
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+    uint32_t id = node_dev_id(node.c_str());
+    ASSERT_NE(UINT32_MAX, id);
+    std::string cdev = "/dev/ublkc" + std::to_string(id);
+
+    // Drop the serving side from underneath the consumer's IO -- on the vcpu,
+    // since that is where the serving coroutines are, and only once the kernel
+    // says that IO is outstanding.
+    std::atomic<uint64_t> parked{0};
+    std::atomic<int> drc{-1};
+    std::atomic<uint64_t> detach_us{0};
+    auto helper = photon::thread_create11([&] {
+        // Let the consumer get there first. Dropping the serving side before it
+        // has the node open would leave shutdown()'s TRY_STOP with no opener to
+        // wait for, and the registration would go out from under a consumer that
+        // was never given the chance to wedge on it.
+        photon::thread_usleep(300 * 1000);
+        for (int i = 0; i < 2000 && !parked.load(); i++) {
+            uint64_t n = node_inflight(node);
+            if (n)
+                parked.store(n);
+            else
+                photon::thread_usleep(1000);
+        }
+        uint64_t t0 = photon::now;
+        int rc = dev->detach(false);
+        // Published before `drc`: that is the flag the body below waits on, so
+        // seeing it means the duration is visible too.
+        detach_us.store(photon::now - t0);
+        drc.store(rc);
+    });
+    photon::thread_enable_join(helper);
+
+    // 3 s: far above a served IO, which takes milliseconds, and far below what a
+    // suite can afford to lose to one consumer.
+    static constexpr uint64_t BUDGET_US = 3ull * 1000 * 1000;
+    auto wbuf = pattern(0x5a);
+    test::DeviceIoOpts o;
+    o.timeout_us = BUDGET_US;
+    test::ConsumerIoResult rep;
+    o.report = &rep;
+    int rc = test::device_io(node, wbuf.data(), wbuf.size(), IO_OFF, o);
+
+    // The drop may still be running when the deadline expires. It is bounded --
+    // detach's own quiesce wait is -- so wait it out instead of racing it.
+    for (int i = 0; i < 10000 && drc.load() < 0; i++)
+        photon::thread_usleep(1000);
+    LOG_INFO("detach(false) returned ` after ` us, with the consumer still wedged",
+             drc.load(), detach_us.load());
+
+    // (a) the caller is back at its deadline and the consumer is not: still
+    // alive, and deliberately not signalled -- an uninterruptible sleeper cannot
+    // be killed, and a queued signal would only sit next to the wedge.
+    EXPECT_EQ(ETIMEDOUT, rc);
+    EXPECT_TRUE(rep.hung);
+    EXPECT_FALSE(rep.reaped);
+    EXPECT_EQ(test::CONS_TIMEOUT, rep.stage);
+    EXPECT_GE(rep.elapsed_us, BUDGET_US);
+    EXPECT_GT(rep.pid, 0);
+    EXPECT_EQ(0, ::kill(rep.pid, 0));
+    EXPECT_GE(parked.load(), 1u);   // the kernel counted the IO before the drop
+    EXPECT_EQ(0, drc.load());
+
+    // (b) this process is still here and still asserting, and the registration
+    // survived the drop. The kernel's outstanding-request count is deliberately
+    // NOT sampled here: a drop that worked takes the queue out of dispatch, so a
+    // non-zero count at this point would mean the drop did NOT take. `parked`
+    // above is that same oracle read at the one moment it can witness anything --
+    // before the drop -- and (a)'s hung/CONS_TIMEOUT/kill() are what say the
+    // consumer was still stuck right through it.
+    EXPECT_EQ(0, ::access(node.c_str(), F_OK));
+
+    // The observation that is not ours: who holds the control device, and who
+    // holds the node. Logged rather than asserted, because requiring `fuser` is
+    // not something this suite may do -- but a consumer that held the control
+    // device would show up here and in (c) below.
+    std::string hc = test::sh_off_vcpu("fuser -v " + cdev + " 2>&1 | tr '\\n' ' '");
+    std::string hn = test::sh_off_vcpu("fuser -v " + node + " 2>&1 | tr '\\n' ' '");
+    LOG_INFO("consumer child ` still wedged; holders of `: ` | holders of `: `",
+             (int64_t)rep.pid, cdev, hc, node, hn);
+
+    // (c) Open the gate so the re-attached daemon can complete the IO it
+    // inherits, then destroy the device underneath the still-wedged consumer.
+    rec.release_gate(1);
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(node.c_str(), F_OK));
+    // ... which is what lets the consumer finish: reaped, drained, and reporting
+    // the IO it was doing when the serving side vanished as successful.
+    EXPECT_TRUE(test::consumer_reap(rep, 30ull * 1000 * 1000));
+    EXPECT_FALSE(rep.hung);
+    EXPECT_TRUE(rep.reaped);
+    EXPECT_EQ(0, rep.status);
+    EXPECT_EQ(test::CONS_DONE, rep.stage);
+    EXPECT_EQ(0u, rep.fds);
+    photon::thread_join((photon::join_handle*)helper);
+    test::consumer_release(rep);   // a no-op once reaped; the net for when not
 }
 
 // was `dedicated_vcpu`. The assertion is the PLACEMENT, not merely that IO

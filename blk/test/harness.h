@@ -242,13 +242,17 @@ int count_mq_dirs(const std::string& name);
 // Measured, on a consumer wedged on a real device: the child held nothing of the
 // daemon's. Its descriptor table was the three it was born with plus the node it
 // had opened, its address space had no device mapping in it, and the daemon's
-// control device showed no holder but the daemon. What is NOT yet demonstrated
-// end to end is the recovery the isolation exists to make possible. Taking the
-// device back needs the serving side to stop while that consumer is still
-// wedged, and a stop with a serving coroutine parked inside the backend did not
-// return; a separate daemon that attached afterwards did complete the wedged
-// consumer's IO and destroy the registration. So the property is reachable --
-// just not yet from the stop that has to come first.
+// control device showed no holder but the daemon. The recovery the isolation
+// exists to make possible is measured too, and by the daemon that stopped
+// serving: it took the registration back, destroyed it while that consumer was
+// still wedged on the node, and the consumer then drained on its own and reported
+// the IO it was doing when the serving side vanished as successful.
+//
+// That last step has a precondition worth stating, because it is a property of the
+// probe and not of the transport: stopping has to wake whatever is parked inside
+// the backend, so a backend that parks must park interruptibly. RecordingFile's
+// gate does. A backend that cannot be woken does not merely fail a case -- the
+// stop that is waiting for it has no deadline of its own.
 // ---------------------------------------------------------------------------
 
 // The child's record of what it did, at offset 0 of the result channel below.

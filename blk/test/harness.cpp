@@ -1254,7 +1254,17 @@ void RecordingFile::record() {
     // parks AT THE SAME TIME, so a caller can observe a device with its in-flight
     // count pinned at a cap. Waiting under the mutex would let them through one at
     // a time and the pinned state would never exist.
-    if (gated) gate.wait(1);
+    if (gated) {
+        // wait_interruptible, not wait: tearing a serving queue down interrupts
+        // every coroutine still parked in the backend and expects it to leave at
+        // that point, and semaphore::wait is documented as the uninterruptible
+        // wrapper -- it swallows the interrupt and parks again, so a tag held here
+        // never leaves and the teardown waiting for it never ends. An interrupt
+        // only reaches this point while the device is going away, when where the IO
+        // ran is no longer an observation worth keeping.
+        if (gate.wait_interruptible(1) < 0)
+            return;
+    }
     auto* v = photon::get_vcpu();
     SCOPED_LOCK(m_lock);
     for (auto* x : m_vcpus)
