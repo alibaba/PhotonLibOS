@@ -963,16 +963,19 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     for (int i = 0; i < WRITERS; i++)
         pinned[i] = bw[i].iters();
 
-    // A coroutine, not a statement beside the call. Placed after the detach it
-    // would never run at all: detach(true) cannot return while the gate is
-    // shut, since serve_stop needs a dispatch slot to flush with and in_flight
-    // at zero, and the gate-parked IOs hold both. Placed before it, the
-    // still-alive pump races the flush for the same backlog (case header). So
-    // how LONG this waits sets only WHEN the flush proceeds, never WHICH vcpu
-    // it runs on: serve_stop joins the pump before flushing, and the surplus
-    // behind the parked IOs outnumbers the slots their release returns, so the
-    // flush dispatches the tail. Measured with the sleep at zero and as
-    // written: the mutant dies either way, the case is green either way.
+    // A coroutine, not a statement beside the call: placed after the detach it
+    // never runs at all, because detach(true) cannot return while the gate is
+    // shut -- serve_stop needs a dispatch slot to flush with and in_flight at
+    // zero, and the gate-parked IOs hold both. Placed before it, the pump is
+    // still alive and eats the backlog before serve_stop joins it, so the flush
+    // gets nothing. The length is free but the sleep is not: sleeping is what
+    // yields this vcpu, so the teardown thunk queued behind this coroutine
+    // reaches its park first at any value, zero included, and joins the pump
+    // before the gate opens. What no length can reach is WHICH vcpu the flush
+    // runs on -- run_serve_stop moves the teardown to the vcpu the pump
+    // recorded, a choice that reads no gate and no clock. Measured at zero and
+    // as written: deleting that move is caught either way, and the case is
+    // green either way.
     auto rth = photon::thread_create11([&] {
         photon::thread_usleep(50 * 1000);
         rec.release_gate(4096);   // comfortably over the parked + backlog IOs
