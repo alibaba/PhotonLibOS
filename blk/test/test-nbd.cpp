@@ -880,6 +880,63 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     EXPECT_GE(ok.load(), THREADS * ITERS - THREADS);
 }
 
+// accept_th never moves -- nbd's control plane stays on the caller's vcpu -- and
+// with no pool neither does serve_conn, so the only vcpu that touches the backend
+// is this one. No backend verification here on purpose: it would run on this vcpu
+// through `rec` and record the caller as a placement twice over.
+TEST_F(NbdTest, pool_null_serves_on_the_caller_vcpu) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = nullptr;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it up front, before any
+// endpoint is bound.
+TEST_F(NbdTest, pool_without_an_event_engine_is_refused) {
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = &bad;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+}
+
 }  // namespace blk
 }  // namespace photon
 

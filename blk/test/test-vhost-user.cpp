@@ -2473,6 +2473,127 @@ TEST_F(VhostUserTest, event_idx_wrap) {
         LOG_ERROR("mock frontend: `", fe.err);
 }
 
+// One queue, so the placement is a single fact: the loop coroutine that serves
+// every request must be on a pool vcpu, not on the vcpu that called start(). The
+// IO is real -- the frontend writes it and reads it back -- so the recorded set is
+// populated by an actual serving coroutine.
+TEST_F(VhostUserTest, pool_placement) {
+    test::TestPool pool(2);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.pool = pool;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x5a);
+    std::vector<char> rbuf(IO_LEN);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(1 << 20, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        if (fe.read_dev(1 << 20, rbuf.data(), rbuf.size()) != S_OK) return EIO;
+        return memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    // through `file`, not `rec`: this read runs on the caller's vcpu, so routing it
+    // via the probe would record that vcpu as one of the device's own placements
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// No pool at all. Identical IO, and the one loop coroutine must be on this vcpu --
+// the placement every other case in this file runs with.
+TEST_F(VhostUserTest, pool_null_serves_on_the_caller_vcpu) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.pool = nullptr;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x5a);
+    std::vector<char> rbuf(IO_LEN);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(1 << 20, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        if (fe.read_dev(1 << 20, rbuf.data(), rbuf.size()) != S_OK) return EIO;
+        return memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// WorkPool's cursor is `vcpu_index++ % size`, so a zero-size pool is a SIGFPE the
+// moment anything asks it for a vcpu; migrate_to_pool's short-circuit is the only
+// thing in the way. Surviving is half the assertion, and staying on the caller's
+// vcpu is the other half.
+TEST_F(VhostUserTest, empty_pool_falls_back_to_the_caller_vcpu) {
+    photon::WorkPool empty(0, (int)photon::get_event_engine(),
+                              (int)photon::get_io_engine());
+    ASSERT_EQ(0, empty.get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.pool = &empty;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x5a);
+    std::vector<char> rbuf(IO_LEN);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(1 << 20, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        if (fe.read_dev(1 << 20, rbuf.data(), rbuf.size()) != S_OK) return EIO;
+        return memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it up front -- before
+// anything is bound or listened on -- and the failed start's rollback leaves no
+// socket behind.
+TEST_F(VhostUserTest, pool_without_an_event_engine_is_refused) {
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.pool = &bad;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));   // start failed: no live socket left behind
+}
+
 }  // namespace blk
 }  // namespace photon
 

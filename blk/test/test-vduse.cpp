@@ -658,6 +658,95 @@ TEST_F(VduseTest, custom_lock_dir) {
     EXPECT_NE(0, ::access(node.c_str(), F_OK));
 }
 
+// The observable half of multiqueue: the kernel must see four hardware queues AND
+// the IO must actually reach more than one of them, with the pool picking the vcpu
+// each queue's serving coroutine runs on. The stress driver is what makes
+// vq_refresh's per-queue vi.index and VDUSE_VQ_INJECT_IRQ's per-queue index
+// load-bearing -- with vi.index hard-written to 0, every queue but the first never
+// learns its own ring address and its IO times out here. Which of the four queues
+// get traffic is the block layer's choice, so the placement assertion is a lower
+// bound: it takes the same spread over hardware queues that the adoption resync
+// case above relies on.
+TEST_F(VduseTest, multiqueue_io_spreads_over_the_pool) {
+    test::TestPool pool(4);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;
+    cfg.pool = pool;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    EXPECT_EQ(4, test::count_mq_dirs(kname));
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse mq + pool", 8));
+
+    EXPECT_GE(rec.vcpu_count(), 2u);
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// Four queues and no pool at all: the kernel must still see four hardware queues,
+// and all four serving coroutines must stay on the vcpu that called start().
+TEST_F(VduseTest, multiqueue_without_a_pool) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;
+    cfg.pool = nullptr;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    EXPECT_EQ(4, test::count_mq_dirs(kname));
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse mq, no pool", 8));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// WorkPool's cursor is `vcpu_index++ % size`, so a zero-size pool is a SIGFPE the
+// moment anything asks it for a vcpu; migrate_to_pool's short-circuit is the only
+// thing in the way. Surviving is half the assertion, and staying on the caller's
+// vcpu is the other half.
+TEST_F(VduseTest, empty_pool_falls_back_to_the_caller_vcpu) {
+    photon::WorkPool empty(0, (int)photon::get_event_engine(),
+                              (int)photon::get_io_engine());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 2;
+    cfg.pool = &empty;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    // the fixture helper verifies through `file`, never through `rec`: a
+    // verification read runs on THIS vcpu, so routing it through the probe would
+    // record the caller as one of the device's own placements
+    EXPECT_EQ(0, device_io(node, pattern(0x33), true));
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
 }  // namespace blk
 }  // namespace photon
 
