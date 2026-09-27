@@ -915,7 +915,7 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     auto* caller = photon::get_vcpu();
     auto cfg = make_cfg(/*loopback=*/true);
     cfg.pool = &pool;
-    cfg.queue_depth = 2;   // < WRITERS, so the surplus writes are ring backlog
+    cfg.queue_depth = 2;   // fewer slots than writers, so the surplus is ring backlog
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -963,12 +963,15 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     for (int i = 0; i < WRITERS; i++)
         pinned[i] = bw[i].iters();
 
-    // The gate must open while the detach is inside its flush: drain_ring
-    // blocks on a dispatch slot until the parked IOs return theirs. This
-    // coroutine cannot run before the detach blocks this vcpu, and the
-    // teardown interrupts + joins the pump within microseconds of starting,
-    // so by the time the 50 ms are up the pump is gone and only the flush can
-    // consume the released slots.
+    // The gate must open while the detach is inside its flush, and it cannot
+    // open before: this coroutine is created READY on the caller's vcpu, and
+    // run_serve_stop does not yield until it waits for the teardown. By then
+    // the flush is already parked -- by code order, not by timing: serve_stop
+    // joins the pump before it calls drain_ring, and drain_ring needs a
+    // dispatch slot, both of which the gate-parked IOs are holding. So the
+    // coroutines the flush creates inherit whichever vcpu run_serve_stop put
+    // it on, which is the quantity under test. The 50 ms is margin, not a
+    // barrier: nothing about this case's colour depends on it.
     auto rth = photon::thread_create11([&] {
         photon::thread_usleep(50 * 1000);
         rec.release_gate(4096);   // comfortably over the parked + backlog IOs
@@ -1021,6 +1024,7 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true));
 
     EXPECT_FALSE(rec.ran_on(caller));
+    EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_EQ(0, dev->shutdown());
 }
 

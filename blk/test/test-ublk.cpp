@@ -59,6 +59,7 @@ namespace photon {
 namespace blk {
 
 static const char IMG_PATH[]       = "/tmp/photon-blk-ublk.img";
+static const char IMG2_PATH[]      = "/tmp/photon-blk-ublk2.img";
 static constexpr uint64_t IMG_SIZE = 64ull << 20;
 static const char TEST_IDENTITY[]  = "photon-ublk-test";   // informational (ublk keys on dev_id)
 
@@ -776,7 +777,7 @@ TEST_F(UblkTest, two_devices_share_one_pool) {
     // would mix the two devices' placements into one set. Declared before
     // rec_b: reverse destruction drops rec_b first, img2 second.
     test::TestImage img2;
-    ASSERT_EQ(0, img2.create("/tmp/photon-blk-ublk2.img", IMG_SIZE));
+    ASSERT_EQ(0, img2.create(IMG2_PATH, IMG_SIZE));
     DEFER(img2.release());
     test::RecordingFile rec_b(img2.file);
 
