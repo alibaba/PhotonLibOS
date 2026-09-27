@@ -430,13 +430,15 @@ size_t channel_io_bytes(int mode, size_t len) {
     return mode == CONS_MODE_STRESS ? 0 : page_align(len);
 }
 
+// NSDMI on every member: a layout whose value is wrong misplaces every offset in
+// the channel, so no instance of this may ever exist uninitialized.
 struct ChannelLayout {
-    size_t report_bytes;   // the region holding both report PODs
-    size_t stress_off;     // ConsumerStressReport, inside that region
-    size_t wbuf_off;       // the caller's write payload
-    size_t rbuf_off;       // the child's read-back
-    size_t io_bytes;       // each of those two; 0 in stress mode
-    size_t total;          // what ftruncate() and both mmap() calls take
+    size_t report_bytes = 0;   // the region holding both report PODs
+    size_t stress_off = 0;     // ConsumerStressReport, inside that region
+    size_t wbuf_off = 0;       // the caller's write payload
+    size_t rbuf_off = 0;       // the child's read-back
+    size_t io_bytes = 0;       // each of those two; 0 in stress mode
+    size_t total = 0;          // what ftruncate() and both mmap() calls take
 };
 ChannelLayout channel_layout(int mode, size_t len) {
     ChannelLayout l;
@@ -743,6 +745,18 @@ int consumer_stress_body(const ConsumerArgs* a) {
     s->ios = res.ios;
     s->bytes = res.bytes;
     s->failures = res.failures;
+    // Echo what this child decoded, so the parent can prove every field arrived
+    // in the slot it sent it to -- a swap of two same-range fields decodes
+    // cleanly and would otherwise be invisible (see ConsumerStressReport).
+    s->echo_base_off = a->stress.base_off;
+    s->echo_span = a->stress.span;
+    s->echo_max_block = (uint64_t)a->stress.max_block;
+    s->echo_mode = (uint32_t)a->stress.mode;
+    s->echo_threads = (uint32_t)a->stress.threads;
+    s->echo_iters = (uint32_t)a->stress.iters;
+    s->echo_direct = (uint32_t)a->stress.direct;
+    s->echo_flush = (uint32_t)a->stress.flush;
+    s->echo_seed = a->stress.seed;
     size_t n = res.first_error.size();
     if (n > sizeof(s->errbuf) - 1)
         n = sizeof(s->errbuf) - 1;
@@ -868,15 +882,14 @@ struct ConsumerSpawn {
     std::string node;                  // r.node, and the log lines
     std::vector<const char*> argv;     // argv[1..], the sentinel first; argv[0]
                                        // and the terminator are added here
-    ChannelLayout layout;              // the channel's, from channel_layout()
+    ChannelLayout layout{};            // the channel's, from channel_layout()
     const void* wbuf = nullptr;        // copied into the channel before the spawn
-    void* rbuf = nullptr;              // the read-back is copied out into it
-    size_t len = 0;                    // both buffers'; 0 copies neither
+    size_t len = 0;                    // the write payload's; 0 copies none
     ConsumerStressReport* stress = nullptr;   // filled from the channel if reaped
     uint64_t timeout_us = 0;           // 0 = CONSUMER_TIMEOUT_US
 };
 
-ConsumerIoResult consumer_spawn(ConsumerSpawn& s) {
+ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
     ConsumerIoResult r;
     r.node = s.node;
     uint64_t timeout = s.timeout_us ? s.timeout_us : CONSUMER_TIMEOUT_US;
@@ -1009,12 +1022,8 @@ ConsumerIoResult consumer_spawn(ConsumerSpawn& s) {
     }
     r.reaped = w > 0;
     consumer_decode(r, rep, st, w > 0);
-    if (r.reaped) {
-        if (s.rbuf && s.len)
-            memcpy(s.rbuf, (char*)base + s.layout.rbuf_off, s.len);
-        if (s.stress)
-            *s.stress = *(const ConsumerStressReport*)((char*)base + s.layout.stress_off);
-    }
+    if (r.reaped && s.stress)
+        *s.stress = *(const ConsumerStressReport*)((char*)base + s.layout.stress_off);
     return r;
 }
 
@@ -1048,6 +1057,8 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span) {
     s.stress = &srep;
     s.timeout_us = CONSUMER_STRESS_TIMEOUT_US;
     ConsumerIoResult r = consumer_spawn(s);
+    res.child_pid = r.pid;
+    res.child_fds = r.fds;
     // Nothing keeps this child's pid, so a channel handed over for a later reap
     // has nowhere to go -- release it, as device_io() does in the same situation.
     if (r.shm)
@@ -1062,6 +1073,31 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span) {
         LOG_ERROR_RETURN(EIO, res, "` stress: the consumer child ` never reported the phase, stage `, status `, exit `",
                          c.node, (int64_t)r.pid, consumer_stage_name(r.stage), r.status, r.exit_code);
     }
+    // The child echoed back every scalar it decoded. Comparing them is what pins
+    // the builder to the decoder: a swap of two same-range fields decodes cleanly,
+    // so neither the range checks nor the counters could see it, and the phase
+    // would have run a configuration nobody sent.
+    struct EchoField { const char* name; uint64_t sent, got; };
+    const EchoField echo[] = {
+        {"stress_mode", (uint64_t)c.mode, srep.echo_mode},
+        {"threads", (uint64_t)c.threads, srep.echo_threads},
+        {"iters", (uint64_t)c.iters, srep.echo_iters},
+        {"base_off", c.base_off, srep.echo_base_off},
+        {"span", span, srep.echo_span},
+        {"max_block", (uint64_t)c.max_block, srep.echo_max_block},
+        {"direct", (uint64_t)(c.direct ? 1 : 0), srep.echo_direct},
+        {"flush", (uint64_t)(c.flush ? 1 : 0), srep.echo_flush},
+        {"seed", c.seed, srep.echo_seed},
+    };
+    for (const auto& f : echo)
+        if (f.sent != f.got) {
+            res.failures = 1;
+            res.first_error = std::string("the consumer child decoded ") + f.name +
+                              " as " + std::to_string(f.got) + ", but the parent sent " +
+                              std::to_string(f.sent);
+            LOG_ERROR_RETURN(EILSEQ, res, "` stress: the child's argv echo disagrees on `: sent `, decoded `",
+                             c.node, f.name, f.sent, f.got);
+        }
     res.ios = srep.ios;
     res.bytes = srep.bytes;
     res.failures = srep.failures;
@@ -1136,7 +1172,7 @@ int consumer_child_main(int argc, char** argv) {
     _exit(a.mode == CONS_MODE_STRESS ? consumer_stress_body(&a) : consumer_io_body(&a));
 }
 
-ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
+ConsumerIoResult consumer_io(const std::string& node, const void* wbuf,
                              size_t len, uint64_t off, const ConsumerIoOpts& o) {
     // argv, in decode_io_argv's order. Decimal integers and the path last, so
     // nothing here needs quoting and nothing can be ambiguous about where a
@@ -1157,7 +1193,6 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
               node.c_str()};
     s.layout = channel_layout(CONS_MODE_IO, len);
     s.wbuf = wbuf;
-    s.rbuf = rbuf;
     s.len = len;
     s.timeout_us = o.timeout_us;
     return consumer_spawn(s);
@@ -1165,14 +1200,16 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
 
 ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv, uint64_t timeout_us) {
     ConsumerIoResult refused;
-    refused.node = argv.empty() ? std::string("?") : argv[0];
+    // Name the node, not the sentinel: the path is argv's last element by
+    // contract, and the refusal below prints the offending first element itself.
+    refused.node = argv.empty() ? std::string("?") : argv.back();
     // Refused rather than spawned: see CONS_CHILD_ARG for what a child that does
     // not see the sentinel is.
     if (argv.empty() || argv[0] != CONS_CHILD_ARG) {
         refused.status = EINVAL;
         refused.stage = CONS_ARGV;
         LOG_ERROR_RETURN(EINVAL, refused, "a consumer child's argv must start with the sentinel `, not `",
-                         CONS_CHILD_ARG, refused.node);
+                         CONS_CHILD_ARG, argv.empty() ? "?" : argv[0].c_str());
     }
 
     ConsumerSpawn s;
@@ -1239,17 +1276,15 @@ std::vector<char> pattern(uint8_t seed, size_t n) {
 
 int device_io(const std::string& node, const void* wbuf, size_t len,
               uint64_t off, const DeviceIoOpts& o) {
-    // The read-back lands in the result channel and is copied here once the
-    // child is collected; the comparison against `wbuf` runs in the child, which
-    // is the only side that sees both.
-    std::vector<char> rbuf(len);
+    // The read-back lands in the result channel and the comparison against
+    // `wbuf` runs in the child, which is the only side that sees both.
     ConsumerIoResult r;
     run_off_vcpu([&] {
         ConsumerIoOpts c;
         c.read_only = o.read_only;
         c.direct = o.direct;
         c.timeout_us = o.timeout_us;
-        r = consumer_io(node, wbuf, rbuf.data(), len, off, c);
+        r = consumer_io(node, wbuf, len, off, c);
     });
     if (o.report)
         *o.report = r;

@@ -284,6 +284,22 @@ struct ConsumerStressReport {      // POD, shared with the child
     char errbuf[320];              // the first error. The width is
                                    // StressCounters::errbuf's, not a new one: it
                                    // is the buffer this one is copied out of.
+    // What the child decoded its config argv into, for the parent to compare
+    // against what it sent. Range checks alone cannot witness a swap of two
+    // fields whose accepted ranges are the same -- a direct that lands in
+    // flush's slot still decodes cleanly -- so every scalar is echoed back and
+    // a slot disagreement becomes a failure that names the field. The path is
+    // not echoed: it is the argv's only non-numeric element, so any slot swap
+    // involving it fails a parse instead of decoding silently.
+    uint64_t echo_base_off;
+    uint64_t echo_span;
+    uint64_t echo_max_block;
+    uint32_t echo_mode;            // StressMode
+    uint32_t echo_threads;
+    uint32_t echo_iters;
+    uint32_t echo_direct;
+    uint32_t echo_flush;
+    uint32_t echo_seed;
 };
 
 // The result channel: ONE fd-backed shared object, mapped by both sides, handed
@@ -411,11 +427,11 @@ struct ConsumerIoResult {
 };
 
 // Run one write+fsync+read-back (or, with read_only, one read) against `node`
-// in a spawned child process, and report what it did. `wbuf` and `rbuf` are
-// `len` bytes each; `wbuf` is copied into the result channel before the spawn and
-// the read-back is copied out of it into `rbuf` once the child is collected. The
-// read-back comparison happens IN the child: it is the only side that sees both
-// the payload and what the device returned.
+// in a spawned child process, and report what it did. `wbuf` is `len` bytes and
+// is copied into the result channel before the spawn. The read-back stays in the
+// channel and the comparison happens IN the child: it is the only side that sees
+// both the payload and what the device returned, and it is the side that
+// survives the caller giving up.
 //
 // CALL FROM OFF THE VCPU (e.g. inside run_off_vcpu): the wait is a bounded
 // WNOHANG/nanosleep poll, and running that on the vcpu would stall the very
@@ -423,10 +439,9 @@ struct ConsumerIoResult {
 //
 // A result with `hung` set owns a child that is still running and a channel that
 // is still mapped: finish with consumer_reap(), or give up on it and call
-// consumer_release(). A child abandoned here and reaped later leaves `rbuf`
-// untouched -- its verdict still reaches `status`.
-ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
-                             size_t len, uint64_t off, const ConsumerIoOpts& o = {});
+// consumer_release().
+ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, size_t len,
+                             uint64_t off, const ConsumerIoOpts& o = {});
 
 // Wait out a child that consumer_io() abandoned, then finish reading its
 // report. Returns true once the child is collected, which sets `reaped`; false
@@ -437,10 +452,14 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
 // clear and `hung` as it was. Runs its poll off the vcpu, so it is safe to call
 // from a coroutine.
 //
-// The two `false` returns leave different things behind, and that decides whether
-// a cleanup path retries: only the timeout keeps the channel mapped, so it is the
-// only one worth calling again. A call that got as far as a verdict has released
-// the channel, and a second one fails on having nothing left to read through.
+// The two `false` returns a cleanup path can get leave different things behind,
+// and that decides whether it retries: only the timeout keeps the channel
+// mapped, so it is the only one worth calling again. A call that collected the
+// child sets `reaped` and releases the channel before it returns, so a second
+// call answers `true` from the `reaped` guard without reading anything -- it
+// does not fail. The "no result channel left" refusal is reached the other way
+// round: a caller that gave up on the child, released the channel itself (see
+// consumer_release), and then called this anyway.
 bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
 
 // Unmap the result channel of a consumer that will not be reaped. Idempotent.
@@ -452,7 +471,11 @@ void consumer_release(ConsumerIoResult& r);
 // (this binary) and the terminator are supplied here, and anything else is
 // refused without spawning (see CONS_CHILD_ARG for what a child that does not see
 // the sentinel turns out to be). The channel is the report page alone, which is
-// all a child that never reaches its IO can touch.
+// all a child that never reaches its IO can touch -- and a child whose argv DOES
+// decode would size its IO region from the len inside that argv, so this one
+// page is necessarily shorter than what it maps and its first touch past the end
+// of the backing file would kill it: the second reason every argv handed here
+// must name a node that does not exist.
 //
 // Test-only, and the reason it exists: the structural exit codes above are the
 // loud half of the isolation, and the only way to hear them is to hand the child
@@ -569,6 +592,12 @@ struct StressResult {
     uint64_t elapsed_us = 0;              // measured by stress_run(), around the
                                           // spawn of the child that ran the phase,
                                           // so it includes the spawn and the exec
+    // The child that ran the phase. Surfaced because "the phase ran in a child
+    // at all" is the property the isolation exists for, and counters alone
+    // cannot witness it: an in-process phase reports the same numbers. -1 until
+    // a spawn happened, so a phase that never got that far stays distinguishable.
+    pid_t child_pid = -1;
+    uint32_t child_fds = 0;               // its post-drop census, the child's own
 
     explicit operator bool() const { return failures == 0 && ios > 0; }
     void report(const char* what, const StressCfg& c) const;

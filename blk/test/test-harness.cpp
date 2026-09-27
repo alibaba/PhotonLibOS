@@ -174,8 +174,7 @@ TEST(ConsumerIo, the_child_reports_success_and_a_clean_fd_table) {
     DEFER(::unlink(path));
 
     auto wbuf = pattern(0x5a, BLK);
-    std::vector<char> rbuf(BLK);
-    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), BLK, OFF);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), BLK, OFF);
     EXPECT_EQ(0, r.status);
     EXPECT_EQ(CONS_DONE, r.stage);
     EXPECT_TRUE(r.reaped);
@@ -206,8 +205,7 @@ TEST(ConsumerIo, the_child_does_not_inherit_the_callers_descriptors) {
         ASSERT_EQ(0, ::fcntl(h, F_GETFD));   // the parent really is holding them
 
     auto wbuf = pattern(0x5a, BLK);
-    std::vector<char> rbuf(BLK);
-    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), BLK, OFF);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), BLK, OFF);
     EXPECT_EQ(0, r.status);                     // the IO still ran
     EXPECT_EQ(0u, r.fds);                       // with none of them inherited
     EXPECT_NE((int)CONS_EXIT_FDLEAK, r.exit_code);
@@ -222,8 +220,7 @@ TEST(ConsumerIo, a_failure_carries_its_stage_and_errno_back) {
     const char* path = "/tmp/photon-blk-consumer-absent";
     ::unlink(path);
     auto wbuf = pattern(0x5a, 4096);
-    std::vector<char> rbuf(4096);
-    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), 4096, OFF);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), 4096, OFF);
     // the child cannot log, so the verdict has to survive the exit status: the
     // stage says which syscall, the errno says why, and the exit code mirrors
     // the status so that even a lost report page still names the failure
@@ -242,11 +239,10 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
     DEFER(::unlink(path));
 
     auto wbuf = pattern(0x5a, 4096);
-    std::vector<char> rbuf(4096);
     ConsumerIoOpts o;
     o.read_only = true;      // open() on a FIFO with no writer does not return
     o.timeout_us = 1000 * 1000;
-    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), 4096, OFF, o);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), 4096, OFF, o);
 
     // The caller is back and the consumer is not, which is the reason the
     // consumer is a child rather than a thread: a thread here takes the caller
@@ -318,6 +314,11 @@ static std::vector<std::string> shortened(std::vector<std::string> a) {
     a.pop_back();   // one under the mode's argc, which is the path it loses
     return a;
 }
+static std::vector<std::string> over(std::vector<std::string> a) {
+    a.push_back("0");   // one over the mode's argc: an exact gate must refuse
+                        // this too, and "argc is at least the table" would not
+    return a;
+}
 
 // The node the malformed rows point at does not exist, deliberately: a row that
 // stops being rejected must not turn into a phase doing real IO. It still exits 0
@@ -335,26 +336,42 @@ TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
         {"argv[2]: the mode tag is not a ConsumerMode",  patched(io, 2, "7")},
         {"argv[2]: the mode tag is one over its range",  patched(st, 2, "2")},
         {"argc 3: too short for the tag and the fd",     {CONS_CHILD_ARG, "0"}},
+        // the channel fd's range is decode_child_argv's own, so it is checked
+        // ahead of either mode's half -- and BOTH bounds need a row: a bound
+        // only flanked from one side survives being relaxed on the other
+        {"argv[3]: the channel fd is below its range",   patched(io, 3, "2")},
+        {"argv[3]: the channel fd is above its range",   patched(io, 3, "65536")},
         // single-IO mode, argc 10
         {"argc 9: one under the single-IO table",        shortened(io)},
+        {"argc 11: one over the single-IO table",        over(io)},
         {"argv[5]: open_tries below its range",          patched(io, 5, "0")},
+        {"argv[5]: open_tries above its range",          patched(io, 5, "1000001")},
         {"argv[6]: write is neither 0 nor 1",            patched(io, 6, "2")},
         {"argv[7]: off has a tail",                      patched(io, 7, "4096x")},
         {"argv[8]: len is not a number",                 patched(io, 8, "12x")},
         {"argv[8]: len is zero",                         patched(io, 8, "0")},
+        // 2^40 + 1: exactly one over the len bound, which the "12x" and "0"
+        // rows on either side of it cannot see
+        {"argv[8]: len is above its range",              patched(io, 8, "1099511627777")},
         {"argv[9]: the path is empty",                   patched(io, 9, "")},
         // stress mode, argc 14
         {"argc 13: one under the stress table",          shortened(st)},
+        {"argc 15: one over the stress table",           over(st)},
         {"argv[4]: the stress mode is not a StressMode", patched(st, 4, "9")},
+        {"argv[4]: the stress mode is one over its range", patched(st, 4, "2")},
         {"argv[5]: threads below its range",             patched(st, 5, "0")},
+        {"argv[5]: threads above its range",             patched(st, 5, "4097")},
         {"argv[6]: iters below its range",               patched(st, 6, "0")},
+        {"argv[6]: iters above its range",               patched(st, 6, "1000001")},
         {"argv[7]: base_off is not 4K-aligned",          patched(st, 7, "1048577")},
         {"argv[8]: span is zero",                        patched(st, 8, "0")},
         {"argv[8]: span is not 4K-aligned",              patched(st, 8, "4194305")},
         {"argv[9]: max_block is zero",                   patched(st, 9, "0")},
         {"argv[10]: direct is neither 0 nor 1",          patched(st, 10, "2")},
         {"argv[11]: flush is not a number",              patched(st, 11, "x")},
+        {"argv[11]: flush is neither 0 nor 1",           patched(st, 11, "2")},
         {"argv[12]: seed is over 32 bits",               patched(st, 12, "4294967296")},
+        {"argv[13]: the path is empty",                  patched(st, 13, "")},
     };
     for (const auto& row : rows) {
         SCOPED_TRACE(row.what);
@@ -399,6 +416,29 @@ TEST(ConsumerArgv, a_channel_that_did_not_arrive_exits_203) {
     EXPECT_EQ(nullptr, r.shm);
 }
 
+TEST(ConsumerArgv, an_unmodified_stress_argv_runs_to_completion) {
+    // The positive control for stress_argv(), which the table above only ever
+    // hands over in refused forms: were its arity itself wrong, every stress row
+    // would stop at the argc gate and return 202, and the table would look green
+    // while testing nothing. This spawns the helper UNMODIFIED against a real
+    // file, so every field of it is proven to decode. Safe here: the stress
+    // channel is the report page alone, exactly what consumer_spawn_argv
+    // allocates, and the O_DIRECT this helper spells falls back to buffered on
+    // tmpfs through stress_open's own retry.
+    const char* path = "/tmp/photon-blk-consumer-stress-control";
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)(8ull << 20)));   // holds base_off + span
+    ::close(fd);
+    DEFER(::unlink(path));
+    ConsumerIoResult r = consumer_spawn_argv(stress_argv(path), 60ull * 1000 * 1000);
+    EXPECT_EQ(0, r.status);
+    EXPECT_EQ(0, r.exit_code);          // the phase ran: 0 is what a stress
+    EXPECT_EQ(CONS_DONE, r.stage);      // child exits whenever it got that far
+    EXPECT_TRUE(r.reaped);
+    EXPECT_EQ(nullptr, r.shm);
+}
+
 // ---------------------------------------------------------------------------
 // a stress phase in a consumer child
 //
@@ -415,27 +455,54 @@ TEST(StressChild, a_phase_runs_in_the_child_and_its_counters_come_back) {
     int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
     ASSERT_GE(fd, 0);
     ASSERT_EQ(0, ::ftruncate(fd, (off_t)SIZE));
-    ::close(fd);
+    DEFER(::close(fd));
     DEFER(::unlink(path));
+    // The same shape as the single-IO inheritance case above: the parent holds
+    // extra descriptors on the very file the phase is about to use, so the
+    // child's census of 0 proves its drop ran -- with an empty parent table the
+    // census would pass either way.
+    int held[3];
+    for (int& h : held)
+        h = ::open(path, O_RDONLY);
+    DEFER(for (int h : held) ::close(h));
+    for (int h : held)
+        ASSERT_EQ(0, ::fcntl(h, F_GETFD));   // the parent really is holding them
 
     StressCfg c;
     c.node = path;
     c.size = SIZE;
     c.threads = 2;
     c.iters = 2;
+    c.flush = true;        // direct and flush must not carry the same value: an
+                           // echo of two equal scalars cannot see their slots
+                           // swapped. (i % 8) == 7 never fires at 2 iters, so
+                           // this changes what is encoded and nothing else.
     c.max_block = 64 << 10;
     c.direct = false;      // a regular file on tmpfs rejects O_DIRECT
 
     StressResult d = stress_run(c);
     EXPECT_EQ(0, d.failures) << d.first_error;
+    // The first half of this case's name: the phase ran in a CHILD, not in this
+    // process -- its pid is not ours, and it was born with a clean fd table even
+    // though this process is holding four descriptors on the same file.
+    EXPECT_GT(d.child_pid, 0);
+    EXPECT_NE((pid_t)::getpid(), d.child_pid);
+    EXPECT_EQ(0u, d.child_fds);
     EXPECT_EQ(4u, d.ios);                 // every worker completed every iteration
-    EXPECT_GT(d.bytes, 0u);               // DISJOINT mixes block sizes
+    EXPECT_GT(d.bytes, 0u);               // the total is whatever the seeded RNG
+                                          // picks, deliberately not pinned:
+                                          // recomputing it here would be a second
+                                          // copy of the driver's own block-size
+                                          // logic, free to drift. A phase that
+                                          // moved no IO drives this to 0, and
+                                          // that is caught
     EXPECT_TRUE(d.first_error.empty());
     EXPECT_GT(d.elapsed_us, 0u);
 
     c.mode = StressMode::SHARED;
     StressResult s = stress_run(c);
     EXPECT_EQ(0, s.failures) << s.first_error;
+    EXPECT_NE((pid_t)::getpid(), s.child_pid);
     EXPECT_EQ(4u, s.ios);
     EXPECT_EQ(4u * 64u * 1024u, s.bytes);   // SHARED's slot is fixed, so this is exact
     EXPECT_TRUE(s.first_error.empty());
@@ -460,6 +527,31 @@ TEST(StressChild, a_real_failure_reaches_the_parent_verbatim) {
     EXPECT_EQ(0u, r.ios);
     EXPECT_NE(std::string::npos, r.first_error.find("open failed")) << r.first_error;
     EXPECT_NE(std::string::npos, r.first_error.find(strerror(ENOENT))) << r.first_error;
+}
+
+TEST(StressChild, a_config_the_child_rejects_is_named_not_silently_zero) {
+    // threads one over the [1, 4096] decode_stress_argv accepts: the child is
+    // stopped at its argv before it spawns a single worker, and the parent has
+    // to NAME that -- the zeros a channel is born with would otherwise read as
+    // "a clean phase that moved no IO". This is also the real builder's witness
+    // against the decoder's ranges: the table above spells its argv by hand,
+    // while this config travels through stress_in_child's own encoding.
+    const char* absent = "/tmp/photon-blk-stress-child-rejected";
+    ::unlink(absent);
+    StressCfg c;
+    c.node = absent;
+    c.size = 8ull << 20;   // the span check is the parent's and it passes: the
+    c.threads = 4097;      // rejection is the child's, at decode time
+    c.iters = 1;
+    c.max_block = 64 << 10;
+    c.direct = false;
+    StressResult r = stress_run(c);
+    EXPECT_EQ(1, r.failures);
+    EXPECT_EQ(0u, r.ios);
+    EXPECT_NE(std::string::npos, r.first_error.find("never reported a stress phase"))
+        << r.first_error;
+    EXPECT_NE(std::string::npos, r.first_error.find("decoding its argv")) << r.first_error;
+    EXPECT_GT(r.child_pid, 0);   // spawned and reaped, though the phase never ran
 }
 
 TEST(StressChild, a_span_that_does_not_fit_is_caught_before_any_spawn) {
