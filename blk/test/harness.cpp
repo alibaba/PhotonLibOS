@@ -332,8 +332,8 @@ void run_off_vcpu(TempDelegate<void> fn) {
     // count is already available. CURRENT is a null __thread pointer in a thread
     // photon never initialized, so the hand-back dereferences null rather than
     // waiting, and a count that was already signalled does not save it: the write
-    // comes first. Reading CURRENT just below is safe -- only the wait writes
-    // through it.
+    // comes first. Reading CURRENT in the guard below is safe: it takes the
+    // pointer's value and dereferences nothing.
     if (!photon::CURRENT) {
         fn();
         return;
