@@ -278,6 +278,206 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
     EXPECT_EQ(nullptr, r.shm);   // consumer_reap released the channel
 }
 
+// ---------------------------------------------------------------------------
+// the consumer child's argv encoding
+//
+// The scalars travel in argv rather than in the channel because argv is
+// self-checking: every field is parsed and range-checked on its own, and a
+// mis-decode is its own exit code rather than a plausible wrong number. That is
+// what makes the encoding safe to change, so these cases pin it -- each row is a
+// well-formed argv with exactly one thing wrong, spelled out here independently of
+// harness.cpp's builders, because an encoding whose only other copy is the code
+// that produces it cannot drift loudly.
+// ---------------------------------------------------------------------------
+
+// A well-formed single-IO argv against `path`, in decode_io_argv's order: mode
+// tag, channel fd, flags, open_tries, write, off, len, path. argc 10 with argv[0].
+static std::vector<std::string> io_argv(const std::string& path) {
+    return {CONS_CHILD_ARG, std::to_string((int)CONS_MODE_IO), "3",
+            std::to_string(O_RDWR), "200", "1", std::to_string(OFF), "4096", path};
+}
+
+// A well-formed stress argv, in decode_stress_argv's order: mode tag, channel fd,
+// DISJOINT, 2 threads, 2 iterations, 1 MiB base, 4 MiB span, 64 KiB blocks,
+// O_DIRECT, no flush, seed 0, path. argc 14 with argv[0].
+static std::vector<std::string> stress_argv(const std::string& path) {
+    return {CONS_CHILD_ARG, std::to_string((int)CONS_MODE_STRESS), "3",
+            std::to_string((int)StressMode::DISJOINT), "2", "2",
+            std::to_string(1ull << 20), std::to_string(4ull << 20),
+            std::to_string(64ull << 10), "1", "0", "0", path};
+}
+
+// `at` is an ARGV index, which is one more than the index into the vectors above:
+// consumer_spawn_argv() takes argv[1] onwards.
+static std::vector<std::string> patched(std::vector<std::string> a, int at,
+                                        const std::string& v) {
+    a[at - 1] = v;
+    return a;
+}
+static std::vector<std::string> shortened(std::vector<std::string> a) {
+    a.pop_back();   // one under the mode's argc, which is the path it loses
+    return a;
+}
+
+// The node the malformed rows point at does not exist, deliberately: a row that
+// stops being rejected must not turn into a phase doing real IO. It still exits 0
+// (a phase that ran and failed every open is not a structural failure), so the
+// row goes red on the exit code either way -- just without moving any data.
+TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
+    const std::string absent = "/tmp/photon-blk-consumer-argv-absent";
+    ::unlink(absent.c_str());
+    const auto io = io_argv(absent), st = stress_argv(absent);
+    struct Row { const char* what; std::vector<std::string> argv; };
+    const std::vector<Row> rows = {
+        // the mode tag selects the rest of the table, so an unknown one is a
+        // mis-decode and not a default -- and 2 is the row that pins the top of
+        // its accepted range rather than merely flanking it
+        {"argv[2]: the mode tag is not a ConsumerMode",  patched(io, 2, "7")},
+        {"argv[2]: the mode tag is one over its range",  patched(st, 2, "2")},
+        {"argc 3: too short for the tag and the fd",     {CONS_CHILD_ARG, "0"}},
+        // single-IO mode, argc 10
+        {"argc 9: one under the single-IO table",        shortened(io)},
+        {"argv[5]: open_tries below its range",          patched(io, 5, "0")},
+        {"argv[6]: write is neither 0 nor 1",            patched(io, 6, "2")},
+        {"argv[7]: off has a tail",                      patched(io, 7, "4096x")},
+        {"argv[8]: len is not a number",                 patched(io, 8, "12x")},
+        {"argv[8]: len is zero",                         patched(io, 8, "0")},
+        {"argv[9]: the path is empty",                   patched(io, 9, "")},
+        // stress mode, argc 14
+        {"argc 13: one under the stress table",          shortened(st)},
+        {"argv[4]: the stress mode is not a StressMode", patched(st, 4, "9")},
+        {"argv[5]: threads below its range",             patched(st, 5, "0")},
+        {"argv[6]: iters below its range",               patched(st, 6, "0")},
+        {"argv[7]: base_off is not 4K-aligned",          patched(st, 7, "1048577")},
+        {"argv[8]: span is zero",                        patched(st, 8, "0")},
+        {"argv[8]: span is not 4K-aligned",              patched(st, 8, "4194305")},
+        {"argv[9]: max_block is zero",                   patched(st, 9, "0")},
+        {"argv[10]: direct is neither 0 nor 1",          patched(st, 10, "2")},
+        {"argv[11]: flush is not a number",              patched(st, 11, "x")},
+        {"argv[12]: seed is over 32 bits",               patched(st, 12, "4294967296")},
+    };
+    for (const auto& row : rows) {
+        SCOPED_TRACE(row.what);
+        ConsumerIoResult r = consumer_spawn_argv(row.argv, 10ull * 1000 * 1000);
+        // 202 rather than a status: a mis-decode must not be able to read as
+        // "nothing to do", and exit_code_stage() is what maps it to a stage.
+        EXPECT_EQ(CONS_EXIT_ARGV, r.exit_code);
+        EXPECT_EQ(CONS_ARGV, r.stage);
+        EXPECT_EQ(EIO, r.status);
+        EXPECT_TRUE(r.reaped);
+        EXPECT_FALSE(r.hung);
+        EXPECT_EQ(nullptr, r.shm);
+    }
+}
+
+TEST(ConsumerArgv, an_argv_without_the_sentinel_is_refused_not_spawned) {
+    // What a child that does not see the sentinel is, is this suite running again
+    // inside a child -- so the refusal is the guard, and spawning to find out
+    // would be the accident it exists to prevent.
+    ConsumerIoResult r = consumer_spawn_argv({"--not-the-sentinel", "0"}, 1000 * 1000);
+    EXPECT_EQ(EINVAL, r.status);
+    EXPECT_EQ(CONS_ARGV, r.stage);
+    EXPECT_EQ(-1, r.exit_code);      // nothing was spawned to have one
+    EXPECT_EQ(-1, r.pid);
+    EXPECT_EQ(nullptr, r.shm);
+    ConsumerIoResult e = consumer_spawn_argv({}, 1000 * 1000);
+    EXPECT_EQ(EINVAL, e.status);
+}
+
+TEST(ConsumerArgv, a_channel_that_did_not_arrive_exits_203) {
+    // The channel arrives on a fixed descriptor and its number also travels in
+    // argv, so "the channel did not survive the spawn" is indistinguishable from
+    // "argv named a descriptor that is not there" -- which is what this hands
+    // over. 65535 is the top of the range decode_child_argv accepts, so the row
+    // pins that bound too: being in range says nothing about being open.
+    auto a = patched(io_argv("/tmp/photon-blk-consumer-channel-absent"), 3, "65535");
+    ConsumerIoResult r = consumer_spawn_argv(a, 10ull * 1000 * 1000);
+    EXPECT_EQ(CONS_EXIT_CHANNEL, r.exit_code);
+    EXPECT_EQ(CONS_CHANNEL, r.stage);
+    EXPECT_EQ(EIO, r.status);
+    EXPECT_TRUE(r.reaped);
+    EXPECT_EQ(nullptr, r.shm);
+}
+
+// ---------------------------------------------------------------------------
+// a stress phase in a consumer child
+//
+// The counters and the first error are all a phase can say, and they cross a
+// process boundary in a fixed-width POD at an offset both sides derive from the
+// same function. A parent that read them where the child did not write them would
+// read zeros -- and zero failures is a pass, so these cases assert the values, not
+// merely that they are nonzero.
+// ---------------------------------------------------------------------------
+
+TEST(StressChild, a_phase_runs_in_the_child_and_its_counters_come_back) {
+    const char* path = "/tmp/photon-blk-stress-child";
+    constexpr uint64_t SIZE = 8ull << 20;
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)SIZE));
+    ::close(fd);
+    DEFER(::unlink(path));
+
+    StressCfg c;
+    c.node = path;
+    c.size = SIZE;
+    c.threads = 2;
+    c.iters = 2;
+    c.max_block = 64 << 10;
+    c.direct = false;      // a regular file on tmpfs rejects O_DIRECT
+
+    StressResult d = stress_run(c);
+    EXPECT_EQ(0, d.failures) << d.first_error;
+    EXPECT_EQ(4u, d.ios);                 // every worker completed every iteration
+    EXPECT_GT(d.bytes, 0u);               // DISJOINT mixes block sizes
+    EXPECT_TRUE(d.first_error.empty());
+    EXPECT_GT(d.elapsed_us, 0u);
+
+    c.mode = StressMode::SHARED;
+    StressResult s = stress_run(c);
+    EXPECT_EQ(0, s.failures) << s.first_error;
+    EXPECT_EQ(4u, s.ios);
+    EXPECT_EQ(4u * 64u * 1024u, s.bytes);   // SHARED's slot is fixed, so this is exact
+    EXPECT_TRUE(s.first_error.empty());
+}
+
+TEST(StressChild, a_real_failure_reaches_the_parent_verbatim) {
+    // errbuf is a fixed 320 bytes across the boundary and becomes a std::string
+    // on this side, so a truncation or a dropped copy would show up here as a
+    // failure with no stated reason -- which no suite asserts on and no reader
+    // could diagnose.
+    const char* absent = "/tmp/photon-blk-stress-child-absent";
+    ::unlink(absent);
+    StressCfg c;
+    c.node = absent;
+    c.size = 8ull << 20;   // the span check is the parent's and it passes: that
+    c.threads = 2;         // the node is absent is the child's to discover
+    c.iters = 1;
+    c.max_block = 64 << 10;
+    c.direct = false;
+    StressResult r = stress_run(c);
+    EXPECT_EQ(2, r.failures);            // one per worker
+    EXPECT_EQ(0u, r.ios);
+    EXPECT_NE(std::string::npos, r.first_error.find("open failed")) << r.first_error;
+    EXPECT_NE(std::string::npos, r.first_error.find(strerror(ENOENT))) << r.first_error;
+}
+
+TEST(StressChild, a_span_that_does_not_fit_is_caught_before_any_spawn) {
+    // A configuration check, not IO: it needs no descriptor, so it stays in the
+    // parent. The node below does not exist, which is what makes the two
+    // distinguishable -- had this spawned, the child's own open failure would be
+    // in first_error instead.
+    StressCfg c;
+    c.node = "/tmp/photon-blk-stress-child-unspawned";
+    c.size = 4096;
+    c.base_off = 1ull << 20;   // leaves no span at all
+    StressResult r = stress_run(c);
+    EXPECT_EQ(1, r.failures);
+    EXPECT_EQ(0u, r.ios);
+    EXPECT_NE(std::string::npos, r.first_error.find("the span does not fit the device"))
+        << r.first_error;
+}
+
 }  // namespace test
 }  // namespace blk
 }  // namespace photon

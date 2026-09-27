@@ -272,17 +272,64 @@ struct ConsumerReport {            // POD, shared with the child
     uint32_t fds;                  // the child's own census after the drop
 };
 
+// A stress phase's counters, in the same report page as the ConsumerReport above
+// it, written by the same child. Kept out of ConsumerReport because that one is
+// what EVERY consumer writes and what the single-IO cases assert on: 320 bytes of
+// error text folded into it would be carried by every child to report a phase it
+// never ran.
+struct ConsumerStressReport {      // POD, shared with the child
+    uint64_t ios;                  // completed write+read-back pairs
+    uint64_t bytes;                // bytes written (== bytes read back)
+    int32_t failures;              // syscall + validation errors
+    char errbuf[320];              // the first error. The width is
+                                   // StressCounters::errbuf's, not a new one: it
+                                   // is the buffer this one is copied out of.
+};
+
 // The result channel: ONE fd-backed shared object, mapped by both sides, handed
 // to the child as a descriptor. Not an anonymous mapping -- exec replaces the
 // whole address space, so only what the child is handed as an fd survives into
 // it. Not a pipe either -- the child drops every descriptor it was handed, and
 // the verdict has to outlive that, which a mapping does and a pipe cannot.
 //
-// Layout, derived by both sides from `len` alone:
-//   [0, page_align(sizeof(ConsumerReport)))  the report
-//   [.., + page_align(len))                  the write payload, the caller's
-//   [.., + page_align(len))                  the read-back, the child's
-// Page-aligned so an O_DIRECT consumer can use both buffers as they are.
+// Layout, derived by BOTH sides from (mode, len) through the same function
+// (channel_layout(), harness.cpp): the parent from the mode and length it is
+// handing over, the child from the mode and length in its argv. Never worked out
+// once per side, because two copies of these offsets can drift, and a parent that
+// reads its report where the child did not write one reads zeros -- and zero is
+// "nothing failed", so the case stays green and lies.
+//   [0, page_align(both report PODs))   ConsumerReport, then ConsumerStressReport
+//   [.., + page_align(len))             the write payload, the caller's
+//   [.., + page_align(len))             the read-back, the child's
+// Page-aligned so an O_DIRECT consumer can use both buffers as they are. A stress
+// child allocates its own IO buffers, so it has no payload region and its channel
+// is the report page alone.
+//
+// The child's argv, which is how the mode and the length above reach it. argv[0]
+// is the suite's own binary, argv[1] the sentinel consumer_child_main() dispatches
+// on, argv[2] the mode tag, argv[3] the descriptor the channel arrived on, then
+// the mode's own fields, then the node path LAST -- argv elements pass through
+// verbatim, so a path needs no quoting, while anything packed into one element
+// would need a separator the path could contain.
+//
+// Every field is a decimal integer, range-checked on its own, and argc is per
+// mode: a mis-decode has to be loud, because the alternative is a field read out
+// of the wrong slot yielding a plausible number and a silent wrong IO. That is
+// also why the scalars travel here rather than in the channel, whose fields
+// nothing checks -- a wrong offset there is just a wrong number.
+//
+//   mode tag              argc  fields after argv[3], with their accepted range
+//   CONS_MODE_IO            10  flags [0, INT_MAX], open_tries [1, 1e6],
+//                               write [0, 1], off, len [1, 2^40], path
+//   CONS_MODE_STRESS        14  stress_mode [DISJOINT, SHARED], threads [1, 4096],
+//                               iters [1, 1e6], base_off (4K-aligned), span
+//                               (4K-aligned, nonzero), max_block (nonzero),
+//                               direct [0, 1], flush [0, 1], seed [0, 2^32-1],
+//                               path
+enum ConsumerMode : int32_t {
+    CONS_MODE_IO     = 0,   // one write+fsync+read-back: consumer_io()
+    CONS_MODE_STRESS = 1,   // a whole stress phase: stress_run()
+};
 
 // Where a consumer IO ended. Also how the caller's own failure to even start
 // one is reported, so that a single `stage` names the culprit in every case.
@@ -319,6 +366,13 @@ enum ConsumerExit : int32_t {
 // process is a suite and not a consumer child. Negative, so no exit code -- which
 // is 0..255 -- can be mistaken for it.
 constexpr int CONS_NOT_A_CHILD = -1;
+
+// argv[1] of a consumer child, the sentinel consumer_child_main() dispatches on.
+// Exposed because a case that spawns a child of its own has to spell it exactly:
+// a child that does not see it is not a consumer that failed, it is this suite
+// running again inside a child -- and every consumer case in that suite spawning
+// another one.
+extern const char CONS_CHILD_ARG[];
 
 // The consumer child's entire program. Every blk suite's main() must call this
 // FIRST, ahead of photon::init() and of InitGoogleTest(): the child needs no
@@ -382,10 +436,31 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
 // it turned out to be gone without a status to read, which leaves `reaped`
 // clear and `hung` as it was. Runs its poll off the vcpu, so it is safe to call
 // from a coroutine.
+//
+// The two `false` returns leave different things behind, and that decides whether
+// a cleanup path retries: only the timeout keeps the channel mapped, so it is the
+// only one worth calling again. A call that got as far as a verdict has released
+// the channel, and a second one fails on having nothing left to read through.
 bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
 
 // Unmap the result channel of a consumer that will not be reaped. Idempotent.
 void consumer_release(ConsumerIoResult& r);
+
+// Spawn the consumer child with EXACTLY this argv and report what came back
+// through the same posix_spawn / bounded wait / consumer_decode path consumer_io()
+// takes. `argv` is argv[1] onwards and must start with CONS_CHILD_ARG -- argv[0]
+// (this binary) and the terminator are supplied here, and anything else is
+// refused without spawning (see CONS_CHILD_ARG for what a child that does not see
+// the sentinel turns out to be). The channel is the report page alone, which is
+// all a child that never reaches its IO can touch.
+//
+// Test-only, and the reason it exists: the structural exit codes above are the
+// loud half of the isolation, and the only way to hear them is to hand the child
+// an argv that cannot decode. A case that spawned the child itself would witness
+// libc's exit codes rather than this mapping of them -- and would say nothing
+// about the path the suites actually take.
+ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv,
+                                     uint64_t timeout_us = 0);
 
 // ---------------------------------------------------------------------------
 // single-shot device IO (the suites' workhorse) and a deterministic pattern
@@ -491,7 +566,9 @@ struct StressResult {
     uint64_t bytes = 0;                   // bytes written (== bytes read back)
     int failures = 0;                     // syscall + validation errors
     std::string first_error;
-    uint64_t elapsed_us = 0;
+    uint64_t elapsed_us = 0;              // measured by stress_run(), around the
+                                          // spawn of the child that ran the phase,
+                                          // so it includes the spawn and the exec
 
     explicit operator bool() const { return failures == 0 && ios > 0; }
     void report(const char* what, const StressCfg& c) const;
@@ -509,12 +586,18 @@ struct StressRnd {
     uint64_t below(uint64_t n) { return n ? next() % n : 0; }
 };
 
-// Runs on the CALLING OS THREAD (it spawns and joins its own workers); from a
-// coroutine use stress_off_vcpu() below.
+// Runs the phase in a SPAWNED CHILD and returns that child's counters. One child
+// per phase, not per IO: the property being protected is who holds the node, and
+// every worker of a phase opens it, so a phase is the smallest unit that can be
+// wedged on it -- and per-IO children would be tens of thousands of execs.
+// Runs on the CALLING OS THREAD: it spawns that child and then polls for it with
+// a deadline of its own. From a coroutine use stress_off_vcpu() below.
 StressResult stress_run(const StressCfg& c);
 
-// Coroutine-safe wrapper: the driver runs entirely on OS threads while this
-// vcpu keeps serving the device under test.
+// Coroutine-safe wrapper: the spawn and the bounded wait both run on an OS thread
+// while this vcpu keeps serving the device under test. The wait is a
+// WNOHANG/nanosleep poll, so on the vcpu it would stall the very coroutines that
+// have to serve the IO being waited on.
 StressResult stress_off_vcpu(const StressCfg& c);
 
 // Both phases the kernel-node suites run: DISJOINT at the default concurrency
