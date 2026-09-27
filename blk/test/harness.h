@@ -51,6 +51,8 @@ namespace test {
 // Run a blocking callable on a fresh OS thread and yield the vcpu until it
 // returns: blk::run_off_vcpu (utils.h) for a callable with nothing to report.
 // Synchronous, so a temporary lambda is safe (the TempDelegate contract).
+// A caller with no photon thread runs it inline: it has no vcpu to yield, and
+// the hand-back needs one.
 void run_off_vcpu(TempDelegate<void> fn);
 
 // Open a device node, retrying the not-ready race (ENXIO while the driver and
@@ -105,7 +107,8 @@ public:
     void reset();
     fs::IFile* underlying() { return m_file; }
 
-    // Hold every backend IO inside record() until release_gate(). The purpose is to
+    // Hold every backend IO inside record() until release_gate(), or until a
+    // teardown interrupts it -- see record() for that one exit. The purpose is to
     // PIN a device state that is otherwise transient: with all of a virtqueue's
     // dispatched requests parked here at once, in_flight stays at the dispatch cap
     // for as long as the gate is shut, so the avail entries behind the cap stay
@@ -115,8 +118,9 @@ public:
     // microseconds wide and an assertion on it would be a timing guess. Off by
     // default, so an ungated RecordingFile stays exactly the placement probe above.
     bool gated = false;
-    // Resume every parked IO at once. `n` only has to be at least the number that
-    // reached the gate; whatever is left over stays in the count and is harmless.
+    // Resume every parked IO at once. `n` only has to be at least the number still
+    // parked, which a teardown's interrupt can make fewer than reached the gate;
+    // whatever is left over stays in the count and is harmless.
     // Clears `gated` FIRST: an IO arriving after the release must not park on a
     // gate nobody is going to open again.
     void release_gate(uint64_t n = 1) {
@@ -163,7 +167,11 @@ public:
 private:
     void record();
     fs::IFile* m_file;
-    photon::semaphore gate{0};   // NSDMI, not {}: semaphore's ctor is explicit
+    // NSDMI, not {}: semaphore's ctor is explicit. In-order (the ctor's default),
+    // deliberately: that is the mode in which an interrupted wait_interruptible
+    // wakes the waiters queued behind it to take the count it did not, while
+    // out-of-order leaves that count for the next signal() to hand over.
+    photon::semaphore gate{0};
     photon::mutex m_lock;
     std::vector<photon::vcpu_base*> m_vcpus;
 
@@ -367,11 +375,13 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
                              size_t len, uint64_t off, const ConsumerIoOpts& o = {});
 
 // Wait out a child that consumer_io() abandoned, then finish reading its
-// report. Returns false if `timeout_us` (0 = CONSUMER_TIMEOUT_US) passed again,
-// in which case the child is still running and still not killed -- an
-// uninterruptible sleeper cannot be, which is why the consumer is a child
-// rather than a thread in the first place. Runs its poll off the vcpu, so it is
-// safe to call from a coroutine.
+// report. Returns true once the child is collected, which sets `reaped`; false
+// if `timeout_us` (0 = CONSUMER_TIMEOUT_US) passed again -- the child is still
+// running and still not killed, an uninterruptible sleeper cannot be, which is
+// why the consumer is a child rather than a thread in the first place -- or if
+// it turned out to be gone without a status to read, which leaves `reaped`
+// clear and `hung` as it was. Runs its poll off the vcpu, so it is safe to call
+// from a coroutine.
 bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
 
 // Unmap the result channel of a consumer that will not be reaped. Idempotent.

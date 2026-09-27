@@ -42,7 +42,6 @@ limitations under the License.
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -265,11 +264,18 @@ TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
     // device case: a FIFO open is an interruptible wait. The device case is not,
     // which is why consumer_reap() waits and never signals.
     EXPECT_EQ(0, ::kill(r.pid, SIGKILL));
-    int st = 0;
-    EXPECT_EQ(r.pid, ::waitpid(r.pid, &st, 0));
-    EXPECT_TRUE(WIFSIGNALED(st));
-    consumer_release(r);
-    EXPECT_EQ(nullptr, r.shm);
+    // Through the harness's bounded primitive rather than a raw waitpid(): the
+    // parent never waits on a consumer child without a deadline of its own,
+    // however sure it is that this particular one will die.
+    EXPECT_TRUE(consumer_reap(r, 5ull * 1000 * 1000));
+    EXPECT_TRUE(r.reaped);
+    EXPECT_FALSE(r.hung);
+    // consumer_decode's signal branch: a signal is what ended this child, and the
+    // signal number is what comes back as its exit code
+    EXPECT_EQ(CONS_EXIT, r.stage);
+    EXPECT_EQ(EIO, r.status);
+    EXPECT_EQ(SIGKILL, r.exit_code);
+    EXPECT_EQ(nullptr, r.shm);   // consumer_reap released the channel
 }
 
 }  // namespace test

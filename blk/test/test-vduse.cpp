@@ -219,8 +219,8 @@ public:
         return i;
     }
 
-    // run blocking device IO off the photon vcpu; returns 0 on success, errno
-    // on a syscall failure, or EILSEQ on a data mismatch
+    // run blocking device IO off the photon vcpu, in a spawned consumer child;
+    // harness.h's device_io is the authoritative statement of what it returns
     int device_io(const std::string& node, const std::vector<char>& wbuf,
                   bool verify_backend, uint64_t off = IO_OFF, bool read_only = false) {
         test::DeviceIoOpts o;

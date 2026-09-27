@@ -351,9 +351,10 @@ public:
         return cfg;
     }
 
-    // run blocking device IO off the photon vcpu; returns 0 on success, errno on
-    // a syscall failure, or EILSEQ on a data mismatch. verify_backend reads the
-    // range back from backend_file (default: the fixture's backend `file`).
+    // run blocking device IO off the photon vcpu, in a spawned consumer child;
+    // harness.h's device_io is the authoritative statement of what it returns.
+    // verify_backend reads the range back from backend_file (default: the
+    // fixture's backend `file`).
     int device_io(const std::string& sd, const std::vector<char>& wbuf, bool verify_backend,
                   uint64_t off = IO_OFF, fs::IFile* backend_file = nullptr) {
         test::DeviceIoOpts o;

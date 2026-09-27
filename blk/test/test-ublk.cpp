@@ -249,8 +249,8 @@ public:
         return i;
     }
 
-    // run blocking device IO off the photon vcpu; returns 0 on success, errno
-    // on a syscall failure, or EILSEQ on a data mismatch
+    // run blocking device IO off the photon vcpu, in a spawned consumer child;
+    // harness.h's device_io is the authoritative statement of what it returns
     int device_io(const std::string& node, const std::vector<char>& wbuf,
                   bool verify_backend, uint64_t off = IO_OFF) {
         test::DeviceIoOpts o;
@@ -664,16 +664,19 @@ TEST_F(UblkTest, restart_window_io) {
 // the daemon takes the registration back and destroys it while the consumer is
 // still stuck on it, and the consumer then drains on its own.
 //
-// (c) is precisely what a consumer inside this process cannot do: it shares one
-// fd table with the daemon, and releasing the control device is a precondition
-// of the re-attach that alone could complete the stuck IO.
+// (c) is what a consumer inside this process measurably cost once: it shares one
+// fd table with the daemon, and that process was unkillable for two days with a
+// device that was never recovered.
+//
+// A red here costs one ublk dev_id and may leave a process that cannot be killed,
+// so do not re-run it in a loop and measure the D-state census after any failure.
 TEST_F(UblkTest, consumer_hang_is_contained) {
     test::RecordingFile rec(file);
     UblkController::Config cfg(make_info());
     // The consumer drains only once the re-attached daemon has completed its IO,
     // and shutdown() bounds its wait for the node's last opener with this knob.
-    // The default is tuned for a holder that will never leave; here one is
-    // expected to, and 2 s of margin is not much against a re-attach.
+    // The default is a 2 s budget in total, tuned for a holder that will never
+    // leave; here one is expected to, and 2 s is not much against a re-attach.
     cfg.stop_timeout_ms = 20000;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);

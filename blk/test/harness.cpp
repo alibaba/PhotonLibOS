@@ -324,6 +324,14 @@ StressResult stress_shared(const StressCfg& c, uint64_t span) {
 // ---------------------------------------------------------------------------
 
 void run_off_vcpu(TempDelegate<void> fn) {
+    // The hop exists so a blocking callable does not stall the vcpu that has to
+    // serve the IO it is waiting on. A caller with no photon thread has no vcpu
+    // to stall -- and cannot take the hop either, since the semaphore that hands
+    // the result back parks on one.
+    if (!photon::CURRENT) {
+        fn();
+        return;
+    }
     // qualified: unqualified lookup from photon::blk::test finds THIS function
     blk::run_off_vcpu([&] { fn(); return 0; });
 }
@@ -463,9 +471,10 @@ struct ConsumerArgs {
 // fcntl(F_GETFD) per candidate is one syscall and opens nothing.
 //
 // Capped, because the census runs on every consumer IO and RLIMIT_NOFILE is
-// commonly 1M. The cap bounds the SELF-CHECK only -- drop_inherited_fds() below
-// covers every fd however high -- and a drop that does not work at all shows up
-// at the low end, where the descriptors this process opens early are.
+// commonly 1M. The cap bounds the SELF-CHECK only on Linux, where
+// drop_inherited_fds() below covers every fd however high; that function's
+// non-Linux fallback loop shares this bound. A drop that does not work at all
+// shows up at the low end, where the descriptors this process opens early are.
 uint32_t fd_table_bound() {
     constexpr uint32_t CAP = 1u << 16;
     struct rlimit rl;
@@ -768,8 +777,10 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
                          node, ERRNO());
     }
     // The parent's own mapping is what keeps the channel alive from here on, so
-    // the descriptor can go as soon as the spawn has handed it over.
-    DEFER(::close(cfd));
+    // the descriptor can go as soon as the spawn has handed it over. Until then
+    // the early returns below still have to close it.
+    bool spawned = false;
+    DEFER(if (!spawned) ::close(cfd));
     void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
     if (base == MAP_FAILED) {
         r.stage = CONS_MAPPING;
@@ -811,10 +822,13 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     char* const av[] = {exe, CONS_CHILD_ARG, a_fd, a_flags, a_tries, a_write,
                         a_off, a_len, (char*)node.c_str(), nullptr};
 
+    // Every posix_spawn* call from here down -- the setup ones and posix_spawn
+    // itself -- reports failure as its own return value; POSIX does not ask any
+    // of them to set errno, so `e` is always taken from the call.
+    int e = 0;
     posix_spawn_file_actions_t fa;
-    if (::posix_spawn_file_actions_init(&fa) != 0) {
-        int e = errno;
-        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+    if ((e = ::posix_spawn_file_actions_init(&fa)) != 0) {
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
                          node, ERRNO(e));
     }
@@ -825,9 +839,8 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     // that from depending on how a libc spells the no-op.
     if (cfd == CONS_CHANNEL_FD)
         ::fcntl(cfd, F_SETFD, 0);
-    if (::posix_spawn_file_actions_adddup2(&fa, cfd, CONS_CHANNEL_FD) != 0) {
-        int e = errno;
-        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+    if ((e = ::posix_spawn_file_actions_adddup2(&fa, cfd, CONS_CHANNEL_FD)) != 0) {
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to hand the result channel to the consumer child for `, ",
                          node, ERRNO(e));
     }
@@ -836,17 +849,16 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     // of whatever pipe the suite is being captured through, and the capture would
     // never see EOF. It also cannot corrupt the gtest output, which it produces
     // none of: its verdict travels in the channel.
-    if (::posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) != 0 ||
-        ::posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0) != 0) {
-        int e = errno;
-        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+    const char* devnull = "/dev/null";
+    if ((e = ::posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, devnull, O_WRONLY, 0)) != 0 ||
+        (e = ::posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, devnull, O_WRONLY, 0)) != 0) {
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to detach the consumer child of ` from this process's stdio, ",
                          node, ERRNO(e));
     }
     posix_spawnattr_t attr;
-    if (::posix_spawnattr_init(&attr) != 0) {
-        int e = errno;
-        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+    if ((e = ::posix_spawnattr_init(&attr)) != 0) {
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
                          node, ERRNO(e));
     }
@@ -855,23 +867,22 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rb
     // one it can never handle, and nothing about a consumer IO wants one.
     sigset_t no_signals;
     sigemptyset(&no_signals);
-    if (::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK) != 0 ||
-        ::posix_spawnattr_setsigmask(&attr, &no_signals) != 0) {
-        int e = errno;
-        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e ? e : EIO;
+    if ((e = ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK)) != 0 ||
+        (e = ::posix_spawnattr_setsigmask(&attr, &no_signals)) != 0) {
+        r.stage = CONS_SPAWN; r.child_errno = e; r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to prepare the spawn of the consumer child for `, ",
                          node, ERRNO(e));
     }
 
     pid_t pid = -1;
-    // posix_spawn reports failure as its return value, not through errno
-    int e = ::posix_spawn(&pid, exe, &fa, &attr, av, environ);
-    if (e != 0) {
+    if ((e = ::posix_spawn(&pid, exe, &fa, &attr, av, environ)) != 0) {
         r.stage = CONS_SPAWN;
         r.child_errno = e;
         r.status = e;
         LOG_ERROR_RETURN(e, r, "failed to spawn the consumer child for `, ", node, ERRNO(e));
     }
+    spawned = true;
+    ::close(cfd);   // promptly: the collision case above cleared its CLOEXEC
 
     r.pid = pid;
     int st = 0;
@@ -917,10 +928,14 @@ bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
         LOG_ERROR_RETURN(ETIMEDOUT, false, "the abandoned consumer child ` of ` is still running after ` us more",
                          (int64_t)r.pid, r.node, elapsed);
     r.reaped = w > 0;
-    r.hung = false;
+    // Only a collected child is known to have stopped running. -1 means it is gone
+    // without a status to read, which says nothing about when it stopped, so
+    // `hung` is left as it was and consumer_decode's own log carries the diagnosis.
+    if (r.reaped)
+        r.hung = false;
     consumer_decode(r, rep, st, w > 0);
     consumer_release(r);
-    return true;
+    return r.reaped;
 }
 
 void consumer_release(ConsumerIoResult& r) {
