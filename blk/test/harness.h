@@ -27,9 +27,11 @@ limitations under the License.
 #include <photon/thread/workerpool.h>   // WorkPool
 
 #include <atomic>
+#include <cerrno>                 // EIO, ETIMEDOUT in the defaults below
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <sys/types.h>            // pid_t
 #include <thread>
 #include <vector>
 
@@ -199,6 +201,132 @@ struct TestPool {
 int count_mq_dirs(const std::string& name);
 
 // ---------------------------------------------------------------------------
+// consumer-side process isolation
+//
+// A consumer IO on an exported node has no completion bound of its own: if the
+// serving side stops while a request is in flight, only a daemon that attaches
+// again can complete it. Doing that IO inside the test process is what turned
+// "stuck" into "unrecoverable", measurably and once already: the process has ONE
+// fd table and the daemon shares it, so a consumer thread parked in an
+// uninterruptible sleep kept the daemon's control device referenced for as long
+// as the process existed, while releasing it is a precondition of the re-attach
+// that alone could complete the IO. That process was unkillable for two days.
+//
+// What a forked consumer buys, and what it was measured NOT to buy:
+//   bought -- the caller keeps a deadline of its own, so a consumer that never
+//     returns costs the suite a timeout instead of the process; and the daemon's
+//     process is no longer the thing that is stuck, so it stays free to act and
+//     free to exit.
+//   NOT bought, for ublk -- dropping the inherited fd table is necessary but not
+//     sufficient. The daemon also MAPS its control device (the per-queue
+//     descriptor rings), a fork copies that mapping, and a shared mapping holds
+//     the opened file referenced exactly as an fd does. So a wedged child still
+//     blocks the release a re-attach needs. Measured on a device whose consumer
+//     child had a verified-empty fd table: the control device still counted the
+//     child as a mapping holder, the device never quiesced after the daemon
+//     closed its own fd, and its shutdown() ended in "still in use" with the
+//     child still wedged. Closing that needs the inherited device mappings
+//     dropped as well, or a consumer that is not a fork of the daemon's process.
+//
+// The fd drop and its self-check stay regardless: they are the proven part, and
+// the census is what keeps the drop from being a comment nobody checks.
+// ---------------------------------------------------------------------------
+
+// The child's record of what it did, in a MAP_SHARED|MAP_ANONYMOUS mapping made
+// before the fork. Not a pipe: a mapping is not an fd, so dropping the fd table
+// cannot take it away, and filling it in is pure stores, so the child never
+// allocates.
+struct ConsumerReport {            // POD, shared with the child
+    uint32_t magic;                // CONSUMER_MAGIC once `status` is final
+    int32_t status;                // 0, an errno, or EILSEQ
+    int32_t stage;                 // which step produced it (ConsumerStage)
+    int32_t child_errno;           // errno at that step
+    uint32_t fds;                  // the child's own census after the drop
+};
+
+// Where a consumer IO ended. Also how the caller's own failure to even start
+// one is reported, so that a single `stage` names the culprit in every case.
+enum ConsumerStage : int32_t {
+    CONS_DONE = 0,   // nothing failed
+    CONS_OPEN,       // the child's open() on the node
+    CONS_WRITE,      // its pwrite()
+    CONS_SYNC,       // its fsync()
+    CONS_READ,       // its pread()
+    CONS_VERIFY,     // the read-back comparison
+    CONS_DROP_FDS,   // it could not drop the inherited fd table
+    CONS_FDLEAK,     // its census found fds that survived the drop
+    CONS_EXIT,       // it ended without writing a report
+    CONS_FORK,       // the caller's fork()
+    CONS_MAPPING,    // the caller's report mapping
+    CONS_TIMEOUT,    // the deadline passed with the child still running
+};
+const char* consumer_stage_name(ConsumerStage s);
+
+// The child's exit codes above the status range. `_exit(status)` carries 0 or
+// an errno, so these two sit where no errno can reach them -- otherwise a
+// structural failure of the isolation itself would read as an IO error.
+enum ConsumerExit : int32_t {
+    CONS_EXIT_DROP_FDS = 200,
+    CONS_EXIT_FDLEAK   = 201,
+};
+
+struct ConsumerIoOpts {
+    bool read_only = false;      // skip the write+fsync, just read the range
+    bool direct = false;         // O_DIRECT
+    int open_tries = 200;        // ENXIO retry budget for the not-ready race
+    // How long the caller waits. On expiry the child is ABANDONED -- never
+    // killed, an uninterruptible sleeper ignores signals -- and the call
+    // reports ETIMEDOUT with `hung` set. 0 selects the default below, which is
+    // deliberately far above a served IO: that one completes in milliseconds.
+    uint64_t timeout_us = 0;
+};
+constexpr uint64_t CONSUMER_TIMEOUT_US = 60ull * 1000 * 1000;
+
+struct ConsumerIoResult {
+    int status = EIO;            // 0, an errno, EILSEQ, or ETIMEDOUT if abandoned
+    ConsumerStage stage = CONS_DONE;
+    int child_errno = 0;         // the child's errno at `stage`
+    int exit_code = -1;          // raw, or -1 while the child has not exited
+    pid_t pid = -1;
+    bool hung = false;           // the deadline passed with the child running
+    bool reaped = false;         // waitpid() collected it and read its report
+    uint32_t fds = 0;            // its post-drop census: anything else is a bug
+    uint64_t elapsed_us = 0;
+    std::string node;            // for the log lines, including consumer_reap's
+    // The report mapping, held while the child may still write it -- which an
+    // abandoned one does. consumer_reap() reads it and releases it; a caller
+    // that gives up on the child must release it itself.
+    void* shm = nullptr;
+};
+
+// Run one write+fsync+read-back (or, with read_only, one read) against `node`
+// in a forked child, and report what it did. `wbuf` and `rbuf` are `len` bytes
+// each and must be prepared by the caller: the child allocates nothing, and the
+// read-back comparison happens IN the child because its copy of `rbuf` is not
+// visible here once the two address spaces diverge.
+//
+// CALL FROM OFF THE VCPU (e.g. inside run_off_vcpu): the wait is a bounded
+// WNOHANG/nanosleep poll, and running that on the vcpu would stall the very
+// coroutines that have to serve the IO being waited on.
+//
+// A result with `hung` set owns a child that is still running and a report page
+// that is still mapped: finish with consumer_reap(), or give up on it and call
+// consumer_release().
+ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
+                             size_t len, uint64_t off, const ConsumerIoOpts& o = {});
+
+// Wait out a child that consumer_io() abandoned, then finish reading its
+// report. Returns false if `timeout_us` (0 = CONSUMER_TIMEOUT_US) passed again,
+// in which case the child is still running and still not killed -- an
+// uninterruptible sleeper cannot be, which is why the consumer is a child
+// rather than a thread in the first place. Runs its poll off the vcpu, so it is
+// safe to call from a coroutine.
+bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
+
+// Unmap the report page of a consumer that will not be reaped. Idempotent.
+void consumer_release(ConsumerIoResult& r);
+
+// ---------------------------------------------------------------------------
 // single-shot device IO (the suites' workhorse) and a deterministic pattern
 // ---------------------------------------------------------------------------
 
@@ -208,11 +336,17 @@ struct DeviceIoOpts {
     fs::IFile* backend = nullptr;   // also verify the range in the backend file
     bool read_only = false;         // skip the write+fsync, just read the range
     bool direct = false;            // O_DIRECT
+    uint64_t timeout_us = 0;        // 0 = CONSUMER_TIMEOUT_US
+    ConsumerIoResult* report = nullptr;   // optional: what the consumer child did
 };
 
-// Write + fsync + read back `len` bytes at `off` through the device node,
-// entirely off the photon vcpu. Returns 0, an errno, or EILSEQ when the data
-// read back (or the backend's copy) does not match what was written.
+// Write + fsync + read back `len` bytes at `off` through the device node, from a
+// forked consumer child (see above) and entirely off the photon vcpu. Returns 0,
+// an errno, EILSEQ when the data read back (or the backend's copy) does not
+// match what was written, or ETIMEDOUT when the child had to be abandoned --
+// which leaves it running. Ask for `report` to keep the handle on it (its pid
+// and its report page, for a later consumer_reap()); without one the page is
+// released here and the child is left to finish or not on its own.
 int device_io(const std::string& node, const void* wbuf, size_t len,
               uint64_t off, const DeviceIoOpts& o = {});
 

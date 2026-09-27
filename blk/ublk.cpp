@@ -63,7 +63,12 @@ limitations under the License.
 // - START_USER_RECOVERY requires the old daemon's /dev/ublkcN released AND the
 //   device QUIESCED; the quiesce runs asynchronously after the close, so the
 //   EBUSY must be polled rather than assumed gone. END_USER_RECOVERY(pid) brings
-//   the device back to LIVE and requeues what was in flight.
+//   the device back to LIVE and requeues what was in flight. A thread of the old
+//   daemon that is stuck in an uninterruptible sleep defeats the first
+//   precondition for good: the fd table belongs to the process, not the thread,
+//   so the control device stays referenced until the LAST thread exits -- and
+//   the thread that cannot exit is exactly the one waiting on the IO that only
+//   a re-attach would complete.
 // - request data crosses via the per-tag userspace buffer whose address was
 //   handed over in FETCH_REQ: the request's bytes are copied into that buffer at
 //   fetch time (a WRITE) and out of it at commit time (a READ).

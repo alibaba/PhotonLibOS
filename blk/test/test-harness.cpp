@@ -16,7 +16,7 @@ limitations under the License.
 
 // Unit checks for the shared blk test helpers themselves (harness.h/.cpp): the
 // self-describing stress block format, its validator, the failure classifier,
-// and pattern().
+// pattern(), and the consumer-side process isolation.
 //
 // A stress test that cannot fail is worthless, and the suites' concurrent_stress
 // cases only ever exercise the HAPPY path -- so this is what locks in the
@@ -25,11 +25,25 @@ limitations under the License.
 // mode's canonical-block invariant must hold, since the whole shared-region
 // verification model rests on it.
 //
+// The consumer checks below hold the isolation to the same standard. No device
+// node and no root, deliberately: what has to be true for every transport is the
+// plumbing (the child's verdict reaching the caller), the child dropping the fd
+// table it inherited, and the caller keeping a deadline of its own instead of
+// waiting on a consumer that may never come back.
+//
 // Pure logic: no root, no device node, no photon runtime, every platform.
 
 #include "harness.h"
 
 #include "../../test/gtest.h"
+
+#include <photon/common/utility.h>   // DEFER
+
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
@@ -150,6 +164,112 @@ TEST(Pattern, pattern_is_deterministic_and_seed_sensitive) {
     EXPECT_EQ(pattern(0x5a, 4096), pattern(0x5a, 4096));
     EXPECT_NE(pattern(0x5a, 4096), pattern(0xa5, 4096));
     EXPECT_EQ(4096u, pattern(0x5a, 4096).size());
+}
+
+TEST(ConsumerIo, the_child_reports_success_and_a_clean_fd_table) {
+    const char* path = "/tmp/photon-blk-consumer-file";
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)(OFF + BLK)));
+    ::close(fd);
+    DEFER(::unlink(path));
+
+    auto wbuf = pattern(0x5a, BLK);
+    std::vector<char> rbuf(BLK);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), BLK, OFF);
+    EXPECT_EQ(0, r.status);
+    EXPECT_EQ(CONS_DONE, r.stage);
+    EXPECT_TRUE(r.reaped);
+    EXPECT_FALSE(r.hung);
+    EXPECT_EQ(0, r.exit_code);
+    EXPECT_EQ(nullptr, r.shm);
+    EXPECT_EQ(0u, r.fds);   // see the inheritance case below for what this proves
+}
+
+TEST(ConsumerIo, the_child_does_not_inherit_the_callers_descriptors) {
+    // A wedged consumer that still holds the descriptors of the process serving
+    // the device holds the one reference whose release a re-attach needs, so the
+    // drop is the load-bearing step of the isolation -- and the child censuses
+    // its own table afterwards rather than trusting it. Both halves need a
+    // caller that HAS descriptors to mean anything: with an empty parent table
+    // the census passes whether or not the drop ran, and the guard is decoration.
+    const char* path = "/tmp/photon-blk-consumer-inherit";
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)(OFF + BLK)));
+    DEFER(::close(fd));
+    DEFER(::unlink(path));
+    int held[3];
+    for (int& h : held)
+        h = ::open(path, O_RDONLY);
+    DEFER(for (int h : held) ::close(h));
+    for (int h : held)
+        ASSERT_EQ(0, ::fcntl(h, F_GETFD));   // the parent really is holding them
+
+    auto wbuf = pattern(0x5a, BLK);
+    std::vector<char> rbuf(BLK);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), BLK, OFF);
+    EXPECT_EQ(0, r.status);                     // the IO still ran
+    EXPECT_EQ(0u, r.fds);                       // with none of them inherited
+    EXPECT_NE((int)CONS_EXIT_FDLEAK, r.exit_code);
+    // ...and the drop is the CHILD's only: a parent-side close here would look
+    // identical to the child from the report's point of view
+    EXPECT_EQ(0, ::fcntl(fd, F_GETFD));
+    for (int h : held)
+        EXPECT_EQ(0, ::fcntl(h, F_GETFD));
+}
+
+TEST(ConsumerIo, a_failure_carries_its_stage_and_errno_back) {
+    const char* path = "/tmp/photon-blk-consumer-absent";
+    ::unlink(path);
+    auto wbuf = pattern(0x5a, 4096);
+    std::vector<char> rbuf(4096);
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), 4096, OFF);
+    // the child cannot log, so the verdict has to survive the exit status: the
+    // stage says which syscall, the errno says why, and the exit code mirrors
+    // the status so that even a lost report page still names the failure
+    EXPECT_EQ(ENOENT, r.status);
+    EXPECT_EQ(CONS_OPEN, r.stage);
+    EXPECT_EQ(ENOENT, r.child_errno);
+    EXPECT_EQ(ENOENT, r.exit_code);
+    EXPECT_TRUE(r.reaped);
+    EXPECT_EQ(nullptr, r.shm);
+}
+
+TEST(ConsumerIo, a_consumer_that_never_returns_costs_the_caller_a_deadline) {
+    const char* path = "/tmp/photon-blk-consumer-fifo";
+    ::unlink(path);
+    ASSERT_EQ(0, ::mkfifo(path, 0600));
+    DEFER(::unlink(path));
+
+    auto wbuf = pattern(0x5a, 4096);
+    std::vector<char> rbuf(4096);
+    ConsumerIoOpts o;
+    o.read_only = true;      // open() on a FIFO with no writer does not return
+    o.timeout_us = 1000 * 1000;
+    ConsumerIoResult r = consumer_io(path, wbuf.data(), rbuf.data(), 4096, OFF, o);
+
+    // The caller is back and the consumer is not, which is the reason the
+    // consumer is a child rather than a thread: a thread here takes the caller
+    // with it, and with the caller goes everything it still had to do -- for a
+    // suite that also serves the device under test, that is the device.
+    EXPECT_EQ(ETIMEDOUT, r.status);
+    EXPECT_TRUE(r.hung);
+    EXPECT_FALSE(r.reaped);
+    EXPECT_EQ(CONS_TIMEOUT, r.stage);
+    EXPECT_GT(r.pid, 0);
+    EXPECT_GE(r.elapsed_us, o.timeout_us);
+    EXPECT_NE(nullptr, r.shm);
+
+    // This one CAN be collected, and that is the difference between it and the
+    // device case: a FIFO open is an interruptible wait. The device case is not,
+    // which is why consumer_reap() waits and never signals.
+    EXPECT_EQ(0, ::kill(r.pid, SIGKILL));
+    int st = 0;
+    EXPECT_EQ(r.pid, ::waitpid(r.pid, &st, 0));
+    EXPECT_TRUE(WIFSIGNALED(st));
+    consumer_release(r);
+    EXPECT_EQ(nullptr, r.shm);
 }
 
 }  // namespace test

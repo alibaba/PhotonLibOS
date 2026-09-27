@@ -31,6 +31,9 @@ limitations under the License.
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -342,6 +345,340 @@ std::string sh_off_vcpu(const std::string& cmd, int* rc) {
 }
 
 // ---------------------------------------------------------------------------
+// consumer-side process isolation
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint32_t CONSUMER_MAGIC = 0x434f4e53u;   // "CONS"
+
+// Everything the child needs, all of it prepared by the parent before the fork
+// and all of it POD. The child may not allocate, construct, log, or touch
+// photon: it forked out of a multi-threaded process, so any lock another thread
+// held at the fork instant stays held forever in the child, and an allocator or
+// a logger taking one deadlocks -- probabilistically, which is worse than
+// reliably. Keeping this a flat POD struct is what makes the child body
+// auditable in one read.
+struct ConsumerArgs {
+    const char* path;        // NUL-terminated, outlives the fork
+    int flags;               // open() flags
+    int open_tries;          // >= 1
+    int write;               // 0 = read only
+    uint64_t off;
+    size_t len;
+    const void* wbuf;        // len bytes
+    void* rbuf;              // len bytes
+    ConsumerReport* rep;     // the shared mapping
+};
+
+// The bound of the fd census. NOT /proc/self/fd: opendir()/readdir() allocate,
+// and the child must not. fcntl(F_GETFD) per candidate is a bare syscall.
+//
+// Capped, because the census runs on every consumer IO and RLIMIT_NOFILE is
+// commonly 1M. The cap bounds the SELF-CHECK only -- drop_inherited_fds() below
+// covers every fd however high -- and a drop that does not work at all shows up
+// at the low end, where the daemon's control-device and ring fds are.
+uint32_t fd_table_bound() {
+    constexpr uint32_t CAP = 1u << 16;
+    struct rlimit rl;
+    if (::getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY)
+        return CAP;
+    return rl.rlim_cur > CAP ? CAP : (uint32_t)rl.rlim_cur;
+}
+
+uint32_t count_fds_from(uint32_t lo) {
+    uint32_t hi = fd_table_bound(), n = 0;
+    for (uint32_t i = lo; i < hi; i++)
+        if (::fcntl((int)i, F_GETFD) == 0)
+            n++;
+    return n;
+}
+
+// Drop the whole inherited fd table -- the load-bearing step of the isolation,
+// and necessary but NOT sufficient: harness.h records what else a fork copies
+// that this cannot reach. Without it the child holds every descriptor the daemon
+// has, its control device among them, and the fork would have changed the
+// structure without changing the property -- the hardest kind of false fix to
+// notice. So the caller does not trust this: it censuses afterwards and refuses
+// to run the IO if anything survived.
+int drop_inherited_fds() {
+#ifdef __linux__
+    return ::close_range(3u, ~0u, 0u);
+#else
+    // no close_range(2); every transport that exports a node is Linux-only, so
+    // this branch only has to be correct enough to keep the file compiling
+    uint32_t hi = fd_table_bound();
+    for (uint32_t i = 3; i < hi; i++)
+        if (::close((int)i) < 0 && errno != EBADF)
+            return -1;
+    return 0;
+#endif
+}
+
+// The child's IO: bare syscalls, no allocation, no logging. Records the verdict
+// in the report page and returns the exit code, which mirrors `status`.
+int consumer_io_body(const ConsumerArgs* a) {
+    ConsumerStage stage = CONS_DONE;
+    int e = 0, status = 0, fd = -1;
+    for (int i = 0; i < a->open_tries; i++) {
+        fd = ::open(a->path, a->flags);
+        if (fd >= 0 || errno != ENXIO)
+            break;
+        struct timespec ts{0, 5 * 1000 * 1000};   // 5 ms: the not-ready race
+        ::nanosleep(&ts, nullptr);
+    }
+    if (fd < 0) {
+        stage = CONS_OPEN;
+        e = errno;
+    } else if (a->write) {
+        if (::pwrite(fd, a->wbuf, a->len, (off_t)a->off) != (ssize_t)a->len) {
+            stage = CONS_WRITE; e = errno;
+        } else if (::fsync(fd) < 0) {
+            stage = CONS_SYNC; e = errno;
+        }
+    }
+    if (fd >= 0 && stage == CONS_DONE &&
+        ::pread(fd, a->rbuf, a->len, (off_t)a->off) != (ssize_t)a->len) {
+        stage = CONS_READ; e = errno;
+    }
+    // the comparison has to happen HERE: the caller's copy of rbuf is a
+    // different page now, and what the device returned never reaches it
+    if (stage == CONS_DONE && a->write && ::memcmp(a->wbuf, a->rbuf, a->len) != 0) {
+        stage = CONS_VERIFY; status = EILSEQ;
+    }
+    if (fd >= 0)
+        ::close(fd);
+    if (stage != CONS_DONE && status == 0)
+        status = e ? e : EIO;
+    ConsumerReport* rep = a->rep;
+    rep->status = status;
+    rep->stage = (int32_t)stage;
+    rep->child_errno = e;
+    rep->magic = CONSUMER_MAGIC;
+    return status < CONS_EXIT_DROP_FDS ? status : EIO;
+}
+
+// Turn the child's exit status and report page into the caller's verdict.
+// Shared by consumer_io() and consumer_reap(), because an abandoned child's
+// report is only readable once it does exit.
+void consumer_decode(ConsumerIoResult& r, const ConsumerReport* rep, int st,
+                     bool have_status) {
+    if (!have_status) {
+        r.status = EIO;
+        r.stage = CONS_EXIT;
+        LOG_ERROR("the consumer child ` of ` was collected before it reported",
+                  (int64_t)r.pid, r.node);
+        return;
+    }
+    if (WIFSIGNALED(st)) {
+        r.status = EIO;
+        r.stage = CONS_EXIT;
+        r.exit_code = WTERMSIG(st);
+        LOG_ERROR("the consumer child ` of ` died on signal `",
+                  (int64_t)r.pid, r.node, WTERMSIG(st));
+        return;
+    }
+    if (!WIFEXITED(st)) {
+        r.status = EIO;
+        r.stage = CONS_EXIT;
+        LOG_ERROR("the consumer child ` of ` ended in an unexpected wait status `",
+                  (int64_t)r.pid, r.node, st);
+        return;
+    }
+    int code = WEXITSTATUS(st);
+    r.exit_code = code;
+    if (rep->magic == CONSUMER_MAGIC) {
+        r.status = rep->status;
+        r.stage = (ConsumerStage)rep->stage;
+        r.child_errno = rep->child_errno;
+        r.fds = rep->fds;
+    } else {
+        r.status = code;   // the exit code mirrors `status`
+        r.stage = CONS_EXIT;
+    }
+    // the two structural codes outrank the report: both say the isolation
+    // itself is in question, which is a louder finding than any IO error
+    if (code == CONS_EXIT_DROP_FDS || code == CONS_EXIT_FDLEAK) {
+        r.status = EIO;
+        r.stage = code == CONS_EXIT_DROP_FDS ? CONS_DROP_FDS : CONS_FDLEAK;
+    }
+    if (r.status)
+        LOG_ERROR("consumer IO on ` failed at ` (exit `), ", r.node,
+                  consumer_stage_name(r.stage), code,
+                  ERRNO(r.child_errno ? r.child_errno : r.status));
+}
+
+// The parent's wait, bounded. Polls instead of blocking, and on expiry gives up
+// on the child rather than signalling it: a process in an uninterruptible sleep
+// cannot be killed, so a signal would only queue up beside the wedge while the
+// caller -- the thing the isolation exists to protect -- stays stuck.
+// Returns 1 if the child exited (`*st` holds its status), 0 if the deadline
+// passed with it still running, -1 if it is gone without a status to read.
+int consumer_wait(pid_t pid, uint64_t timeout_us, int* st, uint64_t* elapsed_us,
+                  uint64_t poll_ns) {
+    uint64_t t0 = stress_now_us(), deadline = t0 + timeout_us;
+    int ret = 0;
+    *st = 0;
+    for (;;) {
+        pid_t w = ::waitpid(pid, st, WNOHANG);
+        if (w == pid) {
+            ret = 1;
+            break;
+        }
+        // EINTR: keep the deadline and poll again. Anything else is ECHILD, i.e.
+        // collected behind our back, so no status exists to read.
+        if (w < 0 && errno != EINTR) {
+            *st = 0;
+            ret = -1;
+            break;
+        }
+        if (stress_now_us() >= deadline)
+            break;
+        struct timespec ts{(time_t)(poll_ns / 1000000000ull), (long)(poll_ns % 1000000000ull)};
+        ::nanosleep(&ts, nullptr);
+    }
+    *elapsed_us = stress_now_us() - t0;
+    return ret;
+}
+
+}  // namespace
+
+const char* consumer_stage_name(ConsumerStage s) {
+    switch (s) {
+    case CONS_DONE:     return "done";
+    case CONS_OPEN:     return "open";
+    case CONS_WRITE:    return "pwrite";
+    case CONS_SYNC:     return "fsync";
+    case CONS_READ:     return "pread";
+    case CONS_VERIFY:   return "the read-back comparison";
+    case CONS_DROP_FDS: return "dropping the inherited fd table";
+    case CONS_FDLEAK:   return "the fd-table self-check";
+    case CONS_EXIT:     return "the child's exit";
+    case CONS_FORK:     return "fork";
+    case CONS_MAPPING:  return "mapping the report page";
+    case CONS_TIMEOUT:  return "the caller's deadline";
+    }
+    return "?";
+}
+
+ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, void* rbuf,
+                             size_t len, uint64_t off, const ConsumerIoOpts& o) {
+    ConsumerIoResult r;
+    r.node = node;
+    uint64_t timeout = o.timeout_us ? o.timeout_us : CONSUMER_TIMEOUT_US;
+    size_t page = sizeof(ConsumerReport);
+    void* m = ::mmap(nullptr, page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) {
+        r.stage = CONS_MAPPING;
+        r.child_errno = errno;
+        r.status = errno ? errno : EIO;
+        LOG_ERROR_RETURN(r.status, r, "failed to map the consumer's report page, ", ERRNO());
+    }
+    ConsumerReport* rep = (ConsumerReport*)m;
+    memset(rep, 0, page);
+
+    ConsumerArgs a;
+    a.path = node.c_str();
+    a.flags = (o.read_only ? O_RDONLY : O_RDWR) | (o.direct ? O_DIRECT : 0);
+    a.open_tries = o.open_tries > 0 ? o.open_tries : 1;
+    a.write = o.read_only ? 0 : 1;
+    a.off = off;
+    a.len = len;
+    a.wbuf = wbuf;
+    a.rbuf = rbuf;
+    a.rep = rep;
+
+    // The child inherits our stdio buffers and _exit() does not flush them, so
+    // unflushed output would be lost or duplicated depending on who wrote last.
+    // Flush everything first; the child itself uses no stdio at all.
+    ::fflush(nullptr);
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        int e = errno;
+        r.stage = CONS_FORK;
+        r.child_errno = e;
+        r.status = e ? e : EIO;
+        ::munmap(rep, page);
+        LOG_ERROR_RETURN(e, r, "failed to fork the consumer child for `, ", node, ERRNO(e));
+    }
+    if (pid == 0) {
+        // ---- the child. From here to _exit(): bare syscalls only. ----
+        // Condition 1 of the isolation, and its first action without exception.
+        if (drop_inherited_fds() != 0)
+            _exit(CONS_EXIT_DROP_FDS);
+        // ...verified, not assumed: the census is the only thing that turns
+        // condition 1 from a comment into a checked property.
+        uint32_t left = count_fds_from(3);
+        if (left != 0) {
+            rep->stage = CONS_FDLEAK;
+            rep->fds = left;
+            rep->status = EIO;
+            rep->magic = CONSUMER_MAGIC;
+            _exit(CONS_EXIT_FDLEAK);
+        }
+        _exit(consumer_io_body(&a));
+    }
+
+    r.pid = pid;
+    int st = 0;
+    uint64_t elapsed = 0;
+    int w = consumer_wait(pid, timeout, &st, &elapsed, 2 * 1000 * 1000);
+    r.elapsed_us = elapsed;
+    if (w == 0) {
+        // Abandoned, still running, deliberately not killed. Keep the report
+        // page mapped: the child may complete later and write into it, and
+        // consumer_reap() is what finishes the job (consumer_release() gives up
+        // on it and just unmaps).
+        r.hung = true;
+        r.status = ETIMEDOUT;
+        r.stage = CONS_TIMEOUT;
+        r.shm = rep;
+        LOG_ERROR_RETURN(ETIMEDOUT, r, "consumer IO on ` did not finish within ` us; abandoning pid ` (an uninterruptible sleeper cannot be killed)",
+                         node, timeout, (int64_t)pid);
+    }
+    r.reaped = w > 0;
+    r.shm = nullptr;
+    consumer_decode(r, rep, st, w > 0);
+    ::munmap(rep, page);
+    return r;
+}
+
+bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us) {
+    if (r.reaped)
+        return true;
+    if (r.pid <= 0)
+        LOG_ERROR_RETURN(EINVAL, false, "there is no consumer child to wait for");
+    ConsumerReport* rep = (ConsumerReport*)r.shm;
+    if (!rep)
+        LOG_ERROR_RETURN(EINVAL, false, "the consumer child ` of ` has no report page left",
+                         (int64_t)r.pid, r.node);
+    int st = 0, w = 0;
+    uint64_t elapsed = 0;
+    // off the vcpu: it is the same bounded WNOHANG/nanosleep poll
+    run_off_vcpu([&] {
+        w = consumer_wait(r.pid, timeout_us ? timeout_us : CONSUMER_TIMEOUT_US,
+                          &st, &elapsed, 10 * 1000 * 1000);
+    });
+    r.elapsed_us += elapsed;
+    if (w == 0)
+        LOG_ERROR_RETURN(ETIMEDOUT, false, "the abandoned consumer child ` of ` is still running after ` us more",
+                         (int64_t)r.pid, r.node, elapsed);
+    r.reaped = w > 0;
+    r.hung = false;
+    consumer_decode(r, rep, st, w > 0);
+    consumer_release(r);
+    return true;
+}
+
+void consumer_release(ConsumerIoResult& r) {
+    if (r.shm) {
+        ::munmap(r.shm, sizeof(ConsumerReport));
+        r.shm = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // single-shot device IO and the deterministic pattern
 // ---------------------------------------------------------------------------
 
@@ -353,38 +690,24 @@ std::vector<char> pattern(uint8_t seed, size_t n) {
 }
 
 int device_io(const std::string& node, const void* wbuf, size_t len,
-                uint64_t off, const DeviceIoOpts& o) {
-    std::atomic<int> rc{-1};
+              uint64_t off, const DeviceIoOpts& o) {
+    // Allocated here, not in the child: the child allocates nothing. It is the
+    // child's copy that receives the read-back, and the child is also where the
+    // comparison runs, because that copy is not visible from here.
     std::vector<char> rbuf(len);
+    ConsumerIoResult r;
     run_off_vcpu([&] {
-        int fd = open_node(node, (o.read_only ? O_RDONLY : O_RDWR) | (o.direct ? O_DIRECT : 0));
-        if (fd < 0) {
-            LOG_ERROR("open ` failed, ", node, ERRNO());
-            rc = errno ? errno : EIO;
-            return;
-        }
-        DEFER(::close(fd));
-        if (!o.read_only) {
-            if (::pwrite(fd, wbuf, len, (off_t)off) != (ssize_t)len) {
-                LOG_ERROR("pwrite failed, ", ERRNO());
-                rc = errno ? errno : EIO;
-                return;
-            }
-            if (::fsync(fd) < 0) {
-                LOG_ERROR("fsync failed, ", ERRNO());
-                rc = errno ? errno : EIO;
-                return;
-            }
-        }
-        if (::pread(fd, rbuf.data(), len, (off_t)off) != (ssize_t)len) {
-            LOG_ERROR("pread failed, ", ERRNO());
-            rc = errno ? errno : EIO;
-            return;
-        }
-        rc = (!o.read_only && memcmp(wbuf, rbuf.data(), len)) ? EILSEQ : 0;
+        ConsumerIoOpts c;
+        c.read_only = o.read_only;
+        c.direct = o.direct;
+        c.timeout_us = o.timeout_us;
+        r = consumer_io(node, wbuf, rbuf.data(), len, off, c);
     });
-    int r = rc.load();
-    if (r == 0 && o.backend && !o.read_only) {
+    if (o.report)
+        *o.report = r;
+    else if (r.hung)
+        consumer_release(r);   // nobody can reap a child whose pid was not kept
+    if (r.status == 0 && o.backend && !o.read_only) {
         std::vector<char> bbuf(len);
         iovec iov{bbuf.data(), len};
         if (o.backend->preadv(&iov, 1, (off_t)off) != (ssize_t)len)
@@ -392,7 +715,7 @@ int device_io(const std::string& node, const void* wbuf, size_t len,
         if (memcmp(wbuf, bbuf.data(), len))
             return EILSEQ;
     }
-    return r;
+    return r.status;
 }
 
 // ---------------------------------------------------------------------------
