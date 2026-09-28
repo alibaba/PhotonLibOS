@@ -11,9 +11,9 @@ FROM ${BASE_IMAGE}
 
 # Runner release versions - update as needed
 # https://github.com/actions/runner/releases
-ARG RUNNER_VERSION=2.323.0
+ARG RUNNER_VERSION=2.337.0
 # https://github.com/actions/runner-container-hooks/releases
-ARG RUNNER_CONTAINER_HOOKS_VERSION=0.7.0
+ARG RUNNER_CONTAINER_HOOKS_VERSION=0.8.1
 
 # Map Docker platform to runner arch
 ARG TARGETARCH
