@@ -621,8 +621,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // the same thing to every transport.
         //
         // Derived HERE, with exactly one exception: start()'s adopt branch raises
-        // it to the count the registration already has. Three things read this
-        // value -- the vqs slots sized just below, the vq_num create_dev declares
+        // it to the count the registration already has. Three things have to agree
+        // with it -- the vqs slots sized just below, the vq_num create_dev declares
         // and the num_queues fill_config publishes -- and the raise cannot
         // desynchronize them, because the last two never run on an adopt and an
         // adopt is the only branch that raises. The slots are the exception, so
@@ -1284,11 +1284,11 @@ struct VduseDeviceImpl : IBlkDevice {
     // The uapi has no readback of vq_num, so the count is measured instead.
     // VDUSE_VQ_GET_INFO bounds the index we supply against the registration's own
     // count and answers an index at or beyond it with EINVAL -- measured on
-    // 7.0.0-31-generic at vq_num 1, 4, 8 and 64, with and without VQ_SETUP, so
-    // the first index it refuses IS the count. Its `num` field is no use here: it
-    // reads 0 for an in-range index until a consumer drives the device, VQ_SETUP's
-    // max_size included, so a detector built on num would report "no such queue"
-    // for every queue that exists.
+    // 7.0.0-31-generic at vq_num 1, 4, 8, 64, 65, 128 and 1024, with and without
+    // VQ_SETUP, so the first index it refuses IS the count. Its `num` field is no
+    // use here: it reads 0 for an in-range index until a consumer drives the
+    // device, VQ_SETUP's max_size included, so a detector built on num would
+    // report "no such queue" for every queue that exists.
     int adopt_queue_count() {
         uint32_t n = nqueues;
         // At most MAX_QUEUES + 1 ioctls, and one in the usual case: the walk stops
@@ -1308,18 +1308,17 @@ struct VduseDeviceImpl : IBlkDevice {
             // Refused, not clamped: serving fewer queues than the registration
             // declares is the defect this exists to remove, and there are no slots
             // to serve more with. The refusal leaves the registration alive,
-            // because rollback destroys only what WE created -- which is right
-            // twice over here: it is not ours to destroy, and a count this large
-            // cannot have come from our own create_dev, which clamps. So this
-            // cannot strand a device of ours that the fixture's sweep would then
-            // fail to clear on every later run.
+            // because rollback destroys only what WE created -- and a count this
+            // large cannot have come from our own create_dev, which clamps. So it
+            // is somebody else's registration, and no recovery loop of ours can end
+            // up refusing it forever and leaving it behind on every later run.
             LOG_ERROR_RETURN(EINVAL, -1, "vduse ` is registered with more than ` virtqueues; refusing to adopt it",
                              name, MAX_QUEUES);
         if (n == nqueues)
             // The count is ours -- or lower, which is not this function's to
-            // judge: the setup_vq loop that follows asks the kernel about every
-            // index we mean to serve, and it answers EINVAL for one it was never
-            // told about, failing start() there.
+            // judge: start()'s setup_vq loop that follows asks the kernel for
+            // every index we mean to serve, and an index the registration does
+            // not have is not one it can grant.
             return 0;
 
         // Grow the slots BEFORE publishing the count: every reader of `nqueues`
