@@ -621,12 +621,13 @@ struct VduseDeviceImpl : IBlkDevice {
         // the same thing to every transport.
         //
         // Derived HERE, with exactly one exception: start()'s adopt branch raises
-        // it to the count the registration already has. Three things have to agree
-        // with it -- the vqs slots sized just below, the vq_num create_dev declares
-        // and the num_queues fill_config publishes -- and the raise cannot
-        // desynchronize them, because the last two never run on an adopt and an
-        // adopt is the only branch that raises. The slots are the exception, so
-        // the function that raises also grows them.
+        // it to the count the registration already has. Four things have to agree
+        // with it -- the vqs slots sized just below, the vq_num create_dev
+        // declares, the num_queues fill_config publishes, and the F_MQ bit
+        // offer_features takes from it further down -- and the raise cannot
+        // desynchronize them: the middle two never run on an adopt, an adopt is
+        // the only branch that raises, and the function that raises grows the
+        // slots and sets the bit itself.
         nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
 
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
@@ -1281,7 +1282,10 @@ struct VduseDeviceImpl : IBlkDevice {
     // request that lands on one we never set up, resolved or started simply never
     // completes.
     //
-    // The uapi has no readback of vq_num, so the count is measured instead.
+    // The uapi has no readback of vq_num, so the count is measured instead. On
+    // 7.0.0-31-generic the kernel's <linux/vduse.h> declares sixteen ioctls,
+    // four of which this file does not copy, and vq_num appears in it only as
+    // CREATE_DEV's input.
     // VDUSE_VQ_GET_INFO bounds the index we supply against the registration's own
     // count and answers an index at or beyond it with EINVAL -- measured on
     // 7.0.0-31-generic at vq_num 1, 4, 8, 64, 65, 128 and 1024, with and without
@@ -1291,9 +1295,9 @@ struct VduseDeviceImpl : IBlkDevice {
     // report "no such queue" for every queue that exists.
     int adopt_queue_count() {
         uint32_t n = nqueues;
-        // At most MAX_QUEUES + 1 ioctls, and one in the usual case: the walk stops
-        // at the first refusal, which a registration that already agrees with
-        // cfg.queues produces on the spot.
+        // At most MAX_QUEUES ioctls -- the walk starts at our own count, which is
+        // at least 1, so index 0 is never tested -- and one in the usual case: any
+        // registration whose count is at or below ours refuses the first probe.
         for (; n <= MAX_QUEUES; n++) {
             vduse_vq_info vi;
             memset(&vi, 0, sizeof(vi));
@@ -1309,16 +1313,24 @@ struct VduseDeviceImpl : IBlkDevice {
             // declares is the defect this exists to remove, and there are no slots
             // to serve more with. The refusal leaves the registration alive,
             // because rollback destroys only what WE created -- and a count this
-            // large cannot have come from our own create_dev, which clamps. So it
-            // is somebody else's registration, and no recovery loop of ours can end
-            // up refusing it forever and leaving it behind on every later run.
+            // large cannot have come from our own create_dev, which clamps, so it
+            // is somebody else's registration and leaving it alone is the only
+            // correct outcome. A recovery loop will not get past it, though:
+            // list_orphans decides "ours" from the tombstone alone, acquire_lock
+            // plants one before we know whose device this is, and release never
+            // unlinks -- so the name stays listed and is refused again on every
+            // later run. That is intended, not a leak of ours.
             LOG_ERROR_RETURN(EINVAL, -1, "vduse ` is registered with more than ` virtqueues; refusing to adopt it",
                              name, MAX_QUEUES);
         if (n == nqueues)
-            // The count is ours -- or lower, which is not this function's to
-            // judge: start()'s setup_vq loop that follows asks the kernel for
-            // every index we mean to serve, and an index the registration does
-            // not have is not one it can grant.
+            // The count is ours -- or lower, which this walk cannot tell
+            // apart: it starts at our own count, so a narrower registration
+            // refuses the first probe and looks exactly like agreement.
+            // start() still refuses it later. The loops it then runs per
+            // index ask the kernel about indices the registration may not
+            // have, and vq_refresh's is the bounds check that is measured --
+            // so this fails start() there at the latest. The message names
+            // that step, not this mismatch.
             return 0;
 
         // Grow the slots BEFORE publishing the count: every reader of `nqueues`
