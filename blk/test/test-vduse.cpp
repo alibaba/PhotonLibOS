@@ -103,6 +103,20 @@ static void vdpa_detach(const char* name) {
     test::sh_off_vcpu(cmd);
 }
 
+// The kernel-side state a start() refused part-way through could leave behind,
+// as one sortable listing: the vduse registrations, and each of this suite's
+// flock files marked HELD or FREE. The lock FILE is expected to survive --
+// devlock_release() unlocks and closes, it never unlinks, and the orphan scan
+// keys on "file exists and is free" -- so what must not survive is a lock still
+// held, which would wedge every later run.
+static std::string residue() {
+    return test::sh_off_vcpu(
+        "{ ls -1 /dev/vduse 2>/dev/null;"
+        "  for f in /run/photon-blk/vduse-*.lock; do [ -e \"$f\" ] || continue;"
+        "    flock -n \"$f\" -c true 2>/dev/null && echo \"FREE $f\" || echo \"HELD $f\"; done;"
+        "} | sort");
+}
+
 // The virtio bus publishes the consumer's NEGOTIATED feature set as a
 // bitstring -- one char per bit, bit 0 first -- in the sysfs of the virtio
 // device the gendisk hangs off. That is the kernel's record of what arrived
@@ -745,6 +759,39 @@ TEST_F(VduseTest, empty_pool_falls_back_to_the_caller_vcpu) {
     EXPECT_EQ(0, device_io(node, pattern(0x33), true));
     EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it rather than serve
+// pathologically -- here genuinely up front, before any queue is bound or any
+// serving coroutine is spawned, though after the registration itself exists.
+//
+// That last part is why the residue comparison matters more here than elsewhere:
+// rollback() destroys the registration only when WE created it, so an ADOPTED
+// orphan survives a refusal by design and a case that reached the guard through
+// the adoption path would leave a registration behind on every run. The fixture's
+// sweep() clears TEST_NAME in SetUp, which is what makes this start() take the
+// create path, and the comparison is taken inside the case because that same sweep
+// in TearDown would otherwise clean up a leak before any outside check could see
+// it. No vdpa attach: start() never got far enough to serve, so there is no
+// consumer side to bring up or down.
+TEST_F(VduseTest, pool_without_an_event_engine_is_refused) {
+    const std::string residue_before = residue();
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 2;
+    cfg.pool = &bad;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+    EXPECT_EQ(residue_before, residue());
 }
 
 }  // namespace blk

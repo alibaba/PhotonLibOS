@@ -84,6 +84,20 @@ static std::string node_of(IBlkDevice* d) {
     return n ? n : "";
 }
 
+// Everything a start() that was refused after it had already talked to the
+// kernel could leave behind, as one sortable listing: the ublk nodes under /dev,
+// and each of this suite's flock files marked HELD or FREE. The lock FILE is
+// expected to survive -- devlock_release() unlocks and closes, it never unlinks,
+// and the orphan scan keys on "file exists and is free" -- so what must not
+// survive is a lock still held, which would wedge every later run.
+static std::string residue() {
+    return test::sh_off_vcpu(
+        "{ ls -1 /dev 2>/dev/null | grep '^ublk';"
+        "  for f in /run/photon-blk/ublk-*.lock; do [ -e \"$f\" ] || continue;"
+        "    flock -n \"$f\" -c true 2>/dev/null && echo \"FREE $f\" || echo \"HELD $f\"; done;"
+        "} | sort");
+}
+
 // The kernel's own count of requests outstanding on the node, reads plus writes.
 // An oracle that reads nothing this suite wrote, which is what makes it able to
 // say "that IO really is still out there" rather than "our bookkeeping says so".
@@ -1113,6 +1127,35 @@ TEST_F(UblkTest, empty_pool_falls_back_to_the_caller_vcpu) {
     EXPECT_EQ(0, device_io(node_of(dev), pattern(0x99), true));
     EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it rather than serve
+// pathologically.
+//
+// The refusal is NOT up front here: start() has already added the kernel device,
+// taken the flock and built the queues, so it arrives as a rollback whose del_dev
+// discards its return value and is therefore best effort. The residue comparison
+// is what turns "best effort" into something observable, and it is taken inside
+// the case because the fixture's TearDown sweep runs afterwards and would clean up
+// a leak before any outside check could see it.
+TEST_F(UblkTest, pool_without_an_event_engine_is_refused) {
+    const std::string residue_before = residue();
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = 2;
+    cfg.pool = &bad;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+    EXPECT_EQ(residue_before, residue());
 }
 
 // Two devices on one pool must not pile onto the same vcpu: the cursor is

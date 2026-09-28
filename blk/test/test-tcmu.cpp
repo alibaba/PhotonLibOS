@@ -112,6 +112,52 @@ static bool lock_free(const char* identity) {
     return free;
 }
 
+// Three-valued, because lock_free() above deliberately collapses "absent" and
+// "held" into one false and a residue check must not: a lock file that merely
+// EXISTS is this transport's own orphan-scan convention rather than residue
+// (devlock_release unlocks and closes, it never unlinks), so only a lock that is
+// still HELD counts, and that is what would wedge every later run.
+static const char* lock_state(const char* identity) {
+    std::string lp = std::string("/run/photon-blk/tcmu-") + identity + ".lock";
+    int fd = ::open(lp.c_str(), O_RDONLY);
+    if (fd < 0) return "not-held";
+    DEFER(::close(fd));
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) return "HELD";
+    ::flock(fd, LOCK_UN);
+    return "not-held";
+}
+
+// How many uio nodes the kernel currently exposes. An enabled tcmu backstore
+// gets exactly one, so this is the kernel's own answer to "is a backstore of
+// ours still live" -- it reads nothing this suite wrote, which is what makes it
+// able to say so rather than merely reporting our bookkeeping.
+static int uio_count() {
+    int n = 0;
+    if (DIR* d = ::opendir("/sys/class/uio")) {
+        struct dirent* e;
+        while ((e = ::readdir(d)))
+            if (strncmp(e->d_name, "uio", 3) == 0 && e->d_name[3] >= '0' && e->d_name[3] <= '9')
+                n++;
+        ::closedir(d);
+    }
+    return n;
+}
+
+// The kernel-side state a start() refused part-way through could leave behind,
+// as one comparable string: the backstore directory, the tcm_loop WWN directory,
+// the uio node count, and whether this identity's flock is still held.
+static std::string residue() {
+    std::string r = "bs=";
+    r += (::access(BS_PATH, F_OK) == 0) ? "present" : "absent";
+    r += " lb=";
+    r += (::access(LB_PATH, F_OK) == 0) ? "present" : "absent";
+    r += " uio=";
+    r += std::to_string(uio_count());
+    r += " lock=";
+    r += lock_state(TEST_IDENTITY);
+    return r;
+}
+
 // operator-side tcm_loop LUN wiring for a raw backstore (mirrors attach_lun /
 // detach_lun in tcmu.cpp; the daemon never touches fabrics)
 static int lun_attach(const char* wwn, const char* bs_path, const char* bs_name) {
@@ -1079,6 +1125,35 @@ TEST_F(TcmuTest, queues_are_ignored) {
     EXPECT_EQ(0, device_io(sd, pattern(0xa5), true));
     EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it rather than serve
+// pathologically.
+//
+// The refusal is NOT up front here: the guard sits in TcmuServer::start(), which
+// start() reaches only after the backstore exists and is enabled and its uio node
+// has been found, and only before attach_lun(). So it arrives as a rollback that
+// has to destroy a live backstore, and the residue comparison is what makes that
+// observable. It is taken inside the case because the fixture's TearDown runs
+// force_cleanup() afterwards and would remove a leak before any outside check
+// could see it.
+TEST_F(TcmuTest, pool_without_an_event_engine_is_refused) {
+    const std::string residue_before = residue();
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    auto cfg = make_cfg(/*loopback=*/true);
+    cfg.pool = &bad;
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+    EXPECT_EQ(residue_before, residue());
 }
 
 // High-concurrency stress on the LUN's /dev/sdX: many O_DIRECT threads (so
