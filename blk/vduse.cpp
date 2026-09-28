@@ -545,12 +545,11 @@ struct VduseDeviceImpl : IBlkDevice {
         // nothing here would notice a detach() or a shutdown() issued from another
         // vcpu. `home` is then what two OS threads would share: vq_start writes it on
         // the vcpu that called start(), while a caller on the other one both reads it
-        // and nulls it. msg_loop
-        // honours it because start() creates it there and deliberately never
-        // migrates it. The loop's own vcpu never touches it. vq_stop clears it once
-        // the loop is joined, so the drain that follows runs in place -- which it
-        // may, because drain() polls nothing but the atomic in_flight and therefore
-        // has no vcpu it must be on.
+        // and nulls it. msg_loop honours it because start() creates it there and
+        // deliberately never migrates it. The loop's own vcpu never touches it.
+        // vq_stop clears it once the loop is joined, so the drain that follows
+        // runs in place -- which it may, because drain() polls nothing but the
+        // atomic in_flight and therefore has no vcpu it must be on.
         //
         // Work stealing is what would break it: photon writes the field again only in
         // its two stealing scans, and those need a per-thread create flag and a

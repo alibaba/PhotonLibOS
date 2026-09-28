@@ -553,15 +553,17 @@ struct TcmuServer {
     // Control-plane field: written by serve_start and read by run_serve_stop. That
     // both are on the vcpu that started the device is a contract with the caller, not
     // a property of this code -- `home` is a plain pointer, while every TcmuLink field
-    // the listener and the caller both write is atomic, because this device is driven
-    // from whatever vcpu its caller runs on; TcmuLink's two plain fields are set once
-    // in the constructor and never reassigned. So a detach() or a shutdown() from
-    // another vcpu leaves `home` read and written from two OS threads: serve_start
-    // writes it on the vcpu that started the device, while run_serve_stop reads and
-    // clears it on its caller's. The pump's own vcpu never touches it. That is
-    // why the clear lives in run_serve_stop's DEFER instead of at the end of
-    // serve_stop -- under the hop, serve_stop runs on the serving vcpu, and writing
-    // `home` from there would be the cross-vcpu write this field exists to avoid.
+    // that both the HBA's listener vcpu and this device's caller write is atomic,
+    // because this device is driven from whatever vcpu its caller runs on; TcmuLink
+    // below has two plain fields, and those are set once in TcmuDeviceImpl's
+    // constructor -- before it publishes the link to the HBA's registry -- and are
+    // never reassigned. So a detach() or a shutdown() from another vcpu leaves `home`
+    // read and written from two OS threads: serve_start writes it on the vcpu that
+    // started the device, while run_serve_stop reads and clears it on its caller's.
+    // The pump's own vcpu never touches it. That is why the clear lives in
+    // run_serve_stop's DEFER instead of at the end of serve_stop -- under the hop,
+    // serve_stop runs on the serving vcpu, and writing `home` from there would be the
+    // cross-vcpu write this field exists to avoid.
     //
     // Work stealing is what would break it: photon writes the field again only in its
     // two stealing scans, and those need a per-thread create flag and a per-vcpu init
@@ -687,17 +689,20 @@ struct TcmuServer {
         // records the landing vcpu of the pump it just created.
         DEFER(home = nullptr);
         if (!home || home == photon::get_vcpu()) {
-            // !home means there is no pump on another vcpu, and nothing else. Three
-            // ways to get here with a null: serve_start never ran; a previous
-            // run_serve_stop already joined the pump and cleared home on the way out;
-            // or a migration was refused, so a pump exists but is on this vcpu. Only
-            // that last one puts a live pump behind a null, and it puts it here:
-            // serve_start records home itself, in the same stretch that creates the
-            // pump, and that stretch yields only where a refused migration logs --
-            // which leaves the pump on this vcpu, where stopping in place is what the
-            // no-pool case does anyway. So this is never the "pump exists on another
-            // vcpu but has not been recorded yet" window, the one where stopping in
-            // place would race the coroutines pump dispatched.
+            // !home means there is no pump on another vcpu, and nothing else. The
+            // in-place stop below rests on exactly that: whenever this branch reads
+            // a null `home`, no pump is running on a different vcpu. Arrivals with a
+            // null include serve_start never having run, a serve_start that returned
+            // before it recorded home, a previous run_serve_stop having cleared home
+            // on the way out -- which it does whether or not it found a pump to join
+            // -- and a migration that was refused, so a pump exists but is on this
+            // vcpu. Only a refused migration puts a live pump behind a null, and it
+            // puts it here: serve_start records home itself, in the same stretch that
+            // creates the pump, and that stretch yields only where a refused
+            // migration logs -- which leaves the pump on this vcpu, where stopping in
+            // place is what the no-pool case does anyway. So this is never the "pump
+            // exists on another vcpu but has not been recorded yet" window, the one
+            // where stopping in place would race the coroutines pump dispatched.
             serve_stop(flush);   // no pool, or this IS the serving vcpu
             return;
         }
