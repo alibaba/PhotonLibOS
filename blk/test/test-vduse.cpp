@@ -48,6 +48,13 @@ limitations under the License.
 #include <sys/stat.h>
 #include <unistd.h>
 #include <linux/fs.h>
+// The raw uapi, for the one registration blk cannot create (see raw_vduse_create).
+// All four are C++-safe; <linux/virtio_ring.h> is the one that is not, and nothing
+// here needs it.
+#include <linux/vduse.h>
+#include <linux/virtio_blk.h>
+#include <linux/virtio_config.h>
+#include <linux/virtio_ids.h>
 
 #include <atomic>
 #include <cerrno>
@@ -101,6 +108,71 @@ static void vdpa_detach(const char* name) {
     cmd += name;
     cmd += " 2>/dev/null; true";
     test::sh_off_vcpu(cmd);
+}
+
+// The raw uapi, for the one registration blk cannot create: the create path
+// clamps cfg.queues, so nothing reachable through blk.h can declare a vq_num
+// above the clamp. System headers only -- pulling blk/utils.h in for its virtio
+// structs is what the standing rule spelled out at PEER_MAX_QUEUES below forbids.
+// Both return 0 or the errno of the step that failed, captured before the control
+// fd is closed, so a DEFER can test the result without depending on errno
+// surviving a close(2).
+//
+// Nothing this creates is ever attached to the vdpa bus, so there is no /dev/vdX
+// and nothing that can wedge a process in D state.
+static int raw_vduse_create(const char* name, uint32_t vq_num) {
+    int c = ::open("/dev/vduse/control", O_RDWR | O_CLOEXEC);
+    if (c < 0) {
+        int e = errno ? errno : EIO;
+        LOG_ERRNO_RETURN(0, e, "raw vduse create: open /dev/vduse/control failed");
+    }
+    DEFER(::close(c));
+    uint64_t ver = 0;   // the classic single-address-space ABI
+    if (::ioctl(c, VDUSE_SET_API_VERSION, &ver) < 0) {
+        int e = errno ? errno : EIO;
+        LOG_ERRNO_RETURN(0, e, "raw vduse create: SET_API_VERSION failed");
+    }
+    alignas(vduse_dev_config) uint8_t raw[sizeof(vduse_dev_config) + sizeof(::virtio_blk_config)];
+    memset(raw, 0, sizeof(raw));
+    auto* cc = (vduse_dev_config*)raw;
+    snprintf(cc->name, sizeof(cc->name), "%s", name);
+    cc->vendor_id = 0x1af4;
+    cc->device_id = VIRTIO_ID_BLOCK;
+    // Both bits, and ACCESS_PLATFORM is the one that is not obvious: CREATE_DEV
+    // answers EINVAL for a device that does not offer it, measured on
+    // 7.0.0-31-generic with everything else in this payload held constant.
+    cc->features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM);
+    cc->vq_num = vq_num;
+    cc->vq_align = (uint32_t)sysconf(_SC_PAGESIZE);
+    cc->config_size = sizeof(::virtio_blk_config);
+    auto* bc = (::virtio_blk_config*)(raw + sizeof(vduse_dev_config));
+    bc->capacity = 8192;   // 4 MiB @512
+    bc->blk_size = 512;
+    bc->num_queues = (uint16_t)vq_num;
+    if (::ioctl(c, VDUSE_CREATE_DEV, cc) < 0) {
+        int e = errno ? errno : EIO;
+        LOG_ERRNO_RETURN(0, e, "raw vduse create: CREATE_DEV of ` with vq_num ` failed", name, vq_num);
+    }
+    return 0;
+}
+
+static int raw_vduse_destroy(const char* name) {
+    int c = ::open("/dev/vduse/control", O_RDWR | O_CLOEXEC);
+    if (c < 0) {
+        int e = errno ? errno : EIO;
+        LOG_ERRNO_RETURN(0, e, "raw vduse destroy: open /dev/vduse/control failed");
+    }
+    DEFER(::close(c));
+    uint64_t ver = 0;
+    ::ioctl(c, VDUSE_SET_API_VERSION, &ver);   // best effort
+    char nm[VDUSE_NAME_MAX];
+    memset(nm, 0, sizeof(nm));
+    snprintf(nm, sizeof(nm), "%s", name);
+    if (::ioctl(c, VDUSE_DESTROY_DEV, nm) < 0) {
+        int e = errno ? errno : EIO;
+        LOG_ERRNO_RETURN(0, e, "raw vduse destroy: DESTROY_DEV of ` failed", name);
+    }
+    return 0;
 }
 
 // The kernel-side state a start() refused part-way through could leave behind,
@@ -625,6 +697,111 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
     ASSERT_EQ(0, dev2->start(file));   // adoption: resync of EVERY queue
     EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mq-adopted"));
     EXPECT_EQ(0, device_io(node, pattern(0x44), true));
+}
+
+// The case above adopts with the SAME cfg.queues the registration was created
+// with. This one adopts with a deliberately different one, which is what a
+// recovery loop that does not know the geometry does -- and what this fixture's
+// own sweep() does on every run, since the BlkConfig it builds sets identity and
+// size and never sets `queues`, so it adopts every orphan asking for one queue.
+//
+// create_dev is the only place a queue count is declared and it does not run on an
+// adopt, and DEV_SET_CONFIG's one call site publishes capacity only, so without
+// start() asking the kernel for the count the daemon would serve ONE virtqueue
+// while the registration has four -- and so does the still-attached consumer,
+// whose config-space num_queues came from the daemon that created it and which
+// nothing re-published. The consumer keeps spreading requests over all four
+// hardware queues, so the stress phase after the handover is the assertion: a
+// request that lands on a queue the adopter never set up, resolved or started
+// never completes, and the phase reports it as hung rather than done.
+TEST_F(VduseTest, adoption_serves_the_registered_queue_count) {
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;
+    auto dev1 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev1);
+    DEFER(delete dev1);
+    ASSERT_EQ(0, dev1->start(file));
+    // Registered BEFORE the attach, not after: vdpa_attach's timeout branch
+    // returns "" with the consumer already added, so the ASSERT below is itself
+    // inside the window. Firing twice is harmless -- see sweep()'s header.
+    DEFER(vdpa_detach(TEST_NAME));
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    // The premise the mismatch is measured against: the consumer really built four
+    // hardware queues, so there are three for a one-queue adopter to miss. 4 is
+    // below any plausible CPU count, so this does not inherit the table test's
+    // per-CPU clamp.
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    ASSERT_EQ(4, test::count_mq_dirs(kname));
+    ASSERT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mismatch-fresh"));
+
+    // daemon goes away, consumer STAYS attached: four live rings, nobody serving
+    ASSERT_EQ(0, dev1->detach(false));
+
+    // Adopt asking for ONE queue -- what sweep() asks for. The registration's own
+    // count has to win.
+    BlkConfig cfg2(make_info());
+    cfg2.queues = 1;
+    auto dev2 = ctl->new_device(cfg2);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    DEFER(dev2->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // fires BEFORE dev2->shutdown: the consumer
+                                     // must go while the daemon still serves
+    ASSERT_EQ(0, dev2->start(file));
+    // The consumer's view did not change across the handover: still four hardware
+    // queues to serve, which is what makes the stress below an oracle at all.
+    EXPECT_EQ(4, test::count_mq_dirs(kname));
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse-mismatch-adopted"));
+    EXPECT_EQ(0, device_io(node, pattern(0x55), true));
+}
+
+// A registration wider than this transport can hold is REFUSED, not clamped:
+// serving fewer queues than the kernel declares is the defect the case above
+// exists to prevent, and quietly serving the first PEER_MAX_QUEUES of a wider one
+// reproduces it with a quieter log. Nothing reachable through blk.h can build such
+// a registration -- the create path clamps -- so this one comes from the raw uapi,
+// and its name is deliberately OUTSIDE sweep()'s NAME_PREFIX: a registration that
+// can only ever be refused must not become something the fixture tries to adopt,
+// and fails to clear, on every later run.
+//
+// This is also the only case that walks the count probe to its cap, so it is what
+// pins the walk's termination and its bound: an off-by-one that stops the walk one
+// index early turns the refusal into exactly the silent clamp above, and no
+// narrower registration can show it.
+TEST_F(VduseTest, adoption_refuses_a_registration_wider_than_the_transport) {
+    static const char WIDE[] = "vduse-wide-test";
+    char reg[64];
+    snprintf(reg, sizeof(reg), "/dev/vduse/%s", WIDE);
+    // Declared first, so it fires last: whatever the case concludes with, the
+    // registration must not outlive it. Tolerant of EINVAL because a start() that
+    // SUCCEEDS here is the mutation this case exists to catch, and its destructor
+    // then destroys the registration itself.
+    DEFER({
+        int e = raw_vduse_destroy(WIDE);
+        EXPECT_TRUE(e == 0 || e == EINVAL) << "leftover registration, errno " << e;
+        EXPECT_NE(0, ::access(reg, F_OK)) << "leftover registration " << reg;
+    });
+    ASSERT_EQ(0, raw_vduse_create(WIDE, PEER_MAX_QUEUES + 1));
+    ASSERT_EQ(0, ::access(reg, F_OK));
+
+    BlkConfig cfg(make_info());
+    cfg.info.identity = WIDE;
+    cfg.queues = 1;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EINVAL, errno);
+    // Refused with nothing torn down: the registration is still there for whoever
+    // does own it -- rollback destroys only what WE created -- and our handle on
+    // the single-opener char dev is closed, so it is unheld again.
+    EXPECT_EQ(0, ::access(reg, F_OK));
+    int fd = ::open(reg, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    EXPECT_GE(fd, 0);
+    if (fd >= 0)
+        ::close(fd);
 }
 
 // The tombstone is vduse's ONLY ownership test -- the char device answers "is a
