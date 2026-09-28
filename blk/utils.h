@@ -197,13 +197,42 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 //     optional -- WorkPool's constructor defaults to ev_engine = 0 and
 //     INIT_EVENT_NONE is 0, so the natural `WorkPool pool(4);` yields vcpus whose
 //     master engine is the NullEventEngine, whose wait_for_fd returns -1 WITHOUT
-//     setting errno. Every fd wait then fails at once and the serving loop
-//     hot-spins while logging on each pass. "Same" is not optional either --
-//     a backend file opened with the iouring engine casts the CURRENT vcpu's
-//     master engine to iouringEngine*, so landing on an epoll vcpu is a
-//     wrong-type cast. Note that asking init() for several event engines does not
-//     install several: it keeps the first that works, which is why this compares
-//     get_event_engine() (the winner) and not the request mask.
+//     setting errno. Every fd wait on such a vcpu then fails at once and throws
+//     its timeout away -- including one issued on an explicitly created cascading
+//     engine, because every cascading engine in photon blocks by calling back
+//     into the master engine. That much is a property of photon and is the same
+//     for all five transports.
+//
+//     What a transport then DOES with a failed wait is its own property, and the
+//     five are not alike; each was measured with this guard deleted. vhost-user's
+//     virtqueue loop spins and logs on every pass: one run wrote 8.07 GB over
+//     42.9 M lines before it filled the filesystem it was logging to, and the
+//     frontend's write never completed. ublk breaks too, but quietly -- its
+//     per-queue pump cannot reap, so no request is ever fetched, the initiator's
+//     write times out, and shutdown does not return. nbd neither spins nor logs:
+//     start() returns 0, the endpoint listens, and only the client handshake
+//     fails. tcmu still WORKS -- a write, an fsync and a read-back through its
+//     LUN all succeed -- and only stops being cheap: at PollPolicy::SLEEP its
+//     pump logs and sleeps 1 ms per pass, near 1 kHz, while at PollPolicy::SPIN
+//     it yields instead, logs nothing, and holds a core. vduse with no consumer
+//     attached logs nothing either, because its loop's readiness gate is false
+//     and so it never reaches the wait.
+//
+//     Since the engine never writes errno, every gate on this path that tests one
+//     is reading a value left over from an unrelated syscall. There are three:
+//     the shared virtqueue loop's, each pump's, and the io_uring engine's own
+//     decision to report a failed wait as a timeout rather than an error -- which
+//     is what turns ublk's throttled loud poll into an unthrottled silent one.
+//     The values observed at them were 0, 2, 6 and 110, plus -1, which is not an
+//     errno at all. So whether a given failure is loud, silent or throttled is an
+//     accident of what errno happened to hold, not a property of the pool, and no
+//     errno printed by those messages is an observation.
+//
+//     "Same" is not optional either -- a backend file opened with the iouring
+//     engine casts the CURRENT vcpu's master engine to iouringEngine*, so landing
+//     on an epoll vcpu is a wrong-type cast. Note that asking init() for several
+//     event engines does not install several: it keeps the first that works, which
+//     is why this compares get_event_engine() (the winner) and not the request mask.
 //   io engines: the pool vcpu's mask must COVER the caller's. libaio's context is
 //     thread-local and is only set by libaio_wrapper_init(), which init() calls
 //     only when the flag is present; on a vcpu without it the context is null and
