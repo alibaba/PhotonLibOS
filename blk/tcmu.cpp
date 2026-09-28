@@ -2156,17 +2156,18 @@ struct TcmuHBAImpl : TcmuHBA {
             if (lf == 0)
                 continue;   // a live server holds it: routine, and deliberately silent
             if (lf < 0) {
-                // The filter above already restricted this scan to dev_config ==
-                // "photon/...", so this namespace holds no foreign devices, and
-                // acquire_lock precedes create_backstore in start() while release
-                // never unlinks -- so a real orphan always has its file. A
-                // tombstone that is missing or unopenable is therefore an
-                // inconsistent state, and the consequence is worse than one
-                // skipped entry: this device becomes unreportable, so no recovery
-                // run will ever see it again. devlock_free is a probe and logs
-                // nothing, so this is the only place that can say it.
-                LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, "
-                         "so it cannot be reported as an orphan", identity);
+                // What reaches here passed the dev_config filter above, so it is
+                // ours -- and the filter is that guarantee, not the directory,
+                // which holds foreign entries too. A real orphan always has its
+                // file: acquire_lock precedes create_backstore in start(), and
+                // release unlocks and closes without ever unlinking. So a
+                // tombstone that is missing or unopenable is an inconsistent
+                // state, and the consequence is worse than one skipped entry:
+                // this device becomes unreportable, so no recovery run will ever
+                // see it again. devlock_free is a probe and logs nothing, so
+                // this is the only place that can say it.
+                LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
+                         identity);
                 continue;
             }
             BlkDevInfo info;

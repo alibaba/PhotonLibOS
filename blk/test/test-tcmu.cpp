@@ -102,9 +102,9 @@ static int cfs_write(const std::string& path, const std::string& val) {
 }
 
 // The scan's tombstone path. Mirrors tcmu's own lock_file_name(), which is a
-// private static of a class that does not exist outside its .cpp -- so this is a
-// deliberate second copy of the convention, and the third copy is the one this
-// helper removes.
+// private static of a class that does not exist outside its .cpp -- so this is
+// a deliberate second copy of the convention, and it is the only one: every
+// probe below goes through here rather than spelling the path out again.
 static std::string lock_path(const char* identity) {
     return std::string("/run/photon-blk/tcmu-") + identity + ".lock";
 }

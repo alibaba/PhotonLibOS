@@ -1277,14 +1277,13 @@ struct UblkControllerImpl : UblkController {
             return ret;
         DEFER(::closedir(dd));
         UblkCtrl ctrl;
-        // init() logs its own cause. What it cannot log is the consequence, and
-        // the consequence is the whole problem: the empty vector this returns
-        // then reads exactly like "this host has no orphans", which is the answer
-        // a recovery run decides whether to adopt on. There is no error channel
-        // to distinguish them with -- the signature returns a vector.
+        // init() logs its own cause. What it cannot log is the consequence,
+        // and the consequence is the whole problem: the empty vector this
+        // returns then reads exactly like "this host has no orphans" -- the
+        // answer a recovery run decides whether to adopt on. There is no error
+        // channel to distinguish them with: the signature returns a vector.
         if (ctrl.init() < 0) {
-            LOG_ERROR("ublk: the control plane is unavailable, so the orphan scan cannot run "
-                      "and its empty result does not mean this host has no orphans");
+            LOG_ERROR("ublk: the control plane is unavailable, so the orphan scan did not run -- an empty result does not mean this host has no orphans");
             return ret;
         }
         DEFER(ctrl.fini());
@@ -1295,9 +1294,9 @@ struct UblkControllerImpl : UblkController {
             uint32_t id = (uint32_t)atoi(e->d_name + 5);
             // probe the flock first (cheap): free => no live server. Read-only
             // open, no O_CREAT: a query must not create files. This walks a
-            // kernel-enumerated namespace, so a device with no tombstone of ours
-            // is the norm rather than an inconsistency -- it is somebody else's
-            // ublk device, and "not ours to list" is the whole answer.
+            // kernel-enumerated namespace, so a device with no tombstone of
+            // ours is the norm rather than an inconsistency -- it is somebody
+            // else's ublk device, and "not ours to list" is the whole answer.
             char name[32];
             snprintf(name, sizeof(name), "ublk-%u.lock", id);
             if (devlock_free(lock_dir, name) != 1)
