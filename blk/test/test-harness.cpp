@@ -525,7 +525,7 @@ TEST(RoWriteChild, a_node_that_takes_the_write_is_reported_not_passed_over) {
     EXPECT_EQ(EILSEQ, rep.exit_code);   // the exit code mirrors the status
     EXPECT_EQ(0, rep.child_errno);      // no syscall failed; the write is the finding
     // ... and it happened in a CHILD, born with a clean fd table even though this
-    // process is holding four descriptors on the same file.
+    // process is holding three descriptors on the same file.
     EXPECT_GT(rep.pid, 0);
     EXPECT_NE((pid_t)::getpid(), rep.pid);
     EXPECT_EQ(0u, rep.fds);
@@ -533,7 +533,7 @@ TEST(RoWriteChild, a_node_that_takes_the_write_is_reported_not_passed_over) {
     EXPECT_FALSE(rep.hung);
     EXPECT_EQ(nullptr, rep.shm);
     for (int h : held)
-        EXPECT_EQ(0, ::fcntl(h, F_GETFD));   // the drop was the child's only
+        EXPECT_EQ(0, ::fcntl(h, F_GETFD));   // the drop touched the child's table only
 }
 
 TEST(RoWriteChild, a_node_that_is_not_there_comes_back_as_the_childs_errno) {

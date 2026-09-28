@@ -542,8 +542,10 @@ int device_io(const std::string& node, const void* wbuf, size_t len,
 // Returns 0 when the write was rejected as expected, EILSEQ when it went through,
 // EBADMSG when the child echoed an off or a len other than the one sent -- its
 // verdict is then about an IO nobody asked for, so it is not handed back as one --
-// or an errno from the child's open or read, the structural ones included. Ask for
-// `report` to keep the child's own account of it (see consumer_io above).
+// an errno from the child's open or read, the structural ones included, or
+// ETIMEDOUT when the child had to be abandoned, which leaves it running: without a
+// `report` its channel is released here and nothing keeps its pid. Ask for `report`
+// to keep the child's own account of it (see consumer_io above).
 int expect_write_rejected(const std::string& node, uint64_t off, size_t len,
                           ConsumerIoResult* report = nullptr);
 
