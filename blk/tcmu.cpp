@@ -2166,10 +2166,11 @@ struct TcmuHBAImpl : TcmuHBA {
                 // caller that is neither its owner nor root. The consequence is
                 // bounded -- THIS scan cannot report the device. Recovery is not
                 // lost with it: initial_scan filters on enable instead of
-                // dev_config and reads -1 as "not held", so an enabled
-                // registration is still handed over and re-plants its tombstone.
+                // dev_config and reads -1 as "not held", so an enabled one is
+                // still handed over. Adoption must then open the file for
+                // writing: it plants a missing one, not one this uid cannot open.
                 // This file's two other probes of devlock_free pass -1 through
-                // uncommented, so this is the only place an operator hears of it.
+                // uncommented, so this WARN is the only report of an unusable one.
                 LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
                          identity);
                 continue;
