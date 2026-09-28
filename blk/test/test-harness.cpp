@@ -804,11 +804,14 @@ TEST(WriterChild, its_counters_are_live_while_it_runs_and_its_argv_is_echoed) {
                              // abandoned by the call that found it stopped
 
     // A second configuration, because three fields that are each 0 or 1 cannot be
-    // pairwise distinct: with (direct, advance, verify) = (1, 1, 0) above, an
-    // exchange of the first two slots carries two equal values and no echo can see
-    // it. (1, 0, 1) covers that pair, and the two runs together cover all three --
-    // which is as far as "every field differs from every other" can be pushed when
-    // three of them are booleans.
+    // pairwise distinct. The run above sends (direct, advance, verify) = (1, 1, 1),
+    // in which every exchange of two slots carries equal values and no echo can see
+    // it -- what that run witnesses is the read-back comparison, not the encoding.
+    // This one sends (1, 0, 1), covering the pairs (direct, advance) and (advance,
+    // verify). The third pair is covered nowhere in this case: witnessing it needs
+    // a caller that sends the two unequal, and that is the stop-under-load case in
+    // the tcmu suite, whose five writers send (1, 1, 0) and whose errors(), where
+    // an echo disagreement lands, is asserted after stop().
     BackgroundWriter v;
     BackgroundWriter::Opts p;
     p.off = W_OFF;
