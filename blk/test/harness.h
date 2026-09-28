@@ -329,8 +329,11 @@ struct ConsumerStressReport {      // POD, shared with the child
 // A cross-process std::atomic is safe only when it is lock-free: a non-lock-free
 // one falls back to a lock table that belongs to the process, so the two sides
 // would lock different tables and the counter would have no mutual exclusion at
-// all. Hence the two asserts -- they are about these members, not about atomics in
-// general, and they are the reason the members are the widths they are.
+// all. Hence one assert per member below, each taking the type it checks from the
+// member itself: an assert that named a width instead would keep passing over a
+// member that had stopped being an atomic at all. They are about these members, not
+// about atomics in general, and they are the reason the members are the widths they
+// are.
 struct ConsumerWriterReport {      // shared with the child; constructed, not cleared
     std::atomic<uint64_t> iters{0};      // blocks completed, published as they go
     std::atomic<int32_t> errors{0};      // the writer's own failures, plus the
@@ -351,12 +354,15 @@ struct ConsumerWriterReport {      // shared with the child; constructed, not cl
     uint32_t echo_advance;
     uint32_t echo_verify;
 };
-static_assert(std::atomic<uint64_t>::is_always_lock_free,
+static_assert(decltype(ConsumerWriterReport::iters)::is_always_lock_free,
               "ConsumerWriterReport::iters crosses a process boundary, so a "
               "non-lock-free atomic would leave it guarded by a per-process lock");
-static_assert(std::atomic<int32_t>::is_always_lock_free,
-              "ConsumerWriterReport's flags cross a process boundary, so a "
-              "non-lock-free atomic would leave them guarded by a per-process lock");
+static_assert(decltype(ConsumerWriterReport::errors)::is_always_lock_free,
+              "ConsumerWriterReport::errors crosses a process boundary, so a "
+              "non-lock-free atomic would leave it guarded by a per-process lock");
+static_assert(decltype(ConsumerWriterReport::stop_flag)::is_always_lock_free,
+              "ConsumerWriterReport::stop_flag crosses a process boundary, so a "
+              "non-lock-free atomic would leave it guarded by a per-process lock");
 
 // The result channel: ONE fd-backed shared object, mapped by both sides, handed
 // to the child as a descriptor. Not an anonymous mapping -- exec replaces the
@@ -568,10 +574,18 @@ void consumer_release(ConsumerIoResult& r);
 // that region from its argv, so the child maps more than the one page handed
 // here, and its first touch past the end of the backing file would kill it --
 // the second reason such an argv must name a node that does not exist, failing
-// its open before any payload. A mode without one is exempt: channel_io_bytes()
-// returns 0 for CONS_MODE_STRESS, which allocates its own IO buffers, so the
-// page is all a stress child maps, and a stress argv handed here may name a
-// real file and run to completion.
+// its open before any payload. channel_io_bytes() returns 0 for two modes, whose
+// children allocate their own IO buffers instead of taking a payload region from
+// their argv: CONS_MODE_STRESS, each of whose workers posix_memaligns a pair, and
+// CONS_MODE_WRITER, which posix_memaligns the block it hammers. For those the page
+// handed here is all the child maps, so the reason above does not reach them -- but
+// the two are not alike in what a decoded argv handed here then does. A stress
+// child ends on its own, so a stress argv may name a real file and run to
+// completion. A writer child loops until its parent stops it, so one whose argv
+// decoded would spend the caller's whole deadline here and then leave the child
+// running. Hence a row in the table of argvs that must not decode may be a writer's
+// only in a form that is refused, and the writer's positive control is a
+// BackgroundWriter, whose start() is the builder those rows pin.
 //
 // Test-only, and the reason it exists: the structural exit codes above are the
 // loud half of the isolation, and the only way to hear them is to hand the child
@@ -731,10 +745,13 @@ struct StressRnd {
 // every worker of a phase opens it, so a phase is the smallest unit that can be
 // wedged on it -- and per-IO children would be tens of thousands of execs.
 // Runs on the CALLING OS THREAD: it spawns that child and then polls for it with
-// a deadline of its own. From a coroutine use stress_off_vcpu() below. Ask for
-// `abandoned` to keep the handle on a child the deadline gave up on (its pid and
-// its result channel, for a later consumer_reap()); without one the channel is
-// released there and the child is left to finish or not on its own.
+// a deadline of its own. From a coroutine use stress_off_vcpu() below. `abandoned`,
+// when given, receives this phase's result whether or not the child had to be given
+// up on: a clean phase hands over the pid it spawned with `shm` null, and only a
+// child the deadline gave up on comes with its result channel still mapped, for a
+// later consumer_reap(). So `shm`, not `pid`, is what says there is a child still
+// to reap. Without `abandoned` the channel is released there and the child is left
+// to finish or not on its own.
 StressResult stress_run(const StressCfg& c, ConsumerIoResult* abandoned = nullptr);
 
 // Coroutine-safe wrapper: the spawn and the bounded wait both run on an OS thread

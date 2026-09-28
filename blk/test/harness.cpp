@@ -1337,13 +1337,16 @@ ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
 // child with a deadline of its own, and read the counters back out of the
 // channel. Everything that touches the node happens in the child.
 //
-// `abandoned`, when given, receives the whole result of a child this phase had to
-// give up on -- pid, channel and the ownership of both -- so that a caller can
-// still reap it later. StressResult is returned by value and carries two scalars
-// out of the same event, and a scalar is not enough: a wedged child cannot be
-// reaped without its channel, and consumer_reap() refuses one that has been
-// released. The shape is device_io()'s `report` and expect_write_rejected()'s
-// fourth parameter, not a new one.
+// `abandoned`, when given, receives this phase's whole result whether or not the
+// child had to be given up on: a clean phase writes it too, with the pid it spawned
+// and `shm` null, the mapping having been dropped inside consumer_spawn(). Only a
+// child the deadline gave up on arrives with its channel still mapped, carrying the
+// ownership of both pid and channel so that a caller can still reap it later -- so
+// `shm`, not `pid`, is what says there is a child still to reap. StressResult is
+// returned by value and carries two scalars out of the same event, and a scalar is
+// not enough: a wedged child cannot be reaped without its channel, and
+// consumer_reap() refuses one that has been released. The shape is device_io()'s
+// `report` and expect_write_rejected()'s fourth parameter, not a new one.
 StressResult stress_in_child(const StressCfg& c, uint64_t span,
                              ConsumerIoResult* abandoned) {
     StressResult res;

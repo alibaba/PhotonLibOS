@@ -938,10 +938,13 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     // Safety net, release FIRST: a writer parked in a gated backend IO only leaves
     // it once the gate opens, and stop() waits for the writer to leave its IO. That
     // wait is bounded, so the wrong order no longer hangs this case -- it abandons
-    // five writers instead -- which is why the stops are asserted rather than
-    // merely called: an abandoned writer has to be red, not a silent pass. EXPECT
-    // and not ASSERT because ASSERT_ returns, and in a lambda that means "stop
-    // cleaning up" rather than "fail the case".
+    // five writers instead. On the normal path these are each object's SECOND stop:
+    // the case body's own stop loop ran first, and stop() says true of a writer that
+    // is not running, so the assertion that makes an abandoned writer red is that
+    // loop's -- this one only bites when an ASSERT_ ended the case before it. And
+    // EXPECT, not ASSERT: an ASSERT_ fails the case too, but its return leaves this
+    // lambda, so the four stops after the first are left to the writers' own
+    // destructors, where an abandoned one has nobody to tell.
     DEFER({
         rec.release_gate(4096);
         for (auto& b : bw)
@@ -1023,7 +1026,7 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     }
 
     for (auto& b : bw)
-        b.stop();
+        EXPECT_TRUE(b.stop());
     for (int i = 0; i < WRITERS; i++)
         EXPECT_EQ(0, bw[i].errors());
 
@@ -1119,7 +1122,7 @@ TEST_F(TcmuTest, restart_window_io) {
     test::BackgroundWriter w;
     ASSERT_EQ(0, w.start(sd, {IO_OFF, 0, IO_LEN, /*direct=*/true,
                               /*advance=*/false, /*verify=*/true}));
-    DEFER(w.stop());
+    DEFER(EXPECT_TRUE(w.stop()));
 
     // steady state: a few verified iterations before the outage
     ASSERT_TRUE(w.wait_iters(3));
