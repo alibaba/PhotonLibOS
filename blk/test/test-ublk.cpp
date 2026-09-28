@@ -788,6 +788,118 @@ TEST_F(UblkTest, consumer_hang_is_contained) {
     test::consumer_release(rep);   // a no-op once reaped; the net for when not
 }
 
+// The writer's twin of the case above, and the reason a bounded stop() has to
+// return something. A writer is the one consumer that never ends on its own, so
+// the caller's deadline is the only thing that can bound it -- and a deadline
+// expiring has to be a failure a case can assert on, not a silence that looks
+// exactly like a clean stop.
+//
+// It also has to hand the wedged child over, pid AND result channel together: a
+// pid on its own cannot be reaped, because consumer_reap() refuses a child whose
+// channel has been released, and a writer this process gave up on would then be
+// uncollectable by construction. That is what the out-parameter below is for.
+//
+// A red here costs one ublk dev_id and may leave a process that cannot be killed,
+// so do not re-run it in a loop and measure the D-state census after any failure.
+TEST_F(UblkTest, writer_hang_is_contained) {
+    test::RecordingFile rec(file);
+    UblkController::Config cfg(make_info());
+    // As above: shutdown() bounds its wait for the node's last opener with this
+    // knob, and here one is expected to leave -- as soon as the gate opens.
+    cfg.stop_timeout_ms = 20000;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    test::ConsumerIoResult abandoned;
+    DEFER(test::consumer_release(abandoned));   // a no-op once it has been reaped
+    DEFER(delete dev);
+    DEFER(dev->shutdown());
+    // Declared AFTER the shutdown DEFER so it runs BEFORE it, as above: a daemon
+    // that finds the gate shut parks on it again and never completes the IO.
+    DEFER(rec.release_gate(4096));
+    ASSERT_EQ(0, dev->start(&rec));
+
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+
+    // Declared last so it is destroyed FIRST: on any early return its own stop()
+    // gives the writer its bounded deadline before the DEFERs above start taking
+    // the device apart. On the path this case actually takes it is already stopped.
+    test::BackgroundWriter w;
+    ASSERT_EQ(0, w.start(node, {IO_OFF, IMG_SIZE - IO_OFF, 64 << 10}));
+
+    // UNGATED first, and one completed block before the gate shuts. Not tidiness:
+    // stop() sets its flag before it waits, so a child that has not got going yet
+    // reads that flag on its first pass through the loop and exits having written
+    // nothing -- which is a clean stop, not a wedge, and this case would pass by
+    // measuring nothing. A completed block is also what says the node is ready, so
+    // the writer below is parked in the backend and not in an open that will not
+    // resolve.
+    ASSERT_TRUE(w.wait_iters(1));
+    rec.gated = true;
+
+    // Its next write parks in the backend and the kernel counts it. What "wedged"
+    // has to mean here is a counter that has STOPPED, and that needs two windows
+    // rather than one: the write already past the gate when it shut is not held by
+    // it and completes normally, so a snapshot taken at that instant is one behind
+    // the writer's last completed block. The first window is for that write to
+    // finish, the second is the measurement -- 200 ms is two orders of magnitude
+    // over what one of these writes takes when nothing is holding it.
+    uint64_t parked = 0;
+    for (int i = 0; i < 5000 && !parked; i++) {
+        parked = node_inflight(node);
+        if (!parked)
+            photon::thread_usleep(1000);
+    }
+    EXPECT_GE(parked, 1u);
+    photon::thread_usleep(200 * 1000);
+    uint64_t frozen = w.iters();
+    EXPECT_GT(frozen, 0u);
+    photon::thread_usleep(200 * 1000);
+    EXPECT_EQ(frozen, w.iters());
+
+    // (a) The caller gets its deadline back instead of the wedge. 3 s: far above a
+    // served IO, which takes milliseconds, and far below what a suite can afford to
+    // lose to one writer.
+    static constexpr uint64_t BUDGET_US = 3ull * 1000 * 1000;
+    EXPECT_FALSE(w.stop(&abandoned, BUDGET_US));
+    EXPECT_TRUE(abandoned.hung);
+    EXPECT_FALSE(abandoned.reaped);
+    EXPECT_EQ(test::CONS_TIMEOUT, abandoned.stage);
+    EXPECT_EQ(ETIMEDOUT, abandoned.status);
+    EXPECT_GE(abandoned.elapsed_us, BUDGET_US);
+    // Still alive, and deliberately not signalled: an uninterruptible sleeper
+    // cannot be killed, and a queued signal would only sit next to the wedge.
+    EXPECT_GT(abandoned.pid, 0);
+    EXPECT_EQ(0, ::kill(abandoned.pid, 0));
+    // The counters stay readable right through the give-up: what the writer got to
+    // before it wedged is still there to read, and giving up on it did not cost the
+    // caller that. The census is still the "there was none" value -- a wedged writer
+    // has produced no final report, and the zeros the channel was born with must not
+    // read as a clean one.
+    EXPECT_EQ(frozen, w.iters());
+    EXPECT_EQ(test::CONS_FDS_UNMEASURED, abandoned.fds);
+
+    // (b) this process is still here and still asserting, and the registration
+    // survived the wedge.
+    EXPECT_EQ(0, ::access(node.c_str(), F_OK));
+
+    // (c) ... and the child is collectable, because the hand-over carried its
+    // channel with it. Opening the gate lets the write it is parked in return, and
+    // the loop that returns to it sees the stop flag the give-up already set -- so
+    // it drains on its own, the daemon gets the node back, and only then is there a
+    // status to read.
+    rec.release_gate(4096);
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(node.c_str(), F_OK));
+    EXPECT_TRUE(test::consumer_reap(abandoned, 30ull * 1000 * 1000));
+    EXPECT_FALSE(abandoned.hung);
+    EXPECT_TRUE(abandoned.reaped);
+    EXPECT_EQ(0, abandoned.status);
+    EXPECT_EQ(test::CONS_DONE, abandoned.stage);
+    // The real census, which only a collected child has one to give.
+    EXPECT_EQ(0u, abandoned.fds);
+}
+
 // was `dedicated_vcpu`. The assertion is the PLACEMENT, not merely that IO
 // works: the pool-wide cursor must hand the two queues two different vcpus,
 // and neither may be the caller's, or BlkConfig::pool is decoration.
