@@ -21,10 +21,9 @@ limitations under the License.
 // vcpu with no master event engine cannot host an fd wait at all. The second
 // needs no exotic setup: ev_engine defaults to 0 and INIT_EVENT_NONE is 0, so the
 // natural `WorkPool pool(4);` installs the NullEventEngine, whose wait_for_fd
-// answers -1 at once, drops the timeout and leaves errno alone. A serving
-// coroutine parked on such a vcpu never parks; what it does instead differs per
-// transport -- tcmu among them still serves, at the price of a poll -- and is
-// documented at check_pool_engines.
+// answers -1 at once, drops the timeout and leaves errno alone. The consequence
+// for a serving coroutine differs per transport -- tcmu among them still serves,
+// at the price of a poll -- and is documented at check_pool_engines.
 
 #include "../utils.h"
 #include "../../test/gtest.h"
