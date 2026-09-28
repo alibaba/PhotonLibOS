@@ -46,6 +46,7 @@ limitations under the License.
 
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -323,6 +324,21 @@ static std::vector<std::string> ro_write_argv(const std::string& path) {
             std::to_string(RW_OFF), std::to_string(RW_LEN), path};
 }
 
+// A well-formed writer argv, in decode_writer_argv's order: mode tag, channel fd,
+// off, wrap_at, block, direct, advance, verify, path. argc 11 with argv[0]. The
+// values differ pairwise so that an echo of them can see two slots exchanged.
+//
+// Only ever handed over in REFUSED forms: unlike the other three modes this child
+// does not end on its own, so an unmodified writer argv given to
+// consumer_spawn_argv() would not return -- it would cost the caller its whole
+// deadline and then leave the child running. Its positive control is a
+// BackgroundWriter, whose start() is the builder these rows pin.
+static std::vector<std::string> writer_argv(const std::string& path) {
+    return {CONS_CHILD_ARG, std::to_string((int)CONS_MODE_WRITER), "3",
+            std::to_string(OFF), std::to_string(OFF + (4ull << 20)),
+            std::to_string(BLK), "1", "1", "0", path};
+}
+
 // `at` is an ARGV index, which is one more than the index into the vectors above:
 // consumer_spawn_argv() takes argv[1] onwards.
 static std::vector<std::string> patched(std::vector<std::string> a, int at,
@@ -348,17 +364,17 @@ TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
     const std::string absent = "/tmp/photon-blk-consumer-argv-absent";
     ::unlink(absent.c_str());
     const auto io = io_argv(absent), st = stress_argv(absent),
-               rw = ro_write_argv(absent);
+               rw = ro_write_argv(absent), wr = writer_argv(absent);
     struct Row { const char* what; std::vector<std::string> argv; };
     const std::vector<Row> rows = {
         // the mode tag selects the rest of the table, so an unknown one is a
-        // mis-decode and not a default -- and 3 is the row that pins the top of its
+        // mis-decode and not a default -- and 4 is the row that pins the top of its
         // accepted range rather than merely flanking it. On the read-only-write argv
-        // because that is the mode the top of the range names: on any other base a
-        // relaxed bound lands in a half whose own argc gate refuses it, and this row
-        // survives the relaxation it exists to catch.
+        // because that is the mode decode_child_argv's tail handles: on any other
+        // base a relaxed bound lands in a half whose own argc gate refuses it, and
+        // this row survives the relaxation it exists to catch.
         {"argv[2]: the mode tag is not a ConsumerMode",  patched(io, 2, "7")},
-        {"argv[2]: the mode tag is one over its range",  patched(rw, 2, "3")},
+        {"argv[2]: the mode tag is one over its range",  patched(rw, 2, "4")},
         {"argc 3: too short for the tag and the fd",     {CONS_CHILD_ARG, "0"}},
         // the channel fd's range is decode_child_argv's own, so it is checked
         // ahead of either mode's half -- and BOTH bounds need a row: a bound
@@ -409,6 +425,22 @@ TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
         // from the accepted side.
         {"argv[5]: len is above its range",              patched(rw, 5, "1099511627777")},
         {"argv[6]: the path is empty",                   patched(rw, 6, "")},
+        // writer mode, argc 11
+        {"argc 10: one under the writer table",          shortened(wr)},
+        {"argc 12: one over the writer table",           over(wr)},
+        {"argv[4]: off has a tail",                      patched(wr, 4, "1048576x")},
+        {"argv[5]: wrap_at is not a number",             patched(wr, 5, "x")},
+        {"argv[6]: block is below its range",            patched(wr, 6, "4095")},
+        // 1099511627777 is 2^40 + 1 again. 4096 -- the bound itself -- is ACCEPTED,
+        // so it is no row of a table every row of which is refused; the accepted
+        // side is pinned instead by start(), which makes the same check before it
+        // builds an argv, and by every BackgroundWriter the suites start, whose
+        // block travels through this decoder and then through the echo.
+        {"argv[6]: block is above its range",            patched(wr, 6, "1099511627777")},
+        {"argv[7]: direct is neither 0 nor 1",           patched(wr, 7, "2")},
+        {"argv[8]: advance is not a number",             patched(wr, 8, "x")},
+        {"argv[9]: verify is neither 0 nor 1",           patched(wr, 9, "2")},
+        {"argv[10]: the path is empty",                  patched(wr, 10, "")},
     };
     for (const auto& row : rows) {
         SCOPED_TRACE(row.what);
@@ -683,6 +715,134 @@ TEST(StressChild, a_span_that_does_not_fit_is_caught_before_any_spawn) {
     EXPECT_EQ(0u, r.ios);
     EXPECT_NE(std::string::npos, r.first_error.find("the span does not fit the device"))
         << r.first_error;
+}
+
+// ---------------------------------------------------------------------------
+// a writer in a consumer child
+//
+// The counters a caller waits on live in the channel and are published as the
+// child goes, not once at the end: ConsumerReport::magic exists to say "the rest
+// of this page is final", and nothing about a writer that is still running is.
+// Reading the counters while the child runs is the only thing that can tell the
+// two apart -- published at the end, they read 0 from here, and every case that
+// waits for a writer to get going would time out instead.
+//
+// No photon runtime, like the rest of this file: start(), iters(), errors() and
+// stop() are syscalls plus a bounded WNOHANG poll, and the hop off the vcpu that
+// stop() takes is one run_off_vcpu() declines to take when there is no vcpu.
+// wait_iters() is the exception -- it yields a coroutine -- so these cases poll
+// with nanosleep() instead.
+// ---------------------------------------------------------------------------
+
+static constexpr uint64_t W_OFF = OFF;
+static constexpr uint64_t W_WRAP = OFF + (4ull << 20);
+
+// Poll, not wait_iters(): there is no vcpu here to yield, and a writer's whole
+// point is that a caller can watch it make progress from outside.
+static bool poll_iters(const BackgroundWriter& w, uint64_t n, uint64_t* got) {
+    for (int i = 0; i < 30000; i++) {
+        *got = w.iters();
+        if (*got >= n)
+            return true;
+        struct timespec ts{0, 1000 * 1000};   // 1 ms
+        ::nanosleep(&ts, nullptr);
+    }
+    *got = w.iters();
+    return *got >= n;
+}
+
+TEST(WriterChild, its_counters_are_live_while_it_runs_and_its_argv_is_echoed) {
+    // A regular file, as in the two cases above: open_node() is a bare open() with
+    // an ENXIO retry and has nothing to say about the node being a device. The
+    // O_DIRECT the writer asks for is refused by tmpfs and the child's own fallback
+    // handles that -- the same retry the stress control above relies on.
+    const char* path = "/tmp/photon-blk-writer-child";
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)W_WRAP));   // the writer wraps inside this
+    ::close(fd);
+    DEFER(::unlink(path));
+    // The same shape as the two inheritance cases above: this process holds extra
+    // descriptors on the very file the writer is about to hammer, so a census of 0
+    // from the child proves its drop ran.
+    int held[3];
+    for (int& h : held)
+        h = ::open(path, O_RDONLY);
+    DEFER(for (int h : held) ::close(h));
+    for (int h : held)
+        ASSERT_EQ(0, ::fcntl(h, F_GETFD));   // the parent really is holding them
+
+    BackgroundWriter w;
+    BackgroundWriter::Opts o;
+    o.off = W_OFF;
+    o.wrap_at = W_WRAP;
+    o.block = BLK;
+    o.direct = true;
+    o.advance = true;
+    o.verify = true;
+    ASSERT_EQ(0, w.start(path, o));
+    DEFER(w.stop());
+
+    uint64_t first = 0, second = 0;
+    ASSERT_TRUE(poll_iters(w, 1, &first));
+    // The teeth of "live". Nothing has stopped this child, so a second read has to
+    // be strictly ahead of the first -- and that it is also says the child was
+    // still running when both were taken, since a writer that had already exited
+    // would leave the counter frozen where it fell.
+    ASSERT_TRUE(poll_iters(w, first + 1, &second));
+    EXPECT_GT(second, first);
+    // Read BEFORE stop(): this is the child's own account of its IO, still being
+    // published, and it includes the read-back comparison `verify` turned on.
+    EXPECT_EQ(0, w.errors());
+
+    // stop() is bounded, collects the child, and says whether it did. What it
+    // returns after that is the same number, out of a channel that is gone.
+    EXPECT_TRUE(w.stop());
+    EXPECT_EQ(0, w.errors());
+    EXPECT_GE(w.iters(), second);
+    EXPECT_TRUE(w.stop());   // idempotent, and a writer already stopped was not
+                             // abandoned by the call that found it stopped
+
+    // A second configuration, because three fields that are each 0 or 1 cannot be
+    // pairwise distinct: with (direct, advance, verify) = (1, 1, 0) above, an
+    // exchange of the first two slots carries two equal values and no echo can see
+    // it. (1, 0, 1) covers that pair, and the two runs together cover all three --
+    // which is as far as "every field differs from every other" can be pushed when
+    // three of them are booleans.
+    BackgroundWriter v;
+    BackgroundWriter::Opts p;
+    p.off = W_OFF;
+    p.wrap_at = W_WRAP;
+    p.block = BLK;
+    p.direct = true;
+    p.advance = false;   // hammer one offset
+    p.verify = true;
+    ASSERT_EQ(0, v.start(path, p));
+    uint64_t n = 0;
+    ASSERT_TRUE(poll_iters(v, 1, &n));
+    EXPECT_GT(n, 0u);
+    EXPECT_TRUE(v.stop());
+    EXPECT_EQ(0, v.errors());
+    EXPECT_GE(v.iters(), n);   // the counters survive the channel that carried them
+}
+
+TEST(WriterChild, a_block_below_the_minimum_is_refused_before_any_spawn) {
+    // start()'s own check, and the same 4096 decode_writer_argv() restates on the
+    // other side of the boundary: the case above runs the accepted side through the
+    // real builder, this one is the refused side. A configuration check rather than
+    // IO, so no child is spawned and no node is touched -- which is why the path
+    // below does not exist.
+    const char* absent = "/tmp/photon-blk-writer-unspawned";
+    ::unlink(absent);
+    BackgroundWriter w;
+    errno = 0;
+    EXPECT_EQ(-1, w.start(absent, {W_OFF, W_WRAP, 4095}));
+    EXPECT_EQ(EINVAL, errno);
+    // Nothing was started, so there is nothing to collect and nothing was
+    // abandoned -- which is what stop()'s true means for a writer it found stopped.
+    EXPECT_TRUE(w.stop());
+    EXPECT_EQ(0u, w.iters());
+    EXPECT_EQ(0, w.errors());
 }
 
 }  // namespace test
