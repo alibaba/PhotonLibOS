@@ -154,10 +154,9 @@ TEST(blk_pool, engines_null_pool_is_accepted) {
 // INIT_EVENT_NONE is 0 -- so the natural `WorkPool pool(4);` produces vcpus whose
 // master engine is the NullEventEngine, whose wait_for_fd returns -1 immediately,
 // discards the timeout, and never writes errno. A vcpu with no master engine
-// cannot host an fd wait at all, so a wait there returns at once instead of
-// parking the coroutine that issued it; what it does then differs per transport,
-// and is documented at check_pool_engines. That is a configuration error, so
-// start() must refuse it rather than serve pathologically.
+// cannot host an fd wait at all; what a serving coroutine does then differs per
+// transport, and is documented at check_pool_engines. That is a configuration
+// error, so start() must refuse it rather than serve pathologically.
 TEST(blk_pool, engines_reject_a_pool_with_no_event_engine) {
     photon::WorkPool pool(2);   // defaults: no event engine, no io engine
     ASSERT_EQ(2, pool.get_vcpu_num());
