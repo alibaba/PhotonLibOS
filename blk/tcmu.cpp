@@ -520,7 +520,7 @@ struct TcmuServer {
     // uint32_t counters, the bools, PollPolicy) trails them -- interleaving a
     // narrow member between two 8-wide ones (block_size after identity,
     // pending_capacity_ua or read_only before features) opens a hole the next
-    // 8-aligned member has to skip. 416 bytes.
+    // 8-aligned member has to skip. 424 bytes (measured).
     TcmuUio uio;
     fs::IFile* backend = nullptr;
     char identity[256] = {};    // capped well below this at registration time
@@ -534,17 +534,28 @@ struct TcmuServer {
     // under the thread's own lock before it returns, so the migrator already holds
     // the answer. That is why no completion handshake belongs here -- a semaphore
     // exists to tell a waiter that some work finished, and no work has to finish for
-    // this value to be known. Nothing between the create and this read yields
-    // (thread_create11 only queues the coroutine, thread_migrate does not switch,
-    // get_vcpu is an inline field read), so `home != nullptr` and `pump_th !=
-    // nullptr` hold or fail together by construction -- the equivalence
-    // run_serve_stop's !home branch rests on. A refused migration needs no handling
-    // either: do_thread_migrate leaves the field untouched when it says no, and what
-    // it left is this vcpu, which is where the pump then really runs. With pool ==
-    // nullptr it is simply the caller's own vcpu.
+    // this value to be known. An accepted migration leaves nothing between the create
+    // and this read that yields (thread_create11 only queues the coroutine,
+    // thread_migrate does not switch for a thread that is not the caller, get_vcpu is
+    // an inline field read), so no other coroutine on this vcpu can catch the pump
+    // created while `home` is still null. That a null means "no pump to race" is the
+    // direction run_serve_stop's !home branch rests on, and the only one that holds:
+    // serve_stop nulls `pump_th` on the serving vcpu inside the hop, and the DEFER
+    // nulls `home` here only after that hop returns. A refused migration needs no
+    // handling either, though it is not yield-free -- thread_migrate logs every
+    // refusal and migrate_to_pool warns behind it, so a caller-installed sink writing
+    // through a photon IFile does yield in here. The value is still right:
+    // do_thread_migrate leaves the field untouched when it says no, and what it left
+    // is this vcpu, which is where the pump then really runs -- so a stop that sees
+    // the null runs in place on the pump's own vcpu, which is what that branch is
+    // for. With pool == nullptr it is simply the caller's own vcpu.
     //
-    // Control-plane field: written by serve_start and read by run_serve_stop, both on
-    // the vcpu that started the device; the pump's own vcpu never touches it. That is
+    // Control-plane field: written by serve_start and read by run_serve_stop. That
+    // both are on the vcpu that started the device is a contract with the caller, not
+    // a property of this code -- `home` is a plain pointer, while TcmuLink below is
+    // atomic because this device is driven from whatever vcpu its caller runs on. A
+    // detach() or a shutdown() from another vcpu would read `home` and write it from
+    // two OS threads. The pump's own vcpu never touches it. That is
     // why the clear lives in run_serve_stop's DEFER instead of at the end of
     // serve_stop -- under the hop, serve_stop runs on the serving vcpu, and writing
     // `home` from there would be the cross-vcpu write this field exists to avoid.
@@ -1354,8 +1365,8 @@ struct TcmuDeviceImpl : IBlkDevice {
     // among the wide members, where each stranded the align-4 or align-8 member
     // behind it -- own_backend/started cost 2 bytes before lock_fd, created and
     // lun_attached 5 before `server`, on top of 7 bytes of tail -- so they now
-    // trail the odd-sized bs_name instead. 1936 bytes vs 1944 (and vs the 1968
-    // measured before TcmuServer shrank to 496).
+    // trail the odd-sized bs_name instead. 1864 bytes (measured), and it moves
+    // whenever TcmuServer does, which this struct embeds by value.
     TcmuHBA::Config cfg;
     fs::IFile* backend = nullptr;
 

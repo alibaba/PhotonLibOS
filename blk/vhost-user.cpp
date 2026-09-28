@@ -328,15 +328,25 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // do_thread_migrate stores under the thread's own lock before it returns, so
         // the migrator already holds the answer. That is why no completion handshake
         // belongs here -- a semaphore exists to tell a waiter that some work
-        // finished, and no work has to finish for this value to be known. Nothing
-        // between the create and this read yields (thread_create only queues the new
-        // coroutine, thread_migrate does not switch, get_vcpu is an inline field
-        // read), so `home != nullptr` and `th != nullptr` hold or fail together by
-        // construction -- the equivalence run_on_home's !home branch rests on. A
-        // refused migration needs no handling either: do_thread_migrate leaves the
-        // field untouched when it says no, and what it left is this vcpu, which is
-        // where the loop then really runs. With cfg.pool null it is simply the
-        // caller's own vcpu.
+        // finished, and no work has to finish for this value to be known. An
+        // accepted migration leaves nothing between the create and this read that
+        // yields (thread_create only queues the new coroutine, thread_migrate does
+        // not switch for a thread that is not the caller, get_vcpu is an inline
+        // field read), so no other coroutine on this vcpu can catch the loop created
+        // while `home` is still null. That a null means "no loop to race" is the
+        // direction run_on_home's !home branch rests on, and the only one that holds:
+        // vq_stop_here nulls `th` on the serving vcpu inside the hop, and vq_stop
+        // nulls `home` here only after that hop returns. A refused migration needs no
+        // handling either, though it is not yield-free -- thread_migrate logs every
+        // refusal and migrate_to_pool warns behind it, so a caller-installed sink
+        // writing through a photon IFile does yield in here. No reader sees the
+        // window that opens, because vq_start runs only from the message loop, and the
+        // only other two paths into those teardown wrappers -- stop_session and
+        // rollback -- join that loop before they touch a queue (the argument is at
+        // run_on_home's !home branch). The value is right anyway, since
+        // do_thread_migrate leaves the field untouched when it says no, and what it
+        // left is this vcpu, which is where the loop then really runs. With cfg.pool
+        // null it is simply the caller's own vcpu.
         //
         // vq_stop/vq_drain move their work there, because the loop and the request
         // coroutines it spawned share it and are the only writers of last_avail,
@@ -349,13 +359,16 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // Control-plane field: written by vq_start and read by the teardown callers,
         // every one of which runs on the vcpu that called start() -- the message loop
         // too, which start() creates there and which is deliberately never migrated.
-        // The loop's own vcpu never touches it. vq_stop clears it once the loop is
-        // joined, so a drain that follows a stop runs in place -- which it may,
-        // because drain() polls nothing but the atomic in_flight and therefore has no
-        // vcpu it must be on. The drains that precede a stop still hop. Clearing it
-        // is also what makes a restart inside one session safe: the next vq_start
-        // records the landing vcpu of the loop it just created instead of leaving the
-        // previous loop's here.
+        // That is a contract with the caller, not a property of this code: `home` is a
+        // plain pointer, and nothing here would notice a detach() or a shutdown()
+        // issued from another vcpu, which would then read it and write it from two OS
+        // threads. The loop's own vcpu never touches it. vq_stop clears it once the
+        // loop is joined, so a drain that follows a stop runs in place -- which it
+        // may, because drain() polls nothing but the atomic in_flight and therefore
+        // has no vcpu it must be on. The drains that precede a stop still hop.
+        // Clearing it is also what makes a restart inside one session safe: the next
+        // vq_start records the landing vcpu of the loop it just created instead of
+        // leaving the previous loop's here.
         //
         // Work stealing is what would break it: photon writes the field again only in
         // its two stealing scans, and those need a per-thread create flag and a

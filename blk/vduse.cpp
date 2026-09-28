@@ -514,28 +514,41 @@ struct VduseDeviceImpl : IBlkDevice {
         // do_thread_migrate stores under the thread's own lock before it returns, so
         // the migrator already holds the answer. That is why no completion handshake
         // belongs here -- a semaphore exists to tell a waiter that some work
-        // finished, and no work has to finish for this value to be known. Nothing
-        // between the create and this read yields (thread_create only queues the new
-        // coroutine, thread_migrate does not switch, get_vcpu is an inline field
-        // read), so `home != nullptr` and `th != nullptr` hold or fail together by
-        // construction -- the equivalence run_on_home's !home branch rests on. A
-        // refused migration needs no handling either: do_thread_migrate leaves the
-        // field untouched when it says no, and what it left is this vcpu, which is
-        // where the loop then really runs. With cfg.pool null it is simply the
-        // caller's own vcpu.
+        // finished, and no work has to finish for this value to be known. An
+        // accepted migration leaves nothing between the create and this read that
+        // yields (thread_create only queues the new coroutine, thread_migrate does
+        // not switch for a thread that is not the caller, get_vcpu is an inline
+        // field read), so no other coroutine on this vcpu can catch the loop
+        // created while `home` is still null. That a null means "no loop to race"
+        // is the direction run_on_home's !home branch rests on, and the only one
+        // that holds: the converse has a window, because vq_stop_here nulls `th` on
+        // the serving vcpu inside the hop while vq_stop nulls `home` here only after
+        // that hop returns, and this vcpu yields while it waits for it. A refused
+        // migration needs no handling either, though it is not yield-free --
+        // thread_migrate logs every refusal and migrate_to_pool warns behind it, so
+        // a caller-installed sink writing through a photon IFile does yield in here.
+        // The value is still right: do_thread_migrate leaves the field untouched
+        // when it says no, and what it left is this vcpu, which is where the loop
+        // then really runs -- so a reader that sees the null sits on the loop's own
+        // vcpu instead of racing it. With cfg.pool null it is simply the caller's
+        // own vcpu.
         //
         // Teardown moves its work there, because the loop and the request coroutines
         // it spawned share it and are the only writers of last_avail, used_idx and
         // the used ring WHILE THE LOOP IS LIVE -- and because the backlog wait
         // dereferences `avail`, which flush_stale on this same vcpu is what munmaps.
         //
-        // Control-plane field: written by vq_start and read by the teardown callers,
-        // every one of which runs on the vcpu that called start() -- msg_loop too,
-        // which start() creates there and which is deliberately never migrated. The
-        // loop's own vcpu never touches it. vq_stop clears it once the loop is
-        // joined, so the drain that follows runs in place -- which it may, because
-        // drain() polls nothing but the atomic in_flight and therefore has no vcpu it
-        // must be on.
+        // Control-plane field: written by vq_start, read by the three teardown
+        // callers and by msg_loop's answer to the kernel's vq state read. That all
+        // of those readers run on the vcpu that called start() is a contract with
+        // the caller, not a property of this code: `home` is a plain pointer, and
+        // nothing here would notice a detach() or a shutdown() issued from another
+        // vcpu, which would then read it and write it from two OS threads. msg_loop
+        // honours it because start() creates it there and deliberately never
+        // migrates it. The loop's own vcpu never touches it. vq_stop clears it once
+        // the loop is joined, so the drain that follows runs in place -- which it
+        // may, because drain() polls nothing but the atomic in_flight and therefore
+        // has no vcpu it must be on.
         //
         // Work stealing is what would break it: photon writes the field again only in
         // its two stealing scans, and those need a per-thread create flag and a
@@ -1082,8 +1095,14 @@ struct VduseDeviceImpl : IBlkDevice {
             // msg_loop answering the kernel's vq state read, and start() spawns
             // msg_loop before it reaches the vq_start loop, so that reader is
             // ordered behind no start() at all and needs the stronger form: a null
-            // is the whole truth, hence last_avail has no writer on any vcpu and
-            // reading it here is safe.
+            // must mean no writer of last_avail on ANOTHER vcpu. Not that it has no
+            // writer at all -- start()'s vq_refresh writes it for every
+            // not-yet-ready queue between creating msg_loop and reaching the
+            // vq_start loop, and a refused migration leaves a loop created but not
+            // recorded yet. Both writers are on this vcpu, and the body msg_loop
+            // passes is a single load with no yield in it, so nothing can interleave
+            // with the read: the worst case is answering the kernel with a
+            // pre-refresh value.
             body.fire();
             return;
         }
