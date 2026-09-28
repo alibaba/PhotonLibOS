@@ -686,10 +686,12 @@ struct TcmuServer {
         if (!home || home == photon::get_vcpu()) {
             // !home means there is no pump: serve_start never ran, or a previous
             // run_serve_stop already joined it and cleared home on the way out.
-            // serve_start records home itself, in the same yield-free stretch that
-            // creates the pump, so this is never the "pump exists but has not been
-            // scheduled yet" window -- which is the one where stopping in place
-            // would race the coroutines pump dispatched.
+            // serve_start records home itself, in the same stretch that creates the
+            // pump, and that stretch yields only where a refused migration logs --
+            // which leaves the pump on this vcpu, where stopping in place is what the
+            // no-pool case does anyway. So this is never the "pump exists on another
+            // vcpu but has not been recorded yet" window, the one where stopping in
+            // place would race the coroutines pump dispatched.
             serve_stop(flush);   // no pool, or this IS the serving vcpu
             return;
         }

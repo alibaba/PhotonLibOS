@@ -1082,18 +1082,19 @@ struct VduseDeviceImpl : IBlkDevice {
 
     void run_on_home(photon::vcpu_base* home, TempDelegate<void> body) {
         if (!home || home == photon::get_vcpu()) {
-            // !home means this queue has no loop coroutine, and nothing else:
-            // vq_start records `home` in the same yield-free stretch that creates
-            // the loop, and vq_stop clears it only after joining that loop, so
-            // there is no window in which the loop exists and this reads null --
-            // which is the window where working in place would race it. That has to
-            // hold for all four call sites, and they are not alike. Three are
-            // teardown (vq_stop, vq_drain, vq_backlog_drain), reached from
-            // stop_serving -- gated on `started`, which start() sets only after the
-            // whole vq_start loop -- and from rollback, start()'s own DEFER: for
-            // those a null already meant "this queue never started". The fourth is
-            // msg_loop answering the kernel's vq state read, and start() spawns
-            // msg_loop before it reaches the vq_start loop, so that reader is
+            // !home means this queue has no loop coroutine on another vcpu, and
+            // nothing else: vq_start records `home` in the same stretch that creates
+            // the loop, and that stretch yields only where a refused migration logs --
+            // which leaves the loop on this vcpu. vq_stop clears `home` only after
+            // joining that loop. So there is no window in which a loop runs elsewhere
+            // and this reads null, which is the window where working in place would
+            // race it. That has to hold for all four call sites, and they are not
+            // alike. Three are teardown (vq_stop, vq_drain, vq_backlog_drain),
+            // reached from stop_serving -- gated on `started`, which start() sets
+            // only after the whole vq_start loop -- and from rollback, start()'s own
+            // DEFER: for those a null already meant "this queue never started". The
+            // fourth is msg_loop answering the kernel's vq state read, and start()
+            // spawns msg_loop before it reaches the vq_start loop, so that reader is
             // ordered behind no start() at all and needs the stronger form: a null
             // must mean no writer of last_avail on ANOTHER vcpu. Not that it has no
             // writer at all -- start()'s vq_refresh writes it for every

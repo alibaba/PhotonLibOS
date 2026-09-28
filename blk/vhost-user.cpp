@@ -764,12 +764,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
     void run_on_home(photon::vcpu_base* home, TempDelegate<void> body) {
         if (!home || home == photon::get_vcpu()) {
             // !home means this queue has no loop coroutine, and nothing else:
-            // vq_start records `home` in the same yield-free stretch that creates
-            // the loop, and vq_stop clears it only after joining that loop, so
-            // there is no window in which the loop exists and this reads null --
-            // the window where working in place would race it. Who can get here is
-            // the premise this branch rests on, and it is not visible from this
-            // function: all three call sites are teardown (vq_stop, vq_drain,
+            // vq_start records `home` in the same stretch that creates the loop, and
+            // vq_stop clears it only after joining that loop. That stretch is
+            // yield-free only for an accepted migration -- a refusal logs, and a
+            // caller-installed sink writing through a photon IFile makes the log
+            // yield -- so what closes the window where the loop exists and this reads
+            // null is who can get here, and that is not visible from this function:
+            // all three call sites are teardown (vq_stop, vq_drain,
             // vq_backlog_drain), vq_start is reachable only from the message loop's
             // own handling, that loop is a single coroutine, and the two callers
             // which are not it (stop_session, rollback) join it before they touch a
