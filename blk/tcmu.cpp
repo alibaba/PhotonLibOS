@@ -552,10 +552,13 @@ struct TcmuServer {
     //
     // Control-plane field: written by serve_start and read by run_serve_stop. That
     // both are on the vcpu that started the device is a contract with the caller, not
-    // a property of this code -- `home` is a plain pointer, while TcmuLink below is
-    // atomic because this device is driven from whatever vcpu its caller runs on. A
-    // detach() or a shutdown() from another vcpu would read `home` and write it from
-    // two OS threads. The pump's own vcpu never touches it. That is
+    // a property of this code -- `home` is a plain pointer, while every TcmuLink field
+    // the listener and the caller both write is atomic, because this device is driven
+    // from whatever vcpu its caller runs on; TcmuLink's two plain fields are set once
+    // in the constructor and never reassigned. So a detach() or a shutdown() from
+    // another vcpu leaves `home` read and written from two OS threads: serve_start
+    // writes it on the vcpu that started the device, while run_serve_stop reads and
+    // clears it on its caller's. The pump's own vcpu never touches it. That is
     // why the clear lives in run_serve_stop's DEFER instead of at the end of
     // serve_stop -- under the hop, serve_stop runs on the serving vcpu, and writing
     // `home` from there would be the cross-vcpu write this field exists to avoid.
@@ -684,8 +687,11 @@ struct TcmuServer {
         // records the landing vcpu of the pump it just created.
         DEFER(home = nullptr);
         if (!home || home == photon::get_vcpu()) {
-            // !home means there is no pump: serve_start never ran, or a previous
-            // run_serve_stop already joined it and cleared home on the way out.
+            // !home means there is no pump on another vcpu, and nothing else. Three
+            // ways to get here with a null: serve_start never ran; a previous
+            // run_serve_stop already joined the pump and cleared home on the way out;
+            // or a migration was refused, so a pump exists but is on this vcpu. Only
+            // that last one puts a live pump behind a null, and it puts it here:
             // serve_start records home itself, in the same stretch that creates the
             // pump, and that stretch yields only where a refused migration logs --
             // which leaves the pump on this vcpu, where stopping in place is what the
@@ -1192,7 +1198,10 @@ static const char* const TARGET_ROOT = "/sys/kernel/config/target";
 struct TcmuDeviceImpl;   // the device: defined just below
 
 // Device <-> HBA linkage. Written by the HBA's listener vcpu, read
-// by the device on whatever vcpu its caller runs on, hence all atomic.
+// by the device on whatever vcpu its caller runs on -- so every field both of those
+// sides write is atomic. `dev` and `fam` are plain because each is set once in the
+// device's constructor, before register_link publishes this struct, and neither is
+// ever reassigned: later readers on any vcpu see a value nothing changes.
 struct TcmuLink {
     TcmuDeviceImpl* dev = nullptr;              // back-pointer, for orphaning on
                                                 // HBA teardown

@@ -543,7 +543,9 @@ struct VduseDeviceImpl : IBlkDevice {
         // of those readers run on the vcpu that called start() is a contract with
         // the caller, not a property of this code: `home` is a plain pointer, and
         // nothing here would notice a detach() or a shutdown() issued from another
-        // vcpu, which would then read it and write it from two OS threads. msg_loop
+        // vcpu. `home` is then what two OS threads would share: vq_start writes it on
+        // the vcpu that called start(), while a caller on the other one both reads it
+        // and nulls it. msg_loop
         // honours it because start() creates it there and deliberately never
         // migrates it. The loop's own vcpu never touches it. vq_stop clears it once
         // the loop is joined, so the drain that follows runs in place -- which it
@@ -1095,8 +1097,10 @@ struct VduseDeviceImpl : IBlkDevice {
             // DEFER: for those a null already meant "this queue never started". The
             // fourth is msg_loop answering the kernel's vq state read, and start()
             // spawns msg_loop before it reaches the vq_start loop, so that reader is
-            // ordered behind no start() at all and needs the stronger form: a null
-            // must mean no writer of last_avail on ANOTHER vcpu. Not that it has no
+            // ordered behind no start() at all. What it needs is weaker than what the
+            // three above get -- a null must mean no writer of last_avail on ANOTHER
+            // vcpu -- but the need is unconditional, because no `started` gate and no
+            // rollback DEFER stand in front of this reader. Not that it has no
             // writer at all -- start()'s vq_refresh writes it for every
             // not-yet-ready queue between creating msg_loop and reaching the
             // vq_start loop, and a refused migration leaves a loop created but not
