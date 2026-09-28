@@ -2156,16 +2156,20 @@ struct TcmuHBAImpl : TcmuHBA {
             if (lf == 0)
                 continue;   // a live server holds it: routine, and deliberately silent
             if (lf < 0) {
-                // What reaches here passed the dev_config filter above, so it is
-                // ours -- and the filter is that guarantee, not the directory,
-                // which holds foreign entries too. A real orphan always has its
-                // file: acquire_lock precedes create_backstore in start(), and
-                // release unlocks and closes without ever unlinking. So a
-                // tombstone that is missing or unopenable is an inconsistent
-                // state, and the consequence is worse than one skipped entry:
-                // this device becomes unreportable, so no recovery run will ever
-                // see it again. devlock_free is a probe and logs nothing, so
-                // this is the only place that can say it.
+                // Ours: what reaches here passed the dev_config filter above,
+                // and the filter is that guarantee, not the directory, which
+                // holds foreign entries too. A real orphan always has its file
+                // (acquire_lock precedes create_backstore in start(), and
+                // release never unlinks), so -1 does not mean "not ours" -- only
+                // that this caller could not use the file, and devlock_free
+                // never inspects errno: a 0600 tombstone is unreadable by a
+                // caller that is neither its owner nor root. The consequence is
+                // bounded -- THIS scan cannot report the device. Recovery is not
+                // lost with it: initial_scan filters on enable instead of
+                // dev_config and reads -1 as "not held", so an enabled
+                // registration is still handed over and re-plants its tombstone.
+                // This file's two other probes of devlock_free pass -1 through
+                // uncommented, so this is the only place an operator hears of it.
                 LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
                          identity);
                 continue;

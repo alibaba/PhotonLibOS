@@ -1283,7 +1283,7 @@ struct UblkControllerImpl : UblkController {
         // answer a recovery run decides whether to adopt on. There is no error
         // channel to distinguish them with: the signature returns a vector.
         if (ctrl.init() < 0) {
-            LOG_ERROR("ublk: the control plane is unavailable, so the orphan scan did not run -- an empty result does not mean this host has no orphans");
+            LOG_ERROR("ublk: the orphan scan did not run -- an empty result does not mean this host has no orphans");
             return ret;
         }
         DEFER(ctrl.fini());

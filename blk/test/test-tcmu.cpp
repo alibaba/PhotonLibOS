@@ -101,9 +101,9 @@ static int cfs_write(const std::string& path, const std::string& val) {
     return n == (ssize_t)val.size() ? 0 : -(e ? e : EIO);
 }
 
-// The scan's tombstone path. Mirrors tcmu's own lock_file_name(), which is a
-// private static of a class that does not exist outside its .cpp -- so this is
-// a deliberate second copy of the convention, and it is the only one: every
+// The scan's tombstone path. Mirrors tcmu's own lock_file_name(), a public
+// static of a type that does not exist outside its .cpp -- so this is a
+// deliberate second copy of the convention, and it is the only one: every
 // probe below goes through here rather than spelling the path out again.
 static std::string lock_path(const char* identity) {
     return std::string("/run/photon-blk/tcmu-") + identity + ".lock";
@@ -695,12 +695,14 @@ TEST_F(TcmuTest, orphan_list) {
     }
     EXPECT_TRUE(found) << "detached registration not reported as an orphan";
 
-    // The tombstone is the scan's only ownership evidence, so removing it must
-    // make the device UNreportable rather than reportable -- and the two states
-    // differ here, which is what makes this an assertion rather than a comment:
-    // the loop above just found it. The DEFER restores the file if this case dies
-    // before start() below re-plants it, so a failure here cannot leave a
-    // registration that no later scan can see.
+    // Removing the tombstone must make the device UNreportable rather than
+    // reportable, and the two states differ here -- the loop above just found
+    // it -- which is what makes this an assertion rather than a comment. Note
+    // what the tombstone decides: liveness, not ownership. The scan takes
+    // ownership from the backstore's dev_config and asks the flock only
+    // whether somebody is serving it. The DEFER re-creates the file if this
+    // case exits early, before start() below re-plants it; it ignores its own
+    // open failure, so it is a best-effort tidy-up, not a guarantee.
     std::string lp = lock_path(TEST_IDENTITY);
     DEFER({
         if (::access(lp.c_str(), F_OK) != 0) {
