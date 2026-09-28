@@ -2149,12 +2149,26 @@ struct TcmuHBAImpl : TcmuHBA {
             if (strncmp(b, "photon/", 7) != 0) continue;   // an operator's device, not ours
             const char* identity = b + 7;
             // probe the flock: free => no live server => orphan. Read-only open,
-            // no O_CREAT: a query must not create files. A real photon orphan
-            // always has its lock file (acquire_lock precedes create_backstore in
-            // start()); a missing one is an inconsistent state, so skip it.
+            // no O_CREAT: a query must not create files.
             char name[80];
             TcmuDeviceImpl::lock_file_name(identity, name, sizeof(name));
-            if (devlock_free(lock_dir, name) != 1) continue;
+            int lf = devlock_free(lock_dir, name);
+            if (lf == 0)
+                continue;   // a live server holds it: routine, and deliberately silent
+            if (lf < 0) {
+                // The filter above already restricted this scan to dev_config ==
+                // "photon/...", so this namespace holds no foreign devices, and
+                // acquire_lock precedes create_backstore in start() while release
+                // never unlinks -- so a real orphan always has its file. A
+                // tombstone that is missing or unopenable is therefore an
+                // inconsistent state, and the consequence is worse than one
+                // skipped entry: this device becomes unreportable, so no recovery
+                // run will ever see it again. devlock_free is a probe and logs
+                // nothing, so this is the only place that can say it.
+                LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, "
+                         "so it cannot be reported as an orphan", identity);
+                continue;
+            }
             BlkDevInfo info;
             info.identity = identity;
             snprintf(p, sizeof(p), "%s/dev_size", ap);

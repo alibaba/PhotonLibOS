@@ -1277,19 +1277,30 @@ struct UblkControllerImpl : UblkController {
             return ret;
         DEFER(::closedir(dd));
         UblkCtrl ctrl;
-        bool ctrl_ok = ctrl.init() == 0;
-        DEFER(if (ctrl_ok) ctrl.fini());
+        // init() logs its own cause. What it cannot log is the consequence, and
+        // the consequence is the whole problem: the empty vector this returns
+        // then reads exactly like "this host has no orphans", which is the answer
+        // a recovery run decides whether to adopt on. There is no error channel
+        // to distinguish them with -- the signature returns a vector.
+        if (ctrl.init() < 0) {
+            LOG_ERROR("ublk: the control plane is unavailable, so the orphan scan cannot run "
+                      "and its empty result does not mean this host has no orphans");
+            return ret;
+        }
+        DEFER(ctrl.fini());
         struct dirent* e;
         while ((e = readdir(dd))) {
             if (strncmp(e->d_name, "ublkc", 5) != 0 || !isdigit(e->d_name[5]))
                 continue;
             uint32_t id = (uint32_t)atoi(e->d_name + 5);
             // probe the flock first (cheap): free => no live server. Read-only
-            // open, no O_CREAT: a query must not create files; a missing one is
-            // an inconsistent state, skip it.
+            // open, no O_CREAT: a query must not create files. This walks a
+            // kernel-enumerated namespace, so a device with no tombstone of ours
+            // is the norm rather than an inconsistency -- it is somebody else's
+            // ublk device, and "not ours to list" is the whole answer.
             char name[32];
             snprintf(name, sizeof(name), "ublk-%u.lock", id);
-            if (devlock_free(lock_dir, name) != 1 || !ctrl_ok)
+            if (devlock_free(lock_dir, name) != 1)
                 continue;
             ublksrv_ctrl_dev_info info;
             if (ctrl.get_info(id, &info) < 0)

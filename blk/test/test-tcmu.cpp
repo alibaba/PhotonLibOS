@@ -101,9 +101,17 @@ static int cfs_write(const std::string& path, const std::string& val) {
     return n == (ssize_t)val.size() ? 0 : -(e ? e : EIO);
 }
 
+// The scan's tombstone path. Mirrors tcmu's own lock_file_name(), which is a
+// private static of a class that does not exist outside its .cpp -- so this is a
+// deliberate second copy of the convention, and the third copy is the one this
+// helper removes.
+static std::string lock_path(const char* identity) {
+    return std::string("/run/photon-blk/tcmu-") + identity + ".lock";
+}
+
 // probe the per-device flock: free => no live server (daemon or active path)
 static bool lock_free(const char* identity) {
-    std::string lp = std::string("/run/photon-blk/tcmu-") + identity + ".lock";
+    std::string lp = lock_path(identity);
     int fd = ::open(lp.c_str(), O_RDONLY);
     if (fd < 0) return false;
     bool free = ::flock(fd, LOCK_EX | LOCK_NB) == 0;
@@ -119,7 +127,7 @@ static bool lock_free(const char* identity) {
 // unlocks and closes, it never unlinks). So only a lock that is still HELD
 // counts, and that is what would wedge every later run.
 static const char* lock_state(const char* identity) {
-    std::string lp = std::string("/run/photon-blk/tcmu-") + identity + ".lock";
+    std::string lp = lock_path(identity);
     int fd = ::open(lp.c_str(), O_RDONLY);
     if (fd < 0) return "not-held";
     DEFER(::close(fd));
@@ -686,6 +694,23 @@ TEST_F(TcmuTest, orphan_list) {
         }
     }
     EXPECT_TRUE(found) << "detached registration not reported as an orphan";
+
+    // The tombstone is the scan's only ownership evidence, so removing it must
+    // make the device UNreportable rather than reportable -- and the two states
+    // differ here, which is what makes this an assertion rather than a comment:
+    // the loop above just found it. The DEFER restores the file if this case dies
+    // before start() below re-plants it, so a failure here cannot leave a
+    // registration that no later scan can see.
+    std::string lp = lock_path(TEST_IDENTITY);
+    DEFER({
+        if (::access(lp.c_str(), F_OK) != 0) {
+            int fd = ::open(lp.c_str(), O_CREAT | O_RDWR, 0600);
+            if (fd >= 0) ::close(fd);
+        }
+    });
+    ASSERT_EQ(0, ::unlink(lp.c_str()));
+    for (auto& o : sys->list_orphans())
+        EXPECT_NE(TEST_IDENTITY, o.identity);
 
     // recover: re-start harvests the orphan, then a clean shutdown removes it
     ASSERT_EQ(0, dev->start(file));
