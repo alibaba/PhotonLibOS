@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// vduse-cli: the vduse diagnostic and recovery assistant -- three subcommands in
+// vduse-cli: the vduse diagnostic and recovery assistant -- four subcommands in
 // one program, sharing the ABI plumbing (the lazy IOTLB, the vring refresh, the
 // virtio-blk descriptor walk, the kernel message replies).
 //
@@ -25,6 +25,9 @@ limitations under the License.
 //   vduse-cli rescue <name> [secs]    adopt an EXISTING registration nobody serves
 //                                     and drain its backlog (default 60s)
 //   vduse-cli destroy <name>          VDUSE_DESTROY_DEV, without serving it
+//   vduse-cli vqprobe <n> <setup> <i>...   create a registration declaring <n>
+//                                     virtqueues and ask VDUSE_VQ_GET_INFO about
+//                                     each index <i>, one row per index
 //
 // <name> is a vduse registration (an entry of `ls /dev/vduse`), not a /dev/vdX.
 //
@@ -50,6 +53,18 @@ limitations under the License.
 //      actually clears the residue
 // Clean state afterwards: `ls /dev/vduse` shows only `control` and `vdpa dev show`
 // is empty. SIGKILL is not recoverable without the rescue subcommand.
+//
+// WHY vqprobe EXISTS, separately from probe. A daemon that ADOPTS a registration
+// somebody else created never ran CREATE_DEV, so the queue count the kernel holds
+// is not one it declared -- and the uapi has no readback for it: no get-vq_num and
+// no GET_CONFIG, only VDUSE_VQ_GET_INFO, whose index is the caller's to supply.
+// Whether that ioctl can therefore answer "how many queues does this registration
+// have" turns entirely on a behaviour the header does not document ("Caller should
+// set index field" is all it says): does the kernel bound the index against its own
+// count, or answer any index? vqprobe measures it, on a registration of its own
+// with a count of its own choosing, so the answer does not depend on anybody's
+// device being in anybody's state. Unlike probe it never attaches a consumer, so
+// there is no /dev/vdX to wedge and no IOTLB stall to wait out.
 //
 // HAZARD (probe): it can block for MINUTES inside VDUSE_IOTLB_GET_FD for a
 // request's DATA buffer while `vdpa dev add` sits in D state waiting for that very
@@ -135,6 +150,7 @@ struct vring_used {
 };
 
 #define PROBE_NAME "vdprobe"
+#define VQPROBE_NAME "vdvqprobe"
 
 enum Mode {
     PROBE,      // our own device: measure and narrate everything
@@ -177,6 +193,9 @@ static void usage() {
         "usage: vduse-cli probe                  create, serve and dump its own \"" PROBE_NAME "\" device\n"
         "       vduse-cli rescue <name> [secs]   adopt a wedged registration and drain it (default 60)\n"
         "       vduse-cli destroy <name>         VDUSE_DESTROY_DEV without serving\n"
+        "       vduse-cli vqprobe <vq_num> <setup:0|1> <index>...\n"
+        "                                        create a registration of <vq_num> virtqueues and ask\n"
+        "                                        VDUSE_VQ_GET_INFO about each <index>, one row each\n"
         "       <name> is a vduse registration (ls /dev/vduse), not a /dev/vdX\n");
 }
 
@@ -582,11 +601,120 @@ static int cmd_destroy(int argc, char **argv) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// vqprobe: what VDUSE_VQ_GET_INFO answers for an index, on a registration whose
+// queue count this run chose
+// ---------------------------------------------------------------------------
+
+// Idempotent, and also the signal handler's teardown. What this subcommand
+// creates is inert -- no consumer is ever attached, so there is no /dev/vdX and
+// nothing that can wedge in D state -- but a leftover still answers EEXIST to
+// the next run's CREATE_DEV and shows up in `ls /dev/vduse`.
+static void vqprobe_cleanup() {
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    if (dev_fd >= 0) { close(dev_fd); dev_fd = -1; }
+    if (ctrl < 0) return;
+    char nm[VDUSE_NAME_MAX];
+    memset(nm, 0, sizeof(nm));
+    snprintf(nm, sizeof(nm), "%s", VQPROBE_NAME);
+    if (ioctl(ctrl, VDUSE_DESTROY_DEV, nm) < 0 && errno != EINVAL)
+        LOG_ERROR("VDUSE_DESTROY_DEV " VQPROBE_NAME " failed, ", ERRNO());
+}
+
+static void vqprobe_on_term(int sig) {
+    vqprobe_cleanup();
+    _exit(128 + sig);
+}
+
+// argv: <vq_num> <setup:0|1> <index>...
+// One row per index, in the order given, so the caller decides how much of an
+// escalation a single process is allowed to attempt.
+static int cmd_vqprobe(int argc, char **argv) {
+    if (argc < 3) { usage(); return 2; }
+    unsigned vq_num = (unsigned)atoi(argv[0]);
+    int do_setup = atoi(argv[1]);
+    if (vq_num < 1)
+        LOG_ERROR_RETURN(EINVAL, 2, "vq_num must be at least 1");
+
+    ctrl = open("/dev/vduse/control", O_RDWR | O_CLOEXEC);
+    if (ctrl < 0)
+        LOG_ERRNO_RETURN(0, 1, "open /dev/vduse/control failed (modprobe vduse?)");
+    uint64_t ver = 0;   // the only version this tool sets; the kernel reports its own
+    if (ioctl(ctrl, VDUSE_SET_API_VERSION, &ver) < 0)
+        LOG_ERROR("VDUSE_SET_API_VERSION failed, ", ERRNO());
+
+    alignas(vduse_dev_config) char cbuf[sizeof(struct vduse_dev_config) + 512] = {};
+    auto cc = (struct vduse_dev_config*)cbuf;
+    strcpy(cc->name, VQPROBE_NAME);
+    cc->vendor_id = 0x1af4;
+    cc->device_id = VIRTIO_ID_BLOCK;
+    cc->features = (1ULL << VIRTIO_F_ACCESS_PLATFORM) | (1ULL << VIRTIO_F_VERSION_1);
+    cc->vq_num = vq_num;
+    cc->vq_align = sysconf(_SC_PAGESIZE);
+    cc->config_size = sizeof(struct virtio_blk_config);
+    auto bc = (struct virtio_blk_config*)cc->config;
+    bc->capacity = 4096;      // 2 MiB @512
+    bc->blk_size = 512;
+    bc->num_queues = (uint16_t)vq_num;
+    if (ioctl(ctrl, VDUSE_CREATE_DEV, cbuf) < 0)
+        LOG_ERRNO_RETURN(0, 1, "VDUSE_CREATE_DEV of " VQPROBE_NAME " with vq_num ` failed "
+                         "(a leftover of a run that died? 'vduse-cli destroy " VQPROBE_NAME "')",
+                         vq_num);
+    signal(SIGTERM, vqprobe_on_term);
+    signal(SIGINT, vqprobe_on_term);
+
+    dev_fd = open("/dev/vduse/" VQPROBE_NAME, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (dev_fd < 0) {
+        int e = errno;
+        vqprobe_cleanup();
+        LOG_ERROR_RETURN(e, 1, "open /dev/vduse/" VQPROBE_NAME " failed");
+    }
+    // The variant that matches an adoption: whoever registered these queues also
+    // set every one of them up, so an in-range index is a queue the kernel has
+    // been told about rather than an untouched slot.
+    if (do_setup)
+        for (unsigned i = 0; i < vq_num; i++) {
+            struct vduse_vq_config vqc;
+            memset(&vqc, 0, sizeof(vqc));
+            vqc.index = i;
+            vqc.max_size = 128;
+            if (ioctl(dev_fd, VDUSE_VQ_SETUP, &vqc) < 0)
+                LOG_ERROR("VDUSE_VQ_SETUP of index ` failed, ", i, ERRNO());
+        }
+
+    for (int a = 2; a < argc; a++) {
+        unsigned idx = (unsigned)atoi(argv[a]);
+        struct vduse_vq_info vi;
+        memset(&vi, 0, sizeof(vi));
+        vi.index = idx;
+        int rc = ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi);
+        int e = errno;   // captured before anything below can set it again
+        // stderr and flushed per row, deliberately not alog: the next index this
+        // loop asks about is one nobody has ever asked the kernel about, and a row
+        // still sitting in a buffer when the machine objects to it is a row the
+        // measurement lost.
+        fprintf(stderr,
+                "VQPROBE vq_num=%u setup=%d index=%u rc=%d errno=%d(%s)"
+                " vi.index=%u vi.num=%u vi.ready=%u"
+                " desc=0x%llx driver=0x%llx device=0x%llx avail_index=%u\n",
+                vq_num, do_setup, idx, rc, rc < 0 ? e : 0,
+                rc < 0 ? strerror(e) : "-", vi.index, vi.num, vi.ready,
+                (unsigned long long)vi.desc_addr, (unsigned long long)vi.driver_addr,
+                (unsigned long long)vi.device_addr, vi.split.avail_index);
+        fflush(stderr);
+    }
+    vqprobe_cleanup();
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 2; }
     if (!strcmp(argv[1], "probe")) return cmd_probe();
     if (!strcmp(argv[1], "rescue")) return cmd_rescue(argc - 2, argv + 2);
     if (!strcmp(argv[1], "destroy")) return cmd_destroy(argc - 2, argv + 2);
+    if (!strcmp(argv[1], "vqprobe")) return cmd_vqprobe(argc - 2, argv + 2);
     LOG_ERROR("unknown subcommand ", argv[1]);
     usage();
     return 2;
