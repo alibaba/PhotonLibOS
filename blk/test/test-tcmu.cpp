@@ -935,13 +935,17 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
     // says the settling IO is all behind us.
     constexpr int WRITERS = 5;
     test::BackgroundWriter bw[WRITERS];
-    // Safety net, release FIRST: stop() polls coroutine-side for the writer
-    // thread to leave its IO, and a writer parked in a gated backend IO only
-    // returns once the gate opens -- stopping before releasing would stall.
+    // Safety net, release FIRST: a writer parked in a gated backend IO only leaves
+    // it once the gate opens, and stop() waits for the writer to leave its IO. That
+    // wait is bounded, so the wrong order no longer hangs this case -- it abandons
+    // five writers instead -- which is why the stops are asserted rather than
+    // merely called: an abandoned writer has to be red, not a silent pass. EXPECT
+    // and not ASSERT because ASSERT_ returns, and in a lambda that means "stop
+    // cleaning up" rather than "fail the case".
     DEFER({
         rec.release_gate(4096);
         for (auto& b : bw)
-            b.stop();
+            EXPECT_TRUE(b.stop());
     });
     for (int i = 0; i < WRITERS; i++) {
         uint64_t base = IO_OFF + (uint64_t)i * (8ull << 20);
