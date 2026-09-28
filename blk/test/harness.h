@@ -272,11 +272,12 @@ struct ConsumerReport {            // POD, shared with the child
     uint32_t fds;                  // the child's own census after the drop
 };
 
-// A stress phase's counters, in the same report page as the ConsumerReport above
-// it, written by the same child. Kept out of ConsumerReport because that one is
-// what EVERY consumer writes and what the single-IO cases assert on: 320 bytes of
-// error text folded into it would be carried by every child to report a phase it
-// never ran.
+// A stress phase's counters, plus what a child echoes its argv back as, in the
+// same report page as the ConsumerReport above it and written by the same child.
+// Kept out of ConsumerReport because that one is what EVERY consumer writes and
+// what the single-IO cases assert on: 320 bytes of error text folded into it would
+// be carried by every child to report a phase it never ran. A mode with no counters
+// of its own still has echoes, and this POD is the only room the page has for them.
 struct ConsumerStressReport {      // POD, shared with the child
     uint64_t ios;                  // completed write+read-back pairs
     uint64_t bytes;                // bytes written (== bytes read back)
@@ -300,6 +301,12 @@ struct ConsumerStressReport {      // POD, shared with the child
     uint32_t echo_direct;
     uint32_t echo_flush;
     uint32_t echo_seed;
+    // CONS_MODE_RO_WRITE's, which is the whole of what its argv carries. Here
+    // rather than in a third POD because the page is already sized for both of
+    // these and has room: a third would need an offset of its own derived on both
+    // sides, which is one more pair of numbers free to drift.
+    uint64_t echo_off;
+    uint64_t echo_len;
 };
 
 // The result channel: ONE fd-backed shared object, mapped by both sides, handed
@@ -342,9 +349,15 @@ struct ConsumerStressReport {      // POD, shared with the child
 //                               (4K-aligned, nonzero), max_block (nonzero),
 //                               direct [0, 1], flush [0, 1], seed [0, 2^32-1],
 //                               path
+//   CONS_MODE_RO_WRITE      7   off, len [1, 2^40], path. Three of the single-IO
+//                               table's fields dropped -- flags, open_tries and
+//                               write: this mode is always O_RDWR, always writes,
+//                               and the retry budget it needs is the one
+//                               open_node() already defaults to.
 enum ConsumerMode : int32_t {
-    CONS_MODE_IO     = 0,   // one write+fsync+read-back: consumer_io()
-    CONS_MODE_STRESS = 1,   // a whole stress phase: stress_run()
+    CONS_MODE_IO       = 0,   // one write+fsync+read-back: consumer_io()
+    CONS_MODE_STRESS   = 1,   // a whole stress phase: stress_run()
+    CONS_MODE_RO_WRITE = 2,   // a write a read-only node must refuse: expect_write_rejected()
 };
 
 // Where a consumer IO ended. Also how the caller's own failure to even start
@@ -356,6 +369,11 @@ enum ConsumerStage : int32_t {
     CONS_SYNC,       // its fsync()
     CONS_READ,       // its pread()
     CONS_VERIFY,     // the read-back comparison
+    // CONS_MODE_RO_WRITE alone: the node took a write it had to refuse. Its own
+    // value and not CONS_WRITE, which in every other mode names a pwrite that
+    // FAILED -- and ConsumerReport carries no mode, so one enumerator cannot say
+    // both without the reader having to guess which one it meant.
+    CONS_RO_ACCEPTED,
     CONS_DROP_FDS,   // it could not drop the inherited fd table
     CONS_FDLEAK,     // its census found fds that survived the drop
     CONS_ARGV,       // its argv did not decode
@@ -516,9 +534,18 @@ int device_io(const std::string& node, const void* wbuf, size_t len,
 
 // A read-only export: open(O_RDWR) on the node still SUCCEEDS (verified against
 // a read-only loop device) and the RO enforcement happens at write time, so a
-// write must fail. Returns 0 when it was rejected as expected, EILSEQ when it
-// went through, or an errno from the open. Runs off the vcpu.
-int expect_write_rejected(const std::string& node, uint64_t off, size_t len);
+// write must fail. The open, the read that has to come back and the write that
+// must not all run in a spawned consumer child (CONS_MODE_RO_WRITE), off the vcpu:
+// an IO against an exported node has no completion bound, and a caller in this
+// process would hold the descriptors of whatever is serving that node.
+//
+// Returns 0 when the write was rejected as expected, EILSEQ when it went through,
+// EBADMSG when the child echoed an off or a len other than the one sent -- its
+// verdict is then about an IO nobody asked for, so it is not handed back as one --
+// or an errno from the child's open or read, the structural ones included. Ask for
+// `report` to keep the child's own account of it (see consumer_io above).
+int expect_write_rejected(const std::string& node, uint64_t off, size_t len,
+                          ConsumerIoResult* report = nullptr);
 
 // ---------------------------------------------------------------------------
 // block formats

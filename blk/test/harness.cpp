@@ -608,8 +608,9 @@ bool parse_int(const char* s, int* v, int lo, int hi) {
 // argc per mode. A single shared value would let a stress child read single-IO
 // fields out of the wrong slots and get plausible numbers back, which is exactly
 // the silent mis-decode the argv path exists to make loud.
-constexpr int CONS_ARGC_IO     = 10;
-constexpr int CONS_ARGC_STRESS = 14;
+constexpr int CONS_ARGC_IO       = 10;
+constexpr int CONS_ARGC_STRESS   = 14;
+constexpr int CONS_ARGC_RO_WRITE = 7;
 
 // The child's argv: fixed order, decimal integers, node path LAST (see the table
 // in harness.h). A mis-decode must not be able to read as "nothing to do", so it
@@ -660,15 +661,67 @@ bool decode_stress_argv(int argc, char** argv, ConsumerArgs* a) {
     return true;
 }
 
+// CONS_MODE_RO_WRITE: off and len, then the path. No flags, no open_tries and no
+// write -- this mode is always O_RDWR and always writes, and the ENXIO retry budget
+// its body needs is the one open_node() already defaults to -- so this table drops
+// three of the single-IO table's fields and its argc is three smaller.
+bool decode_ro_write_argv(int argc, char** argv, ConsumerArgs* a) {
+    if (argc != CONS_ARGC_RO_WRITE)
+        return false;
+    uint64_t off = 0, len = 0;
+    // The same two bounds the single-IO table puts on these same two fields, and
+    // for the same reasons: off has none of its own because what makes an offset
+    // wrong is the node refusing it, while len also sizes the channel and so has to
+    // be one this side can allocate.
+    if (!parse_u64(argv[4], &off) ||
+        !parse_u64(argv[5], &len) ||
+        !len || len > (1ull << 40) || !argv[6][0])
+        return false;
+    a->off = off;
+    a->len = (size_t)len;
+    a->path = argv[6];
+    return true;
+}
+
 bool decode_child_argv(int argc, char** argv, ConsumerArgs* a) {
-    // The mode tag selects the rest of the table, so it is read ahead of either
-    // half -- and an unknown tag is a mis-decode like any other, not a default.
+    // The mode tag selects the rest of the table, so it is read ahead of the
+    // halves it chooses between -- and an unknown tag is a mis-decode like any
+    // other, not a default.
     if (argc < 4 ||
-        !parse_int(argv[2], &a->mode, CONS_MODE_IO, CONS_MODE_STRESS) ||
+        !parse_int(argv[2], &a->mode, CONS_MODE_IO, CONS_MODE_RO_WRITE) ||
         !parse_int(argv[3], &a->channel_fd, 3, 65535))
         return false;
-    return a->mode == CONS_MODE_STRESS ? decode_stress_argv(argc, argv, a)
-                                       : decode_io_argv(argc, argv, a);
+    if (a->mode == CONS_MODE_IO)
+        return decode_io_argv(argc, argv, a);
+    if (a->mode == CONS_MODE_STRESS)
+        return decode_stress_argv(argc, argv, a);
+    // Reached only with the third tag, the range check above having refused
+    // anything else, so this is that tag's half of the table and not a fallback.
+    return decode_ro_write_argv(argc, argv, a);
+}
+
+// One field of a child's argv echo: what the parent sent, and what the child says
+// it decoded. A function of its own because two parents hand one in -- a stress
+// phase echoes nine of these, CONS_MODE_RO_WRITE the two its argv carries -- and
+// the mechanism is worth what it is only if every builder is held to its decoder
+// the same way.
+//
+// It sees a swap of two fields ONLY when their values differ. StressCfg defaults
+// threads and iters to the same 32, so a case built on the defaults cannot see
+// those two slots exchanged; the suites' SHARED phases can, because they pass fewer
+// threads than the default iteration count. What an echo therefore proves is that
+// THIS case's encoding is right, not that the encoding is right -- and a case that
+// witnesses a mode has to send values differing pairwise, or its witness is silent
+// by construction and the mode's builder is unpinned.
+struct EchoField { const char* name; uint64_t sent, got; };
+
+// The first field whose echo disagrees, or nullptr when all of them match.
+template <size_t N>
+const EchoField* echo_mismatch(const EchoField (&fields)[N]) {
+    for (size_t i = 0; i < N; i++)
+        if (fields[i].sent != fields[i].got)
+            return &fields[i];
+    return nullptr;
 }
 
 // The child's IO. Records the verdict in the channel and returns the exit code,
@@ -768,6 +821,63 @@ int consumer_stress_body(const ConsumerArgs* a) {
     rep->child_errno = 0;
     rep->magic = CONSUMER_MAGIC;   // last: it is what says the rest is final
     return 0;
+}
+
+// The child's attempt to write a node that is supposed to refuse it. The verdict is
+// the pwrite's, and only the side holding the descriptor can reach one: a read that
+// comes back and a write that does not is what a read-only export looks like from
+// here, and telling that apart from a node that merely failed is this body's whole
+// content.
+//
+// The bytes it writes are the ones its own read returned, so the channel's payload
+// region is half used: rbuf is where the read lands, and wbuf -- where a
+// caller-supplied payload would have been copied -- stays at the zeros the channel
+// was born with. It is not sized away, because that would make the layout depend on
+// the mode in a second place, and a layout wrong by one offset misplaces every
+// region after it.
+int consumer_ro_write_body(const ConsumerArgs* a) {
+    ConsumerStage stage = CONS_DONE;
+    int e = 0, status = 0;
+    // The ENXIO retry budget is open_node()'s own default: this mode's argv carries
+    // no knob for it, so there is nothing here to decode one into.
+    int fd = open_node(a->path, O_RDWR);
+    if (fd < 0) {
+        stage = CONS_OPEN;
+        e = errno;
+    } else if (::pread(fd, a->rbuf, a->len, (off_t)a->off) != (ssize_t)a->len) {
+        stage = CONS_READ; e = errno;
+    } else if (::pwrite(fd, a->rbuf, a->len, (off_t)a->off) >= 0) {
+        // >= 0 rather than == len, which is what this check has always been: a
+        // short write is still a write the node took.
+        stage = CONS_RO_ACCEPTED; status = EILSEQ;
+    }
+    if (fd >= 0)
+        ::close(fd);
+    if (stage != CONS_DONE && status == 0)
+        status = e ? e : EIO;
+    // What this child decoded off and len into, for the parent to compare against
+    // what it sent. The two sit in adjacent slots with the same accepted range, so
+    // a swap of them decodes cleanly and the write is then attempted at a range
+    // nobody asked about -- which on a node that takes writes yields exactly the
+    // verdict this body exists to produce, and looks like a pass.
+    ConsumerStressReport* s = a->srep;
+    s->echo_off = a->off;
+    s->echo_len = (uint64_t)a->len;
+    ConsumerReport* rep = a->rep;
+    rep->status = status;
+    rep->stage = (int32_t)stage;
+    rep->child_errno = e;
+    rep->magic = CONSUMER_MAGIC;   // last: it is what says the rest is final
+    return status < CONS_EXIT_DROP_FDS ? status : EIO;
+}
+
+// The stages the body above can end at, i.e. the ones that prove it ran and so
+// wrote an echo. Everything else is a structural exit, which leaves the report page
+// at the zeros it was born with -- and comparing those would report a disagreement
+// about an off nobody sent, on top of the failure that actually happened.
+bool ro_write_body_ran(ConsumerStage s) {
+    return s == CONS_DONE || s == CONS_OPEN || s == CONS_READ ||
+           s == CONS_RO_ACCEPTED;
 }
 
 // The structural exit codes, which say the isolation itself is in question and
@@ -1077,7 +1187,6 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span) {
     // the builder to the decoder: a swap of two same-range fields decodes cleanly,
     // so neither the range checks nor the counters could see it, and the phase
     // would have run a configuration nobody sent.
-    struct EchoField { const char* name; uint64_t sent, got; };
     const EchoField echo[] = {
         {"stress_mode", (uint64_t)c.mode, srep.echo_mode},
         {"threads", (uint64_t)c.threads, srep.echo_threads},
@@ -1089,15 +1198,14 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span) {
         {"flush", (uint64_t)(c.flush ? 1 : 0), srep.echo_flush},
         {"seed", c.seed, srep.echo_seed},
     };
-    for (const auto& f : echo)
-        if (f.sent != f.got) {
-            res.failures = 1;
-            res.first_error = std::string("the consumer child decoded ") + f.name +
-                              " as " + std::to_string(f.got) + ", but the parent sent " +
-                              std::to_string(f.sent);
-            LOG_ERROR_RETURN(EILSEQ, res, "` stress: the child's argv echo disagrees on `: sent `, decoded `",
-                             c.node, f.name, f.sent, f.got);
-        }
+    if (const EchoField* f = echo_mismatch(echo)) {
+        res.failures = 1;
+        res.first_error = std::string("the consumer child decoded ") + f->name +
+                          " as " + std::to_string(f->got) + ", but the parent sent " +
+                          std::to_string(f->sent);
+        LOG_ERROR_RETURN(EILSEQ, res, "` stress: the child's argv echo disagrees on `: sent `, decoded `",
+                         c.node, f->name, f->sent, f->got);
+    }
     res.ios = srep.ios;
     res.bytes = srep.bytes;
     res.failures = srep.failures;
@@ -1115,6 +1223,7 @@ const char* consumer_stage_name(ConsumerStage s) {
     case CONS_SYNC:     return "fsync";
     case CONS_READ:     return "pread";
     case CONS_VERIFY:   return "the read-back comparison";
+    case CONS_RO_ACCEPTED: return "the node taking a write it had to refuse";
     case CONS_DROP_FDS: return "dropping the inherited fd table";
     case CONS_FDLEAK:   return "the fd-table self-check";
     case CONS_ARGV:     return "decoding its argv";
@@ -1168,8 +1277,14 @@ int consumer_child_main(int argc, char** argv) {
         a.wbuf = (char*)base + l.wbuf_off;
         a.rbuf = (char*)base + l.rbuf_off;
     }
-    // (d) the body, and (e) the exit
-    _exit(a.mode == CONS_MODE_STRESS ? consumer_stress_body(&a) : consumer_io_body(&a));
+    // (d) the body, and (e) the exit -- dispatched on the same tag
+    // decode_child_argv just dispatched on, because a mode routed to the wrong body
+    // would run its IO against fields decoded out of another mode's slots.
+    if (a.mode == CONS_MODE_STRESS)
+        _exit(consumer_stress_body(&a));
+    if (a.mode == CONS_MODE_RO_WRITE)
+        _exit(consumer_ro_write_body(&a));
+    _exit(consumer_io_body(&a));
 }
 
 ConsumerIoResult consumer_io(const std::string& node, const void* wbuf,
@@ -1478,25 +1593,48 @@ TestImage::~TestImage() {
         ::unlink(path.c_str());
 }
 
-int expect_write_rejected(const std::string& node, uint64_t off, size_t len) {
-    int rc = -1;
+int expect_write_rejected(const std::string& node, uint64_t off, size_t len,
+                          ConsumerIoResult* report) {
+    ConsumerIoResult r;
+    ConsumerStressReport srep;
+    memset(&srep, 0, sizeof(srep));
     run_off_vcpu([&] {
-        // open(O_RDWR) on a read-only block device SUCCEEDS (verified with a
-        // read-only loop device): the RO enforcement is at write time
-        int fd = open_node(node, O_RDWR);
-        if (fd < 0) {
-            rc = errno ? errno : EIO;
-            return;
-        }
-        DEFER(::close(fd));
-        std::vector<char> b(len, 0);
-        if (::pread(fd, b.data(), len, (off_t)off) != (ssize_t)len) {   // reads work
-            rc = errno ? errno : EIO;
-            return;
-        }
-        rc = ::pwrite(fd, b.data(), len, (off_t)off) < 0 ? 0 : EILSEQ;   // writes must not
+        // argv, in decode_ro_write_argv's order, path last
+        char a_mode[4], a_fd[12], a_off[24], a_len[24];
+        snprintf(a_mode, sizeof(a_mode), "%d", (int)CONS_MODE_RO_WRITE);
+        snprintf(a_fd, sizeof(a_fd), "%d", CONS_CHANNEL_FD);
+        snprintf(a_off, sizeof(a_off), "%llu", (unsigned long long)off);
+        snprintf(a_len, sizeof(a_len), "%llu", (unsigned long long)len);
+        ConsumerSpawn s;
+        s.node = node;
+        s.argv = {CONS_CHILD_ARG, a_mode, a_fd, a_off, a_len, node.c_str()};
+        s.layout = channel_layout(CONS_MODE_RO_WRITE, len);
+        // The report page's second POD, which is where a child's echoed argv scalars
+        // live in every mode and not only in a stress phase's.
+        s.stress = &srep;
+        r = consumer_spawn(s);
     });
-    return rc;
+    const EchoField echo[] = {
+        {"off", off, srep.echo_off},
+        {"len", (uint64_t)len, srep.echo_len},
+    };
+    const EchoField* bad = (r.reaped && ro_write_body_ran(r.stage))
+                               ? echo_mismatch(echo) : nullptr;
+    if (bad) {
+        // The child's own account goes with it, as stress_in_child drops its
+        // counters on the same finding: whatever that child did, it was not the IO
+        // this parent asked for, so its verdict is not one a caller can act on.
+        r.status = EBADMSG;
+        r.stage = CONS_ARGV;
+    }
+    if (report)
+        *report = r;
+    else if (r.hung)
+        consumer_release(r);   // nobody can reap a child whose pid was not kept
+    if (bad)
+        LOG_ERROR_RETURN(EBADMSG, EBADMSG, "` write-rejected: the child's argv echo disagrees on `: sent `, decoded `",
+                         node, bad->name, bad->sent, bad->got);
+    return r.status;
 }
 
 // ---------------------------------------------------------------------------
