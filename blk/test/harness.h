@@ -301,13 +301,62 @@ struct ConsumerStressReport {      // POD, shared with the child
     uint32_t echo_direct;
     uint32_t echo_flush;
     uint32_t echo_seed;
-    // CONS_MODE_RO_WRITE's, which is the whole of what its argv carries. Here
-    // rather than in a third POD because the page is already sized for both of
-    // these and has room: a third would need an offset of its own derived on both
-    // sides, which is one more pair of numbers free to drift.
+    // CONS_MODE_RO_WRITE's, which is the whole of what its argv carries. Here and
+    // not in a POD of its own: this one is already in the page and has room, and an
+    // offset is a pair of numbers the two sides have to derive identically, so
+    // there is a cost to each new one. The writer's counters below are the
+    // exception, and what makes them one is that they are read while the child is
+    // still running -- which no field of this POD is, every reader of these having
+    // collected the child that wrote them first.
     uint64_t echo_off;
     uint64_t echo_len;
 };
+
+// The writer's counters, in the same report page as the two PODs above it and at an
+// offset both sides derive from the same function. Unlike those two, this one is
+// read WHILE the child writing it is still running: a caller synchronizes on a
+// writer's progress from the outside (wait_iters), which is the only way to say
+// "the writer has got going" about IO this process is serving. So none of these
+// fields are published behind ConsumerReport::magic -- the magic is written last
+// precisely because it says the rest is final, and a writer's counters are not
+// final until it is stopped.
+//
+// std::atomic rather than photon::semaphore here is NOT a departure from the
+// project's rule that completion between threads uses a semaphore: that rule is
+// about threads of one process, and a semaphore's contract does not cross a process
+// boundary at all, so an atomic in a shared mapping is the only thing available.
+//
+// A cross-process std::atomic is safe only when it is lock-free: a non-lock-free
+// one falls back to a lock table that belongs to the process, so the two sides
+// would lock different tables and the counter would have no mutual exclusion at
+// all. Hence the two asserts -- they are about these members, not about atomics in
+// general, and they are the reason the members are the widths they are.
+struct ConsumerWriterReport {      // shared with the child; constructed, not cleared
+    std::atomic<uint64_t> iters{0};      // blocks completed, published as they go
+    std::atomic<int32_t> errors{0};      // the writer's own failures, plus the
+                                         // parent's finding about its argv (below)
+    std::atomic<int32_t> stop_flag{0};   // the parent's: leave the loop
+    // No "the loop is behind me" flag: a writer's exit IS that fact, and the parent
+    // learns of the exit through consumer_reap()'s own bounded wait, which is what
+    // makes the counters and the report final together. A second copy of the same
+    // fact is a second thing to get out of order.
+    // What the child decoded its config argv into, for the parent to compare
+    // against what it sent -- the same mechanism and the same reason as the two
+    // PODs above: six fields whose accepted ranges overlap pairwise, so a swap of
+    // two of them decodes cleanly and would otherwise be invisible.
+    uint64_t echo_off;
+    uint64_t echo_wrap_at;
+    uint64_t echo_block;
+    uint32_t echo_direct;
+    uint32_t echo_advance;
+    uint32_t echo_verify;
+};
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "ConsumerWriterReport::iters crosses a process boundary, so a "
+              "non-lock-free atomic would leave it guarded by a per-process lock");
+static_assert(std::atomic<int32_t>::is_always_lock_free,
+              "ConsumerWriterReport's flags cross a process boundary, so a "
+              "non-lock-free atomic would leave them guarded by a per-process lock");
 
 // The result channel: ONE fd-backed shared object, mapped by both sides, handed
 // to the child as a descriptor. Not an anonymous mapping -- exec replaces the
@@ -321,12 +370,13 @@ struct ConsumerStressReport {      // POD, shared with the child
 // once per side, because two copies of these offsets can drift, and a parent that
 // reads its report where the child did not write one reads zeros -- and zero is
 // "nothing failed", so the case stays green and lies.
-//   [0, page_align(both report PODs))   ConsumerReport, then ConsumerStressReport
+//   [0, page_align(all three report PODs))  ConsumerReport, then the other two
 //   [.., + page_align(len))             the write payload, the caller's
 //   [.., + page_align(len))             the read-back, the child's
-// Page-aligned so an O_DIRECT consumer can use both buffers as they are. A stress
-// child allocates its own IO buffers, so it has no payload region and its channel
-// is the report page alone.
+// Page-aligned so an O_DIRECT consumer can use both buffers as they are. Two modes
+// carry no payload because they allocate their own IO buffers -- a stress child's
+// workers each posix_memalign a pair, and a writer posix_memaligns the block it
+// hammers -- so for those the channel is the report page alone.
 //
 // The child's argv, which is how the mode and the length above reach it. argv[0]
 // is the suite's own binary, argv[1] the sentinel consumer_child_main() dispatches
@@ -354,10 +404,24 @@ struct ConsumerStressReport {      // POD, shared with the child
 //                               write: this mode is always O_RDWR, always writes,
 //                               and the retry budget it needs is the one
 //                               open_node() already defaults to.
+//   CONS_MODE_WRITER        11  off, wrap_at (0 = never wrap), block [4096, 2^40],
+//                               direct [0, 1], advance [0, 1], verify [0, 1], path.
+//                               Six fields because BackgroundWriter::Opts has six
+//                               and every one of them changes what the child does,
+//                               so every one has to arrive in the slot it was sent
+//                               in. `block`'s lower bound is start()'s own check;
+//                               its upper bound is the child's, and is the same
+//                               2^40 as `len` above for the same reason -- it is a
+//                               size this side has to allocate.
 enum ConsumerMode : int32_t {
     CONS_MODE_IO       = 0,   // one write+fsync+read-back: consumer_io()
     CONS_MODE_STRESS   = 1,   // a whole stress phase: stress_run()
     CONS_MODE_RO_WRITE = 2,   // a write a read-only node must refuse: expect_write_rejected()
+    // A writer that hammers one region until it is told to stop:
+    // BackgroundWriter. The only mode whose child does not end on its own, which is
+    // why its spawn is the one that does not wait and its caller has a bounded
+    // stop() of its own.
+    CONS_MODE_WRITER   = 3,
 };
 
 // Where a consumer IO ended. Also how the caller's own failure to even start
@@ -426,6 +490,14 @@ struct ConsumerIoOpts {
 };
 constexpr uint64_t CONSUMER_TIMEOUT_US = 60ull * 1000 * 1000;
 
+// What a consumer's fd census reads as when there was no census. The child only
+// ever writes one into the channel beside a final report, so on the paths that
+// produce no report -- an abandoned child, a structural exit -- the field in the
+// page is one of the zeros the channel was born with, and copying that out would
+// read as "censused, and clean" when nothing was censused. A caller handed the
+// child can still get the real number: consumer_reap() decodes it.
+constexpr uint32_t CONS_FDS_UNMEASURED = UINT32_MAX;
+
 struct ConsumerIoResult {
     int status = EIO;            // 0, an errno, EILSEQ, or ETIMEDOUT if abandoned
     ConsumerStage stage = CONS_DONE;
@@ -434,7 +506,8 @@ struct ConsumerIoResult {
     pid_t pid = -1;
     bool hung = false;           // the deadline passed with the child running
     bool reaped = false;         // waitpid() collected it and read its report
-    uint32_t fds = 0;            // its post-drop census: anything else is a bug
+    uint32_t fds = CONS_FDS_UNMEASURED;   // its post-drop census: any other
+                                          // nonzero is a bug
     uint64_t elapsed_us = 0;
     std::string node;            // for the log lines, including consumer_reap's
     // The result channel, held mapped while the child may still write into it --
@@ -631,7 +704,11 @@ struct StressResult {
     // cannot witness it: an in-process phase reports the same numbers. -1 until
     // a spawn happened, so a phase that never got that far stays distinguishable.
     pid_t child_pid = -1;
-    uint32_t child_fds = 0;               // its post-drop census, the child's own
+    // Its post-drop census, the child's own, or CONS_FDS_UNMEASURED when the child
+    // never wrote a final report to read one out of. Not 0 in that case: a phase
+    // that was abandoned is exactly the one a reader most wants to ask about its
+    // descriptors, and 0 would answer "clean" to a question nobody asked.
+    uint32_t child_fds = CONS_FDS_UNMEASURED;
 
     explicit operator bool() const { return failures == 0 && ios > 0; }
     void report(const char* what, const StressCfg& c) const;
@@ -654,14 +731,17 @@ struct StressRnd {
 // every worker of a phase opens it, so a phase is the smallest unit that can be
 // wedged on it -- and per-IO children would be tens of thousands of execs.
 // Runs on the CALLING OS THREAD: it spawns that child and then polls for it with
-// a deadline of its own. From a coroutine use stress_off_vcpu() below.
-StressResult stress_run(const StressCfg& c);
+// a deadline of its own. From a coroutine use stress_off_vcpu() below. Ask for
+// `abandoned` to keep the handle on a child the deadline gave up on (its pid and
+// its result channel, for a later consumer_reap()); without one the channel is
+// released there and the child is left to finish or not on its own.
+StressResult stress_run(const StressCfg& c, ConsumerIoResult* abandoned = nullptr);
 
 // Coroutine-safe wrapper: the spawn and the bounded wait both run on an OS thread
 // while this vcpu keeps serving the device under test. The wait is a
 // WNOHANG/nanosleep poll, so on the vcpu it would stall the very coroutines that
 // have to serve the IO being waited on.
-StressResult stress_off_vcpu(const StressCfg& c);
+StressResult stress_off_vcpu(const StressCfg& c, ConsumerIoResult* abandoned = nullptr);
 
 // Both phases the kernel-node suites run: DISJOINT at the default concurrency
 // (fsync every 8th IO), then SHARED at `shared_threads` on one slot grid.
@@ -674,19 +754,43 @@ int stress_node_both_modes(const std::string& node, uint64_t size, const char* l
 // the restart-window writer
 // ---------------------------------------------------------------------------
 
-// A continuous writer on its own OS thread, for the tests that drop and
-// re-start (or hand over) the daemon while IO is in flight. It must NEVER be
-// joined on the photon vcpu while it may hold IO: join blocks the whole vcpu,
-// serving stops, and the in-flight IO then only returns through the kernel's
-// timeout paths (tcmu's cmd_time_out/EH cycles are 30s quanta). stop() therefore
-// polls a done flag coroutine-side and joins only once the thread is out of its
-// IO -- and it is idempotent, so a test can stop it explicitly at the right
-// point (before the device shutdown, which would otherwise EBUSY against the
-// still-open node) and still leave a DEFER as the safety net.
+// A continuous writer in a SPAWNED CHILD, for the tests that drop and re-start (or
+// hand over) the daemon while IO is in flight. A child and not a thread of this
+// process: a writer is the consumer most likely to end up wedged on the node, and a
+// wedged thread here holds this process's descriptors and shares its address space,
+// in which every transport has the device mapped MAP_SHARED -- so the recovery path,
+// which begins by letting go of the control device, could never run. Measured once:
+// 47 hours unkillable, device never recovered.
+//
+// stop() is BOUNDED and never signals the child: an uninterruptible sleeper cannot
+// be killed, so a signal would only queue up beside the wedge while this process
+// stays stuck. On expiry it gives up, says so loudly with the pid, and returns
+// false -- so a writer that was abandoned is a failure a case can assert on and not
+// something that looks exactly like a clean stop. That is also why the release of a
+// gate the writer is parked behind still has to come first: with a deadline the
+// wrong order no longer hangs, it just goes red, and red is the correct answer.
+//
+// Its counters are LIVE across the process boundary: iters() and wait_iters() read
+// what the child has published so far while it is still running, which is what lets
+// a case synchronize on it (see ConsumerWriterReport for why that is an atomic in a
+// shared mapping and not a semaphore). Both of those, and stop()'s wait, need a
+// photon runtime on the calling thread -- they yield the vcpu rather than block it,
+// which is the point: the IO a writer is inside is served by this very process.
+//
+// Idempotent, so a case can stop it explicitly at the right point (before the
+// device shutdown, which would otherwise EBUSY against the still-open node) and
+// still leave a DEFER as the safety net. A second stop() answers true: a writer
+// already stopped was not abandoned by the call that found it stopped. The
+// destructor calls stop() too and nobody reads what it returns, so a case that
+// cares whether its writer was collected has to call stop() itself and assert on it.
 class BackgroundWriter {
 public:
+    // Spelled because the deleted copy below is itself a user-declared constructor,
+    // and declaring one suppresses the implicit default.
+    BackgroundWriter() = default;
+
     struct Opts {
-        uint64_t off;                 // first (or, with advance=false, only) offset
+        uint64_t off = 0;              // first (or, with advance=false, only) offset
         uint64_t wrap_at = 0;         // advance: wrap back to `off` once a block
                                       // would start past this; 0 = never wrap
         size_t block = 64 << 10;
@@ -696,20 +800,42 @@ public:
     };
 
     int start(const std::string& node, const Opts& o);   // 0, or errno
-    void stop();                                         // idempotent
+
+    // Wait out the writer with a deadline of its own (0 = CONSUMER_TIMEOUT_US) and
+    // collect it. true once it is collected; false when the deadline passed with it
+    // still running -- it is then abandoned, not killed, and logged here with its
+    // pid, because the destructor's call has nobody to tell. Ask for `abandoned` to
+    // keep the handle on it (its pid and its result channel, for a later
+    // consumer_reap()); without one the channel is released here and the child is
+    // left to finish or not on its own. Idempotent.
+    bool stop(ConsumerIoResult* abandoned = nullptr, uint64_t timeout_us = 0);
     ~BackgroundWriter() { stop(); }
 
-    int errors() const { return bad.load(); }
-    uint64_t iters() const { return iter_count.load(); }
+    // The child's own IO failures, plus one from this side if what the child
+    // decoded its argv into disagreed with what was sent to it -- the same folding
+    // stress_in_child() does, and for the same reason: a writer that ran a
+    // configuration nobody asked for is not a writer that ran cleanly.
+    int errors() const;
+    uint64_t iters() const;
     // wait until at least `n` iterations completed; false on timeout
     bool wait_iters(uint64_t n, uint64_t timeout_us = 30ull * 1000 * 1000);
 
 private:
-    std::thread th;
-    std::atomic<bool> stop_flag{false}, done{false};
-    std::atomic<int> bad{0};
-    std::atomic<uint64_t> iter_count{0};
+    ConsumerIoResult r;                 // the child: its pid, and the channel
+    ConsumerWriterReport* w = nullptr;  // inside r.shm; null once that is released
+    // What was sent, kept because what the child says it decoded is compared
+    // against it in stop() -- which is after the argv it was built from is gone.
+    Opts sent{};
+    // What iters() and errors() answer with afterwards: both are read after stop()
+    // returns, and by then the channel they came out of is gone.
+    uint64_t final_iters = 0;
+    int final_errors = 0;
     bool running = false;
+
+    // It owns a mapping and a child: a copy would release the one twice and leave
+    // two objects each believing the other's pid was theirs to reap.
+    BackgroundWriter(const BackgroundWriter&) = delete;
+    BackgroundWriter& operator=(const BackgroundWriter&) = delete;
 };
 
 }  // namespace test

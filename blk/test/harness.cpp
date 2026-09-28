@@ -53,6 +53,7 @@ extern char** environ;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <thread>
 
 #ifndef O_DIRECT
@@ -412,43 +413,74 @@ constexpr uint64_t CONSUMER_STRESS_TIMEOUT_US = 10ull * 60 * 1000 * 1000;
 size_t page_align(size_t n) {
     return (n + 4095) & ~(size_t)4095;
 }
-// Both report PODs share this one region, in every mode. Reserving the stress one
-// costs a single-IO child nothing: the two together are still well under the page
-// this region was already rounded up to.
-size_t channel_report_bytes() {
-    return page_align(sizeof(ConsumerReport) + sizeof(ConsumerStressReport));
-}
 // The stress POD's offset, aligned for its widest member: ConsumerReport is 20
 // bytes, so without this a uint64_t field of it would sit on a 4-byte boundary.
 size_t channel_stress_off() {
     constexpr size_t A = alignof(ConsumerStressReport);
     return (sizeof(ConsumerReport) + A - 1) & ~(A - 1);
 }
+// The writer POD's, after both of the PODs it follows and aligned the same way.
+size_t channel_writer_off() {
+    constexpr size_t A = alignof(ConsumerWriterReport);
+    size_t end = channel_stress_off() + sizeof(ConsumerStressReport);
+    return (end + A - 1) & ~(A - 1);
+}
+// All three report PODs share this one region, in every mode. Reserving the two a
+// given child never writes costs it nothing: the three together are still well
+// under the page this region was already rounded up to. Derived from the offsets
+// rather than from a sum of the sizes, because the offsets are the thing the two
+// sides have to agree on and a sum of sizes silently drops the alignment padding
+// in front of a POD that follows a narrower one.
+size_t channel_report_bytes() {
+    return page_align(channel_writer_off() + sizeof(ConsumerWriterReport));
+}
 // A stress child allocates its own IO buffers -- each of its workers
 // posix_memaligns a pair -- so the channel carries no payload for it.
 size_t channel_io_bytes(int mode, size_t len) {
-    return mode == CONS_MODE_STRESS ? 0 : page_align(len);
+    switch (mode) {
+    // Named, and not "every mode except the two that do have a payload": a mode
+    // added later then lands on the payload side by default, which is the side
+    // that fails loudly (its child maps more channel than the parent sized).
+    case CONS_MODE_STRESS:
+        return 0;
+    case CONS_MODE_WRITER:   // posix_memaligns the block it hammers, same reason
+        return 0;
+    default:
+        return page_align(len);
+    }
 }
 
 // NSDMI on every member: a layout whose value is wrong misplaces every offset in
 // the channel, so no instance of this may ever exist uninitialized.
 struct ChannelLayout {
-    size_t report_bytes = 0;   // the region holding both report PODs
+    size_t report_bytes = 0;   // the region holding all three report PODs
     size_t stress_off = 0;     // ConsumerStressReport, inside that region
+    size_t writer_off = 0;     // ConsumerWriterReport, inside that region
     size_t wbuf_off = 0;       // the caller's write payload
     size_t rbuf_off = 0;       // the child's read-back
-    size_t io_bytes = 0;       // each of those two; 0 in stress mode
+    size_t io_bytes = 0;       // each of those two; 0 in stress and writer modes
     size_t total = 0;          // what ftruncate() and both mmap() calls take
 };
 ChannelLayout channel_layout(int mode, size_t len) {
     ChannelLayout l;
     l.report_bytes = channel_report_bytes();
     l.stress_off = channel_stress_off();
+    l.writer_off = channel_writer_off();
     l.io_bytes = channel_io_bytes(mode, len);
     l.wbuf_off = l.report_bytes;
     l.rbuf_off = l.wbuf_off + l.io_bytes;
     l.total = l.rbuf_off + l.io_bytes;
     return l;
+}
+
+// The writer's report POD has std::atomic members, which have to be CONSTRUCTED
+// rather than merely cleared: an all-zero page holds the right bytes for a
+// lock-free atomic containing zero, but no object. Run by consumer_spawn() after
+// it zeroes the region and before it spawns, so that both sides then see the one
+// object built here -- the child cannot build it itself, since the parent is
+// already reading it by the time the child's first instruction runs.
+void writer_report_init(void* base, const ChannelLayout& l) {
+    new ((ConsumerWriterReport*)((char*)base + l.writer_off)) ConsumerWriterReport{};
 }
 
 // One fd-backed shared object, because exec leaves the child nothing of this
@@ -517,6 +549,19 @@ struct ConsumerStressArgs {
     uint32_t seed;           // 0 = derive from the thread id
 };
 
+// A writer's decoded argv, in the same place and for the same reason as the stress
+// one above it: ConsumerArgs is memset before the decode, so everything in it is
+// POD, and what the decoder produces is not what the caller's Opts held -- three
+// bools become three ints, because that is what a range check can be written
+// against.
+struct ConsumerWriterArgs {
+    uint64_t wrap_at;            // 0 = never wrap
+    size_t block;                // >= 4096, the same check start() makes
+    int direct;                  // O_DIRECT, with the same fallback as before
+    int advance;                 // 0 = hammer one offset
+    int verify;                  // read each block back and compare
+};
+
 // Everything the child needs, all of it POD and all of it decoded from argv: the
 // child shares no memory with the caller, so what does not travel in argv or in
 // the channel does not exist for it.
@@ -528,15 +573,18 @@ struct ConsumerArgs {
     int flags;               // open() flags
     int open_tries;          // >= 1
     int write;               // 0 = read only
-    uint64_t off;
+    uint64_t off;            // CONS_MODE_WRITER's too, which is why it is out here
     size_t len;
     // CONS_MODE_STRESS
     ConsumerStressArgs stress;
+    // CONS_MODE_WRITER
+    ConsumerWriterArgs writer;
     // both, filled in from the mapping after the census
     const void* wbuf;        // len bytes, in the channel
     void* rbuf;              // len bytes, in the channel
     ConsumerReport* rep;     // offset 0 of the channel
     ConsumerStressReport* srep;   // channel_stress_off()
+    ConsumerWriterReport* wrep;   // channel_writer_off()
 };
 
 // The bound of the fd census. NOT /proc/self/fd: reading that directory needs an
@@ -611,6 +659,7 @@ bool parse_int(const char* s, int* v, int lo, int hi) {
 constexpr int CONS_ARGC_IO       = 10;
 constexpr int CONS_ARGC_STRESS   = 14;
 constexpr int CONS_ARGC_RO_WRITE = 7;
+constexpr int CONS_ARGC_WRITER   = 11;
 
 // The child's argv: fixed order, decimal integers, node path LAST (see the table
 // in harness.h). A mis-decode must not be able to read as "nothing to do", so it
@@ -683,18 +732,49 @@ bool decode_ro_write_argv(int argc, char** argv, ConsumerArgs* a) {
     return true;
 }
 
+// CONS_MODE_WRITER: the six fields of BackgroundWriter::Opts, then the path. All
+// six because each one changes what the child does, and a field that does not
+// travel is a field the parent cannot prove arrived.
+bool decode_writer_argv(int argc, char** argv, ConsumerArgs* a) {
+    if (argc != CONS_ARGC_WRITER)
+        return false;
+    ConsumerWriterArgs* w = &a->writer;
+    uint64_t off = 0, wrap_at = 0, block = 0;
+    // `off` and `wrap_at` have no bound of their own, for the reason the two tables
+    // above give: what makes an offset wrong is the node refusing it. `block` is
+    // bounded on both sides -- the lower bound is start()'s own check restated here,
+    // because a builder is not the only thing that can produce an argv, and the
+    // upper one is the same 2^40 as `len` above for the same reason: it is a size
+    // this side has to allocate, twice over when `verify` is on.
+    if (!parse_u64(argv[4], &off) ||
+        !parse_u64(argv[5], &wrap_at) ||
+        !parse_u64(argv[6], &block) ||
+        !parse_int(argv[7], &w->direct, 0, 1) ||
+        !parse_int(argv[8], &w->advance, 0, 1) ||
+        !parse_int(argv[9], &w->verify, 0, 1) ||
+        block < 4096 || block > (1ull << 40) || !argv[10][0])
+        return false;
+    a->off = off;
+    w->wrap_at = wrap_at;
+    w->block = (size_t)block;
+    a->path = argv[10];
+    return true;
+}
+
 bool decode_child_argv(int argc, char** argv, ConsumerArgs* a) {
     // The mode tag selects the rest of the table, so it is read ahead of the
     // halves it chooses between -- and an unknown tag is a mis-decode like any
     // other, not a default.
     if (argc < 4 ||
-        !parse_int(argv[2], &a->mode, CONS_MODE_IO, CONS_MODE_RO_WRITE) ||
+        !parse_int(argv[2], &a->mode, CONS_MODE_IO, CONS_MODE_WRITER) ||
         !parse_int(argv[3], &a->channel_fd, 3, 65535))
         return false;
     if (a->mode == CONS_MODE_IO)
         return decode_io_argv(argc, argv, a);
     if (a->mode == CONS_MODE_STRESS)
         return decode_stress_argv(argc, argv, a);
+    if (a->mode == CONS_MODE_WRITER)
+        return decode_writer_argv(argc, argv, a);
     // Reached only with the third tag, the range check above having refused
     // anything else, so this is that tag's half of the table and not a fallback.
     return decode_ro_write_argv(argc, argv, a);
@@ -880,6 +960,98 @@ bool ro_write_body_ran(ConsumerStage s) {
            s == CONS_RO_ACCEPTED;
 }
 
+// The child's writer loop: the whole of what BackgroundWriter used to be as a
+// thread of the daemon's. It is a child for the reason the other three modes are,
+// and a writer is the case that reason was first measured on -- a writer wedged on
+// the node holds it open, and a thread of the daemon holds the daemon's
+// descriptors and shares its address space, in which every transport has the device
+// mapped MAP_SHARED. So the recovery path, which begins by letting go of the
+// control device, could never run: measured once at 47 hours unkillable with the
+// device never recovered. An empty fd table does not close that second channel and
+// neither does a fork, which copies the mappings; only a new address space does.
+//
+// Its counters are published as it goes rather than in the report at the end,
+// because a caller waits on them from outside while this is still running:
+// ConsumerReport::magic is written last precisely because it says the rest is
+// final, and nothing about a running writer is.
+int consumer_writer_body(const ConsumerArgs* a) {
+    ConsumerWriterReport* w = a->wrep;
+    ConsumerStage stage = CONS_DONE;
+    int e = 0, status = 0, fd = -1;
+    void* wbuf = nullptr;
+    void* rbuf = nullptr;
+    DEFER({ free(wbuf); free(rbuf); if (fd >= 0) ::close(fd); });
+    // Ahead of any IO: the caller may already be waiting on the counters that sit
+    // beside these, and the parent reads the echoes back out of this same page once
+    // it has collected this child.
+    w->echo_off = a->off;
+    w->echo_wrap_at = a->writer.wrap_at;
+    w->echo_block = (uint64_t)a->writer.block;
+    w->echo_direct = (uint32_t)a->writer.direct;
+    w->echo_advance = (uint32_t)a->writer.advance;
+    w->echo_verify = (uint32_t)a->writer.verify;
+
+    size_t block = a->writer.block;
+    if (posix_memalign(&wbuf, 4096, block) != 0 ||
+        (a->writer.verify && posix_memalign(&rbuf, 4096, block) != 0)) {
+        // No enumerator names an allocation, and nothing has touched the node yet,
+        // so this stays CONS_DONE with a status of its own.
+        status = errno ? errno : ENOMEM;
+    } else {
+        fd = open_node(a->path, O_RDWR | (a->writer.direct ? O_DIRECT : 0));
+        if (fd < 0 && a->writer.direct && (errno == EINVAL || errno == EOPNOTSUPP))
+            fd = open_node(a->path, O_RDWR);   // this node rejects O_DIRECT
+        if (fd < 0) {
+            stage = CONS_OPEN;
+            e = errno;
+        } else {
+            uint64_t off = a->off;
+            while (!w->stop_flag.load(std::memory_order_relaxed)) {
+                uint64_t it = w->iters.load(std::memory_order_relaxed);
+                memset(wbuf, (int)((it & 0xff) | 1), block);
+                if (::pwrite(fd, wbuf, block, (off_t)off) != (ssize_t)block) {
+                    stage = CONS_WRITE; e = errno; break;
+                }
+                if (a->writer.verify) {
+                    if (::pread(fd, rbuf, block, (off_t)off) != (ssize_t)block) {
+                        stage = CONS_READ; e = errno; break;
+                    }
+                    if (memcmp(wbuf, rbuf, block)) {
+                        stage = CONS_VERIFY; status = EILSEQ; break;
+                    }
+                }
+                w->iters.fetch_add(1, std::memory_order_relaxed);
+                if (a->writer.advance) {
+                    off += block;
+                    if (a->writer.wrap_at && off + block > a->writer.wrap_at)
+                        off = a->off;
+                }
+            }
+        }
+    }
+    if (stage != CONS_DONE && status == 0)
+        status = e ? e : EIO;
+    // One increment per failure, as the thread this replaced had: the loop breaks
+    // on the first one, so there is never a second to count.
+    if (status)
+        w->errors.fetch_add(1, std::memory_order_relaxed);
+    ConsumerReport* rep = a->rep;
+    rep->status = status;
+    rep->stage = (int32_t)stage;
+    rep->child_errno = e;
+    rep->magic = CONSUMER_MAGIC;   // last: it is what says the rest is final
+    return status < CONS_EXIT_DROP_FDS ? status : EIO;
+}
+
+// The stages the writer's body can end at, i.e. the ones that prove it ran and so
+// published its echoes. Everything else is a structural exit, which leaves the page
+// at the zeros the channel was born with -- and comparing those would report a
+// disagreement about an off nobody sent, on top of the failure that happened.
+bool writer_body_ran(ConsumerStage s) {
+    return s == CONS_DONE || s == CONS_OPEN || s == CONS_WRITE ||
+           s == CONS_READ || s == CONS_VERIFY;
+}
+
 // The structural exit codes, which say the isolation itself is in question and
 // so outrank anything an IO could report. CONS_EXIT for a plain status.
 ConsumerStage exit_code_stage(int code) {
@@ -983,11 +1155,13 @@ int consumer_wait(pid_t pid, uint64_t timeout_us, int* st, uint64_t* elapsed_us,
 }
 
 // The spawn, the bounded wait and the decode that every consumer child goes
-// through: consumer_io()'s, the stress driver's, and the malformed-argv
-// witnesses'. ONE copy, deliberately -- they differ in the argv they hand over
-// and in what they read back out of the channel, and in nothing else. A witness
-// that spawned its own child would measure libc's exit codes instead of this
-// path's mapping of them, which is the thing worth witnessing.
+// through: consumer_io()'s, the stress driver's, the writer's, and the
+// malformed-argv witnesses'. ONE copy, deliberately -- they differ in the argv they
+// hand over, in what they read back out of the channel, and (for the writer, whose
+// child is still running when this returns) in whether they wait at all, and in
+// nothing else. A witness that spawned its own child would measure libc's exit
+// codes instead of this path's mapping of them, which is the thing worth
+// witnessing.
 struct ConsumerSpawn {
     std::string node;                  // r.node, and the log lines
     std::vector<const char*> argv;     // argv[1..], the sentinel first; argv[0]
@@ -997,6 +1171,14 @@ struct ConsumerSpawn {
     size_t len = 0;                    // the write payload's; 0 copies none
     ConsumerStressReport* stress = nullptr;   // filled from the channel if reaped
     uint64_t timeout_us = 0;           // 0 = CONSUMER_TIMEOUT_US
+    // Cleared by the one mode whose child does not end on its own: the spawn then
+    // hands the pid and the channel back without waiting, and the caller's own
+    // bounded stop is what collects it. `timeout_us` is not read in that case.
+    bool wait = true;
+    // A report POD that has to be constructed rather than merely cleared, which is
+    // what one with std::atomic members is. Runs after the zeroing below and before
+    // the spawn: see writer_report_init.
+    void (*report_init)(void* base, const ChannelLayout& l) = nullptr;
 };
 
 ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
@@ -1035,6 +1217,8 @@ ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
     memset(rep, 0, s.layout.report_bytes);   // magic 0 until the child's last store
     if (s.wbuf && s.len)
         memcpy((char*)base + s.layout.wbuf_off, s.wbuf, s.len);
+    if (s.report_init)
+        s.report_init(base, s.layout);
 
     char exe[PATH_MAX];
     if (!self_exe(exe, sizeof(exe))) {
@@ -1115,6 +1299,18 @@ ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
     ::close(cfd);   // promptly: the collision case above cleared its CLOEXEC
 
     r.pid = pid;
+    if (!s.wait) {
+        // The child outlives this call by design, so there is no status to decode
+        // and the channel is the caller's from here on: it is where the counters a
+        // caller waits on live, so it has to stay mapped for as long as the child
+        // may still be writing them. `status` and `stage` keep their defaults and
+        // mean nothing here -- the caller's own bounded stop is what collects this
+        // child, and collecting it is what produces a verdict.
+        handed_over = true;
+        r.shm = base;
+        r.shm_size = size;
+        return r;
+    }
     int st = 0;
     uint64_t elapsed = 0;
     int w = consumer_wait(pid, timeout, &st, &elapsed, 2 * 1000 * 1000);
@@ -1140,7 +1336,16 @@ ConsumerIoResult consumer_spawn(const ConsumerSpawn& s) {
 // The parent's half of a stress phase: hand the config over in argv, wait for the
 // child with a deadline of its own, and read the counters back out of the
 // channel. Everything that touches the node happens in the child.
-StressResult stress_in_child(const StressCfg& c, uint64_t span) {
+//
+// `abandoned`, when given, receives the whole result of a child this phase had to
+// give up on -- pid, channel and the ownership of both -- so that a caller can
+// still reap it later. StressResult is returned by value and carries two scalars
+// out of the same event, and a scalar is not enough: a wedged child cannot be
+// reaped without its channel, and consumer_reap() refuses one that has been
+// released. The shape is device_io()'s `report` and expect_write_rejected()'s
+// fourth parameter, not a new one.
+StressResult stress_in_child(const StressCfg& c, uint64_t span,
+                             ConsumerIoResult* abandoned) {
     StressResult res;
     // argv, in decode_stress_argv's order, path last
     char a_mode[4], a_fd[12], a_sm[4], a_th[12], a_it[12], a_base[24], a_span[24];
@@ -1168,11 +1373,13 @@ StressResult stress_in_child(const StressCfg& c, uint64_t span) {
     s.timeout_us = CONSUMER_STRESS_TIMEOUT_US;
     ConsumerIoResult r = consumer_spawn(s);
     res.child_pid = r.pid;
+    // Not a copy of a census this parent may not have: r.fds is
+    // CONS_FDS_UNMEASURED unless the child wrote a final report to read one out of.
     res.child_fds = r.fds;
-    // Nothing keeps this child's pid, so a channel handed over for a later reap
-    // has nowhere to go -- release it, as device_io() does in the same situation.
-    if (r.shm)
-        consumer_release(r);
+    if (abandoned)
+        *abandoned = r;
+    else if (r.shm)
+        consumer_release(r);   // nobody can reap a child whose pid was not kept
     if (r.status != 0 || r.stage != CONS_DONE) {
         // The phase never ran, or its counters are not readable. Name the culprit
         // instead of reporting the zeros a channel is born with, which would read
@@ -1271,6 +1478,7 @@ int consumer_child_main(int argc, char** argv) {
     }
     a.rep = rep;
     a.srep = (ConsumerStressReport*)((char*)base + l.stress_off);
+    a.wrep = (ConsumerWriterReport*)((char*)base + l.writer_off);
     // A stress child has no payload region, so leaving these pointing one past
     // its mapping would be a trap for whoever next adds a read to that body.
     if (l.io_bytes) {
@@ -1284,6 +1492,8 @@ int consumer_child_main(int argc, char** argv) {
         _exit(consumer_stress_body(&a));
     if (a.mode == CONS_MODE_RO_WRITE)
         _exit(consumer_ro_write_body(&a));
+    if (a.mode == CONS_MODE_WRITER)
+        _exit(consumer_writer_body(&a));
     _exit(consumer_io_body(&a));
 }
 
@@ -1491,7 +1701,7 @@ void StressResult::report(const char* what, const StressCfg& c) const {
 // Runs on the CALLING OS THREAD: it spawns the child that runs the phase and
 // then polls for it with a deadline of its own. From a coroutine use
 // stress_off_vcpu() below.
-StressResult stress_run(const StressCfg& c) {
+StressResult stress_run(const StressCfg& c, ConsumerIoResult* abandoned) {
     StressResult res;
     uint64_t span = (c.span ? c.span : (c.size > c.base_off ? c.size - c.base_off : 0))
                     & ~(uint64_t)4095;
@@ -1504,7 +1714,7 @@ StressResult stress_run(const StressCfg& c) {
         return res;
     }
     uint64_t t0 = stress_now_us();
-    res = stress_in_child(c, span);
+    res = stress_in_child(c, span, abandoned);
     // Measured here, around the spawn, so it now includes the spawn and the exec
     // of the child that ran the phase as well as the phase itself.
     res.elapsed_us = stress_now_us() - t0;
@@ -1514,9 +1724,9 @@ StressResult stress_run(const StressCfg& c) {
 
 // Coroutine-safe wrapper: the spawn and the bounded wait both run on an OS thread
 // while this vcpu keeps serving the device under test.
-StressResult stress_off_vcpu(const StressCfg& c) {
+StressResult stress_off_vcpu(const StressCfg& c, ConsumerIoResult* abandoned) {
     StressResult res;
-    run_off_vcpu([&] { res = stress_run(c); });
+    run_off_vcpu([&] { res = stress_run(c, abandoned); });
     return res;
 }
 
@@ -1646,67 +1856,129 @@ int BackgroundWriter::start(const std::string& node, const Opts& o) {
         LOG_ERROR_RETURN(EALREADY, -1, "the background writer is already running");
     if (o.block < 4096)
         LOG_ERROR_RETURN(EINVAL, -1, "the writer's block size must be at least 4096");
-    stop_flag = false;
-    done = false;
-    bad = 0;
-    iter_count = 0;
-    th = std::thread([this, node, o] {
-        DEFER(done = true);
-        int fd = open_node(node, O_RDWR | (o.direct ? O_DIRECT : 0));
-        if (fd < 0 && o.direct && (errno == EINVAL || errno == EOPNOTSUPP))
-            fd = open_node(node, O_RDWR);   // this node rejects O_DIRECT
-        if (fd < 0) {
-            LOG_ERROR("background writer: open ` failed, ", node, ERRNO());
-            bad++;
-            return;
-        }
-        DEFER(::close(fd));
-        void* wbuf = nullptr;
-        void* rbuf = nullptr;
-        if (posix_memalign(&wbuf, 4096, o.block) ||
-            (o.verify && posix_memalign(&rbuf, 4096, o.block))) {
-            LOG_ERROR("background writer: posix_memalign failed, ", ERRNO());
-            bad++;
-            free(wbuf);
-            return;
-        }
-        DEFER({ free(wbuf); free(rbuf); });
-        uint64_t off = o.off;
-        while (!stop_flag.load(std::memory_order_relaxed)) {
-            uint64_t it = iter_count.load(std::memory_order_relaxed);
-            memset(wbuf, (int)((it & 0xff) | 1), o.block);
-            if (::pwrite(fd, wbuf, o.block, (off_t)off) != (ssize_t)o.block) { bad++; break; }
-            if (o.verify) {
-                if (::pread(fd, rbuf, o.block, (off_t)off) != (ssize_t)o.block) { bad++; break; }
-                if (memcmp(wbuf, rbuf, o.block)) { bad++; break; }
-            }
-            iter_count.fetch_add(1, std::memory_order_relaxed);
-            if (o.advance) {
-                off += o.block;
-                if (o.wrap_at && off + o.block > o.wrap_at)
-                    off = o.off;
-            }
-        }
-    });
+    final_iters = 0;
+    final_errors = 0;
+    w = nullptr;
+    sent = o;
+    // argv, in decode_writer_argv's order, path last
+    char a_mode[4], a_fd[12], a_off[24], a_wrap[24], a_blk[24];
+    char a_direct[4], a_advance[4], a_verify[4];
+    snprintf(a_mode, sizeof(a_mode), "%d", (int)CONS_MODE_WRITER);
+    snprintf(a_fd, sizeof(a_fd), "%d", CONS_CHANNEL_FD);
+    snprintf(a_off, sizeof(a_off), "%llu", (unsigned long long)o.off);
+    snprintf(a_wrap, sizeof(a_wrap), "%llu", (unsigned long long)o.wrap_at);
+    snprintf(a_blk, sizeof(a_blk), "%llu", (unsigned long long)o.block);
+    snprintf(a_direct, sizeof(a_direct), "%d", o.direct ? 1 : 0);
+    snprintf(a_advance, sizeof(a_advance), "%d", o.advance ? 1 : 0);
+    snprintf(a_verify, sizeof(a_verify), "%d", o.verify ? 1 : 0);
+
+    ConsumerSpawn s;
+    s.node = node;
+    s.argv = {CONS_CHILD_ARG, a_mode, a_fd, a_off, a_wrap, a_blk,
+              a_direct, a_advance, a_verify, node.c_str()};
+    s.layout = channel_layout(CONS_MODE_WRITER, 0);
+    s.report_init = writer_report_init;
+    s.wait = false;   // this writer outlives the call; stop() is what collects it
+    r = consumer_spawn(s);
+    if (r.pid <= 0 || !r.shm) {
+        // A new abstraction level, so a new line: consumer_spawn named the spawn
+        // failure, this names the writer that did not start because of it.
+        int e = r.status ? r.status : EIO;
+        consumer_release(r);
+        LOG_ERROR_RETURN(e, -1, "the background writer on ` never started", node);
+    }
+    w = (ConsumerWriterReport*)((char*)r.shm + s.layout.writer_off);
     running = true;
     return 0;
 }
 
-void BackgroundWriter::stop() {
+bool BackgroundWriter::stop(ConsumerIoResult* abandoned, uint64_t timeout_us) {
     if (!running)
-        return;
-    stop_flag = true;
-    // poll coroutine-side until the thread is out of its IO; only then is join
-    // instant instead of stalling the vcpu that serves that very IO
-    while (!done.load())
-        photon::thread_usleep(1000);
-    th.join();
+        return true;   // a writer already stopped was not abandoned by this call
     running = false;
+    ConsumerWriterReport* wr = w;
+    w = nullptr;   // the channel is about to go; nothing may read through it after
+    uint64_t timeout = timeout_us ? timeout_us : CONSUMER_TIMEOUT_US;
+    wr->stop_flag.store(1, std::memory_order_relaxed);
+    // Off the vcpu and bounded. The writer leaves its loop only once the IO it is
+    // inside has returned, and that IO is served by this very process -- so a wait
+    // that blocked the vcpu would be waiting on the thing it was blocking. Never a
+    // signal: an uninterruptible sleeper cannot be killed, and a writer on a daemon
+    // that stopped serving is sitting in exactly that.
+    //
+    // Relaxed on both sides of the channel is enough and is what the thread this
+    // replaced used: these are progress counters with no data depending on them, so
+    // there is nothing to order. What DOES order them is the wait itself -- a child
+    // that has been collected cannot write again, so every value below is final.
+    int st = 0, ww = 0;
+    uint64_t elapsed = 0;
+    run_off_vcpu([&] {
+        ww = consumer_wait(r.pid, timeout, &st, &elapsed, 10 * 1000 * 1000);
+    });
+    r.elapsed_us += elapsed;
+    // The last moment these can be read, and both are read after stop() returns.
+    final_iters = wr->iters.load(std::memory_order_relaxed);
+    final_errors = wr->errors.load(std::memory_order_relaxed);
+    if (ww == 0) {
+        r.hung = true;
+        r.status = ETIMEDOUT;
+        r.stage = CONS_TIMEOUT;
+        // Logged here rather than left to the caller: the destructor calls stop()
+        // too, and nothing there could report what it got back.
+        LOG_ERROR("the background writer on ` did not stop within ` us; abandoning pid ` (an uninterruptible sleeper cannot be killed)",
+                  r.node, timeout, (int64_t)r.pid);
+        if (abandoned) {
+            *abandoned = r;
+            r.pid = -1;      // ownership moved: nothing here may reap or release it
+            r.shm = nullptr;
+            r.shm_size = 0;
+        } else {
+            consumer_release(r);   // nobody can reap a child whose pid was not kept
+        }
+        return false;
+    }
+    r.reaped = ww > 0;
+    // Only a collected child is known to have stopped running. -1 means it is gone
+    // without a status to read, which says nothing about when it stopped.
+    if (r.reaped)
+        r.hung = false;
+    consumer_decode(r, (const ConsumerReport*)r.shm, st, ww > 0);
+    // The child echoed back every scalar it decoded, and comparing them is what pins
+    // this builder to that decoder: a swap of two same-range fields decodes cleanly,
+    // so nothing the writer then DID could have shown it. Compared only when the
+    // body that publishes them ran -- a structural exit leaves the page at the zeros
+    // the channel was born with, and a disagreement about an off nobody sent would
+    // sit on top of the failure that actually happened.
+    if (r.reaped && writer_body_ran(r.stage)) {
+        const EchoField echo[] = {
+            {"off", sent.off, wr->echo_off},
+            {"wrap_at", sent.wrap_at, wr->echo_wrap_at},
+            {"block", (uint64_t)sent.block, wr->echo_block},
+            {"direct", (uint64_t)(sent.direct ? 1 : 0), wr->echo_direct},
+            {"advance", (uint64_t)(sent.advance ? 1 : 0), wr->echo_advance},
+            {"verify", (uint64_t)(sent.verify ? 1 : 0), wr->echo_verify},
+        };
+        if (const EchoField* f = echo_mismatch(echo)) {
+            final_errors++;
+            LOG_ERROR("the background writer on ` decoded ` as `, but the parent sent `",
+                      r.node, f->name, f->got, f->sent);
+        }
+    }
+    consumer_release(r);
+    return r.reaped;
+}
+
+uint64_t BackgroundWriter::iters() const {
+    return w ? w->iters.load(std::memory_order_relaxed) : final_iters;
+}
+
+int BackgroundWriter::errors() const {
+    return w ? w->errors.load(std::memory_order_relaxed) : final_errors;
 }
 
 bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout_us) {
     uint64_t deadline = photon::now + timeout_us;
-    while (iter_count.load() < n) {
+    while (iters() < n) {
         if (photon::now >= deadline)
             return false;
         photon::thread_usleep(1000);
