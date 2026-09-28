@@ -209,7 +209,9 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 //     42.9 M lines before it filled the filesystem it was logging to, and the
 //     frontend's write never completed. ublk breaks too, but quietly -- its
 //     per-queue pump cannot reap, so no request is ever fetched, the initiator's
-//     write times out, and shutdown does not return. nbd neither spins nor logs:
+//     write times out, shutdown() returns -1, and the teardown that follows it
+//     never completes: the queue-teardown coroutine migrated onto the pool vcpu is
+//     starved by a pump that no longer yields. nbd neither spins nor logs:
 //     start() returns 0, the endpoint listens, and only the client handshake
 //     fails. tcmu still WORKS -- a write, an fsync and a read-back through its
 //     LUN all succeed -- and only stops being cheap: at PollPolicy::SLEEP its
@@ -219,14 +221,21 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 //     and so it never reaches the wait.
 //
 //     Since the engine never writes errno, every gate on this path that tests one
-//     is reading a value left over from an unrelated syscall. There are three:
-//     the shared virtqueue loop's, each pump's, and the io_uring engine's own
-//     decision to report a failed wait as a timeout rather than an error -- which
-//     is what turns ublk's throttled loud poll into an unthrottled silent one.
-//     The values observed at them were 0, 2, 6 and 110, plus -1, which is not an
-//     errno at all. So whether a given failure is loud, silent or throttled is an
-//     accident of what errno happened to hold, not a property of the pool, and no
-//     errno printed by those messages is an observation.
+//     is reading a value left over from an unrelated syscall: the shared
+//     virtqueue loop's, each pump's, and the cascading engine's own decision to
+//     report a failed wait on the master engine as no events rather than as an
+//     error whenever the stale errno happens to be ETIMEDOUT. Every cascading
+//     engine in photon reports that way -- io_uring is only the one blk uses --
+//     and that report is what turns ublk's throttled loud poll into an
+//     unthrottled silent one.
+//
+//     Which value a gate happens to read differs between transports and between
+//     runs of the same transport; as one illustration, a pass through the shared
+//     virtqueue loop's gate in the vhost-user run above read 11. One of those
+//     gates read -1, which is not an errno at all. So whether a given failure is
+//     loud, silent or throttled is an accident of what errno happened to hold, not
+//     a property of the pool, and no errno printed by those messages is an
+//     observation.
 //
 //     "Same" is not optional either -- a backend file opened with the iouring
 //     engine casts the CURRENT vcpu's master engine to iouringEngine*, so landing
