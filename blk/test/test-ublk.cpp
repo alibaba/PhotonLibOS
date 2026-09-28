@@ -134,6 +134,31 @@ public:
     int ftruncate(off_t len) override { return f->ftruncate(len); }
 };
 
+// A backend that hands back one byte other than the one it was given, at one
+// offset. What it exists for: a consumer child's read-back comparison is the only
+// thing standing between a device that returns wrong data and a suite that reports
+// success, and every node these suites export returns right data -- so without a
+// backend that does not, the comparison's own sensitivity is never exercised and
+// CONS_VERIFY is an enumerator nothing asserts on.
+//
+// File-local, and one offset rather than all of them: the kernel reads a new device
+// while it is scanning it, and corrupting those reads would change what the device
+// looks like, which is not what is under test. UINT64_MAX is "corrupt nothing", so a
+// case can bring the node up honest and turn the fault on once it is up.
+class CorruptingFile : public test::RecordingFile {
+public:
+    explicit CorruptingFile(fs::IFile* f) : test::RecordingFile(f) {}
+    uint64_t corrupt_at = UINT64_MAX;
+    ssize_t preadv(const struct iovec* iov, int iovcnt, off_t offset) override {
+        ssize_t r = test::RecordingFile::preadv(iov, iovcnt, offset);
+        // Only the fragment that starts AT the offset, so a request the kernel
+        // split on the way down is corrupted once and not once per fragment.
+        if (r > 0 && iovcnt > 0 && (uint64_t)offset == corrupt_at)
+            ((char*)iov[0].iov_base)[0] ^= 0xff;
+        return r;
+    }
+};
+
 class UblkTest : public ::testing::Test {
 public:
     test::TestImage img;
@@ -898,6 +923,68 @@ TEST_F(UblkTest, writer_hang_is_contained) {
     EXPECT_EQ(test::CONS_DONE, abandoned.stage);
     // The real census, which only a collected child has one to give.
     EXPECT_EQ(0u, abandoned.fds);
+}
+
+// CONS_VERIFY's only witness. The comparison a consumer child does between what it
+// wrote and what came back is what makes every `EXPECT_EQ(0, device_io(...))` in
+// every suite mean something, and no node those suites export has ever disagreed
+// with itself -- so the comparison could be deleted, or inverted, or its stage and
+// status misassigned, and all of them would stay green. This is the case that says
+// otherwise: a backend that serves one wrong byte, and the verdict it produces.
+//
+// It needs a transport, which is why it is here and not in test-harness.cpp: with no
+// daemon between the caller and the node there is nothing to make disagree. Measured
+// rather than assumed -- a regular file is coherent by construction, and the three
+// pseudo-devices that would answer a read with something other than what was written
+// to them (/dev/zero, /dev/null, /dev/urandom) all refuse the fsync that
+// consumer_io_body() does between its write and its read-back, so they stop at
+// CONS_SYNC and never reach the comparison.
+TEST_F(UblkTest, a_read_back_that_disagrees_is_reported_as_a_verify_failure) {
+    CorruptingFile rec(file);
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    DEFER(dev->shutdown());
+    ASSERT_EQ(0, dev->start(&rec));
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+
+    auto wbuf = pattern(0x6c);
+    test::DeviceIoOpts o;
+    // O_DIRECT, so the read-back really comes down to this backend instead of being
+    // answered out of the page cache the write just filled -- a cached answer agrees
+    // with what was written by construction and would prove nothing.
+    o.direct = true;
+    test::ConsumerIoResult rep;
+    o.report = &rep;
+
+    // Honest first, and through the very same call: this is the arm that says the
+    // red below is the corruption and not the node, the offset, or the O_DIRECT.
+    ASSERT_EQ(0, test::device_io(node, wbuf.data(), wbuf.size(), IO_OFF, o));
+    ASSERT_EQ(test::CONS_DONE, rep.stage);
+
+    rec.corrupt_at = IO_OFF;
+    EXPECT_EQ(EILSEQ, test::device_io(node, wbuf.data(), wbuf.size(), IO_OFF, o));
+    // CONS_VERIFY and not CONS_READ: the read came back whole, it is what came back
+    // that was wrong. That distinction is the reason the enumerator exists --
+    // CONS_READ names a syscall that failed -- and this is the assertion that pins
+    // it to the right one.
+    EXPECT_EQ(test::CONS_VERIFY, rep.stage);
+    EXPECT_EQ(EILSEQ, rep.status);
+    EXPECT_EQ(EILSEQ, rep.exit_code);   // the exit code mirrors the status
+    EXPECT_EQ(0, rep.child_errno);      // no syscall failed; the comparison did
+    EXPECT_TRUE(rep.reaped);
+    EXPECT_FALSE(rep.hung);
+    EXPECT_EQ(0u, rep.fds);
+
+    // ... and the node was never the problem: the same IO, with the backend honest
+    // again, is clean. Without this arm a red above would be indistinguishable from
+    // a case that simply cannot do IO through this device.
+    rec.corrupt_at = UINT64_MAX;
+    EXPECT_EQ(0, test::device_io(node, wbuf.data(), wbuf.size(), IO_OFF, o));
+    EXPECT_EQ(test::CONS_DONE, rep.stage);
+    EXPECT_EQ(0, rep.status);
 }
 
 // was `dedicated_vcpu`. The assertion is the PLACEMENT, not merely that IO
