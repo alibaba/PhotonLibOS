@@ -55,6 +55,11 @@ namespace test {
 
 static constexpr size_t BLK = 64 << 10;
 static constexpr uint64_t OFF = 1ull << 20;
+// The CONS_MODE_RO_WRITE pair. Two different values, and neither of them zero: the
+// child echoes both back, and an echo cannot see a swap of two equal ones, while a
+// zero len would stop at the decoder instead of reaching the write.
+static constexpr uint64_t RW_OFF = 8192;
+static constexpr uint64_t RW_LEN = 4096;
 
 // rewrite just the header of a formatted block, leaving the payload alone
 static void patch_hdr(std::vector<char>& b, const StressBlockHdr& h) {
@@ -303,6 +308,13 @@ static std::vector<std::string> stress_argv(const std::string& path) {
             std::to_string(64ull << 10), "1", "0", "0", path};
 }
 
+// A well-formed read-only-write argv, in decode_ro_write_argv's order: mode tag,
+// channel fd, off, len, path. argc 7 with argv[0].
+static std::vector<std::string> ro_write_argv(const std::string& path) {
+    return {CONS_CHILD_ARG, std::to_string((int)CONS_MODE_RO_WRITE), "3",
+            std::to_string(RW_OFF), std::to_string(RW_LEN), path};
+}
+
 // `at` is an ARGV index, which is one more than the index into the vectors above:
 // consumer_spawn_argv() takes argv[1] onwards.
 static std::vector<std::string> patched(std::vector<std::string> a, int at,
@@ -327,14 +339,18 @@ static std::vector<std::string> over(std::vector<std::string> a) {
 TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
     const std::string absent = "/tmp/photon-blk-consumer-argv-absent";
     ::unlink(absent.c_str());
-    const auto io = io_argv(absent), st = stress_argv(absent);
+    const auto io = io_argv(absent), st = stress_argv(absent),
+               rw = ro_write_argv(absent);
     struct Row { const char* what; std::vector<std::string> argv; };
     const std::vector<Row> rows = {
         // the mode tag selects the rest of the table, so an unknown one is a
-        // mis-decode and not a default -- and 2 is the row that pins the top of
-        // its accepted range rather than merely flanking it
+        // mis-decode and not a default -- and 3 is the row that pins the top of its
+        // accepted range rather than merely flanking it. On the read-only-write argv
+        // because that is the mode the top of the range names: on any other base a
+        // relaxed bound lands in a half whose own argc gate refuses it, and this row
+        // survives the relaxation it exists to catch.
         {"argv[2]: the mode tag is not a ConsumerMode",  patched(io, 2, "7")},
-        {"argv[2]: the mode tag is one over its range",  patched(st, 2, "2")},
+        {"argv[2]: the mode tag is one over its range",  patched(rw, 2, "3")},
         {"argc 3: too short for the tag and the fd",     {CONS_CHILD_ARG, "0"}},
         // the channel fd's range is decode_child_argv's own, so it is checked
         // ahead of either mode's half -- and BOTH bounds need a row: a bound
@@ -372,6 +388,19 @@ TEST(ConsumerArgv, an_argv_that_does_not_decode_exits_202) {
         {"argv[11]: flush is neither 0 nor 1",           patched(st, 11, "2")},
         {"argv[12]: seed is over 32 bits",               patched(st, 12, "4294967296")},
         {"argv[13]: the path is empty",                  patched(st, 13, "")},
+        // read-only-write mode, argc 7
+        {"argc 6: one under the read-only-write table",  shortened(rw)},
+        {"argc 8: one over the read-only-write table",   over(rw)},
+        {"argv[4]: off has a tail",                      patched(rw, 4, "4096x")},
+        {"argv[5]: len is not a number",                 patched(rw, 5, "12x")},
+        {"argv[5]: len is zero",                         patched(rw, 5, "0")},
+        // 1099511627777 is 2^40 + 1, exactly one over the `len > (1ull << 40)`
+        // guard, which the two rows beside it cannot see. 2^40 itself is
+        // 1099511627776 and the guard ACCEPTS it, so it is no row of this table --
+        // and since len also sizes the channel, no case here can reach that bound
+        // from the accepted side.
+        {"argv[5]: len is above its range",              patched(rw, 5, "1099511627777")},
+        {"argv[6]: the path is empty",                   patched(rw, 6, "")},
     };
     for (const auto& row : rows) {
         SCOPED_TRACE(row.what);
@@ -437,6 +466,84 @@ TEST(ConsumerArgv, an_unmodified_stress_argv_runs_to_completion) {
     EXPECT_EQ(CONS_DONE, r.stage);      // child exits whenever it got that far
     EXPECT_TRUE(r.reaped);
     EXPECT_EQ(nullptr, r.shm);
+}
+
+// ---------------------------------------------------------------------------
+// a write a node had to refuse, in a consumer child
+//
+// The suites export read-only nodes and assert that a write to one is rejected.
+// What nothing there can say is whether the check would NOTICE a node that took
+// the write, since every node those suites export refuses it -- so this is the
+// other half, and it doubles as CONS_MODE_RO_WRITE's positive control: it goes
+// through expect_write_rejected()'s own builder, its own spawn and its own channel
+// sizing, so a mode that could not run at all fails here rather than only in the
+// two suites that export a read-only node.
+//
+// consumer_spawn_argv() cannot stand in for that control. It hands over the report
+// page alone whatever the argv says, and this mode sizes a payload region from the
+// len inside it, so the child would map more than the page it was given.
+// ---------------------------------------------------------------------------
+
+TEST(RoWriteChild, a_node_that_takes_the_write_is_reported_not_passed_over) {
+    // A regular file: open_node() is a bare open() with an ENXIO retry and has
+    // nothing to say about the node being a device, so this needs no root and no
+    // export. A regular file takes the write, which is the verdict under test.
+    const char* path = "/tmp/photon-blk-consumer-ro-write";
+    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    ASSERT_GE(fd, 0);
+    // RW_OFF + RW_LEN, so the swapped pair (RW_LEN, RW_OFF) ends at the same byte
+    // and still fits: a swap of those two argv slots then changes nothing the child
+    // can notice -- the write is still taken -- and only the echo sees it.
+    ASSERT_EQ(0, ::ftruncate(fd, (off_t)(RW_OFF + RW_LEN)));
+    ::close(fd);
+    DEFER(::unlink(path));
+    // This process holds descriptors on the very file the child is about to use, so
+    // the child's census of 0 proves its drop ran -- with an empty parent table the
+    // census passes either way.
+    int held[3];
+    for (int& h : held)
+        h = ::open(path, O_RDONLY);
+    DEFER(for (int h : held) ::close(h));
+    for (int h : held)
+        ASSERT_EQ(0, ::fcntl(h, F_GETFD));   // the parent really is holding them
+
+    ConsumerIoResult rep;
+    EXPECT_EQ(EILSEQ, expect_write_rejected(path, RW_OFF, RW_LEN, &rep));
+    // The stage is why this enumerator exists: CONS_WRITE names a pwrite that
+    // FAILED in every other mode, and the report carries no mode, so a reader handed
+    // CONS_WRITE here could not tell which of the two opposites happened.
+    EXPECT_EQ(CONS_RO_ACCEPTED, rep.stage);
+    EXPECT_EQ(EILSEQ, rep.status);
+    EXPECT_EQ(EILSEQ, rep.exit_code);   // the exit code mirrors the status
+    EXPECT_EQ(0, rep.child_errno);      // no syscall failed; the write is the finding
+    // ... and it happened in a CHILD, born with a clean fd table even though this
+    // process is holding four descriptors on the same file.
+    EXPECT_GT(rep.pid, 0);
+    EXPECT_NE((pid_t)::getpid(), rep.pid);
+    EXPECT_EQ(0u, rep.fds);
+    EXPECT_TRUE(rep.reaped);
+    EXPECT_FALSE(rep.hung);
+    EXPECT_EQ(nullptr, rep.shm);
+    for (int h : held)
+        EXPECT_EQ(0, ::fcntl(h, F_GETFD));   // the drop was the child's only
+}
+
+TEST(RoWriteChild, a_node_that_is_not_there_comes_back_as_the_childs_errno) {
+    // The open's errno is the child's and reaches the caller through the same report
+    // a verdict would, so a node that never appeared is not mistaken for one that
+    // refused nothing. It also puts the echo comparison on a report whose stage is
+    // not the happy one: this body ran, so it echoed, and off and len still have to
+    // come back as sent.
+    const char* absent = "/tmp/photon-blk-consumer-ro-write-absent";
+    ::unlink(absent);
+    ConsumerIoResult rep;
+    EXPECT_EQ(ENOENT, expect_write_rejected(absent, RW_OFF, RW_LEN, &rep));
+    EXPECT_EQ(CONS_OPEN, rep.stage);
+    EXPECT_EQ(ENOENT, rep.child_errno);
+    EXPECT_EQ(ENOENT, rep.exit_code);
+    EXPECT_TRUE(rep.reaped);
+    EXPECT_FALSE(rep.hung);
+    EXPECT_EQ(nullptr, rep.shm);
 }
 
 // ---------------------------------------------------------------------------
