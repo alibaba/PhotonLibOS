@@ -452,14 +452,15 @@ ConsumerIoResult consumer_io(const std::string& node, const void* wbuf, size_t l
 // clear and `hung` as it was. Runs its poll off the vcpu, so it is safe to call
 // from a coroutine.
 //
-// The two `false` returns a cleanup path can get leave different things behind,
-// and that decides whether it retries: only the timeout keeps the channel
-// mapped, so it is the only one worth calling again. A call that collected the
-// child sets `reaped` and releases the channel before it returns, so a second
-// call answers `true` from the `reaped` guard without reading anything -- it
-// does not fail. The "no result channel left" refusal is reached the other way
-// round: a caller that gave up on the child, released the channel itself (see
-// consumer_release), and then called this anyway.
+// The two `false` returns a cleanup path can get -- the timeout, and the "no
+// result channel left" refusal -- leave different things behind, and that
+// decides whether it retries: only the timeout keeps the channel mapped, so it
+// is the only one worth calling again. A call that collected the child sets
+// `reaped` and releases the channel before it returns, so a second call answers
+// `true` from the `reaped` guard without reading anything -- it does not fail.
+// That refusal is reached the other way round: a caller that gave up on the
+// child, released the channel itself (see consumer_release), and then called
+// this anyway.
 bool consumer_reap(ConsumerIoResult& r, uint64_t timeout_us = 0);
 
 // Unmap the result channel of a consumer that will not be reaped. Idempotent.
@@ -471,11 +472,15 @@ void consumer_release(ConsumerIoResult& r);
 // (this binary) and the terminator are supplied here, and anything else is
 // refused without spawning (see CONS_CHILD_ARG for what a child that does not see
 // the sentinel turns out to be). The channel is the report page alone, which is
-// all a child that never reaches its IO can touch -- and a child whose argv DOES
-// decode would size its IO region from the len inside that argv, so this one
-// page is necessarily shorter than what it maps and its first touch past the end
-// of the backing file would kill it: the second reason every argv handed here
-// must name a node that does not exist.
+// all a child that never reaches its IO can touch. Whether one whose argv DOES
+// decode stays inside it turns on its mode: a mode with a payload region sizes
+// that region from its argv, so the child maps more than the one page handed
+// here, and its first touch past the end of the backing file would kill it --
+// the second reason such an argv must name a node that does not exist, failing
+// its open before any payload. A mode without one is exempt: channel_io_bytes()
+// returns 0 for CONS_MODE_STRESS, which allocates its own IO buffers, so the
+// page is all a stress child maps, and a stress argv handed here may name a
+// real file and run to completion.
 //
 // Test-only, and the reason it exists: the structural exit codes above are the
 // loud half of the isolation, and the only way to hear them is to hand the child
