@@ -17,8 +17,13 @@ limitations under the License.
 // migrate_to_pool / check_pool_engines: the two primitives every transport uses
 // to hand its serving coroutines to a caller-supplied photon::WorkPool. Tested
 // here rather than through a transport because the failure modes are properties
-// of the primitives -- an empty pool is a division by zero inside WorkPool, and
-// a pool whose vcpus have no event engine turns every fd wait into a hot spin.
+// of the primitives -- an empty pool is a division by zero inside WorkPool, and a
+// vcpu with no master event engine cannot host an fd wait at all. The second
+// needs no exotic setup: ev_engine defaults to 0 and INIT_EVENT_NONE is 0, so the
+// natural `WorkPool pool(4);` installs the NullEventEngine, whose wait_for_fd
+// answers -1 at once, drops the timeout and leaves errno alone. A serving
+// coroutine parked on such a vcpu cannot make progress; what it does instead
+// differs per transport, and is documented at check_pool_engines.
 
 #include "../utils.h"
 #include "../../test/gtest.h"
@@ -147,9 +152,11 @@ TEST(blk_pool, engines_null_pool_is_accepted) {
 
 // WorkPool's constructor defaults are ev_engine = 0, io_engine = 0, and
 // INIT_EVENT_NONE is 0 -- so the natural `WorkPool pool(4);` produces vcpus whose
-// master engine is the NullEventEngine, whose wait_for_fd returns -1 without
-// setting errno. A serving coroutine parked there hot-spins and logs every pass
-// instead of sleeping. That is a configuration error, so start() must refuse it
+// master engine is the NullEventEngine, whose wait_for_fd returns -1 immediately,
+// discards the timeout, and never writes errno. A vcpu with no master engine
+// cannot host an fd wait at all, so a serving coroutine parked on one cannot make
+// progress; what it does instead differs per transport, and is documented at
+// check_pool_engines. That is a configuration error, so start() must refuse it
 // rather than serve pathologically.
 TEST(blk_pool, engines_reject_a_pool_with_no_event_engine) {
     photon::WorkPool pool(2);   // defaults: no event engine, no io engine

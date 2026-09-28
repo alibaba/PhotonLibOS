@@ -112,11 +112,12 @@ static bool lock_free(const char* identity) {
     return free;
 }
 
-// Three-valued, because lock_free() above deliberately collapses "absent" and
-// "held" into one false and a residue check must not: a lock file that merely
-// EXISTS is this transport's own orphan-scan convention rather than residue
-// (devlock_release unlocks and closes, it never unlinks), so only a lock that is
-// still HELD counts, and that is what would wedge every later run.
+// Distinguishes still-held from everything else, which lock_free() above
+// deliberately does not: it collapses "absent" and "held" into one false, and a
+// residue check must not, because a lock file that merely EXISTS is this
+// transport's own orphan-scan convention rather than residue (devlock_release
+// unlocks and closes, it never unlinks). So only a lock that is still HELD
+// counts, and that is what would wedge every later run.
 static const char* lock_state(const char* identity) {
     std::string lp = std::string("/run/photon-blk/tcmu-") + identity + ".lock";
     int fd = ::open(lp.c_str(), O_RDONLY);
