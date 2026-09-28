@@ -55,11 +55,19 @@ namespace test {
 
 static constexpr size_t BLK = 64 << 10;
 static constexpr uint64_t OFF = 1ull << 20;
-// The CONS_MODE_RO_WRITE pair. Two different values, and neither of them zero: the
-// child echoes both back, and an echo cannot see a swap of two equal ones, while a
-// zero len would stop at the decoder instead of reaching the write.
-static constexpr uint64_t RW_OFF = 8192;
-static constexpr uint64_t RW_LEN = 4096;
+// The CONS_MODE_RO_WRITE pair, chosen so that a swap of their two argv slots is
+// visible to the echo and to nothing else:
+//   - two different values, neither of them zero: an echo cannot see a swap of two
+//     equal ones, and a zero len stops at the decoder instead of reaching the write;
+//   - both page-aligned, and off <= len: the child sizes its channel from the len
+//     IT decoded, so a swap that made len larger would have it map more channel than
+//     the parent allocated and its pread would come back EFAULT. That is a second
+//     detector of the same swap, and leaving it in place would mean the echo's own
+//     teeth were never proven;
+//   - summing to the size the case truncates its file to, so the swapped pair ends
+//     at the same byte and still fits.
+static constexpr uint64_t RW_OFF = 4096;
+static constexpr uint64_t RW_LEN = 8192;
 
 // rewrite just the header of a formatted block, leaving the payload alone
 static void patch_hdr(std::vector<char>& b, const StressBlockHdr& h) {
