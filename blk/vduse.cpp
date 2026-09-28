@@ -60,7 +60,8 @@ limitations under the License.
 //   stops, or the device wedges its users.
 //
 // P1 scope: BlkConfig::queues virtqueues -- 0 means one, over MAX_QUEUES means
-// clamped to it -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
+// clamped to it, and an ADOPTED registration keeps the count it was created with
+// instead -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
 // than one, split ring only (no RING_PACKED / INDIRECT -- not offered, so the
 // driver must not use them), IN/OUT/FLUSH/GET_ID requests, FEATURE_FLUSH +
 // read_only + logical block size; FEATURE_DISCARD/WRITE_ZEROES are accepted in
@@ -470,7 +471,13 @@ struct VduseDeviceImpl : IBlkDevice {
     BlkConfig cfg;
     fs::IFile* backend = nullptr;
 
-    uint64_t offer_features = 0;       // what CREATE_DEV advertised
+    // The word create_dev advertises -- so it is the kernel's only on the create
+    // branch. An adopt never runs create_dev: there this says what a create WOULD
+    // have advertised, and `negotiated` below is what the registration holds. Kept
+    // in step with nqueues all the same, so that a shutdown followed by another
+    // start -- which does create -- cannot publish a count and a feature word that
+    // disagree about it.
+    uint64_t offer_features = 0;
     uint64_t negotiated = 0;           // DEV_GET_FEATURES after FEATURES_OK
     uint64_t capacity_sectors = 0;     // 512-byte units, the virtio constant
 
@@ -567,10 +574,11 @@ struct VduseDeviceImpl : IBlkDevice {
         photon::thread* th = nullptr;
     };
     std::vector<Vq*> vqs;
-    // How many virtqueues this device serves, derived from BlkConfig::queues in
-    // the constructor (0 = one, over MAX_QUEUES = clamped to it). `nqueues` sits
-    // with the fds rather than down with the bools: here it fills the 4-byte
-    // slot they leave.
+    // How many virtqueues this device serves: BlkConfig::queues as the
+    // constructor reads it (0 = one, over MAX_QUEUES = clamped to it), except on
+    // an adopt, where it becomes the count the registration already has.
+    // `nqueues` sits with the fds rather than down with the bools: here it fills
+    // the 4-byte slot they leave.
     uint32_t nqueues = 1;
 
     int ctrl_fd = -1;
@@ -610,11 +618,15 @@ struct VduseDeviceImpl : IBlkDevice {
 
         // Clamped, not rejected, and 0 means "you choose" -- the same reading the
         // ublk and vhost-user transports give this field, so one BlkConfig means
-        // the same thing to every transport. Derived HERE and never again: the
-        // constructor below sizes vqs from it, CREATE_DEV declares vq_num with it
-        // and fill_config publishes it, so a later change would desynchronize
-        // the three -- and a kernel that was told one count while the device
-        // serves another sets up virtqueues nobody is listening on.
+        // the same thing to every transport.
+        //
+        // Derived HERE, with exactly one exception: start()'s adopt branch raises
+        // it to the count the registration already has. Three things read this
+        // value -- the vqs slots sized just below, the vq_num create_dev declares
+        // and the num_queues fill_config publishes -- and the raise cannot
+        // desynchronize them, because the last two never run on an adopt and an
+        // adopt is the only branch that raises. The slots are the exception, so
+        // the function that raises also grows them.
         nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
 
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
@@ -1259,6 +1271,79 @@ struct VduseDeviceImpl : IBlkDevice {
         return 0;
     }
 
+    // The queue count of a registration we did NOT create. create_dev above is
+    // the only place a count is ever declared, and DEV_SET_CONFIG's only call
+    // site publishes capacity, so on an adopt the kernel's vq_num -- and with it
+    // the num_queues the consumer reads out of config space -- still belongs to
+    // the previous daemon while `nqueues` is still ours. Nothing reconciles the
+    // two by itself, and the disagreement is silent rather than an error: the
+    // consumer keeps spreading requests over every queue it was told about, and a
+    // request that lands on one we never set up, resolved or started simply never
+    // completes.
+    //
+    // The uapi has no readback of vq_num, so the count is measured instead.
+    // VDUSE_VQ_GET_INFO bounds the index we supply against the registration's own
+    // count and answers an index at or beyond it with EINVAL -- measured on
+    // 7.0.0-31-generic at vq_num 1, 4, 8 and 64, with and without VQ_SETUP, so
+    // the first index it refuses IS the count. Its `num` field is no use here: it
+    // reads 0 for an in-range index until a consumer drives the device, VQ_SETUP's
+    // max_size included, so a detector built on num would report "no such queue"
+    // for every queue that exists.
+    int adopt_queue_count() {
+        uint32_t n = nqueues;
+        // At most MAX_QUEUES + 1 ioctls, and one in the usual case: the walk stops
+        // at the first refusal, which a registration that already agrees with
+        // cfg.queues produces on the spot.
+        for (; n <= MAX_QUEUES; n++) {
+            vduse_vq_info vi;
+            memset(&vi, 0, sizeof(vi));
+            vi.index = n;
+            if (::ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) == 0)
+                continue;
+            if (errno != EINVAL)
+                LOG_ERRNO_RETURN(0, -1, "vduse VQ_GET_INFO failed while counting the registered queues, dev `", name);
+            break;
+        }
+        if (n > MAX_QUEUES)
+            // Refused, not clamped: serving fewer queues than the registration
+            // declares is the defect this exists to remove, and there are no slots
+            // to serve more with. The refusal leaves the registration alive,
+            // because rollback destroys only what WE created -- which is right
+            // twice over here: it is not ours to destroy, and a count this large
+            // cannot have come from our own create_dev, which clamps. So this
+            // cannot strand a device of ours that the fixture's sweep would then
+            // fail to clear on every later run.
+            LOG_ERROR_RETURN(EINVAL, -1, "vduse ` is registered with more than ` virtqueues; refusing to adopt it",
+                             name, MAX_QUEUES);
+        if (n == nqueues)
+            // The count is ours -- or lower, which is not this function's to
+            // judge: the setup_vq loop that follows asks the kernel about every
+            // index we mean to serve, and it answers EINVAL for one it was never
+            // told about, failing start() there.
+            return 0;
+
+        // Grow the slots BEFORE publishing the count: every reader of `nqueues`
+        // indexes `vqs` with it. The constructor's own pattern, and the pointer
+        // vector is what makes doing it here safe at all -- the addresses the
+        // already-built slots are known by do not move.
+        vqs.reserve(n);
+        for (uint32_t i = nqueues; i < n; i++) {
+            auto* q = new Vq;
+            q->impl = this;
+            q->qid = i;
+            vqs.push_back(q);
+        }
+        nqueues = n;
+        // Keep the invariant the constructor established -- F_MQ offered exactly
+        // when there is more than one queue. It is not published by an adopt, but
+        // this word outlives it: a shutdown followed by another start CREATES the
+        // registration, and create_dev then declares the raised vq_num beside it.
+        offer_features |= (1ULL << VIRTIO_BLK_F_MQ);
+        LOG_INFO("vduse ` is registered with ` virtqueues while the config asks for `: serving the registered count",
+                 name, n, cfg.queues);
+        return 0;
+    }
+
     // VQ_SETUP + kickfd; safe on both fresh and adopted devices (the kernel
     // only records max_size; the driver's negotiated size comes via GET_INFO)
     int setup_vq(uint32_t idx) {
@@ -1444,6 +1529,11 @@ struct VduseDeviceImpl : IBlkDevice {
             }
         } else {
             LOG_INFO("vduse adopting the existing registration `", name);
+            // create_dev, the only place a queue count is declared, did not run
+            // for this registration -- so ask the kernel what it holds instead of
+            // assuming cfg.queues describes it.
+            if (adopt_queue_count() < 0)
+                return -1;
         }
         iotlb.dev_fd = dev_fd;
         registered = true;   // created or adopted: shutdown() may destroy it
@@ -1504,11 +1594,14 @@ struct VduseDeviceImpl : IBlkDevice {
         // EVERY queue, not just queue 0: an adopted device receives no further
         // SET_STATUS, so nothing re-arms needs_refresh and this call is the only
         // refresh queues 1..n-1 will ever get -- a queue it skips keeps its ring
-        // unresolved while the kernel, told vq_num == nqueues, keeps putting
-        // requests on it. The test stays `< 0`: a resolve that raced an iotlb
-        // invalidation returns 0 with needs_refresh re-armed and loop()'s first
-        // tick retries it; only a genuine failure (ring IOVAs truly unmapped)
-        // may fail start().
+        // unresolved while the kernel keeps putting requests on it. It puts them
+        // on vq_num queues, which is why nqueues has to equal vq_num on both
+        // branches and is established two different ways: create_dev declares
+        // vq_num FROM nqueues, and an adopt raises nqueues TO the vq_num the
+        // registration already has (adopt_queue_count). The test stays `< 0`: a
+        // resolve that raced an iotlb invalidation returns 0 with needs_refresh
+        // re-armed and loop()'s first tick retries it; only a genuine failure
+        // (ring IOVAs truly unmapped) may fail start().
         for (uint32_t i = 0; i < nqueues; i++)
             if (vq_refresh(i) < 0)
                 return -1;
@@ -1524,8 +1617,11 @@ struct VduseDeviceImpl : IBlkDevice {
 
         started = true;
         ok = true;
+        // `created` is what makes the feature word readable: on an adopt
+        // create_dev never ran, so `offer` is the word a create would have
+        // advertised and not what the registration holds.
         LOG_INFO("vduse device started, ", make_named_value("name", (const char*)name), VALUE(cfg.info.size),
-                 "created=", (int)created, "features=", HEX(offer_features));
+                 "created=", (int)created, VALUE(nqueues), "offer=", HEX(offer_features));
         return 0;
     }
 
