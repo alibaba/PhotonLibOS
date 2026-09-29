@@ -2167,10 +2167,10 @@ struct TcmuHBAImpl : TcmuHBA {
                 // bounded -- THIS scan cannot report the device. Recovery is not
                 // lost with it: initial_scan gates on enable, and the dev_config
                 // it also reads gates on whether the read succeeds, not on what
-                // it says. It skips only on 0, so an unusable tombstone does not
-                // by itself drop the entry; adoption re-opens the file to write,
-                // and that open reports its own failure. This file's two other
-                // probes of devlock_free pass -1 through without a word.
+                // it says. initial_scan treats -1 at its probe as not held, so an
+                // unusable tombstone does not by itself drop the entry; adoption
+                // opens the file to write, and devlock_acquire logs that open's
+                // failure. Neither other probe in this file says a word about -1.
                 LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
                          identity);
                 continue;
