@@ -322,6 +322,50 @@ struct GenlSock {
 // translation (injected as a delegate: vduse resolves IOVAs via the VDUSE
 // IOTLB, vhost-user translates guest GPAs via its memfd table) and completion
 // notification (VDUSE_VQ_INJECT_IRQ vs the call eventfd).
+//
+// One obligation every consumer of this core shares: the integers inside a
+// descriptor or a ring entry were written by the peer or the guest, so any
+// one of them that bounds a memory access, an iovec, an array index or a
+// shift has to be range-checked before it is used. What is checked today,
+// each line naming a symbol you can grep for:
+//
+//   head, de->next  descriptor indices. Both are peer-written and both are
+//                   tested against ring_num before desc[] is indexed.
+//                   MAX_DESC_CHAIN bounds how many steps the walk takes, not
+//                   where they land, so it is not this guard; chain_end is
+//                   what refuses a chain that never terminates -- longer
+//                   than MAX_DESC_CHAIN, or circular.
+//   de->addr,       an address goes to the translate delegate together with
+//   de->len         its length, and translate must fail unless the whole
+//                   [addr, addr + len) is mapped with no wrap in the sum.
+//                   A zero len asks for one byte, so a zero-length desc
+//                   gets that answer instead of a vacuous success.
+//   sizeof(*hdr)    the first device-readable desc must be large enough to
+//                   hold a virtio_blk_outhdr before it is cast to one.
+//   ndata           the payload iovec array is MAX_DESC_CHAIN deep and the
+//                   count is tested before every store into it.
+//   VRING_DESC_F_INDIRECT
+//                   refused outright: an indirect table carries a second
+//                   peer-supplied length, and this core does not walk it.
+//   hdr->sector,    the sector bound is compared in SECTORS, because sector
+//   want            is a full 64 bits and (sector << 9) can wrap back into
+//                   the range it was just tested against; only once that
+//                   holds is the byte sum subtracted from capacity.
+//   hdr->type       dispatched by a switch whose default is UNSUPP, so an
+//                   unknown type never reaches a length it would consume.
+//   avail->idx      a free-running peer-written counter. dispatch_avail caps
+//                   itself at in_flight >= num and reaches the avail ring
+//                   through last_avail % num, so one kick cannot fan out
+//                   more coroutines than the ring is deep.
+//   num             the modulo divisor for both rings, the in-flight cap,
+//                   and the index of the event slot one element past the end
+//                   of each ring -- which is why the transports size those
+//                   regions as 3 + num uint16s. Not re-validated here: the
+//                   transport publishes it, and both reject the 0 that would
+//                   divide by zero on the first completion.
+//   capacity        ours, not the peer's, but load-bearing for the sector
+//                   check above: it is always a multiple of 512, which is
+//                   what keeps that subtraction from underflowing.
 // ===========================================================================
 
 // ----------------------------------------------------------------------------

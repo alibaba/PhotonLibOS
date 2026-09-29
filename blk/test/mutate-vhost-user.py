@@ -6,9 +6,9 @@ as "found by QEMU": that is substantiated for nocallsignal only -- it is a defec
 the real frontend catches at its qvirtio_wait_queue_isr and a polling mock
 structurally cannot. overread and nobound go the other way, and have long been
 caught in-repo by pipelined_messages and oversized_payload. The eight EVENT_IDX
-mutants are a different case and are ledgered mutant by mutant in
-blk/SPEC-event-idx.md §4.2: several of them have no real-frontend detection at
-all, so do not read this file as claiming one. What every mutant here does
+mutants are a different case, and each is annotated where it is listed below:
+several of them have no real-frontend detection at all, so do not read this file
+as claiming one. What every mutant here does
 establish is narrower and still worth having -- that the new mock-side assertion
 actually fires, rather than passing for a reason
 that has nothing to do with the guard it is supposed to cover. Every mutation is
@@ -35,7 +35,7 @@ blk/vhost-user.cpp -- protocol layer:
                     # negotiation
     nocallsignal    # stop signalling the callfd when SET_VRING_CALL installs it
 
-blk/utils.cpp -- VIRTIO_RING_F_EVENT_IDX, ledger in blk/SPEC-event-idx.md §4.2:
+blk/utils.cpp -- VIRTIO_RING_F_EVENT_IDX, one annotation per mutant below:
 
     alwaynotify     # should_notify always says notify, so the §2.7.7.2 SHOULD
                     # NOT half is gone. Caught by interrupt_suppressed_by_used_event's
