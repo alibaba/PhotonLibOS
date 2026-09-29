@@ -535,9 +535,9 @@ public:
         // 4-alignment so it starts at 88 and the string at 96. 128 bytes; leading
         // with the string costs 8 more.
         SockRole sock_role = SockRole::SERVER;
-        uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 = 0666 &
-                                      // ~umask; widen the group/other bits when the guest process
-                                      // (qemu) runs as a different user
+        uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 means
+                                      // 0600, this process alone. Set it explicitly when the
+                                      // guest process (qemu) runs as a different user.
         std::string sock_path;
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}

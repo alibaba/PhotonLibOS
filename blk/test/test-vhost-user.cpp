@@ -1225,6 +1225,43 @@ TEST_F(VhostUserTest, stale_socket_takeover) {
     EXPECT_EQ(0, rc);
 }
 
+// The default is a fixed 0600, not a umask-derived 0666. The observation point
+// is the inode's own permission bits as the kernel recorded them from our
+// chmod, so this cannot be satisfied by the device reporting its own config.
+// It discriminates under either umask this suite runs with: 0666 & ~0022 is
+// 0644 and 0666 & ~0002 is 0664, neither of which is 0600.
+TEST_F(VhostUserTest, sock_mode_default_is_0600) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    // sock_mode deliberately left at 0: that IS the default under test
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    struct stat sb;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &sb));
+    EXPECT_EQ(0600u, (unsigned)(sb.st_mode & 0777));
+}
+
+// The other half of the same contract: a caller whose guest process runs as a
+// different user has to be able to widen the node, and what it asks for is
+// what lands. 0640 is not the 0600 default, so this case cannot pass by way
+// of sock_mode being ignored.
+TEST_F(VhostUserTest, sock_mode_explicit_is_honored) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.sock_mode = 0640;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    struct stat sb;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &sb));
+    EXPECT_EQ(0640u, (unsigned)(sb.st_mode & 0777));
+}
+
 TEST_F(VhostUserTest, orphan_list) {
     // a dead listener in the scan dir -> tombstone; a live one -> skipped
     char dead[96], live[96];   // bounded: they go into sun_path (108)

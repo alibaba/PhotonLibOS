@@ -1379,12 +1379,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
             LOG_ERRNO_RETURN(0, -1, "vhost-user listen failed: ", sock_path);
         }
         // bind() created the node with 0777 & ~umask; honor sock_mode, or the
-        // documented 0666 & ~umask default (the guest process may run as
-        // another user). umask has no read-only query: set-and-restore.
-        mode_t um = ::umask(0);
-        ::umask(um);
+        // documented 0600 default -- this process alone, so a caller whose
+        // guest process runs as another user has to widen it explicitly. Not
+        // derived from umask: that has no read-only query, and the
+        // set-and-restore which emulates one changes the mask of the whole
+        // process rather than this thread, so any file another thread creates
+        // in the window is unmasked.
         if (::chmod(sock_path, cfg.sock_mode ? (mode_t)cfg.sock_mode
-                                             : (mode_t)(0666 & ~um)) < 0)
+                                             : (mode_t)0600) < 0)
             LOG_WARN("vhost-user chmod failed on `, ", sock_path, ERRNO());
         listen_fd = fd;
         return 0;
