@@ -2165,12 +2165,12 @@ struct TcmuHBAImpl : TcmuHBA {
                 // never inspects errno: a 0600 tombstone is unreadable by a
                 // caller that is neither its owner nor root. The consequence is
                 // bounded -- THIS scan cannot report the device. Recovery is not
-                // lost with it: initial_scan filters on enable instead of
-                // dev_config and reads -1 as "not held", so an enabled one is
-                // still handed over. Adoption must then open the file for
-                // writing: it plants a missing one, not one this uid cannot open.
-                // This file's two other probes of devlock_free pass -1 through
-                // uncommented, so this WARN is the only report of an unusable one.
+                // lost with it: initial_scan gates on enable, and the dev_config
+                // it also reads gates on whether the read succeeds, not on what
+                // it says. It skips only on 0, so an unusable tombstone does not
+                // by itself drop the entry; adoption re-opens the file to write,
+                // and that open reports its own failure. This file's two other
+                // probes of devlock_free pass -1 through without a word.
                 LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
                          identity);
                 continue;
