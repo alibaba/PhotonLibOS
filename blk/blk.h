@@ -556,6 +556,23 @@ public:
     // zero, because vhost-user keeps no kernel-side registry and the device's
     // geometry is only known once a guest connects and negotiates.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
+
+    // Remove one orphan -- here the socket itself, which is the whole of a
+    // vhost-user registration. 0 once it is gone, after which list_orphans() no
+    // longer reports it; -1 + errno otherwise, and nothing is removed.
+    //
+    // The identity is CALLER-SUPPLIED and names something to delete, so it gets
+    // the containment check new_device() applies to a sock_path: a path outside
+    // this controller's directory is EINVAL. So is a path that is not a socket,
+    // and a probe error is propagated. A socket whose listener is still live is
+    // EBUSY -- list_orphans() filters those out, but a caller's BlkDevInfo may
+    // predate another daemon re-binding the path, which is the window this
+    // exists to close. Nothing there at all is ENOENT.
+    //
+    // stat() follows symlinks, matching list_orphans(); that cannot let a link
+    // delete something outside the directory, because unlink() removes the link
+    // itself and never its target.
+    virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
 // sock_dir must be non-empty -- there is no default socket directory -- and is

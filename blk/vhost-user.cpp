@@ -1744,6 +1744,37 @@ struct VhostUserControllerImpl : VhostUserController {
         }
         return ret;
     }
+
+    // Remove one orphan. The identity is caller-supplied and names something to
+    // delete, so it passes the same containment check new_device() applies to a
+    // sock_path: without that check this is an unlink of any path the caller can
+    // spell. The S_ISSOCK test is the same idea one level down -- this directory
+    // is ours, but it is not empty of everything else either.
+    int destroy_orphan(const BlkDevInfo& orphan) override {
+        const char* path = orphan.identity.c_str();
+        if (!inside(sock_dir, path))
+            LOG_ERROR_RETURN(EINVAL, -1, "refusing to destroy `: not inside this controller's directory `",
+                             path, sock_dir);
+        struct stat st;
+        if (::stat(path, &st) != 0)
+            LOG_ERRNO_RETURN(0, -1, "cannot stat the vhost-user socket to destroy ", path);
+        if (!S_ISSOCK(st.st_mode))
+            LOG_ERROR_RETURN(EINVAL, -1, "` is not a socket, so it is not a vhost-user registration", path);
+        // A live listener means some server holds this path. list_orphans() never
+        // reports one, but the caller's BlkDevInfo can predate another daemon
+        // re-binding the path -- the window UblkDeviceImpl::shutdown() closes by
+        // re-claiming the flock before it lets DEL_DEV run.
+        int live = unix_listener_live(path);
+        if (live < 0)
+            LOG_ERRNO_RETURN(0, -1, "cannot probe the vhost-user socket ", path);
+        if (live == 1)
+            LOG_ERROR_RETURN(EBUSY, -1, "vhost-user socket ` still has a live listener; leaving it alone", path);
+        // ENOENT is the goal state, reached by a race: someone removed it between
+        // the stat above and here.
+        if (::unlink(path) != 0 && errno != ENOENT)
+            LOG_ERRNO_RETURN(0, -1, "failed to unlink the vhost-user socket ", path);
+        return 0;
+    }
 };
 
 VhostUserController* new_vhost_user_controller(const char* sock_dir) {

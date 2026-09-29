@@ -1299,6 +1299,182 @@ TEST_F(VhostUserTest, orphan_list) {
     ::unlink(live);
 }
 
+// Bind a listener at `path` and then close it, so the socket inode survives with
+// nobody behind it: exactly the tombstone list_orphans() reports. Returns the
+// bound fd's former listen state as 0, or an errno.
+static int make_dead_socket(const char* path) {
+    ::unlink(path);
+    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return errno;
+    sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", path);
+    if (::bind(fd, (sockaddr*)&un, sizeof(un)) != 0) {
+        int e = errno;
+        ::close(fd);
+        return e;
+    }
+    if (::listen(fd, 1) != 0) {
+        int e = errno;
+        ::close(fd);
+        return e;
+    }
+    ::close(fd);   // dead: a connect probe now gets ECONNREFUSED
+    return 0;
+}
+
+// The scan and the destroy agree, and the destroy is witnessed by the kernel
+// rather than by us: two dead sockets go in, two inodes are gone afterwards, and
+// the counter is what tells a run that did the work from a run that did nothing.
+TEST_F(VhostUserTest, destroy_orphan_removes_dead_sockets) {
+    char d1[96], d2[96];   // bounded: they go into sun_path (108)
+    snprintf(d1, sizeof(d1), "%s/dead1.sock", SOCK_DIR);
+    snprintf(d2, sizeof(d2), "%s/dead2.sock", SOCK_DIR);
+    ASSERT_EQ(0, make_dead_socket(d1));
+    ASSERT_EQ(0, make_dead_socket(d2));
+
+    // the "before" half of the observation point: real socket inodes, recorded
+    struct stat s1, s2;
+    ASSERT_EQ(0, ::stat(d1, &s1));
+    ASSERT_EQ(0, ::stat(d2, &s2));
+    ASSERT_TRUE(S_ISSOCK(s1.st_mode) && S_ISSOCK(s2.st_mode));
+
+    auto orphans = ctl->list_orphans();
+    ASSERT_EQ(2u, orphans.size());   // SetUp emptied SOCK_DIR, so these are ours
+
+    int destroyed = 0;
+    for (auto& o : orphans) {
+        errno = 0;
+        int rc = ctl->destroy_orphan(o);
+        // errno is only contracted on the -1 path. Asserting it is 0 here would
+        // fail on a SUCCESS: the liveness probe that lets the destroy proceed is
+        // a connect() that got ECONNREFUSED, and that is what a dead listener
+        // looks like -- so 111 is left in errno on the path that returns 0.
+        int e = errno;
+        EXPECT_EQ(0, rc) << o.identity << " (errno " << e << ")";
+        if (rc == 0)
+            destroyed++;
+    }
+    EXPECT_EQ(2, destroyed);   // positive work counter: both, not "at least one"
+
+    // the "after" half, read from the inode table and not from our own state.
+    // errno is captured on the line after each stat: a gtest macro between the
+    // call and the read could clobber it, which would turn this into a check of
+    // whatever gtest last did.
+    struct stat gone;
+    int r1 = ::stat(d1, &gone);
+    int e1 = errno;
+    int r2 = ::stat(d2, &gone);
+    int e2 = errno;
+    EXPECT_NE(0, r1);
+    EXPECT_EQ(ENOENT, e1);
+    EXPECT_NE(0, r2);
+    EXPECT_EQ(ENOENT, e2);
+    EXPECT_EQ(0u, ctl->list_orphans().size());
+}
+
+// A live endpoint must survive a destroy asked for by a caller whose BlkDevInfo
+// predates the daemon that now holds the path. list_orphans() would never have
+// offered this one -- that is the point: the gate has to hold for a stale record,
+// which is what a recovery loop actually carries.
+TEST_F(VhostUserTest, destroy_orphan_refuses_a_live_endpoint) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    EXPECT_EQ(0u, ctl->list_orphans().size());   // live, so the scan skips it
+
+    BlkDevInfo stale;
+    stale.identity = SOCK_PATH;   // a record from before start(), or from a peer
+    errno = 0;
+    int rc = ctl->destroy_orphan(stale);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e);
+
+    // still there, still a socket, still not an orphan ...
+    struct stat sb;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &sb));
+    EXPECT_TRUE(S_ISSOCK(sb.st_mode));
+    EXPECT_EQ(0u, ctl->list_orphans().size());
+
+    // ... and still SERVING, which "the file exists" cannot tell us
+    auto wbuf = pattern(0x3c);
+    std::vector<char> rbuf(wbuf.size());
+    EXPECT_EQ(0, run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(1 << 19, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        if (fe.read_dev(1 << 19, rbuf.data(), rbuf.size()) != S_OK) return EIO;
+        return memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
+    }));
+}
+
+// The identity is caller-supplied and names something to delete, so scope is the
+// only thing between this API and an unlink of anything the caller can spell.
+// Three escapes: a path in another directory, the same path spelled as a
+// traversal, and a non-socket sitting in our own directory. Each sentinel is
+// asserted to still exist afterwards -- "it returned EINVAL" alone would pass
+// just as happily if the delete happened first.
+TEST_F(VhostUserTest, destroy_orphan_refuses_out_of_scope_and_non_sockets) {
+    // (1) a dead socket OUTSIDE SOCK_DIR. Dead, so nothing but scope protects it.
+    char outside[96];
+    snprintf(outside, sizeof(outside), "/tmp/photon-blk-vhu-outside.sock");
+    ASSERT_EQ(0, make_dead_socket(outside));
+    DEFER(::unlink(outside));
+
+    BlkDevInfo o;
+    o.identity = outside;
+    errno = 0;
+    int rc = ctl->destroy_orphan(o);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EINVAL, e);
+    EXPECT_EQ(0, ::access(outside, F_OK)) << "the out-of-scope socket was deleted";
+
+    // (2) the same target spelled as a traversal out of SOCK_DIR
+    char trav[160];
+    snprintf(trav, sizeof(trav), "%s/../photon-blk-vhu-outside.sock", SOCK_DIR);
+    o.identity = trav;
+    errno = 0;
+    rc = ctl->destroy_orphan(o);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EINVAL, e);
+    EXPECT_EQ(0, ::access(outside, F_OK)) << "the traversal spelling got through";
+
+    // (3) a regular file INSIDE SOCK_DIR: scope passes, so S_ISSOCK is the gate
+    char reg[96];
+    snprintf(reg, sizeof(reg), "%s/not-a-socket", SOCK_DIR);
+    int fd = ::open(reg, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(1, ::write(fd, "x", 1));
+    ::close(fd);
+    DEFER(::unlink(reg));
+
+    o.identity = reg;
+    errno = 0;
+    rc = ctl->destroy_orphan(o);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EINVAL, e);
+    EXPECT_EQ(0, ::access(reg, F_OK)) << "the regular file was deleted";
+
+    // (4) and nothing there at all is ENOENT, not success
+    o.identity = std::string(SOCK_DIR) + "/never-existed.sock";
+    errno = 0;
+    rc = ctl->destroy_orphan(o);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(ENOENT, e);
+}
+
 // High-concurrency stress at the PROTOCOL level: the mock fills the avail ring
 // with a whole batch of request chains and kicks ONCE, so the backend
 // dispatches them all at once (one coroutine per request) and completes them
