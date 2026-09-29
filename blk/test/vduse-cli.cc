@@ -476,12 +476,11 @@ static int cmd_probe() {
     // down, because an unserved vduse device wedges its users in D state
     signal(SIGTERM, on_term);
     signal(SIGINT, on_term);
-    LOG_WARN("may block for minutes in IOTLB_GET_FD while 'vdpa dev add' waits; "
-             "do NOT SIGKILL -- recover with 'vduse-cli rescue'");
+    LOG_WARN("may block for minutes in IOTLB_GET_FD while 'vdpa dev add' waits; do NOT SIGKILL -- recover with 'vduse-cli rescue'");
 
     dev_fd = open("/dev/vduse/" PROBE_NAME, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (dev_fd < 0)
-        LOG_ERRNO_RETURN(0, 1, "open /dev/vduse/" PROBE_NAME " failed");
+        LOG_ERRNO_RETURN(0, 1, "open /dev/vduse/` failed", PROBE_NAME);
     int fd2 = open("/dev/vduse/" PROBE_NAME, O_RDWR | O_CLOEXEC);
     LOG_INFO("second open returned ` [expect EBUSY: the char dev IS the lock], ", fd2, ERRNO());
     if (fd2 >= 0) close(fd2);
@@ -591,9 +590,7 @@ static int cmd_destroy(int argc, char **argv) {
     snprintf(name, sizeof(name), "%s", argv[0]);
     if (ioctl(c, VDUSE_DESTROY_DEV, name) < 0) {
         if (errno == EBUSY)
-            LOG_ERROR_RETURN(0, 1, "VDUSE_DESTROY_DEV ` failed: a daemon is still connected "
-                             "to /dev/vduse/<name>, or the vdpa dev still exists -- kill or "
-                             "detach it first, ", name, ERRNO());
+            LOG_ERROR_RETURN(0, 1, "VDUSE_DESTROY_DEV ` failed: a daemon is still connected to /dev/vduse/<name>, or the vdpa dev still exists -- kill or detach it first, ", name, ERRNO());
         LOG_ERROR_RETURN(0, 1, "VDUSE_DESTROY_DEV ` failed, ", name, ERRNO());
     }
     LOG_INFO("destroyed ", name);
@@ -620,7 +617,7 @@ static void vqprobe_cleanup() {
     memset(nm, 0, sizeof(nm));
     snprintf(nm, sizeof(nm), "%s", VQPROBE_NAME);
     if (ioctl(ctrl, VDUSE_DESTROY_DEV, nm) < 0 && errno != EINVAL)
-        LOG_ERROR("VDUSE_DESTROY_DEV " VQPROBE_NAME " failed, ", ERRNO());
+        LOG_ERROR("VDUSE_DESTROY_DEV ` failed, ", VQPROBE_NAME, ERRNO());
 }
 
 static void vqprobe_on_term(int sig) {
@@ -659,9 +656,7 @@ static int cmd_vqprobe(int argc, char **argv) {
     bc->blk_size = 512;
     bc->num_queues = (uint16_t)vq_num;
     if (ioctl(ctrl, VDUSE_CREATE_DEV, cbuf) < 0)
-        LOG_ERRNO_RETURN(0, 1, "VDUSE_CREATE_DEV of " VQPROBE_NAME " with vq_num ` failed "
-                         "(a leftover of a run that died? 'vduse-cli destroy " VQPROBE_NAME "')",
-                         vq_num);
+        LOG_ERRNO_RETURN(0, 1, "VDUSE_CREATE_DEV of ` with vq_num ` failed (a leftover of a run that died? 'vduse-cli destroy `')", VQPROBE_NAME, vq_num, VQPROBE_NAME);
     signal(SIGTERM, vqprobe_on_term);
     signal(SIGINT, vqprobe_on_term);
 
@@ -669,7 +664,7 @@ static int cmd_vqprobe(int argc, char **argv) {
     if (dev_fd < 0) {
         int e = errno;
         vqprobe_cleanup();
-        LOG_ERROR_RETURN(e, 1, "open /dev/vduse/" VQPROBE_NAME " failed");
+        LOG_ERROR_RETURN(e, 1, "open /dev/vduse/` failed", VQPROBE_NAME);
     }
     // The variant that matches an adoption: whoever registered these queues also
     // set every one of them up, so an in-range index is a queue the kernel has

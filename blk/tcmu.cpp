@@ -1824,9 +1824,7 @@ struct TcmuDeviceImpl : IBlkDevice {
             if (cfg_write(p, "-1") < 0) {
                 if (errno != ENOENT)
                     return -1;
-                LOG_WARN("no ` (kernel older than v4.15): this backstore cannot opt out of a "
-                         "foreign reply-mode daemon; pass defensive_reply=true to new_tcmu_hba "
-                         "if one may run on this host", p);
+                LOG_WARN("no ` (kernel older than v4.15): this backstore cannot opt out of a foreign reply-mode daemon; pass defensive_reply=true to new_tcmu_hba if one may run on this host", p);
             }
         }
 
@@ -1941,8 +1939,7 @@ struct TcmuDeviceImpl : IBlkDevice {
             }
             photon::thread_usleep(1000);
         }
-        LOG_WARN("no block device appeared under ` within 3s; the tcmu block node "
-                 "stays unknown (the export itself is unaffected)", blk);
+        LOG_WARN("no block device appeared under ` within 3s; the tcmu block node stays unknown (the export itself is unaffected)", blk);
     }
 
     int attach_lun() {
@@ -2357,9 +2354,7 @@ struct TcmuHBAImpl : TcmuHBA {
         if (!off || rsk.transact(fam, TCMU_CMD_SET_FEATURES, attrs, off, sink, sizeof(sink)) < 0)
             // an unknown SET_FEATURES command means a kernel without the reply
             // protocol at all; netlink_reply is unavailable there, not optional
-            LOG_ERROR_RETURN(errno ? errno : EIO, -1,
-                             "tcmu SET_FEATURES supp_kern_cmd_reply=` failed (the netlink "
-                             "reply protocol needs kernel v4.13+; pass netlink_reply=false)", (int)v);
+            LOG_ERROR_RETURN(errno ? errno : EIO, -1, "tcmu SET_FEATURES supp_kern_cmd_reply=` failed (the netlink reply protocol needs kernel v4.13+; pass netlink_reply=false)", (int)v);
         return 0;
     }
 

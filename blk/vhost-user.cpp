@@ -546,8 +546,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 return -1;   // the frontend closed mid-message
             off += (size_t)r;
             if (mh.msg_flags & MSG_CTRUNC)
-                LOG_WARN("vhost-user: the frontend attached more than ` fds to one message; "
-                         "the surplus did not reach us", VHU_MSG_MAX_FDS);
+                LOG_WARN("vhost-user: the frontend attached more than ` fds to one message; the surplus did not reach us", VHU_MSG_MAX_FDS);
             for (cmsghdr* cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
                 if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS) continue;
                 int k = (int)((cm->cmsg_len - CMSG_LEN(0)) / sizeof(int));
@@ -559,8 +558,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
                     // for -- close them rather than leak, and refuse the message.
                     for (int i = 0; i < k; i++)
                         ::close(((int*)CMSG_DATA(cm))[i]);
-                    LOG_ERROR_RETURN(EPROTO, -1, "vhost-user: one message carried more than "
-                                     "` fds", VHU_MSG_MAX_FDS);
+                    LOG_ERROR_RETURN(EPROTO, -1, "vhost-user: one message carried more than ` fds", VHU_MSG_MAX_FDS);
                 }
                 memcpy(fds + *nfds, CMSG_DATA(cm), (size_t)k * sizeof(int));
                 *nfds += k;
@@ -602,9 +600,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // reference cannot bind a packed field (see the access rule above)
             int32_t req = m->request;
             uint32_t sz = m->size;
-            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, "
-                             "the largest this protocol has is `",
-                             req, sz, (uint32_t)sizeof(m->payload));
+            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, the largest this protocol has is `", req, sz, (uint32_t)sizeof(m->payload));
         }
         memset(&m->payload, 0, sizeof(m->payload));   // no stale union bytes from
                                                       // the previous message
@@ -1623,11 +1619,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
             m.flags = VHOST_USER_VERSION;
             m.size = 0;
             if (send_msg(backend_req_fd, &m) < 0)
-                LOG_WARN("vhost-user config-change notification failed (the frontend "
-                         "picks the new capacity up at the next GET_CONFIG)");
+                LOG_WARN("vhost-user config-change notification failed (the frontend picks the new capacity up at the next GET_CONFIG)");
         } else {
-            LOG_WARN("vhost-user resize without a backend channel: the frontend sees "
-                     "the new capacity at its next GET_CONFIG");
+            LOG_WARN("vhost-user resize without a backend channel: the frontend sees the new capacity at its next GET_CONFIG");
         }
         LOG_INFO("vhost-user device resized, ",
                  make_named_value("sock_path", (const char*)sock_path),

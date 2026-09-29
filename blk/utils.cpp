@@ -246,13 +246,10 @@ int check_pool_engines(photon::WorkPool* pool) {
         p.done.wait(1);
         if (p.ev == INIT_EVENT_NONE || p.ev != need_ev)
             LOG_ERROR_RETURN(EINVAL, -1,
-                "work pool vcpu ` cannot host blk serving coroutines: event engine `, need ` "
-                "(a pool built with the default ev_engine has none, and every fd wait on it "
-                "fails at once)", i, HEX(p.ev), HEX(need_ev));
+                "work pool vcpu ` cannot host blk serving coroutines: event engine `, need ` (a pool built with the default ev_engine has none, and every fd wait on it fails at once)",
+                i, HEX(p.ev), HEX(need_ev));
         if ((p.io & need_io) != need_io)
-            LOG_ERROR_RETURN(EINVAL, -1,
-                "work pool vcpu ` is missing io engines: has `, need ` (a backend opened on a "
-                "vcpu with them cannot be served from one without)", i, HEX(p.io), HEX(need_io));
+            LOG_ERROR_RETURN(EINVAL, -1, "work pool vcpu ` is missing io engines: has `, need ` (a backend opened on a vcpu with them cannot be served from one without)", i, HEX(p.io), HEX(need_io));
     }
     return 0;
 }
