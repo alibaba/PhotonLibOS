@@ -693,116 +693,10 @@ protected:
  * LockfreeBatchMPMCRingQueue, or LockfreeSPSCRingQueue, with their own template
  * parameters.
  */
-<<<<<<< HEAD
 template <typename QueueType>
 class RingChannel : public QueueType {
 protected:
-    photon::semaphore     queue_sem;
-    std::atomic<uint64_t> idler{0};    // # consumers in idle/wait
-    std::atomic<uint64_t> pending{0};  // mirror of queue_sem.m_count
-=======
-// Shared send-side backoff logic. Members (send_sem, send_waiters,
-// send_pending) are declared in each channel class; only the logic is shared.
-template <typename T>
-struct SendBackoff {
-    // Wakes one blocked sender up, unless enough wake-ups are already in
-    // flight. The caller must have issued a seq_cst fence after the pop that
-    // freed a queue slot -- hence the name -- so that the load of
-    // `send_waiters` below can not be reordered before it. That is the Dekker
-    // half paired with the seq_cst RMW on `send_waiters` in push_backoff().
-    static void notify_senders_fenced(photon::semaphore& send_sem,
-                               std::atomic<uint64_t>& send_waiters,
-                               std::atomic<uint64_t>& send_pending) {
-        auto cur_waiters = send_waiters.load(std::memory_order_seq_cst);
-        if (cur_waiters == 0) return;
-        auto sp = send_pending.load(std::memory_order_acquire);
-        for (;;) {
-            if (sp >= cur_waiters) {
-                auto fresh = send_waiters.load(std::memory_order_relaxed);
-                if (fresh <= cur_waiters) return;
-                cur_waiters = fresh;
-                continue;
-            }
-            if (send_pending.compare_exchange_weak(sp, sp + 1,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                send_sem.signal(1);
-                return;
-            }
-        }
-    }
-
-    template <typename Pause = ThreadPause, typename PushFn,
-              typename std::enable_if<std::is_same<Pause, PhotonPause>::value, int>::type = 0>
-    static void push_backoff(const T& x, PushFn push_fn, uint64_t yield_turn, uint64_t yield_usec,
-                             photon::semaphore& send_sem,
-                             std::atomic<uint64_t>& send_waiters,
-                             std::atomic<uint64_t>& send_pending) {
-        if (!push_fn(x)) {
-            send_waiters.fetch_add(1, std::memory_order_seq_cst);
-            DEFER(send_waiters.fetch_sub(1, std::memory_order_seq_cst));
-            Timeout yield_timeout(yield_usec);
-            uint64_t yt = yield_turn;
-            while (!push_fn(x)) {
-                if (yt > 0 && !yield_timeout.expired()) {
-                    yt--;
-                    photon::thread_yield();
-                } else {
-                    // wait for 100ms
-                    int r = send_sem.wait(1, 100UL * 1000);
-                    if (r == 0)
-                        send_pending.fetch_sub(1, std::memory_order_acq_rel);
-                    yt = yield_turn;
-                    yield_timeout.timeout(yield_usec);
-                }
-            }
-        }
-    }
-
-    template <typename Pause = ThreadPause, typename PushFn,
-              typename std::enable_if<std::is_same<Pause, ThreadPause>::value, int>::type = 0>
-    static void push_backoff(const T& x, PushFn push_fn, uint64_t yield_turn, uint64_t yield_usec,
-                             photon::semaphore&,
-                             std::atomic<uint64_t>&,
-                             std::atomic<uint64_t>&) {
-        if (!push_fn(x)) {
-            uint64_t yt = yield_turn;
-            auto deadline = std::chrono::steady_clock::now() +
-                std::chrono::microseconds(yield_usec);
-            while (!push_fn(x)) {
-                if (yt > 0 &&
-                    std::chrono::steady_clock::now() < deadline) {
-                    yt--;
-                    std::this_thread::yield();
-                } else {
-                    std::this_thread::sleep_for(
-                        std::chrono::microseconds(yield_usec));
-                    yt = yield_turn;
-                    deadline = std::chrono::steady_clock::now() +
-                        std::chrono::microseconds(yield_usec);
-                }
-            }
-        }
-    }
-
-    template <typename Pause = ThreadPause, typename PushFn,
-              typename std::enable_if<!std::is_same<Pause, PhotonPause>::value &&
-                                      !std::is_same<Pause, ThreadPause>::value, int>::type = 0>
-    static void push_backoff(const T& x, PushFn push_fn, uint64_t, uint64_t,
-                             photon::semaphore&, std::atomic<uint64_t>&,
-                             std::atomic<uint64_t>&) {
-        while (!push_fn(x)) Pause::pause();
-    }
-};
-
-template <typename QueueType>
-class RingChannel : public QueueType {
-protected:
-    ParkStack             idlers;      // park slots of the idle consumers
-    photon::semaphore     send_sem;
-    std::atomic<uint64_t> send_waiters{0};
-    std::atomic<uint64_t> send_pending{0};
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
+    ParkStack idlers;      // park slots of the idle consumers
     uint64_t default_yield_turn = 1024;
     uint64_t default_yield_usec = 1024;
     // Safety net only: a parked consumer wakes itself up this often to
@@ -827,46 +721,7 @@ public:
 
     template <typename Pause = ThreadPause>
     void send(const T& x) {
-<<<<<<< HEAD
-        while (!push(x)) {
-            Pause::pause();
-        }
-        // Dekker barrier: ensure the prior push (mark.store release) is
-        // ordered before the following idler load, paired with the seq_cst
-        // RMW on `idler` in recv(). This guarantees that we cannot
-        // simultaneously miss the consumer's idler++ AND have the consumer
-        // miss our push.
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        auto cur_idler = idler.load(std::memory_order_seq_cst);
-        if (cur_idler == 0) return;
-
-        // Cap pending (== m_count) at cur_idler so a long burst can never
-        // accumulate stale wake-up tokens. Multiple producers may each succeed
-        // up to the observed idler count, preserving fan-out for N consumers.
-        auto p = pending.load(std::memory_order_acquire);
-        for (;;) {
-            if (p >= cur_idler) {
-                auto fresh = idler.load(std::memory_order_relaxed);
-                if (fresh <= cur_idler) return;
-                cur_idler = fresh;
-                continue;
-            }
-            if (pending.compare_exchange_weak(p, p + 1,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
-                queue_sem.signal(1);
-                return;
-            }
-            // CAS failed: `p` was refreshed automatically; retry.
-        }
-    }
-    T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
-        T x;
-        if (pop(x)) return x;
-=======
-        SendBackoff<T>::template push_backoff<Pause>(x, [this](const T& v) { return push(v); },
-                            default_yield_turn, default_yield_usec,
-                            send_sem, send_waiters, send_pending);
+        while (!push(x)) Pause::pause();
         notify_recvers();
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
@@ -875,7 +730,6 @@ public:
             after_recv();
             return x;
         }
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
         // yield once if failed, so photon::now will be updated
         photon::thread_yield();
         Timeout yield_timeout(max_yield_usec);
@@ -885,15 +739,6 @@ public:
                 yield_turn--;
                 photon::thread_yield();
             } else {
-<<<<<<< HEAD
-                // wait for 100ms
-                int r = queue_sem.wait(1, 100UL * 1000);
-                // r == 0 means we actually consumed one m_count token; mirror
-                // it on `pending`. r < 0 (timeout/interrupt) does not touch
-                // m_count, so we must not touch `pending` either.
-                if (r == 0)
-                    pending.fetch_sub(1, std::memory_order_acq_rel);
-=======
                 park();
                 // reset yield mark and set into busy wait
                 yield_turn = max_yield_turn;
@@ -924,20 +769,10 @@ protected:
         if (idlers.idle()) unpark_if_ready();
     }
 
-    // Called by a consumer right after a successful pop: hand the freed queue
-    // slot to a blocked sender, and pass the baton on if there is still work
-    // and somebody to do it.
-    //
-    // The baton matters because a claimer holds the whole idle stack while it
-    // hands the surplus back, so a producer pushing right then finds nobody
-    // parked and skips its wake-up. Whoever gets woken up is therefore
-    // responsible for re-checking here, and the fence below makes sure it sees
-    // that producer's item. Without it, such an item would still be consumed
-    // -- by us, on our next recv() -- but serially instead of in parallel, and
-    // it would be left in the queue if we happened not to come back for more.
+    // Called by a consumer right after a successful pop: pass the baton on if
+    // there is still work and somebody to do it.
     void after_recv() {
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        SendBackoff<T>::notify_senders_fenced(send_sem, send_waiters, send_pending);
         if (idlers.idle()) unpark_if_ready();
     }
 
@@ -945,141 +780,9 @@ protected:
     void park() {
         ParkStack::Slot slot;
         idlers.publish(&slot);
-        // The consumer half of the Dekker barrier in notify_recvers(): a
-        // producer that has missed our slot can not be missed here. This is
-        // what makes the channel live -- the last consumer to fall asleep is
-        // the one that can not afford to miss an item.
         std::atomic_thread_fence(std::memory_order_seq_cst);
         unpark_if_ready();     // may well claim our own slot, which is fine
         idlers.park(&slot, default_park_usec, [this] { unpark_if_ready(); });
-    }
-};
-
-// FlexRingChannel: composition-based wrapper for FlexQueue types.
-// Unlike RingChannel (which inherits from QueueType), FlexRingChannel holds
-// a pointer to a dynamically-allocated FlexQueue. This avoids the memory
-// layout conflict where RingChannel's members (park stack, semaphore, etc.)
-// would overlap with the zero-length slots[] array in the base queue class.
-//
-// Usage:
-//   using FlexRing = FlexLockfreeMPMCRingQueue<Delegate<void>>;
-//   auto* ch = FlexRingChannel<FlexRing>::create(1024);
-//   ch->send(task);
-//   auto task = ch->recv();
-//   FlexRingChannel<FlexRing>::destroy(ch);
-template <typename FlexQueueType>
-class FlexRingChannel {
-    FlexQueueType* queue;
-    ParkStack             idlers;      // park slots of the idle consumers
-    photon::semaphore     send_sem;
-    std::atomic<uint64_t> send_waiters{0};
-    std::atomic<uint64_t> send_pending{0};
-    uint64_t default_yield_turn = 1024;
-    uint64_t default_yield_usec = 1024;
-    uint64_t default_park_usec = 100UL * 1000;   // safety net, see RingChannel
-
-    using T = decltype(std::declval<FlexQueueType>().recv());
-
-    FlexRingChannel(FlexQueueType* q, uint64_t yield_turn, uint64_t yield_usec)
-        : queue(q), default_yield_turn(yield_turn),
-          default_yield_usec(yield_usec) {}
-
-public:
-    ~FlexRingChannel() = default;
-
-    FlexRingChannel(const FlexRingChannel&) = delete;
-    FlexRingChannel& operator=(const FlexRingChannel&) = delete;
-
-    static FlexRingChannel* create(size_t capacity,
-                                   uint64_t max_yield_turn = 1024,
-                                   uint64_t max_yield_usec = 1024) {
-        auto q = FlexQueueType::create(capacity);
-        if (!q) return nullptr;
-        return new FlexRingChannel(q, max_yield_turn, max_yield_usec);
-    }
-
-    static void destroy(FlexRingChannel* ch) {
-        if (!ch) return;
-        FlexQueueType::destroy(ch->queue);
-        delete ch;
-    }
-
-    template <typename Pause = ThreadPause>
-    void send(const T& x) {
-        SendBackoff<T>::template push_backoff<Pause>(x, [this](const T& v) { return queue->push(v); },
-                            default_yield_turn, default_yield_usec,
-                            send_sem, send_waiters, send_pending);
-        notify_recvers();
-    }
-
-    T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
-        T x;
-        if (queue->pop(x)) {
-            after_recv();
-            return x;
-        }
-        // yield once if failed, so photon::now will be updated
-        photon::thread_yield();
-        Timeout yield_timeout(max_yield_usec);
-        uint64_t yield_turn = max_yield_turn;
-        while (!queue->pop(x)) {
-            if (yield_turn > 0 && !yield_timeout.expired()) {
-                yield_turn--;
-                photon::thread_yield();
-            } else {
-                park();
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
-                // reset yield mark and set into busy wait
-                yield_turn = max_yield_turn;
-                yield_timeout.timeout(max_yield_usec);
-            }
-        }
-<<<<<<< HEAD
-=======
-        after_recv();
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
-        return x;
-    }
-    T recv() { return recv(default_yield_turn, default_yield_usec); }
-
-<<<<<<< HEAD
-    // Diagnostic accessor: returns the current count of in-flight wake-up
-    // tokens (mirrors `queue_sem.m_count`). Tests use this to assert that no
-    // stale signals accumulate across a producer burst.
-    uint64_t notification_pending() const {
-        return pending.load(std::memory_order_acquire);
-=======
-    bool empty() const { return queue->empty(); }
-    bool full() const { return queue->full(); }
-    size_t read_available() const { return queue->read_available(); }
-    size_t write_available() const { return queue->write_available(); }
-
-    // Diagnostic accessor: wake-ups that have been issued to a parked consumer
-    // but not yet observed by it; see RingChannel.
-    uint64_t notification_pending() const { return idlers.inflight(); }
-
-protected:
-    void unpark_if_ready() { if (!queue->empty()) idlers.unpark_one(); }
-
-    // See RingChannel for why each of the three is needed and sufficient.
-    void notify_recvers() {
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        if (idlers.idle()) unpark_if_ready();
-    }
-
-    void after_recv() {
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        SendBackoff<T>::notify_senders_fenced(send_sem, send_waiters, send_pending);
-        if (idlers.idle()) unpark_if_ready();
-    }
-
-    void park() {
-        ParkStack::Slot slot;
-        idlers.publish(&slot);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        unpark_if_ready();     // may well claim our own slot, which is fine
-        idlers.park(&slot, default_park_usec, [this] { unpark_if_ready(); });
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
     }
 };
 

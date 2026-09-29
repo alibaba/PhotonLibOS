@@ -9,7 +9,6 @@ add_executable(perf-objcache perf_objcache.cpp)
 target_link_libraries(perf-objcache PRIVATE photon_shared)
 add_test(NAME perf-objcache COMMAND $<TARGET_FILE:test-objcache>)
 
-<<<<<<< HEAD
 add_executable(test-common test.cpp)
 target_link_libraries(test-common PRIVATE photon_shared)
 add_test(NAME test-common COMMAND $<TARGET_FILE:test-common>)
@@ -30,23 +29,16 @@ add_executable(test-lockfree test_lockfree.cpp)
 target_link_libraries(test-lockfree PRIVATE photon_shared)
 add_test(NAME test-lockfree COMMAND $<TARGET_FILE:test-lockfree>)
 
+add_executable(test-ringchannel-notify test_ringchannel_notify.cpp)
+target_link_libraries(test-ringchannel-notify PRIVATE photon_shared)
+add_test(NAME test-ringchannel-notify COMMAND $<TARGET_FILE:test-ringchannel-notify>)
+
+add_executable(perf-ringchannel perf_ringchannel.cpp)
+target_link_libraries(perf-ringchannel PRIVATE photon_shared)
+
 add_executable(test-alog test_alog.cpp x.cpp)
 target_link_libraries(test-alog PRIVATE photon_shared)
 add_test(NAME test-alog COMMAND $<TARGET_FILE:test-alog>)
 
 add_executable(perf-rcuptr perf_rcuptr.cpp)
 target_link_libraries(perf-rcuptr PRIVATE photon_shared)
-=======
-photon_add_test(test-common test.cpp)
-photon_add_test(test-scalepool test_scalepool.cpp)
-photon_add_test(test-throttle test_throttle.cpp)
-photon_add_test(test-constexprstr test_constexprstr.cpp)
-photon_add_test(test-lockfree test_lockfree.cpp)
-photon_add_test(test-ringchannel-notify test_ringchannel_notify.cpp)
-photon_add_test(perf-ringchannel perf_ringchannel.cpp NO_REGISTER)
-photon_add_test(test-alog test_alog.cpp x.cpp)
-photon_add_test(perf-rcuptr perf_rcuptr.cpp NO_REGISTER)
-photon_add_test(perf-alog perf_alog.cpp NO_REGISTER)
-photon_add_test(test-delegates test_delegates.cpp)
-photon_add_test(test-singleflight test_singleflight.cpp)
->>>>>>> 4afcb98 (perf(common): notify RingChannel consumers via a lock-free park stack (#1649))
