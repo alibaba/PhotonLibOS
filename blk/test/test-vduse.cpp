@@ -44,6 +44,7 @@ limitations under the License.
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -108,6 +109,42 @@ static void vdpa_detach(const char* name) {
     cmd += name;
     cmd += " 2>/dev/null; true";
     test::sh_off_vcpu(cmd);
+}
+
+// Whether one of this suite's flock tombstones is CLAIMED right now: "HELD",
+// "not-held", or "missing". Only a lock still held is residue -- the FILE surviving
+// is the convention, since devlock_release() unlocks and closes and never unlinks --
+// while a held lock hides a device from every later scan, because devlock_free()
+// reads 0 and list_orphans() skips the entry. "missing" is its own answer rather than
+// folded into not-held: a successful destroy_orphan() unlinks the tombstone, and
+// reading that as "free" would turn the difference between the two outcomes into
+// nothing. File-local rather than in the harness, which also compiles on macOS where
+// neither this nor fd_count() below has the interface it needs.
+static const char* lock_state(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return "missing";
+    DEFER(::close(fd));
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0)
+        return "HELD";
+    ::flock(fd, LOCK_UN);
+    return "not-held";
+}
+
+// How many descriptors this process holds. What it is for: a claim or a control
+// channel that a call takes and forgets to give back is invisible to a directory
+// listing or an access() check once the file it locked has been unlinked -- a flock
+// on a deleted inode shows up in neither. Counting the table does. Measured the same
+// way on both sides so the descriptor opendir() itself takes cancels out.
+static int fd_count() {
+    DIR* d = ::opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (readdir(d))
+        n++;
+    ::closedir(d);
+    return n;
 }
 
 // The raw uapi, for the one registration blk cannot create: the create path
@@ -252,15 +289,33 @@ public:
         ctl = nullptr;
     }
 
-    // remove leftovers of crashed runs, consumer first: detach our vdpa devs
-    // (works without a daemon), then adopt+shutdown every orphan registration.
-    // Owns its controller rather than using ctl: a GTEST_SKIP in SetUp returns
-    // before ctl exists, and TearDown still runs.
-    // The adopt is the only way this sweep destroys a registration: rollback()
+    // Remove leftovers of crashed runs, then adopt+shutdown every orphan
+    // registration. Owns its controller rather than using ctl: a GTEST_SKIP in SetUp
+    // returns before ctl exists, and TearDown still runs.
+    //
+    // THE ORDER BELOW IS WRONG AND IS KNOWN TO BE. Detaching our vdpa devs before
+    // anything serves them is precisely the ordering that wedges a task in D state --
+    // see destroy_orphan_refuses_an_attached_consumer, which measures it. It is not a
+    // theoretical exposure: a run killed between attaching a consumer and serving it
+    // leaves one behind, and the next run's sweep opens by detaching it with no daemon
+    // up. The safe order is adopt, serve, THEN detach. Detaching per device from
+    // inside the loop below loses no coverage, because a consumer can only exist for a
+    // registration that loop already visits -- the tombstone is planted before
+    // CREATE_DEV, and the only thing that unlinks it is destroy_orphan(), which
+    // unlinks the registration with it.
+    //
+    // Recovery from a wedge is to serve the registration again, not to kill anything:
+    // a task in D state ignores SIGKILL, and serving it is what lets the removal
+    // finish. The finish is not instantaneous, so a census taken the moment the server
+    // exits can still show D -- reading that as failure is what prompts a second
+    // detach on top of the first.
+    //
+    // The adopt is how this sweep normally destroys a registration: rollback()
     // destroys only what it created, and a failed start clears the state the
     // destructor keys on -- so when the adopt fails, the registration survives
     // this sweep and every later one, and each later start() on that name dies
-    // the same way.
+    // the same way. destroy_orphan() below is the second way, and the one that
+    // works on exactly the orphans the adopt cannot take.
     void sweep() {
         test::sh_off_vcpu(
             "ls /sys/bus/vdpa/devices/ 2>/dev/null | grep '^"
@@ -286,6 +341,22 @@ public:
             else
                 delete f;
             delete d;
+            // The adopt is not always available. Counting an orphan's queues goes
+            // through VDUSE_VQ_GET_INFO, and on this registration -- one whose
+            // consumer had been removed, and whose removal had finished -- that
+            // ioctl answered EPERM instead of the EINVAL the walk reads as "no such
+            // index", so the adopt gave up and left the registration standing. Why it
+            // answered EPERM is NOT established: a registration that was never bound
+            // answers rc=0 for an in-range index, so being unbound is not by itself
+            // the trigger, and the state this one had been through (bound, wedged
+            // mid-removal, then drained) is not one the walk was measured against.
+            // destroy_orphan() asks no ioctl of the queues, so it does not depend on
+            // the answer. Ordered AFTER the adopt rather than instead of it: an
+            // orphan whose consumer is still mid-removal can only be drained by
+            // serving it, and the adopt is what serves it.
+            std::string reg = std::string("/dev/vduse/") + rec.identity;
+            if (::access(reg.c_str(), F_OK) == 0)
+                c->destroy_orphan(rec);
         }
     }
     fs::IFile* lfs_open_dummy() {
@@ -540,6 +611,328 @@ TEST_F(VduseTest, orphan_recovery) {
     });
     ASSERT_EQ(0, rc);
     EXPECT_EQ(0, memcmp(pattern(0x22).data(), rbuf.data(), IO_LEN));
+}
+
+// Start, then detach so the daemon is gone but the registration stays -- that is the
+// orphan -- with no vdpa consumer attached, so nothing refuses the removal.
+TEST_F(VduseTest, destroy_orphan_removes_a_dead_registration) {
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->detach(false));
+    std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    ASSERT_EQ(0, ::access(reg.c_str(), F_OK));
+    ASSERT_EQ(0, ::access(lp.c_str(), F_OK));
+
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) { rec = i; found = true; }
+    ASSERT_TRUE(found) << "the detached device was not reported as an orphan";
+
+    // Bracketing the call, so the pair covers exactly the descriptors it takes: the
+    // claim, the probing open of the single-opener char device, and the control
+    // channel it opens and hands the DESTROY_DEV to.
+    int fds_before = fd_count();
+    ASSERT_LT(0, fds_before);
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_EQ(fds_before, fd_count()) << "destroy_orphan kept a descriptor";
+
+    // Both halves, asserted separately and BEFORE the device's destructor runs:
+    // shutdown() re-claims the tombstone on its way out, which re-creates the file.
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK)) << "the registration survived";
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "the tombstone survived";
+    for (auto& i : ctl->list_orphans())
+        EXPECT_NE(std::string(TEST_NAME), i.identity);
+}
+
+TEST_F(VduseTest, destroy_orphan_refuses_a_live_device) {
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    DEFER(dev->shutdown());
+    ASSERT_EQ(0, dev->start(file));
+    std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+
+    // live, so this server holds the tombstone and the scan does not report it
+    for (auto& i : ctl->list_orphans())
+        EXPECT_NE(std::string(TEST_NAME), i.identity);
+
+    // A record from an EARLIER scan: it can predate this server taking the name over,
+    // which is the window the claim closes. Without it, DESTROY_DEV would tear down a
+    // device that is being served right now.
+    BlkDevInfo stale;
+    stale.identity = TEST_NAME;
+    errno = 0;
+    int rc = ctl->destroy_orphan(stale);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "a live device must be refused, not destroyed";
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK)) << "a live device's registration was destroyed";
+    EXPECT_STREQ("HELD", lock_state(lp)) << "the refusal did not leave the server's own claim in place";
+
+    // nothing was torn down, and the proof is that it still works: a real round trip
+    // through a consumer attached after the refusal
+    DEFER(vdpa_detach(TEST_NAME));
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    EXPECT_EQ(0, device_io(node, pattern(0x55), true));
+}
+
+// The refusal that is specific to vduse: a consumer still attached to a registration
+// whose daemon is gone. Tearing that down would leave the consumer's users wedged on
+// a device nothing serves, so the call has to say no and leave it recoverable.
+//
+// THE CLEANUP ORDER BELOW IS LOAD-BEARING. `vdpa dev del` against a registration
+// nothing serves does not fail -- it wedges in D state, because removing the disk has
+// to drain IO and then reset the device, and both need an answer only a daemon can
+// give. Measured twice, and it blocks at one point or the other: once waiting for the
+// block queue to freeze, once later waiting for the reset to be acknowledged. A task
+// in D state ignores SIGKILL, so nothing outside can undo it; what does undo it is the
+// same cause run in reverse. Both times, an adopter that served the registration
+// cleared it -- the first wedge had stood for 19 minutes, then one sweep adopted and
+// served it, resuming an avail entry it found waiting, and the disk went with both
+// wedged tasks after it.
+//
+// The clearing is NOT instantaneous, and mistaking that for failure is how a second
+// `vdpa dev del` gets issued on top of the first. A census taken the moment the
+// adopter exits can still show the task in D state; it was gone by the next look, with
+// no further help. So: serve it, then wait and look again before concluding anything.
+//
+// Hence the consumer comes off WHILE an adopter serves, exactly the ordering
+// orphan_recovery documents from the other side, and never while the device is an
+// orphan.
+TEST_F(VduseTest, destroy_orphan_refuses_an_attached_consumer) {
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    // Registered BEFORE the attach, not after: vdpa_attach's timeout branch returns ""
+    // with the consumer already added, so the ASSERT below is itself inside the
+    // window. Firing twice is harmless -- see sweep()'s header.
+    DEFER(vdpa_detach(TEST_NAME));
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    // daemon goes away, consumer STAYS attached
+    ASSERT_EQ(0, dev->detach(false));
+
+    std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    std::string sp = std::string("/sys/bus/vdpa/devices/") + TEST_NAME;
+    // The precondition, measured rather than assumed: this sysfs entry is what the
+    // refusal keys on, so if it were absent the case would go green having tested
+    // nothing but the happy path.
+    ASSERT_EQ(0, ::access(sp.c_str(), F_OK))
+        << "the consumer is not attached, so nothing below is about a consumer";
+
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) { rec = i; found = true; }
+    ASSERT_TRUE(found) << "the detached device was not reported as an orphan";
+
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "a consumer is attached; destroying would strand its users";
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK)) << "the registration was destroyed under a consumer";
+    // THE POINT for vduse, and the one ublk has no reachable witness for: this refusal
+    // happens AFTER the claim was taken, so the claim has to come back with it. A
+    // leaked one is not a lost descriptor but an unreportable device.
+    EXPECT_STREQ("not-held", lock_state(lp))
+        << "a refused destroy kept the claim, which hides this device from every later scan";
+    bool still = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) still = true;
+    EXPECT_TRUE(still) << "a refused destroy should leave the orphan reportable";
+
+    // Adopt, and only then take the consumer off -- see the header. From here the
+    // device is served, so the removal drains instead of wedging.
+    BlkConfig cfg2(make_info());
+    auto dev2 = ctl->new_device(cfg2);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    DEFER(dev2->shutdown());
+    ASSERT_EQ(0, dev2->start(file));
+    vdpa_detach(TEST_NAME);
+    EXPECT_NE(0, ::access(sp.c_str(), F_OK)) << "the consumer did not go";
+
+    // With the consumer gone and the device detached again, the same call takes both
+    // halves -- so what blocked it was the consumer, not the device having become
+    // undestroyable.
+    ASSERT_EQ(0, dev2->detach(false));
+    errno = 0;
+    rc = ctl->destroy_orphan(rec);
+    e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK));
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK));
+}
+
+TEST_F(VduseTest, destroy_orphan_validates_the_identity) {
+    // A real orphan, so the rejections below can be checked against something: what
+    // each spelling would have named, had it been let through.
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->detach(false));
+    std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    ASSERT_EQ(0, ::access(reg.c_str(), F_OK));
+
+    // Unlike tcmu there is no character mapping here: both the registration path and
+    // the tombstone name take the identity VERBATIM. Without the '/' check a name
+    // like "a/b" reaches devlock_unlink() as a path with a component in it, and
+    // because a missing file is the goal state rather than an error, the call would
+    // report SUCCESS about a device it never touched.
+    const std::vector<std::pair<std::string, const char*>> bad = {
+        {"", "nothing to name"},
+        {std::string(300, 'x'), "past the 255-byte device name the uapi allows"},
+        {"a/b", "verbatim into a path, so it names a directory that is not this one"},
+        {".", "resolves to /dev/vduse itself, which exists"},
+        {"..", "resolves to /dev, which exists"},
+    };
+    int refused = 0;
+    for (auto& b : bad) {
+        BlkDevInfo d;
+        d.identity = b.first;
+        errno = 0;
+        int rc = ctl->destroy_orphan(d);
+        int e = errno;
+        EXPECT_EQ(-1, rc) << "identity [" << b.first << "]: " << b.second;
+        EXPECT_EQ(EINVAL, e) << "identity [" << b.first << "]: " << b.second;
+        if (rc == -1 && e == EINVAL)
+            refused++;
+    }
+    EXPECT_EQ((int)bad.size(), refused) << "not every unusable identity was refused";
+    // the two directories those spellings resolve to are untouched, and so is the
+    // orphan this case fabricated
+    EXPECT_EQ(0, ::access("/dev/vduse", F_OK));
+    EXPECT_EQ(0, ::access("/dev", F_OK));
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK)) << "a rejected identity destroyed the real device";
+    bool still = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) still = true;
+    EXPECT_TRUE(still) << "the orphan stopped being reported after a refused destroy";
+
+    // A name that was never a device is ENOENT, not EINVAL and not a silent 0: the
+    // caller asked about something and deserves to be told it is not there.
+    BlkDevInfo none;
+    none.identity = "photon-vduse-never-existed";
+    ::unlink((std::string("/run/photon-blk/vduse-") + none.identity + ".lock").c_str());
+    errno = 0;
+    EXPECT_EQ(-1, ctl->destroy_orphan(none));
+    EXPECT_EQ(ENOENT, errno);
+
+    // And the correct spelling of the same dev still works, so the rejections above
+    // are about the spellings and not about the device having become undestroyable.
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) { rec = i; found = true; }
+    ASSERT_TRUE(found);
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK));
+}
+
+// The two answers devlock_free() gives when there is NO registration for the name,
+// and why they differ. A tombstone nobody holds is our own litter and goes with the
+// device it outlived. One a LIVE SERVER holds is not this call's to take even though
+// there is nothing in the kernel for it to stand for: that server is between claiming
+// the name and CREATE_DEV, and unlinking the file would leave the device it then
+// creates with no tombstone -- which list_orphans() skips, so it would stop being
+// reported by every later scan.
+TEST_F(VduseTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
+    const std::string name = "photon-vduse-no-such-dev";
+    std::string reg = "/dev/vduse/" + name;
+    std::string lp = "/run/photon-blk/vduse-" + name + ".lock";
+    ASSERT_NE(0, ::access(reg.c_str(), F_OK)) << "this name unexpectedly exists";
+
+    BlkDevInfo rec;
+    rec.identity = name;
+
+    // Claim it from this process: that is what makes it a live server's rather than
+    // litter. A process that dies drops its flock, so "held" always means live.
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0);
+    DEFER({ if (fd >= 0) ::close(fd); ::unlink(lp.c_str()); });
+    ASSERT_EQ(0, ::flock(fd, LOCK_EX | LOCK_NB));
+
+    errno = 0;
+    EXPECT_EQ(-1, ctl->destroy_orphan(rec));
+    EXPECT_EQ(EBUSY, errno) << "a tombstone a live server holds is not this call's to remove";
+    EXPECT_EQ(0, ::access(lp.c_str(), F_OK)) << "the claimed tombstone was deleted";
+
+    // Let go, and the same call takes the identical file away as litter and reports
+    // success -- so the refusal above was about the claim and not about the name.
+    ::flock(fd, LOCK_UN);
+    ::close(fd);
+    fd = -1;
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "a tombstone outliving its device survived";
+}
+
+// The claim's other half, and the one the case above cannot reach: here the
+// registration DOES exist, so the call gets past the existence probe and the
+// tombstone is the only thing between it and a DESTROY_DEV against a device a live
+// server owns. Without the claim that destroy succeeds, and the owner goes on
+// serving a registration the kernel no longer has.
+TEST_F(VduseTest, destroy_orphan_refuses_a_registration_claimed_by_another) {
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    // Leaves the registration standing and gives the name back: detach() is what
+    // releases the tombstone, so from here somebody else can hold it.
+    ASSERT_EQ(0, dev->detach(false));
+    std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    ASSERT_EQ(0, ::access(reg.c_str(), F_OK));
+
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == TEST_NAME) { rec = i; found = true; }
+    ASSERT_TRUE(found) << "the detached device was not reported as an orphan";
+
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0);
+    DEFER({ if (fd >= 0) ::close(fd); });
+    ASSERT_EQ(0, ::flock(fd, LOCK_EX | LOCK_NB));
+
+    errno = 0;
+    EXPECT_EQ(-1, ctl->destroy_orphan(rec));
+    EXPECT_EQ(EBUSY, errno) << "a live server holds the claim on a device that exists";
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK)) << "the registration went under its owner";
+
+    // Let go and the identical call succeeds, so the refusal was about the claim.
+    ::flock(fd, LOCK_UN);
+    ::close(fd);
+    fd = -1;
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK));
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK));
 }
 
 TEST_F(VduseTest, daemon_restart_io) {

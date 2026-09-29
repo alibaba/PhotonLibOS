@@ -1324,6 +1324,121 @@ struct UblkControllerImpl : UblkController {
         }
         return ret;
     }
+
+    // Remove one orphan: the kernel-side registration, then the tombstone.
+    //
+    // The identity is caller-supplied and names something to DELETE, and the dev_id
+    // space is host-wide and flat, so it gets a stricter parse than list_orphans()
+    // needs. That one reads a kernel-enumerated /dev dirent it has already checked
+    // with isdigit(); this one reads whatever the caller wrote, and atoi() turns
+    // "garbage" into 0 -- a valid dev_id belonging to somebody else.
+    //
+    // Registration first, tombstone second, so a failure leaves something a later
+    // scan still reports. The other way round would delete the tombstone of a device
+    // DEL_DEV then failed on, and list_orphans() skips an entry whose tombstone is
+    // missing -- the orphan would vanish from every scan while still being in the
+    // kernel.
+    int destroy_orphan(const BlkDevInfo& orphan) override {
+        const std::string& id = orphan.identity;
+        if (id.empty())
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk destroy_orphan needs a non-empty dev_id");
+        // Digits throughout, which is what rejects the two spellings the numeric
+        // parse below would otherwise accept: strtoul skips leading white space and
+        // takes an optional sign, both measured, so " 12" and "+12" would name
+        // device 12. Leading zeros are allowed -- "0012" is another spelling of the
+        // same device, and the lock name and DEL_DEV both go through %u.
+        for (char c : id)
+            if (!isdigit((unsigned char)c))
+                LOG_ERROR_RETURN(EINVAL, -1, "ublk identity ` is not a decimal dev_id", id);
+        uint32_t want = 0;
+        if (!UblkDeviceImpl::parse_u32(id, &want))
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk dev_id ` does not fit in 32 bits", id);
+        // UINT32_MAX is Config::dev_id's "let the kernel choose" sentinel, so it is
+        // not a device this call may be pointed at.
+        if (want == UINT32_MAX)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk dev_id ` is the auto-assign sentinel, not a device", want);
+        char name[32];
+        snprintf(name, sizeof(name), "ublk-%u.lock", want);
+
+        UblkCtrl ctrl;
+        if (ctrl.init() < 0)
+            return -1;   // init() logged it
+        // fini() deletes the io_uring engine and closes the control fd on the way
+        // out, and that teardown overwrites errno -- measured: an EBUSY return
+        // reached the caller as errno -1, a value no syscall sets. The io_uring
+        // wrapper is the one place in the tree that can produce a negative errno,
+        // assigning it from a completion result. start() guards the same hazard
+        // around rollback(); this guards it around fini(), so that the errno named
+        // in this API's contract is the one the caller actually receives.
+        DEFER({ int e = errno; ctrl.fini(); errno = e; });
+        ublksrv_ctrl_dev_info info;
+        if (ctrl.get_info(want, &info) < 0) {
+            // No registration, so there is no orphan to recover. devlock_free()'s
+            // three answers still have to be told apart, and only one of them is
+            // litter this call may take away:
+            //   -1  nothing there at all -- the dev_id names no device this host
+            //       ever had, so there is nothing to remove and nothing to report.
+            //    0  a LIVE SERVER holds the tombstone, which with no registration
+            //       means it is between claiming the name and ADD_DEV. Unlinking it
+            //       would leave the device that server then creates with no
+            //       tombstone, and list_orphans() skips a registration whose
+            //       tombstone is missing -- so it would become unrecoverable by
+            //       every later scan. Same hazard the ordering above avoids.
+            //    1  free: a tombstone outliving its device is our own litter, and it
+            //       goes with it.
+            int lf = devlock_free(lock_dir, name);
+            if (lf < 0)
+                LOG_ERROR_RETURN(ENOENT, -1, "no ublk device ` and no tombstone for it that this call could use", want);
+            if (lf == 0)
+                LOG_ERROR_RETURN(EBUSY, -1, "no ublk device ` yet, but a live server holds its tombstone", want);
+            if (devlock_unlink(lock_dir, name) < 0)
+                return -1;   // devlock_unlink logged it
+            return 0;
+        }
+        // CLAIM the flock rather than probe it, and hold it across the DEL_DEV:
+        // DEL_DEV is unconditional, so a probe would leave a window in which
+        // another daemon adopts the device and this destroys a live one. This is
+        // the gate UblkDeviceImpl::shutdown() re-claims the lock for.
+        int lock_fd = -1;
+        if (devlock_acquire(lock_dir, name, &lock_fd) < 0) {
+            if (errno == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "ublk device ` is held by another live server; leaving it alone", want);
+            return -1;   // devlock_acquire logged it
+        }
+        // Declared after the fini() DEFER above, so it unwinds first and the claim is
+        // dropped on EVERY exit path rather than only the one at the bottom.
+        // shutdown() does the opposite on a failed DEL_DEV and says why: it is a live
+        // owner that goes on existing, and dropping the claim while /dev/ublkbN
+        // survives would let recovery take a device the kernel still has. This call
+        // is the other shape -- a one-shot from a controller that stores no fd -- so
+        // "keep it" is a leak, and a leaked claim costs more than the ownership
+        // window shutdown() guards: devlock_free() then reports 0 and list_orphans()
+        // skips the entry, so the device stops being reported by every later scan
+        // while still being in the kernel. Giving the claim back leaves it listed and
+        // retryable. Same errno guard as above, because devlock_release() calls
+        // flock() and close() and either can set errno.
+        DEFER({ int e = errno; devlock_release(lock_fd); errno = e; });
+        // UNBOUNDED, and that is the kernel's doing rather than a missing knob: with
+        // an initiator still holding /dev/ublkbN, DEL_DEV takes the node away and then
+        // waits for the last opener to close before returning success. Measured on a
+        // quiesced orphan whose holder issued nothing to it: 227s, then 0 -- and at
+        // once, when that holder was killed. It blocks this coroutine, not the vcpu;
+        // the wait is a kernel wait on an io_uring worker while the vcpu stays in its
+        // event loop. blk.h tells the caller, who is the one that has to decide
+        // whether it can afford to wait.
+        if (ctrl.del_dev(want) < 0 && errno != ENODEV)
+            // ENODEV means the registration is already gone, which is the goal.
+            // Anything else means it SURVIVES, so this did not do what it claims.
+            LOG_ERRNO_RETURN(0, -1, "ublk DEL_DEV failed, dev `", want);
+        // Unlinked while the lock is still held -- the release is deferred to scope
+        // exit, after this statement -- so nobody else can have created this file in
+        // the meantime, and what goes is provably the tombstone this call opened.
+        // Releasing first would let another daemon create it in between and this
+        // would then delete theirs.
+        if (devlock_unlink(lock_dir, name) < 0)
+            return -1;   // devlock_unlink logged it
+        return 0;
+    }
 };
 
 UblkController* new_ublk_controller(const char* lock_dir) {

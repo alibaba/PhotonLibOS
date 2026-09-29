@@ -529,6 +529,49 @@ public:
     // dev_id -- the recovery key: build a cfg from the returned BlkDevInfo, hand it
     // to new_device(), and start(backend).
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
+
+    // Remove one orphan: the kernel-side registration (DEL_DEV) and the tombstone
+    // that stands for it. 0 once both are gone, after which list_orphans() no
+    // longer reports the dev_id; -1 + errno otherwise.
+    //
+    // The identity is CALLER-SUPPLIED and names something to delete, so it must be
+    // decimal digits throughout: leading white space and a leading '+' both parse
+    // as the device they spell, and the permissive parse a scan can afford is not
+    // one this call can, because the dev_id space is host-wide and flat -- parsing
+    // "garbage" as 0 would aim DEL_DEV at somebody else's device. UINT32_MAX is
+    // rejected too: it is Config::dev_id's "let the kernel choose" sentinel, not a
+    // device. Both are EINVAL, with nothing deleted.
+    //
+    // EBUSY here means exactly one thing: another LIVE SERVER holds the tombstone.
+    // The flock is CLAIMED and held across the DEL_DEV rather than merely probed,
+    // because DEL_DEV is unconditional -- no EBUSY, no state check -- so a
+    // probe-then-destroy pair leaves a window in which another daemon adopts the
+    // device and this call destroys a live one. That is the same gate shutdown()
+    // re-claims the lock for.
+    //
+    // An INITIATOR holding /dev/ublkbN is not a refusal and does not produce EBUSY.
+    // DEL_DEV removes the node and then WAITS for the last opener to close before it
+    // returns, and returns success: measured on a quiesced orphan with a process
+    // holding the node open and issuing nothing to it, the call took 227s and came
+    // back 0, and came back at once when that holder was killed. So this call is
+    // UNBOUNDED -- it blocks the calling coroutine for as long as anything holds the
+    // node. It does not block the vcpu: the wait is a kernel wait on an io_uring
+    // worker while the caller's vcpu stays in its event loop, so other coroutines
+    // there keep running. A caller that cannot afford to wait has to establish that
+    // the node is unheld before calling: nothing in this signature bounds it, and a
+    // timeout knob would not either, because there is nothing to retry -- the call is
+    // already inside the kernel rather than waiting to be issued. The bounded loop
+    // shutdown() drives with stop_timeout_ms sits around TRY_STOP_DEV, which is the
+    // step that answers EBUSY, and this call has no reason to stop a device it is
+    // about to delete.
+    //
+    // No such device and no tombstone either is ENOENT. A tombstone with no
+    // registration is our own litter and is removed, returning 0 -- unless a live
+    // server holds it, which means it is between claiming the dev_id and ADD_DEV, and
+    // that is EBUSY: removing the file would leave the device it then creates with no
+    // tombstone, and list_orphans() skips an entry whose tombstone is missing, so it
+    // would stop being reported by every later scan while still being in the kernel.
+    virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
 // lock_dir is the flock directory (nullptr/"" = "/run/photon-blk"). It is bounded
@@ -635,6 +678,50 @@ public:
     // (the kernel never learns it), so the record carries size 0 plus best-effort
     // features and the recovery cfg must declare the size itself.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
+
+    // Remove one orphan: the vduse registration (DESTROY_DEV) and the tombstone
+    // that stands for it. 0 once both are gone, after which list_orphans() no
+    // longer reports the name; -1 + errno otherwise.
+    //
+    // The identity is the device NAME, and it is CALLER-SUPPLIED and names something
+    // to delete. Unlike tcmu there is no character mapping here: both the
+    // registration path and the tombstone name take it VERBATIM, so the two checks
+    // new_device() runs on a name are run again on this one -- 1..255 chars, and no
+    // '/'. A '/' would aim the registration probe at some other directory. "." and
+    // ".." are rejected too: they are whole path components rather than device
+    // names, and both resolve -- to /dev/vduse and to /dev -- so the probe would
+    // succeed against a directory that is no device at all and the call would go on
+    // to report success about nothing. All three are EINVAL with nothing deleted.
+    // The geometry checks new_device() also
+    // runs are deliberately NOT repeated: a record from list_orphans() carries size
+    // 0 because the capacity is not recoverable, so requiring it would make every
+    // orphan undestroyable.
+    //
+    // EBUSY is the live refusal and it has three sources, checked in this order:
+    // a live server holds the tombstone; a FOREIGN daemon is connected to the
+    // single-opener char device, which the tombstone cannot tell us about; or a vdpa
+    // consumer is still attached, which is what /sys/bus/vdpa/devices/<name> is for.
+    // That entry does not bracket the kernel-side vdev exactly -- see the next
+    // paragraph. The claim is taken and held across the DESTROY_DEV rather than
+    // merely probed, so that no other server of this implementation adopts the
+    // device in between.
+    //
+    // The consumer is refused by that check BEFORE DESTROY_DEV is issued, which is
+    // where shutdown() refuses it as well and what its own busy case witnesses. The
+    // check is a fast path and not the authority: a `vdpa dev del` that wedges part
+    // way through removal leaves the sysfs entry gone while the kernel side is still
+    // bound, and measured in exactly that state the pre-check passed, nothing held
+    // the char device, and DESTROY_DEV still answered EBUSY. So the ioctl's EBUSY is
+    // handled too, for that and for a consumer that attaches in between. What is NOT
+    // claimed here is anything about waiting: ublk's DEL_DEV was measured to WAIT for
+    // the last opener rather than refuse it, and no equivalent measurement was made
+    // of vduse's.
+    //
+    // No such device and no tombstone either is ENOENT. A tombstone with no
+    // registration is our own litter and is removed, returning 0 -- unless a live
+    // server holds it, which means it is between claiming the name and CREATE_DEV,
+    // and that is EBUSY.
+    virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
 // lock_dir is the flock directory (nullptr/"" = "/run/photon-blk"), bounded as for

@@ -98,6 +98,23 @@ static std::string residue() {
         "} | sort");
 }
 
+// How many descriptors this process holds. What it is for: a claim or a control
+// channel that a call takes and forgets to give back is invisible to every other
+// oracle in this suite, because the tombstone it locked has usually been unlinked
+// by then -- a flock on a deleted inode shows up in no listing, and residue() reads
+// the directory, not the fd table. Counting the table does. Measured the same way on
+// both sides so the descriptor opendir() itself takes cancels out.
+static int fd_count() {
+    DIR* d = ::opendir("/proc/self/fd");
+    if (!d)
+        return -1;
+    int n = 0;
+    while (readdir(d))
+        n++;
+    ::closedir(d);
+    return n;
+}
+
 // The kernel's own count of requests outstanding on the node, reads plus writes.
 // An oracle that reads nothing this suite wrote, which is what makes it able to
 // say "that IO really is still out there" rather than "our bookkeeping says so".
@@ -517,6 +534,291 @@ TEST_F(UblkTest, orphan_list) {
     DEFER(dev2->shutdown());
     ASSERT_EQ(0, dev2->start(file));
     EXPECT_EQ(node, node_of(dev2));
+}
+
+// Start a device and leave it quiesced with its flock free, which is what a
+// daemon that died mid-life leaves behind, and hand back the dev_id. The device
+// object stays the caller's: its destructor re-claims the flock, so it will
+// RE-CREATE the tombstone file on the way out. Every assertion about a tombstone
+// being gone therefore has to be made before that runs, and a stale lock file is
+// what residue() already expects rather than residue -- devlock_release() never
+// unlinks.
+static std::string detach_into_orphan(UblkController* ctl, fs::IFile* file,
+                                      const BlkDevInfo& info, IBlkDevice** dev_out) {
+    *dev_out = nullptr;
+    UblkController::Config cfg(info);
+    auto dev = ctl->new_device(cfg);
+    if (!dev)
+        return "";
+    if (dev->start(file) < 0) {
+        delete dev;
+        return "";
+    }
+    const char* n = dev->get_device_node();
+    std::string node = n ? n : "";
+    uint32_t id = node.empty() ? UINT32_MAX : node_dev_id(node.c_str());
+    if (id == UINT32_MAX || dev->detach(true) < 0) {
+        dev->shutdown();
+        delete dev;
+        return "";
+    }
+    *dev_out = dev;
+    return std::to_string(id);
+}
+
+TEST_F(UblkTest, destroy_orphan_removes_a_dead_registration) {
+    IBlkDevice* dev = nullptr;
+    std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
+    ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    std::string cn = "/dev/ublkc" + id;
+    std::string bn = "/dev/ublkb" + id;
+    std::string lp = "/run/photon-blk/ublk-" + id + ".lock";
+
+    // BEFORE, read independently of our own state
+    ASSERT_EQ(0, ::access(cn.c_str(), F_OK));
+    ASSERT_EQ(0, ::access(lp.c_str(), F_OK));
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == id) { rec = i; found = true; }
+    ASSERT_TRUE(found) << "the quiesced device was not reported as an orphan";
+    EXPECT_EQ(IMG_SIZE, rec.size);
+
+    // Descriptor count taken here, once the scan above has finished with its own
+    // control channel, and read again the moment destroy_orphan() returns -- so the
+    // pair brackets exactly the descriptors that call takes: the claim it opens, and
+    // the control channel it inits and finis. Neither may outlive it.
+    int fds_before = fd_count();
+    ASSERT_LT(0, fds_before);
+
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    int destroyed = (rc == 0) ? 1 : 0;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_EQ(1, destroyed) << "nothing was destroyed";
+    EXPECT_EQ(fds_before, fd_count())
+        << "destroy_orphan kept a descriptor: the claim it took, or the control channel it opened";
+
+    // AFTER. Three separate observations, because the scan's gate is the kernel
+    // registration: once /dev/ublkcN is gone readdir never yields it again,
+    // whatever the tombstone does. So "the list no longer reports it" cannot
+    // witness a leaked tombstone, and the tombstone is asserted on its own --
+    // before the device's destructor re-creates it (see detach_into_orphan).
+    EXPECT_NE(0, ::access(cn.c_str(), F_OK)) << "the kernel registration survived";
+    EXPECT_NE(0, ::access(bn.c_str(), F_OK)) << "the block node survived";
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "the tombstone survived";
+    for (auto& i : ctl->list_orphans())
+        EXPECT_NE(id, i.identity);
+}
+
+TEST_F(UblkTest, destroy_orphan_refuses_a_live_device) {
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+    uint32_t id = node_dev_id(node.c_str());
+    ASSERT_NE(UINT32_MAX, id);
+    std::string sid = std::to_string(id);
+    std::string cn = "/dev/ublkc" + sid;
+
+    // live, so a server holds the flock and the scan does not report it
+    for (auto& i : ctl->list_orphans())
+        EXPECT_NE(sid, i.identity);
+
+    // A BlkDevInfo from an EARLIER scan: the record can predate this server
+    // taking the dev_id over, which is the window the claim closes. DEL_DEV is
+    // unconditional -- no EBUSY, no state check -- so unlike tcmu there is no
+    // second gate here to mask a missing flock check: without the claim this call
+    // would really destroy a live device.
+    BlkDevInfo stale;
+    stale.identity = sid;
+    stale.size = IMG_SIZE;
+    stale.sector_size_shift = 9;
+    errno = 0;
+    int rc = ctl->destroy_orphan(stale);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "a live device must be refused, not destroyed";
+
+    // nothing was torn down, and the proof is that it still works: one real I/O
+    // through the node, verified against the backend image
+    EXPECT_EQ(0, ::access(cn.c_str(), F_OK)) << "a live device's registration was destroyed";
+    EXPECT_EQ(0, device_io(node, pattern(0x44), true));
+    for (auto& i : ctl->list_orphans())
+        EXPECT_NE(sid, i.identity);
+}
+
+TEST_F(UblkTest, destroy_orphan_validates_the_identity) {
+    IBlkDevice* dev = nullptr;
+    std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
+    ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    std::string cn = "/dev/ublkc" + id;
+    ASSERT_EQ(0, ::access(cn.c_str(), F_OK));
+
+    // The victim: what each spelling below would name if it were parsed
+    // permissively. Measured rather than assumed -- the numeric parse this call
+    // uses is strtoul-based, and strtoul skips leading white space and accepts an
+    // optional sign, so " 7" and "+7" both parse to 7. atoi(), which list_orphans()
+    // can afford because it reads a kernel-enumerated dirent it has already
+    // checked with isdigit(), turns "garbage" into 0 -- a valid dev_id.
+    //
+    // Owned strings, not c_str() of temporaries: two of these are built from the
+    // dev_id this case fabricated, so they have to outlive the initializer.
+    const std::vector<std::pair<std::string, const char*>> bad = {
+        {"+" + id, "a leading sign parses to the device it spells"},
+        {"  " + id, "leading white space parses to the device it spells"},
+        {"garbage", "atoi() would make this dev 0, somebody else's device"},
+        {"4294967295", "Config::dev_id's auto-assign sentinel, not a device"},
+        {"4294967296", "one past what fits in the 32-bit dev_id"},
+        {"", "nothing to name"},
+    };
+    int refused = 0;
+    for (auto& b : bad) {
+        BlkDevInfo d;
+        d.identity = b.first;
+        d.size = IMG_SIZE;
+        d.sector_size_shift = 9;
+        errno = 0;
+        int rc = ctl->destroy_orphan(d);
+        int e = errno;
+        EXPECT_EQ(-1, rc) << "identity [" << b.first << "]: " << b.second;
+        EXPECT_EQ(EINVAL, e) << "identity [" << b.first << "]: " << b.second;
+        if (rc == -1 && e == EINVAL)
+            refused++;
+    }
+    EXPECT_EQ((int)bad.size(), refused) << "not every unusable identity was refused";
+    // and the device they all would have named is untouched
+    EXPECT_EQ(0, ::access(cn.c_str(), F_OK)) << "a rejected identity destroyed the device it parsed to";
+    bool still = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == id) still = true;
+    EXPECT_TRUE(still) << "the orphan stopped being reported after a refused destroy";
+
+    // The correct spelling of the same dev_id still works, so the rejections above
+    // are about the spellings and not about the device having become undestroyable.
+    BlkDevInfo good;
+    good.identity = id;
+    good.size = IMG_SIZE;
+    good.sector_size_shift = 9;
+    errno = 0;
+    int rc = ctl->destroy_orphan(good);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(cn.c_str(), F_OK));
+}
+
+TEST_F(UblkTest, destroy_orphan_refuses_a_directory_tombstone) {
+    IBlkDevice* dev = nullptr;
+    std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
+    ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    std::string cn = "/dev/ublkc" + id;
+    std::string lp = "/run/photon-blk/ublk-" + id + ".lock";
+
+    // A DIRECTORY where the tombstone should be. devlock_free() opens O_RDONLY and
+    // flocks, and both succeed on a directory fd, so the scan still reads this
+    // entry as free and reports it; it is devlock_acquire()'s O_CREAT|O_RDWR that
+    // refuses one. That asymmetry is what makes the entry listed but unadoptable,
+    // and both halves are measured below rather than assumed.
+    ASSERT_EQ(0, ::unlink(lp.c_str()));
+    ASSERT_EQ(0, ::mkdir(lp.c_str(), 0755));
+    DEFER(::rmdir(lp.c_str()));
+
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == id) { rec = i; found = true; }
+    ASSERT_TRUE(found) << "a directory tombstone should still read as free to the scan";
+
+    // adoption cannot proceed, at the very open devlock_acquire() performs
+    errno = 0;
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    int oe = errno;
+    EXPECT_EQ(-1, fd) << "the tombstone path was claimable after all";
+    EXPECT_EQ(EISDIR, oe);
+    if (fd >= 0) ::close(fd);
+
+    // Here destroy_orphan() refuses too, and removes NOTHING -- which is not the
+    // same as tcmu, and the difference is forced rather than chosen: on ublk the
+    // claim IS the liveness gate (DEL_DEV is unconditional), so a tombstone that
+    // cannot be opened means liveness cannot be established, and the only safe
+    // answer is to touch nothing. The registration stays, so the scan keeps
+    // reporting it and the operator keeps seeing the same EISDIR until they clear
+    // the directory themselves.
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EISDIR, e) << "a directory tombstone is operator state: report it, do not delete it";
+    EXPECT_EQ(0, ::access(cn.c_str(), F_OK)) << "the registration was removed without the liveness gate";
+    EXPECT_EQ(0, ::access(lp.c_str(), F_OK)) << "the directory was deleted on the operator's behalf";
+    bool still = false;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == id) still = true;
+    EXPECT_TRUE(still) << "a refused destroy should leave the orphan reportable";
+
+    // Once the operator clears it, the same call succeeds and takes both halves.
+    ASSERT_EQ(0, ::rmdir(lp.c_str()));
+    errno = 0;
+    rc = ctl->destroy_orphan(rec);
+    e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(cn.c_str(), F_OK));
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK));
+}
+
+// The two answers devlock_free() gives when the kernel has NO registration for the
+// dev_id, and why they are not the same answer. A tombstone nobody holds is our own
+// litter and goes with the device it outlived. One a LIVE SERVER holds is not this
+// call's to take even though there is nothing in the kernel for it to stand for:
+// that server is between claiming the name and ADD_DEV, and unlinking the file would
+// leave the device it then creates with no tombstone -- which list_orphans() skips,
+// so it would stop being reported by every later scan.
+//
+// The dev_id is one no ublk device can have been given, so this is about the
+// tombstone alone and cannot collide with a real registration.
+TEST_F(UblkTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
+    const std::string sid = "4000000000";
+    std::string cn = "/dev/ublkc" + sid;
+    std::string lp = "/run/photon-blk/ublk-" + sid + ".lock";
+    ASSERT_NE(0, ::access(cn.c_str(), F_OK)) << "this dev_id unexpectedly exists";
+
+    BlkDevInfo rec;
+    rec.identity = sid;
+    rec.size = IMG_SIZE;
+    rec.sector_size_shift = 9;
+
+    // Claim it from this process: that is what makes it a live server's rather than
+    // litter. A process that dies drops its flock, so "held" always means live.
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0);
+    DEFER({ if (fd >= 0) ::close(fd); ::unlink(lp.c_str()); });
+    ASSERT_EQ(0, ::flock(fd, LOCK_EX | LOCK_NB));
+
+    errno = 0;
+    EXPECT_EQ(-1, ctl->destroy_orphan(rec));
+    EXPECT_EQ(EBUSY, errno) << "a tombstone a live server holds is not this call's to remove";
+    EXPECT_EQ(0, ::access(lp.c_str(), F_OK)) << "the claimed tombstone was deleted";
+
+    // Let go, and the same call takes the identical file away as litter and reports
+    // success -- so the refusal above was about the claim and not about the dev_id.
+    ::flock(fd, LOCK_UN);
+    ::close(fd);
+    fd = -1;
+    errno = 0;
+    int rc = ctl->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "errno " << e;
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "a tombstone outliving its device survived";
 }
 
 TEST_F(UblkTest, resize_dev) {

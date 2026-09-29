@@ -1696,8 +1696,11 @@ struct VduseDeviceImpl : IBlkDevice {
         // the contractual EBUSY: a vdpa consumer holds the registration. Check
         // BEFORE stopping serving -- tearing down first would leave the
         // consumer's device unserved (its users wedge in D state) while still
-        // failing the destroy. /sys/bus/vdpa/devices/<name> exists exactly
-        // while the kernel-side vdev does (the DESTROY_DEV EBUSY condition).
+        // failing the destroy. /sys/bus/vdpa/devices/<name> stands in for the
+        // kernel-side vdev but does not bracket it exactly: a removal that wedges
+        // part way leaves the entry gone while the vdev is still bound, and
+        // DESTROY_DEV answers EBUSY anyway -- measured. That is one reason the
+        // EBUSY on the ioctl below is handled rather than left as unreachable.
         char sp[VDUSE_NAME_MAX + 40];
         snprintf(sp, sizeof(sp), "/sys/bus/vdpa/devices/%s", name);
         if (registered && ::access(sp, F_OK) == 0) {
@@ -1863,6 +1866,119 @@ struct VduseControllerImpl : VduseController {
             ret.push_back(bi);
         }
         return ret;
+    }
+
+    // Remove one orphan: the registration (DESTROY_DEV), then the tombstone.
+    //
+    // The name is CALLER-SUPPLIED and both the registration path and the tombstone
+    // name take it VERBATIM -- there is no character mapping here, unlike tcmu's
+    // sanitize() -- so the two checks validate() runs on a name are run again on this
+    // one. They are duplicated rather than shared because validate() takes a
+    // BlkConfig and goes on to require a geometry, while a record from
+    // list_orphans() carries size 0: the capacity is not recoverable, so requiring
+    // it would make every orphan undestroyable.
+    //
+    // Registration first, tombstone second, so a failure leaves something a later
+    // scan still reports.
+    int destroy_orphan(const BlkDevInfo& orphan) override {
+        const std::string& id = orphan.identity;
+        if (id.empty() || id.size() >= VDUSE_NAME_MAX)
+            LOG_ERROR_RETURN(EINVAL, -1, "vduse destroy_orphan needs an identity of 1..255 chars (the device name)");
+        if (id.find('/') != std::string::npos)
+            LOG_ERROR_RETURN(EINVAL, -1, "vduse identity must not contain '/'");
+        // Both resolve: /dev/vduse/. is /dev/vduse and /dev/vduse/.. is /dev, so the
+        // existence probe below would succeed against a directory that is no device.
+        if (id == "." || id == "..")
+            LOG_ERROR_RETURN(EINVAL, -1, "vduse identity ` is a path component, not a device name", id);
+        char name[VDUSE_NAME_MAX];
+        snprintf(name, sizeof(name), "%s", id.c_str());
+        char ln[VDUSE_LOCK_BUF];
+        vduse_lock_name(name, ln, sizeof(ln));
+        char path[VDUSE_NAME_MAX + 16];
+        snprintf(path, sizeof(path), "/dev/vduse/%s", name);
+
+        if (::access(path, F_OK) != 0) {
+            // No registration, and devlock_free()'s three answers still have to be
+            // told apart. Nothing at all means this name was never a device of ours.
+            // A tombstone nobody holds is our own litter and goes with the device it
+            // outlived. One a LIVE SERVER holds is not ours to take: that server is
+            // between claiming the name and CREATE_DEV, and removing the file would
+            // leave the device it then creates with no tombstone, which
+            // list_orphans() skips -- unrecoverable by every later scan.
+            int lf = devlock_free(lock_dir, ln);
+            if (lf < 0)
+                LOG_ERROR_RETURN(ENOENT, -1, "no vduse device ` and no tombstone for it that this call could use", name);
+            if (lf == 0)
+                LOG_ERROR_RETURN(EBUSY, -1, "no vduse device ` yet, but a live server holds its tombstone", name);
+            if (devlock_unlink(lock_dir, ln) < 0)
+                return -1;   // devlock_unlink logged it
+            return 0;
+        }
+        // CLAIM rather than probe, and hold it across the DESTROY_DEV, so that no
+        // other server of this implementation adopts the device in between.
+        int lock_fd = -1;
+        if (devlock_acquire(lock_dir, ln, &lock_fd) < 0) {
+            if (errno == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "vduse device ` is held by another live server; leaving it alone", name);
+            return -1;   // devlock_acquire logged it
+        }
+        // Unwinds before nothing else here -- it is the last DEFER -- so the claim is
+        // dropped on every exit path, including the refusals below. A controller
+        // stores no fd, so keeping it after a failure would be a leak, and a leaked
+        // claim is not a lost descriptor but an unreportable device: devlock_free()
+        // reads 0 and list_orphans() skips the entry. devlock_release() calls flock()
+        // and close(), either of which can set errno, hence the guard.
+        DEFER({ int e = errno; devlock_release(lock_fd); errno = e; });
+        // A FOREIGN daemon takes no tombstone of ours, so the claim says nothing
+        // about it. The char device admits one opener, which is what lets a probing
+        // open answer -- list_orphans() and shutdown() both rely on that.
+        int probe = ::open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (probe < 0) {
+            if (errno == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "vduse device ` has a daemon connected; leaving it alone", name);
+            LOG_ERRNO_RETURN(0, -1, "failed to probe the vduse char device ", path);
+        }
+        ::close(probe);   // the destroy only needs no daemon connected: true once closed
+        // The contractual EBUSY, checked BEFORE destroying rather than left to the
+        // ioctl. shutdown() checks it in the same place for the same reason --
+        // tearing down first would leave the consumer's device unserved and still
+        // fail the destroy. /sys/bus/vdpa/devices/<name> is only a stand-in for the
+        // kernel-side vdev and does not bracket it exactly: a removal that wedges
+        // part way leaves the entry gone while the vdev is still bound, and measured
+        // in that state this check passed, nothing held the char device, and
+        // DESTROY_DEV answered EBUSY anyway. So the EBUSY branch on the ioctl below
+        // is what catches that, and is not only a guard against a consumer attaching
+        // in between.
+        char sp[VDUSE_NAME_MAX + 40];
+        snprintf(sp, sizeof(sp), "/sys/bus/vdpa/devices/%s", name);
+        if (::access(sp, F_OK) == 0)
+            LOG_ERROR_RETURN(EBUSY, -1, "vduse device ` is still attached to a vdpa consumer (vdpa dev del it first)", name);
+        // Duplicated from VduseDeviceImpl::ctrl_init() rather than shared with it:
+        // that one caches into a device member and assigns it BEFORE the handshake,
+        // so lifting it would change what a retry after a failed handshake does --
+        // device-lifecycle behavior this call has no reason to touch.
+        int ctrl = ::open("/dev/vduse/control", O_RDWR | O_CLOEXEC);
+        if (ctrl < 0)
+            LOG_ERRNO_RETURN(0, -1, "failed to open /dev/vduse/control (vduse module loaded?)");
+        DEFER(::close(ctrl));
+        uint64_t ver = 0;
+        if (::ioctl(ctrl, VDUSE_GET_API_VERSION, &ver) < 0)
+            LOG_ERRNO_RETURN(0, -1, "vduse GET_API_VERSION failed");
+        ver = VDUSE_API_VERSION;
+        if (::ioctl(ctrl, VDUSE_SET_API_VERSION, &ver) < 0)
+            LOG_ERRNO_RETURN(0, -1, "vduse SET_API_VERSION(0) failed (kernel supports `)", ver);
+        if (::ioctl(ctrl, VDUSE_DESTROY_DEV, name) < 0) {
+            if (errno == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "vduse device ` is still attached to a vdpa consumer (vdpa dev del it first)", name);
+            if (errno != EINVAL)   // EINVAL: the registration is already gone
+                LOG_ERRNO_RETURN(0, -1, "vduse DESTROY_DEV failed, name `", name);
+        }
+        // Unlinked while the claim is still held -- the release is deferred to scope
+        // exit, after this statement -- so what goes is provably the tombstone this
+        // call opened, not one another daemon created in between.
+        if (devlock_unlink(lock_dir, ln) < 0)
+            return -1;   // devlock_unlink logged it
+        return 0;
     }
 };
 
