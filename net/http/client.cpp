@@ -41,6 +41,22 @@ static constexpr size_t kTunnelRespSize = 4 * 1024;
 // a CONNECT request is a request line, a Host, and whatever the authenticator adds
 static constexpr uint16_t kTunnelReqSize = 8 * 1024 - 1;
 
+// The shared_ptr atomic free functions are required by the C++14 baseline.
+// libstdc++ deprecates them in C++23 in favor of atomic<shared_ptr<T>>, which
+// is only available since C++20. Keep the compatibility shim narrowly scoped.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+static std::shared_ptr<Resolver> atomic_load_resolver(
+        const std::shared_ptr<Resolver>* resolver) {
+    return std::atomic_load(resolver);
+}
+
+static void atomic_store_resolver(std::shared_ptr<Resolver>* target,
+                                  std::shared_ptr<Resolver> resolver) {
+    std::atomic_store(target, std::move(resolver));
+}
+#pragma GCC diagnostic pop
+
 class ClientImpl;
 
 // One DNS cache for the whole process, so that each host is cold-resolved once
@@ -202,7 +218,7 @@ public:
 protected:
     // the resolver for one dial: the injected one, or a borrow of the shared cache
     SharedResolver::Ref get_resolver() {
-        auto r = std::atomic_load(resolver);
+        auto r = atomic_load_resolver(resolver);
         if (r) return SharedResolver::Ref(std::move(r));
         return g_shared_resolver.borrow();
     }
@@ -412,7 +428,7 @@ void Client::set_resolver(Resolver* resolver, bool ownership) {
         else
             next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
     }
-    std::atomic_store(&m_resolver, std::move(next));
+    atomic_store_resolver(&m_resolver, std::move(next));
 }
 
 void Client::set_proxy(std::string_view proxy) {
