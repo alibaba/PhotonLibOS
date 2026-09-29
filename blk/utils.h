@@ -64,10 +64,10 @@ namespace blk {
 // Serving-coroutine stack size
 // ----------------------------------------------------------------------------
 
-// photon's DEFAULT_STACK_SIZE is 8 MiB (thread/thread.h:64). The per-request
+// photon's DEFAULT_STACK_SIZE is 8 MiB. The per-request
 // coroutines here use a few KiB of it: parse, one preadv/pwritev into the
 // backend, complete. What 8 MiB actually costs is not RSS -- the stacks are
-// posix_memalign'd (thread/stack-allocator.cpp:175), so only touched pages
+// posix_memalign'd, so only touched pages
 // become resident -- but ADDRESS SPACE and one VMA per stack, and how many there
 // are is the PEER's choice: a virtqueue may hold 32768 entries, and nbd takes
 // one coroutine per connection. At 8 MiB that maps 256 GiB and runs

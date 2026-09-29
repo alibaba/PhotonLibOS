@@ -566,7 +566,7 @@ TEST_F(TcmuTest, detach_then_shutdown) {
     LOG_INFO("shutdown() after detach: rc=`, took ` ms, backstore_exists=`, lun_exists=`",
              rc, ms, bs_exists, lun_exists);
 
-    // contract (blk.h:98 "detach() + destroy"): shutdown() from the detached
+    // blk.h's "detach() + destroy" contract: shutdown() from the detached
     // state re-serves transiently and tears the registration + LUN down, fast --
     // a live pump answers the LUN-removal commands, so no cmd_time_out stall
     EXPECT_EQ(0, rc);
