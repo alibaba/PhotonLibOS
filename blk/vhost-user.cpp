@@ -1381,11 +1381,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // bind() created the node with 0777 & ~umask; honor sock_mode, or the
         // documented 0600 default -- the owner's uid alone (root excepted),
         // so a caller whose guest process runs as another user has to widen
-        // it explicitly. Not
-        // derived from umask: that has no read-only query, and the
-        // set-and-restore which emulates one changes the mask of the whole
-        // process rather than this thread, so any file another thread creates
-        // in the window is unmasked.
+        // it explicitly. Not derived from umask: that has no read-only query,
+        // and the set-and-restore which emulates one changes the mask of the
+        // whole process rather than this thread, so any file another thread
+        // creates in the window is unmasked.
         if (::chmod(sock_path, cfg.sock_mode ? (mode_t)cfg.sock_mode
                                              : (mode_t)0600) < 0)
             LOG_WARN("vhost-user chmod failed on `, ", sock_path, ERRNO());
