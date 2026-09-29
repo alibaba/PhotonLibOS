@@ -350,7 +350,9 @@ struct GenlSock {
 //   hdr->sector,    the sector bound is compared in SECTORS, because sector
 //   want            is a full 64 bits and (sector << 9) can wrap back into
 //                   the range it was just tested against; only once that
-//                   holds is the byte sum subtracted from capacity.
+//                   holds is the sector's byte offset subtracted from
+//                   capacity, and the byte sum compared against the
+//                   remainder.
 //   hdr->type       dispatched by a switch whose default is UNSUPP, so an
 //                   unknown type never reaches a length it would consume.
 //   avail->idx      a free-running peer-written counter. dispatch_avail caps
@@ -359,10 +361,12 @@ struct GenlSock {
 //                   more coroutines than the ring is deep.
 //   num             the modulo divisor for both rings, the in-flight cap,
 //                   and the index of the event slot one element past the end
-//                   of each ring -- which is why the transports size those
-//                   regions as 3 + num uint16s. Not re-validated here: the
-//                   transport publishes it, and both reject the 0 that would
-//                   divide by zero on the first completion.
+//                   of each ring -- which is why the transports size the
+//                   avail region as 3 + num uint16s and the used region
+//                   as 3 uint16s plus num vring_used_elems. Not re-validated
+//                   here: the transport publishes it, and both reject the
+//                   0 that would stall the queue silently: this core's cap
+//                   reads 0 >= 0, and dispatch returns before any modulo.
 //   capacity        ours, not the peer's, but load-bearing for the sector
 //                   check above: it is always a multiple of 512, which is
 //                   what keeps that subtraction from underflowing.

@@ -536,8 +536,9 @@ public:
         // with the string costs 8 more.
         SockRole sock_role = SockRole::SERVER;
         uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 means
-                                      // 0600, this process alone. Set it explicitly when the
-                                      // guest process (qemu) runs as a different user.
+                                      // 0600, the owner's uid alone (root excepted). Set it
+                                      // explicitly when the guest process (qemu) runs as a
+                                      // different user.
         std::string sock_path;
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}

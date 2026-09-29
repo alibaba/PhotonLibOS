@@ -1379,8 +1379,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
             LOG_ERRNO_RETURN(0, -1, "vhost-user listen failed: ", sock_path);
         }
         // bind() created the node with 0777 & ~umask; honor sock_mode, or the
-        // documented 0600 default -- this process alone, so a caller whose
-        // guest process runs as another user has to widen it explicitly. Not
+        // documented 0600 default -- the owner's uid alone (root excepted),
+        // so a caller whose guest process runs as another user has to widen
+        // it explicitly. Not
         // derived from umask: that has no read-only query, and the
         // set-and-restore which emulates one changes the mask of the whole
         // process rather than this thread, so any file another thread creates
