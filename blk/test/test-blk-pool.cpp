@@ -99,7 +99,7 @@ TEST(blk_pool, null_pool_leaves_coroutine_on_caller_vcpu) {
 
 TEST(blk_pool, null_thread_is_not_an_error) {
     migrate_to_pool(nullptr, nullptr);
-    photon::WorkPool pool(2, INIT_EVENT_EPOLL, INIT_IO_NONE);
+    photon::WorkPool pool(2, photon::get_event_engine(), INIT_IO_NONE);
     migrate_to_pool(&pool, nullptr);   // must not crash, must not migrate anything
 }
 
@@ -117,14 +117,14 @@ TEST(blk_pool, empty_pool_does_not_divide_by_zero) {
 }
 
 TEST(blk_pool, fewer_queues_than_vcpus_land_on_distinct_vcpus) {
-    photon::WorkPool pool(4, INIT_EVENT_EPOLL, INIT_IO_NONE);
+    photon::WorkPool pool(4, photon::get_event_engine(), INIT_IO_NONE);
     ASSERT_EQ(4, pool.get_vcpu_num());
     auto v = land(3, &pool);
     EXPECT_EQ(3UL, v.size());   // n <= m: one vcpu each, no sharing
 }
 
 TEST(blk_pool, more_queues_than_vcpus_use_every_vcpu) {
-    photon::WorkPool pool(2, INIT_EVENT_EPOLL, INIT_IO_NONE);
+    photon::WorkPool pool(2, photon::get_event_engine(), INIT_IO_NONE);
     ASSERT_EQ(2, pool.get_vcpu_num());
     auto v = land(6, &pool);
     EXPECT_EQ(2UL, v.size());   // n > m: shared, but every vcpu is used
@@ -134,7 +134,7 @@ TEST(blk_pool, more_queues_than_vcpus_use_every_vcpu) {
 // WorkPool's own, shared across callers, so the second batch continues where the
 // first left off rather than restarting.
 TEST(blk_pool, cursor_spreads_two_devices) {
-    photon::WorkPool pool(3, INIT_EVENT_EPOLL, INIT_IO_NONE);
+    photon::WorkPool pool(3, photon::get_event_engine(), INIT_IO_NONE);
     auto a = land(2, &pool);
     auto b = land(2, &pool);
     EXPECT_EQ(2UL, a.size());
