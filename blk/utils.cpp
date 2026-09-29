@@ -152,6 +152,15 @@ int devlock_free(const char* dir, const char* name) {
     return free_lock ? 1 : 0;
 }
 
+int devlock_unlink(const char* dir, const char* name) {
+    if (!dir || !*dir) dir = DEVLOCK_DIR;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (::unlink(path) != 0 && errno != ENOENT)
+        LOG_ERRNO_RETURN(0, -1, "failed to remove the tombstone ", path);
+    return 0;
+}
+
 int unix_listener_live(const char* path) {
     size_t n = strlen(path);
     if (!n || n >= sizeof(sockaddr_un::sun_path))

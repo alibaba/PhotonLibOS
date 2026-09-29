@@ -346,6 +346,35 @@ public:
     // event loop covers both the backlog and whatever arrives later.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
 
+    // Remove one orphan -- the configfs backstore registration, and the tombstone
+    // that stands for it. 0 once both are gone, after which list_orphans() no
+    // longer reports the identity; -1 + errno otherwise.
+    //
+    // The identity is CALLER-SUPPLIED and names something to delete, so it goes
+    // through the same name-mapping the device path uses -- every character
+    // outside [alnum . _ -] becomes '_', and the result is capped at 64 bytes --
+    // and is never spelled into a path directly. A '/' therefore cannot survive,
+    // which is what keeps this from being an rmdir of any directory the caller
+    // can name. That mapping does allow '.', so "." and ".." are rejected by name
+    // as well: they are whole path components rather than backstore names, and
+    // left alone they would aim the removal at this HBA's own directory and at its
+    // parent. An identity longer than a backstore name can be is EINVAL -- it
+    // would name the PREFIX's backstore, not the caller's -- and one this HBA has
+    // no backstore for is ENOENT.
+    //
+    // EBUSY is the live-identity refusal, and it is what makes the call safe on a
+    // BlkDevInfo taken from an earlier scan: a server may have adopted the
+    // registration since, so the flock is probed again here rather than trusted
+    // from the listing. The kernel's own refusal -- a LUN still references the
+    // backstore -- surfaces as EBUSY too.
+    //
+    // The registration goes first, the order shutdown() tears down in. So a
+    // tombstone that is not a file is reported as EISDIR *after* the registration
+    // is already gone: the orphan is recovered, and the -1 says the lock directory
+    // still needs a human. A directory there is operator state, and is never
+    // removed on the operator's behalf.
+    virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
+
     // A device of this HBA, built from cfg -- which is validated here, so a bad
     // config gives nullptr + errno instead of an object. The device answers the
     // kernel wherever an operator is waiting: ADDED_DEVICE_DONE from start() (0,

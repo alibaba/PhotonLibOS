@@ -114,7 +114,20 @@ void devlock_release(int fd);
 // Non-creating probe for the orphan scans: 1 = free (no live server holds it),
 // 0 = held, -1 = missing or unopenable (an inconsistent state -- the caller
 // skips the device). Read-only and no O_CREAT: a query must not create files.
+// Note that a DIRECTORY in place of the file reads as 1: open(O_RDONLY) and
+// flock both succeed on a directory fd. It is devlock_acquire that refuses one,
+// because O_CREAT|O_RDWR on a directory is EISDIR.
 int devlock_free(const char* dir, const char* name);
+
+// The inverse of devlock_release's "the FILE stays": remove the tombstone once
+// the registration it stands for is gone too. 0 once nothing is there -- an
+// absent file is the goal state, not an error -- or -1 with errno after logging.
+// unlink(), never remove(): a DIRECTORY where a tombstone should be is operator
+// state, and unlink reports it (EISDIR) rather than recursing into it or
+// deleting it on the operator's behalf. A caller removing a registration
+// alongside the tombstone therefore has to decide what a refused tombstone
+// means for the registration it already took down.
+int devlock_unlink(const char* dir, const char* name);
 
 // The bound a controller puts on its scope directory (the lock dir; the socket
 // dir for vhost-user) so that what it STORES is what it USES: devlock_acquire and

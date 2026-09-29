@@ -2185,6 +2185,98 @@ struct TcmuHBAImpl : TcmuHBA {
         return ret;
     }
 
+    // Remove one orphan: the configfs registration, then the tombstone that
+    // stands for it. Both names come from the derivation the device itself uses --
+    // sanitize() for the backstore directory, TcmuDeviceImpl::lock_file_name() for
+    // the tombstone, the one definition of that mapping the device and the HBA
+    // share so the two cannot drift apart. Nothing here spells a path out of
+    // orphan.identity, which is caller-supplied and names something to DELETE;
+    // sanitize() is what makes that safe, mapping every character outside
+    // [alnum . _ -] to '_' so a '/' cannot survive into the path. sanitize() does
+    // allow '.', which is why "." and ".." are rejected separately below -- they
+    // are complete path components, not names.
+    //
+    // The flock is probed again rather than trusted from the listing, because a
+    // caller's BlkDevInfo can predate another daemon adopting the registration --
+    // the window this call exists to close. A probe that cannot read the tombstone
+    // counts as not held, which is what initial_scan does at this same probe
+    // before handing a backstore over for ADOPTION; destroying is the weaker of
+    // the two actions, so it does not get the stricter rule.
+    //
+    // Registration first, tombstone second -- the order shutdown() tears down in.
+    // The other way round would delete the tombstone of a backstore the kernel
+    // then refused to rmdir, and a registration whose tombstone is missing is one
+    // list_orphans() skips, so that failure would be invisible to every later
+    // scan. This way round a tombstone that turns out not to be a file leaves the
+    // orphan recovered and reports the litter's path instead.
+    //
+    // Runs on the caller's vcpu, like list_orphans() and destroy_backstore(): the
+    // disable/rmdir fires a REMOVED that this HBA's listener answers for a
+    // backstore no device is registered against, so the write cannot block here.
+    // Nor can it block after stop(), which restores the kernel's reply global to 0
+    // and so stops the kernel waiting on userspace at all.
+    int destroy_orphan(const BlkDevInfo& orphan) override {
+        if (orphan.identity.empty())
+            LOG_ERROR_RETURN(EINVAL, -1, "tcmu destroy_orphan needs a non-empty identity");
+        // validate()'s bound, for validate()'s reason: the identity BECOMES the
+        // backstore directory name and sanitize() truncates it at 64 bytes, so a
+        // longer one would name the PREFIX's backstore and destroy that instead of
+        // what the caller asked for. The errno is this API's uniform vocabulary
+        // rather than validate()'s ENAMETOOLONG, because a caller recovers across
+        // four transports with one loop.
+        if (orphan.identity.size() >= TcmuDeviceImpl::BS_NAME_BUF)
+            LOG_ERROR_RETURN(EINVAL, -1, "tcmu identity is too long for a backstore name (` bytes, max `): ",
+                             orphan.identity.size(), TcmuDeviceImpl::BS_NAME_BUF - 1, orphan.identity);
+        char bs_name[TcmuDeviceImpl::BS_NAME_BUF];
+        sanitize(bs_name, sizeof(bs_name), orphan.identity.c_str());
+        // sanitize() maps '/' to '_', so no separator survives -- but it allows
+        // '.', and "." / ".." are whole path components on their own. Left alone
+        // they would name this HBA's own directory and its PARENT, both of which
+        // exist, so the rmdir below would be aimed at configfs itself rather than
+        // at a backstore. Rejected here rather than by the charset, because the
+        // charset is right for every other name.
+        if (!strcmp(bs_name, ".") || !strcmp(bs_name, ".."))
+            LOG_ERROR_RETURN(EINVAL, -1, "tcmu identity ` is a path component, not a backstore name", bs_name);
+        char bs_path[384];   // TARGET_ROOT/core/<subtype>/<bs_name>
+        snprintf(bs_path, sizeof(bs_path), "%s/core/%s/%s", TARGET_ROOT, subtype, bs_name);
+        char lock[80];
+        TcmuDeviceImpl::lock_file_name(bs_name, lock, sizeof(lock));
+        int lf = devlock_free(lock_dir, lock);
+        if (lf == 0)
+            LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` has a live server holding its tombstone; leaving it alone", bs_name);
+        if (!path_exists(bs_path)) {
+            // No registration, so there is no orphan to recover. lf still tells the
+            // two remaining cases apart: a tombstone outliving its registration is
+            // our own litter and goes with it, while nothing at all means the
+            // identity names no backstore this HBA ever had.
+            if (lf < 0)
+                LOG_ERROR_RETURN(ENOENT, -1, "no tcmu backstore ` under this HBA, and no tombstone for it that this call could use", bs_name);
+            if (devlock_unlink(lock_dir, lock) < 0)
+                return -1;   // devlock_unlink logged it
+            return 0;
+        }
+        // disable is best-effort exactly as in destroy_backstore(): the kernel may
+        // already have torn the device down, and the rmdir is the real cleanup.
+        char p[PATH_MAX];
+        snprintf(p, sizeof(p), "%s/enable", bs_path);
+        cfg_write_best(p, "0");
+        // ENOENT means it went away between the existence check and here, which is
+        // the goal state rather than a failure.
+        if (::rmdir(bs_path) != 0 && errno != ENOENT) {
+            int e = errno;
+            if (e == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` is still in use: a LUN references it", bs_name);
+            LOG_ERRNO_RETURN(0, -1, "failed to rmdir the tcmu backstore ", bs_path);
+        }
+        // The registration is already gone at this point, so a refusal here --
+        // EISDIR on a directory somebody put in the lock dir, which is operator
+        // state and is never removed on the operator's behalf -- is reported
+        // rather than smoothed over into a success.
+        if (devlock_unlink(lock_dir, lock) < 0)
+            return -1;   // devlock_unlink logged it
+        return 0;
+    }
+
     IBlkDevice* new_device(const TcmuHBA::Config& cfg) override {
         if (TcmuDeviceImpl::validate(cfg) < 0)
             return nullptr;

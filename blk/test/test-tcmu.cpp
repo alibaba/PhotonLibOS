@@ -136,6 +136,37 @@ static const char* lock_state(const char* identity) {
     return "not-held";
 }
 
+// A configfs registration marked as ours, which is what makes list_orphans()
+// report it at all -- the scan takes ownership from dev_config and nothing else.
+// Returns 0 or -errno.
+static int plant_backstore(const char* bs_path, const char* identity, uint64_t size) {
+    if (::mkdir(bs_path, 0755) != 0 && errno != EEXIST)
+        return -errno;
+    if (int rc = cfs_write(std::string(bs_path) + "/attrib/dev_config",
+                           std::string("photon/") + identity))
+        return rc;
+    return cfs_write(std::string(bs_path) + "/attrib/dev_size", std::to_string(size));
+}
+
+// The state a server that died mid-life leaves behind: that registration,
+// enabled, plus a tombstone nobody holds. Planted rather than built through a
+// device on purpose -- a device object keeps tracking the registration
+// destroy_orphan() is about to take away, and its destructor then goes looking
+// for it, re-creating the tombstone and polling for a uio node that cannot
+// appear. That would put litter behind the assertions' back.
+static int plant_orphan(const char* bs_path, const char* identity, uint64_t size) {
+    if (int rc = plant_backstore(bs_path, identity, size))
+        return rc;
+    if (int rc = cfs_write(std::string(bs_path) + "/enable", "1"))
+        return rc;
+    std::string lp = lock_path(identity);
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -errno;
+    ::close(fd);
+    return 0;
+}
+
 // How many uio nodes the kernel currently exposes. An enabled tcmu backstore
 // gets exactly one, so this is the kernel's own answer to "is a backstore of
 // ours still live" -- it reads nothing this suite wrote, which is what makes it
@@ -718,6 +749,252 @@ TEST_F(TcmuTest, orphan_list) {
     ASSERT_EQ(0, dev->start(file));
     EXPECT_EQ(0, dev->shutdown());
     EXPECT_NE(0, ::access(BS_PATH, F_OK));
+}
+
+TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
+    ASSERT_EQ(0, plant_orphan(BS_PATH, TEST_IDENTITY, IMG_SIZE));
+    ASSERT_EQ(0, plant_orphan(REFUSE_BS_PATH, REFUSE_BS, IMG_SIZE));
+    std::string lp1 = lock_path(TEST_IDENTITY), lp2 = lock_path(REFUSE_BS);
+    DEFER({ ::unlink(lp1.c_str()); ::unlink(lp2.c_str());
+            ::rmdir(BS_PATH); ::rmdir(REFUSE_BS_PATH); });
+
+    // BEFORE, at observation points that read nothing this suite wrote
+    ASSERT_EQ(0, ::access(BS_PATH, F_OK));
+    ASSERT_EQ(0, ::access(REFUSE_BS_PATH, F_OK));
+    ASSERT_EQ(0, ::access(lp1.c_str(), F_OK));
+    ASSERT_EQ(0, ::access(lp2.c_str(), F_OK));
+    std::vector<BlkDevInfo> recs;
+    for (auto& o : sys->list_orphans())
+        if (o.identity == TEST_IDENTITY || o.identity == REFUSE_BS)
+            recs.push_back(o);
+    ASSERT_EQ(2u, recs.size()) << "the planted registrations were not both reported as orphans";
+    for (auto& r : recs)
+        EXPECT_EQ(IMG_SIZE, r.size);
+
+    // A counter, not just a return code: a case whose only assertion is "it said
+    // 0" can pass while doing nothing at all.
+    int destroyed = 0;
+    for (auto& r : recs) {
+        errno = 0;
+        int rc = sys->destroy_orphan(r);
+        int e = errno;
+        EXPECT_EQ(0, rc) << r.identity << " (errno " << e << ")";
+        if (rc == 0)
+            destroyed++;
+    }
+    EXPECT_EQ(2, destroyed);
+
+    // AFTER. The registration and the tombstone are two separate observations
+    // because the scan's gate is the registration: once that directory is gone
+    // readdir never yields it again, whatever the tombstone does. So "the list no
+    // longer reports it" cannot witness a leaked tombstone, and the tombstone has
+    // to be asserted on its own.
+    EXPECT_NE(0, ::access(BS_PATH, F_OK)) << "the configfs registration survived";
+    EXPECT_NE(0, ::access(REFUSE_BS_PATH, F_OK)) << "the configfs registration survived";
+    EXPECT_NE(0, ::access(lp1.c_str(), F_OK)) << "the tombstone survived";
+    EXPECT_NE(0, ::access(lp2.c_str(), F_OK)) << "the tombstone survived";
+    for (auto& o : sys->list_orphans()) {
+        EXPECT_NE(TEST_IDENTITY, o.identity);
+        EXPECT_NE(REFUSE_BS, o.identity);
+    }
+}
+
+TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device) {
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty()) << "no /dev/sdX appeared for the tcm_loop LUN";
+
+    // serving, so a server holds the flock and the scan does not report it
+    for (auto& o : sys->list_orphans())
+        EXPECT_NE(TEST_IDENTITY, o.identity);
+
+    // A caller's BlkDevInfo from an EARLIER scan. That the scan would not hand
+    // back this identity just now is the point of the case rather than a defect
+    // in it: the record can predate this server taking the identity over, which
+    // is the window the EBUSY gate exists to close.
+    BlkDevInfo stale = make_info();
+    errno = 0;
+    int rc = sys->destroy_orphan(stale);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "a live identity must be refused, not destroyed";
+
+    // Nothing was torn down, and the proof is that it still works: one real I/O
+    // through the LUN, verified against the backend image.
+    EXPECT_EQ(0, ::access(BS_PATH, F_OK));
+    EXPECT_STREQ("HELD", lock_state(TEST_IDENTITY));
+    std::vector<char> wbuf = pattern(0x5a);
+    EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true));
+    for (auto& o : sys->list_orphans())
+        EXPECT_NE(TEST_IDENTITY, o.identity);
+    // Still enabled, too. Worth stating but NOT what witnesses the flock gate:
+    // measured, the kernel refuses the removal path's `enable=0` write while a
+    // LUN is attached (the best-effort write logs "wrote -1 of 1 (tolerated)")
+    // and then refuses the rmdir with EBUSY on its own. So this device is
+    // protected twice, and deleting the flock gate would leave this case green --
+    // which is why the next case uses a device the kernel will not protect.
+    std::string en;
+    ASSERT_TRUE(sysfs_read(std::string(BS_PATH) + "/enable", en));
+    EXPECT_EQ("1", en) << "a refused destroy left the backstore disabled";
+}
+
+// The flock gate's real witness. A backstore-only device has no LUN, so the
+// kernel disables and rmdirs it without complaint: the flock is the ONLY thing
+// between a caller's stale BlkDevInfo and a live server's registration being
+// taken away from under it. This is the case that goes red when the gate is
+// deleted, and it is the more realistic of the two -- backstore-only is a
+// supported configuration, not a corner.
+TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device_the_kernel_will_not) {
+    auto cfg = make_cfg(/*loopback=*/false);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    ASSERT_EQ(0, ::access(BS_PATH, F_OK));
+    EXPECT_STREQ("HELD", lock_state(TEST_IDENTITY));
+    // live, so the scan does not report it
+    for (auto& o : sys->list_orphans())
+        EXPECT_NE(TEST_IDENTITY, o.identity);
+
+    // a BlkDevInfo from an earlier scan, which is the window the gate closes
+    BlkDevInfo stale = make_info();
+    errno = 0;
+    int rc = sys->destroy_orphan(stale);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "here the flock is the only gate this device has";
+
+    // nothing was touched: still registered, still enabled, still held
+    EXPECT_EQ(0, ::access(BS_PATH, F_OK)) << "a live device's registration was destroyed";
+    std::string en;
+    ASSERT_TRUE(sysfs_read(std::string(BS_PATH) + "/enable", en));
+    EXPECT_EQ("1", en) << "a live device was disabled";
+    EXPECT_STREQ("HELD", lock_state(TEST_IDENTITY));
+    // and it still shuts down cleanly, which it could not if the registration
+    // had been taken from under it
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(BS_PATH, F_OK));
+}
+
+TEST_F(TcmuTest, destroy_orphan_validates_the_identity) {
+    // An identity longer than a backstore name can be. The name mapping truncates
+    // at 64 bytes, so without the length check this would name the PREFIX's
+    // backstore -- planted here at exactly 64 bytes -- and destroy that instead
+    // of what the caller asked for.
+    const std::string PREFIX(64, 'a');
+    std::string pre_path = std::string("/sys/kernel/config/target/core/user_0/") + PREFIX;
+    ASSERT_EQ(0, plant_backstore(pre_path.c_str(), PREFIX.c_str(), IMG_SIZE));
+    DEFER(::rmdir(pre_path.c_str()));
+    BlkDevInfo over = make_info();
+    over.identity = PREFIX + "BBBBBB";
+    errno = 0;
+    int rc = sys->destroy_orphan(over);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EINVAL, e) << "an over-long identity must not be truncated into another device";
+    EXPECT_EQ(0, ::access(pre_path.c_str(), F_OK)) << "the 64-byte prefix's backstore was destroyed";
+
+    // A traversal identity. The mapping turns '/' into '_', so a separator cannot
+    // survive -- but that is the claim under test, so the sentinel is a real
+    // directory at the exact path this identity WOULD name if one did.
+    const char SENTINEL[] = "/tmp/photon-tcmu-destroy-sentinel";
+    ASSERT_EQ(0, ::mkdir(SENTINEL, 0755));
+    DEFER(::rmdir(SENTINEL));
+    BlkDevInfo trav = make_info();
+    trav.identity = "../../../../tmp/photon-tcmu-destroy-sentinel";
+    errno = 0;
+    rc = sys->destroy_orphan(trav);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(ENOENT, e) << "a traversal identity must not resolve to anything";
+    EXPECT_EQ(0, ::access(SENTINEL, F_OK)) << "the sentinel was touched";
+
+    // "." and ".." survive the mapping unchanged, because it allows '.', and they
+    // are complete path components: they would aim the rmdir at this HBA's own
+    // directory and at its parent. Both exist, so both are asserted afterwards
+    // rather than assumed to have been spared.
+    for (const char* dot : {".", ".."}) {
+        BlkDevInfo d = make_info();
+        d.identity = dot;
+        errno = 0;
+        rc = sys->destroy_orphan(d);
+        e = errno;
+        EXPECT_EQ(-1, rc) << "identity " << dot;
+        EXPECT_EQ(EINVAL, e) << "identity " << dot;
+    }
+    EXPECT_EQ(0, ::access("/sys/kernel/config/target/core/user_0", F_OK)) << "this HBA was removed";
+    EXPECT_EQ(0, ::access("/sys/kernel/config/target/core", F_OK)) << "the fabric's core directory was removed";
+
+    // An identity this HBA has no backstore for, and no tombstone either.
+    BlkDevInfo gone = make_info();
+    gone.identity = "photon-tcmu-never-existed";
+    errno = 0;
+    rc = sys->destroy_orphan(gone);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(ENOENT, e);
+}
+
+TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
+    ASSERT_EQ(0, plant_backstore(BS_PATH, TEST_IDENTITY, IMG_SIZE));
+    ASSERT_EQ(0, cfs_write(std::string(BS_PATH) + "/enable", "1"));
+    std::string lp = lock_path(TEST_IDENTITY);
+    // A DIRECTORY where the tombstone should be. devlock_free() opens O_RDONLY
+    // and flocks, and both succeed on a directory fd, so the scan still reads
+    // this entry as free and reports it; it is devlock_acquire()'s O_CREAT|O_RDWR
+    // that refuses one. That asymmetry is what makes the entry listed but
+    // unadoptable, and it is measured below rather than assumed.
+    //
+    // A regular tombstone is already here -- an earlier case's device planted it,
+    // and devlock_release() unlocks and closes but never unlinks -- so it has to
+    // go before the directory can take its place.
+    ::unlink(lp.c_str());
+    ASSERT_EQ(0, ::mkdir(lp.c_str(), 0755));
+    DEFER({ ::rmdir(lp.c_str()); ::rmdir(BS_PATH); });
+
+    BlkDevInfo rec;
+    bool found = false;
+    for (auto& o : sys->list_orphans())
+        if (o.identity == TEST_IDENTITY) { rec = o; found = true; }
+    ASSERT_TRUE(found) << "a directory tombstone should still read as free to the scan";
+
+    // Adoption cannot proceed, and this is the very open devlock_acquire()
+    // performs, so the refusal is measured at the gate adoption actually uses.
+    errno = 0;
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    int oe = errno;
+    EXPECT_EQ(-1, fd) << "the tombstone path was claimable after all";
+    EXPECT_EQ(EISDIR, oe);
+    if (fd >= 0) ::close(fd);
+
+    // destroy_orphan() still takes the registration away -- recovering the orphan
+    // is the point of the call -- but it does not rmdir a directory in the lock
+    // dir on the operator's behalf, so the tombstone half is refused and reported
+    // rather than smoothed over into a success.
+    errno = 0;
+    int rc = sys->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EISDIR, e) << "a directory tombstone is operator state: report it, do not delete it";
+    EXPECT_NE(0, ::access(BS_PATH, F_OK)) << "the registration should be gone even though the tombstone was refused";
+    EXPECT_EQ(0, ::access(lp.c_str(), F_OK)) << "the directory was deleted on the operator's behalf";
+    for (auto& o : sys->list_orphans())
+        EXPECT_NE(TEST_IDENTITY, o.identity);
+
+    // Once the operator clears it, the identity names nothing at all -- so a
+    // retry is not stuck, it just has nothing left to do.
+    ASSERT_EQ(0, ::rmdir(lp.c_str()));
+    errno = 0;
+    rc = sys->destroy_orphan(rec);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(ENOENT, e);
 }
 
 TEST_F(TcmuTest, discard_write_zeroes) {
