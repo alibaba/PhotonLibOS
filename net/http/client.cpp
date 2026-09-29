@@ -63,7 +63,10 @@ public:
     class Ref {
     public:
         Ref(SharedResolver* owner, Gen* gen, Resolver* r) : _owner(owner), _gen(gen), _r(r) { }
-        Ref(Ref&& rhs) : _owner(rhs._owner), _gen(rhs._gen), _r(rhs._r) { rhs._r = nullptr; }
+        explicit Ref(std::shared_ptr<Resolver> r)
+            : _owner(nullptr), _gen(nullptr), _r(r.get()), _owned(std::move(r)) { }
+        Ref(Ref&& rhs) : _owner(rhs._owner), _gen(rhs._gen), _r(rhs._r),
+                        _owned(std::move(rhs._owned)) { rhs._r = nullptr; }
         Ref(const Ref&) = delete;
         ~Ref() { if (_owner && _r) _owner->put(_gen); }
         Resolver* operator->() const { return _r; }
@@ -71,6 +74,7 @@ public:
         SharedResolver* _owner;
         Gen* _gen;
         Resolver* _r;
+        std::shared_ptr<Resolver> _owned;
     };
 
     Ref borrow() {
@@ -159,9 +163,12 @@ public:
     std::unique_ptr<ISocketClient> proxy_tls;   // outer leg to a TLS proxy
     std::unique_ptr<ISocketPool> tunnelsock;    // pools the established tunnels
     std::vector<IPAddr> bind_ips;
-    Resolver* resolver;   // set_resolver()'s, not owned; null for the shared cache
+    // Points at Client::m_resolver so set_resolver() also affects dialers that
+    // this client has already built. Atomic loads keep an owned resolver alive
+    // until the current resolution finishes.
+    std::shared_ptr<Resolver>* resolver;
 
-    PooledDialer(TLSContext* _tls_ctx, Resolver* resolver,
+    PooledDialer(TLSContext* _tls_ctx, std::shared_ptr<Resolver>* resolver,
                  const std::vector<IPAddr>& src_ips)
             : bind_ips(src_ips), resolver(resolver) {
         tls_ctx = _tls_ctx;
@@ -195,7 +202,8 @@ public:
 protected:
     // the resolver for one dial: the injected one, or a borrow of the shared cache
     SharedResolver::Ref get_resolver() {
-        if (resolver) return {nullptr, nullptr, resolver};
+        auto r = std::atomic_load(resolver);
+        if (r) return SharedResolver::Ref(std::move(r));
         return g_shared_resolver.borrow();
     }
 
@@ -394,6 +402,19 @@ constexpr static std::bitset<10>
 
 static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
 
+Client::~Client() = default;
+
+void Client::set_resolver(Resolver* resolver, bool ownership) {
+    std::shared_ptr<Resolver> next;
+    if (resolver) {
+        if (ownership)
+            next.reset(resolver);
+        else
+            next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
+    }
+    std::atomic_store(&m_resolver, std::move(next));
+}
+
 void Client::set_proxy(std::string_view proxy) {
     m_proxy_url.from_string(proxy);
     m_proxy = true;
@@ -433,7 +454,7 @@ public:
     }
 
     PooledDialer* make_dialer() {   // on the current vCPU, for this client
-        return new PooledDialer(m_tls_ctx, m_resolver, m_bind_ips);
+        return new PooledDialer(m_tls_ctx, &m_resolver, m_bind_ips);
     }
 
     IDialer* acquire_dialer() {

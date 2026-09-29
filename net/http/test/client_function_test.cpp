@@ -1360,6 +1360,38 @@ TEST(http_client, dialer_injection) {
     EXPECT_EQ(nullptr, current_dialer_of(client));
 }
 
+static std::vector<IPAddr> g_resolve_filter_seen;
+static bool resolve_filter_accept_all(void*, IPAddr addr) {
+    g_resolve_filter_seen.push_back(addr);
+    return true;
+}
+static bool resolve_filter_reject_all(void*, IPAddr addr) {
+    g_resolve_filter_seen.push_back(addr);
+    return false;
+}
+
+class TestFilteredResolver : public Resolver {
+public:
+    Resolver* inner;
+    Delegate<bool, IPAddr> filter;
+    int* destroyed;
+    explicit TestFilteredResolver(Delegate<bool, IPAddr> filter, int* destroyed = nullptr)
+        : inner(new_default_resolver()), filter(filter), destroyed(destroyed) {}
+    ~TestFilteredResolver() {
+        delete inner;
+        if (destroyed) ++*destroyed;
+    }
+    IPAddr resolve(std::string_view host) override {
+        return inner->resolve_filter(host, filter);
+    }
+    IPAddr resolve_filter(std::string_view host, Delegate<bool, IPAddr>) override {
+        return inner->resolve_filter(host, filter);
+    }
+    void discard_cache(std::string_view host, IPAddr ip) override {
+        inner->discard_cache(host, ip);
+    }
+};
+
 TEST(http_client, resolver_injection) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->bind_v4localhost();
@@ -1372,6 +1404,8 @@ TEST(http_client, resolver_injection) {
     tcpserver->start_loop();
     auto target = to_url(tcpserver, "/simple");
 
+    // Borrowed resolvers can be shared by clients. Their dialers are destroyed
+    // before the resolver's owner releases it.
     auto resolver = new_default_resolver(kDNSCacheLife);
     auto c1 = new_http_client();
     auto c2 = new_http_client();
@@ -1379,10 +1413,44 @@ TEST(http_client, resolver_injection) {
     c2->set_resolver(resolver);
     simple_get(c1, target);
     simple_get(c2, target);
-    // clients go first: their dialers reference the shared resolver
     delete c1;
     delete c2;
     delete resolver;
+
+    // Changing the resolver after the first request must also affect an existing
+    // per-vCPU dialer. The owned resolver is released after that dialer drains.
+    int rejected_destroyed = 0;
+    {
+        auto client = new_http_client();
+        DEFER(delete client);
+        simple_get(client, target);   // build this vCPU's dialer first
+        client->set_resolver(new TestFilteredResolver(
+            {nullptr, &resolve_filter_reject_all}, &rejected_destroyed), true);
+        g_resolve_filter_seen.clear();
+        auto hostname_target = estring().appends(
+            "http://localhost:", tcpserver->getsockname().port, "/simple");
+        Client::OperationOnStack<> op(client, Verb::GET, hostname_target);
+        op.retry = 0;
+        EXPECT_NE(0, op.call());
+        EXPECT_EQ(-1, op.status_code);
+        EXPECT_FALSE(g_resolve_filter_seen.empty());
+    }
+    EXPECT_EQ(1, rejected_destroyed);
+
+    // The same owned-resolver path succeeds when the filter accepts addresses.
+    int accepted_destroyed = 0;
+    {
+        auto client = new_http_client();
+        DEFER(delete client);
+        client->set_resolver(new TestFilteredResolver(
+            {nullptr, &resolve_filter_accept_all}, &accepted_destroyed), true);
+        g_resolve_filter_seen.clear();
+        Client::OperationOnStack<> op(client, Verb::GET, target);
+        EXPECT_EQ(0, op.call());
+        EXPECT_EQ(200, op.resp.status_code());
+        EXPECT_FALSE(g_resolve_filter_seen.empty());
+    }
+    EXPECT_EQ(1, accepted_destroyed);
 }
 
 TEST(http_client, cross_vcpu_client_destruction) {

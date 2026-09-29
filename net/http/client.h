@@ -95,6 +95,8 @@ public:
 
 class Client : public Object {
 public:
+    ~Client() override;
+
     class Operation;
     Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, v, url, buf_size);
@@ -247,10 +249,11 @@ public:
     void set_dialer(IDialer* dialer) { m_dialer = dialer; }
 
     // Inject a DNS resolver, replacing the process-wide default one that the
-    // built-in dialers of this client would otherwise share. Not owned; must
-    // outlive the client, and must be safe for concurrent use across vCPUs.
-    // No effect on a dialer set by set_dialer().
-    void set_resolver(Resolver* resolver) { m_resolver = resolver; }
+    // built-in dialers of this client would otherwise share. It may be replaced
+    // while requests are in flight. The resolver must support concurrent calls;
+    // a borrowed resolver must outlive the client. No effect on a dialer set by
+    // set_dialer().
+    void set_resolver(Resolver* resolver, bool ownership = false);
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
                                           bool secure = false, uint64_t timeout = -1ULL) = 0;
@@ -273,7 +276,7 @@ protected:
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
     IDialer* m_dialer = nullptr;
-    Resolver* m_resolver = nullptr;
+    std::shared_ptr<Resolver> m_resolver;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
