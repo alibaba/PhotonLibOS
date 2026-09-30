@@ -329,8 +329,16 @@ void VCPULocalBase::Table::at_fini() {
     for (;;) {
         lock.lock();
         Slot* s = live.pop_front();
+        bool busy = destroying > 0;
         lock.unlock();
-        if (!s) break;
+        if (!s) {
+            // A failed helper can return its claimed slot to live before the
+            // handoff unpins this vCPU. Recheck both under the same lock rather
+            // than finishing the list pass and then only waiting on the pin.
+            if (!busy) break;
+            photon::thread_usleep(1000);
+            continue;
+        }
         if (s->epoch != epoch) {
             // The child inherited this slot from the parent. Its value belongs
             // to the parent; discard only the child process's copy of the slot.
@@ -353,19 +361,10 @@ void VCPULocalBase::Table::at_fini() {
         s->destroy(s->ptr);
         delete s;
     }
-    // Old-epoch entries were deliberately not inspected because their keys may
-    // name destroyed instances. No get() can race this vCPU's fini hook.
+    // The list is empty and every claimed handoff has landed (or returned its
+    // slot for reclamation above), so no helper can access this table afterward.
+    // Old-epoch map keys may name destroyed instances; do not inspect them.
     map.clear();
-    // a cross-vCPU ~VCPULocal may have claimed a slot of ours and still be
-    // migrating a helper here to destroy it; let fini() free this vCPU only once
-    // that has landed, or the migrate would write to a freed vcpu_t
-    for (;;) {
-        lock.lock();
-        bool busy = destroying > 0;
-        lock.unlock();
-        if (!busy) break;
-        photon::thread_usleep(1000);
-    }
     hook = false;   // photon::fini() clears the hook vector; re-arm on next init
 }
 

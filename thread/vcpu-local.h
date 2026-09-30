@@ -47,6 +47,8 @@ namespace photon {
 //     destroys it there. With no Photon context, it only detaches those Ts: each
 //     remains alive until its owning vCPU reaches photon::fini() or encounters a
 //     new VCPULocal at the same address.
+//     Failure to allocate a cross-vCPU destroy helper also defers reclamation
+//     to the owning vCPU, whose fini waits for handoffs and reaps returned slots.
 //
 // Constraints:
 //   * get() must not race ~VCPULocal on the same instance -- destroying a thing

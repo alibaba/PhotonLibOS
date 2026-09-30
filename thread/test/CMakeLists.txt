@@ -24,3 +24,4 @@ photon_add_test(test-workpool-fanout test-workpool-fanout.cpp LIBS ${GOOGLETEST_
 photon_add_test(test-sleepq-stale-idx test-sleepq-stale-idx.cpp)
 photon_add_test(test-semaphore-lost-wakeup test-semaphore-lost-wakeup.cpp)
 photon_add_test(test-vcpu-local test-vcpu-local.cpp)
+photon_add_test(test-vcpu-local-failure vcpu_local_failure_test.cpp)
