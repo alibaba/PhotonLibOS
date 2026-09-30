@@ -56,12 +56,6 @@ Use RAII as long as it is not troublesome.
 - `memset`/`memcpy` remain appropriate for variable-length data and for zeroing structures larger than 8 bytes.
 - Alignment and byte order are the caller's responsibility; on little-endian hosts (x86_64, arm64) this reads/writes little-endian values directly, which matches many network and on-disk wire formats.
 
-### Struct layout
-- Order a struct's own fields by descending alignment — the 8-byte members first, then the 4-, 2- and 1-byte ones, with `char` arrays wherever they fit — so that no member has to skip padding. The win compounds when the struct is embedded by value or allocated per queue, per connection or per tag.
-- Field order in an existing struct is therefore **deliberate, not accidental**: do not reorder one to group members by topic or to "tidy" it. Read the whole struct before moving any member, and expect narrow members to be sitting somewhere that looks wrong. Grouping members under the `#ifdef` that decides whether they exist at all is not tidying — that grouping states something the layout cannot, so it outranks the ordering above.
-- Do not write the padding arithmetic into a comment at the struct, and do not leave a one-line pointer to this section there either: this section is the record, so a per-struct note about field order is noise that still has to be maintained. Offsets and byte counts go stale the moment a member is added or removed, and a stale size in a comment is a false claim of exactly the same rank as one in code. Comment on a member only for what a reader cannot recover from the layout — what it is for, a hazard in using it, or an invariant it has to keep.
-- A struct transcribed from a kernel uapi header or a wire format is the exception, and the opposite case: its order is fixed by the ABI, and it is the one place where `static_assert` on `offsetof` and `sizeof` belongs, so that a transcription error fails the build rather than the protocol. A struct copied from a header proves nothing on its own.
-
 ### String concatenation
 - When concatenating multiple parts into a string, prefer `estring().appends(a, b, c)` over `std::string(a) + b + c`.
 - `estring::appends` avoids creating intermediate `std::string` temporaries and accepts mixed types (string_view, integers, etc.) without manual conversion.
