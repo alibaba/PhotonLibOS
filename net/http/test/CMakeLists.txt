@@ -1,4 +1,4 @@
-photon_add_test(client_function_test client_function_test.cpp)
+photon_add_test(client_function_test client_function_test.cpp LIBS Photon::openssl)
 photon_add_test(dialer_test dialer_test.cpp)
 photon_add_test(shared_resolver_test shared_resolver_test.cpp)
 photon_add_test(server_function_test server_function_test.cpp)

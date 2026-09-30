@@ -452,6 +452,11 @@ public:
 
     ISocketStream* dial(const DialTarget& target, uint64_t timeout) override {
         auto key = make_key(target);
+        // The socket pool stores key lengths in uint16_t and reserves the
+        // maximum value. Reject before either lookup or connection creation.
+        if (key.size() >= UINT16_MAX)
+            LOG_ERROR_RETURN(ENAMETOOLONG, nullptr,
+                             "HTTP route key is too long: ` bytes", key.size());
         auto stream = m_pool->connect(key, [&]() {
             return m_underlay->dial(target, timeout);
         });

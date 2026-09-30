@@ -84,6 +84,8 @@ IDialer* new_tls_dialer(TLSContext* context, IDialer* underlay, TLSLayer layer,
                         bool context_ownership = false);
 IDialer* new_connect_tunnel_dialer(IDialer* underlay,
                                    bool ownership = false);
+// Pool dials fail with ENAMETOOLONG if the encoded route key is 65535 bytes or
+// longer; rejected routes never reach the underlay or reuse pooled sockets.
 IDialer* new_pool_dialer(IDialer* underlay, bool ownership = false,
                          uint64_t expiration = -1ULL);
 

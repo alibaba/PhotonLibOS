@@ -72,7 +72,7 @@ struct OwnedResolverSlot {
     }
 };
 
-class OwnedResolverLease : public photon::VCPULocal<OwnedResolverSlot> {
+class OwnedResolverLease final : public photon::VCPULocal<OwnedResolverSlot> {
 public:
     explicit OwnedResolverLease(std::shared_ptr<ResolverOwnership> state)
         : VCPULocal({this, &OwnedResolverLease::make_slot}),

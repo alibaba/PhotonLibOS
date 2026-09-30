@@ -341,6 +341,63 @@ TEST(dialer, pool_reuses_only_identical_routes) {
     EXPECT_EQ(1, destroyed);
 }
 
+TEST(dialer, pool_rejects_oversized_route_keys_before_connect) {
+    auto underlay = new StreamDialer;
+    std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
+    ASSERT_NE(nullptr, pool);
+
+    // Direct keys contain three tag bytes, one string length and one port.
+    constexpr size_t direct_key_overhead = 3 + sizeof(uint64_t) + sizeof(uint16_t);
+    std::string host(UINT16_MAX - direct_key_overhead - 1, 'h');
+    DialTarget target;
+    target.host = host;
+    target.port = 80;
+    auto stream = pool->dial(target);
+    ASSERT_NE(nullptr, stream); // largest key accepted by the socket pool
+    delete stream;
+    EXPECT_EQ(1, underlay->calls);
+
+    auto reject = [&](const DialTarget& route) {
+        errno = 0;
+        std::unique_ptr<ISocketStream> result(pool->dial(route));
+        EXPECT_EQ(nullptr, result);
+        EXPECT_EQ(ENAMETOOLONG, errno);
+        EXPECT_EQ(1, underlay->calls);
+    };
+    host.push_back('h');
+    target.host = host;
+    reject(target); // exactly UINT16_MAX bytes
+    host.append(UINT16_MAX, 'h');
+    target.host = host;
+    reject(target); // a length that would wrap in uint16_t
+
+    std::string oversized(UINT16_MAX, 'x');
+    target.host = "origin.example";
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+    target.proxy_auth = oversized;
+    reject(target);
+    oversized.back() = 'y';
+    reject(target); // different credentials must never find a truncated key
+    target.proxy_auth = {};
+    target.proxy_pool_key = oversized;
+    reject(target);
+    target.secure = true;
+    reject(target); // CONNECT route
+    target.uds_path = oversized;
+    reject(target);
+
+    // Rejection leaves the previously pooled connection intact.
+    host.resize(UINT16_MAX - direct_key_overhead - 1);
+    DialTarget valid;
+    valid.host = host;
+    valid.port = 80;
+    stream = pool->dial(valid);
+    ASSERT_NE(nullptr, stream);
+    delete stream;
+    EXPECT_EQ(1, underlay->calls);
+}
+
 TEST(dialer, pool_updates_timeout_on_reuse) {
     int destroyed = 0;
     auto underlay = new FailingStreamDialer(&destroyed);
