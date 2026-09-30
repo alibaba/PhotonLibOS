@@ -288,7 +288,7 @@ public:
     }
     virtual int cancel_wait() override { return eventfd_write(evfd, 1); }
 
-    uint64_t engine_flag() const override { return INIT_EVENT_EPOLL_NG; }
+    std::string_view get_engine_name() const override { return "epoll-ng"; }
 
     int wait_for_fd(int fd, uint32_t interests, Timeout timeout) override {
         if (interests == 0) return 0;

@@ -1419,8 +1419,7 @@ TEST_F(UblkTest, multiqueue_without_a_pool) {
 // WorkPool's cursor is `vcpu_index++ % size`, so size 0 there is a SIGFPE --
 // migrate_to_pool's short-circuit is the only thing standing in the way.
 TEST_F(UblkTest, empty_pool_falls_back_to_the_caller_vcpu) {
-    photon::WorkPool empty(0, (int)photon::get_event_engine(),
-                              (int)photon::get_io_engine());
+    photon::WorkPool empty(0);   // no vcpus, so no engines to match
     ASSERT_EQ(0, empty.get_vcpu_num());
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1699,7 +1698,8 @@ int main(int argc, char** argv) {
     int cons = photon::blk::test::consumer_child_main(argc, argv);
     if (cons != photon::blk::test::CONS_NOT_A_CHILD)
         return cons;
-    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+    if (photon::init(photon::blk::test::TEST_EVENT_ENGINE,
+                     photon::blk::test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, argv);

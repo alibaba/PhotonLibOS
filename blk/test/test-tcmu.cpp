@@ -1239,11 +1239,11 @@ TEST_F(TcmuTest, resize_grow) {
 // resize() issued from this vcpu (the capacity atomics are written here, read
 // there).
 TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
-    // TestPool QUERIES the caller's engines instead of spelling one out:
-    // check_pool_engines derives its requirement from the caller's own vcpu, so
-    // a pool built from that query satisfies it by construction; writing
-    // INIT_EVENT_EPOLL here would encode today's recommended_order (epoll ahead
-    // of iouring) as if it were a contract.
+    // TestPool is built with the same request mask this suite's main() inited
+    // the caller's vcpu with, which is what makes check_pool_engines pass: it
+    // derives its requirement from the caller's own vcpu, and photon has no query
+    // for the engine a vcpu actually installed, so the match has to be arranged
+    // by construction rather than read back and copied. See TEST_EVENT_ENGINE.
     test::TestPool pool(2);
     // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1)
     test::RecordingFile rec(file);
@@ -1320,11 +1320,11 @@ TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
 // WHEN the flush can proceed, never WHICH vcpu it runs on.
 TEST_F(TcmuTest, pool_serving_stop_under_load) {
     // ONE pool vcpu, so the placement set is {pool} or {pool, caller}, and
-    // only the teardown path can add the caller. Engines QUERIED, not spelled
-    // out, and declared before cfg/dev so the pool outlives the device --
-    // see pool_placement_pump_off_the_caller_vcpu (CONTRACT 1)
-    photon::WorkPool pool(1, (int)photon::get_event_engine(),
-                             (int)photon::get_io_engine());
+    // only the teardown path can add the caller. Engines are the shared pair
+    // main() also inits with (see TEST_EVENT_ENGINE), and the pool is declared
+    // before cfg/dev so it outlives the device -- see
+    // pool_placement_pump_off_the_caller_vcpu (CONTRACT 1)
+    photon::WorkPool pool(1, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
     auto cfg = make_cfg(/*loopback=*/true);
@@ -2017,7 +2017,8 @@ int main(int argc, char** argv) {
     int cons = photon::blk::test::consumer_child_main(argc, argv);
     if (cons != photon::blk::test::CONS_NOT_A_CHILD)
         return cons;
-    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+    if (photon::init(photon::blk::test::TEST_EVENT_ENGINE,
+                     photon::blk::test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, argv);

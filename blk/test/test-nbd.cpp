@@ -946,7 +946,8 @@ int main(int argc, char** arg) {
     int cons = photon::blk::test::consumer_child_main(argc, arg);
     if (cons != photon::blk::test::CONS_NOT_A_CHILD)
         return cons;
-    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+    if (photon::init(photon::blk::test::TEST_EVENT_ENGINE,
+                     photon::blk::test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
     ::testing::InitGoogleTest(&argc, arg);

@@ -109,10 +109,10 @@ namespace photon
             return 0;
         }
 
-        // The answer for a vcpu with no master engine installed. init() installs
-        // one only when the request names an engine, and fd_events_fini() puts this
-        // back, so NONE covers both the window before that install and after it.
-        uint64_t engine_flag() const override { return INIT_EVENT_NONE; }
+        // The empty name, meaning no engine at all. init() installs a master
+        // engine only when the request names one, and fd_events_fini() puts this
+        // back, so this covers both the window before that install and after it.
+        std::string_view get_engine_name() const override { return {}; }
 
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {

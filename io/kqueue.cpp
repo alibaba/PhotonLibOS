@@ -153,7 +153,7 @@ public:
         return do_kevent(&entry, 1, nullptr, 0, &tm00);
     }
 
-    uint64_t engine_flag() const override { return INIT_EVENT_KQUEUE; }
+    std::string_view get_engine_name() const override { return "kqueue"; }
 
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
     // functionality.

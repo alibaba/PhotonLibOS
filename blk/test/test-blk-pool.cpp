@@ -99,7 +99,7 @@ TEST(blk_pool, null_pool_leaves_coroutine_on_caller_vcpu) {
 
 TEST(blk_pool, null_thread_is_not_an_error) {
     migrate_to_pool(nullptr, nullptr);
-    photon::WorkPool pool(2, photon::get_event_engine(), INIT_IO_NONE);
+    photon::WorkPool pool(2, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     migrate_to_pool(&pool, nullptr);   // must not crash, must not migrate anything
 }
 
@@ -117,14 +117,14 @@ TEST(blk_pool, empty_pool_does_not_divide_by_zero) {
 }
 
 TEST(blk_pool, fewer_queues_than_vcpus_land_on_distinct_vcpus) {
-    photon::WorkPool pool(4, photon::get_event_engine(), INIT_IO_NONE);
+    photon::WorkPool pool(4, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     ASSERT_EQ(4, pool.get_vcpu_num());
     auto v = land(3, &pool);
     EXPECT_EQ(3UL, v.size());   // n <= m: one vcpu each, no sharing
 }
 
 TEST(blk_pool, more_queues_than_vcpus_use_every_vcpu) {
-    photon::WorkPool pool(2, photon::get_event_engine(), INIT_IO_NONE);
+    photon::WorkPool pool(2, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     ASSERT_EQ(2, pool.get_vcpu_num());
     auto v = land(6, &pool);
     EXPECT_EQ(2UL, v.size());   // n > m: shared, but every vcpu is used
@@ -134,7 +134,7 @@ TEST(blk_pool, more_queues_than_vcpus_use_every_vcpu) {
 // WorkPool's own, shared across callers, so the second batch continues where the
 // first left off rather than restarting.
 TEST(blk_pool, cursor_spreads_two_devices) {
-    photon::WorkPool pool(3, photon::get_event_engine(), INIT_IO_NONE);
+    photon::WorkPool pool(3, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     auto a = land(2, &pool);
     auto b = land(2, &pool);
     EXPECT_EQ(2UL, a.size());
@@ -166,8 +166,9 @@ TEST(blk_pool, engines_reject_a_pool_with_no_event_engine) {
 }
 
 TEST(blk_pool, engines_accept_a_matching_pool) {
-    // the caller's own vcpu is what the requirement is derived from
-    photon::WorkPool pool(2, photon::get_event_engine(), photon::get_io_engine());
+    // The same request the caller's own vcpu got, which is what the requirement
+    // is derived from -- see TEST_EVENT_ENGINE for why it is a shared constant.
+    photon::WorkPool pool(2, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     ASSERT_EQ(2, pool.get_vcpu_num());
     EXPECT_EQ(0, check_pool_engines(&pool));
 }
@@ -179,12 +180,7 @@ int main(int argc, char** argv) {
     if (cons != photon::blk::test::CONS_NOT_A_CHILD)
         return cons;
     ::testing::InitGoogleTest(&argc, argv);
-#ifdef __linux__
-    int ev = INIT_EVENT_EPOLL;
-#else
-    int ev = INIT_EVENT_KQUEUE;
-#endif
-    if (photon::init(ev, INIT_IO_NONE))
+    if (photon::init(test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
     set_log_output_level(1);

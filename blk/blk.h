@@ -158,15 +158,22 @@ struct BlkConfig {
     // vcpus, so nothing can be counted against them.
     //
     // CONTRACT 2 -- engines. Every vcpu in the pool must be able to host the
-    // serving coroutines, which start() verifies by comparing each pool vcpu's
-    // engines against the caller's own. In practice: construct the pool with the
-    // same event engine you initialized your own vcpu with, and with an io_engine
-    // that covers your backend. `WorkPool pool(n);` is NOT that -- its defaults
-    // are no event engine and no io engine, and start() rejects it with EINVAL.
-    // A backend file opened with the iouring engine additionally requires the
-    // pool's vcpus to run iouring as their master engine, not merely to have been
-    // asked for it: init() keeps the first engine that initializes, so a request
-    // naming several installs one.
+    // serving coroutines. The event-engine half is verified: start() asks each
+    // pool vcpu's master engine to name itself and compares that with the
+    // caller's, so construct the pool with the same event engine you initialized
+    // your own vcpu with. `WorkPool pool(n);` is NOT that -- its default
+    // ev_engine installs no engine at all, every fd wait on such a vcpu fails at
+    // once, and start() rejects the pool with EINVAL. A backend file opened with
+    // the iouring engine additionally requires the pool's vcpus to run iouring as
+    // their master engine, not merely to have been asked for it: init() keeps the
+    // first engine that initializes, so a request naming several installs one.
+    //
+    // The io-engine half is NOT verified, and is yours alone: give the pool vcpus
+    // an io_engine that covers your backend. An io engine is a per-vcpu init
+    // function rather than an object, and photon keeps the mask a vcpu was inited
+    // with to itself, so there is nothing start() could ask. Getting it wrong is
+    // a crash rather than an EINVAL -- libaio's context is thread-local, and a
+    // vcpu inited without INIT_IO_LIBAIO has none.
     photon::WorkPool* pool = nullptr;
                                   // Where the serving coroutines run. nullptr: on the
                                   // caller's own vcpu. Non-null: every coroutine this

@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <photon/common/callback.h>     // TempDelegate
 #include <photon/fs/filesystem.h>       // fs::IFile
+#include <photon/photon.h>              // INIT_EVENT_DEFAULT / INIT_IO_NONE
 #include <photon/thread/thread.h>       // vcpu_base, get_vcpu, mutex
 #include <photon/thread/workerpool.h>   // WorkPool
 
@@ -179,11 +180,20 @@ private:
     RecordingFile& operator=(const RecordingFile&) = delete;
 };
 
-// A WorkPool whose vcpus are initialized with exactly the engines the calling
-// vcpu has, which is what check_pool_engines() requires. Spelling an engine
-// name at the call sites instead would encode today's recommended_order (epoll
-// ahead of iouring) as if it were a contract, and would be wrong on macOS,
-// where the caller's engine is kqueue or select.
+// The engine masks every blk suite passes to photon::init(), and the ones TestPool
+// builds its pool with. One pair used on both sides is what makes a pool
+// "matching": photon has no query for the engine a vcpu actually installed --
+// init() walks a recommended order and keeps the first that works -- so the match
+// has to be arranged by construction instead of read back and copied. Spelling an
+// engine at the call sites instead would encode today's recommended_order (epoll
+// ahead of iouring) as if it were a contract, and would be wrong on macOS, where
+// the caller's engine is kqueue or select.
+constexpr int TEST_EVENT_ENGINE = (int)INIT_EVENT_DEFAULT;
+constexpr int TEST_IO_ENGINE = (int)INIT_IO_NONE;
+
+// A WorkPool whose vcpus are initialized with the masks above, i.e. the same
+// request the calling suite's own vcpu got, which is what check_pool_engines()
+// requires.
 struct TestPool {
     photon::WorkPool* pool;
     explicit TestPool(size_t n);

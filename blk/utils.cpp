@@ -22,9 +22,9 @@ limitations under the License.
 #include "utils.h"
 
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>   // logging the engine name, a string_view
 #include <photon/common/utility.h>      // DEFER
-#include <photon/io/fd-events.h>        // wait_for_fd_readable / writable
-#include <photon/photon.h>              // INIT_EVENT_NONE / get_event_engine / get_io_engine
+#include <photon/io/fd-events.h>        // wait_for_fd_readable / writable, get_engine_name
 #include <photon/thread/thread.h>       // Timeout
 
 #include <fcntl.h>
@@ -40,6 +40,7 @@ limitations under the License.
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 #include <thread>
 
 #ifdef __linux__
@@ -212,21 +213,25 @@ namespace {
 
 struct PoolProbe {
     photon::semaphore done;
-    uint64_t ev = 0;
-    uint64_t io = 0;
+    std::string_view ev;
 };
 
-// Runs ON the pool vcpu, so what it reports is that vcpu's: get_event_engine()
-// asks the master engine this vcpu is currently pointing at, and get_io_engine()
-// reads this vcpu's thread_local record. Signals before returning; nothing of the
+// Runs ON the pool vcpu, so what it reports is that vcpu's: it asks the master
+// engine this vcpu is currently pointing at to name itself. The view is copied out
+// of a frame that dies with this coroutine, which the name's contract allows (see
+// MasterEventEngine::get_engine_name). Signals before returning; nothing of the
 // caller's is touched after the signal, so the caller may unwind as soon as it
 // wakes.
 void* pool_probe_thunk(void* a) {
     auto* p = (PoolProbe*)a;
-    p->ev = photon::get_event_engine();
-    p->io = photon::get_io_engine();
+    p->ev = photon::get_vcpu()->master_event_engine->get_engine_name();
     p->done.signal(1);
     return nullptr;
+}
+
+// The empty name means no engine is installed at all, which would log as nothing.
+std::string_view show_engine(std::string_view name) {
+    return name.empty() ? std::string_view("<none>") : name;
 }
 
 }   // namespace
@@ -237,8 +242,9 @@ int check_pool_engines(photon::WorkPool* pool) {
     int n = pool->get_vcpu_num();
     if (n <= 0)
         return 0;
-    const uint64_t need_ev = photon::get_event_engine();
-    const uint64_t need_io = photon::get_io_engine();
+    // Derived from the caller's own vcpu, and like the probe above it needs one:
+    // master_event_engine is per-vcpu state, not a process-wide setting.
+    const std::string_view need = photon::get_vcpu()->master_event_engine->get_engine_name();
     for (int i = 0; i < n; i++) {
         PoolProbe p;
         auto th = photon::thread_create(&pool_probe_thunk, &p);
@@ -250,12 +256,10 @@ int check_pool_engines(photon::WorkPool* pool) {
         if (pool->thread_migrate(th, (size_t)i) < 0)
             LOG_ERRNO_RETURN(0, -1, "cannot reach work pool vcpu `", i);
         p.done.wait(1);
-        if (p.ev == INIT_EVENT_NONE || p.ev != need_ev)
+        if (p.ev.empty() || p.ev != need)
             LOG_ERROR_RETURN(EINVAL, -1,
                 "work pool vcpu ` cannot host blk serving coroutines: event engine `, need ` (a pool built with the default ev_engine has none, and every fd wait on it fails at once)",
-                i, HEX(p.ev), HEX(need_ev));
-        if ((p.io & need_io) != need_io)
-            LOG_ERROR_RETURN(EINVAL, -1, "work pool vcpu ` is missing io engines: has `, need ` (a backend opened on a vcpu with them cannot be served from one without)", i, HEX(p.io), HEX(need_io));
+                i, show_engine(p.ev), show_engine(need));
     }
     return 0;
 }

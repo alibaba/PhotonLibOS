@@ -89,41 +89,6 @@ int init(uint64_t event_engine = INIT_EVENT_DEFAULT,
 int fini();
 
 /**
- * @brief The event engine installed on this vcpu, as a single INIT_EVENT_* flag.
- *
- * init() tries a recommended order and keeps the first engine that initializes,
- * so this is NOT the mask that was requested, which may name several. Asking the
- * installed engine is what makes it exact: the request mask cannot distinguish
- * "iouring was asked for and epoll won" from "iouring is running", and code that
- * casts the master engine to a concrete type needs that distinction.
- *
- * INIT_EVENT_NONE means no master engine was installed, i.e. this vcpu runs the
- * NullEventEngine and every fd wait on it fails at once. Callers that dispatch
- * work to another vcpu (a WorkPool, say) use this to check that vcpu can actually
- * host fd waits before parking a coroutine there.
- *
- * Must be called on a vcpu, i.e. with a current photon thread -- the same
- * precondition as is_master_event_engine_default().
- */
-uint64_t get_event_engine();
-
-/**
- * @brief The io-engine mask this vcpu's init() was given.
- *
- * Unlike get_event_engine() this is the request mask, because io engines are
- * independent add-ons rather than a fallback chain, and there is no per-vcpu
- * engine object to ask. It reports what was asked for, not what was built: a bit
- * whose engine is compiled out of this build (INIT_IO_LIBCURL without ENABLE_CURL,
- * say) stays set. init() aborts if one that IS compiled in fails to initialize, so
- * by the time it returns the distinction only matters for the compiled-out bits.
- * Per-vcpu state does exist underneath it: libaio's context is thread-local, so a
- * vcpu whose mask lacks INIT_IO_LIBAIO cannot serve a libaio-backed file at all.
- *
- * Must be called on a vcpu, as above.
- */
-uint64_t get_io_engine();
-
-/**
  * @brief add callbacks on fini()
  */
 void fini_hook(Delegate<void> handler);

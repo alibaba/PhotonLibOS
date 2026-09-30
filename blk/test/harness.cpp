@@ -26,7 +26,6 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>   // report() logs a std::string
 #include <photon/common/utility.h>          // DEFER
 #include <photon/fs/localfs.h>              // TestImage
-#include <photon/photon.h>                  // get_event_engine / get_io_engine
 #include <photon/thread/thread.h>           // thread_usleep, now
 
 #include <dirent.h>
@@ -2065,11 +2064,8 @@ int RecordingFile::ftruncate(off_t length) { record(); return m_file->ftruncate(
 int RecordingFile::fallocate(int mode, off_t offset, off_t len) { record(); return m_file->fallocate(mode, offset, len); }
 int RecordingFile::close() { return m_file->close(); }
 
-// Must be constructed on a photon vcpu: get_event_engine()/get_io_engine() are
-// per-vcpu, and a gtest body runs on the caller's.
 TestPool::TestPool(size_t n)
-    : pool(new photon::WorkPool(n, (int)photon::get_event_engine(),
-                                (int)photon::get_io_engine())) {}
+    : pool(new photon::WorkPool(n, TEST_EVENT_ENGINE, TEST_IO_ENGINE)) {}
 
 TestPool::~TestPool() {
     delete pool;

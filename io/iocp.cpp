@@ -563,7 +563,7 @@ public:
         return 0;
     }
 
-    uint64_t engine_flag() const override { return INIT_EVENT_IOCP; }
+    std::string_view get_engine_name() const override { return "iocp"; }
 
     virtual int wait_for_fd(int fd, uint32_t interest, Timeout timeout) override {
         if (fd < 0)

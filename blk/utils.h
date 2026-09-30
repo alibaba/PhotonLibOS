@@ -182,10 +182,11 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 // is parked on them. Returns 0, or -1 with errno=EINVAL after logging the
 // offending vcpu index.
 //
-// Two requirements, derived from the CALLER's own vcpu rather than declared in the
-// config -- a serving coroutine does to the backend exactly what the caller's
-// coroutines would do, so "at least as capable as the vcpu you are calling from"
-// is the whole requirement and the caller never has to state it:
+// One requirement is checked, and it is derived from the CALLER's own vcpu rather
+// than declared in the config -- a serving coroutine does to the backend exactly
+// what the caller's coroutines would do, so "at least as capable as the vcpu you
+// are calling from" is the whole requirement and the caller never has to state it.
+// A second requirement is just as real but cannot be checked at all:
 //
 //   event engine: must be installed, and must be the SAME one. "Installed" is not
 //     optional -- WorkPool's constructor defaults to ev_engine = 0 and
@@ -233,13 +234,20 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 //
 //     "Same" is not optional either -- a backend file opened with the iouring
 //     engine casts the CURRENT vcpu's master engine to iouringEngine*, so landing
-//     on an epoll vcpu is a wrong-type cast. Note that asking init() for several
-//     event engines does not install several: it keeps the first that works, which
-//     is why this compares get_event_engine() (the winner) and not the request mask.
-//   io engines: the pool vcpu's mask must COVER the caller's. libaio's context is
-//     thread-local and is only set by libaio_wrapper_init(), which init() calls
-//     only when the flag is present; on a vcpu without it the context is null and
-//     the first libaio-backed IO dereferences null.
+//     on an epoll vcpu is a wrong-type cast. Asking init() for several event
+//     engines does not install several: it keeps the first that works, so the
+//     request mask cannot answer "the same as what". Each engine therefore names
+//     itself (MasterEventEngine::get_engine_name) and the names are what get
+//     compared -- the winner's, on both sides.
+//   io engines are NOT checked, and the gap is the caller's to close. The
+//     requirement behind it is real: libaio's context is thread-local and is set
+//     only by the init that INIT_IO_LIBAIO gates, so a backend opened on a vcpu
+//     with it and served from one without dereferences a null context. But an io
+//     engine is a per-vcpu init function rather than an object, and the mask a
+//     vcpu was inited with is photon-private state with no query for it -- there
+//     is nothing to ask and nothing to compare an answer against. So the pool
+//     handed to blk must be given an io_engine covering the backend, and a
+//     mistake there surfaces as a crash, not as this EINVAL.
 int check_pool_engines(photon::WorkPool* pool);
 
 // ===========================================================================

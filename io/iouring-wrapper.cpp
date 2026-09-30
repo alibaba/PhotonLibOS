@@ -522,7 +522,7 @@ public:
         return 0;
     }
 
-    uint64_t engine_flag() const override { return INIT_EVENT_IOURING; }
+    std::string_view get_engine_name() const override { return "iouring"; }
 
     static bool register_files_enabled() {
         return m_register_files_flag == 1;
