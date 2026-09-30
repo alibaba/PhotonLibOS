@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #include "client.h"
+#include <atomic>
 #include <bitset>
 #include <algorithm>
 #include <photon/common/alog-stdstring.h>
@@ -24,6 +25,7 @@ limitations under the License.
 #include <photon/net/socket.h>
 #include <photon/net/utils.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/vcpu-local.h>
 #include <photon/photon.h>
 
 namespace photon {
@@ -46,6 +48,46 @@ static void atomic_store_resolver(std::shared_ptr<Resolver>* target,
     std::atomic_store(target, std::move(resolver));
 }
 #pragma GCC diagnostic pop
+
+namespace {
+
+struct ResolverOwnership {
+    Resolver* resolver;
+    bool adopted = false;
+    std::atomic<bool> released{false};
+    explicit ResolverOwnership(Resolver* resolver) : resolver(resolver) {}
+};
+
+struct OwnedResolverSlot {
+    std::shared_ptr<ResolverOwnership> state;
+    explicit OwnedResolverSlot(std::shared_ptr<ResolverOwnership> state)
+        : state(std::move(state)) {}
+    ~OwnedResolverSlot() {
+        // If fini wins ownership of this slot, keep its vCPU alive until every
+        // client/request lease is gone. No new lease can be issued after the
+        // aliasing shared_ptr's control block reaches zero.
+        while (!state->released.load(std::memory_order_acquire))
+            photon::thread_usleep(1000);
+        if (state->adopted) delete state->resolver;
+    }
+};
+
+class OwnedResolverLease : public photon::VCPULocal<OwnedResolverSlot> {
+public:
+    explicit OwnedResolverLease(std::shared_ptr<ResolverOwnership> state)
+        : VCPULocal({this, &OwnedResolverLease::make_slot}),
+          m_state(std::move(state)) {
+        get(); // bind reclamation to the resolver's registering vCPU
+    }
+    ~OwnedResolverLease() {
+        m_state->released.store(true, std::memory_order_release);
+    }
+private:
+    std::shared_ptr<ResolverOwnership> m_state;
+    OwnedResolverSlot* make_slot() { return new OwnedResolverSlot(m_state); }
+};
+
+} // namespace
 
 class ClientImpl;
 
@@ -70,14 +112,34 @@ void Client::set_resolver(Resolver* resolver, bool ownership) {
         SCOPED_LOCK(m_resolver_lock);
         current = atomic_load_resolver(&m_resolver);
         if (current.get() == resolver) return;
+    }
+    current.reset();
 
-        std::shared_ptr<Resolver> next;
-        if (resolver) {
-            if (ownership)
-                next.reset(resolver);
-            else
-                next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
+    // Preparing a vCPU slot can reap an old slot at a reused address and yield
+    // during its destruction. Do this outside the setter lock. Ownership is
+    // adopted only after the pointer is rechecked under that lock.
+    std::shared_ptr<ResolverOwnership> state;
+    std::shared_ptr<Resolver> next;
+    if (resolver) {
+        if (!ownership) {
+            next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
+        } else {
+            state = std::make_shared<ResolverOwnership>(resolver);
+            if (photon::CURRENT) {
+                auto lease = std::make_shared<OwnedResolverLease>(state);
+                next = std::shared_ptr<Resolver>(std::move(lease), resolver);
+            } else {
+                next = std::shared_ptr<Resolver>(resolver, [state](Resolver* p) {
+                    if (state->adopted) delete p;
+                });
+            }
         }
+    }
+    {
+        SCOPED_LOCK(m_resolver_lock);
+        current = atomic_load_resolver(&m_resolver);
+        if (current.get() == resolver) return;
+        if (state) state->adopted = true;
         atomic_store_resolver(&m_resolver, std::move(next));
     }
 }

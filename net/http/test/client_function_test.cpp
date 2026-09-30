@@ -35,6 +35,7 @@ limitations under the License.
 #include <photon/fs/localfs.h>
 #include "../../../test/gtest.h"
 #include "../../test/cert-key.cpp"
+#include "../../security-context/test/test_cert_utils.h"
 #include "to_url.h"
 
 using namespace photon::net;
@@ -1499,6 +1500,94 @@ TEST(http_client, resolver_replacement_destroys_outside_setter_lock) {
     EXPECT_EQ(1, next_destroyed);
 }
 
+TEST(http_client, owned_resolver_last_request_lease_reclaims_on_owner) {
+    auto tcpserver = new_tcp_socket_server();
+    DEFER(delete tcpserver);
+    ASSERT_EQ(0, tcpserver->bind_v4localhost());
+    ASSERT_EQ(0, tcpserver->listen());
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcpserver->start_loop());
+
+    photon::semaphore entered(0), release(0), done(0);
+    int destroyed = 0;
+    struct BlockingResolver : TestFilteredResolver {
+        photon::semaphore *entered, *release;
+        photon::vcpu_base* owner = photon::get_vcpu();
+        BlockingResolver(int* destroyed, photon::semaphore* entered,
+                         photon::semaphore* release)
+            : TestFilteredResolver({nullptr, &resolve_filter_accept_all}, destroyed),
+              entered(entered), release(release) {}
+        ~BlockingResolver() override { EXPECT_EQ(owner, photon::get_vcpu()); }
+        IPAddr resolve(std::string_view host) override {
+            auto result = inner->resolve(host);
+            entered->signal(1);
+            release->wait(1);
+            return result;
+        }
+    };
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_resolver(new BlockingResolver(&destroyed, &entered, &release), true);
+    auto target = to_url(tcpserver, "/simple");
+    std::thread worker([&] {
+        EXPECT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+        simple_get(client.get(), target);
+        done.signal(1);
+        EXPECT_EQ(0, photon::fini());
+    });
+    EXPECT_EQ(0, entered.wait(1, 5ULL * 1000 * 1000));
+    client->set_resolver(nullptr);
+    EXPECT_EQ(0, destroyed);
+    release.signal(1);
+    EXPECT_EQ(0, done.wait(1, 5ULL * 1000 * 1000));
+    worker.join();
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(http_client, owned_resolver_owner_fini_waits_for_last_lease) {
+    struct LeaseClient : ClientImpl {
+        LeaseClient() : ClientImpl(nullptr, nullptr) {}
+        std::shared_ptr<Resolver> lease() { return atomic_load_resolver(&m_resolver); }
+    };
+    std::unique_ptr<LeaseClient> client(new LeaseClient());
+    photon::semaphore ready(0), start_fini(0), done(0);
+    std::atomic<int> destroyed{0};
+    std::atomic<bool> finished{false};
+    std::thread owner([&] {
+        EXPECT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+        struct TrackedResolver : TestFilteredResolver {
+            std::atomic<int>* destroyed;
+            photon::vcpu_base* built_on = photon::get_vcpu();
+            explicit TrackedResolver(std::atomic<int>* destroyed)
+                : TestFilteredResolver({nullptr, &resolve_filter_accept_all}),
+                  destroyed(destroyed) {}
+            ~TrackedResolver() override {
+                EXPECT_EQ(built_on, photon::get_vcpu());
+                ++*destroyed;
+            }
+        };
+        client->set_resolver(new TrackedResolver(&destroyed), true);
+        ready.signal(1);
+        start_fini.wait(1);
+        EXPECT_EQ(0, photon::fini());
+        finished.store(true);
+        done.signal(1);
+    });
+    EXPECT_EQ(0, ready.wait(1, 5ULL * 1000 * 1000));
+    auto lease = client->lease();
+    client->set_resolver(nullptr);
+    start_fini.signal(1);
+    photon::thread_usleep(20'000);
+    EXPECT_FALSE(finished.load());
+    EXPECT_EQ(0, destroyed.load());
+    lease.reset();
+    EXPECT_EQ(0, done.wait(1, 5ULL * 1000 * 1000));
+    owner.join();
+    EXPECT_EQ(1, destroyed.load());
+}
+
 TEST(http_client, cross_vcpu_client_destruction) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->bind_v4localhost();
@@ -1599,6 +1688,8 @@ struct FakeConnectProxy {
     std::string authority;   // the request-target of the last CONNECT
     std::string redirect_to; // if set, a forwarded request is answered with a 302 to here
     bool serve_forwards = false; // answer forwarded requests with a plain 200
+    bool secure = false;
+    TLSContext* tls_context = nullptr;
     estring last_head;       // the head of the last request, forwarded or CONNECT
     int connects = 0;        // tunnels established
     int forwards = 0;        // forwarded (non-CONNECT) requests answered
@@ -1607,27 +1698,39 @@ struct FakeConnectProxy {
 
     ~FakeConnectProxy() {
         delete srv;   // stops accepting; the tunnels in flight are the client's
+        photon::thread_yield(); // let already accepted handlers enter live
         for (int i = 0; live > 0 && i < 10000; ++i)
             photon::thread_usleep(1000);
         EXPECT_EQ(0, live);
         delete cli;
     }
 
-    int start() {
+    int start(TLSContext* context = nullptr) {
+        tls_context = context;
+        secure = (context != nullptr);
         srv->set_handler({this, &FakeConnectProxy::handle});
         if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
         return srv->start_loop();
     }
 
-    estring url(std::string_view user_passwd = {}) {
-        return estring().appends("http://",
+    estring url(std::string_view user_passwd = {},
+                 std::string_view host = "127.0.0.1") {
+        return estring().appends(secure ? "https://" : "http://",
             estring::make_conditional_cat_list(!user_passwd.empty(), user_passwd, "@"),
-            "127.0.0.1:", srv->getsockname().port);
+            host, ":", srv->getsockname().port);
     }
 
     int handle(ISocketStream* s) {
         live++;
         DEFER(live--);
+        // Count TLS handshakes too: a failed peer verification can leave an
+        // accepted handshake running after the client's call has returned.
+        std::unique_ptr<ISocketStream> tls;
+        if (tls_context) {
+            tls.reset(new_tls_stream(tls_context, s, SecurityRole::Server, false));
+            if (!tls) return 0;
+            s = tls.get();
+        }
         char buf[4096];
         size_t n = 0, end;
         while (true) {
@@ -1713,24 +1816,39 @@ struct FakeConnectProxy {
 
 // Brings up a TLS origin server on localhost, serving `handler`.
 struct TLSOrigin {
-    TLSContext* ctx = new_tls_context(cert_str, key_str, passphrase_str);
+    TLSContext* ctx;
     ISocketServer* srv = nullptr;
     HTTPServer* http = new_http_server();
+    int live = 0;
+
+    explicit TLSOrigin(TLSContext* context = nullptr)
+        : ctx(context ? context : new_tls_context(cert_str, key_str, passphrase_str)) {}
 
     ~TLSOrigin() {
         delete srv;
+        photon::thread_yield();
+        while (live > 0) photon::thread_usleep(1000);
         delete http;
         delete ctx;
     }
 
     int start(HTTPHandler* handler) {
         if (!ctx) return -1;
-        srv = new_tls_server(ctx, new_tcp_socket_server(), true);
+        srv = new_tcp_socket_server();
         if (!srv) return -1;
         http->add_handler(handler, true, "/simple");
-        srv->set_handler(http->get_connection_handler());
+        srv->set_handler({this, &TLSOrigin::handle});
         if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
         return srv->start_loop();
+    }
+
+    int handle(ISocketStream* stream) {
+        ++live;
+        DEFER(--live);
+        std::unique_ptr<ISocketStream> tls(new_tls_stream(
+            ctx, stream, SecurityRole::Server, false));
+        if (!tls) return 0;
+        return http->get_connection_handler().fire(tls.get());
     }
 
     estring url(std::string_view path) {
@@ -1770,6 +1888,73 @@ TEST(http_client, connect_tunnel) {
     // the tunnel is pooled, so the next request through it costs no CONNECT
     EXPECT_EQ("/simple", get_body(client, origin.url("/simple")));
     EXPECT_EQ(1, proxy.connects);
+}
+
+TEST(http_client, secure_proxy_forwarding_verifies_proxy_hostname) {
+    auto chain = generate_ca_signed_cert({"DNS:localhost"}, "localhost");
+    std::unique_ptr<TLSContext> proxy_context(new_tls_context(
+        chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr));
+    ASSERT_NE(nullptr, proxy_context);
+    FakeConnectProxy proxy;
+    proxy.serve_forwards = true;
+    ASSERT_EQ(0, proxy.start(proxy_context.get()));
+    std::unique_ptr<TLSContext> client_context(new_tls_context());
+    ASSERT_NE(nullptr, client_context);
+    ASSERT_EQ(0, client_context->set_ca_cert(chain.ca_pem.c_str()));
+    std::unique_ptr<Client> client(new_http_client(nullptr, client_context.get()));
+    client->set_proxy(proxy.url({}, "localhost"));
+    // The origin name intentionally differs from the proxy certificate.
+    EXPECT_EQ("", get_body(client.get(), "http://origin.invalid/simple"));
+    EXPECT_EQ(1, proxy.forwards);
+    EXPECT_EQ(0, proxy.connects);
+    EXPECT_NE(std::string::npos, proxy.last_head.find(
+        "GET http://origin.invalid/simple HTTP/1.1"));
+
+    client->set_proxy(proxy.url({}, "127.0.0.1"));
+    Client::OperationOnStack<> mismatch(client.get(), Verb::GET,
+                                       "http://localhost/simple");
+    mismatch.retry = 0;
+    EXPECT_NE(0, mismatch.call()); // proxy cert has no IP SAN
+    EXPECT_EQ(1, proxy.forwards);
+}
+
+TEST(http_client, secure_proxy_connect_verifies_both_hostnames) {
+    auto proxy_chain = generate_ca_signed_cert({"DNS:localhost"}, "localhost",
+                                                "ProxyTestCA");
+    auto origin_chain = generate_ca_signed_cert({"DNS:origin.test"}, "origin.test",
+                                                 "OriginTestCA");
+    std::unique_ptr<TLSContext> proxy_context(new_tls_context(
+        proxy_chain.cert_pem.c_str(), proxy_chain.key_pem.c_str(), nullptr));
+    ASSERT_NE(nullptr, proxy_context);
+    FakeConnectProxy proxy;
+    ASSERT_EQ(0, proxy.start(proxy_context.get()));
+    TLSOrigin origin(new_tls_context(origin_chain.cert_pem.c_str(),
+                                     origin_chain.key_pem.c_str(), nullptr));
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+    std::unique_ptr<TLSContext> client_context(new_tls_context());
+    ASSERT_NE(nullptr, client_context);
+    auto roots = proxy_chain.ca_pem + origin_chain.ca_pem;
+    ASSERT_EQ(0, client_context->set_ca_cert(roots.c_str()));
+    std::unique_ptr<Client> client(new_http_client(nullptr, client_context.get()));
+    client->set_proxy(proxy.url({}, "localhost"));
+    auto port = origin.srv->getsockname().port;
+    auto target = estring().appends("https://origin.test:", port, "/simple");
+    EXPECT_EQ("/simple", get_body(client.get(), target));
+    EXPECT_EQ(1, proxy.connects); // decrypted CONNECT preceded origin TLS
+    EXPECT_EQ(0, proxy.forwards);
+    EXPECT_EQ(estring().appends("origin.test:", port), proxy.authority);
+
+    Client::OperationOnStack<> wrong_origin(client.get(), Verb::GET,
+        estring().appends("https://wrong-origin.test:", port, "/simple"));
+    wrong_origin.retry = 0;
+    EXPECT_NE(0, wrong_origin.call());
+    EXPECT_EQ(2, proxy.connects); // proxy TLS succeeded; origin identity failed
+
+    client->set_proxy(proxy.url({}, "127.0.0.1"));
+    Client::OperationOnStack<> wrong_proxy(client.get(), Verb::GET, target);
+    wrong_proxy.retry = 0;
+    EXPECT_NE(0, wrong_proxy.call());
+    EXPECT_EQ(2, proxy.connects); // rejected before emitting another CONNECT
 }
 
 TEST(http_client, connect_tunnel_auth) {

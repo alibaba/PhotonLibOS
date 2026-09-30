@@ -201,7 +201,12 @@ public:
     // while requests are in flight. The resolver must support concurrent calls;
     // a borrowed resolver must outlive the client. Reinstalling the currently
     // configured pointer is a no-op and preserves its original ownership. No
-    // effect on a dialer set by set_dialer().
+    // effect on a dialer set by set_dialer(). Register an owned vCPU-bound
+    // resolver on its creating vCPU: final reclamation is dispatched there, and
+    // that vCPU's fini waits for all client/request leases to be released. With
+    // no Photon context at registration, an owned resolver must support
+    // destruction on any thread. With no Photon context at final release,
+    // vCPU-bound reclamation is deferred until its owner's fini.
     void set_resolver(Resolver* resolver, bool ownership = false);
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
