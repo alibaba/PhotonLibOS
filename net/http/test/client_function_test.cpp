@@ -1557,7 +1557,8 @@ static std::string get_body(Client* client, std::string_view target) {
     if (op.call() != 0) return "<call failed>";
     EXPECT_EQ(200, op.resp.status_code());
     std::string body(op.resp.body_size(), '\0');
-    if (op.resp.read(&body[0], body.size()) != (ssize_t)body.size())
+    if (!body.empty() &&
+        op.resp.read(&body[0], body.size()) != (ssize_t)body.size())
         return "<read failed>";
     return body;
 }
@@ -1785,7 +1786,9 @@ TEST(http_client, request_proxy_auth_is_consumed_by_connect) {
                                        "Basic ZXhwbGljaXQ="));
     ASSERT_EQ(0, op.call());
     std::string body(op.resp.body_size(), '\0');
-    ASSERT_EQ((ssize_t)body.size(), op.resp.read(&body[0], body.size()));
+    if (!body.empty()) {
+        ASSERT_EQ((ssize_t)body.size(), op.resp.read(&body[0], body.size()));
+    }
     EXPECT_EQ("none", body);
     EXPECT_EQ(1, proxy.connects);
     EXPECT_EQ(0, proxy.denials);

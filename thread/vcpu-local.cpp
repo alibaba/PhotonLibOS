@@ -257,54 +257,54 @@ void VCPULocalBase::drain() {
     m_drained = true;
     while (true) {
         SlotRef ref;
+        Slot* s;
+        bool claimed = false;
+        bool disowned = false;
         {
+            // Keep the back-reference pinned until its slot has been arbitrated
+            // under the table lock. at_fini() drops the table lock before taking
+            // this one, so the nesting here cannot form a lock-order cycle.
             SCOPED_LOCK(m_lock);
             if (m_refs.empty()) break;
             ref = m_refs.back();
-        }
-        Slot* s = ref.slot;
+            s = ref.slot;
 
-        if (ref.epoch != g_fork_epoch.load(std::memory_order_relaxed)) {
-            // A pre-fork slot: its vCPU is gone in this child and its T belongs
-            // to the parent. Detach it from this dead instance; the inherited
-            // table's fini hook discards the slot without touching its T.
-            s->disowned.store(true, std::memory_order_release);
-            SCOPED_LOCK(m_lock);
-            remove_ref(s);
-            continue;
+            if (ref.epoch != g_fork_epoch.load(std::memory_order_relaxed)) {
+                // A pre-fork slot: its vCPU is gone in this child and its T belongs
+                // to the parent. Detach it from this dead instance; the inherited
+                // table's fini hook discards the slot without touching its T.
+                s->disowned.store(true, std::memory_order_release);
+                remove_ref(s);
+                continue;
+            }
+
+            SCOPED_LOCK(ref.table->lock);
+            if (ref.table->contains_locked(s)) {
+                if (!photon::CURRENT) {
+                    // There is no Photon context here to destroy on the owning
+                    // vCPU; let that vCPU's fini hook reap this disowned slot.
+                    s->disowned.store(true, std::memory_order_release);
+                    disowned = true;
+                } else {
+                    ref.table->live.erase(s);
+                    // Pin the owning vCPU's fini until the destroy handoff lands.
+                    ref.table->destroying++;
+                    claimed = true;
+                }
+                remove_ref(s);
+            }
         }
 
         if (!photon::CURRENT) {
-            // no photon context here to destroy on the owning vCPU; disown the
-            // slot and let that vCPU's fini hook reap it
-            bool disowned = false;
-            {
-                SCOPED_LOCK(ref.table->lock);
-                if (ref.table->contains_locked(s)) {
-                    s->disowned.store(true, std::memory_order_release);
-                    disowned = true;
-                }
-            }
-            if (disowned) { SCOPED_LOCK(m_lock); remove_ref(s); }
-            else ::sched_yield();   // the fini hook is dropping our backref
+            if (!disowned)
+                ::sched_yield();   // the fini hook is dropping our backref
             continue;
-        }
-
-        bool claimed = false;
-        {
-            SCOPED_LOCK(ref.table->lock);
-            if (ref.table->contains_locked(s)) {
-                ref.table->live.erase(s);
-                ref.table->destroying++;   // pin the owning vCPU's fini until done
-                claimed = true;
-            }
         }
         if (!claimed) {
             // the fini hook of its vCPU claimed it and will drop our backref
             photon::thread_yield();
             continue;
         }
-        { SCOPED_LOCK(m_lock); remove_ref(s); }
         destroy_slot(s, ref.vcpu);
         { SCOPED_LOCK(ref.table->lock); ref.table->destroying--; }
     }

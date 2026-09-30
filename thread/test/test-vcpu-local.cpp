@@ -18,6 +18,7 @@ limitations under the License.
 #include <unistd.h>
 
 #include <atomic>
+#include <memory>
 #include <new>
 #include <set>
 #include <thread>
@@ -136,6 +137,31 @@ TEST(vcpu_local, reaped_by_vcpu_fini) {
     }
     EXPECT_EQ(N, g_dtor.load());                     // reaped by the vCPUs' fini
     // `local` still alive with an empty ref set; its ~ below must be a no-op
+}
+
+TEST(vcpu_local, instance_destroy_races_vcpu_fini) {
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    DEFER(photon::fini());
+    constexpr int ROUNDS = 32;
+    for (int i = 0; i < ROUNDS; ++i) {
+        reset();
+        auto pool = std::make_unique<WorkPool>(
+            1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+        struct Local final : VCPULocal<Value> {};
+        auto local = new Local;
+        pool->call([&] { ASSERT_NE(nullptr, local->get()); });
+
+        std::atomic<bool> start{false};
+        std::thread destroyer([&] {
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            delete local;
+        });
+        start.store(true, std::memory_order_release);
+        pool.reset();
+        destroyer.join();
+        EXPECT_EQ(1, g_dtor.load());
+    }
 }
 
 // A factory is honored, and a factory that returns nullptr is not cached: the
