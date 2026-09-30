@@ -72,8 +72,8 @@ public:
     ssize_t writev(const iovec* iov, int iovcnt) override {
         return inner->writev(iov, iovcnt);
     }
-    uint64_t timeout() const override { return inner->timeout(); }
-    void timeout(uint64_t value) override { inner->timeout(value); }
+    uint64_t timeout() const override { return timeout_value; }
+    void timeout(uint64_t value) override { timeout_value = value; }
     ssize_t recv(void* buf, size_t count, int flags = 0) override {
         return inner->recv(buf, count, flags);
     }
@@ -116,6 +116,7 @@ public:
 private:
     std::unique_ptr<StringSocketStream> inner;
     int* destroyed;
+    uint64_t timeout_value = -1ULL;
 };
 
 class FailingStreamDialer : public IDialer {
@@ -336,6 +337,31 @@ TEST(dialer, pool_reuses_only_identical_routes) {
     use(uds_other_origin);
 
     EXPECT_EQ(8, underlay->calls);
+    pool.reset();
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(dialer, pool_updates_timeout_on_reuse) {
+    int destroyed = 0;
+    auto underlay = new FailingStreamDialer(&destroyed);
+    std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
+    ASSERT_NE(nullptr, pool);
+
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 80;
+
+    auto stream = pool->dial(target, 10'000'000);
+    ASSERT_NE(nullptr, stream);
+    EXPECT_EQ(10'000'000U, stream->timeout());
+    auto first = stream->get_underlay_object();
+    delete stream;
+
+    stream = pool->dial(target, 1'000);
+    ASSERT_NE(nullptr, stream);
+    EXPECT_EQ(first, stream->get_underlay_object());
+    EXPECT_EQ(1'000U, stream->timeout());
+    delete stream;
     pool.reset();
     EXPECT_EQ(1, destroyed);
 }

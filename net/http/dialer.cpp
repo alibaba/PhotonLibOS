@@ -349,9 +349,11 @@ public:
 
     ISocketStream* dial(const DialTarget& target, uint64_t timeout) override {
         auto key = make_key(target);
-        return m_pool->connect(key, [&]() {
+        auto stream = m_pool->connect(key, [&]() {
             return m_underlay->dial(target, timeout);
         });
+        if (stream) stream->timeout(timeout);
+        return stream;
     }
 
 protected:
