@@ -236,8 +236,10 @@ protected:
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
 // Each client owns its connection pools (created lazily, one per vCPU used),
-// destroyed with the client, or at photon::fini() of the respective vCPU. The
-// DNS cache behind the pools is shared by the whole process.
+// which retire with the client or at the respective vCPU's fini. Returned
+// responses, native connections and WebSockets keep their pool alive until
+// released; use/release them on their creating vCPU before its fini. A borrowed
+// tls_ctx must outlive them too. DNS caches are shared by the whole process.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();

@@ -423,6 +423,34 @@ TEST(dialer, pool_updates_timeout_on_reuse) {
     EXPECT_EQ(1, destroyed);
 }
 
+TEST(dialer, checked_out_streams_keep_pool_and_underlay_alive) {
+    int destroyed = 0;
+    auto underlay = new StreamDialer(&destroyed);
+    std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 80;
+    std::unique_ptr<ISocketStream> first(pool->dial(target));
+    std::unique_ptr<ISocketStream> second(pool->dial(target));
+    ASSERT_NE(nullptr, first);
+    ASSERT_NE(nullptr, second);
+    pool.reset();
+    EXPECT_EQ(0, destroyed);
+    if (destroyed) {
+        // A broken implementation has already freed the streams' pool/heads;
+        // avoid dereferencing those dangling pointers after reporting failure.
+        first.release();
+        second.release();
+        return;
+    }
+    EXPECT_EQ(4, first->write("test", 4));
+    EXPECT_EQ(0, second->close());
+    first.reset();
+    EXPECT_EQ(0, destroyed);
+    second.reset();
+    EXPECT_EQ(1, destroyed);
+}
+
 TEST(dialer, vcpu_local_retries_and_reuses) {
     LocalState state;
     state.fail.store(true, std::memory_order_relaxed);

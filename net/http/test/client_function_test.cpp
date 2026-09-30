@@ -1606,14 +1606,57 @@ TEST(http_client, cross_vcpu_client_destruction) {
         photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
         DEFER(photon::fini());
         simple_get(client, target);   // creates a dialer on this worker vCPU
+        std::unique_ptr<ISocketStream> native(client->native_connect(
+            "127.0.0.1", tcpserver->getsockname().port));
+        EXPECT_NE(nullptr, native);
         req_done.signal(1);
         quit.wait(1);                 // keep the vCPU alive during deletion
+        if (native) {
+            EXPECT_EQ(0, native->close());
+        }
     });
     req_done.wait(1);
-    // destroys the worker-vCPU dialer from the main vCPU (migrate path)
+    // Retire the worker's dialer while its checked-out stream is still alive.
     delete client;
     quit.signal(1);
     th.join();
+}
+
+TEST(http_client, response_and_native_stream_outlive_client) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcp->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcp->start_loop());
+    auto url = to_url(tcp.get(), "/simple");
+
+    std::unique_ptr<Client> client(new_http_client());
+    Client::OperationOnStack<> op(client.get(), Verb::GET, url);
+    ASSERT_EQ(0, op.call());
+    std::unique_ptr<ISocketStream> native(client->native_connect(
+        "127.0.0.1", tcp->getsockname().port));
+    ASSERT_NE(nullptr, native);
+    client.reset();
+
+    char body[7];
+    ASSERT_EQ(7, op.resp.read(body, sizeof(body)));
+    EXPECT_EQ("/simple", std::string(body, sizeof(body)));
+    const char request[] = "GET /simple HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(sizeof(request) - 1, native->write(request, sizeof(request) - 1));
+    native->timeout(5ULL * 1000 * 1000);
+    struct NativeResponse final : Response {
+        using Response::Response;
+        using Response::receive_header;
+    };
+    char buffer[8 * 1024];
+    NativeResponse response(buffer, sizeof(buffer));
+    response.reset(native.get(), false);
+    ASSERT_EQ(0, response.receive_header());
+    EXPECT_EQ(200, response.status_code());
+    ASSERT_EQ(7, response.read(body, sizeof(body)));
+    EXPECT_EQ("/simple", std::string(body, sizeof(body)));
 }
 
 // A proxy serves a plaintext origin by forwarding an absolute-URI request, but a

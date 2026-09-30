@@ -278,6 +278,43 @@ TEST(ReqHeaders, connect_is_in_authority_form) {
     EXPECT_EQ(ENOBUFS, errno);
 }
 
+TEST(ReqHeaders, connect_redirect_preserves_headers_and_explicit_port) {
+    for (bool proxy : {false, true}) {
+        RequestHeadersStored<> req(Verb::CONNECT, "https://origin:8080/");
+        ASSERT_EQ(0, req.headers.insert("X-Preserved", "value"));
+        std::string host(220, 'a');
+        auto url = estring().appends("https://", host, "/?ignored=1");
+        ASSERT_EQ(0, req.redirect(Verb::CONNECT, url, proxy));
+        auto authority = estring().appends(host, ":443");
+        EXPECT_EQ(authority, req.target());
+        EXPECT_EQ(authority, req.headers["Host"]);
+        EXPECT_EQ("value", req.headers["X-Preserved"]);
+        EXPECT_TRUE(req.query().empty());
+        EXPECT_EQ(443, req.port());
+        std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+        ASSERT_EQ(0, req.send_header(stream.get()));
+        EXPECT_EQ(0U, stream->output().find(estring().appends(
+            "CONNECT ", authority, " HTTP/1.1\r\nHost: ", authority, "\r\n")));
+    }
+}
+
+TEST(ReqHeaders, connect_redirect_rejects_insufficient_space_without_changes) {
+    char buf[128];
+    Request req(buf, sizeof(buf), Verb::CONNECT, "https://origin:8080/");
+    ASSERT_EQ(0, req.headers.insert("X-Preserved", "value"));
+    // The new request line fits alone, but not with its Host and other headers.
+    auto url = estring().appends("https://", std::string(80, 'a'), "/");
+    EXPECT_EQ(-1, req.redirect(Verb::CONNECT, url));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ("origin:8080", req.target());
+    EXPECT_EQ("origin:8080", req.headers["Host"]);
+    EXPECT_EQ("value", req.headers["X-Preserved"]);
+    url = estring().appends("https://", std::string(256, 'a'), "/");
+    EXPECT_EQ(-1, req.redirect(Verb::CONNECT, url, true));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ("origin:8080", req.target());
+}
+
 TEST(debug, debug) {
     RequestHeadersStored<> req(Verb::PUT, "http://domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:80/target1?param1=x1");
     req.headers.content_length(0);

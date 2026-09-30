@@ -86,6 +86,9 @@ IDialer* new_connect_tunnel_dialer(IDialer* underlay,
                                    bool ownership = false);
 // Pool dials fail with ENAMETOOLONG if the encoded route key is 65535 bytes or
 // longer; rejected routes never reach the underlay or reuse pooled sockets.
+// Checked-out streams keep the pool and its owned underlay alive after the
+// dialer is destroyed. Use/release them on their creating vCPU before its fini;
+// borrowed underlays and TLS contexts must also outlive these streams.
 IDialer* new_pool_dialer(IDialer* underlay, bool ownership = false,
                          uint64_t expiration = -1ULL);
 

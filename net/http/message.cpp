@@ -399,12 +399,23 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
         location = full_location;
     }
     StoredURL u(location);
-    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
+    auto target_size = v == Verb::CONNECT ? authority_size(u) :
         (use_absolute_uri(u, enable_proxy) ? full_url_size(u) : u.target().size());
+    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
+        target_size;
+    if (new_request_line_size > m_buf_capacity)
+        LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
+
+    estring authority;
+    std::string_view host = u.host_port();
+    if (v == Verb::CONNECT) {
+        authority.appends(u.host(), ":", u.port());
+        host = authority;
+    }
 
     int delta = (int)new_request_line_size - m_buf_size;
     LOG_DEBUG(VALUE(delta));
-    if (headers.reset_host(delta, u.host_port()) < 0)
+    if (headers.reset_host(delta, host) < 0)
         LOG_ERROR_RETURN(0, -1, "failed to move header data");
 
     m_buf_size = new_request_line_size;

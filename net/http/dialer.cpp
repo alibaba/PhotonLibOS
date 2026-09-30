@@ -31,6 +31,7 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 #include <photon/thread/vcpu-local.h>
+#include "../base_socket.h"
 
 namespace photon {
 namespace net {
@@ -441,14 +442,56 @@ protected:
     }
 };
 
-class PoolDialer : public ForwardDialer {
+struct PoolDialerState {
+    // Member order keeps the entire underlay (including owned TLS contexts)
+    // alive until the pool has closed its idle sockets and stopped collecting.
+    std::unique_ptr<IDialer> ownedUnderlay;
+    IDialer* underlay;
+    std::unique_ptr<ISocketPool> pool;
+
+    PoolDialerState(IDialer* underlay, bool ownership, uint64_t expiration)
+        : ownedUnderlay(ownership ? underlay : nullptr), underlay(underlay),
+          pool(new_tcp_socket_pool(nullptr, expiration, false)) {}
+    PoolDialerState(std::unique_ptr<IDialer> underlay, uint64_t expiration)
+        : PoolDialerState(underlay.release(), true, expiration) {}
+};
+
+class LeasedPoolStream : public ForwardSocketStream {
+public:
+    LeasedPoolStream(ISocketStream* stream, std::shared_ptr<PoolDialerState> state)
+        : ForwardSocketStream(stream, true), m_state(std::move(state)) {}
+    ~LeasedPoolStream() override {
+        // Return/drop the checked-out socket while its pool is still alive,
+        // before releasing our state member and then running the base dtor.
+        safe_delete(m_underlay);
+    }
+    int close() override { return m_underlay->close(); }
+    int shutdown(ShutdownHow how) override { return m_underlay->shutdown(how); }
+    ssize_t read(void* buf, size_t count) override { return m_underlay->read(buf, count); }
+    ssize_t readv(const iovec* iov, int count) override { return m_underlay->readv(iov, count); }
+    ssize_t readv_mutable(iovec* iov, int count) override { return m_underlay->readv_mutable(iov, count); }
+    ssize_t write(const void* buf, size_t count) override { return m_underlay->write(buf, count); }
+    ssize_t writev(const iovec* iov, int count) override { return m_underlay->writev(iov, count); }
+    ssize_t writev_mutable(iovec* iov, int count) override { return m_underlay->writev_mutable(iov, count); }
+    ssize_t recv(void* buf, size_t count, int flags = 0) override { return m_underlay->recv(buf, count, flags); }
+    ssize_t recv(const iovec* iov, int count, int flags = 0) override { return m_underlay->recv(iov, count, flags); }
+    ssize_t send(const void* buf, size_t count, int flags = 0) override { return m_underlay->send(buf, count, flags); }
+    ssize_t send(const iovec* iov, int count, int flags = 0) override { return m_underlay->send(iov, count, flags); }
+    ssize_t sendfile(int fd, off_t offset, size_t count) override { return m_underlay->sendfile(fd, offset, count); }
+    Object* get_underlay_object(uint64_t recursion = 0) override {
+        // Preserve the pooled stream's original introspection/FD semantics.
+        return m_underlay->get_underlay_object(recursion);
+    }
+private:
+    std::shared_ptr<PoolDialerState> m_state;
+};
+
+class PoolDialer : public IDialer {
 public:
     PoolDialer(IDialer* underlay, bool ownership, uint64_t expiration)
-        : ForwardDialer(underlay, ownership),
-          m_pool(new_tcp_socket_pool(nullptr, expiration, false)) {}
+        : m_state(std::make_shared<PoolDialerState>(underlay, ownership, expiration)) {}
     PoolDialer(std::unique_ptr<IDialer> underlay, uint64_t expiration)
-        : ForwardDialer(std::move(underlay)),
-          m_pool(new_tcp_socket_pool(nullptr, expiration, false)) {}
+        : m_state(std::make_shared<PoolDialerState>(std::move(underlay), expiration)) {}
 
     ISocketStream* dial(const DialTarget& target, uint64_t timeout) override {
         auto key = make_key(target);
@@ -457,15 +500,18 @@ public:
         if (key.size() >= UINT16_MAX)
             LOG_ERROR_RETURN(ENAMETOOLONG, nullptr,
                              "HTTP route key is too long: ` bytes", key.size());
-        auto stream = m_pool->connect(key, [&]() {
-            return m_underlay->dial(target, timeout);
-        });
-        if (stream) stream->timeout(timeout);
-        return stream;
+        std::unique_ptr<ISocketStream> stream(m_state->pool->connect(key, [&]() {
+            return m_state->underlay->dial(target, timeout);
+        }));
+        if (!stream) return nullptr;
+        stream->timeout(timeout);
+        auto result = new LeasedPoolStream(stream.get(), m_state);
+        stream.release();
+        return result;
     }
 
 protected:
-    std::unique_ptr<ISocketPool> m_pool;
+    std::shared_ptr<PoolDialerState> m_state;
 
     static void append_u8(std::string& key, uint8_t value) {
         key.push_back((char)value);
