@@ -145,7 +145,7 @@ int Message::send_header(net::ISocketStream* stream, const HeadersBase* extra) {
     // `extra` goes on the wire without becoming part of `headers`, so that a
     // redirect of this message cannot carry it to the next hop
     auto tail = m_buf + m_buf_size + headers.size();
-    memcpy(tail, ex.data(), ex.size());
+    if (!ex.empty()) memcpy(tail, ex.data(), ex.size());
     memcpy(tail + ex.size(), "\r\n", 2);
     std::string_view sv = {m_buf, m_buf_size + headers.size() + ex.size() + 2};
 

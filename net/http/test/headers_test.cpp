@@ -34,6 +34,7 @@ limitations under the License.
 #include "../../socket.h"
 #include "../../base_socket.h"
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/memory-stream/memory-stream.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
@@ -53,6 +54,20 @@ public:
 protected:
     char _buffer[BUF_CAPACITY];
 };
+TEST(headers, send_without_extra_headers) {
+    auto send = [](const HeadersBase* extra) {
+        RequestHeadersStored<> req(Verb::GET, "http://example.com/");
+        req.headers.content_length(0);
+        std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+        EXPECT_EQ(0, req.send_header(stream.get(), extra));
+        EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
+    };
+
+    send(nullptr);
+    CommonHeaders<64> empty;
+    send(&empty);
+}
+
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"
