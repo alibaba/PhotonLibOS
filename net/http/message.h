@@ -156,7 +156,7 @@ protected:
 
     friend class HTTPServerImpl;
     friend class ClientImpl;
-    friend class PooledDialer;   // sends the CONNECT of a tunnel
+    friend class ConnectTunnelDialer;   // sends the CONNECT of a tunnel
 };
 
 class URL;

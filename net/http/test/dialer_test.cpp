@@ -1,0 +1,401 @@
+/*
+Copyright 2022 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+#include <atomic>
+#include <memory>
+#include <thread>
+
+#include <photon/common/memory-stream/memory-stream.h>
+#include <photon/common/utility.h>
+#include <photon/net/http/dialer.h>
+#include <photon/net/security-context/tls-stream.h>
+#include <photon/photon.h>
+#include <photon/thread/thread.h>
+
+#include "../../../test/gtest.h"
+
+using namespace photon;
+using namespace photon::net;
+using namespace photon::net::http;
+
+namespace {
+
+class StreamDialer : public IDialer {
+public:
+    int calls = 0;
+    int* destroyed = nullptr;
+    std::string input;
+    StringSocketStream* last = nullptr;
+
+    explicit StreamDialer(int* destroyed = nullptr) : destroyed(destroyed) {}
+    ~StreamDialer() override {
+        if (destroyed) ++*destroyed;
+    }
+
+    ISocketStream* dial(const DialTarget&, uint64_t) override {
+        ++calls;
+        last = new_string_socket_stream();
+        last->set_input(input);
+        return last;
+    }
+};
+
+class TrackedStream : public ISocketStream {
+public:
+    explicit TrackedStream(int* destroyed)
+        : inner(new_string_socket_stream()), destroyed(destroyed) {}
+    ~TrackedStream() override { ++*destroyed; }
+
+    int close() override { return inner->close(); }
+    ssize_t read(void* buf, size_t count) override {
+        return inner->read(buf, count);
+    }
+    ssize_t readv(const iovec* iov, int iovcnt) override {
+        return inner->readv(iov, iovcnt);
+    }
+    ssize_t write(const void* buf, size_t count) override {
+        return inner->write(buf, count);
+    }
+    ssize_t writev(const iovec* iov, int iovcnt) override {
+        return inner->writev(iov, iovcnt);
+    }
+    uint64_t timeout() const override { return inner->timeout(); }
+    void timeout(uint64_t value) override { inner->timeout(value); }
+    ssize_t recv(void* buf, size_t count, int flags = 0) override {
+        return inner->recv(buf, count, flags);
+    }
+    ssize_t recv(const iovec* iov, int iovcnt, int flags = 0) override {
+        return inner->recv(iov, iovcnt, flags);
+    }
+    ssize_t send(const void* buf, size_t count, int flags = 0) override {
+        return inner->send(buf, count, flags);
+    }
+    ssize_t send(const iovec* iov, int iovcnt, int flags = 0) override {
+        return inner->send(iov, iovcnt, flags);
+    }
+    ssize_t sendfile(int in_fd, off_t offset, size_t count) override {
+        return inner->sendfile(in_fd, offset, count);
+    }
+    Object* get_underlay_object(uint64_t recursion = 0) override {
+        return inner->get_underlay_object(recursion);
+    }
+    int setsockopt(int level, int name, const void* value,
+                   socklen_t length) override {
+        return inner->setsockopt(level, name, value, length);
+    }
+    int getsockopt(int level, int name, void* value,
+                   socklen_t* length) override {
+        return inner->getsockopt(level, name, value, length);
+    }
+    int getsockname(EndPoint& address) override {
+        return inner->getsockname(address);
+    }
+    int getpeername(EndPoint& address) override {
+        return inner->getpeername(address);
+    }
+    int getsockname(char* path, size_t count) override {
+        return inner->getsockname(path, count);
+    }
+    int getpeername(char* path, size_t count) override {
+        return inner->getpeername(path, count);
+    }
+
+private:
+    std::unique_ptr<StringSocketStream> inner;
+    int* destroyed;
+};
+
+class FailingStreamDialer : public IDialer {
+public:
+    explicit FailingStreamDialer(int* destroyed) : destroyed(destroyed) {}
+
+    ISocketStream* dial(const DialTarget&, uint64_t) override {
+        return new TrackedStream(destroyed);
+    }
+
+private:
+    int* destroyed;
+};
+
+struct LocalState;
+
+class LocalDialer : public IDialer {
+public:
+    LocalState* state;
+    vcpu_base* owner;
+
+    explicit LocalDialer(LocalState* state);
+    ~LocalDialer() override;
+    ISocketStream* dial(const DialTarget&, uint64_t) override;
+};
+
+struct LocalState {
+    std::atomic<int> attempts{0};
+    std::atomic<int> created{0};
+    std::atomic<int> destroyed{0};
+    std::atomic<int> calls{0};
+    std::atomic<int> wrong_vcpu_destructions{0};
+    std::atomic<bool> fail{false};
+
+    IDialer* make() {
+        attempts.fetch_add(1, std::memory_order_relaxed);
+        if (fail.load(std::memory_order_relaxed)) return nullptr;
+        created.fetch_add(1, std::memory_order_relaxed);
+        return new LocalDialer(this);
+    }
+};
+
+LocalDialer::LocalDialer(LocalState* state)
+    : state(state), owner(photon::get_vcpu()) {}
+
+LocalDialer::~LocalDialer() {
+    if (owner != photon::get_vcpu())
+        state->wrong_vcpu_destructions.fetch_add(1, std::memory_order_relaxed);
+    state->destroyed.fetch_add(1, std::memory_order_relaxed);
+}
+
+ISocketStream* LocalDialer::dial(const DialTarget&, uint64_t) {
+    state->calls.fetch_add(1, std::memory_order_relaxed);
+    return nullptr;
+}
+
+} // namespace
+
+TEST(dialer, conditional_layers_passthrough) {
+    std::unique_ptr<TLSContext> context(
+        new_tls_context(nullptr, nullptr, nullptr));
+    ASSERT_NE(nullptr, context);
+    context->set_verify_mode(VerifyMode::NONE);
+
+    DialTarget direct;
+    direct.host = "origin.example";
+    direct.port = 80;
+
+    StreamDialer tls_underlay;
+    std::unique_ptr<IDialer> origin_tls(new_tls_dialer(
+        context.get(), &tls_underlay, TLSLayer::ORIGIN));
+    ASSERT_NE(nullptr, origin_tls);
+    auto stream = origin_tls->dial(direct);
+    ASSERT_EQ(tls_underlay.last, stream);
+    delete stream;
+
+    StreamDialer proxy_tls_underlay;
+    std::unique_ptr<IDialer> proxy_tls(new_tls_dialer(
+        context.get(), &proxy_tls_underlay, TLSLayer::PROXY));
+    ASSERT_NE(nullptr, proxy_tls);
+    stream = proxy_tls->dial(direct);
+    ASSERT_EQ(proxy_tls_underlay.last, stream);
+    delete stream;
+
+    StreamDialer tunnel_underlay;
+    std::unique_ptr<IDialer> tunnel(
+        new_connect_tunnel_dialer(&tunnel_underlay));
+    ASSERT_NE(nullptr, tunnel);
+    stream = tunnel->dial(direct);
+    ASSERT_EQ(tunnel_underlay.last, stream);
+    delete stream;
+
+    DialTarget uds = direct;
+    uds.secure = true;
+    uds.uds_path = std::string_view("\0abstract", 9);
+    StreamDialer uds_underlay;
+    std::unique_ptr<IDialer> uds_tls(new_tls_dialer(
+        context.get(), &uds_underlay, TLSLayer::ORIGIN));
+    ASSERT_NE(nullptr, uds_tls);
+    stream = uds_tls->dial(uds);
+    ASSERT_EQ(uds_underlay.last, stream);
+    delete stream;
+}
+
+TEST(dialer, tunnel_precedes_origin_tls) {
+    std::unique_ptr<TLSContext> context(
+        new_tls_context(nullptr, nullptr, nullptr));
+    ASSERT_NE(nullptr, context);
+    context->set_verify_mode(VerifyMode::NONE);
+
+    StreamDialer transport;
+    transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    std::unique_ptr<IDialer> tunnel(
+        new_connect_tunnel_dialer(&transport));
+    ASSERT_NE(nullptr, tunnel);
+    std::unique_ptr<IDialer> origin_tls(new_tls_dialer(
+        context.get(), tunnel.get(), TLSLayer::ORIGIN));
+    ASSERT_NE(nullptr, origin_tls);
+
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+
+    auto stream = origin_tls->dial(target);
+    ASSERT_NE(nullptr, stream);
+    EXPECT_NE(transport.last, stream);
+    EXPECT_EQ(1, transport.calls);
+    EXPECT_EQ(0U, transport.last->input().size());
+    EXPECT_FALSE(transport.last->output().empty());
+    delete stream;
+}
+
+TEST(dialer, tunnel_failure_releases_stream) {
+    int destroyed = 0;
+    FailingStreamDialer underlay(&destroyed);
+    std::unique_ptr<IDialer> tunnel(new_connect_tunnel_dialer(&underlay));
+    ASSERT_NE(nullptr, tunnel);
+
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+
+    EXPECT_EQ(nullptr, tunnel->dial(target));
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(dialer, ownership_deletes_underlay) {
+    int destroyed = 0;
+    auto underlay = new StreamDialer(&destroyed);
+    auto tunnel = new_connect_tunnel_dialer(underlay, true);
+    ASSERT_NE(nullptr, tunnel);
+    delete tunnel;
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(dialer, pool_reuses_only_identical_routes) {
+    int destroyed = 0;
+    auto underlay = new StreamDialer(&destroyed);
+    std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
+    ASSERT_NE(nullptr, pool);
+
+    DialTarget direct;
+    direct.host = "origin.example";
+    direct.port = 80;
+
+    auto use = [&](const DialTarget& target) {
+        auto stream = pool->dial(target);
+        ASSERT_NE(nullptr, stream);
+        delete stream;
+    };
+
+    use(direct);
+    use(direct);
+    EXPECT_EQ(1, underlay->calls);
+
+    DialTarget secure = direct;
+    secure.secure = true;
+    secure.port = 443;
+    use(secure);
+
+    DialTarget forward = direct;
+    forward.proxy_host = "proxy.example";
+    forward.proxy_port = 8080;
+    use(forward);
+
+    DialTarget forward_other_origin = forward;
+    forward_other_origin.host = "another.example";
+    forward_other_origin.port = 81;
+    use(forward_other_origin);
+    EXPECT_EQ(3, underlay->calls);
+
+    DialTarget forward_other_auth = forward;
+    forward_other_auth.proxy_auth = "Basic other";
+    use(forward_other_auth);
+
+    DialTarget tunnel = secure;
+    tunnel.proxy_host = "proxy.example";
+    tunnel.proxy_port = 8080;
+    use(tunnel);
+
+    DialTarget tunnel_other_origin = tunnel;
+    tunnel_other_origin.host = "another.example";
+    use(tunnel_other_origin);
+
+    const char abstract_path[] = "\0pool-key";
+    DialTarget uds = direct;
+    uds.uds_path = std::string_view(abstract_path, sizeof(abstract_path) - 1);
+    use(uds);
+
+    DialTarget uds_other_origin = uds;
+    uds_other_origin.host = "another.example";
+    use(uds_other_origin);
+
+    EXPECT_EQ(8, underlay->calls);
+    pool.reset();
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(dialer, vcpu_local_retries_and_reuses) {
+    LocalState state;
+    state.fail.store(true, std::memory_order_relaxed);
+    std::unique_ptr<IDialer> dialer(new_vcpu_local_dialer(
+        {&state, &LocalState::make}));
+    ASSERT_NE(nullptr, dialer);
+
+    DialTarget target;
+    EXPECT_EQ(nullptr, dialer->dial(target));
+    EXPECT_EQ(1, state.attempts.load());
+    EXPECT_EQ(0, state.created.load());
+
+    state.fail.store(false, std::memory_order_relaxed);
+    EXPECT_EQ(nullptr, dialer->dial(target));
+    EXPECT_EQ(nullptr, dialer->dial(target));
+    EXPECT_EQ(2, state.attempts.load());
+    EXPECT_EQ(1, state.created.load());
+    EXPECT_EQ(2, state.calls.load());
+
+    dialer.reset();
+    EXPECT_EQ(1, state.destroyed.load());
+    EXPECT_EQ(0, state.wrong_vcpu_destructions.load());
+}
+
+TEST(dialer, vcpu_local_cross_vcpu_destruction) {
+    LocalState state;
+    auto dialer = new_vcpu_local_dialer({&state, &LocalState::make});
+    ASSERT_NE(nullptr, dialer);
+    DialTarget target;
+    EXPECT_EQ(nullptr, dialer->dial(target));
+
+    photon::semaphore ready(0), release(0);
+    std::thread worker([&] {
+        ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
+                                  photon::INIT_IO_NONE));
+        DEFER(photon::fini());
+        EXPECT_EQ(nullptr, dialer->dial(target));
+        EXPECT_EQ(nullptr, dialer->dial(target));
+        ready.signal(1);
+        release.wait(1);
+    });
+
+    ASSERT_EQ(0, ready.wait(1, 5ULL * 1000 * 1000));
+    EXPECT_EQ(2, state.created.load());
+    EXPECT_EQ(3, state.calls.load());
+    delete dialer;
+    EXPECT_EQ(2, state.destroyed.load());
+    EXPECT_EQ(0, state.wrong_vcpu_destructions.load());
+    release.signal(1);
+    worker.join();
+}
+
+int main(int argc, char** argv) {
+    if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE))
+        return -1;
+    DEFER(photon::fini());
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

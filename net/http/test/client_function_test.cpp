@@ -25,6 +25,7 @@ limitations under the License.
 #include <string>
 
 #include <photon/net/socket.h>
+#include <photon/net/security-context/tls-stream.h>
 #include <photon/common/alog.h>
 #include "../client.cpp"
 #include "../server.h"
@@ -636,12 +637,44 @@ TEST(http_client, unix_socket) {
     ASSERT_EQ(n, (ssize_t) op.resp.body_size());
     LOG_INFO(buf);
 
+    // The same logical route reuses the pooled UDS connection.
+    Client::OperationOnStack<> repeated(
+        client, Verb::GET, "http://localhost/simple-api");
+    ASSERT_EQ(0, repeated.call(uds_path));
+    ASSERT_EQ(200, repeated.resp.status_code());
+    ASSERT_EQ((ssize_t)repeated.resp.body_size(),
+              repeated.resp.read(buf, repeated.resp.body_size()));
+
     // A wrong hostname or HTTPS doesn't have effect on unix socket
     Client::OperationOnStack<> op2(client, Verb::GET, "https://www.wrong.hostname/simple-api");
     ret = op2.call(uds_path);
     ASSERT_EQ(0, ret);
     ASSERT_EQ(200, op2.resp.status_code());
 }
+
+#ifdef __linux__
+TEST(http_client, abstract_unix_socket_path_length) {
+    static const char uds_path[] = "\0photon-http-client-abstract";
+
+    auto http_server = new_http_server();
+    DEFER(delete http_server);
+    http_server->add_handler(new SimpleHandler, true, "/simple-api");
+
+    auto socket_server = new_uds_server();
+    DEFER(delete socket_server);
+    socket_server->set_handler(http_server->get_connection_handler());
+    ASSERT_EQ(0, socket_server->bind(uds_path, sizeof(uds_path) - 1));
+    ASSERT_EQ(0, socket_server->listen());
+    ASSERT_EQ(0, socket_server->start_loop(false));
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    Client::OperationOnStack<> op(
+        client, Verb::GET, "http://localhost/simple-api");
+    ASSERT_EQ(0, op.call(std::string_view(uds_path, sizeof(uds_path) - 1)));
+    ASSERT_EQ(200, op.resp.status_code());
+}
+#endif
 
 int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     auto ua = req.headers["User-Agent"];
@@ -1273,14 +1306,7 @@ TEST(http_server, forward_proxy_close_delimited) {
     EXPECT_EQ(g_close_delim_payload, out);
 }
 
-// Helpers/tests for per-client dialer lifecycle and injection
-// The built-in dialer this client has built on the current vCPU, or nullptr.
-// With per-(client, vCPU) dialers there is at most one, so it doubles as a
-// presence check. Only valid while the client is alive.
-static PooledDialer* current_dialer_of(Client* c) {
-    return ((ClientImpl*)c)->m_dialers.get_if();
-}
-
+// Helpers/tests for client dialer and resolver injection.
 static void simple_get(Client* client, std::string_view target) {
     Client::OperationOnStack<> op(client, Verb::GET, target);
     op.req.headers.content_length(0);
@@ -1291,36 +1317,6 @@ static void simple_get(Client* client, std::string_view target) {
     char buf[4096];
     auto n = op.resp.read(buf, op.resp.body_size());
     EXPECT_EQ((ssize_t)op.resp.body_size(), n);
-}
-
-TEST(http_client, per_client_dialer_lifecycle) {
-    auto tcpserver = new_tcp_socket_server();
-    tcpserver->bind_v4localhost();
-    tcpserver->listen();
-    DEFER(delete tcpserver);
-    auto server = new_http_server();
-    DEFER(delete server);
-    server->add_handler(new SimpleHandler, true, "/simple");
-    tcpserver->set_handler(server->get_connection_handler());
-    tcpserver->start_loop();
-    auto target = to_url(tcpserver, "/simple");
-
-    auto c1 = new_http_client();
-    auto c2 = new_http_client();
-    DEFER(delete c2);
-    simple_get(c1, target);
-    simple_get(c2, target);
-    // each client builds its own dialer on this vCPU -- no implicit sharing
-    auto d1 = current_dialer_of(c1);
-    auto d2 = current_dialer_of(c2);
-    EXPECT_NE(nullptr, d1);
-    EXPECT_NE(nullptr, d2);
-    EXPECT_NE(d1, d2);
-    // deleting a client tears down its own dialer, not the sibling's; c2 keeps
-    // the very same dialer and keeps working
-    delete c1;
-    EXPECT_EQ(d2, current_dialer_of(c2));
-    simple_get(c2, target);
 }
 
 TEST(http_client, dialer_injection) {
@@ -1356,8 +1352,6 @@ TEST(http_client, dialer_injection) {
     EXPECT_GT(dialer.dials, 0);
     EXPECT_FALSE(dialer.saw_proxy);
     EXPECT_FALSE(dialer.saw_secure);
-    // the injected dialer fully replaces the built-in one (none is ever built)
-    EXPECT_EQ(nullptr, current_dialer_of(client));
 }
 
 static std::vector<IPAddr> g_resolve_filter_seen;
@@ -1406,7 +1400,7 @@ TEST(http_client, resolver_injection) {
 
     // Borrowed resolvers can be shared by clients. Their dialers are destroyed
     // before the resolver's owner releases it.
-    auto resolver = new_default_resolver(kDNSCacheLife);
+    auto resolver = new_default_resolver();
     auto c1 = new_http_client();
     auto c2 = new_http_client();
     c1->set_resolver(resolver);
@@ -1423,7 +1417,9 @@ TEST(http_client, resolver_injection) {
     {
         auto client = new_http_client();
         DEFER(delete client);
-        simple_get(client, target);   // build this vCPU's dialer first
+        auto numeric_target = estring().appends(
+            "http://127.0.0.1:", tcpserver->getsockname().port, "/simple");
+        simple_get(client, numeric_target);   // build this vCPU's dialer first
         client->set_resolver(new TestFilteredResolver(
             {nullptr, &resolve_filter_reject_all}, &rejected_destroyed), true);
         g_resolve_filter_seen.clear();
