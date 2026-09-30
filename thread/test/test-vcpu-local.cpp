@@ -208,6 +208,32 @@ TEST(vcpu_local, rebuild_after_fork) {
     EXPECT_EQ(1, g_ctor.load());
 }
 
+TEST(vcpu_local, destroy_then_fini_after_fork_without_get) {
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    DEFER(photon::fini());
+    reset();
+    struct Local final : VCPULocal<Value> {};
+    auto local = new Local;
+    ASSERT_NE(nullptr, local->get());
+
+    auto pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        delete local;
+        bool ok = g_dtor.load() == 0;
+        ok = photon::fini() == 0 && g_dtor.load() == 0 && ok;
+        _exit(ok ? 0 : 1);
+    }
+
+    int status = 0;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+    EXPECT_EQ(0, g_dtor.load());
+    delete local;
+    EXPECT_EQ(1, g_dtor.load());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

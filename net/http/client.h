@@ -26,6 +26,7 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
 #include <photon/net/socket.h>
+#include <photon/thread/thread.h>
 #include <vector>
 
 namespace photon {
@@ -198,8 +199,9 @@ public:
     // Inject a DNS resolver, replacing the process-wide default one that the
     // built-in dialers of this client would otherwise share. It may be replaced
     // while requests are in flight. The resolver must support concurrent calls;
-    // a borrowed resolver must outlive the client. No effect on a dialer set by
-    // set_dialer().
+    // a borrowed resolver must outlive the client. Reinstalling the currently
+    // configured pointer is a no-op and preserves its original ownership. No
+    // effect on a dialer set by set_dialer().
     void set_resolver(Resolver* resolver, bool ownership = false);
 
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
@@ -224,6 +226,7 @@ protected:
     std::vector<IPAddr> m_bind_ips;
     IDialer* m_dialer = nullptr;
     std::shared_ptr<Resolver> m_resolver;
+    photon::spinlock m_resolver_lock;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.

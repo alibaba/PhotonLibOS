@@ -265,8 +265,10 @@ void VCPULocalBase::drain() {
         Slot* s = ref.slot;
 
         if (ref.epoch != g_fork_epoch.load(std::memory_order_relaxed)) {
-            // a pre-fork slot: its vCPU is gone in this child and its T belongs
-            // to the parent, so just drop the backref and leak both
+            // A pre-fork slot: its vCPU is gone in this child and its T belongs
+            // to the parent. Detach it from this dead instance; the inherited
+            // table's fini hook discards the slot without touching its T.
+            s->disowned.store(true, std::memory_order_release);
             SCOPED_LOCK(m_lock);
             remove_ref(s);
             continue;
@@ -323,11 +325,24 @@ VCPULocalBase::~VCPULocalBase() {
 
 void VCPULocalBase::Table::at_fini() {
     // reap every T this vCPU still owns, here, where they belong
+    auto epoch = g_fork_epoch.load(std::memory_order_relaxed);
     for (;;) {
         lock.lock();
         Slot* s = live.pop_front();
         lock.unlock();
         if (!s) break;
+        if (s->epoch != epoch) {
+            // The child inherited this slot from the parent. Its value belongs
+            // to the parent; discard only the child process's copy of the slot.
+            // A live instance still needs its inherited back-reference removed,
+            // while a disowned slot's key may already be dangling.
+            if (!s->disowned.load(std::memory_order_acquire)) {
+                SCOPED_LOCK(s->key->m_lock);
+                s->key->remove_ref(s);
+            }
+            delete s;
+            continue;
+        }
         if (!s->disowned.load(std::memory_order_acquire)) {
             // the instance is still alive (its ~ blocks until we drop this
             // backref, so key is safe to touch); keep its m_refs consistent
@@ -338,6 +353,9 @@ void VCPULocalBase::Table::at_fini() {
         s->destroy(s->ptr);
         delete s;
     }
+    // Old-epoch entries were deliberately not inspected because their keys may
+    // name destroyed instances. No get() can race this vCPU's fini hook.
+    map.clear();
     // a cross-vCPU ~VCPULocal may have claimed a slot of ours and still be
     // migrating a helper here to destroy it; let fini() free this vCPU only once
     // that has landed, or the migrate would write to a freed vcpu_t

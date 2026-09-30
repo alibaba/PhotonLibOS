@@ -1449,6 +1449,30 @@ TEST(http_client, resolver_injection) {
     EXPECT_EQ(1, accepted_destroyed);
 }
 
+TEST(http_client, repeated_resolver_registration_preserves_ownership) {
+    int owned_destroyed = 0;
+    auto client = new_http_client();
+    auto owned = new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &owned_destroyed);
+    client->set_resolver(owned, true);
+    client->set_resolver(owned, true);
+    client->set_resolver(owned, false);
+    EXPECT_EQ(0, owned_destroyed);
+    delete client;
+    EXPECT_EQ(1, owned_destroyed);
+
+    int borrowed_destroyed = 0;
+    client = new_http_client();
+    auto borrowed = new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &borrowed_destroyed);
+    client->set_resolver(borrowed, false);
+    client->set_resolver(borrowed, true);
+    delete client;
+    EXPECT_EQ(0, borrowed_destroyed);
+    delete borrowed;
+    EXPECT_EQ(1, borrowed_destroyed);
+}
+
 TEST(http_client, cross_vcpu_client_destruction) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->bind_v4localhost();

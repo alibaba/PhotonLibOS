@@ -63,6 +63,10 @@ static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
 Client::~Client() = default;
 
 void Client::set_resolver(Resolver* resolver, bool ownership) {
+    SCOPED_LOCK(m_resolver_lock);
+    auto current = atomic_load_resolver(&m_resolver);
+    if (current.get() == resolver) return;
+
     std::shared_ptr<Resolver> next;
     if (resolver) {
         if (ownership)

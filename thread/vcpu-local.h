@@ -28,8 +28,9 @@ namespace photon {
 // keyed by the VCPULocal instance. It is the coroutine-aware analogue of a
 // thread_local member: each vCPU gets its own T, so a T never has to guard its
 // own state against other vCPUs, yet -- unlike a raw thread_local -- every T is
-// destroyed on the vCPU that built it when the VCPULocal instance goes away, or
-// when that vCPU shuts down via photon::fini(), whichever comes first.
+// destroyed on the vCPU that built it when the VCPULocal instance goes away from
+// a Photon context, or when that vCPU shuts down via photon::fini(), whichever
+// comes first.
 //
 // This matters for a T whose resources are bound to a vCPU (pools, timers, the
 // collector threads inside a socket pool): they must be created, used and torn
@@ -42,8 +43,10 @@ namespace photon {
 //   * The first get() on a vCPU builds the T under a per-slot mutex, so a sibling
 //     coroutine that arrives mid-construction waits for that one T, not a lock
 //     covering the whole table.
-//   * ~VCPULocal (on any vCPU, or with no photon context at all) reaches every
-//     vCPU that built a T and destroys it there.
+//   * ~VCPULocal from any Photon context reaches every vCPU that built a T and
+//     destroys it there. With no Photon context, it only detaches those Ts: each
+//     remains alive until its owning vCPU reaches photon::fini() or encounters a
+//     new VCPULocal at the same address.
 //
 // Constraints:
 //   * get() must not race ~VCPULocal on the same instance -- destroying a thing
