@@ -18,6 +18,7 @@ limitations under the License.
 #include "message.h"
 
 #include <memory>
+#include <pthread.h>
 #include <string>
 #include <utility>
 
@@ -33,35 +34,79 @@ limitations under the License.
 
 namespace photon {
 namespace net {
+
+// Internal hook implemented alongside DefaultResolver in net/utils.cpp.
+void abandon_default_resolver_after_fork(Resolver* resolver);
+
 namespace http {
 
 static const uint64_t kDNSCacheLife = 3600ULL * 1000 * 1000;
-static const uint64_t kResolverDrainTimeout = 3ULL * 1000 * 1000;
 static constexpr size_t kTunnelRespSize = 4 * 1024;
 static constexpr uint16_t kTunnelReqSize = 8 * 1024 - 1;
+
+namespace {
+
+class SharedResolver;
+static photon::spinlock g_resolvers_lock;
+static SharedResolver* g_resolvers = nullptr;
+static bool g_resolvers_atfork_registered = false;
 
 class SharedResolver {
 public:
     struct Gen {
         Resolver* resolver;
         uint32_t users = 0;
+        uint64_t epoch = 0;
+        vcpu_base* owner = nullptr;
+        Gen* next = nullptr;
     };
+
+    SharedResolver()
+        : SharedResolver({nullptr, &make_default_resolver},
+                         {nullptr, &abandon_default_resolver}) {}
+
+    explicit SharedResolver(Delegate<Resolver*> factory,
+                            Delegate<void, Resolver*> abandon = {})
+        : m_factory(factory), m_abandon(abandon) {
+        SCOPED_LOCK(g_resolvers_lock);
+        if (!g_resolvers_atfork_registered) {
+            auto ret = pthread_atfork(&atfork_prepare, &atfork_parent,
+                                      &atfork_child);
+            if (ret == 0)
+                g_resolvers_atfork_registered = true;
+            else
+                LOG_ERROR("resolver pthread_atfork failed, ", VALUE(ret));
+        }
+        m_next = g_resolvers;
+        g_resolvers = this;
+    }
+
+    ~SharedResolver() {
+        SCOPED_LOCK(g_resolvers_lock);
+        for (auto p = &g_resolvers; *p; p = &(*p)->m_next) {
+            if (*p != this) continue;
+            *p = m_next;
+            break;
+        }
+    }
 
     class Ref {
     public:
         Ref(SharedResolver* owner, Gen* gen, Resolver* resolver)
-            : m_owner(owner), m_gen(gen), m_resolver(resolver) {}
+            : m_owner(owner), m_gen(gen), m_resolver(resolver),
+              m_epoch(gen->epoch) {}
         explicit Ref(std::shared_ptr<Resolver> resolver)
             : m_owner(nullptr), m_gen(nullptr), m_resolver(resolver.get()),
               m_owned(std::move(resolver)) {}
         Ref(Ref&& rhs)
             : m_owner(rhs.m_owner), m_gen(rhs.m_gen),
-              m_resolver(rhs.m_resolver), m_owned(std::move(rhs.m_owned)) {
+              m_resolver(rhs.m_resolver), m_owned(std::move(rhs.m_owned)),
+              m_epoch(rhs.m_epoch) {
             rhs.m_resolver = nullptr;
         }
         Ref(const Ref&) = delete;
         ~Ref() {
-            if (m_owner && m_resolver) m_owner->put(m_gen);
+            if (m_owner && m_resolver) m_owner->put(m_gen, m_epoch);
         }
         Resolver* operator->() const { return m_resolver; }
 
@@ -70,6 +115,7 @@ public:
         Gen* m_gen;
         Resolver* m_resolver;
         std::shared_ptr<Resolver> m_owned;
+        uint64_t m_epoch = 0;
     };
 
     Ref borrow() {
@@ -79,7 +125,7 @@ public:
                 return ++m_current->users,
                        Ref(this, m_current, m_current->resolver);
         }
-        auto resolver = new_default_resolver(kDNSCacheLife);
+        auto resolver = m_factory();
         Resolver* redundant = nullptr;
         Gen* gen;
         {
@@ -87,7 +133,9 @@ public:
             if (m_current) {
                 redundant = resolver;
             } else {
-                m_current = new Gen{resolver, 0};
+                m_current = new Gen{resolver, 0, m_epoch, photon::get_vcpu(),
+                                    m_generations};
+                m_generations = m_current;
                 m_vcpu = photon::get_vcpu();
                 if (!m_hook) {
                     m_hook = true;
@@ -111,35 +159,90 @@ public:
             m_vcpu = nullptr;
             m_hook = false;
         }
-        Timeout timeout(kResolverDrainTimeout);
+        // Keep the owning vCPU alive until this generation's final lease is
+        // returned. New borrowers use a new generation and cannot extend this
+        // drain. A finite timeout would permanently leak a cache and its timer.
         while (true) {
             uint32_t users;
             {
                 SCOPED_LOCK(m_lock);
+                if (gen->epoch != m_epoch) return; // inherited drain after fork
                 users = gen->users;
             }
             if (users == 0) break;
-            if (timeout.expired())
-                LOG_ERROR_RETURN(0, , "DNS cache is still borrowed by other vCPUs, leaking it, ", VALUE(users));
             photon::thread_usleep(1000);
         }
         delete gen->resolver;
+        {
+            SCOPED_LOCK(m_lock);
+            for (auto p = &m_generations; *p; p = &(*p)->next) {
+                if (*p != gen) continue;
+                *p = gen->next;
+                break;
+            }
+        }
         delete gen;
     }
 
 protected:
     photon::spinlock m_lock;
     Gen* m_current = nullptr;
+    Gen* m_generations = nullptr; // includes unpublished generations draining
     vcpu_base* m_vcpu = nullptr;
     bool m_hook = false;
+    uint64_t m_epoch = 1;
+    Delegate<Resolver*> m_factory;
+    Delegate<void, Resolver*> m_abandon;
+    SharedResolver* m_next = nullptr;
 
-    void put(Gen* gen) {
+    void put(Gen* gen, uint64_t epoch) {
         SCOPED_LOCK(m_lock);
+        // A Ref inherited across fork must not touch its parent generation.
+        if (epoch != m_epoch) return;
         --gen->users;
+    }
+
+    static Resolver* make_default_resolver(void*) {
+        return new_default_resolver(kDNSCacheLife);
+    }
+
+    static void abandon_default_resolver(void*, Resolver* resolver) {
+        abandon_default_resolver_after_fork(resolver);
+    }
+
+    static void atfork_prepare() {
+        g_resolvers_lock.lock();
+        for (auto p = g_resolvers; p; p = p->m_next) p->m_lock.lock();
+    }
+
+    static void atfork_parent() {
+        for (auto p = g_resolvers; p; p = p->m_next) p->m_lock.unlock();
+        g_resolvers_lock.unlock();
+    }
+
+    static void atfork_child() {
+        for (auto p = g_resolvers; p; p = p->m_next) {
+            ++p->m_epoch;
+            if (p->m_abandon && photon::CURRENT) {
+                for (auto gen = p->m_generations; gen; gen = gen->next) {
+                    if (gen->owner == photon::get_vcpu())
+                        p->m_abandon(gen->resolver);
+                }
+            }
+            // Abandon parent caches and leases without invoking destructors;
+            // inherited workers on this vCPU have been stopped above.
+            p->m_current = nullptr;
+            p->m_generations = nullptr;
+            p->m_vcpu = nullptr;
+            p->m_hook = false;
+        }
+        atfork_parent();
     }
 };
 
 static SharedResolver g_shared_resolver;
+
+} // namespace
 
 class ForwardDialer : public IDialer {
 public:

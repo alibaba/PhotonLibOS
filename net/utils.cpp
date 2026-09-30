@@ -342,12 +342,26 @@ public:
     }
 
 private:
-    ObjectCache<std::string, IPAddrList*> dnscache_;
+    class DNSCache : public ObjectCache<std::string, IPAddrList*> {
+    public:
+        explicit DNSCache(uint64_t ttl) : ObjectCache(ttl) {}
+        void abandon_after_fork() { _timer.abandon_after_fork(); }
+    };
+    DNSCache dnscache_;
     uint64_t resolve_timeout_;
+
+public:
+    void abandon_after_fork() { dnscache_.abandon_after_fork(); }
 };
 
 Resolver* new_default_resolver(uint64_t cache_ttl, uint64_t resolve_timeout) {
     return new DefaultResolver(cache_ttl, resolve_timeout);
+}
+
+// Internal HTTP resolver lifecycle hook; called only for a built-in resolver on
+// its inherited owning vCPU. The cache itself is never inspected or destroyed.
+void abandon_default_resolver_after_fork(Resolver* resolver) {
+    static_cast<DefaultResolver*>(resolver)->abandon_after_fork();
 }
 
 int parse_address_list(std::string_view list, std::vector<EndPoint>* addresses, uint16_t default_port) {

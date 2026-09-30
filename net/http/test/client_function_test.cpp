@@ -1473,6 +1473,32 @@ TEST(http_client, repeated_resolver_registration_preserves_ownership) {
     EXPECT_EQ(1, borrowed_destroyed);
 }
 
+TEST(http_client, resolver_replacement_destroys_outside_setter_lock) {
+    struct ReentrantResolver : TestFilteredResolver {
+        Client* client;
+        ReentrantResolver(Client* client, int* destroyed)
+            : TestFilteredResolver({nullptr, &resolve_filter_accept_all}, destroyed),
+              client(client) {}
+        ~ReentrantResolver() override {
+            // Model timer cleanup yielding while another setter runs. Reentry
+            // must also be safe while releasing the client's last old lease.
+            photon::thread_yield();
+            client->set_resolver(nullptr);
+        }
+    };
+
+    std::unique_ptr<Client> client(new_http_client());
+    int old_destroyed = 0, next_destroyed = 0;
+    client->set_resolver(new ReentrantResolver(client.get(), &old_destroyed), true);
+    client->set_resolver(new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &next_destroyed), true);
+    EXPECT_EQ(1, old_destroyed);
+    EXPECT_EQ(1, next_destroyed);
+    client.reset();
+    EXPECT_EQ(1, old_destroyed);
+    EXPECT_EQ(1, next_destroyed);
+}
+
 TEST(http_client, cross_vcpu_client_destruction) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->bind_v4localhost();

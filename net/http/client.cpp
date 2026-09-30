@@ -63,18 +63,23 @@ static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
 Client::~Client() = default;
 
 void Client::set_resolver(Resolver* resolver, bool ownership) {
-    SCOPED_LOCK(m_resolver_lock);
-    auto current = atomic_load_resolver(&m_resolver);
-    if (current.get() == resolver) return;
+    // Keep the old lease outside the lock scope: resolver destruction can yield
+    // or reenter set_resolver(), and must never run while the spinlock is held.
+    std::shared_ptr<Resolver> current;
+    {
+        SCOPED_LOCK(m_resolver_lock);
+        current = atomic_load_resolver(&m_resolver);
+        if (current.get() == resolver) return;
 
-    std::shared_ptr<Resolver> next;
-    if (resolver) {
-        if (ownership)
-            next.reset(resolver);
-        else
-            next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
+        std::shared_ptr<Resolver> next;
+        if (resolver) {
+            if (ownership)
+                next.reset(resolver);
+            else
+                next = std::shared_ptr<Resolver>(resolver, [](Resolver*) { });
+        }
+        atomic_store_resolver(&m_resolver, std::move(next));
     }
-    atomic_store_resolver(&m_resolver, std::move(next));
 }
 
 void Client::set_proxy(std::string_view proxy) {
