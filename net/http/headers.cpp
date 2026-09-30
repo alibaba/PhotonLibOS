@@ -16,6 +16,7 @@ limitations under the License.
 
 #include "headers.h"
 #include <algorithm>
+#include <vector>
 #include <photon/common/utility.h>
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/iovector.h>
@@ -94,6 +95,38 @@ int HeadersBase::insert(std::string_view key, std::string_view value, int allow_
             {(uint16_t)vbegin, (uint16_t)value.size()}}) - kv_begin();
     m_buf_size = (uint16_t)new_size;
     return 0;
+}
+
+int HeadersBase::erase(std::string_view key) {
+    int erased = 0;
+    while (true) {
+        auto it = find(key);
+        if (it == end()) return erased;
+        auto index = it.i;
+        auto removed = kv(index);
+        auto first = removed.first.offset();
+        auto last = removed.second.offset() + removed.second.size() + 2;
+        auto bytes = last - first;
+
+        memmove(m_buf + first, m_buf + last, m_buf_size - last);
+        std::vector<KV> retained;
+        retained.reserve(m_kv_size - 1);
+        for (uint16_t i = 0; i < m_kv_size; ++i) {
+            if (i == index) continue;
+            auto item = kv(i);
+            if (item.first.offset() >= last) {
+                item.first += -(int)bytes;
+                item.second += -(int)bytes;
+            }
+            retained.push_back(item);
+        }
+        m_buf_size -= bytes;
+        m_kv_size = retained.size();
+        if (!retained.empty())
+            std::copy(retained.begin(), retained.end(), kv_begin());
+        m_last_kv = m_kv_size;
+        ++erased;
+    }
 }
 
 bool HeadersBase::value_append(std::string_view value) {

@@ -34,7 +34,7 @@ struct VCPULocalBase::Slot : intrusive_list_node<Slot> {
     photon::mutex ctor_mtx;         // serialises construction; siblings wait here
     void* ptr = nullptr;            // the T; read lock-free by the owning vCPU
     bool ready = false;             // ptr fully built; only touched on owning vCPU
-    bool disowned = false;          // ~VCPULocal gave up on us; fini reaps, alone
+    std::atomic<bool> disowned{false}; // ~VCPULocal gave up; owning vCPU reaps
     uint64_t epoch = 0;             // fork generation this T belongs to
     vcpu_base* vcpu = nullptr;      // the owning vCPU
     VCPULocalBase* key = nullptr;   // the instance (map key); never deref if disowned
@@ -102,7 +102,8 @@ void* VCPULocalBase::get_or_create() {
     auto it = t.map.find(this);
     if (it != t.map.end()) {
         Slot* s = it->second;
-        if (s->epoch == epoch) {
+        if (s->epoch == epoch &&
+            !s->disowned.load(std::memory_order_acquire)) {
             if (s->ready) return s->ptr;   // steady state: lock-free
             // a sibling coroutine on this vCPU is building it (or a build failed
             // and left it empty); wait on just this slot, then take/retry it
@@ -110,12 +111,31 @@ void* VCPULocalBase::get_or_create() {
             if (!s->ready) { s->ptr = create_value(); s->ready = (s->ptr != nullptr); }
             return s->ptr;
         }
-        // a pre-fork slot surviving into the child: forget it (its T belongs to
-        // the parent), then fall through to build a fresh one on this vCPU
         t.map.erase(it);
-        { SCOPED_LOCK(t.lock); t.live.erase(s); }
-        { SCOPED_LOCK(m_lock); remove_ref(s); }
-        // s and its T are leaked on purpose
+        if (s->epoch == epoch) {
+            // The previous VCPULocal at this address was destroyed outside a
+            // photon context. Reap its disowned slot before this address is used
+            // as a key again; this runs on the slot's owning vCPU.
+            {
+                SCOPED_LOCK(t.lock);
+                if (t.contains_locked(s)) t.live.erase(s);
+            }
+            if (s->vcpu == photon::get_vcpu()) {
+                s->destroy(s->ptr);
+                delete s;
+            }
+            // Otherwise its original vCPU has already gone away. Leak the old
+            // value rather than destroy a vCPU-bound object in the new runtime.
+        } else {
+            // A pre-fork slot surviving into the child: forget it (its T belongs
+            // to the parent), then build a fresh one on this vCPU.
+            {
+                SCOPED_LOCK(t.lock);
+                if (t.contains_locked(s)) t.live.erase(s);
+            }
+            { SCOPED_LOCK(m_lock); remove_ref(s); }
+            // s and its T are leaked on purpose
+        }
     }
 
     // Publish an empty slot before building, so a sibling that arrives during
@@ -148,7 +168,8 @@ void* VCPULocalBase::peek_current() {
     auto it = t.map.find(this);
     if (it == t.map.end()) return nullptr;
     Slot* s = it->second;
-    if (s->epoch == g_fork_epoch.load(std::memory_order_relaxed) && s->ready)
+    if (s->epoch == g_fork_epoch.load(std::memory_order_relaxed) && s->ready &&
+        !s->disowned.load(std::memory_order_acquire))
         return s->ptr;
     return nullptr;
 }
@@ -179,6 +200,17 @@ void VCPULocalBase::destroy_slot(Slot* s, vcpu_base* v) {
     }
     DestroyCtx ctx{s};
     auto th = photon::thread_create(&destroy_entry, &ctx);
+    if (!th) {
+        // There is no helper that could signal ctx.done. Return ownership to the
+        // vCPU's live list, so its fini hook or address-reuse path can reap it.
+        s->disowned.store(true, std::memory_order_release);
+        {
+            SCOPED_LOCK(s->table->lock);
+            s->table->live.push_back(s);
+        }
+        LOG_ERROR("failed to create the vCPU-local destroy helper, deferring cleanup");
+        return;
+    }
     if (photon::thread_migrate(th, v) < 0)
         LOG_WARN("failed to migrate to the value's vCPU, destroying locally");
     ctx.done.wait(1);
@@ -210,7 +242,10 @@ void VCPULocalBase::drain() {
             bool disowned = false;
             {
                 SCOPED_LOCK(ref.table->lock);
-                if (ref.table->contains_locked(s)) { s->disowned = true; disowned = true; }
+                if (ref.table->contains_locked(s)) {
+                    s->disowned.store(true, std::memory_order_release);
+                    disowned = true;
+                }
             }
             if (disowned) { SCOPED_LOCK(m_lock); remove_ref(s); }
             else ::sched_yield();   // the fini hook is dropping our backref
@@ -250,7 +285,7 @@ void VCPULocalBase::Table::at_fini() {
         Slot* s = live.pop_front();
         lock.unlock();
         if (!s) break;
-        if (!s->disowned) {
+        if (!s->disowned.load(std::memory_order_acquire)) {
             // the instance is still alive (its ~ blocks until we drop this
             // backref, so key is safe to touch); keep its m_refs consistent
             SCOPED_LOCK(s->key->m_lock);

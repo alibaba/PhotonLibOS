@@ -67,6 +67,13 @@ TEST(headers, req_header) {
     LOG_DEBUG(req.headers["Content-Length"]);
     EXPECT_EQ(req.headers["Host"], "HostName");
     EXPECT_EQ(req.headers.find("noexist"), req.headers.end());
+    ASSERT_EQ(0, req.headers.insert("Proxy-Authorization", "secret"));
+    ASSERT_EQ(0, req.headers.insert("X-After", "retained"));
+    ASSERT_EQ(1, req.headers.erase("Proxy-Authorization"));
+    EXPECT_TRUE(req.headers["Proxy-Authorization"].empty());
+    EXPECT_EQ(req.headers["Host"], "HostName");
+    EXPECT_EQ(req.headers["Content-Length"], "0");
+    EXPECT_EQ(req.headers["X-After"], "retained");
     LOG_DEBUG(req.headers["Host"]);
     string capacity_overflow;
     capacity_overflow.resize(100000);
@@ -243,6 +250,17 @@ TEST(ReqHeaders, connect_is_in_authority_form) {
     EXPECT_EQ(req.headers["Host"], "origin:4321");
     EXPECT_EQ(req.query(), "");
     EXPECT_EQ(4321, req.port());
+
+    RequestHeadersStored<> default_port(Verb::CONNECT, "https://origin:443/");
+    EXPECT_EQ(default_port.target(), "origin:443");
+    EXPECT_EQ(default_port.headers["Host"], "origin:443");
+
+    char buf[128];
+    Request bounded(buf, sizeof(buf));
+    std::string long_host(256, 'a');
+    auto url = estring().appends("https://", long_host, ":443/");
+    EXPECT_EQ(-1, bounded.reset(Verb::CONNECT, url));
+    EXPECT_EQ(ENOBUFS, errno);
 }
 
 TEST(debug, debug) {

@@ -295,6 +295,12 @@ public:
                                                                   : std::string_view(m_user_agent));
         op->req.headers.insert("Connection", "keep-alive");
         auto proxy_auth = proxy_auth_of(op);
+        auto& proxy = op->proxy_url.empty() ? m_proxy_url : op->proxy_url;
+        auto header_proxy_auth = op->req.headers["Proxy-Authorization"];
+        if (op->enable_proxy && !proxy.empty() && !header_proxy_auth.empty()) {
+            proxy_auth.assign(header_proxy_auth.data(), header_proxy_auth.size());
+            op->req.headers.erase("Proxy-Authorization");
+        }
         if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
             LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));

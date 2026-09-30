@@ -426,28 +426,22 @@ IDialer* new_transport_dialer(const std::vector<IPAddr>& bind_ips) {
 IDialer* new_tls_dialer(TLSContext* context, IDialer* underlay,
                         TLSLayer layer, bool ownership,
                         bool context_ownership) {
-    if (!context || !underlay) {
-        errno = EINVAL;
-        return nullptr;
-    }
+    if (!context || !underlay)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "TLS context and underlay are required");
     return new TLSDialer(context, underlay, layer, ownership,
                          context_ownership);
 }
 
 IDialer* new_connect_tunnel_dialer(IDialer* underlay, bool ownership) {
-    if (!underlay) {
-        errno = EINVAL;
-        return nullptr;
-    }
+    if (!underlay)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "CONNECT tunnel underlay is required");
     return new ConnectTunnelDialer(underlay, ownership);
 }
 
 IDialer* new_pool_dialer(IDialer* underlay, bool ownership,
                          uint64_t expiration) {
-    if (!underlay) {
-        errno = EINVAL;
-        return nullptr;
-    }
+    if (!underlay)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "pool underlay is required");
     return new PoolDialer(underlay, ownership, expiration);
 }
 
@@ -481,10 +475,8 @@ IDialer* new_http_dialer(TLSContext* context,
 }
 
 IDialer* new_vcpu_local_dialer(Delegate<IDialer*> factory) {
-    if (!factory) {
-        errno = EINVAL;
-        return nullptr;
-    }
+    if (!factory)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "vCPU-local Dialer factory is required");
     return new VCPULocalDialer(factory);
 }
 

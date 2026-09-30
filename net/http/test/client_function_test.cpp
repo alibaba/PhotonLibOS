@@ -1741,6 +1741,32 @@ TEST(http_client, connect_tunnel_auth) {
     EXPECT_EQ(0, proxy.denials);
 }
 
+TEST(http_client, request_proxy_auth_is_consumed_by_connect) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic ZXhwbGljaXQ=";
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());
+
+    Client::OperationOnStack<> op(client, Verb::GET, origin.url("/simple"));
+    op.req.headers.content_length(0);
+    ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization",
+                                       "Basic ZXhwbGljaXQ="));
+    ASSERT_EQ(0, op.call());
+    std::string body(op.resp.body_size(), '\0');
+    ASSERT_EQ((ssize_t)body.size(), op.resp.read(&body[0], body.size()));
+    EXPECT_EQ("none", body);
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(0, proxy.denials);
+}
+
 TEST(http_client, connect_tunnel_refused) {
     FakeConnectProxy proxy;
     proxy.want_auth = "Proxy-Authorization: Basic dXNlcjpwYXNz";

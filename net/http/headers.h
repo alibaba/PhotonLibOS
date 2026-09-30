@@ -98,6 +98,7 @@ public:
     }
 
     int insert(std::string_view key, std::string_view value, int allow_dup=0);
+    int erase(std::string_view key);
     bool value_append(std::string_view value);
 
     template<size_t BufCap = 64, typename...Ts>

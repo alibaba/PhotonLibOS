@@ -302,6 +302,25 @@ inline size_t full_url_size(const URL& u) {
            (u.secure() ? sizeof(https_url_scheme) : sizeof(http_url_scheme)) - 1;
 }
 
+inline size_t decimal_size(uint16_t value) {
+    size_t size = 1;
+    while (value >= 10) {
+        value /= 10;
+        ++size;
+    }
+    return size;
+}
+
+inline size_t authority_size(const URL& u) {
+    return u.host().size() + 1 + decimal_size(u.port());
+}
+
+inline void append_authority(char*& buf, const URL& u) {
+    buf_append(buf, u.host());
+    buf_append(buf, ":");
+    buf_append(buf, u.port());
+}
+
 // A request to a TLS origin through a proxy travels inside a CONNECT tunnel, so
 // it is written in origin-form like any direct request; only a plaintext origin
 // is reached by handing the proxy an absolute-URI request to forward.
@@ -320,8 +339,8 @@ void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     // CONNECT names its target in authority-form: only the host and the port,
     // neither scheme nor path -- it asks for a tunnel, not for a resource
     if (v == Verb::CONNECT) {
-        m_target = {target_disp, u.host_port().size()};
-        buf_append(buf, u.host_port());
+        m_target = {target_disp, authority_size(u)};
+        append_authority(buf, u);
         m_path = m_query = {uint16_t(buf - m_buf), 0};
         buf_append(buf, " HTTP/1.1\r\n");
         m_buf_size = buf - m_buf;
@@ -350,7 +369,11 @@ Request::Request(void* buf, uint16_t buf_capacity, Verb v,
 
 int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     URL u(url);
-    if ((size_t)m_buf_capacity <= u.target().size() + 21 + verbstr[v].size())
+    auto target_size = v == Verb::CONNECT ? authority_size(u) :
+        (use_absolute_uri(u, enable_proxy) ? full_url_size(u) : u.target().size());
+    auto request_line_size = verbstr[v].size() + 1 + target_size +
+                             sizeof(" HTTP/1.1\r\n") - 1;
+    if (request_line_size > m_buf_capacity)
         LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
 
     LOG_DEBUG("request reset ", VALUE(u.host()), VALUE(enable_proxy));
@@ -359,8 +382,11 @@ int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     make_request_line(v, u, enable_proxy);
     headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
 
-    // Host is always the first header
-    headers.insert("Host", u.host_port());
+    // Host is always the first header. CONNECT uses the exact authority-form
+    // target, including the port even when it is the scheme default.
+    auto host = v == Verb::CONNECT ? target() : u.host_port();
+    if (headers.insert("Host", host) < 0)
+        LOG_ERRNO_RETURN(0, -1, "failed to set Host");
     return 0;
 }
 

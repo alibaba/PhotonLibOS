@@ -15,7 +15,9 @@ limitations under the License.
 */
 
 #include <atomic>
+#include <new>
 #include <set>
+#include <thread>
 
 #include <photon/common/alog.h>
 #include <photon/photon.h>
@@ -150,6 +152,32 @@ TEST(vcpu_local, factory_and_null_not_cached) {
     ASSERT_NE(nullptr, a);
     EXPECT_EQ(a, local.get());
     EXPECT_EQ(1, g_ctor.load());
+}
+
+TEST(vcpu_local, address_reuse_after_disown) {
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    DEFER(photon::fini());
+    reset();
+    WorkPool pool(1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+
+    struct Local final : VCPULocal<Value> {};
+    alignas(Local) unsigned char storage[sizeof(Local)];
+    auto first = new (storage) Local;
+    pool.call([&] { ASSERT_NE(nullptr, first->get()); });
+    EXPECT_EQ(1, g_ctor.load());
+
+    // Without a photon context, destruction disowns the worker's slot. Reusing
+    // the same object address must not make the new instance observe that slot.
+    std::thread destroyer([&] { first->~Local(); });
+    destroyer.join();
+    EXPECT_EQ(0, g_dtor.load());
+
+    auto second = new (storage) Local;
+    pool.call([&] { ASSERT_NE(nullptr, second->get()); });
+    EXPECT_EQ(2, g_ctor.load());
+    EXPECT_EQ(1, g_dtor.load());
+    second->~Local();
+    EXPECT_EQ(2, g_dtor.load());
 }
 
 int main(int argc, char** argv) {
