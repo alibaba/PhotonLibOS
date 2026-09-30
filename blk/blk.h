@@ -28,6 +28,27 @@ limitations under the License.
 namespace photon {
 namespace blk {
 
+// ---------------------------------------------------------------------------
+// NO DEFAULTS FOR HOST-WIDE NAMESPACES.
+//
+// Every transport here registers into a namespace the whole host shares: configfs
+// directories, the ublk dev_id space, the vduse device-name space, a directory of
+// unix sockets. None of them is partitioned per process, so the only thing that
+// keeps two applications built on this library apart is that they were TOLD apart.
+//
+// That is why every setting which names such a namespace is a required argument,
+// with no default and no example value anywhere in this file. A default is a value
+// two independent applications would both get, and the failure it causes is not a
+// collision you can see: each one's orphan scan reports the other's registrations
+// as its own, and its recovery loop then adopts or destroys devices it does not own.
+//
+// Give every application of yours its own values, and keep them stable across
+// restarts -- a recovery loop matches on them. The settings this covers:
+// new_tcmu_hba's subtype, dev_config_prefix and lock_dir; new_ublk_controller's and
+// new_vduse_controller's lock_dir; new_vhost_user_controller's sock_dir; and
+// TcmuHBA::Config::loopback_wwn.
+// ---------------------------------------------------------------------------
+
 // Op support bits for BlkDevInfo::features
 static constexpr uint64_t FEATURE_FLUSH         = 1ull << 0;
 static constexpr uint64_t FEATURE_DISCARD       = 1ull << 1;
@@ -124,22 +145,10 @@ public:
     UNIMPLEMENTED(int resize(uint64_t new_size));
 };
 
-enum class PollPolicy : uint8_t {
-    SLEEP,      // block on the kernel event source (uio fd / uring / kick fd); zero idle cost
-    SPIN,       // busy-poll for the lowest latency; burns a vCPU
-    ADAPTIVE,   // spin while busy, fall back to SLEEP after BlkConfig::spin_us idle
-};
-
 struct BlkConfig {
     BlkDevInfo info;
 
-    // Where the serving coroutines run. The single source of serving vcpus:
-    // nullptr (the default) serves on the caller's own vcpu, which is what every
-    // caller did before this existed. Non-null moves each serving coroutine into
-    // the pool with photon::thread_migrate, spread by the pool's own round-robin
-    // cursor; when there are more queues than pool vcpus, queues share one.
-    //
-    // A pool with no vcpus in it is treated as nullptr.
+    // The two contracts a non-null `pool` comes with.
     //
     // CONTRACT 1 -- lifetime. detach()/shutdown() every device that uses this pool
     // BEFORE destroying it. Breaking that does not crash: the serving coroutines
@@ -159,6 +168,16 @@ struct BlkConfig {
     // asked for it: init() keeps the first engine that initializes, so a request
     // naming several installs one.
     photon::WorkPool* pool = nullptr;
+                                  // Where the serving coroutines run. nullptr: on the
+                                  // caller's own vcpu. Non-null: every coroutine this
+                                  // device CREATES in order to serve a request is moved
+                                  // onto a pool vcpu as it is created -- one per queue
+                                  // for ublk, vduse and vhost-user, the ring pump for
+                                  // tcmu, one per client connection for nbd -- and the
+                                  // pool's own round-robin cursor spreads them, so more
+                                  // queues than pool vcpus means queues share one. The
+                                  // caller's vcpu, and whatever already runs on it, is
+                                  // not touched. A pool holding no vcpus reads as nullptr.
 
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
                                   // Honored by ublk, vhost-user and vduse, all clamping it
@@ -176,17 +195,30 @@ struct BlkConfig {
                                   // is set -- raising it helps small-request concurrency, not
                                   // large-block throughput
 
-    uint32_t stack_size = 0;      // coroutine stack for the per-request / per-tag serving
-                                  // coroutines; 0 = the module default (DEFAULT_REQ_STACK,
-                                  // 256 KiB), NOT photon's 8 MiB. How many of these exist is
-                                  // the peer's choice -- one per virtqueue entry, per tcmu ring
-                                  // command, per nbd connection -- and each costs a VMA, so
-                                  // 8 MiB apiece exhausts vm.max_map_count. Raise it if your
-                                  // backend IFile recurses deeply or keeps large buffers on
-                                  // its own stack
+    uint32_t stack_size = DEFAULT_STACK_SIZE;
+                                  // Stack of each serving coroutine named above, handed
+                                  // straight to photon::thread_create -- so 0 asks for the
+                                  // same thing this default already is. How MANY of them
+                                  // there are is the peer's decision, not yours: one per
+                                  // virtqueue entry, per tcmu ring command, per nbd
+                                  // connection. Each costs a VMA and address space, which
+                                  // is what vm.max_map_count runs out of first. Raise it
+                                  // for a backend IFile that recurses deeply or keeps
+                                  // large buffers on its own stack; lower it when the
+                                  // count above is high and address space is what binds.
 
-    uint32_t spin_us = 0;         // PollPolicy::ADAPTIVE only: how long to keep busy-polling
-                                  // after the last completion before sleeping; 0 = impl default
+    uint32_t spin_us = 0;         // how long a serving loop keeps busy-polling after the
+                                  // last completion before it blocks on the kernel's event
+                                  // source. 0 = never poll, always block: no idle CPU cost.
+                                  // UINT32_MAX = always poll, never block: lowest latency,
+                                  // one vCPU burned. Anything in between = poll for that
+                                  // many microseconds of idleness, then block.
+                                  // Read by tcmu (its ring pump) and ublk (its per-queue
+                                  // pump) only. vduse and vhost-user serve through the
+                                  // shared virtqueue engine, whose wait is a blocking
+                                  // kickfd wait with a fixed re-poll budget rather than a
+                                  // caller-tuned poll, and nbd serves one coroutine per
+                                  // connection; none of the three reads this field
 
     uint32_t timeout = 30;        // seconds; kernel-side tolerance for daemon unavailability;
                                   // must cover the restart window. Maps to tcmu cmd_time_out +
@@ -197,8 +229,6 @@ struct BlkConfig {
     bool read_only = false;       // export a read-only device; the write path fails:
                                   // tcmu SCSI WP (handler-level) / ublk UBLK_ATTR_READ_ONLY /
                                   // vduse + vhost-user VIRTIO_BLK_F_RO / nbd NBD_FLAG_READ_ONLY
-
-    PollPolicy poll = PollPolicy::SLEEP;
 
     explicit BlkConfig(const BlkDevInfo& i) : info(i) {}
     BlkConfig() = default;
@@ -286,19 +316,25 @@ struct BlkConfig {
 class TcmuHBA : public Object {
 public:
     struct Config : BlkConfig {
-        // Field order is padding-driven, do not tidy it: BlkConfig's content ends
-        // at offset 86 (its sizeof is 88), and the ABI lets a derived class place
-        // members in the base's tail padding -- so both bools land at 86/87 and the
-        // string then starts at 88 with no hole. 120 bytes; putting the string
-        // first costs 8 more.
-        bool loopback_lun = true;     // also create a tcm_loop LUN so a local /dev/sdX appears
+        bool loopback_lun = true;     // also create a tcm_loop LUN, so that a local
+                                      // /dev/sdX appears for this backstore
+
         bool adopt_external = false;  // serve a backstore an EXTERNAL operator created
-                                      // (targetcli/rtslib/overlaybd): its dev_config is theirs
-                                      // rather than "photon/<identity>", so that check is
-                                      // skipped. info.identity must still name the backstore
-                                      // and info.size still match its dev_size.
-        std::string loopback_wwn;     // tcm_loop WWN; empty = derived deterministically from
-                                      // info.identity (must stay stable across restarts)
+                                      // (targetcli/rtslib/overlaybd). Its dev_config is
+                                      // theirs rather than this HBA's
+                                      // "<dev_config_prefix><identity>", so that ownership
+                                      // check is skipped for it. info.identity must still
+                                      // name the backstore and info.size still match its
+                                      // dev_size.
+
+        std::string loopback_wwn;     // tcm_loop WWN of the loopback_lun target. REQUIRED
+                                      // when loopback_lun is set, and never derived: the
+                                      // tcm_loop WWN space is host-wide, so two
+                                      // applications that derived one from the same
+                                      // identity would hang their LUNs off a single target
+                                      // (see the note at the top of this file). Must stay
+                                      // stable across restarts.
+
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}
     };
@@ -311,24 +347,30 @@ public:
     };
 
     struct Event {
-        // Field order is padding-driven, do not tidy it: the four char arrays are
-        // 592 bytes of align-1, so putting them last lets the wide members pack
-        // from offset 0 with no hole. 608 bytes; leading with `kind` costs 8 more
-        // (the arrays end at 593 and `size` then has to skip to 600).
         uint64_t size = 0;          // ADDED: the backstore's dev_size, so a BlkDevInfo can
                                     // be built from the event alone. RECONFIG of dev_size:
                                     // the size the operator asked for -- the kernel commits
                                     // it only after the reply, so the attrib still reads the
                                     // old one
+
         uint32_t dev_id = 0;        // the kernel's dev_index -- the SAME in all three events
                                     // and the key a *_DONE reply is matched by; 0 = none owed
-        EventKind kind;
+
+        EventKind kind;             // which of the three this is; see EventKind
+
         bool synthesized = false;   // from the startup configfs scan rather than a live
                                     // event: that configure already completed, so no reply
                                     // is owed (and dev_id is 0)
+
         char bs_name[256];          // backstore name under the HBA = the serving identity
-        char dev_config[256];       // the operator's dev_config string; map it to a backend
+
+        char dev_config[256];       // that backstore's dev_config attrib: this HBA's own
+                                    // "<dev_config_prefix><identity>" for one it created,
+                                    // the operator's string for an external one. Map it to
+                                    // a backend.
+
         char uio_node[64];          // "/dev/uioN" of an ADDED device, "" otherwise
+
         char attr[16];              // RECONFIG only: the attribute changed, "dev_size" or
                                     // "dev_config" (the latter carries its new value in
                                     // dev_config and cannot be answered by resize())
@@ -339,11 +381,12 @@ public:
     // arriving while the caller is busy serving are queued, not dropped.
     virtual int wait_for_event(Event* out, Timeout tmo = {}) = 0;
 
-    // Photon-created backstores (dev_config == "photon/<identity>") that no live
-    // server holds the flock for -- crash recovery, with the identity as the
-    // recovery key. The startup scan additionally SYNTHESIZES ADDED events for
-    // every unserved backstore under the HBA, external ones included, so a single
-    // event loop covers both the backlog and whatever arrives later.
+    // Backstores this HBA created -- ones whose dev_config is its own
+    // "<dev_config_prefix><identity>" -- that no live server holds the flock for:
+    // crash recovery, with the identity as the recovery key. The startup scan
+    // additionally SYNTHESIZES ADDED events for every unserved backstore under the
+    // HBA, external ones included, so a single event loop covers both the backlog
+    // and whatever arrives later.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
 
     // Remove one orphan -- the configfs backstore registration, and the tombstone
@@ -419,12 +462,30 @@ public:
     virtual int deny(const Event& ev, int err) = 0;
 };
 
-// subtype is the configfs HBA directory this instance claims, under
-// target/core/ (e.g. "user_0"); lock_dir is the flock directory (nullptr =
-// "/run/photon-blk") and is this HBA's SCOPE: list_orphans() probes it AND the
-// devices new_device() builds claim their tombstones in it. That is the same
-// coupling UblkController states, and why TcmuHBA::Config carries no lock_dir of
-// its own. Bounded as there, because a truncated path is a different directory.
+// The first three arguments each name a host-wide namespace and none has a default
+// -- see the note at the top of this file.
+//
+// subtype is the configfs HBA directory this instance claims, under target/core/.
+// The kernel creates it on demand. It has to be a TCM-USER fabric directory, so its
+// name has the form user_<N>, and the <N> has to be one no other application of
+// yours on this host already uses: two HBAs on one directory see each other's
+// backstores, and this one's startup scan then synthesizes ADDED events for them.
+//
+// dev_config_prefix is the ownership tag written into the dev_config attrib of every
+// backstore this HBA creates, as "<dev_config_prefix><identity>". It is what
+// list_orphans() and the startup scan match on to tell a backstore this HBA created
+// from an operator's, and what a device's start() checks the registration it adopts
+// against -- so it has to be the same string across restarts, and yours alone: an
+// application sharing it sees this one's backstores as its own orphans. Bounded to
+// 63 bytes so that the prefix plus the longest backstore name still fits the
+// 256-byte attrib.
+//
+// lock_dir is the directory holding this HBA's tombstone files, one flock per
+// backstore, which is how a live server marks a registration as served. It is this
+// HBA's SCOPE: list_orphans() probes it AND the devices new_device() builds claim
+// their tombstones in it. That is the same coupling UblkController states, and why
+// TcmuHBA::Config carries no lock_dir of its own. Bounded as there, because a
+// truncated path is a different directory.
 //
 // netlink_reply engages the kernel's command-reply protocol
 // (TCMU_CMD_SET_FEATURES), which is module-GLOBAL: afterwards EVERY tcmu
@@ -467,11 +528,13 @@ public:
 // them); it still matters for adopted external ones, whose opt-out is the
 // operator's to set.
 //
-// nullptr + errno on failure (e.g. the genetlink family is missing, or
-// SET_FEATURES failed).
-TcmuHBA* new_tcmu_hba(const char* subtype = "user_0",
+// nullptr + errno on failure: a missing or empty required argument (EINVAL), an
+// over-long one (ENAMETOOLONG), a subtype that is not a TCM-USER fabric name
+// (EINVAL), the genetlink family missing, or SET_FEATURES failed.
+TcmuHBA* new_tcmu_hba(const char* subtype,
+                      const char* dev_config_prefix,
+                      const char* lock_dir,
                       bool netlink_reply = false,
-                      const char* lock_dir = nullptr,
                       bool defensive_reply = false);
 
 // ---------------------------------------------------------------------------
@@ -490,12 +553,6 @@ TcmuHBA* new_tcmu_hba(const char* subtype = "user_0",
 class UblkController : public Object {
 public:
     struct Config : BlkConfig {
-        // Field order is padding-driven, and here it is deliberately ASCENDING by
-        // width -- do not "fix" it. BlkConfig's content ends at offset 86, which is
-        // not a multiple of 8, so a leading uint64_t would have to skip to 88 and
-        // waste 2 bytes of tail padding it could have filled; leading with the
-        // uint32_t lands at 88 anyway and leaves the uint64_t at 96 with nothing
-        // after it. 112 bytes.
         uint32_t dev_id = UINT32_MAX; // ublk has no uuid; the dev_id IS the recovery identity;
                                       // UINT32_MAX = kernel auto-assign; otherwise requests
                                       // /dev/ublkb<N> (0 is a valid requestable id)
@@ -574,10 +631,13 @@ public:
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
-// lock_dir is the flock directory (nullptr/"" = "/run/photon-blk"). It is bounded
-// so that what the controller stores is what it uses: an over-long path would be
-// truncated into a DIFFERENT directory, silently reintroducing the divergence this
-// class exists to prevent. nullptr + errno (ENAMETOOLONG) if it is too long.
+// lock_dir is the directory holding this controller's tombstone files -- one flock
+// per dev_id, which is how a live server marks a registration as served, and the
+// SCOPE described above. There is no default, because it names a host-wide namespace
+// (see the note at the top of this file). It is bounded to 255 bytes so that what the
+// controller stores is what it uses: an over-long path would be truncated into a
+// DIFFERENT directory, silently reintroducing the divergence this class exists to
+// prevent. nullptr/"" + errno (EINVAL), or too long + errno (ENAMETOOLONG).
 UblkController* new_ublk_controller(const char* lock_dir);
 
 // ---------------------------------------------------------------------------
@@ -602,16 +662,19 @@ public:
     };
 
     struct Config : BlkConfig {
-        // Field order is padding-driven, do not tidy it: `sock_role` is 1 byte and
-        // fits BlkConfig's tail padding at offset 86, then `sock_mode` needs
-        // 4-alignment so it starts at 88 and the string at 96. 128 bytes; leading
-        // with the string costs 8 more.
-        SockRole sock_role = SockRole::SERVER;
-        uint32_t sock_mode = 0;       // unix socket permission bits (SERVER role); 0 means
-                                      // 0600, the owner's uid alone (root excepted). Set it
-                                      // explicitly when the guest process (qemu) runs as a
-                                      // different user.
-        std::string sock_path;
+        SockRole sock_role = SockRole::SERVER;   // which end of sock_path this process is;
+                                                 // see SockRole
+
+        uint32_t sock_mode = 0600;  // permission bits chmod'd onto the socket node in the
+                                    // SERVER role, i.e. who may connect to it. 0600 admits
+                                    // the owner's uid alone (root excepted), so a caller
+                                    // whose guest process (qemu) runs as a different user
+                                    // has to widen it. Not derived from umask.
+
+        std::string sock_path;      // the unix socket this device listens on (SERVER) or
+                                    // connects to (CLIENT). Must sit inside this
+                                    // controller's sock_dir.
+
         Config() = default;
         explicit Config(const BlkDevInfo& i) : BlkConfig(i) {}
     };
@@ -647,8 +710,12 @@ public:
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
-// sock_dir must be non-empty -- there is no default socket directory -- and is
-// bounded like the others. nullptr + errno (EINVAL / ENAMETOOLONG) otherwise.
+// sock_dir is the directory this controller BINDS its listening sockets in and SCANS
+// for listeners that have gone away -- one directory playing both roles, which is why
+// new_device() requires cfg.sock_path to sit inside it. There is no default: it names
+// a host-wide namespace (see the note at the top of this file). Bounded to 255 bytes,
+// so that what the controller stores is what it uses.
+// nullptr/"" + errno (EINVAL), or too long + errno (ENAMETOOLONG).
 VhostUserController* new_vhost_user_controller(const char* sock_dir);
 
 // ---------------------------------------------------------------------------
@@ -692,10 +759,9 @@ public:
     // names, and both resolve -- to /dev/vduse and to /dev -- so the probe would
     // succeed against a directory that is no device at all and the call would go on
     // to report success about nothing. All three are EINVAL with nothing deleted.
-    // The geometry checks new_device() also
-    // runs are deliberately NOT repeated: a record from list_orphans() carries size
-    // 0 because the capacity is not recoverable, so requiring it would make every
-    // orphan undestroyable.
+    // The geometry checks new_device() also runs are deliberately NOT repeated: a
+    // record from list_orphans() carries size 0 because the capacity is not
+    // recoverable, so requiring it would make every orphan undestroyable.
     //
     // EBUSY is the live refusal and it has three sources, checked in this order:
     // a live server holds the tombstone; a FOREIGN daemon is connected to the
@@ -724,26 +790,32 @@ public:
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
-// lock_dir is the flock directory (nullptr/"" = "/run/photon-blk"), bounded as for
-// ublk. nullptr + errno (ENAMETOOLONG) if it is too long.
+// lock_dir is the directory holding this controller's tombstone files -- one flock
+// per device name -- and so its SCOPE, bounded and default-free exactly as for ublk
+// (see the note at the top of this file).
+// nullptr/"" + errno (EINVAL), or too long + errno (ENAMETOOLONG).
 VduseController* new_vduse_controller(const char* lock_dir);
 
 // nbd has no controller to nest this in -- there is no scope to hold, because an
 // export leaves no persistent kernel-side state (see the note below) -- so its
 // config stays at namespace scope.
 struct NbdConfig : BlkConfig {
-    // UDS, TCP and loopback device can be enabled simultaneously.
-    // Field order is padding-driven, do not tidy it. BlkConfig's content ends at
-    // offset 86, and net::EndPoint is 18 bytes of align-1 -- so the two bools go
-    // at 86/87 and the endpoint fills 88..106, which lets the 8-aligned string
-    // start at 112 instead of leaving a hole. 144 bytes; putting the string
-    // before the endpoint costs 8 more.
-    bool enable_tcp = false;
-    bool loopback_device = true;  // whether attach the export to a free local /dev/nbdN kernel
-                                  // device, and this library plays the role of nbd-client;
-                                  // read back the node via get_device_node().
-    net::EndPoint tcp_endpoint;   // serve on this TCP endpoint if enable_tcp is set
-    std::string unix_path;        // serve on this unix socket if non-empty
+    // UDS, TCP and the loopback device can be enabled simultaneously, and at least
+    // one of the three must be.
+    bool enable_tcp = false;        // also serve on tcp_endpoint
+
+    bool loopback_device = true;    // also attach the export to a free local /dev/nbdN
+                                    // kernel device, with this library playing the role
+                                    // of nbd-client; read the node back via
+                                    // get_device_node(). LINUX-ONLY: on any other
+                                    // platform start() fails with ENOSYS.
+
+    net::EndPoint tcp_endpoint;     // the TCP endpoint to serve on when enable_tcp is
+                                    // set. port 0 lets the kernel choose; the listener
+                                    // get_server_sockets() returns then carries it.
+
+    std::string unix_path;          // the unix socket path to serve on; empty = no UDS
+
     NbdConfig() = default;
     explicit NbdConfig(const BlkDevInfo& i) : BlkConfig(i) {}
 };
@@ -751,8 +823,9 @@ struct NbdConfig : BlkConfig {
 class NbdDevice : public IBlkDevice {
 public:
     struct SocketServers {
-        net::ISocketServer* uds = nullptr;   // unix_path mode
-        net::ISocketServer* tcp = nullptr;   // enable_tcp mode
+        net::ISocketServer* uds = nullptr;   // the unix_path listener, or nullptr
+
+        net::ISocketServer* tcp = nullptr;   // the enable_tcp listener, or nullptr
     };
 
     // The listening server sockets after start(). With tcp_endpoint.port == 0

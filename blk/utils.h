@@ -61,26 +61,6 @@ namespace blk {
 // ===========================================================================
 
 // ----------------------------------------------------------------------------
-// Serving-coroutine stack size
-// ----------------------------------------------------------------------------
-
-// photon's DEFAULT_STACK_SIZE is 8 MiB. The per-request coroutines here use a
-// few KiB of it: parse, one preadv/pwritev into the backend, complete. What 8
-// MiB actually costs is not RSS -- the stacks are posix_memalign'd, so only
-// touched pages become resident -- but ADDRESS SPACE and one VMA per stack,
-// and how many there are is the PEER's choice: a virtqueue may hold 32768
-// entries, and nbd takes one coroutine per connection. At 8 MiB that maps 256
-// GiB and runs vm.max_map_count (65530 by default) out long before anything
-// else gives. BlkConfig::stack_size overrides this for a backend IFile that
-// recurses deeply or keeps large buffers on its own stack.
-static constexpr uint32_t DEFAULT_REQ_STACK = 256 * 1024;
-
-// Resolve BlkConfig::stack_size: 0 means the default above, NOT photon's.
-inline uint32_t resolve_stack_size(uint32_t configured) {
-    return configured ? configured : DEFAULT_REQ_STACK;
-}
-
-// ----------------------------------------------------------------------------
 // BlkDevInfo validation (the part of every start() that is transport-neutral)
 // ----------------------------------------------------------------------------
 
@@ -99,9 +79,10 @@ int validate_info(const BlkDevInfo& info, bool virtio);
 // so are the callers (tcmu, ublk).
 int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len);
 
-// Take the exclusive lock for `name` inside the lock dir (nullptr/"" =
-// /run/photon-blk), creating the dir and the file as needed. *fd_out receives the
-// fd to keep for the lifetime of the serving session.
+// Take the exclusive lock for `name` inside the lock dir, creating the dir and the
+// file as needed. *fd_out receives the fd to keep for the lifetime of the serving
+// session. `dir` is never null or empty: no controller has a default directory, so
+// every factory requires one (see the note at the top of blk.h).
 // EBUSY is the ROUTINE "another live server holds this identity" answer and is
 // deliberately not logged here: every caller reports it with its own context
 // (the device identity, or a silent skip in the passive handler's scan).
@@ -134,9 +115,7 @@ int devlock_unlink(const char* dir, const char* name);
 // devlock_free snprintf into a PATH_MAX path, so an over-long dir would be
 // silently truncated into a DIFFERENT directory -- the orphan scan and the
 // device's claim would then disagree, which is exactly the divergence a controller
-// exists to make impossible. This checks the LENGTH only: nullptr/"" is left to
-// each factory, and means DEVLOCK_DIR for the three lock dirs (devlock_* normalizes
-// it) but is rejected outright for vhost-user's socket dir, which has no default.
+// exists to make impossible.
 constexpr size_t SCOPE_DIR_BUF = 256;
 
 // Upper bound on the queues one device will drive. Shared by ublk (which always
@@ -147,8 +126,12 @@ constexpr size_t SCOPE_DIR_BUF = 256;
 // BlkConfig::queues.
 static constexpr uint32_t MAX_QUEUES = 64;
 
-// 0 if `dir` is usable, -1 with errno=ENAMETOOLONG after logging if not.
-int validate_scope_dir(const char* dir);
+// 0 if `dir` is usable as a controller's scope directory, -1 with errno after
+// logging if not: EINVAL when it is null or empty -- no controller has a default
+// directory to fall back on, because a shared one lets two applications adopt each
+// other's orphans (see the note at the top of blk.h) -- and ENAMETOOLONG when it
+// would not fit SCOPE_DIR_BUF. `what` names the directory in the log line.
+int validate_scope_dir(const char* dir, const char* what);
 
 // ----------------------------------------------------------------------------
 // unix socket endpoint probing
@@ -179,8 +162,7 @@ int run_off_vcpu(TempDelegate<int> fn);
 
 // BlkConfig::pool is the single source of serving vcpus. Both helpers below are
 // no-ops on a null pool and on a pool with no vcpus, which is what keeps "serve on
-// the caller's own vcpu" -- the behaviour of every caller before this existed --
-// the default rather than a special case.
+// the caller's own vcpu" the default rather than a special case.
 
 // Move a freshly created, still-READY serving coroutine into `pool`. Call it
 // IMMEDIATELY after thread_create with no yield in between: photon::thread_migrate
@@ -226,9 +208,9 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 //     starved by a pump that no longer yields. nbd neither spins nor logs:
 //     start() returns 0, the endpoint listens, and only the client handshake
 //     fails. tcmu still WORKS -- a write, an fsync and a read-back through its
-//     LUN all succeed -- and only stops being cheap: at PollPolicy::SLEEP its
-//     pump logs and sleeps 1 ms per pass, near 1 kHz, while at PollPolicy::SPIN
-//     it yields instead, logs nothing, and holds a core. vduse with no consumer
+//     LUN all succeed -- and only stops being cheap: with spin_us 0 its pump logs
+//     and sleeps 1 ms per pass, near 1 kHz, while with spin_us UINT32_MAX it
+//     yields instead, logs nothing, and holds a core. vduse with no consumer
 //     attached logs nothing either, because its loop's readiness gate is false
 //     and so it never reaches the wait.
 //
@@ -632,10 +614,6 @@ public:
         Delegate<void> tick;
     } hooks;
 
-    // Field order is padding-driven, do not tidy it: every 8-byte member comes
-    // first, then the 4-, 2- and 1-byte ones. `read_only` used to sit between
-    // `capacity` and `serial`, and since `serial` needs 8-alignment that left a
-    // 7-byte hole at offset 81. 152 bytes vs 160.
     fs::IFile* backend = nullptr;
     std::atomic<uint64_t> capacity{0};   // backend size in bytes; bounds every LBA
     const char* serial = "";      // answers VIRTIO_BLK_T_GET_ID
@@ -646,9 +624,9 @@ public:
     vring_avail* avail = nullptr;
     vring_used* used = nullptr;
     uint32_t num = 0;
-    uint32_t stack_size = DEFAULT_REQ_STACK;   // per-request coroutine stack; the
-                                               // transport resolves
-                                               // BlkConfig::stack_size into it
+    uint32_t stack_size = DEFAULT_STACK_SIZE;   // per-request coroutine stack, copied
+                                                // from BlkConfig::stack_size by the
+                                                // transport
     int kickfd = -1;              // eventfd the transport registered with its
                                   // kernel/frontend side; owned by the
                                   // transport. MUST be O_NONBLOCK: loop() drains

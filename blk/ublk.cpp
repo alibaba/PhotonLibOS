@@ -266,9 +266,6 @@ static_assert(sizeof(ublk_params) == 152, "ublk_params size");
 // ----------------------------------------------------------------------------
 
 struct UblkCtrl {
-    // Field order is padding-driven, do not tidy it: `fd` used to lead, so `ce` had
-    // to skip the 4 bytes behind it and `stopping` then left a 7-byte tail.
-    // 24 bytes vs 32.
     photon::CascadingEventEngine* ce = nullptr;
     photon::thread* pump_th = nullptr;
     int fd = -1;
@@ -371,12 +368,6 @@ static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
 static constexpr uint32_t IO_BUF_BYTES = 512 << 10;   // per-tag data buffer
 
 struct UblkDeviceImpl : IBlkDevice {
-    // Field order is padding-driven, do not tidy it: the align-8 members lead, the
-    // 24 bytes of int-sized ones then tile exactly three whole 8-byte blocks, and
-    // the six 1-byte members close the run ahead of the two char buffers.
-    // `own_backend`/`started`/`created` used to sit right after `backend`, and that
-    // 3-byte run left 18 bytes of holes ahead of `lock_fd`, `features`, `spin_us`
-    // and `queues`. 616 bytes vs 640 (8 of it is UblkCtrl's own shrink).
     UblkController::Config cfg;
     fs::IFile* backend = nullptr;
 
@@ -410,9 +401,6 @@ struct UblkDeviceImpl : IBlkDevice {
     uint16_t nr_queues = 1;
 
     struct Queue {
-        // Field order is padding-driven, do not tidy it: `qid` used to sit between
-        // `d` and `ce`, forcing `ce` to skip to offset 16, and `in_flight` between
-        // `bufs` and `pump_th` forced a second 4-byte skip. 120 bytes vs 136.
         UblkDeviceImpl* d = nullptr;
         photon::CascadingEventEngine* ce = nullptr;   // the queue's io_uring ring
         const ublksrv_io_desc* cmd_buf = nullptr;   // mmap'd off /dev/ublkcN, PROT_READ
@@ -442,7 +430,6 @@ struct UblkDeviceImpl : IBlkDevice {
     bool started = false;
     bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
     bool read_only = false;
-    PollPolicy poll = PollPolicy::SLEEP;
     uint8_t sector_shift = 9;
 
     // The scope directory this device claims its tombstone in, handed over by the
@@ -451,12 +438,10 @@ struct UblkDeviceImpl : IBlkDevice {
     char lock_dir[SCOPE_DIR_BUF] = {};
 
     UblkDeviceImpl(const UblkController::Config& c, const char* ldir) : cfg(c) {
-        if (ldir)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);   // the controller's bounded copy
         sector_shift = cfg.info.sector_size_shift;
         features = cfg.info.features;
         read_only = cfg.read_only;
-        poll = cfg.poll;
         spin_us = cfg.spin_us;
         dev_sectors = cfg.info.size >> sector_shift;
         // a cfg field left 0 means "default", and the config is immutable, so
@@ -601,8 +586,8 @@ struct UblkDeviceImpl : IBlkDevice {
     void pump(Queue* q) {
         uint64_t last_work = photon::now;
         while (!q->pump_stop) {
-            bool spin = poll == PollPolicy::SPIN ||
-                        (poll == PollPolicy::ADAPTIVE && photon::now - last_work < spin_us);
+            bool spin = spin_us == UINT32_MAX ||
+                        (spin_us && photon::now - last_work < spin_us);
             ssize_t n = q->ce->wait_for_events(nullptr, 0, spin ? Timeout(0) : Timeout());
             if (n < 0) {
                 if (q->pump_stop) break;
@@ -647,15 +632,16 @@ struct UblkDeviceImpl : IBlkDevice {
         q->pump_th = photon::thread_create11(&UblkDeviceImpl::pump, this, q);
         photon::thread_enable_join(q->pump_th);
         // queue_depth long-lived coroutines per queue, each calling into the
-        // caller's backend IFile via serve_req -- so these are the ones photon's
-        // 8 MiB default hurts most (see DEFAULT_REQ_STACK in utils.h).
+        // caller's backend IFile via serve_req. BlkConfig::stack_size says how big
+        // they are, and it is the caller's to choose: how many there are per queue
+        // is fixed here, but a device may have many queues.
         //
         // The create is checked because fetches_issued.wait() below is a token
         // committed BEFORE these creates: a nullptr return would hang it forever
         // and hand thread_enable_join a null. Only successful ones are pushed,
         // and queue_teardown is null-safe on a partially set-up queue, which is
         // what start()'s rollback runs for every queue on this -1.
-        uint32_t stack = resolve_stack_size(cfg.stack_size);
+        uint32_t stack = cfg.stack_size;
         for (uint32_t tag = 0; tag < queue_depth; tag++) {
             auto th = photon::thread_create11(stack, &UblkDeviceImpl::tag_loop, this, q, (uint16_t)tag);
             if (!th)
@@ -1252,11 +1238,11 @@ struct UblkDeviceImpl : IBlkDevice {
 };
 
 struct UblkControllerImpl : UblkController {
-    char lock_dir[SCOPE_DIR_BUF] = {};   // "" = /run/photon-blk, normalized by devlock_*
+    char lock_dir[SCOPE_DIR_BUF] = {};   // the controller's, copied at construction
 
     explicit UblkControllerImpl(const char* ld) {
-        if (ld)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ld);   // bounded: the factory checked
+        // the factory required it and bounded it, so this cannot truncate
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ld);
     }
 
     IBlkDevice* new_device(const UblkController::Config& cfg) override {
@@ -1442,7 +1428,7 @@ struct UblkControllerImpl : UblkController {
 };
 
 UblkController* new_ublk_controller(const char* lock_dir) {
-    if (validate_scope_dir(lock_dir) < 0)
+    if (validate_scope_dir(lock_dir, "lock") < 0)
         return nullptr;   // already logged
     return new UblkControllerImpl(lock_dir);
 }

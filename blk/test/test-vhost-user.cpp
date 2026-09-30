@@ -1233,7 +1233,7 @@ TEST_F(VhostUserTest, stale_socket_takeover) {
 TEST_F(VhostUserTest, sock_mode_default_is_0600) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
-    // sock_mode deliberately left at 0: that IS the default under test
+    // sock_mode deliberately untouched: 0600 IS the default under test
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);

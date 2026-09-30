@@ -339,8 +339,8 @@ static int cfg_mkdir(const char* path) {
 static bool path_exists(const char* path) { return ::access(path, F_OK) == 0; }
 
 // ----------------------------------------------------------------------------
-// identity helpers: a stable hash drives the tcm_loop WWN and the SCSI device id,
-// both derived deterministically from cfg.info.identity so they survive restarts
+// identity helpers: a stable hash drives the SCSI device id, derived
+// deterministically from cfg.info.identity so it survives restarts
 // ----------------------------------------------------------------------------
 
 static uint64_t fnv1a64(const char* s) {
@@ -360,11 +360,6 @@ static void sanitize(char* out, size_t cap, const char* s) {
         n = 3;
     }
     if (cap) out[n] = '\0';
-}
-// tcm_loop WWN: "naa." + 16 hex digits, the leading 5 = NAA registered IEEE
-static void derive_wwn(char* out, size_t cap, const char* identity) {
-    uint64_t h = fnv1a64(identity);
-    snprintf(out, cap, "naa.5%015llx", (unsigned long long)(h & 0x0fffffffffffffffull));
 }
 
 // ----------------------------------------------------------------------------
@@ -515,12 +510,6 @@ struct TcmuUio {
 // ----------------------------------------------------------------------------
 
 struct TcmuServer {
-    // Field order is padding-driven, do not tidy it: the 8-wide members and the
-    // 256-byte identity pack from offset 0, and every narrower one (the four
-    // uint32_t counters, the bools, PollPolicy) trails them -- interleaving a
-    // narrow member between two 8-wide ones (block_size after identity,
-    // pending_capacity_ua or read_only before features) opens a hole the next
-    // 8-aligned member has to skip. 424 bytes (measured).
     TcmuUio uio;
     fs::IFile* backend = nullptr;
     char identity[256] = {};    // capped well below this at registration time
@@ -581,14 +570,13 @@ struct TcmuServer {
     photon::semaphore slots;
     uint32_t block_size = 512;
     uint32_t in_flight = 0;
-    // stack for the per-command coroutines: the device resolves
-    // BlkConfig::stack_size into this before start(), which keeps it out of the
-    // start()/serve_start() parameter chain
-    uint32_t stack_size = DEFAULT_REQ_STACK;
+    // stack for the per-command coroutines: the device copies BlkConfig::stack_size
+    // into this before start(), which keeps it out of the start()/serve_start()
+    // parameter chain
+    uint32_t stack_size = DEFAULT_STACK_SIZE;
     uint32_t pending_wakeups = 0;   // doorbell coalescing counter
     std::atomic<bool> pending_capacity_ua{false};   // one-shot UNIT ATTENTION after resize
     bool read_only = false;
-    PollPolicy poll = PollPolicy::SLEEP;
     bool stopping = false;
 
     struct CmdArg { TcmuServer* srv; tcmu_cmd_entry* ent; };
@@ -722,7 +710,7 @@ struct TcmuServer {
         photon::thread_join((photon::join_handle*)th);
     }
 
-    // the serving loop: wait for the uio interrupt per the poll policy, then
+    // the serving loop: wait for the uio interrupt per BlkConfig::spin_us, then
     // dispatch every pending ring command to a fresh coroutine
     void pump() {
         uint64_t last_work = photon::now;
@@ -733,12 +721,12 @@ struct TcmuServer {
                 drain_ring();
                 continue;
             }
-            if (poll == PollPolicy::SPIN ||
-                (poll == PollPolicy::ADAPTIVE && photon::now - last_work < spin_us)) {
+            if (spin_us == UINT32_MAX ||
+                (spin_us && photon::now - last_work < spin_us)) {
                 photon::thread_yield();
                 continue;
             }
-            // SLEEP (or ADAPTIVE that cooled down): block on the uio interrupt
+            // spin_us exhausted (or it is 0): block on the uio interrupt
             if (photon::wait_for_fd_readable(uio.fd) < 0) {
                 if (stopping) break;
                 if (errno != EINTR) {
@@ -1200,6 +1188,12 @@ struct TcmuServer {
 // ----------------------------------------------------------------------------
 
 static const char* const TARGET_ROOT = "/sys/kernel/config/target";
+
+// Bound on new_tcmu_hba's dev_config_prefix. The dev_config attrib is written and
+// read back through 256-byte buffers and holds "<prefix><identity>", and a backstore
+// name is at most BS_NAME_BUF-1 = 64 chars, so 63 chars of prefix cannot overflow it.
+static constexpr size_t DEV_CONFIG_PREFIX_BUF = 64;
+
 struct TcmuDeviceImpl;   // the device: defined just below
 
 // Device <-> HBA linkage. Written by the HBA's listener vcpu, read
@@ -1377,12 +1371,6 @@ struct TcmuDeviceImpl : IBlkDevice {
     static constexpr size_t WWN_BUF = 256;   // tcm_loop WWN buffer, see validate()
     static constexpr size_t BS_NAME_BUF = TcmuRegistry::BS_NAME_BUF;   // backstore name, see validate()
 
-    // Field order is padding-driven, do not tidy it: the four bools used to sit
-    // among the wide members, where each stranded the align-4 or align-8 member
-    // behind it -- own_backend/started cost 2 bytes before lock_fd, created and
-    // lun_attached 5 before `server`, on top of 7 bytes of tail -- so they now
-    // trail the odd-sized bs_name instead. 1864 bytes (measured), and it moves
-    // whenever TcmuServer does, which this struct embeds by value.
     TcmuHBA::Config cfg;
     fs::IFile* backend = nullptr;
 
@@ -1395,8 +1383,9 @@ struct TcmuDeviceImpl : IBlkDevice {
     // log as (const char*), never VALUE(): alog would emit all 128 bytes
     char bs_path[128] = {};      // configfs backstore dir (≤ 103 chars)
     char bs_name[BS_NAME_BUF] = {};   // backstore name (sanitized identity)
-    char hba[32] = "user_0";     // configfs HBA dir under target/core/, our TcmuHBA's
-    char hbanum[32] = "0";       // hba after "user_", for the uio name lookup
+    char hba[32] = {};           // configfs HBA dir under target/core/, our TcmuHBA's
+    char hbanum[32] = {};        // hba after "user_", for the uio name lookup
+    char dev_config_prefix[DEV_CONFIG_PREFIX_BUF] = {};   // our TcmuHBA's ownership tag
     char wwn[WWN_BUF] = {};      // tcm_loop WWN
     char lb_path[320] = {};      // configfs loopback/<wwn> dir (≤ 291 chars)
     char node_path[64] = {};     // "/dev/sdX" of the tcm_loop LUN; "" if none
@@ -1424,18 +1413,18 @@ struct TcmuDeviceImpl : IBlkDevice {
     // message and wait_for_event() already popped the event, so the caller could
     // not give it back even if asked. That is why blk.h requires info.identity to
     // NAME the backstore -- the derived name is the lookup key.
-    TcmuDeviceImpl(TcmuRegistry* r, int fam, const char* subtype, bool reply,
-                   const char* ldir, const TcmuHBA::Config& c)
+    TcmuDeviceImpl(TcmuRegistry* r, int fam, const char* subtype, const char* prefix,
+                   bool reply, const char* ldir, const TcmuHBA::Config& c)
         : cfg(c), reg(r), kern_reply(reply) {
         link.dev = this;
         link.fam = fam;
-        if (subtype && strlen(subtype) < sizeof(hba)) {
-            strcpy(hba, subtype);
-            if (strncmp(hba, "user_", 5) == 0 && hba[5])
-                strcpy(hbanum, hba + 5);
-        }
-        if (ldir)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);   // bounded: new_tcmu_hba checked
+        // all three strings are the HBA's own copies, which new_tcmu_hba() required
+        // and bounded, so none of these can truncate
+        snprintf(hba, sizeof(hba), "%s", subtype);
+        if (strncmp(hba, "user_", 5) == 0 && hba[5])
+            strcpy(hbanum, hba + 5);
+        snprintf(dev_config_prefix, sizeof(dev_config_prefix), "%s", prefix);
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);
         sanitize(bs_name, sizeof(bs_name), cfg.info.identity.c_str());
         reg->register_link(&link, bs_name);
         link.added_id = reg->take_added(bs_name);
@@ -1467,8 +1456,8 @@ struct TcmuDeviceImpl : IBlkDevice {
         // The identity BECOMES the backstore dir name: sanitize() truncates into
         // bs_name, and a truncated name would not match the kernel's, so the HBA
         // could never match an ADDED to this device and the operator's enable
-        // would hang. (It is also "photon/<identity>" in dev_config, read back
-        // into 256-byte buffers -- 64 chars leaves that ample.)
+        // would hang. (It is also the tail of dev_config, read back into 256-byte
+        // buffers -- 64 chars leaves that ample.)
         if (c.info.identity.size() >= BS_NAME_BUF)
             LOG_ERROR_RETURN(ENAMETOOLONG, -1, "device identity is too long for a tcmu backstore name (` bytes, max `)",
                              c.info.identity.size(), BS_NAME_BUF - 1);
@@ -1478,9 +1467,14 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (c.info.sector_size_shift != 9)
             LOG_WARN("tcmu forces a 512-byte sector; ignoring sector_size_shift=`",
                      (int)c.info.sector_size_shift);
-        if (!c.loopback_wwn.empty() && c.loopback_wwn.size() >= WWN_BUF)
-            LOG_ERROR_RETURN(ENAMETOOLONG, -1, "loopback_wwn is too long (` bytes)",
-                             c.loopback_wwn.size());
+        // Never derived from the identity: the tcm_loop WWN space is host-wide, so
+        // two applications that chose the same identity under different HBAs would
+        // compute the same WWN and hang their LUNs off one target.
+        if (c.loopback_lun && c.loopback_wwn.empty())
+            LOG_ERROR_RETURN(EINVAL, -1, "loopback_wwn is required when loopback_lun is set");
+        if (c.loopback_wwn.size() >= WWN_BUF)
+            LOG_ERROR_RETURN(ENAMETOOLONG, -1, "loopback_wwn is too long (` bytes, max `)",
+                             c.loopback_wwn.size(), WWN_BUF - 1);
         return 0;
     }
 
@@ -1522,8 +1516,8 @@ struct TcmuDeviceImpl : IBlkDevice {
         own_backend = ownership;
         // bs_name and the registry entry are the ctor's (identity is fixed at
         // construction); these paths are cleared by rollback(), so re-derive them
-        if (cfg.loopback_wwn.empty()) derive_wwn(wwn, sizeof(wwn), cfg.info.identity.c_str());
-        else                          strcpy(wwn, cfg.loopback_wwn.c_str());
+        // empty unless loopback_lun, and then lb_path is never opened
+        snprintf(wwn, sizeof(wwn), "%s", cfg.loopback_wwn.c_str());   // bounded by validate()
         snprintf(bs_path, sizeof(bs_path), "%s/core/%s/%s", TARGET_ROOT, hba, bs_name);
         snprintf(lb_path, sizeof(lb_path), "%s/loopback/%s", TARGET_ROOT, wwn);
         lock_file_name(bs_name, lock_name, sizeof(lock_name));
@@ -1571,7 +1565,6 @@ struct TcmuDeviceImpl : IBlkDevice {
         snprintf(server.identity, sizeof(server.identity), "%s", cfg.info.identity.c_str());
         server.read_only = cfg.read_only;
         server.features = cfg.info.features;
-        server.poll = cfg.poll;
         server.spin_us = cfg.spin_us;
         server.pending_capacity_ua = false;
 
@@ -1582,7 +1575,7 @@ struct TcmuDeviceImpl : IBlkDevice {
 
         // SERVE THE RING BEFORE attaching the LUN: the attach triggers a SCSI
         // scan that blocks until a handler answers INQUIRY/READ CAPACITY
-        if (server.start(node, cfg.queue_depth, cfg.pool, resolve_stack_size(cfg.stack_size)) < 0)
+        if (server.start(node, cfg.queue_depth, cfg.pool, cfg.stack_size) < 0)
             return -1;
 
         if (cfg.loopback_lun && attach_lun() < 0)
@@ -1652,7 +1645,7 @@ struct TcmuDeviceImpl : IBlkDevice {
                 return -1;
             char node[64];
             if (find_uio(node, sizeof(node)) < 0 ||
-                server.start(node, cfg.queue_depth, cfg.pool, resolve_stack_size(cfg.stack_size)) < 0) {
+                server.start(node, cfg.queue_depth, cfg.pool, cfg.stack_size) < 0) {
                 release_lock();
                 return -1;
             }
@@ -1774,7 +1767,10 @@ struct TcmuDeviceImpl : IBlkDevice {
         created = true;
 
         char p[PATH_MAX], dev_config[256];
-        snprintf(dev_config, sizeof(dev_config), "photon/%s", cfg.info.identity.c_str());
+        // cannot truncate: DEV_CONFIG_PREFIX_BUF is chosen so the longest backstore
+        // name still fits behind the prefix
+        snprintf(dev_config, sizeof(dev_config), "%s%s", dev_config_prefix,
+                 cfg.info.identity.c_str());
         // The per-backstore attribs are v4.13+. Older kernels take the same
         // information as an option string ("dev_config=... dev_size=...") written
         // to the LIO-generic `control` file, which this implementation does not
@@ -1846,10 +1842,11 @@ struct TcmuDeviceImpl : IBlkDevice {
             // theirs, so only the size is ours to validate
             LOG_INFO("adopting external tcmu backstore `, dev_config=", bs_name, b);
         } else {
-            // dev_config is "photon/<identity>"
-            if (strncmp(b, "photon/", 7) != 0)
-                LOG_ERROR_RETURN(EINVAL, -1, "backstore ` is not a photon device (dev_config=`); set adopt_external to serve an operator's backstore", bs_name, b);
-            const char* ident = b + 7;
+            // dev_config is "<dev_config_prefix><identity>"
+            size_t plen = strlen(dev_config_prefix);
+            if (strncmp(b, dev_config_prefix, plen) != 0)
+                LOG_ERROR_RETURN(EINVAL, -1, "backstore ` was not created by this HBA (dev_config=`); set adopt_external to serve an operator's backstore", bs_name, b);
+            const char* ident = b + plen;
             if (strcmp(ident, cfg.info.identity.c_str()) != 0)
                 LOG_ERROR_RETURN(EINVAL, -1, "identity drift: registration `, requested `",
                                  ident, cfg.info.identity);
@@ -2043,17 +2040,13 @@ struct TcmuDeviceImpl : IBlkDevice {
 // ----------------------------------------------------------------------------
 
 struct TcmuHBAImpl : TcmuHBA {
-    // Field order is padding-driven, do not tidy it: the wide members pack from
-    // the vptr and the odd-sized ones (fam, state, the five bools, q_lock) trail
-    // them, so that q_lock's single byte is all `q` has to skip. Interleaved as
-    // before, fam stranded 2 bytes, stop_req 3 before the handshake semaphores,
-    // draining 6 before reg and q_lock 7 before q. 616 bytes vs 632.
     // log as (const char*), never VALUE(): alog would emit all 32 bytes
-    char subtype[32] = "user_0";  // the configfs HBA dir under target/core/
+    char subtype[32] = {};        // the configfs HBA dir under target/core/
     char hbanum[32] = {};         // subtype after "user_"
+    char dev_config_prefix[DEV_CONFIG_PREFIX_BUF] = {};   // the dev_config ownership tag
     // The HBA's one and only scope: list_orphans() and on_added() probe it, and
-    // the devices new_device() builds claim their tombstones in it. Empty =
-    // /run/photon-blk. new_tcmu_hba() bounds it, so the copy below cannot truncate.
+    // the devices new_device() builds claim their tombstones in it. new_tcmu_hba()
+    // requires it and bounds it, so the copy below cannot truncate.
     char lock_dir[SCOPE_DIR_BUF] = {};
     std::thread vcpu_thread;
     // the listener vcpu's two handshakes, one signal each: it publishes state
@@ -2079,17 +2072,17 @@ struct TcmuHBAImpl : TcmuHBA {
     std::deque<TcmuHBA::Event> q;
     photon::semaphore q_sem;
 
-    TcmuHBAImpl(const char* st, bool reply, const char* ld, bool defensive)
+    // All three strings are required and bounded by new_tcmu_hba(). An over-long
+    // subtype leaves hbanum empty, which start() rejects: a truncated copy would
+    // silently claim a different HBA directory.
+    TcmuHBAImpl(const char* st, const char* prefix, const char* ld, bool reply,
+                bool defensive)
         : netlink_reply(reply), defensive_reply(defensive) {
-        if (!st || !*st)
-            st = "user_0";
-        // an over-long subtype leaves hbanum empty, which start() rejects: a
-        // truncated copy would silently claim a different HBA directory
         if (snprintf(subtype, sizeof(subtype), "%s", st) < (int)sizeof(subtype) &&
             strncmp(subtype, "user_", 5) == 0 && subtype[5])
             strcpy(hbanum, subtype + 5);
-        if (ld)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ld);
+        snprintf(dev_config_prefix, sizeof(dev_config_prefix), "%s", prefix);
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ld);
     }
 
     // Devices are the caller's, not ours: they outlive nothing here, but a device
@@ -2125,6 +2118,7 @@ struct TcmuHBAImpl : TcmuHBA {
     // real feature set.
     std::vector<BlkDevInfo> list_orphans() override {
         std::vector<BlkDevInfo> ret;
+        const size_t plen = strlen(dev_config_prefix);
         char hba[384];   // TARGET_ROOT/core/<subtype>
         snprintf(hba, sizeof(hba), "%s/core/%s", TARGET_ROOT, subtype);
         DIR* hd = opendir(hba);
@@ -2143,8 +2137,9 @@ struct TcmuHBAImpl : TcmuHBA {
             snprintf(p, sizeof(p), "%s/dev_config", ap);
             char b[256];
             if (cfg_read(p, b, sizeof(b)) < 0) continue;
-            if (strncmp(b, "photon/", 7) != 0) continue;   // an operator's device, not ours
-            const char* identity = b + 7;
+            // an operator's device, not ours
+            if (strncmp(b, dev_config_prefix, plen) != 0) continue;
+            const char* identity = b + plen;
             // probe the flock: free => no live server => orphan. Read-only open,
             // no O_CREAT: a query must not create files.
             char name[80];
@@ -2280,7 +2275,8 @@ struct TcmuHBAImpl : TcmuHBA {
     IBlkDevice* new_device(const TcmuHBA::Config& cfg) override {
         if (TcmuDeviceImpl::validate(cfg) < 0)
             return nullptr;
-        return new TcmuDeviceImpl(&reg, fam, subtype, netlink_reply, lock_dir, cfg);
+        return new TcmuDeviceImpl(&reg, fam, subtype, dev_config_prefix, netlink_reply,
+                                  lock_dir, cfg);
     }
 
     int deny(const TcmuHBA::Event& ev, int err) override {
@@ -2343,7 +2339,7 @@ struct TcmuHBAImpl : TcmuHBA {
     // that the caller may safely delete this object
     int start() {
         if (!hbanum[0])
-            LOG_ERROR_RETURN(EINVAL, -EINVAL, "tcmu subtype ` must be a configfs HBA name like user_0", subtype);
+            LOG_ERROR_RETURN(EINVAL, -EINVAL, "tcmu subtype ` must name a TCM-USER configfs HBA directory, of the form user_<N>", subtype);
         vcpu_thread = std::thread([this] { vcpu_main(); });
         started_sem.wait(1);
         int st = state.load();
@@ -2755,13 +2751,21 @@ struct TcmuHBAImpl : TcmuHBA {
     }
 };
 
-TcmuHBA* new_tcmu_hba(const char* subtype, bool netlink_reply, const char* lock_dir,
-                      bool defensive_reply) {
+TcmuHBA* new_tcmu_hba(const char* subtype, const char* dev_config_prefix,
+                      const char* lock_dir, bool netlink_reply, bool defensive_reply) {
+    if (!subtype || !*subtype)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "a tcmu HBA needs a configfs subtype; there is no default");
+    if (!dev_config_prefix || !*dev_config_prefix)
+        LOG_ERROR_RETURN(EINVAL, nullptr, "a tcmu HBA needs a dev_config ownership prefix; there is no default");
+    if (strlen(dev_config_prefix) >= DEV_CONFIG_PREFIX_BUF)
+        LOG_ERROR_RETURN(ENAMETOOLONG, nullptr, "tcmu dev_config prefix is too long (` bytes, max `): ",
+                         strlen(dev_config_prefix), DEV_CONFIG_PREFIX_BUF - 1, dev_config_prefix);
     // Before anything else: a truncated copy would be a DIFFERENT directory, and
     // this one scopes both the orphan scan and every device's tombstone claim
-    if (validate_scope_dir(lock_dir) < 0)
+    if (validate_scope_dir(lock_dir, "lock") < 0)
         return nullptr;   // already logged
-    auto sys = new TcmuHBAImpl(subtype, netlink_reply, lock_dir, defensive_reply);
+    auto sys = new TcmuHBAImpl(subtype, dev_config_prefix, lock_dir, netlink_reply,
+                               defensive_reply);
     if (sys->start() < 0) {   // errno set and logged inside, the vcpu already joined
         delete sys;
         return nullptr;

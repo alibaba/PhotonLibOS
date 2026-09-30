@@ -262,18 +262,9 @@ static uint32_t errno_to_nbd(int e) {
 }
 
 struct NbdDeviceImpl : NbdDevice {
-    // Field order is padding-driven, do not tidy it: own_backend/trans_flags and
-    // started/stopping used to sit amid the align-8 members, stranding holes at
-    // 153 and 230 plus more around nbd_fd/doit_thread; gathering every sub-8
-    // member after doit_thread packs them into the tail, conns_lock included.
-    // Data sums to 387 -- BlkConfig::pool added 8 to cfg (378 -> 386) and the
-    // spinlock adds 1 -- so vptr(8) + 387 = 395 rounds to 400 (measured).
     struct Conn {
-        // Field order is padding-driven, do not tidy it: wlock used to sit
-        // between negotiate and in_flight, stranding the 7-byte hole at 9..15;
-        // in_flight now packs into it and wlock takes the tail. The positional
-        // inits below ({s, negotiate}) pin the first two members regardless.
-        // 48 bytes vs 56.
+        // The positional inits below ({s, negotiate}) pin the first two members:
+        // reordering those two silently changes what the braces assign.
         net::ISocketStream* s;  // owned: accepted streams pass ownership to
                                 // the caller, the loopback one is heap-made;
                                 // serve_conn's teardown deletes it
@@ -316,28 +307,30 @@ struct NbdDeviceImpl : NbdDevice {
     net::ISocketServer* tcp_server = nullptr;  // enable_tcp mode
     photon::thread* uds_accept_th = nullptr;
     photon::thread* tcp_accept_th = nullptr;
-    std::thread doit_thread;
     std::vector<Conn*> conns;
     std::vector<photon::thread*> workers;  // joined only at cleanup; churned
                                            // workers accumulate until then
     bool own_backend = false;
     bool started = false;
     std::atomic<bool> stopping{false};
-    // Guards conns, which is declared up there with the other align-8 members:
-    // this struct packs every sub-8 field into the tail on purpose, and a 1-byte
-    // lock sitting between doit_thread and conns would strand a 7-byte hole. A
-    // spinlock, not a photon::mutex: every critical section is yield-free (the
-    // longest is a vector erase and a raw ::shutdown), so no holder can be
-    // preempted while another vcpu spins, and a mutex would drag in a wait queue
-    // and an owner pointer that this tail cannot absorb.
+    // Guards conns. A spinlock, not a photon::mutex: every critical section is
+    // yield-free (the longest is a vector erase and a raw ::shutdown), so no
+    // holder can be preempted while another vcpu spins.
     photon::spinlock conns_lock;
-    bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
     uint16_t trans_flags = 0;
-    // log as (const char*), never VALUE(): alog would emit all 64 bytes
-    char loopback_node[64] = {};   // "/dev/nbdN" while attached; empty = detached
-    int nbd_fd = -1;
-    uint32_t stack_size = DEFAULT_REQ_STACK;   // resolved from cfg at start()
+    uint32_t stack_size = DEFAULT_STACK_SIZE;   // copied from cfg at start()
+
+#ifdef __linux__
+    // Loopback-attach state. Attaching an nbd device is Linux-only -- ioctls on
+    // /dev/nbdN, or the netlink CONNECT/DISCONNECT commands -- so on any other
+    // platform none of this exists and get_device_node() answers nullptr.
+    std::thread doit_thread;        // runs the kernel's DO_IT loop; legacy path only
+    int nbd_fd = -1;                // the attached /dev/nbdN
     uint32_t nbd_index = 0;         // netlink-allocated device index
+    bool loopback_netlink = false;  // attach path: netlink (no DO_IT) vs legacy ioctls
+    // log as (const char*), never VALUE(): alog would emit all 64 bytes
+    char loopback_node[64] = {};    // "/dev/nbdN" while attached; empty = detached
+#endif
 
     explicit NbdDeviceImpl(const NbdConfig& c) : cfg(c) {}
 
@@ -399,7 +392,7 @@ struct NbdDeviceImpl : NbdDevice {
             depth.signal(cap);
         if (bytes.count() == 0)
             bytes.signal(MAX_INFLIGHT_BYTES);
-        stack_size = resolve_stack_size(cfg.stack_size);
+        stack_size = cfg.stack_size;
 
         if (!cfg.unix_path.empty()) {
             // blk.h start() contract: EBUSY when another live server holds the
@@ -435,7 +428,11 @@ struct NbdDeviceImpl : NbdDevice {
 
         started = true;
         ok = true;
+#ifdef __linux__
         LOG_INFO("nbd device started, ", VALUE(cfg.info.identity), VALUE(cfg.info.size), make_named_value("loopback_node", (const char*)loopback_node));
+#else
+        LOG_INFO("nbd device started, ", VALUE(cfg.info.identity), VALUE(cfg.info.size));
+#endif
         return 0;
     }
 
@@ -486,7 +483,11 @@ struct NbdDeviceImpl : NbdDevice {
     }
 
     const char* get_device_node() override {
+#ifdef __linux__
         return loopback_node[0] ? loopback_node : nullptr;
+#else
+        return nullptr;   // only a loopback attach names a node, and that is Linux-only
+#endif
     }
 
     // bind + listen + accept loop for one server; bind() logs its own failure
@@ -512,7 +513,7 @@ struct NbdDeviceImpl : NbdDevice {
     // cleanup_runtime to interrupt and join a dangling entry.
     void spawn_serve_conn(Conn* c) {
         // one coroutine per connection, so this is the stack MAX_CONNECTIONS
-        // multiplies -- see DEFAULT_REQ_STACK in utils.h
+        // multiplies -- BlkConfig::stack_size is the caller's knob for it
         auto th = photon::thread_create11(stack_size, &NbdDeviceImpl::serve_conn, this, c);
         if (!th) {
             // serve_conn's DEFER owns both the Conn and its stream, and it never

@@ -101,18 +101,17 @@ int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len) {
 // controller is what makes an orphan scan and the devices recovered from it agree.
 // ----------------------------------------------------------------------------
 
-static constexpr const char DEVLOCK_DIR[] = "/run/photon-blk";
-
-int validate_scope_dir(const char* dir) {
-    size_t len = dir ? strlen(dir) : 0;
+int validate_scope_dir(const char* dir, const char* what) {
+    if (!dir || !*dir)
+        LOG_ERROR_RETURN(EINVAL, -1, "a ` directory is required; there is no default, because a shared one would let two applications adopt each other's orphans", what);
+    size_t len = strlen(dir);
     if (len >= SCOPE_DIR_BUF)
-        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "scope directory is too long (` bytes, max `): ",
-                         len, SCOPE_DIR_BUF - 1, dir);
+        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "` directory is too long (` bytes, max `): ",
+                         what, len, SCOPE_DIR_BUF - 1, dir);
     return 0;
 }
 
 int devlock_acquire(const char* dir, const char* name, int* fd_out) {
-    if (!dir || !*dir) dir = DEVLOCK_DIR;
     if (::mkdir(dir, 0755) != 0 && errno != EEXIST)
         LOG_ERRNO_RETURN(0, -1, "failed to create lock dir ", dir);
     char path[PATH_MAX];
@@ -139,7 +138,6 @@ void devlock_release(int fd) {
 }
 
 int devlock_free(const char* dir, const char* name) {
-    if (!dir || !*dir) dir = DEVLOCK_DIR;
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     int fd = ::open(path, O_RDONLY | O_CLOEXEC);
@@ -153,7 +151,6 @@ int devlock_free(const char* dir, const char* name) {
 }
 
 int devlock_unlink(const char* dir, const char* name) {
-    if (!dir || !*dir) dir = DEVLOCK_DIR;
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
     if (::unlink(path) != 0 && errno != ENOENT)

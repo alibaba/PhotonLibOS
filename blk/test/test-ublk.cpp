@@ -84,6 +84,13 @@ static std::string node_of(IBlkDevice* d) {
     return n ? n : "";
 }
 
+// The lock directory every controller in this suite is built on. Stated here rather
+// than left to a library default, because there is no default: a directory two
+// applications share lets each one's orphan scan adopt the other's devices. Every
+// tombstone path this file checks is built from it, so the suite cannot drift onto
+// one directory for its controllers and probe another.
+static const char SUITE_LOCKS[] = "/run/photon-blk";
+
 // Everything a start() that was refused after it had already talked to the
 // kernel could leave behind, as one sortable listing: the ublk nodes under /dev,
 // and each of this suite's flock files marked HELD or FREE. The lock FILE is
@@ -93,7 +100,8 @@ static std::string node_of(IBlkDevice* d) {
 static std::string residue() {
     return test::sh_off_vcpu(
         "{ ls -1 /dev 2>/dev/null | grep '^ublk';"
-        "  for f in /run/photon-blk/ublk-*.lock; do [ -e \"$f\" ] || continue;"
+        "  for f in " + std::string(SUITE_LOCKS) +
+        "/ublk-*.lock; do [ -e \"$f\" ] || continue;"
         "    flock -n \"$f\" -c true 2>/dev/null && echo \"FREE $f\" || echo \"HELD $f\"; done;"
         "} | sort");
 }
@@ -209,7 +217,7 @@ public:
             if (::access("/dev/ublk-control", F_OK) != 0)
                 GTEST_SKIP() << "ublk_drv module not available";
         }
-        ctl = new_ublk_controller(nullptr);
+        ctl = new_ublk_controller(SUITE_LOCKS);
         ASSERT_NE(nullptr, ctl);
         sweep_orphans();
         ASSERT_EQ(0, img.create(IMG_PATH, IMG_SIZE));
@@ -234,7 +242,7 @@ public:
     // Owns its controller rather than using ctl: a GTEST_SKIP in SetUp returns
     // before ctl exists, and TearDown still runs.
     void sweep_orphans() {
-        auto c = new_ublk_controller(nullptr);   // the default dir, same scope as ctl
+        auto c = new_ublk_controller(SUITE_LOCKS);   // the same scope as ctl
         if (!c)
             return;
         DEFER(delete c);
@@ -260,7 +268,7 @@ public:
                 if (strncmp(e->d_name, "ublkc", 5) != 0 || !isdigit(e->d_name[5]))
                     continue;
                 uint32_t id = (uint32_t)atoi(e->d_name + 5);
-                std::string lp = "/run/photon-blk/ublk-" + std::to_string(id) + ".lock";
+                std::string lp = std::string(SUITE_LOCKS) + "/ublk-" + std::to_string(id) + ".lock";
                 int fd = ::open(lp.c_str(), O_RDONLY);
                 if (fd < 0)
                     continue;
@@ -574,7 +582,7 @@ TEST_F(UblkTest, destroy_orphan_removes_a_dead_registration) {
     DEFER(delete dev);
     std::string cn = "/dev/ublkc" + id;
     std::string bn = "/dev/ublkb" + id;
-    std::string lp = "/run/photon-blk/ublk-" + id + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/ublk-" + id + ".lock";
 
     // BEFORE, read independently of our own state
     ASSERT_EQ(0, ::access(cn.c_str(), F_OK));
@@ -722,7 +730,7 @@ TEST_F(UblkTest, destroy_orphan_refuses_a_directory_tombstone) {
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
     std::string cn = "/dev/ublkc" + id;
-    std::string lp = "/run/photon-blk/ublk-" + id + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/ublk-" + id + ".lock";
 
     // A DIRECTORY where the tombstone should be. devlock_free() opens O_RDONLY and
     // flocks, and both succeed on a directory fd, so the scan still reads this
@@ -789,7 +797,7 @@ TEST_F(UblkTest, destroy_orphan_refuses_a_directory_tombstone) {
 TEST_F(UblkTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
     const std::string sid = "4000000000";
     std::string cn = "/dev/ublkc" + sid;
-    std::string lp = "/run/photon-blk/ublk-" + sid + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/ublk-" + sid + ".lock";
     ASSERT_NE(0, ::access(cn.c_str(), F_OK)) << "this dev_id unexpectedly exists";
 
     BlkDevInfo rec;
@@ -1560,10 +1568,20 @@ TEST_F(UblkTest, fua) {
 
 // One controller = one scope. This one builds a SECOND controller on a custom dir
 // and checks that its device and its orphan list agree on it, while the fixture's
-// default-dir controller sees neither.
+// controller -- on SUITE_LOCKS -- sees neither.
 TEST_F(UblkTest, custom_lock_dir) {
     static const char LOCKS[] = "/tmp/photon-blk-ublk-test-locks";
     ::system(("rm -rf " + std::string(LOCKS)).c_str());
+
+    // No default directory to fall back on: a null or empty one is a refusal. What
+    // this pins is that the two independent scopes below really are two, rather
+    // than one shared default that both controllers happen to name.
+    errno = 0;
+    EXPECT_EQ(nullptr, new_ublk_controller(nullptr));
+    EXPECT_EQ(EINVAL, errno);
+    errno = 0;
+    EXPECT_EQ(nullptr, new_ublk_controller(""));
+    EXPECT_EQ(EINVAL, errno);
 
     // The bound is enforced at construction, not by silent truncation: a truncated
     // copy would be a DIFFERENT directory, the exact divergence a controller exists
@@ -1587,15 +1605,15 @@ TEST_F(UblkTest, custom_lock_dir) {
     uint32_t id = node_dev_id(node.c_str());
     ASSERT_NE(UINT32_MAX, id);
     // the lock landed exactly in the custom dir; a previous test may have
-    // left a stale default-dir lock file behind for this (reused) id, which
-    // would fool the default-dir probe below -- remove it
+    // left a stale SUITE_LOCKS lock file behind for this (reused) id, which
+    // would fool the SUITE_LOCKS probe below -- remove it
     std::string lp = std::string(LOCKS) + "/ublk-" + std::to_string(id) + ".lock";
     EXPECT_EQ(0, ::access(lp.c_str(), F_OK));
-    ::unlink(("/run/photon-blk/ublk-" + std::to_string(id) + ".lock").c_str());
+    ::unlink((std::string(SUITE_LOCKS) + "/ublk-" + std::to_string(id) + ".lock").c_str());
 
     ASSERT_EQ(0, dev->detach(true));   // quiesced + custom lock free = orphan
 
-    // visible through the custom dir, invisible through the default one
+    // visible through the custom dir, invisible through SUITE_LOCKS
     bool found = false;
     for (auto& i : ctl2->list_orphans())
         if (i.identity == std::to_string(id)) found = true;
@@ -1603,7 +1621,7 @@ TEST_F(UblkTest, custom_lock_dir) {
     for (auto& i : ctl->list_orphans())
         EXPECT_NE(std::to_string(id), i.identity);
 
-    // sweep_orphans probes only the default dir, so this test must remove
+    // sweep_orphans probes only SUITE_LOCKS, so this test must remove
     // its own device: re-attach through the same controller and shut down
     UblkController::Config cfg2(make_info());
     cfg2.dev_id = id;

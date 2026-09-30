@@ -463,11 +463,6 @@ static void vduse_lock_name(const char* name, char* buf, size_t n) {
 }
 
 struct VduseDeviceImpl : IBlkDevice {
-    // Field order is padding-driven, do not tidy it: all 8-byte members first,
-    // then the 4-byte ones, then the 1-byte flags and the two char[256] buffers.
-    // Previously `name` stranded 1 byte before `ctrl_fd`, `sector_shift` +
-    // `read_only` 6 before `capacity_sectors`, `dev_status` 7 before `iotlb`, and
-    // the odd end of `lock_dir` left 7 of tail.
     BlkConfig cfg;
     fs::IFile* backend = nullptr;
 
@@ -609,8 +604,7 @@ struct VduseDeviceImpl : IBlkDevice {
     char lock_dir[SCOPE_DIR_BUF] = {};
 
     VduseDeviceImpl(const BlkConfig& c, const char* ldir) : cfg(c) {
-        if (ldir)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);   // bounded: the factory checked
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);   // the controller's bounded copy
         sector_shift = cfg.info.sector_size_shift;
         read_only = cfg.read_only;
         capacity_sectors = cfg.info.size >> 9;
@@ -1057,7 +1051,7 @@ struct VduseDeviceImpl : IBlkDevice {
         q->srv.backend = backend;
         // the LBA bound serve_chain enforces
         q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
-        q->srv.stack_size = resolve_stack_size(cfg.stack_size);
+        q->srv.stack_size = cfg.stack_size;
         q->srv.read_only = read_only;
         q->srv.serial = "photon-vduse";
         q->srv.tag = name;
@@ -1810,11 +1804,11 @@ struct VduseDeviceImpl : IBlkDevice {
 };
 
 struct VduseControllerImpl : VduseController {
-    char lock_dir[SCOPE_DIR_BUF] = {};   // "" = /run/photon-blk, normalized by devlock_*
+    char lock_dir[SCOPE_DIR_BUF] = {};   // the controller's, copied at construction
 
     explicit VduseControllerImpl(const char* ld) {
-        if (ld)
-            snprintf(lock_dir, sizeof(lock_dir), "%s", ld);   // bounded: the factory checked
+        // the factory required it and bounded it, so this cannot truncate
+        snprintf(lock_dir, sizeof(lock_dir), "%s", ld);
     }
 
     IBlkDevice* new_device(const BlkConfig& cfg) override {
@@ -1983,7 +1977,7 @@ struct VduseControllerImpl : VduseController {
 };
 
 VduseController* new_vduse_controller(const char* lock_dir) {
-    if (validate_scope_dir(lock_dir) < 0)
+    if (validate_scope_dir(lock_dir, "lock") < 0)
         return nullptr;   // already logged
     return new VduseControllerImpl(lock_dir);
 }

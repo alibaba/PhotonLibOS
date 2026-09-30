@@ -57,12 +57,26 @@ limitations under the License.
 namespace photon {
 namespace blk {
 
+// The namespaces this suite claims: its configfs HBA directory (and a second one
+// for the two-instance test), the ownership tag written into dev_config, and the
+// tombstone directory. All are stated here rather than left to a library default,
+// because there is no default -- two photon-based applications that shared any of
+// them would see each other's backstores as their own orphans. The configfs paths
+// below are spelled with the macros so that changing one cannot leave the other
+// stale.
+#define SUITE_SUBTYPE  "user_0"
+#define SUITE_SUBTYPE2 "user_1"
+#define SUITE_HBANUM   "0"        // SUITE_SUBTYPE after "user_"
+#define SUITE_CORE     "/sys/kernel/config/target/core/"
+static const char DEV_CONFIG_PREFIX[] = "photon/";
+static const char SUITE_LOCKS[]       = "/run/photon-blk";
+
 static const char IMG_PATH[]      = "/tmp/photon-blk-tcmu.img";
 static constexpr uint64_t IMG_SIZE = 64ull << 20;
 static const char TEST_IDENTITY[] = "photon-tcmu-test";
 // a fixed WWN keeps the tcm_loop path deterministic for cross-test cleanup
 static const char TEST_WWN[]      = "naa.50000000000007e5";
-static const char BS_PATH[]       = "/sys/kernel/config/target/core/user_0/photon-tcmu-test";
+static const char BS_PATH[]       = SUITE_CORE SUITE_SUBTYPE "/photon-tcmu-test";
 static const char LB_PATH[]       = "/sys/kernel/config/target/loopback/naa.50000000000007e5";
 static const char INQUIRY_VENDOR[]= "PHOTON";  // must match tcmu.cpp's emul_inquiry
 
@@ -85,10 +99,10 @@ static const char PASSIVE_BS[]   = "photon-passive";
 static const char PASSIVE_IMG[]  = "/tmp/photon-blk-passive.img";
 static constexpr uint64_t PASSIVE_SIZE = 32ull << 20;
 static const char PASSIVE_WWN[]  = "naa.50000000000007e6";
-static const char PASSIVE_BS_PATH[] = "/sys/kernel/config/target/core/user_0/photon-passive";
+static const char PASSIVE_BS_PATH[] = SUITE_CORE SUITE_SUBTYPE "/photon-passive";
 static const char PASSIVE_LB_PATH[] = "/sys/kernel/config/target/loopback/naa.50000000000007e6";
 static const char REFUSE_BS[]    = "photon-refuse";
-static const char REFUSE_BS_PATH[] = "/sys/kernel/config/target/core/user_0/photon-refuse";
+static const char REFUSE_BS_PATH[] = SUITE_CORE SUITE_SUBTYPE "/photon-refuse";
 
 // write a configfs/sysfs attribute; returns 0 or -errno (thread-safe errno
 // handoff for off_vcpu)
@@ -106,7 +120,7 @@ static int cfs_write(const std::string& path, const std::string& val) {
 // deliberate second copy of the convention, and it is the only one: every
 // probe below goes through here rather than spelling the path out again.
 static std::string lock_path(const char* identity) {
-    return std::string("/run/photon-blk/tcmu-") + identity + ".lock";
+    return std::string(SUITE_LOCKS) + "/tcmu-" + identity + ".lock";
 }
 
 // probe the per-device flock: free => no live server (daemon or active path)
@@ -143,7 +157,7 @@ static int plant_backstore(const char* bs_path, const char* identity, uint64_t s
     if (::mkdir(bs_path, 0755) != 0 && errno != EEXIST)
         return -errno;
     if (int rc = cfs_write(std::string(bs_path) + "/attrib/dev_config",
-                           std::string("photon/") + identity))
+                           std::string(DEV_CONFIG_PREFIX) + identity))
         return rc;
     return cfs_write(std::string(bs_path) + "/attrib/dev_size", std::to_string(size));
 }
@@ -405,7 +419,7 @@ public:
             GTEST_SKIP() << "tcm_loop module not loaded";
         force_cleanup();  // start from a clean slate
         // after the cleanup, so the startup scan finds nothing to synthesize
-        sys = new_tcmu_hba("user_0");
+        sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
         ASSERT_NE(nullptr, sys);
         ASSERT_EQ(0, img.create(IMG_PATH, IMG_SIZE));
         file = img.file;
@@ -882,13 +896,61 @@ TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device_the_kernel_will_not) {
     EXPECT_NE(0, ::access(BS_PATH, F_OK));
 }
 
+// Every namespace this library registers into is a required argument with no
+// default to fall back on: two photon-based applications that shared one would see
+// each other's backstores as their own orphans. This pins the refusals, so a
+// default reintroduced later fails here rather than in somebody's deployment.
+//
+// errno is only asserted where the refusal happens before anything is constructed.
+// A bad subtype is rejected inside the HBA's own start(), and the object built
+// before it is then deleted -- so what errno holds afterwards is whatever that
+// teardown left, which is not this test's business to pin.
+TEST_F(TcmuTest, requires_its_namespaces) {
+    for (const char* bad : {(const char*)nullptr, ""}) {
+        errno = 0;
+        EXPECT_EQ(nullptr, new_tcmu_hba(bad, DEV_CONFIG_PREFIX, SUITE_LOCKS)) << "subtype";
+        EXPECT_EQ(EINVAL, errno);
+        errno = 0;
+        EXPECT_EQ(nullptr, new_tcmu_hba(SUITE_SUBTYPE, bad, SUITE_LOCKS)) << "dev_config_prefix";
+        EXPECT_EQ(EINVAL, errno);
+        errno = 0;
+        EXPECT_EQ(nullptr, new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, bad)) << "lock_dir";
+        EXPECT_EQ(EINVAL, errno);
+    }
+    // a prefix the longest backstore name could not fit behind, inside the
+    // 256-byte dev_config attrib
+    errno = 0;
+    std::string long_prefix(64, 'p');
+    EXPECT_EQ(nullptr, new_tcmu_hba(SUITE_SUBTYPE, long_prefix.c_str(), SUITE_LOCKS));
+    EXPECT_EQ(ENAMETOOLONG, errno);
+    // not a TCM-USER fabric directory, so there is no HBA number to answer with
+    EXPECT_EQ(nullptr, new_tcmu_hba("not-a-user-hba", DEV_CONFIG_PREFIX, SUITE_LOCKS));
+}
+
+// The tcm_loop WWN is required rather than derived, for the same reason: the WWN
+// space is host-wide too, so a WWN computed from the identity would hang two
+// applications' LUNs off one target whenever they chose the same identity.
+TEST_F(TcmuTest, requires_loopback_wwn) {
+    TcmuHBA::Config cfg(make_info());
+    cfg.loopback_wwn.clear();
+    auto bad = sys->new_device(cfg);   // loopback_lun defaults to true
+    int e = errno;
+    EXPECT_EQ(nullptr, bad);
+    EXPECT_EQ(EINVAL, e);
+
+    cfg.loopback_lun = false;          // no LUN, so no WWN to name
+    auto dev = sys->new_device(cfg);
+    EXPECT_NE(nullptr, dev);
+    delete dev;
+}
+
 TEST_F(TcmuTest, destroy_orphan_validates_the_identity) {
     // An identity longer than a backstore name can be. The name mapping truncates
     // at 64 bytes, so without the length check this would name the PREFIX's
     // backstore -- planted here at exactly 64 bytes -- and destroy that instead
     // of what the caller asked for.
     const std::string PREFIX(64, 'a');
-    std::string pre_path = std::string("/sys/kernel/config/target/core/user_0/") + PREFIX;
+    std::string pre_path = std::string(SUITE_CORE SUITE_SUBTYPE "/") + PREFIX;
     ASSERT_EQ(0, plant_backstore(pre_path.c_str(), PREFIX.c_str(), IMG_SIZE));
     DEFER(::rmdir(pre_path.c_str()));
     BlkDevInfo over = make_info();
@@ -928,7 +990,7 @@ TEST_F(TcmuTest, destroy_orphan_validates_the_identity) {
         EXPECT_EQ(-1, rc) << "identity " << dot;
         EXPECT_EQ(EINVAL, e) << "identity " << dot;
     }
-    EXPECT_EQ(0, ::access("/sys/kernel/config/target/core/user_0", F_OK)) << "this HBA was removed";
+    EXPECT_EQ(0, ::access(SUITE_CORE SUITE_SUBTYPE, F_OK)) << "this HBA was removed";
     EXPECT_EQ(0, ::access("/sys/kernel/config/target/core", F_OK)) << "the fabric's core directory was removed";
 
     // An identity this HBA has no backstore for, and no tombstone either.
@@ -1542,7 +1604,8 @@ TEST_F(TcmuTest, genetlink_added_device) {
     DEFER(dev->shutdown());
 
     // TCMU_ATTR_DEVICE is the uio name "tcm-user/<hbanum>/<backstore>/<dev_config>"
-    std::string want_dev = std::string("tcm-user/0/") + TEST_IDENTITY + "/photon/" + TEST_IDENTITY;
+    std::string want_dev = std::string("tcm-user/" SUITE_HBANUM "/") + TEST_IDENTITY +
+                           "/" + DEV_CONFIG_PREFIX + TEST_IDENTITY;
     int got_minor = -1;
     for (int i = 0; i < 2000 && got_minor < 0; i++) {   // the msg may already be buffered
         gs.recv_notifications([&](uint16_t ntype, uint8_t cmd, const char* attrs, size_t alen) {
@@ -1588,7 +1651,8 @@ TEST_F(TcmuTest, genetlink_added_device) {
 // destroy, with serving already cleared). Without that, this test hangs.
 TEST_F(TcmuTest, active_path_under_reply_mode) {
     delete sys;   // SetUp built this one with netlink_reply off; replace it
-    sys = new_tcmu_hba("user_0", /*netlink_reply=*/true);
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
+                       /*netlink_reply=*/true);
     ASSERT_NE(nullptr, sys);
     auto cfg = make_cfg(/*loopback=*/false);   // no LUN: keep to the configfs path
     auto dev = sys->new_device(cfg);
@@ -1620,9 +1684,9 @@ TEST_F(TcmuTest, active_path_under_reply_mode) {
 // events with -ENOSYS instead, so this test fails without the opt-out. Below
 // v4.15 there is no opt-out and the failure mode is a HANG, hence the skip.
 TEST_F(TcmuTest, two_instances_one_reply_mode) {
-    const char HBA0[] = "/sys/kernel/config/target/core/user_0";
-    const char HBA1[] = "/sys/kernel/config/target/core/user_1";
-    const char BS1[]  = "/sys/kernel/config/target/core/user_1/photon-twoinst";
+    const char HBA0[] = SUITE_CORE SUITE_SUBTYPE;
+    const char HBA1[] = SUITE_CORE SUITE_SUBTYPE2;
+    const char BS1[]  = SUITE_CORE SUITE_SUBTYPE2 "/photon-twoinst";
     int hrc = ::mkdir(HBA0, 0755);
     ASSERT_TRUE(hrc == 0 || errno == EEXIST) << "cannot create the HBA dir: " << strerror(errno);
 
@@ -1636,11 +1700,12 @@ TEST_F(TcmuTest, two_instances_one_reply_mode) {
                         "defensive_reply=true instead";
 
     delete sys;   // SetUp built this one with netlink_reply off; replace it
-    sys = new_tcmu_hba("user_0", /*netlink_reply=*/true);
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
+                       /*netlink_reply=*/true);
     ASSERT_NE(nullptr, sys);
 
     DEFER(::rmdir(HBA1));            // registered first, so it runs last
-    auto plain = new_tcmu_hba("user_1");
+    auto plain = new_tcmu_hba(SUITE_SUBTYPE2, DEV_CONFIG_PREFIX, SUITE_LOCKS);
     ASSERT_NE(nullptr, plain);
     DEFER(delete plain);             // before the fixture's TearDown restores the flag
 
@@ -1649,7 +1714,7 @@ TEST_F(TcmuTest, two_instances_one_reply_mode) {
     auto dev = plain->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
-    ASSERT_EQ(0, dev->start(file));   // -ENOSYS from user_0 without the opt-out
+    ASSERT_EQ(0, dev->start(file));   // -ENOSYS from the reply-mode HBA without the opt-out
     DEFER(dev->shutdown());
 
     std::string v;
@@ -1674,7 +1739,8 @@ TEST_F(TcmuTest, two_instances_one_reply_mode) {
 // vetoes the change), rmdir until REMOVED_DEVICE_DONE.
 TEST_F(TcmuTest, passive_daemon) {
     delete sys;   // SetUp built this one with netlink_reply off; replace it
-    sys = new_tcmu_hba("user_0", /*netlink_reply=*/true);
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
+                       /*netlink_reply=*/true);
     ASSERT_NE(nullptr, sys);
     constexpr uint64_t TMO = 30ull * 1000 * 1000;
 
@@ -1879,7 +1945,7 @@ TEST_F(TcmuTest, passive_daemon_scan) {
     EXPECT_EQ(0, resolved.load());
     constexpr uint64_t TMO = 30ull * 1000 * 1000;
 
-    sys = new_tcmu_hba("user_0");
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
     ASSERT_NE(nullptr, sys);
     TcmuHBA::Event ev;
     ASSERT_EQ(0, sys->wait_for_event(&ev, TMO));
@@ -1888,8 +1954,8 @@ TEST_F(TcmuTest, passive_daemon_scan) {
     EXPECT_EQ(0u, ev.dev_id);
     EXPECT_EQ(PASSIVE_SIZE, ev.size);
     EXPECT_STREQ(PASSIVE_BS, ev.bs_name);
-    // an operator's backstore is not a photon orphan: list_orphans() reports only
-    // registrations whose dev_config is "photon/<identity>"
+    // an operator's backstore is not one of ours: list_orphans() reports only
+    // registrations whose dev_config carries this HBA's ownership prefix
     for (auto& o : sys->list_orphans())
         EXPECT_NE(std::string(PASSIVE_BS), o.identity);
 
@@ -1920,7 +1986,7 @@ TEST_F(TcmuTest, passive_daemon_scan) {
     EXPECT_TRUE(lock_free(PASSIVE_BS));
     ASSERT_EQ(0, ::access(PASSIVE_BS_PATH, F_OK));
     delete sys;
-    sys = new_tcmu_hba("user_0");
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
     ASSERT_NE(nullptr, sys);
     ASSERT_EQ(0, sys->wait_for_event(&ev, TMO));
     ASSERT_EQ(TcmuHBA::EventKind::ADDED, ev.kind);

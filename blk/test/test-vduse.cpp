@@ -212,6 +212,13 @@ static int raw_vduse_destroy(const char* name) {
     return 0;
 }
 
+// The lock directory every controller in this suite is built on. Stated here rather
+// than left to a library default, because there is no default: a directory two
+// applications share lets each one's orphan scan adopt the other's devices. Every
+// tombstone path this file checks is built from it, so the suite cannot drift onto
+// one directory for its controllers and probe another.
+static const char SUITE_LOCKS[] = "/run/photon-blk";
+
 // The kernel-side state a start() refused part-way through could leave behind,
 // as one sortable listing: the vduse registrations, and each of this suite's
 // flock files marked HELD or FREE. The lock FILE is expected to survive --
@@ -221,7 +228,8 @@ static int raw_vduse_destroy(const char* name) {
 static std::string residue() {
     return test::sh_off_vcpu(
         "{ ls -1 /dev/vduse 2>/dev/null;"
-        "  for f in /run/photon-blk/vduse-*.lock; do [ -e \"$f\" ] || continue;"
+        "  for f in " + std::string(SUITE_LOCKS) +
+        "/vduse-*.lock; do [ -e \"$f\" ] || continue;"
         "    flock -n \"$f\" -c true 2>/dev/null && echo \"FREE $f\" || echo \"HELD $f\"; done;"
         "} | sort");
 }
@@ -275,7 +283,7 @@ public:
             GTEST_SKIP() << "vduse module not available";
         if (::system("which vdpa >/dev/null 2>&1") != 0)
             GTEST_SKIP() << "iproute2's vdpa tool not available";
-        ctl = new_vduse_controller(nullptr);
+        ctl = new_vduse_controller(SUITE_LOCKS);
         ASSERT_NE(nullptr, ctl);
         sweep();
         ASSERT_EQ(0, img.create(IMG_PATH, IMG_SIZE));
@@ -321,7 +329,7 @@ public:
             "ls /sys/bus/vdpa/devices/ 2>/dev/null | grep '^"
             + std::string(NAME_PREFIX) +
             "' | while read n; do vdpa dev del \"$n\" 2>/dev/null; done; true");
-        auto c = new_vduse_controller(nullptr);   // the default dir, same scope as ctl
+        auto c = new_vduse_controller(SUITE_LOCKS);   // the same scope as ctl
         if (!c)
             return;
         DEFER(delete c);
@@ -623,7 +631,7 @@ TEST_F(VduseTest, destroy_orphan_removes_a_dead_registration) {
     ASSERT_EQ(0, dev->start(file));
     ASSERT_EQ(0, dev->detach(false));
     std::string reg = std::string("/dev/vduse/") + TEST_NAME;
-    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
     ASSERT_EQ(0, ::access(reg.c_str(), F_OK));
     ASSERT_EQ(0, ::access(lp.c_str(), F_OK));
 
@@ -660,7 +668,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_a_live_device) {
     DEFER(dev->shutdown());
     ASSERT_EQ(0, dev->start(file));
     std::string reg = std::string("/dev/vduse/") + TEST_NAME;
-    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
 
     // live, so this server holds the tombstone and the scan does not report it
     for (auto& i : ctl->list_orphans())
@@ -726,7 +734,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_an_attached_consumer) {
     ASSERT_EQ(0, dev->detach(false));
 
     std::string reg = std::string("/dev/vduse/") + TEST_NAME;
-    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
     std::string sp = std::string("/sys/bus/vdpa/devices/") + TEST_NAME;
     // The precondition, measured rather than assumed: this sysfs entry is what the
     // refusal keys on, so if it were absent the case would go green having tested
@@ -830,7 +838,7 @@ TEST_F(VduseTest, destroy_orphan_validates_the_identity) {
     // caller asked about something and deserves to be told it is not there.
     BlkDevInfo none;
     none.identity = "photon-vduse-never-existed";
-    ::unlink((std::string("/run/photon-blk/vduse-") + none.identity + ".lock").c_str());
+    ::unlink((std::string(SUITE_LOCKS) + "/vduse-" + none.identity + ".lock").c_str());
     errno = 0;
     EXPECT_EQ(-1, ctl->destroy_orphan(none));
     EXPECT_EQ(ENOENT, errno);
@@ -859,7 +867,7 @@ TEST_F(VduseTest, destroy_orphan_validates_the_identity) {
 TEST_F(VduseTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
     const std::string name = "photon-vduse-no-such-dev";
     std::string reg = "/dev/vduse/" + name;
-    std::string lp = "/run/photon-blk/vduse-" + name + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + name + ".lock";
     ASSERT_NE(0, ::access(reg.c_str(), F_OK)) << "this name unexpectedly exists";
 
     BlkDevInfo rec;
@@ -904,7 +912,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_a_registration_claimed_by_another) {
     // releases the tombstone, so from here somebody else can hold it.
     ASSERT_EQ(0, dev->detach(false));
     std::string reg = std::string("/dev/vduse/") + TEST_NAME;
-    std::string lp = std::string("/run/photon-blk/vduse-") + TEST_NAME + ".lock";
+    std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
     ASSERT_EQ(0, ::access(reg.c_str(), F_OK));
 
     BlkDevInfo rec;
@@ -1199,16 +1207,27 @@ TEST_F(VduseTest, adoption_refuses_a_registration_wider_than_the_transport) {
 
 // The tombstone is vduse's ONLY ownership test -- the char device answers "is a
 // daemon connected", never "is this ours" -- so it is also the scan's scope: a
-// device locked in another dir must be invisible to a default-dir controller, as
+// device locked in another dir must be invisible to a SUITE_LOCKS controller, as
 // it is for ublk. One controller = one scope, so this test builds a second one.
-// sweep() probes the default dir only and can therefore never clean up after this
+// sweep() probes SUITE_LOCKS only and can therefore never clean up after this
 // test; the shutdown DEFER does.
 TEST_F(VduseTest, custom_lock_dir) {
     static const char LOCKS[] = "/tmp/photon-blk-vduse-test-locks";
     static const char NAME[]  = "photon-vduse-locks";
     ::system(("rm -rf " + std::string(LOCKS)).c_str());
-    // a stale tombstone in the default dir would fool the invisibility check below
-    ::unlink(("/run/photon-blk/vduse-" + std::string(NAME) + ".lock").c_str());
+
+    // No default directory to fall back on: a null or empty one is a refusal. What
+    // this pins is that the two independent scopes below really are two, rather
+    // than one shared default that both controllers happen to name.
+    errno = 0;
+    EXPECT_EQ(nullptr, new_vduse_controller(nullptr));
+    EXPECT_EQ(EINVAL, errno);
+    errno = 0;
+    EXPECT_EQ(nullptr, new_vduse_controller(""));
+    EXPECT_EQ(EINVAL, errno);
+
+    // a stale tombstone in SUITE_LOCKS would fool the invisibility check below
+    ::unlink((std::string(SUITE_LOCKS) + "/vduse-" + std::string(NAME) + ".lock").c_str());
     std::string node = std::string("/dev/vduse/") + NAME;
     std::string tomb = std::string(LOCKS) + "/vduse-" + NAME + ".lock";
 
@@ -1228,7 +1247,7 @@ TEST_F(VduseTest, custom_lock_dir) {
 
     ASSERT_EQ(0, dev->detach(false));   // registration up for adoption, lock free
 
-    // visible through the custom dir, invisible through the default one
+    // visible through the custom dir, invisible through SUITE_LOCKS
     bool found = false;
     for (auto& i : ctl2->list_orphans())
         if (i.identity == NAME) found = true;

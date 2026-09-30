@@ -294,13 +294,6 @@ struct MemTable {
 };
 
 struct VhostUserDeviceImpl : IBlkDevice {
-    // Field order is padding-driven, do not tidy it: the 8-aligned members come
-    // first, with the alignas(8) `dev_config` LAST among them because its 60
-    // bytes are not a multiple of 8 and would leave a hole after it; then the
-    // 4-, then the 1-byte ones. `nqueues` sits with the three fds rather than down
-    // with the bools: there it fills the 4-byte slot they leave and the struct
-    // rounds to 432, whereas after them it would need fresh 4-alignment and cost 8
-    // more. 432 bytes, content ending at 429 (measured).
     VhostUserController::Config cfg;
 
     // Per-queue state. ONE heap allocation per queue, and the pointer vector is
@@ -725,7 +718,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         q->srv.backend = backend;
         // the LBA bound serve_chain enforces
         q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
-        q->srv.stack_size = resolve_stack_size(cfg.stack_size);
+        q->srv.stack_size = cfg.stack_size;
         q->srv.read_only = read_only;
         q->srv.serial = "photon-vhost-user";
         q->srv.tag = sock_path;
@@ -1378,15 +1371,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
             ::close(fd);
             LOG_ERRNO_RETURN(0, -1, "vhost-user listen failed: ", sock_path);
         }
-        // bind() created the node with 0777 & ~umask; honor sock_mode, or the
-        // documented 0600 default -- the owner's uid alone (root excepted),
-        // so a caller whose guest process runs as another user has to widen
-        // it explicitly. Not derived from umask: that has no read-only query,
-        // and the set-and-restore which emulates one changes the mask of the
-        // whole process rather than this thread, so any file another thread
-        // creates in the window is unmasked.
-        if (::chmod(sock_path, cfg.sock_mode ? (mode_t)cfg.sock_mode
-                                             : (mode_t)0600) < 0)
+        // bind() created the node with 0777 & ~umask; chmod it to what the caller
+        // asked for. Not derived from umask: that has no read-only query, and the
+        // set-and-restore which emulates one changes the mask of the whole process
+        // rather than this thread, so any file another thread creates in the window
+        // is unmasked.
+        if (::chmod(sock_path, (mode_t)cfg.sock_mode) < 0)
             LOG_WARN("vhost-user chmod failed on `, ", sock_path, ERRNO());
         listen_fd = fd;
         return 0;
@@ -1778,9 +1768,7 @@ struct VhostUserControllerImpl : VhostUserController {
 };
 
 VhostUserController* new_vhost_user_controller(const char* sock_dir) {
-    if (!sock_dir || !*sock_dir)
-        LOG_ERROR_RETURN(EINVAL, nullptr, "a vhost-user controller needs a socket directory; there is no default");
-    if (validate_scope_dir(sock_dir) < 0)
+    if (validate_scope_dir(sock_dir, "socket") < 0)
         return nullptr;   // already logged
     return new VhostUserControllerImpl(sock_dir);
 }
