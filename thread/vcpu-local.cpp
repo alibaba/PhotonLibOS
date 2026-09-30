@@ -72,18 +72,54 @@ struct VCPULocalBase::Table {
 
 // A fork bumps the epoch: every slot built before it is stale in the child, so
 // get() rebuilds and ~VCPULocal forgets rather than destroys (the child must not
-// touch resources -- fds, threads -- that belong to the parent). Bumped only by
-// the pthread_atfork child handler, which runs single-threaded.
+// touch resources -- fds, threads -- that belong to the parent).
 static std::atomic<uint64_t> g_fork_epoch{1};
-static void on_fork_child() { g_fork_epoch.fetch_add(1, std::memory_order_relaxed); }
-static int _atfork_registered = [] {
-    pthread_atfork(nullptr, nullptr, &on_fork_child);
-    return 0;
-}();
+
+// atfork must lock every per-instance reference list, and the calling thread's
+// table: either lock can otherwise be inherited while held by a vanished thread.
+// The intrusive registry needs no allocation and is itself held across fork.
+static photon::spinlock g_instances_lock;
+static VCPULocalBase* g_instances = nullptr;
+static bool g_atfork_registered = false;
 
 VCPULocalBase::Table& VCPULocalBase::current_table() {
     static thread_local Table t;
     return t;
+}
+
+VCPULocalBase::VCPULocalBase(void (*destroyer)(void*))
+    : m_destroyer(destroyer) {
+    SCOPED_LOCK(g_instances_lock);
+    if (!g_atfork_registered) {
+        auto ret = pthread_atfork(&VCPULocalBase::atfork_prepare,
+                                  &VCPULocalBase::atfork_parent,
+                                  &VCPULocalBase::atfork_child);
+        if (ret == 0)
+            g_atfork_registered = true;
+        else
+            LOG_ERROR("pthread_atfork failed, ", VALUE(ret));
+    }
+    m_registry_next = g_instances;
+    g_instances = this;
+}
+
+void VCPULocalBase::atfork_prepare() {
+    g_instances_lock.lock();
+    for (auto p = g_instances; p; p = p->m_registry_next)
+        p->m_lock.lock();
+    current_table().lock.lock();
+}
+
+void VCPULocalBase::atfork_parent() {
+    current_table().lock.unlock();
+    for (auto p = g_instances; p; p = p->m_registry_next)
+        p->m_lock.unlock();
+    g_instances_lock.unlock();
+}
+
+void VCPULocalBase::atfork_child() {
+    g_fork_epoch.fetch_add(1, std::memory_order_relaxed);
+    atfork_parent();
 }
 
 bool VCPULocalBase::remove_ref(Slot* s) {
@@ -276,6 +312,13 @@ VCPULocalBase::~VCPULocalBase() {
     // the derived VCPULocal<T> must have drained already: destroy_value is gone
     // by now, and any surviving slot would dangle back to this instance
     assert(m_drained && m_refs.empty());
+    SCOPED_LOCK(g_instances_lock);
+    for (VCPULocalBase** p = &g_instances; *p; p = &(*p)->m_registry_next) {
+        if (*p != this) continue;
+        *p = m_registry_next;
+        return;
+    }
+    assert(false);
 }
 
 void VCPULocalBase::Table::at_fini() {

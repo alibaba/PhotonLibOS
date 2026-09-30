@@ -50,15 +50,16 @@ namespace photon {
 //     while another vCPU still uses it is a use-after-free regardless of us.
 //   * A T built before fork() is abandoned in the child (never used, never
 //     destroyed): its resources belong to the parent. The child lazily builds
-//     fresh Ts on demand. Prefer exec() after fork(); this only keeps the child
-//     from tripping over the parent's pre-fork state until it does.
+//     fresh Ts on demand. Photon still does not support fork() with multiple
+//     vCPUs; this only prevents inherited VCPULocal state from deadlocking or
+//     being reused before the child exec()s.
 class VCPULocalBase {
 public:
     VCPULocalBase(const VCPULocalBase&) = delete;
     VCPULocalBase& operator=(const VCPULocalBase&) = delete;
 
 protected:
-    explicit VCPULocalBase(void (*destroyer)(void*)) : m_destroyer(destroyer) {}
+    explicit VCPULocalBase(void (*destroyer)(void*));
     ~VCPULocalBase();
 
     // built by the derived VCPULocal<T>, which knows the type. Construction runs
@@ -85,11 +86,15 @@ private:
     photon::spinlock m_lock;        // guards m_refs; taken cross-vCPU at teardown
     std::vector<SlotRef> m_refs;    // one entry per vCPU that built a T for us
     bool m_drained = false;
+    VCPULocalBase* m_registry_next = nullptr;
 
     bool remove_ref(Slot* s);              // caller holds m_lock
     static Table& current_table();         // the current vCPU's slot table
     static void* destroy_entry(void* ctx); // thread entry, runs on the owning vCPU
     static void destroy_slot(Slot* s, vcpu_base* v);   // erase + destroy, on owning vCPU
+    static void atfork_prepare();
+    static void atfork_parent();
+    static void atfork_child();
 };
 
 template<typename T>

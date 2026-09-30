@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <new>
 #include <set>
@@ -178,6 +181,31 @@ TEST(vcpu_local, address_reuse_after_disown) {
     EXPECT_EQ(1, g_dtor.load());
     second->~Local();
     EXPECT_EQ(2, g_dtor.load());
+}
+
+TEST(vcpu_local, rebuild_after_fork) {
+    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+    DEFER(photon::fini());
+    reset();
+    VCPULocal<Value> local;
+    auto parent_value = local.get();
+    ASSERT_NE(nullptr, parent_value);
+
+    auto pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        auto child_value = local.get();
+        bool ok = child_value && child_value != parent_value &&
+                  g_ctor.load() == 2 && g_dtor.load() == 0;
+        _exit(ok ? 0 : 1);
+    }
+
+    int status = 0;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+    EXPECT_EQ(parent_value, local.get());
+    EXPECT_EQ(1, g_ctor.load());
 }
 
 int main(int argc, char** argv) {
