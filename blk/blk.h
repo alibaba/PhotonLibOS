@@ -20,34 +20,14 @@ limitations under the License.
 #include <vector>
 #include <photon/common/callback.h>
 #include <photon/common/object.h>
-#include <photon/common/timeout.h>   // Timeout for TcmuHBA::wait_for_event
-#include <photon/fs/filesystem.h>
-#include <photon/net/socket.h>    // net::IPAddr / net::EndPoint for NbdConfig / NbdDevice
-#include <photon/thread/workerpool.h>   // photon::WorkPool for BlkConfig::pool
+#include <photon/common/timeout.h>       // Timeout for TcmuHBA::wait_for_event
+#include <photon/fs/filesystem.h>        // UNIMPLEMENTED for resize(), and fs::IFile
+#include <photon/net/socket.h>           // NbdConfig::tcp_endpoint is a net::EndPoint BY VALUE
+#include <photon/thread/thread.h>        // DEFAULT_STACK_SIZE for BlkConfig::stack_size
 
 namespace photon {
+class WorkPool;                          // BlkConfig::pool is only ever a pointer
 namespace blk {
-
-// ---------------------------------------------------------------------------
-// NO DEFAULTS FOR HOST-WIDE NAMESPACES.
-//
-// Every transport here registers into a namespace the whole host shares: configfs
-// directories, the ublk dev_id space, the vduse device-name space, a directory of
-// unix sockets. None of them is partitioned per process, so the only thing that
-// keeps two applications built on this library apart is that they were TOLD apart.
-//
-// That is why every setting which names such a namespace is a required argument,
-// with no default and no example value anywhere in this file. A default is a value
-// two independent applications would both get, and the failure it causes is not a
-// collision you can see: each one's orphan scan reports the other's registrations
-// as its own, and its recovery loop then adopts or destroys devices it does not own.
-//
-// Give every application of yours its own values, and keep them stable across
-// restarts -- a recovery loop matches on them. The settings this covers:
-// new_tcmu_hba's subtype, dev_config_prefix and lock_dir; new_ublk_controller's and
-// new_vduse_controller's lock_dir; new_vhost_user_controller's sock_dir; and
-// TcmuHBA::Config::loopback_wwn.
-// ---------------------------------------------------------------------------
 
 // Op support bits for BlkDevInfo::features
 static constexpr uint64_t FEATURE_FLUSH         = 1ull << 0;
@@ -174,8 +154,7 @@ struct BlkConfig {
     // with to itself, so there is nothing start() could ask. Getting it wrong is
     // a crash rather than an EINVAL -- libaio's context is thread-local, and a
     // vcpu inited without INIT_IO_LIBAIO has none.
-    photon::WorkPool* pool = nullptr;
-                                  // Where the serving coroutines run. nullptr: on the
+    WorkPool* pool = nullptr;     // Where the serving coroutines run. nullptr: on the
                                   // caller's own vcpu. Non-null: every coroutine this
                                   // device CREATES in order to serve a request is moved
                                   // onto a pool vcpu as it is created -- one per queue
