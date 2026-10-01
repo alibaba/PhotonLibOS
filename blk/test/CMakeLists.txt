@@ -12,14 +12,17 @@ photon_add_test(test-blk-harness test-harness.cpp ${BLK_TEST_SRC})
 # harness checks do
 photon_add_test(test-blk-pool test-blk-pool.cpp ${BLK_TEST_SRC})
 
-# the shared virtio execution engine both virtio transports sit on: a vring in this
-# process's memory, no transport and no kernel, so the request-parsing and
-# notification-ordering decisions are reachable without a frontend mock deciding
-# what a legal request looks like. Runs everywhere for the same reason.
-photon_add_test(test-blk-vq test-blk-vq.cpp ${BLK_TEST_SRC})
-
 photon_add_test(test-blk-nbd test-nbd.cpp ${BLK_TEST_SRC})
 if (LINUX)
+    # The shared virtio execution engine both virtio transports sit on: a vring in
+    # this process's memory, no transport and no kernel, so the request-parsing and
+    # notification-ordering decisions are reachable without a frontend mock deciding
+    # what a legal request looks like. The engine needs neither, but its definitions
+    # sit under #ifdef __linux__ in blk_utils alongside the virtio core they serve,
+    # while blk/utils.h declares the class unconditionally. So on other platforms
+    # this test compiles and then fails to link -- gate it here rather than let the
+    # declaration promise a definition that is not there.
+    photon_add_test(test-blk-vq test-blk-vq.cpp ${BLK_TEST_SRC})
     # tcmu is LINUX-gated (blk_tcmu), so its symbols are absent from photon_shared
     # on other platforms; only build the test where the transport exists.
     photon_add_test(test-blk-tcmu test-tcmu.cpp ${BLK_TEST_SRC})
