@@ -403,7 +403,10 @@ struct TcmuUio {
             if (it == end || *it != "tcm-user") continue;
             if (++it == end || *it != hbanum) continue;
             if (++it == end || *it != bs_name) continue;
-            snprintf(node, n, "/dev/%s", e->d_name);
+            // a /sys/class/uio entry is "uio" plus a minor number, so this never
+            // truncates into our caller's node buffer; the precision just tells
+            // the compiler so (dirent declares d_name as char[256])
+            snprintf(node, n, "/dev/%.*s", (int)n - 6, e->d_name);
             return 0;
         }
         LOG_ERROR_RETURN(ENOENT, -1, "no uio device for tcmu backstore ` (hba `)", bs_name, hbanum);

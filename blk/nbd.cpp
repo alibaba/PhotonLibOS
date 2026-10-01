@@ -952,12 +952,16 @@ struct NbdDeviceImpl : NbdDevice {
         while ((e = readdir(d))) {
             if (strncmp(e->d_name, "nbd", 3) != 0)
                 continue;
+            // /sys/block holds one entry per disk and a disk name is at most 31
+            // characters, so these never truncate into our caller's node buffer;
+            // the precision (size, less the literal text around it and the NUL)
+            // just tells the compiler so -- dirent declares d_name as char[256].
             // /sys/block/nbdN/pid exists only while the device is attached
-            snprintf(node, size, "/sys/block/%s/pid", e->d_name);
+            snprintf(node, size, "/sys/block/%.*s/pid", (int)size - 16, e->d_name);
             if (::access(node, F_OK) == 0)
                 continue;
             // node now holds "/dev/nbdN", the result on return
-            snprintf(node, size, "/dev/%s", e->d_name);
+            snprintf(node, size, "/dev/%.*s", (int)size - 6, e->d_name);
             if (::access(node, F_OK) != 0)
                 continue;
             return 0;
