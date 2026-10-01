@@ -30,6 +30,12 @@ limitations under the License.
 #endif
 
 #include "../blk.h"
+// The VDUSE uapi copies, for the one registration blk cannot create (see
+// raw_vduse_create). Shared with vduse.cpp instead of taken from
+// <linux/vduse.h>: that header arrived in the kernel later than many build
+// hosts' header packages, so a translation unit that includes it does not
+// compile there at all.
+#include "../vduse-uapi.h"
 
 #include "../../test/gtest.h"
 #include "harness.h"
@@ -49,10 +55,8 @@ limitations under the License.
 #include <sys/stat.h>
 #include <unistd.h>
 #include <linux/fs.h>
-// The raw uapi, for the one registration blk cannot create (see raw_vduse_create).
-// All four are C++-safe; <linux/virtio_ring.h> is the one that is not, and nothing
-// here needs it.
-#include <linux/vduse.h>
+// All three are C++-safe; <linux/virtio_ring.h> is the one that is not, and
+// nothing here needs it.
 #include <linux/virtio_blk.h>
 #include <linux/virtio_config.h>
 #include <linux/virtio_ids.h>
