@@ -17,6 +17,7 @@ limitations under the License.
 #include <sys/time.h>
 #include <sys/eventfd.h>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <unordered_map>
@@ -634,6 +635,22 @@ TEST_F(event_engine, cascading_one_shot) {
 TEST(uring_cmd, cmd_len_bound) {
     ASSERT_EQ(0, photon::init(INIT_EVENT_IOURING, INIT_IO_NONE));
     DEFER(photon::fini());
+
+    // A null cascading engine makes iouring_uring_cmd cast this vcpu's master
+    // engine to the iouring one without asking, so the calls below are only safe
+    // when io_uring is what actually got installed -- and asking for it is not
+    // the same as getting it: ci-tools rewrites the event-engine bits of every
+    // photon::init() from PHOTON_CI_EV_ENGINE, so a CI step that selects another
+    // engine leaves this process a master engine with no ring behind it. Ask the
+    // engine to name itself rather than trusting the flag we passed.
+    // Notice-and-return rather than GTEST_SKIP, which the gtest a host finds may
+    // predate (see test-iouring-uaf.cpp).
+    auto installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    if (installed != "iouring") {
+        fprintf(stderr, "  [ SKIPPED ] uring_cmd needs the io_uring event engine, this vcpu has %.*s\n",
+                (int) installed.size(), installed.data());
+        return;
+    }
 
     int fd = eventfd(0, EFD_CLOEXEC);
     ASSERT_GE(fd, 0);
