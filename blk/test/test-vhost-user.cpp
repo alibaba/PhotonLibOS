@@ -605,6 +605,8 @@ struct MockFrontend {
     // Check the ring BEFORE polling: one eventfd read consumes the whole
     // accumulated counter, so a poll-first loop would burn a full timeout on
     // every completion after the first.
+    // Both outputs are written only on the success path, which gcc cannot see
+    // across the call, so every caller initialises the locals it passes in.
     bool collect(uint32_t* head_out, uint32_t* len_out, int ms = 20000) {
         auto* used = (vused*)(mem + L_USED);
         for (int i = 0; i <= ms / 10; i++) {
@@ -645,7 +647,7 @@ struct MockFrontend {
         // unconditional kick() stays for cases that are not about notification.
         if (!kick_if_needed()) return -1;
 
-        uint32_t head, ulen;
+        uint32_t head = 0, ulen = 0;
         if (!collect(&head, &ulen)) return -1;
         if (head >= VQ_NUM || slot_of_head[head] != (int16_t)slot) {
             errno = EPROTO;
@@ -763,7 +765,7 @@ struct MockFrontend {
             desc[head + i] = chain[i];
         publish(head);
         if (!kick()) return -1;
-        uint32_t got;
+        uint32_t got = 0;
         if (!collect(&got, used_len)) return -1;
         if (got != head) { errno = EPROTO; fail("used elem id"); return -1; }
         return *(uint8_t*)(mem + status_off(slot));
@@ -1516,7 +1518,7 @@ TEST_F(VhostUserTest, concurrent_stress) {
 
             bool saw_flush = false;
             for (int n = 0; n < BATCH + 1; n++) {
-                uint32_t head, len;
+                uint32_t head = 0, len = 0;
                 if (!fe.collect(&head, &len)) return ETIMEDOUT;
                 if (head >= VQ_NUM) return EPROTO;
                 int slot = fe.slot_of_head[head];
@@ -1534,7 +1536,7 @@ TEST_F(VhostUserTest, concurrent_stress) {
             }
             if (!fe.kick()) return EIO;
             for (int n = 0; n < BATCH; n++) {
-                uint32_t head, len;
+                uint32_t head = 0, len = 0;
                 if (!fe.collect(&head, &len)) return ETIMEDOUT;
                 if (head >= VQ_NUM) return EPROTO;
                 int slot = fe.slot_of_head[head];
