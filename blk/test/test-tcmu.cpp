@@ -15,8 +15,8 @@ limitations under the License.
 */
 
 // Built only on Linux (the tcmu transport is LINUX-gated). Requires root and
-// the target_core_user + tcm_loop modules with configfs mounted; otherwise the
-// fixture GTEST_SKIPs.
+// the target_core_user + tcm_loop modules with configfs mounted; without them
+// every case prints a skip notice and returns (see test::SkippableTest).
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE   // O_DIRECT
@@ -333,7 +333,7 @@ struct Operator {
     }
 };
 
-class TcmuTest : public ::testing::Test {
+class TcmuTest : public test::SkippableTest {
 public:
     test::TestImage img;
     fs::IFile* file = nullptr;
@@ -410,13 +410,13 @@ public:
 
     void SetUp() override {
         if (geteuid() != 0)
-            GTEST_SKIP() << "tcmu test requires root";
+            return report_skip("tcmu test requires root");
         if (::access("/sys/kernel/config/target/core", F_OK) != 0)
-            GTEST_SKIP() << "configfs target not mounted (target_core_mod?)";
+            return report_skip("configfs target not mounted (target_core_mod)");
         if (::access("/sys/module/target_core_user", F_OK) != 0)
-            GTEST_SKIP() << "target_core_user module not loaded";
+            return report_skip("target_core_user module not loaded");
         if (::access("/sys/module/tcm_loop", F_OK) != 0)
-            GTEST_SKIP() << "tcm_loop module not loaded";
+            return report_skip("tcm_loop module not loaded");
         force_cleanup();  // start from a clean slate
         // after the cleanup, so the startup scan finds nothing to synthesize
         sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
@@ -466,6 +466,7 @@ public:
 };
 
 TEST_F(TcmuTest, config_validation) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);
 
     // the pure config checks are construction-time now: no object at all
@@ -505,6 +506,7 @@ TEST_F(TcmuTest, config_validation) {
 }
 
 TEST_F(TcmuTest, loopback_io) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -531,6 +533,7 @@ TEST_F(TcmuTest, loopback_io) {
 }
 
 TEST_F(TcmuTest, backstore_only) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -547,6 +550,7 @@ TEST_F(TcmuTest, backstore_only) {
 }
 
 TEST_F(TcmuTest, detach_reattach) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -586,6 +590,7 @@ TEST_F(TcmuTest, detach_reattach) {
 }
 
 TEST_F(TcmuTest, detach_then_shutdown) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -621,6 +626,7 @@ TEST_F(TcmuTest, detach_then_shutdown) {
 }
 
 TEST_F(TcmuTest, read_only) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     cfg.read_only = true;
     auto dev = sys->new_device(cfg);
@@ -658,6 +664,7 @@ TEST_F(TcmuTest, read_only) {
 // reaches the ring untouched, so a failure here is about our handler and not
 // about something upstream deciding the command was invalid first.
 TEST_F(TcmuTest, unknown_opcode) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -717,6 +724,7 @@ TEST_F(TcmuTest, unknown_opcode) {
 }
 
 TEST_F(TcmuTest, orphan_list) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -766,6 +774,7 @@ TEST_F(TcmuTest, orphan_list) {
 }
 
 TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
+    if (skip_reason) return;
     ASSERT_EQ(0, plant_orphan(BS_PATH, TEST_IDENTITY, IMG_SIZE));
     ASSERT_EQ(0, plant_orphan(REFUSE_BS_PATH, REFUSE_BS, IMG_SIZE));
     std::string lp1 = lock_path(TEST_IDENTITY), lp2 = lock_path(REFUSE_BS);
@@ -814,6 +823,7 @@ TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
 }
 
 TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -864,6 +874,7 @@ TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device) {
 // deleted, and it is the more realistic of the two -- backstore-only is a
 // supported configuration, not a corner.
 TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device_the_kernel_will_not) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -906,6 +917,7 @@ TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device_the_kernel_will_not) {
 // before it is then deleted -- so what errno holds afterwards is whatever that
 // teardown left, which is not this test's business to pin.
 TEST_F(TcmuTest, requires_its_namespaces) {
+    if (skip_reason) return;
     for (const char* bad : {(const char*)nullptr, ""}) {
         errno = 0;
         EXPECT_EQ(nullptr, new_tcmu_hba(bad, DEV_CONFIG_PREFIX, SUITE_LOCKS)) << "subtype";
@@ -931,6 +943,7 @@ TEST_F(TcmuTest, requires_its_namespaces) {
 // space is host-wide too, so a WWN computed from the identity would hang two
 // applications' LUNs off one target whenever they chose the same identity.
 TEST_F(TcmuTest, requires_loopback_wwn) {
+    if (skip_reason) return;
     TcmuHBA::Config cfg(make_info());
     cfg.loopback_wwn.clear();
     auto bad = sys->new_device(cfg);   // loopback_lun defaults to true
@@ -945,6 +958,7 @@ TEST_F(TcmuTest, requires_loopback_wwn) {
 }
 
 TEST_F(TcmuTest, destroy_orphan_validates_the_identity) {
+    if (skip_reason) return;
     // An identity longer than a backstore name can be. The name mapping truncates
     // at 64 bytes, so without the length check this would name the PREFIX's
     // backstore -- planted here at exactly 64 bytes -- and destroy that instead
@@ -1004,6 +1018,7 @@ TEST_F(TcmuTest, destroy_orphan_validates_the_identity) {
 }
 
 TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
+    if (skip_reason) return;
     ASSERT_EQ(0, plant_backstore(BS_PATH, TEST_IDENTITY, IMG_SIZE));
     ASSERT_EQ(0, cfs_write(std::string(BS_PATH) + "/enable", "1"));
     std::string lp = lock_path(TEST_IDENTITY);
@@ -1060,6 +1075,7 @@ TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
 }
 
 TEST_F(TcmuTest, discard_write_zeroes) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1105,6 +1121,7 @@ TEST_F(TcmuTest, discard_write_zeroes) {
 }
 
 TEST_F(TcmuTest, write_zeroes) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1150,6 +1167,7 @@ TEST_F(TcmuTest, write_zeroes) {
 }
 
 TEST_F(TcmuTest, timeout_knobs) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);
     cfg.timeout = 45;
     auto dev = sys->new_device(cfg);
@@ -1173,6 +1191,7 @@ TEST_F(TcmuTest, timeout_knobs) {
 // the sysfs rescan knob, which synchronously re-reads READ CAPACITY -- hence
 // off the photon vcpu so the pump can answer).
 TEST_F(TcmuTest, resize_grow) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1239,6 +1258,7 @@ TEST_F(TcmuTest, resize_grow) {
 // resize() issued from this vcpu (the capacity atomics are written here, read
 // there).
 TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
+    if (skip_reason) return;
     // TestPool is built with the same request mask this suite's main() inited
     // the caller's vcpu with, which is what makes check_pool_engines pass: it
     // derives its requirement from the caller's own vcpu, and photon has no query
@@ -1319,6 +1339,7 @@ TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
 // the WRONG vcpu goes unobserved. The release 50 ms into the detach only sets
 // WHEN the flush can proceed, never WHICH vcpu it runs on.
 TEST_F(TcmuTest, pool_serving_stop_under_load) {
+    if (skip_reason) return;
     // ONE pool vcpu, so the placement set is {pool} or {pool, caller}, and
     // only the teardown path can add the caller. Engines are the shared pair
     // main() also inits with (see TEST_EVENT_ENGINE), and the pool is declared
@@ -1457,6 +1478,7 @@ TEST_F(TcmuTest, pool_serving_stop_under_load) {
 // baseline for the whole conversion: with no pool the pump stays where it
 // always was.
 TEST_F(TcmuTest, pool_null_serves_on_the_caller_vcpu) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
     auto cfg = make_cfg(/*loopback=*/true);
@@ -1476,6 +1498,7 @@ TEST_F(TcmuTest, pool_null_serves_on_the_caller_vcpu) {
 // tcmu ignores cfg.queues because the kernel hands it one command ring per
 // device (documented on BlkConfig::queues). Setting four must not produce four serving vcpus.
 TEST_F(TcmuTest, queues_are_ignored) {
+    if (skip_reason) return;
     test::TestPool pool(4);
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1507,6 +1530,7 @@ TEST_F(TcmuTest, queues_are_ignored) {
 // force_cleanup() afterwards and would remove a leak before any outside check
 // could see it.
 TEST_F(TcmuTest, pool_without_an_event_engine_is_refused) {
+    if (skip_reason) return;
     const std::string residue_before = residue();
     photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
     test::RecordingFile rec(file);
@@ -1531,6 +1555,7 @@ TEST_F(TcmuTest, pool_without_an_event_engine_is_refused) {
 // survives maximal contention on one region -- a torn or lost write breaks a
 // block's invariants even when the owner is legitimately someone else.
 TEST_F(TcmuTest, concurrent_stress) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1548,6 +1573,7 @@ TEST_F(TcmuTest, concurrent_stress) {
 // and LUN kept, pending IO parks under cmd/qfull_time_out); a re-start()
 // harvests the ring and the initiator must see no IO error, only latency.
 TEST_F(TcmuTest, restart_window_io) {
+    if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
     auto dev = sys->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1584,6 +1610,7 @@ TEST_F(TcmuTest, restart_window_io) {
 }
 
 TEST_F(TcmuTest, genetlink_added_device) {
+    if (skip_reason) return;
     // subscribe to the TCM-USER "config" multicast group BEFORE start() so we
     // capture the ADDED_DEVICE the kernel fires when the backstore is enabled.
     // This validates the utils.h multicast path against the real kernel ABI.
@@ -1650,6 +1677,7 @@ TEST_F(TcmuTest, genetlink_added_device) {
 // enable, RECONFIG at our own resize, matched by self_size, REMOVED at our own
 // destroy, with serving already cleared). Without that, this test hangs.
 TEST_F(TcmuTest, active_path_under_reply_mode) {
+    if (skip_reason) return;
     delete sys;   // SetUp built this one with netlink_reply off; replace it
     sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
                        /*netlink_reply=*/true);
@@ -1684,20 +1712,21 @@ TEST_F(TcmuTest, active_path_under_reply_mode) {
 // events with -ENOSYS instead, so this test fails without the opt-out. Below
 // v4.15 there is no opt-out and the failure mode is a HANG, hence the skip.
 TEST_F(TcmuTest, two_instances_one_reply_mode) {
+    if (skip_reason) return;
     const char HBA0[] = SUITE_CORE SUITE_SUBTYPE;
     const char HBA1[] = SUITE_CORE SUITE_SUBTYPE2;
     const char BS1[]  = SUITE_CORE SUITE_SUBTYPE2 "/photon-twoinst";
     int hrc = ::mkdir(HBA0, 0755);
     ASSERT_TRUE(hrc == 0 || errno == EEXIST) << "cannot create the HBA dir: " << strerror(errno);
 
-    // the opt-out is v4.15+; probe it on a throwaway (never enabled) backstore
+    // the opt-out is a per-backstore attrib on v4.15+; probe it on a throwaway
+    // (never enabled) backstore. Below v4.15 a plain instance beside a reply-mode
+    // one needs defensive_reply=true instead, so this case cannot run here.
     std::string probe = std::string(HBA0) + "/photon-probe-attrib";
     ASSERT_EQ(0, ::mkdir(probe.c_str(), 0755));
     DEFER(::rmdir(probe.c_str()));   // never enabled, so the rmdir always works
     if (::access((probe + "/attrib/nl_reply_supported").c_str(), F_OK) != 0)
-        GTEST_SKIP() << "no per-backstore nl_reply_supported (needs kernel v4.15+); "
-                        "there a plain instance beside a reply-mode one needs "
-                        "defensive_reply=true instead";
+        return report_skip("no nl_reply_supported (kernel v4.15+)");
 
     delete sys;   // SetUp built this one with netlink_reply off; replace it
     sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
@@ -1738,6 +1767,7 @@ TEST_F(TcmuTest, two_instances_one_reply_mode) {
 // our ADDED_DEVICE_DONE, dev_size until RECONFIG_DEVICE_DONE (a negative reply
 // vetoes the change), rmdir until REMOVED_DEVICE_DONE.
 TEST_F(TcmuTest, passive_daemon) {
+    if (skip_reason) return;
     delete sys;   // SetUp built this one with netlink_reply off; replace it
     sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
                        /*netlink_reply=*/true);
@@ -1885,6 +1915,7 @@ TEST_F(TcmuTest, passive_daemon) {
 // netlink_reply=false: no synchronous feedback. Every operator write returns at
 // once and the event loop learns about the device asynchronously.
 TEST_F(TcmuTest, passive_daemon_async) {
+    if (skip_reason) return;
     constexpr uint64_t TMO = 30ull * 1000 * 1000;
 
     ASSERT_EQ(0, ::mkdir(PASSIVE_BS_PATH, 0755));
@@ -1934,6 +1965,7 @@ TEST_F(TcmuTest, passive_daemon_async) {
 // missed event). Deleting and recreating the HBA reports it again, and the
 // same device object re-adopts the surviving registration.
 TEST_F(TcmuTest, passive_daemon_scan) {
+    if (skip_reason) return;
     // nothing may be listening while the operator configures the backstore, or
     // the event arrives live and the scan is not what reports it
     delete sys;

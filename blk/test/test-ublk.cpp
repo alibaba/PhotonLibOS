@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 // Built only on Linux (the ublk transport is LINUX-gated). Requires root and
-// the ublk_drv module (the fixture tries modprobe); otherwise GTEST_SKIPs.
+// the ublk_drv module (the fixture tries modprobe); without them every case
+// prints a skip notice and returns (see test::SkippableTest).
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE   // O_DIRECT
@@ -198,7 +199,7 @@ public:
     }
 };
 
-class UblkTest : public ::testing::Test {
+class UblkTest : public test::SkippableTest {
 public:
     test::TestImage img;
     fs::IFile* file = nullptr;
@@ -210,12 +211,12 @@ public:
 
     void SetUp() override {
         if (geteuid() != 0)
-            GTEST_SKIP() << "ublk test requires root";
+            return report_skip("ublk test requires root");
         if (::access("/dev/ublk-control", F_OK) != 0) {
             ::system("modprobe ublk_drv 2>/dev/null");
             photon::thread_usleep(100 * 1000);
             if (::access("/dev/ublk-control", F_OK) != 0)
-                GTEST_SKIP() << "ublk_drv module not available";
+                return report_skip("ublk_drv module not available");
         }
         ctl = new_ublk_controller(SUITE_LOCKS);
         ASSERT_NE(nullptr, ctl);
@@ -239,7 +240,7 @@ public:
     // recovered), then shutdown(). A missing lock file means a foreign
     // device (never ours); a held lock means a live server.
     //
-    // Owns its controller rather than using ctl: a GTEST_SKIP in SetUp returns
+    // Owns its controller rather than using ctl: a skipped SetUp returns
     // before ctl exists, and TearDown still runs.
     void sweep_orphans() {
         auto c = new_ublk_controller(SUITE_LOCKS);   // the same scope as ctl
@@ -326,6 +327,7 @@ public:
 };
 
 TEST_F(UblkTest, config_validation) {
+    if (skip_reason) return;
     // the pure geometry checks are construction-time now: no object at all
     UblkController::Config bad(make_info());
     bad.info.size = 0;
@@ -363,6 +365,7 @@ TEST_F(UblkTest, config_validation) {
 }
 
 TEST_F(UblkTest, basic_io) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     cfg.queues = 2;
     cfg.queue_depth = 64;
@@ -385,6 +388,7 @@ TEST_F(UblkTest, basic_io) {
 // tags inside one queue). Mixed block sizes exercise the iov/segment paths;
 // the self-describing blocks attribute any misrouted or torn IO.
 TEST_F(UblkTest, concurrent_stress) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     long cpus = ::sysconf(_SC_NPROCESSORS_ONLN);
     cfg.queues = (uint32_t)std::min<long>(4, cpus > 0 ? cpus : 1);   // ublk: <= nr_cpus
@@ -401,6 +405,7 @@ TEST_F(UblkTest, concurrent_stress) {
 }
 
 TEST_F(UblkTest, read_only) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     cfg.read_only = true;
     auto dev = ctl->new_device(cfg);
@@ -425,6 +430,7 @@ TEST_F(UblkTest, read_only) {
 }
 
 TEST_F(UblkTest, discard_write_zeroes) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -472,6 +478,7 @@ TEST_F(UblkTest, discard_write_zeroes) {
 }
 
 TEST_F(UblkTest, detach_reattach) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -510,6 +517,7 @@ TEST_F(UblkTest, detach_reattach) {
 }
 
 TEST_F(UblkTest, orphan_list) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -575,6 +583,7 @@ static std::string detach_into_orphan(UblkController* ctl, fs::IFile* file,
 }
 
 TEST_F(UblkTest, destroy_orphan_removes_a_dead_registration) {
+    if (skip_reason) return;
     IBlkDevice* dev = nullptr;
     std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
     ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
@@ -623,6 +632,7 @@ TEST_F(UblkTest, destroy_orphan_removes_a_dead_registration) {
 }
 
 TEST_F(UblkTest, destroy_orphan_refuses_a_live_device) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -663,6 +673,7 @@ TEST_F(UblkTest, destroy_orphan_refuses_a_live_device) {
 }
 
 TEST_F(UblkTest, destroy_orphan_validates_the_identity) {
+    if (skip_reason) return;
     IBlkDevice* dev = nullptr;
     std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
     ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
@@ -724,6 +735,7 @@ TEST_F(UblkTest, destroy_orphan_validates_the_identity) {
 }
 
 TEST_F(UblkTest, destroy_orphan_refuses_a_directory_tombstone) {
+    if (skip_reason) return;
     IBlkDevice* dev = nullptr;
     std::string id = detach_into_orphan(ctl, file, make_info(), &dev);
     ASSERT_FALSE(id.empty()) << "could not fabricate an orphan";
@@ -795,6 +807,7 @@ TEST_F(UblkTest, destroy_orphan_refuses_a_directory_tombstone) {
 // The dev_id is one no ublk device can have been given, so this is about the
 // tombstone alone and cannot collide with a real registration.
 TEST_F(UblkTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
+    if (skip_reason) return;
     const std::string sid = "4000000000";
     std::string cn = "/dev/ublkc" + sid;
     std::string lp = std::string(SUITE_LOCKS) + "/ublk-" + sid + ".lock";
@@ -830,6 +843,7 @@ TEST_F(UblkTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
 }
 
 TEST_F(UblkTest, resize_dev) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -862,6 +876,7 @@ TEST_F(UblkTest, resize_dev) {
 }
 
 TEST_F(UblkTest, resize_recover) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -896,6 +911,7 @@ TEST_F(UblkTest, resize_recover) {
 }
 
 TEST_F(UblkTest, shutdown_busy) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -918,6 +934,7 @@ TEST_F(UblkTest, shutdown_busy) {
 }
 
 TEST_F(UblkTest, detach_then_shutdown) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -935,6 +952,7 @@ TEST_F(UblkTest, detach_then_shutdown) {
 }
 
 TEST_F(UblkTest, adopted_device_left_alone) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev1 = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev1);
@@ -976,6 +994,7 @@ TEST_F(UblkTest, adopted_device_left_alone) {
 }
 
 TEST_F(UblkTest, restart_window_io) {
+    if (skip_reason) return;
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1020,6 +1039,7 @@ TEST_F(UblkTest, restart_window_io) {
 // A red here costs one ublk dev_id and may leave a process that cannot be killed,
 // so do not re-run it in a loop and measure the D-state census after any failure.
 TEST_F(UblkTest, consumer_hang_is_contained) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     UblkController::Config cfg(make_info());
     // The consumer drains only once the re-attached daemon has completed its IO,
@@ -1151,6 +1171,7 @@ TEST_F(UblkTest, consumer_hang_is_contained) {
 // A red here costs one ublk dev_id and may leave a process that cannot be killed,
 // so do not re-run it in a loop and measure the D-state census after any failure.
 TEST_F(UblkTest, writer_hang_is_contained) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     UblkController::Config cfg(make_info());
     // As above: shutdown() bounds its wait for the node's last opener with this
@@ -1264,6 +1285,7 @@ TEST_F(UblkTest, writer_hang_is_contained) {
 // consumer_io_body() does between its write and its read-back, so they stop at
 // CONS_SYNC and never reach the comparison.
 TEST_F(UblkTest, a_read_back_that_disagrees_is_reported_as_a_verify_failure) {
+    if (skip_reason) return;
     CorruptingFile rec(file);
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
@@ -1320,8 +1342,9 @@ TEST_F(UblkTest, a_read_back_that_disagrees_is_reported_as_a_verify_failure) {
 // relies on. Hence the stress driver rather than two sequential single-thread
 // IOs, which would both land on queue 0.
 TEST_F(UblkTest, pool_placement_n_less_than_m) {
+    if (skip_reason) return;
     if (std::thread::hardware_concurrency() < 2)
-        GTEST_SKIP() << "needs >= 2 CPUs to spread IO over both queues";
+        return report_skip("needs >= 2 CPUs to spread IO over both queues");
     test::TestPool pool(4);
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1347,8 +1370,9 @@ TEST_F(UblkTest, pool_placement_n_less_than_m) {
 // is what "the cursor wraps" means -- and IO must still be correct, which is the
 // half that a placement-only assertion would miss.
 TEST_F(UblkTest, pool_placement_n_greater_than_m) {
+    if (skip_reason) return;
     if (std::thread::hardware_concurrency() < 4)
-        GTEST_SKIP() << "needs >= 4 CPUs to spread IO over four queues";
+        return report_skip("needs >= 4 CPUs to spread IO over four queues");
     test::TestPool pool(2);
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1373,6 +1397,7 @@ TEST_F(UblkTest, pool_placement_n_greater_than_m) {
 // The pool == nullptr row of the config table: behavior must be exactly what it
 // is today. "Exactly" is measurable -- one vcpu, and it is the caller's.
 TEST_F(UblkTest, pool_null_serves_on_the_caller_vcpu) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
 
@@ -1394,6 +1419,7 @@ TEST_F(UblkTest, pool_null_serves_on_the_caller_vcpu) {
 // covered. The kernel must still see n hardware queues, and all n must be
 // served from the caller's vcpu.
 TEST_F(UblkTest, multiqueue_without_a_pool) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
 
@@ -1419,6 +1445,7 @@ TEST_F(UblkTest, multiqueue_without_a_pool) {
 // WorkPool's cursor is `vcpu_index++ % size`, so size 0 there is a SIGFPE --
 // migrate_to_pool's short-circuit is the only thing standing in the way.
 TEST_F(UblkTest, empty_pool_falls_back_to_the_caller_vcpu) {
+    if (skip_reason) return;
     photon::WorkPool empty(0);   // no vcpus, so no engines to match
     ASSERT_EQ(0, empty.get_vcpu_num());
     test::RecordingFile rec(file);
@@ -1450,6 +1477,7 @@ TEST_F(UblkTest, empty_pool_falls_back_to_the_caller_vcpu) {
 // the case because the fixture's TearDown sweep runs afterwards and would clean up
 // a leak before any outside check could see it.
 TEST_F(UblkTest, pool_without_an_event_engine_is_refused) {
+    if (skip_reason) return;
     const std::string residue_before = residue();
     photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
     test::RecordingFile rec(file);
@@ -1472,6 +1500,7 @@ TEST_F(UblkTest, pool_without_an_event_engine_is_refused) {
 // single-threaded IO per device is enough to show it -- what matters is that
 // the two vcpus differ, not how many of each device's queues got traffic.
 TEST_F(UblkTest, two_devices_share_one_pool) {
+    if (skip_reason) return;
     test::TestPool pool(4);
     test::RecordingFile rec_a(file);
     // device B needs its OWN backend and its OWN probe: sharing `file` would
@@ -1516,6 +1545,7 @@ TEST_F(UblkTest, two_devices_share_one_pool) {
 }
 
 TEST_F(UblkTest, fua) {
+    if (skip_reason) return;
     // FUA cannot be triggered from the raw node itself: O_DSYNC degenerates
     // to a write plus a separate FLUSH. It is filesystems that put REQ_FUA on
     // writes -- jbd2 writes every ext4 journal commit record with FUA, and
@@ -1560,7 +1590,7 @@ TEST_F(UblkTest, fua) {
     });
     DEFER(::rmdir(MNT));
     if (rc == -2)
-        GTEST_SKIP() << "mkfs.ext4 or mount not available in this environment";
+        return report_skip("mkfs.ext4 or mount not available here");
     ASSERT_EQ(0, rc);
     EXPECT_GT(cf.dsync_writes.load(), 0u);
 }
@@ -1569,6 +1599,7 @@ TEST_F(UblkTest, fua) {
 // and checks that its device and its orphan list agree on it, while the fixture's
 // controller -- on SUITE_LOCKS -- sees neither.
 TEST_F(UblkTest, custom_lock_dir) {
+    if (skip_reason) return;
     static const char LOCKS[] = "/tmp/photon-blk-ublk-test-locks";
     ::system(("rm -rf " + std::string(LOCKS)).c_str());
 
@@ -1633,6 +1664,7 @@ TEST_F(UblkTest, custom_lock_dir) {
 }
 
 TEST_F(UblkTest, timeout_knobs) {
+    if (skip_reason) return;
     // stop_timeout_ms bounds shutdown()'s TRY_STOP retry window against a
     // persistent holder
     UblkController::Config cfg(make_info());

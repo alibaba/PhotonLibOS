@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 // Built only on Linux (the vduse transport is LINUX-gated). Requires root, the
-// vduse + virtio_vdpa modules and iproute2's `vdpa` tool; otherwise GTEST_SKIPs.
+// vduse + virtio_vdpa modules and iproute2's `vdpa` tool; without them every
+// case prints a skip notice and returns (see test::SkippableTest).
 //
 // The consumer side (the vdpa bus attach that turns the VDUSE registration into
 // a /dev/vdX) is orchestrated by the tests themselves -- mirroring production,
@@ -267,7 +268,7 @@ static int virtio_feature_bit(const std::string& kname, uint32_t bit) {
 static constexpr uint32_t FEAT_BIT_BLK_MQ = 12;
 static constexpr uint32_t PEER_MAX_QUEUES = 64;
 
-class VduseTest : public ::testing::Test {
+class VduseTest : public test::SkippableTest {
 public:
     test::TestImage img;
     fs::IFile* file = nullptr;
@@ -279,14 +280,14 @@ public:
 
     void SetUp() override {
         if (geteuid() != 0)
-            GTEST_SKIP() << "vduse test requires root";
+            return report_skip("vduse test requires root");
         ::system("modprobe vduse 2>/dev/null");
         ::system("modprobe virtio_vdpa 2>/dev/null");   // separate: `modprobe a b`
                                                         // passes b as a PARAMETER of a
         if (::access("/dev/vduse/control", F_OK) != 0)
-            GTEST_SKIP() << "vduse module not available";
+            return report_skip("vduse module not available");
         if (::system("which vdpa >/dev/null 2>&1") != 0)
-            GTEST_SKIP() << "iproute2's vdpa tool not available";
+            return report_skip("iproute2's vdpa tool not available");
         ctl = new_vduse_controller(SUITE_LOCKS);
         ASSERT_NE(nullptr, ctl);
         sweep();
@@ -302,7 +303,7 @@ public:
     }
 
     // Remove leftovers of crashed runs, then adopt+shutdown every orphan
-    // registration. Owns its controller rather than using ctl: a GTEST_SKIP in SetUp
+    // registration. Owns its controller rather than using ctl: a skipped SetUp
     // returns before ctl exists, and TearDown still runs.
     //
     // THE ORDER BELOW IS WRONG AND IS KNOWN TO BE. Detaching our vdpa devs before
@@ -402,6 +403,7 @@ public:
 };
 
 TEST_F(VduseTest, config_validation) {
+    if (skip_reason) return;
     // the pure config checks are construction-time now: no object at all
     BlkConfig bad(make_info());
     bad.info.identity = "";
@@ -457,6 +459,7 @@ TEST_F(VduseTest, config_validation) {
 }
 
 TEST_F(VduseTest, basic_io) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -478,6 +481,7 @@ TEST_F(VduseTest, basic_io) {
 // any misrouted, torn or lost IO; DISJOINT additionally requires each block to
 // carry its reader's own tid+seq.
 TEST_F(VduseTest, concurrent_stress) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -493,6 +497,7 @@ TEST_F(VduseTest, concurrent_stress) {
 }
 
 TEST_F(VduseTest, read_only) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     cfg.read_only = true;
     auto dev = ctl->new_device(cfg);
@@ -512,6 +517,7 @@ TEST_F(VduseTest, read_only) {
 }
 
 TEST_F(VduseTest, resize_dev) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -552,6 +558,7 @@ TEST_F(VduseTest, resize_dev) {
 }
 
 TEST_F(VduseTest, shutdown_busy) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -579,6 +586,7 @@ TEST_F(VduseTest, shutdown_busy) {
 }
 
 TEST_F(VduseTest, orphan_recovery) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev1 = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev1);
@@ -628,6 +636,7 @@ TEST_F(VduseTest, orphan_recovery) {
 // Start, then detach so the daemon is gone but the registration stays -- that is the
 // orphan -- with no vdpa consumer attached, so nothing refuses the removal.
 TEST_F(VduseTest, destroy_orphan_removes_a_dead_registration) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -665,6 +674,7 @@ TEST_F(VduseTest, destroy_orphan_removes_a_dead_registration) {
 }
 
 TEST_F(VduseTest, destroy_orphan_refuses_a_live_device) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -723,6 +733,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_a_live_device) {
 // orphan_recovery documents from the other side, and never while the device is an
 // orphan.
 TEST_F(VduseTest, destroy_orphan_refuses_an_attached_consumer) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -792,6 +803,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_an_attached_consumer) {
 }
 
 TEST_F(VduseTest, destroy_orphan_validates_the_identity) {
+    if (skip_reason) return;
     // A real orphan, so the rejections below can be checked against something: what
     // each spelling would have named, had it been let through.
     BlkConfig cfg(make_info());
@@ -869,6 +881,7 @@ TEST_F(VduseTest, destroy_orphan_validates_the_identity) {
 // creates with no tombstone -- which list_orphans() skips, so it would stop being
 // reported by every later scan.
 TEST_F(VduseTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
+    if (skip_reason) return;
     const std::string name = "photon-vduse-no-such-dev";
     std::string reg = "/dev/vduse/" + name;
     std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + name + ".lock";
@@ -907,6 +920,7 @@ TEST_F(VduseTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
 // server owns. Without the claim that destroy succeeds, and the owner goes on
 // serving a registration the kernel no longer has.
 TEST_F(VduseTest, destroy_orphan_refuses_a_registration_claimed_by_another) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -948,6 +962,7 @@ TEST_F(VduseTest, destroy_orphan_refuses_a_registration_claimed_by_another) {
 }
 
 TEST_F(VduseTest, daemon_restart_io) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     auto dev1 = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev1);
@@ -997,6 +1012,7 @@ TEST_F(VduseTest, daemon_restart_io) {
 // pins the `nqueues >= 2` gate at its exact boundary (2), mirroring what
 // test-vhost-user's queue_count_follows_config pins against its mock frontend.
 TEST_F(VduseTest, queue_count_follows_config) {
+    if (skip_reason) return;
     struct Case { uint32_t ask; int dirs; int mq; };
     static const Case cases[] = {
         {0,                   1,                    0},   // the default: one queue, no F_MQ
@@ -1066,6 +1082,7 @@ TEST_F(VduseTest, queue_count_follows_config) {
 // spreads requests over every hardware queue, and an IO that lands on an
 // unresolved queue never completes.
 TEST_F(VduseTest, adoption_resyncs_every_queue) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     cfg.queues = 4;
     auto dev1 = ctl->new_device(cfg);
@@ -1120,6 +1137,7 @@ TEST_F(VduseTest, adoption_resyncs_every_queue) {
 // request that lands on a queue the adopter never set up, resolved or started
 // never completes, and the phase reports it as hung rather than done.
 TEST_F(VduseTest, adoption_serves_the_registered_queue_count) {
+    if (skip_reason) return;
     BlkConfig cfg(make_info());
     cfg.queues = 4;
     auto dev1 = ctl->new_device(cfg);
@@ -1175,6 +1193,7 @@ TEST_F(VduseTest, adoption_serves_the_registered_queue_count) {
 // index early turns the refusal into exactly the silent clamp above, and no
 // narrower registration can show it.
 TEST_F(VduseTest, adoption_refuses_a_registration_wider_than_the_transport) {
+    if (skip_reason) return;
     static const char WIDE[] = "vduse-wide-test";
     char reg[64];
     snprintf(reg, sizeof(reg), "/dev/vduse/%s", WIDE);
@@ -1216,6 +1235,7 @@ TEST_F(VduseTest, adoption_refuses_a_registration_wider_than_the_transport) {
 // sweep() probes SUITE_LOCKS only and can therefore never clean up after this
 // test; the shutdown DEFER does.
 TEST_F(VduseTest, custom_lock_dir) {
+    if (skip_reason) return;
     static const char LOCKS[] = "/tmp/photon-blk-vduse-test-locks";
     static const char NAME[]  = "photon-vduse-locks";
     ::system(("rm -rf " + std::string(LOCKS)).c_str());
@@ -1275,6 +1295,7 @@ TEST_F(VduseTest, custom_lock_dir) {
 // bound: it takes the same spread over hardware queues that the adoption resync
 // case above relies on.
 TEST_F(VduseTest, multiqueue_io_spreads_over_the_pool) {
+    if (skip_reason) return;
     test::TestPool pool(4);
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1302,6 +1323,7 @@ TEST_F(VduseTest, multiqueue_io_spreads_over_the_pool) {
 // Four queues and no pool at all: the kernel must still see four hardware queues,
 // and all four serving coroutines must stay on the vcpu that called start().
 TEST_F(VduseTest, multiqueue_without_a_pool) {
+    if (skip_reason) return;
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
 
@@ -1329,6 +1351,7 @@ TEST_F(VduseTest, multiqueue_without_a_pool) {
 // thing in the way. Surviving is half the assertion, and staying on the caller's
 // vcpu is the other half.
 TEST_F(VduseTest, empty_pool_falls_back_to_the_caller_vcpu) {
+    if (skip_reason) return;
     photon::WorkPool empty(0);   // no vcpus, so no engines to match
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
@@ -1369,6 +1392,7 @@ TEST_F(VduseTest, empty_pool_falls_back_to_the_caller_vcpu) {
 // it. No vdpa attach: start() never got far enough to serve, so there is no
 // consumer side to bring up or down.
 TEST_F(VduseTest, pool_without_an_event_engine_is_refused) {
+    if (skip_reason) return;
     const std::string residue_before = residue();
     photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
     test::RecordingFile rec(file);

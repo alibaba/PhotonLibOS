@@ -1779,6 +1779,11 @@ int stress_node_both_modes(const std::string& node, uint64_t size, const char* l
 // fixture scaffolding
 // ---------------------------------------------------------------------------
 
+void SkippableTest::report_skip(const char* why) {
+    fprintf(stderr, "  [ SKIPPED ] %s\n", why);
+    skip_reason = why;
+}
+
 int TestImage::create(const char* p, uint64_t size) {
     path = p;
     ::unlink(p);

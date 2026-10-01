@@ -256,7 +256,7 @@ private:
 static const char IMG_PATH[] = "/tmp/photon-blk-nbd-test.img";
 static constexpr uint64_t IMG_SIZE = 4u << 20;
 
-class NbdTest : public ::testing::Test {
+class NbdTest : public test::SkippableTest {
 public:
     test::TestImage img;
     fs::IFile* file = nullptr;
@@ -625,9 +625,9 @@ TEST_F(NbdTest, read_only) {
 #ifdef __linux__
 TEST_F(NbdTest, loopback_device) {
     if (geteuid() != 0)
-        GTEST_SKIP() << "loopback test requires root";
+        return report_skip("loopback test requires root");
     if (::access("/sys/block/nbd0", F_OK) != 0)
-        GTEST_SKIP() << "nbd kernel module not loaded";
+        return report_skip("nbd kernel module not loaded");
 
     NbdConfig cfg(make_info());  // anonymous UDS + loopback device
     auto dev = new_nbd_device(cfg);

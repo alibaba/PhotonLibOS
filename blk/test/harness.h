@@ -21,6 +21,8 @@ limitations under the License.
 // not part of the library): the suites include this header and compile
 // harness.cpp alongside their own source.
 
+#include "../../test/gtest.h"     // SkippableTest's ::testing::Test base
+
 #include <photon/common/callback.h>     // TempDelegate
 #include <photon/fs/filesystem.h>       // fs::IFile
 #include <photon/photon.h>              // INIT_EVENT_DEFAULT / INIT_IO_NONE
@@ -69,6 +71,22 @@ std::string sh_off_vcpu(const std::string& cmd, int* rc = nullptr);
 // ---------------------------------------------------------------------------
 // fixture scaffolding
 // ---------------------------------------------------------------------------
+
+// Base for the fixtures whose whole suite needs an environment the build host
+// may not have -- root, a kernel module, a host tool. The gtest a host finds
+// can predate GTEST_SKIP, so a skip here is the ecosystem's idiom (see
+// io/test/test-iouring-uaf.cpp): print a notice, then return. A fixture that
+// gates in SetUp() needs one more step, because gtest runs the body even when
+// SetUp() returned early -- hence skip_reason, which such a fixture's bodies
+// check before touching members SetUp() never reached.
+class SkippableTest : public ::testing::Test {
+public:
+    // nullptr while the environment is available, else the reason it is not
+    const char* skip_reason = nullptr;
+
+    // print the notice and record the reason; the caller returns right after
+    void report_skip(const char* why);
+};
 
 // The backend image a suite exports: a localfs file created fresh at `path` and
 // sized to `size`, removed when this goes out of scope. Every suite's SetUp and
