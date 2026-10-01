@@ -712,14 +712,21 @@ void* VirtQueueServer::req_trampoline(void* a) {
 }
 
 bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
+    // BOTH notification modes need this, so it precedes the branch instead of
+    // living in the EVENT_IDX arm. It pairs with the driver's barrier ("before
+    // reading flags or avail_event, to avoid missing a notification"): our
+    // used-ring write has to be visible before we read what the driver wrote.
+    // Without it the two sides interleave -- we publish used and read a stale
+    // flags/avail_event while the driver enables notifications and reads a stale
+    // used -- and neither notifies, so a completed request goes unreported until
+    // the next one arrives. A release store on used plus an acquire load on flags
+    // does not close that: the hazard is a store/load pair across two locations,
+    // which only a full fence orders. The spec imposes no device-side barrier
+    // MUST -- this ordering argument is ours, see SPEC §3.3 -- so it cannot be
+    // dropped on the strength of a citation.
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (!event_idx.load(std::memory_order_relaxed))
         return vring_need_irq(avail);
-    // Pair with the driver's §2.7.13.4.1 barrier ("before reading flags or
-    // avail_event, to avoid missing a notification"): make our used-ring write
-    // visible before we read what the driver wrote. The spec imposes no
-    // device-side barrier MUST -- this ordering argument is ours, see SPEC
-    // §3.3 -- so it cannot be dropped on the strength of a citation.
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     // First decision on this ring notifies unconditionally. §2.7.7.1: "The
     // driver MUST handle spurious notifications from the device." It exists for
     // handover: a resumed ring starts used_idx at an arbitrary value while
