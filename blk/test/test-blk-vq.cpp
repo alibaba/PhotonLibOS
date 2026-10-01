@@ -53,7 +53,10 @@ constexpr uint32_t RING_NUM = 8;
 // have to be part of the allocation even for a test that never negotiates
 // EVENT_IDX -- reading them is unconditional in one of should_notify()'s branches.
 // Each region starts on an 8-byte boundary; the real layout pads to a page for DMA,
-// which matters to a device, not to a struct's alignment.
+// which matters to a device, not to a struct's alignment. Its fields are the
+// uapi's plain integers, not std::atomic, so the accesses to them below go
+// through the __atomic builtins -- which take __ATOMIC_*, not std::memory_order:
+// that stopped converting to int when C++20 made it a scoped enum.
 struct MemVring {
     std::vector<char> mem;
     vring_desc* desc = nullptr;
@@ -154,16 +157,16 @@ TEST(VqNotify, flags_mode_does_not_lose_a_completion_to_the_driver_enable_race) 
         // Reset while the device is parked at the barrier, so the two stores that
         // race are only its used-index and this thread's flag.
         __atomic_store_n(&r.avail->flags, (uint16_t)VRING_AVAIL_F_NO_INTERRUPT,
-                         std::memory_order_relaxed);
-        __atomic_store_n(&r.used->idx, base, std::memory_order_relaxed);
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&r.used->idx, base, __ATOMIC_RELAXED);
         srv.used_idx = base;
         uint64_t before = g_notifications.load(std::memory_order_relaxed);
 
         bar.wait();
         // The driver's prescribed sequence: enable, barrier, re-read.
-        __atomic_store_n(&r.avail->flags, (uint16_t)0, std::memory_order_release);
+        __atomic_store_n(&r.avail->flags, (uint16_t)0, __ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        bool driver_saw_it = __atomic_load_n(&r.used->idx, std::memory_order_acquire) != base;
+        bool driver_saw_it = __atomic_load_n(&r.used->idx, __ATOMIC_ACQUIRE) != base;
         bar.wait();
 
         bool device_notified = g_notifications.load(std::memory_order_relaxed) != before;
@@ -221,9 +224,9 @@ TEST(VqNotify, flags_mode_answers_from_the_driver_suppression_bit) {
     srv.hooks.ready.bind(nullptr, &ready_true);
 
     __atomic_store_n(&r.avail->flags, (uint16_t)VRING_AVAIL_F_NO_INTERRUPT,
-                     std::memory_order_relaxed);
+                     __ATOMIC_RELAXED);
     EXPECT_FALSE(srv.should_notify(0));
-    __atomic_store_n(&r.avail->flags, (uint16_t)0, std::memory_order_relaxed);
+    __atomic_store_n(&r.avail->flags, (uint16_t)0, __ATOMIC_RELAXED);
     EXPECT_TRUE(srv.should_notify(0));
 }
 
@@ -248,7 +251,7 @@ TEST(VqNotify, the_first_decision_on_a_ring_notifies_and_the_second_follows_the_
     // the new and the old used index at 5, need_event is (5-0-1) < (5-5), i.e.
     // false -- so a true answer here can only have come from the first-decision
     // rule, not from the arithmetic agreeing by accident.
-    __atomic_store_n(&r.avail->ring[RING_NUM], (uint16_t)0, std::memory_order_relaxed);
+    __atomic_store_n(&r.avail->ring[RING_NUM], (uint16_t)0, __ATOMIC_RELAXED);
     srv.used_idx = 5;
     EXPECT_TRUE(srv.should_notify(5));
     EXPECT_TRUE(srv.notify_valid.load(std::memory_order_relaxed));
