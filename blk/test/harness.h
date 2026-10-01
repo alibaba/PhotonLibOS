@@ -27,13 +27,14 @@ limitations under the License.
 #include <photon/thread/thread.h>       // vcpu_base, get_vcpu, mutex
 #include <photon/thread/workerpool.h>   // WorkPool
 
-#include <atomic>
+#include <atomic>                 // the cross-process counters, and ATOMIC_*_LOCK_FREE
 #include <cerrno>                 // EIO, ETIMEDOUT in the defaults below
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <sys/types.h>            // pid_t
 #include <thread>
+#include <type_traits>            // integral_constant / false_type for atomic_always_lock_free
 #include <vector>
 
 namespace photon {
@@ -364,13 +365,33 @@ struct ConsumerWriterReport {      // shared with the child; constructed, not cl
     uint32_t echo_advance;
     uint32_t echo_verify;
 };
-static_assert(decltype(ConsumerWriterReport::iters)::is_always_lock_free,
+
+// is_always_lock_free is C++17, and these suites are also built at the project's
+// default C++14, so the property comes from <atomic>'s per-type macros instead:
+// 2 means always lock-free, 1 sometimes, 0 never. Every specialization reads the
+// macro that belongs to its own type, so the answer is that type's and never a
+// neighbouring width's. A type with no specialization gets the primary's false --
+// which is what keeps the asserts below able to fail on a member that stopped
+// being an atomic at all.
+template<typename T> struct atomic_always_lock_free : std::false_type {};
+template<> struct atomic_always_lock_free<std::atomic<int>>
+        : std::integral_constant<bool, ATOMIC_INT_LOCK_FREE == 2> {};
+template<> struct atomic_always_lock_free<std::atomic<long>>
+        : std::integral_constant<bool, ATOMIC_LONG_LOCK_FREE == 2> {};
+template<> struct atomic_always_lock_free<std::atomic<unsigned long>>
+        : std::integral_constant<bool, ATOMIC_LONG_LOCK_FREE == 2> {};
+template<> struct atomic_always_lock_free<std::atomic<long long>>
+        : std::integral_constant<bool, ATOMIC_LLONG_LOCK_FREE == 2> {};
+template<> struct atomic_always_lock_free<std::atomic<unsigned long long>>
+        : std::integral_constant<bool, ATOMIC_LLONG_LOCK_FREE == 2> {};
+
+static_assert(atomic_always_lock_free<decltype(ConsumerWriterReport::iters)>::value,
               "ConsumerWriterReport::iters crosses a process boundary, so a "
               "non-lock-free atomic would leave it guarded by a per-process lock");
-static_assert(decltype(ConsumerWriterReport::errors)::is_always_lock_free,
+static_assert(atomic_always_lock_free<decltype(ConsumerWriterReport::errors)>::value,
               "ConsumerWriterReport::errors crosses a process boundary, so a "
               "non-lock-free atomic would leave it guarded by a per-process lock");
-static_assert(decltype(ConsumerWriterReport::stop_flag)::is_always_lock_free,
+static_assert(atomic_always_lock_free<decltype(ConsumerWriterReport::stop_flag)>::value,
               "ConsumerWriterReport::stop_flag crosses a process boundary, so a "
               "non-lock-free atomic would leave it guarded by a per-process lock");
 

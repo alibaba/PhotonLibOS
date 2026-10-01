@@ -39,6 +39,7 @@ limitations under the License.
 #include <photon/common/alog-stdstring.h>
 #include <photon/common/estring.h>
 #include <photon/common/iovector.h>
+#include <photon/common/string_view.h>
 #include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread.h>
@@ -63,7 +64,6 @@ limitations under the License.
 #include <deque>
 #include <iterator>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -1320,9 +1320,16 @@ struct TcmuRegistry {
             p.dev_id = dev_id;
             pending_added.push_back(p);
         }
-        if (evicted[0])
+        if (evicted[0]) {
+            // A local, not the member: log arguments bind by reference, and that
+            // odr-uses a static constexpr member, which before C++17 needs an
+            // out-of-class definition -- photon has none anywhere. Not cosmetic
+            // at C++14: the undefined symbol lands in libphoton.so, so every
+            // executable linked against it fails, not just this one.
+            const size_t cap = MAX_PENDING_ADDED;
             LOG_WARN("tcmu pending-ADDED table is full (`); dropped the entry for `",
-                     MAX_PENDING_ADDED, evicted);
+                     cap, evicted);
+        }
         return true;
     }
 
@@ -2746,7 +2753,8 @@ struct TcmuHBAImpl : TcmuHBA {
 
     static void get_u32(const char* attrs, size_t alen, uint16_t type, uint32_t* out) {
         size_t pl = 0;
-        if (auto p = nla_find(attrs, alen, type, &pl); p && pl >= sizeof(uint32_t))
+        auto p = nla_find(attrs, alen, type, &pl);
+        if (p && pl >= sizeof(uint32_t))
             memcpy(out, p, sizeof(*out));
     }
 };

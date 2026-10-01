@@ -510,7 +510,7 @@ struct VduseDeviceImpl : IBlkDevice {
         std::atomic<bool> needs_refresh{false};  // DRIVER_OK seen; the loop resolves
         // The generation of this queue's readiness. A refresh snapshots it
         // before it resolves anything and publishes only if it has not moved.
-        std::atomic<uint32_t> gen = 0;
+        std::atomic<uint32_t> gen{0};
         // The vcpu this queue's loop coroutine runs on, recorded by vq_start
         // immediately after the migration: photon::get_vcpu(thread*) reads the field
         // do_thread_migrate stores under the thread's own lock before it returns, so

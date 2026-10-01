@@ -16,7 +16,7 @@ limitations under the License.
 
 #pragma once
 #include <sys/types.h>
-#include <string_view>
+#include <photon/common/string_view.h>   // std::string_view, incl. the pre-C++17 alias
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
 #include <photon/common/timeout.h>

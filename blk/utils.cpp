@@ -23,6 +23,7 @@ limitations under the License.
 
 #include <photon/common/alog.h>
 #include <photon/common/alog-stdstring.h>   // logging the engine name, a string_view
+#include <photon/common/string_view.h>  // std::string_view, incl. the pre-C++17 alias
 #include <photon/common/utility.h>      // DEFER
 #include <photon/io/fd-events.h>        // wait_for_fd_readable / writable, get_engine_name
 #include <photon/thread/thread.h>       // Timeout
@@ -40,7 +41,6 @@ limitations under the License.
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <string_view>
 #include <thread>
 
 #ifdef __linux__
