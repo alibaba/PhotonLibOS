@@ -11,8 +11,8 @@ RUN dnf install -y git cmake gcc-c++ openssl-devel-1.1.1k libcurl-devel-7.61.1-3
     wget https://github.com/gflags/gflags/archive/refs/tags/v2.1.2.tar.gz -O - | tar -xvz && \
     cd gflags-2.1.2 && export CXXFLAGS="-fPIC" && cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=1 -DBUILD_STATIC_LIBS=1 . && make -j 8 && make install && \
     cd .. && rm -rf gflags-2.1.2 && ln -s libgflags.so.2.1.2 /usr/local/lib/libgflags.so.2.1 && \
-    wget https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz -O - | tar -xvz && \
-    cd liburing-liburing-2.3 && export CFLAGS="-fPIC -O3 -Wall -Wextra -fno-stack-protector" && ./configure && make -C src -j $(nprocs) && make install && cd .. && rm -rf liburing-liburing-2.3 && \
+    wget https://github.com/axboe/liburing/archive/refs/tags/liburing-2.15.tar.gz -O - | tar -xvz && \
+    cd liburing-liburing-2.15 && export CFLAGS="-fPIC -O3 -Wall -Wextra -fno-stack-protector" && ./configure && make -C src -j $(nprocs) && make install && cd .. && rm -rf liburing-liburing-2.15 && \
     wget https://github.com/cpp-redis/cpp_redis/archive/refs/tags/4.3.1.tar.gz -O - | tar -xvz && \
     cd cpp_redis-4.3.1 && cmake -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CUSTOM_TCP_CLIENT=on; cmake --build build --config Release -j -t install && cd .. && rm -rf cpp_redis-4.3.1
 
