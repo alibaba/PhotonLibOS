@@ -35,6 +35,7 @@ limitations under the License.
 #include <spawn.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>              // __NR_close_range, see drop_inherited_fds
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -593,10 +594,11 @@ struct ConsumerArgs {
 // Capped, because the census runs on every consumer IO and RLIMIT_NOFILE is
 // commonly 1M. Two claims about what the cap bounds, kept apart because they are
 // not the same one: on EVERY platform it bounds the self-check, since
-// count_fds_from() below stops at it. On Linux it bounds nothing else, because
-// drop_inherited_fds() there covers every fd however high; that function's
-// non-Linux fallback loop shares this bound, so on those the cap bounds the drop
-// as well. A drop that does not work at all shows up at the low end, where the
+// count_fds_from() below stops at it. Whether it also bounds the drop depends on
+// which path drop_inherited_fds() takes: the close_range syscall covers every fd
+// however high, while the loop it falls back to shares this bound. So the cap
+// bounds the drop off Linux, and on a Linux whose kernel headers predate that
+// syscall. A drop that does not work at all shows up at the low end, where the
 // descriptors this process opens early are.
 uint32_t fd_table_bound() {
     constexpr uint32_t CAP = 1u << 16;
@@ -621,17 +623,27 @@ uint32_t count_fds_from(uint32_t lo) {
 // unconditional -- and the census behind it is what keeps that from being a
 // comment nobody checks.
 int drop_inherited_fds() {
-#ifdef __linux__
-    return ::close_range(3u, ~0u, 0u);
-#else
-    // no close_range(2); every transport that exports a node is Linux-only, so
-    // this branch only has to be correct enough to keep the file compiling
+#if defined(__linux__) && defined(__NR_close_range)
+    // syscall() rather than the close_range() wrapper: the wrapper is newer than
+    // the containers this gets built in, so their <unistd.h> does not declare it
+    // and the file does not compile. The syscall number comes from the kernel
+    // headers, which is the right thing to key on anyway -- the kernel is what
+    // has to support it, not the libc. Unbounded on purpose: see fd_table_bound()
+    // for why the drop must reach past the census cap. ENOSYS means those headers
+    // are newer than the running kernel, so fall through to the loop.
+    if (::syscall(__NR_close_range, 3u, ~0u, 0u) == 0)
+        return 0;
+    if (errno != ENOSYS)
+        return -1;
+#endif
+    // Either not Linux, or Linux whose kernel headers predate close_range. Unlike
+    // the syscall above, this loop is bounded -- by fd_table_bound(), so on these
+    // platforms that cap bounds the drop as well as the census.
     uint32_t hi = fd_table_bound();
     for (uint32_t i = 3; i < hi; i++)
         if (::close((int)i) < 0 && errno != EBADF)
             return -1;
     return 0;
-#endif
 }
 
 bool parse_u64(const char* s, uint64_t* v) {
