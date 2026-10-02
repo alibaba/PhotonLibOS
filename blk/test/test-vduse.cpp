@@ -681,6 +681,18 @@ TEST_F(VduseTest, shutdown_busy) {
     EXPECT_EQ(0, ::access(("/dev/vduse/" + std::string(TEST_NAME)).c_str(), F_OK));
     EXPECT_EQ(0, device_io(node, pattern(0x77), true));   // still serving
 
+    // The state this refusal leaves is one of the two a failed teardown has to
+    // define, and it is the one where nothing was torn down: the object is still
+    // serving, so it still says so and a start() must refuse. That is the mirror
+    // of a DESTROY_DEV that fails AFTER serving stopped, where serving cannot be
+    // put back and the same start() must instead be free to adopt the
+    // registration and try again. Asserting the refusal here is what keeps the
+    // two outcomes from being collapsed into one behaviour.
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EALREADY, errno);
+    EXPECT_EQ(0, device_io(node, pattern(0x77), true));   // and still serving after
+
     vdpa_detach(TEST_NAME);   // consumer goes first, while we still serve
     EXPECT_EQ(0, dev->shutdown());
     EXPECT_NE(0, ::access(("/dev/vduse/" + std::string(TEST_NAME)).c_str(), F_OK));
@@ -1593,6 +1605,68 @@ TEST_F(VduseTest, pool_without_an_event_engine_is_refused) {
     EXPECT_EQ(EINVAL, errno);
     EXPECT_EQ(0u, rec.vcpu_count());
     EXPECT_EQ(residue_before, residue());
+}
+
+// The refusal the review asked about -- a start that fails AFTER the kernel
+// registration exists -- reached through a trigger this suite can produce on
+// demand instead of the one it named. The named trigger is the open of the char
+// device that follows a successful creation failing, and nothing here can make
+// that open fail: the routes that would (no permission on /dev/vduse, or the
+// descriptor table full) fail the FIRST open in start() as well, since both
+// opens sit at the same depth in the same table, so such a case would never
+// reach the registration it exists to check. The rejected pool below does reach
+// it: start() has created and claimed by then, and rollback() has to undo both.
+//
+// Both invariants are asserted directly and not only through the listing
+// compare, because what the compare can see depends on what earlier cases left
+// behind:
+//   - the registration this start brought into existence is destroyed again, and
+//   - the claim is released, with the tombstone FILE surviving the release --
+//     release unlocks and closes, and only destroy_orphan unlinks. Pinning the
+//     file's existence is also what makes the listing compare deterministic
+//     rather than a function of case order.
+//
+// The retry half then shows the name is genuinely free again. A successful
+// second start does not show that by itself: had the registration leaked,
+// start() would have adopted it and succeeded just the same. So the two halves
+// carry different facts -- the listing carries "nothing leaked into the kernel",
+// the second start carries "nothing is still claimed here".
+TEST_F(VduseTest, a_refused_start_leaves_no_registration_and_no_claim) {
+    if (skip_reason) return;
+    const std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+    const std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
+    const std::string before = residue();
+    {
+        photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+        BlkConfig cfg(make_info());
+        cfg.queues = 2;
+        cfg.pool = &bad;
+        auto dev = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev);
+        DEFER(delete dev);
+        errno = 0;
+        EXPECT_EQ(-1, dev->start(file));
+        EXPECT_EQ(EINVAL, errno);
+    }
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK)) << "the refused start left a registration";
+    EXPECT_STREQ("not-held", lock_state(lp));
+    EXPECT_EQ(before, residue());
+
+    // The config is copied into the device when it is built, so the retry needs a
+    // fresh config as well as a fresh object: reusing either one would retry the
+    // rejected pool and fail for the reason this case just checked.
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    DEFER(dev->shutdown());
+    ASSERT_EQ(0, dev->start(file));
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK));
+    EXPECT_STREQ("HELD", lock_state(lp));      // claimed for as long as it serves
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(reg.c_str(), F_OK));
+    EXPECT_STREQ("not-held", lock_state(lp));
+    EXPECT_EQ(before, residue());
 }
 
 }  // namespace blk

@@ -1666,9 +1666,27 @@ struct VduseDeviceImpl : IBlkDevice {
             char nm[VDUSE_NAME_MAX];
             snprintf(nm, sizeof(nm), "%s", name);
             if (::ioctl(ctrl_fd, VDUSE_DESTROY_DEV, nm) < 0) {
+                // Serving is already stopped and cannot be put back. This ioctl
+                // answers EBUSY while a daemon is connected, so reaching it at all
+                // required stop_serving above to close dev_fd, join the loops and
+                // clear the mappings -- "keep the resources needed to serve" is
+                // not an option the ABI offers here. Leaving `started` set on the
+                // way out described a device that was serving nothing, held no
+                // tombstone (the DEFER releases it on this path) and answered
+                // EALREADY to a start() that should have been free to adopt the
+                // registration and try again. What is left instead is exactly
+                // detach()'s state: not started, not ours to destroy without
+                // re-claiming, still `registered` so a later shutdown() re-claims
+                // the tombstone, probes the char device and retries the destroy.
+                // Every other path through this object already understands that
+                // state, and the destructor deliberately does not retry -- for the
+                // same reason it does not destroy a registration detach() handed
+                // over for adoption.
+                started = false;
+                created = false;
                 if (errno == EBUSY)
                     LOG_ERROR_RETURN(EBUSY, -1,
-                        "vduse device ` is still attached to a vdpa consumer (vdpa dev del it first)",
+                        "vduse DESTROY_DEV on ` answered busy with no consumer listed; serving stopped, retry later",
                         name);
                 if (errno != EINVAL)   // EINVAL: the registration is already gone
                     LOG_ERRNO_RETURN(0, -1, "vduse DESTROY_DEV failed, name `", name);
@@ -1740,11 +1758,23 @@ struct VduseDeviceImpl : IBlkDevice {
                 vqs[i]->srv.kickfd = -1;
             }
         if (dev_fd >= 0) { ::close(dev_fd); dev_fd = -1; iotlb.dev_fd = -1; }
-        if (created && registered && ctrl_fd >= 0) {
+        // `created` alone, and not `created && registered`. create_dev() sets the
+        // first and the open that follows it sets the second, so an open failing
+        // between them leaves a registration this start brought into existence
+        // with no marker saying so -- and the old gate skipped the destroy, then
+        // cleared both markers, which is a leak the object has forgotten. We are
+        // disconnected by the close above, so our own connection cannot be what
+        // makes DESTROY_DEV answer EBUSY: something else holds the device, and it
+        // is theirs to keep.
+        if (created && ctrl_fd >= 0) {
             char nm[VDUSE_NAME_MAX];
             snprintf(nm, sizeof(nm), "%s", name);
-            if (::ioctl(ctrl_fd, VDUSE_DESTROY_DEV, nm) < 0 && errno != EINVAL)
-                LOG_WARN("vduse rollback DESTROY_DEV failed, name `, ", name, ERRNO());
+            if (::ioctl(ctrl_fd, VDUSE_DESTROY_DEV, nm) < 0) {
+                if (errno == EBUSY)
+                    LOG_WARN("vduse rollback left ` registered: another daemon or consumer holds it", name);
+                else if (errno != EINVAL)   // EINVAL: the registration is already gone
+                    LOG_WARN("vduse rollback DESTROY_DEV failed, name `, ", name, ERRNO());
+            }
         }
         created = false;
         registered = false;
