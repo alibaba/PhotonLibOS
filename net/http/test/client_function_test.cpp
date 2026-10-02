@@ -25,14 +25,18 @@ limitations under the License.
 #include <string>
 
 #include <photon/net/socket.h>
+#include <photon/net/security-context/tls-stream.h>
 #include <photon/common/alog.h>
 #include "../client.cpp"
 #include "../server.h"
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
+#include <photon/common/memory-stream/memory-stream.h>
 #include <photon/fs/localfs.h>
 #include "../../../test/gtest.h"
+#include "../../test/cert-key.cpp"
+#include "../../security-context/test/test_cert_utils.h"
 #include "to_url.h"
 
 using namespace photon::net;
@@ -635,12 +639,44 @@ TEST(http_client, unix_socket) {
     ASSERT_EQ(n, (ssize_t) op.resp.body_size());
     LOG_INFO(buf);
 
+    // The same logical route reuses the pooled UDS connection.
+    Client::OperationOnStack<> repeated(
+        client, Verb::GET, "http://localhost/simple-api");
+    ASSERT_EQ(0, repeated.call(uds_path));
+    ASSERT_EQ(200, repeated.resp.status_code());
+    ASSERT_EQ((ssize_t)repeated.resp.body_size(),
+              repeated.resp.read(buf, repeated.resp.body_size()));
+
     // A wrong hostname or HTTPS doesn't have effect on unix socket
     Client::OperationOnStack<> op2(client, Verb::GET, "https://www.wrong.hostname/simple-api");
     ret = op2.call(uds_path);
     ASSERT_EQ(0, ret);
     ASSERT_EQ(200, op2.resp.status_code());
 }
+
+#ifdef __linux__
+TEST(http_client, abstract_unix_socket_path_length) {
+    static const char uds_path[] = "\0photon-http-client-abstract";
+
+    auto http_server = new_http_server();
+    DEFER(delete http_server);
+    http_server->add_handler(new SimpleHandler, true, "/simple-api");
+
+    auto socket_server = new_uds_server();
+    DEFER(delete socket_server);
+    socket_server->set_handler(http_server->get_connection_handler());
+    ASSERT_EQ(0, socket_server->bind(uds_path, sizeof(uds_path) - 1));
+    ASSERT_EQ(0, socket_server->listen());
+    ASSERT_EQ(0, socket_server->start_loop(false));
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    Client::OperationOnStack<> op(
+        client, Verb::GET, "http://localhost/simple-api");
+    ASSERT_EQ(0, op.call(std::string_view(uds_path, sizeof(uds_path) - 1)));
+    ASSERT_EQ(200, op.resp.status_code());
+}
+#endif
 
 int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     auto ua = req.headers["User-Agent"];
@@ -1272,9 +1308,412 @@ TEST(http_server, forward_proxy_close_delimited) {
     EXPECT_EQ(g_close_delim_payload, out);
 }
 
-// set_resolver: the client resolves DNS through the injected resolver. One that
-// rejects every address makes the target unresolvable (request can't connect);
-// one that accepts all lets it succeed.
+// Helpers/tests for client dialer and resolver injection.
+static void simple_get(Client* client, std::string_view target) {
+    Client::OperationOnStack<> op(client, Verb::GET, target);
+    op.req.headers.content_length(0);
+    int ret = op.call();
+    EXPECT_EQ(0, ret);
+    if (ret != 0) return;
+    EXPECT_EQ(200, op.resp.status_code());
+    char buf[4096];
+    auto n = op.resp.read(buf, op.resp.body_size());
+    EXPECT_EQ((ssize_t)op.resp.body_size(), n);
+}
+
+class HeaderCaptureDialer : public IDialer {
+public:
+    std::vector<std::string> responses;
+    std::vector<std::string> auth;
+    int calls = 0;
+    StringSocketStream* last = nullptr;
+    ISocketStream* dial(const DialTarget& target, uint64_t) override {
+        auth.emplace_back(target.proxy_auth);
+        last = new_string_socket_stream();
+        last->set_input(calls < (int)responses.size() ? responses[calls] :
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        ++calls;
+        return last;
+    }
+};
+
+struct BodyCleanupState {
+    bool closed = false;
+    bool cleanupWhileAlive = false;
+    bool destroyed = false;
+};
+
+class BodyCleanupStream : public ISocketStream {
+public:
+    std::unique_ptr<StringSocketStream> inner;
+    BodyCleanupState* state;
+
+    explicit BodyCleanupStream(BodyCleanupState* state)
+        : inner(new_string_socket_stream()), state(state) {}
+    ~BodyCleanupStream() override { state->destroyed = true; }
+    int close() override {
+        state->closed = true;
+        return 0;
+    }
+    ssize_t writev(const iovec* iov, int count) override {
+        if (state->closed) {
+            state->cleanupWhileAlive = true;
+            errno = ECANCELED;
+            return -1;
+        }
+        return inner->writev(iov, count);
+    }
+    ssize_t read(void* buffer, size_t count) override {
+        return inner->read(buffer, count);
+    }
+    ssize_t readv(const iovec* iov, int count) override {
+        return inner->readv(iov, count);
+    }
+    ssize_t write(const void* buffer, size_t count) override {
+        return inner->write(buffer, count);
+    }
+    ssize_t recv(void* buffer, size_t count, int flags = 0) override {
+        return inner->recv(buffer, count, flags);
+    }
+    ssize_t recv(const iovec* iov, int count, int flags = 0) override {
+        return inner->recv(iov, count, flags);
+    }
+    ssize_t send(const void* buffer, size_t count, int flags = 0) override {
+        return inner->send(buffer, count, flags);
+    }
+    ssize_t send(const iovec* iov, int count, int flags = 0) override {
+        return inner->send(iov, count, flags);
+    }
+    ssize_t sendfile(int fd, off_t offset, size_t count) override {
+        return inner->sendfile(fd, offset, count);
+    }
+    uint64_t timeout() const override { return inner->timeout(); }
+    void timeout(uint64_t value) override { inner->timeout(value); }
+    Object* get_underlay_object(uint64_t recursion = 0) override {
+        return inner->get_underlay_object(recursion);
+    }
+    int setsockopt(int level, int name, const void* value,
+                   socklen_t length) override {
+        return inner->setsockopt(level, name, value, length);
+    }
+    int getsockopt(int level, int name, void* value,
+                   socklen_t* length) override {
+        return inner->getsockopt(level, name, value, length);
+    }
+    int getsockname(EndPoint& address) override {
+        return inner->getsockname(address);
+    }
+    int getpeername(EndPoint& address) override {
+        return inner->getpeername(address);
+    }
+    int getsockname(char* path, size_t count) override {
+        return inner->getsockname(path, count);
+    }
+    int getpeername(char* path, size_t count) override {
+        return inner->getpeername(path, count);
+    }
+};
+
+class BodyCleanupDialer : public IDialer {
+public:
+    BodyCleanupState* state;
+
+    explicit BodyCleanupDialer(BodyCleanupState* state) : state(state) {}
+    ISocketStream* dial(const DialTarget&, uint64_t) override {
+        return new BodyCleanupStream(state);
+    }
+};
+
+TEST(http_client, per_hop_headers_preserve_configuration_and_body_callback) {
+    for (int route = 0; route < 3; ++route) {
+        for (bool tightBuffer : {false, true}) {
+            HeaderCaptureDialer dialer;
+            std::unique_ptr<Client> client(new_http_client());
+            client->set_dialer(&dialer);
+            client->set_user_agent("staged-agent");
+            if (route != 0) client->set_proxy("http://url:credentials@proxy.example:8080");
+            ASSERT_EQ(0, client->common_headers()->insert("X-Priority", "common"));
+            ASSERT_EQ(0, client->common_headers()->content_length(7));
+            ASSERT_EQ(0, client->common_headers()->insert("Proxy-Authorization", "Basic common"));
+            auto authenticate = [](const DialTarget&, ProxyAuth& auth) -> int {
+                return auth.headers.insert("X-Priority", "proxy");
+            };
+            client->set_proxy_authenticator(authenticate);
+            auto target = route == 2 ? "https://origin.example/body" : "http://origin.example/body";
+            auto op = client->new_operation(Verb::POST, target, tightBuffer ? 4096 : UINT16_MAX);
+            DEFER(client->destroy_operation(op));
+            ASSERT_EQ(0, op->req.headers.insert("X-Priority", "caller"));
+            ASSERT_EQ(0, op->req.headers.insert("Proxy-Authorization", "Basic manual"));
+            std::string padding(tightBuffer ? 2500 : 0, 'p');
+            if (!padding.empty()) {
+                ASSERT_EQ(0, op->req.headers.insert("X-Padding", padding));
+            }
+            auto before = std::string(op->req.headers.serialized());
+            auto commonBefore = std::string(client->common_headers()->serialized());
+            auto freeRegion = op->req.get_remain_space();
+            int writes = 0;
+            auto writer = [&](Request* request) -> ssize_t {
+                EXPECT_EQ(&op->req, request);
+                EXPECT_EQ(7U, request->headers.content_length());
+                EXPECT_EQ("staged-agent", request->headers["User-Agent"]);
+                EXPECT_EQ(route == 1 ? "proxy" : "caller", request->headers["X-Priority"]);
+                auto address = uintptr_t(request->headers.serialized().data());
+                if (!tightBuffer) {
+                    EXPECT_GE(address, uintptr_t(freeRegion.first));
+                    EXPECT_LT(address, uintptr_t(freeRegion.first) + freeRegion.second);
+                }
+                ++writes;
+                return request->write("payload", 7) == 7 ? 0 : -1;
+            };
+            op->body_writer = writer;
+            op->retry = 0;
+            ASSERT_EQ(0, op->call());
+            EXPECT_EQ(1, writes);
+            EXPECT_EQ(before, op->req.headers.serialized());
+            EXPECT_EQ(commonBefore, client->common_headers()->serialized());
+            EXPECT_EQ(route == 0 ? "" : "Basic manual", dialer.auth.back());
+            auto sentAuth = dialer.last->output().find("Proxy-Authorization:");
+            if (route == 1) {
+                EXPECT_NE(std::string::npos, sentAuth);
+                EXPECT_EQ(std::string::npos, dialer.last->output().find("Proxy-Authorization:", sentAuth + 1));
+            } else {
+                EXPECT_EQ(std::string::npos, sentAuth);
+            }
+            EXPECT_EQ("payload", dialer.last->output().substr(dialer.last->output().size() - 7));
+        }
+    }
+}
+
+TEST(http_client, per_hop_headers_are_rebuilt_on_retry_and_redirect) {
+    for (bool redirect : {false, true}) {
+        HeaderCaptureDialer dialer;
+        dialer.responses = {redirect ?
+            "HTTP/1.1 302 Found\r\nLocation: https://other.example/next\r\nContent-Length: 0\r\n\r\n" : "",
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"};
+        std::unique_ptr<Client> client(new_http_client());
+        client->set_dialer(&dialer);
+        client->set_proxy("http://proxy.example:8080");
+        ASSERT_EQ(0, client->common_headers()->insert("X-Common", "retained"));
+        Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/first");
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization", "Basic manual"));
+        auto before = std::string(op.req.headers.serialized());
+        op.retry = 1;
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(2, dialer.calls);
+        EXPECT_EQ("Basic manual", dialer.auth[0]);
+        EXPECT_EQ("Basic manual", dialer.auth[1]);
+        EXPECT_EQ("Basic manual", op.req.headers["Proxy-Authorization"]);
+        EXPECT_EQ(std::string::npos, op.req.headers.serialized().find("X-Common"));
+        EXPECT_NE(std::string::npos, dialer.last->output().find("X-Common: retained\r\n"));
+        if (redirect) {
+            EXPECT_EQ("other.example", op.req.host());
+            EXPECT_EQ(std::string::npos, dialer.last->output().find("Proxy-Authorization:"));
+        } else {
+            EXPECT_EQ(before, op.req.headers.serialized());
+            EXPECT_NE(std::string::npos, dialer.last->output().find("Proxy-Authorization: Basic manual\r\n"));
+        }
+    }
+}
+
+TEST(http_client, per_hop_headers_keep_duplicate_order_and_common_proxy_auth) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    client->set_proxy("http://url:credentials@proxy.example:8080");
+    ASSERT_EQ(0, client->common_headers()->insert("Proxy-Authorization", "Basic common"));
+    ASSERT_EQ(0, client->common_headers()->insert("X-Repeated", "common"));
+    Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    ASSERT_EQ(0, op.req.headers.insert("X-Repeated", "first", 1));
+    ASSERT_EQ(0, op.req.headers.insert("x-repeated", "second", 1));
+    auto configured = std::string(op.req.headers.serialized());
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+    EXPECT_EQ("Basic common", dialer.auth.back());
+    auto& wire = dialer.last->output();
+    auto first = wire.find("X-Repeated: first\r\n");
+    auto second = wire.find("x-repeated: second\r\n");
+    EXPECT_NE(std::string::npos, first);
+    EXPECT_NE(std::string::npos, second);
+    EXPECT_LT(first, second);
+    EXPECT_EQ(std::string::npos, wire.find("X-Repeated: common\r\n"));
+    EXPECT_NE(std::string::npos, wire.find("Proxy-Authorization: Basic common\r\n"));
+}
+
+TEST(http_client, empty_proxy_authorization_overrides_url_credentials) {
+    for (bool callerHeader : {false, true}) {
+        HeaderCaptureDialer dialer;
+        std::unique_ptr<Client> client(new_http_client());
+        client->set_dialer(&dialer);
+        client->set_proxy("http://url:credentials@proxy.example:8080");
+        ASSERT_EQ(0, client->common_headers()->insert(
+                         "Proxy-Authorization",
+                         callerHeader ? "Basic common" : ""));
+        Client::OperationOnStack<> op(client.get(), Verb::GET,
+                                      "http://origin.example/");
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        if (callerHeader) {
+            ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization", ""));
+        }
+        auto configured = std::string(op.req.headers.serialized());
+        auto common = std::string(client->common_headers()->serialized());
+        ASSERT_EQ(0, op.call());
+        ASSERT_EQ(1U, dialer.auth.size());
+        EXPECT_TRUE(dialer.auth[0].empty());
+        EXPECT_EQ(std::string::npos,
+                  dialer.last->output().find("Proxy-Authorization:"));
+        EXPECT_EQ(configured, op.req.headers.serialized());
+        EXPECT_EQ(common, client->common_headers()->serialized());
+    }
+}
+
+TEST(http_client, per_hop_headers_restore_configuration_on_body_failure) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    ASSERT_EQ(0, client->common_headers()->content_length(7));
+    Client::OperationOnStack<> op(client.get(), Verb::POST, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("X-Configured", "retained"));
+    auto configured = std::string(op.req.headers.serialized());
+    auto writer = [&](Request* request) -> ssize_t {
+        EXPECT_EQ(7U, request->headers.content_length());
+        errno = EIO;
+        return -1;
+    };
+    op.body_writer = writer;
+    op.retry = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+    auto retryWriter = [](Request* request) -> ssize_t {
+        return request->write("payload", 7) == 7 ? 0 : -1;
+    };
+    op.body_writer = retryWriter;
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, chunked_body_cleanup_precedes_failed_socket_destruction) {
+    BodyCleanupState state;
+    BodyCleanupDialer dialer(&state);
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    Client::OperationOnStack<> op(client.get(), Verb::POST,
+                                  "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("Transfer-Encoding", "chunked"));
+    auto configured = std::string(op.req.headers.serialized());
+    auto writer = [](Request*) -> ssize_t {
+        errno = EIO;
+        return -1;
+    };
+    op.body_writer = writer;
+    op.retry = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_TRUE(state.closed);
+    EXPECT_TRUE(state.cleanupWhileAlive);
+    EXPECT_TRUE(state.destroyed);
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, per_hop_headers_validate_merged_body_framing) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    ASSERT_EQ(0, client->common_headers()->content_length(7));
+    Client::OperationOnStack<> op(client.get(), Verb::POST, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("Transfer-Encoding", "chunked"));
+    auto configured = std::string(op.req.headers.serialized());
+    errno = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, per_hop_headers_preserve_explicit_cookie_precedence) {
+    for (int source = 0; source < 3; ++source) {
+        for (auto value : {"manual=value", ""}) {
+            HeaderCaptureDialer dialer;
+            std::unique_ptr<ICookieJar> cookies(new_simple_cookie_jar());
+            std::unique_ptr<Client> client(new_http_client(cookies.get()));
+            client->set_dialer(&dialer);
+            dialer.responses = {
+                "HTTP/1.1 200 OK\r\nSet-Cookie: fresh=value; Path=/\r\nContent-Length: 0\r\n\r\n"};
+            {
+                Client::OperationOnStack<> seed(client.get(), Verb::GET, "http://origin.example/");
+                ASSERT_EQ(0, seed.call());
+            }
+            if (source != 0) {
+                ASSERT_EQ(0, client->common_headers()->insert("Cookie", source == 1 ? value : "common=value"));
+            }
+            Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/");
+            if (source != 1) {
+                ASSERT_EQ(0, op.req.headers.insert("cOoKiE", value));
+            }
+            auto configured = std::string(op.req.headers.serialized());
+            auto common = std::string(client->common_headers()->serialized());
+            ASSERT_EQ(0, op.call());
+            auto expected = std::string(source == 1 ? "Cookie: " : "cOoKiE: ") + value + "\r\n";
+            EXPECT_NE(std::string::npos, dialer.last->output().find(expected));
+            EXPECT_NE(std::string::npos, dialer.last->output().find("Connection: keep-alive\r\n"));
+            EXPECT_EQ(std::string::npos, dialer.last->output().find("fresh=value"));
+            EXPECT_EQ(configured, op.req.headers.serialized());
+            EXPECT_EQ(common, client->common_headers()->serialized());
+        }
+    }
+}
+
+TEST(http_client, per_hop_headers_refresh_cookies_after_redirect) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<ICookieJar> cookies(new_simple_cookie_jar());
+    std::unique_ptr<Client> client(new_http_client(cookies.get()));
+    client->set_dialer(&dialer);
+    dialer.responses = {
+        "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: fresh=value; Path=/\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"};
+    Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/first");
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(2, dialer.calls);
+    EXPECT_NE(std::string::npos, dialer.last->output().find("Cookie: fresh=value\r\n"));
+    EXPECT_TRUE(op.req.headers["Cookie"].empty());
+    EXPECT_EQ("/next", op.req.abs_path());
+}
+
+TEST(http_client, dialer_injection) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+
+    struct CountingDialer : public IDialer {
+        ISocketClient* cli = new_tcp_socket_client();
+        int dials = 0;
+        bool saw_proxy = false, saw_secure = false;
+        ~CountingDialer() override { delete cli; }
+        ISocketStream* dial(const DialTarget& t, uint64_t timeout) override {
+            dials++;
+            saw_proxy = t.via_proxy();
+            saw_secure = t.secure;
+            cli->timeout(timeout);
+            IPAddr addr("127.0.0.1");   // no DNS in this test dialer
+            return cli->connect(EndPoint(addr, t.port));
+        }
+    } dialer;
+
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_dialer(&dialer);
+    simple_get(client, to_url(tcpserver, "/simple"));
+    EXPECT_GT(dialer.dials, 0);
+    EXPECT_FALSE(dialer.saw_proxy);
+    EXPECT_FALSE(dialer.saw_secure);
+}
+
 static std::vector<IPAddr> g_resolve_filter_seen;
 static bool resolve_filter_accept_all(void*, IPAddr addr) {
     g_resolve_filter_seen.push_back(addr);
@@ -1285,15 +1724,17 @@ static bool resolve_filter_reject_all(void*, IPAddr addr) {
     return false;
 }
 
-// Test resolver decorator: forwards to an owned DefaultResolver while applying a
-// filter, recording the addresses the client's resolver considered.
 class TestFilteredResolver : public Resolver {
 public:
     Resolver* inner;
     Delegate<bool, IPAddr> filter;
-    explicit TestFilteredResolver(Delegate<bool, IPAddr> filter)
-        : inner(new_default_resolver()), filter(filter) {}
-    ~TestFilteredResolver() { delete inner; }
+    int* destroyed;
+    explicit TestFilteredResolver(Delegate<bool, IPAddr> filter, int* destroyed = nullptr)
+        : inner(new_default_resolver()), filter(filter), destroyed(destroyed) {}
+    ~TestFilteredResolver() {
+        delete inner;
+        if (destroyed) ++*destroyed;
+    }
     IPAddr resolve(std::string_view host) override {
         return inner->resolve_filter(host, filter);
     }
@@ -1305,48 +1746,831 @@ public:
     }
 };
 
-TEST(http_client, set_resolver) {
+TEST(http_client, resolver_injection) {
     auto tcpserver = new_tcp_socket_server();
-    DEFER(delete tcpserver);
     tcpserver->bind_v4localhost();
     tcpserver->listen();
+    DEFER(delete tcpserver);
     auto server = new_http_server();
     DEFER(delete server);
-    server->add_handler(new SimpleHandler, true, "/simple-api");
+    server->add_handler(new SimpleHandler, true, "/simple");
     tcpserver->set_handler(server->get_connection_handler());
     tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/simple");
 
-    auto target = estring().appends("http://127.0.0.1:",
-                                    tcpserver->getsockname().port, "/simple-api");
+    // Borrowed resolvers can be shared by clients. Their dialers are destroyed
+    // before the resolver's owner releases it.
+    auto resolver = new_default_resolver();
+    auto c1 = new_http_client();
+    auto c2 = new_http_client();
+    c1->set_resolver(resolver);
+    c2->set_resolver(resolver);
+    simple_get(c1, target);
+    simple_get(c2, target);
+    delete c1;
+    delete c2;
+    delete resolver;
 
-    // Phase 1: a resolver rejecting every address fails resolution, so the
-    // request can never connect. Each client owns its resolver (and DNS cache),
-    // so phase 2 starts fresh.
+    // Changing the resolver after the first request must also affect an existing
+    // per-vCPU dialer. The owned resolver is released after that dialer drains.
+    int rejected_destroyed = 0;
     {
         auto client = new_http_client();
         DEFER(delete client);
-        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_reject_all}), true);
+        auto numeric_target = estring().appends(
+            "http://127.0.0.1:", tcpserver->getsockname().port, "/simple");
+        simple_get(client, numeric_target);   // build this vCPU's dialer first
+        client->set_resolver(new TestFilteredResolver(
+            {nullptr, &resolve_filter_reject_all}, &rejected_destroyed), true);
         g_resolve_filter_seen.clear();
-        Client::OperationOnStack<> op(client, Verb::GET, target);
+        auto hostname_target = estring().appends(
+            "http://localhost:", tcpserver->getsockname().port, "/simple");
+        Client::OperationOnStack<> op(client, Verb::GET, hostname_target);
         op.retry = 0;
-        int ret = op.call();
-        EXPECT_NE(0, ret);
+        EXPECT_NE(0, op.call());
         EXPECT_EQ(-1, op.status_code);
         EXPECT_FALSE(g_resolve_filter_seen.empty());
     }
+    EXPECT_EQ(1, rejected_destroyed);
 
-    // Phase 2: accepting addresses lets the request succeed.
+    // The same owned-resolver path succeeds when the filter accepts addresses.
+    int accepted_destroyed = 0;
     {
         auto client = new_http_client();
         DEFER(delete client);
-        client->set_resolver(new TestFilteredResolver({nullptr, &resolve_filter_accept_all}), true);
+        client->set_resolver(new TestFilteredResolver(
+            {nullptr, &resolve_filter_accept_all}, &accepted_destroyed), true);
         g_resolve_filter_seen.clear();
         Client::OperationOnStack<> op(client, Verb::GET, target);
-        int ret = op.call();
-        EXPECT_EQ(0, ret);
+        EXPECT_EQ(0, op.call());
         EXPECT_EQ(200, op.resp.status_code());
         EXPECT_FALSE(g_resolve_filter_seen.empty());
     }
+    EXPECT_EQ(1, accepted_destroyed);
+}
+
+TEST(http_client, repeated_resolver_registration_preserves_ownership) {
+    int owned_destroyed = 0;
+    auto client = new_http_client();
+    auto owned = new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &owned_destroyed);
+    client->set_resolver(owned, true);
+    client->set_resolver(owned, true);
+    client->set_resolver(owned, false);
+    EXPECT_EQ(0, owned_destroyed);
+    delete client;
+    EXPECT_EQ(1, owned_destroyed);
+
+    int borrowed_destroyed = 0;
+    client = new_http_client();
+    auto borrowed = new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &borrowed_destroyed);
+    client->set_resolver(borrowed, false);
+    client->set_resolver(borrowed, true);
+    delete client;
+    EXPECT_EQ(0, borrowed_destroyed);
+    delete borrowed;
+    EXPECT_EQ(1, borrowed_destroyed);
+}
+
+TEST(http_client, resolver_replacement_destroys_outside_setter_lock) {
+    struct ReentrantResolver : TestFilteredResolver {
+        Client* client;
+        ReentrantResolver(Client* client, int* destroyed)
+            : TestFilteredResolver({nullptr, &resolve_filter_accept_all}, destroyed),
+              client(client) {}
+        ~ReentrantResolver() override {
+            // Model timer cleanup yielding while another setter runs. Reentry
+            // must also be safe while releasing the client's last old lease.
+            photon::thread_yield();
+            client->set_resolver(nullptr);
+        }
+    };
+
+    std::unique_ptr<Client> client(new_http_client());
+    int old_destroyed = 0, next_destroyed = 0;
+    client->set_resolver(new ReentrantResolver(client.get(), &old_destroyed), true);
+    client->set_resolver(new TestFilteredResolver(
+        {nullptr, &resolve_filter_accept_all}, &next_destroyed), true);
+    EXPECT_EQ(1, old_destroyed);
+    EXPECT_EQ(1, next_destroyed);
+    client.reset();
+    EXPECT_EQ(1, old_destroyed);
+    EXPECT_EQ(1, next_destroyed);
+}
+
+TEST(http_client, owned_resolver_last_request_lease_reclaims_on_owner) {
+    auto tcpserver = new_tcp_socket_server();
+    DEFER(delete tcpserver);
+    ASSERT_EQ(0, tcpserver->bind_v4localhost());
+    ASSERT_EQ(0, tcpserver->listen());
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcpserver->start_loop());
+
+    photon::semaphore entered(0), release(0), done(0);
+    int destroyed = 0;
+    struct BlockingResolver : TestFilteredResolver {
+        photon::semaphore *entered, *release;
+        photon::vcpu_base* owner = photon::get_vcpu();
+        BlockingResolver(int* destroyed, photon::semaphore* entered,
+                         photon::semaphore* release)
+            : TestFilteredResolver({nullptr, &resolve_filter_accept_all}, destroyed),
+              entered(entered), release(release) {}
+        ~BlockingResolver() override { EXPECT_EQ(owner, photon::get_vcpu()); }
+        IPAddr resolve(std::string_view host) override {
+            auto result = inner->resolve(host);
+            entered->signal(1);
+            release->wait(1);
+            return result;
+        }
+    };
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_resolver(new BlockingResolver(&destroyed, &entered, &release), true);
+    auto target = to_url(tcpserver, "/simple");
+    std::thread worker([&] {
+        EXPECT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+        simple_get(client.get(), target);
+        done.signal(1);
+        EXPECT_EQ(0, photon::fini());
+    });
+    EXPECT_EQ(0, entered.wait(1, 5ULL * 1000 * 1000));
+    client->set_resolver(nullptr);
+    EXPECT_EQ(0, destroyed);
+    release.signal(1);
+    EXPECT_EQ(0, done.wait(1, 5ULL * 1000 * 1000));
+    worker.join();
+    EXPECT_EQ(1, destroyed);
+}
+
+TEST(http_client, owned_resolver_owner_fini_waits_for_last_lease) {
+    struct LeaseClient : ClientImpl {
+        LeaseClient() : ClientImpl(nullptr, nullptr) {}
+        std::shared_ptr<Resolver> lease() { return atomic_load_resolver(&m_resolver); }
+    };
+    std::unique_ptr<LeaseClient> client(new LeaseClient());
+    photon::semaphore ready(0), start_fini(0), done(0);
+    std::atomic<int> destroyed{0};
+    std::atomic<bool> finished{false};
+    std::thread owner([&] {
+        EXPECT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+        struct TrackedResolver : TestFilteredResolver {
+            std::atomic<int>* destroyed;
+            photon::vcpu_base* built_on = photon::get_vcpu();
+            explicit TrackedResolver(std::atomic<int>* destroyed)
+                : TestFilteredResolver({nullptr, &resolve_filter_accept_all}),
+                  destroyed(destroyed) {}
+            ~TrackedResolver() override {
+                EXPECT_EQ(built_on, photon::get_vcpu());
+                ++*destroyed;
+            }
+        };
+        client->set_resolver(new TrackedResolver(&destroyed), true);
+        ready.signal(1);
+        start_fini.wait(1);
+        EXPECT_EQ(0, photon::fini());
+        finished.store(true);
+        done.signal(1);
+    });
+    EXPECT_EQ(0, ready.wait(1, 5ULL * 1000 * 1000));
+    auto lease = client->lease();
+    client->set_resolver(nullptr);
+    start_fini.signal(1);
+    photon::thread_usleep(20'000);
+    EXPECT_FALSE(finished.load());
+    EXPECT_EQ(0, destroyed.load());
+    lease.reset();
+    EXPECT_EQ(0, done.wait(1, 5ULL * 1000 * 1000));
+    owner.join();
+    EXPECT_EQ(1, destroyed.load());
+}
+
+TEST(http_client, cross_vcpu_client_destruction) {
+    auto tcpserver = new_tcp_socket_server();
+    tcpserver->bind_v4localhost();
+    tcpserver->listen();
+    DEFER(delete tcpserver);
+    auto server = new_http_server();
+    DEFER(delete server);
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcpserver->set_handler(server->get_connection_handler());
+    tcpserver->start_loop();
+    auto target = to_url(tcpserver, "/simple");
+
+    auto client = new_http_client();
+    photon::semaphore req_done(0), quit(0);
+    std::thread th([&] {
+        photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+        DEFER(photon::fini());
+        simple_get(client, target);   // creates a dialer on this worker vCPU
+        std::unique_ptr<ISocketStream> native(client->native_connect(
+            "127.0.0.1", tcpserver->getsockname().port));
+        EXPECT_NE(nullptr, native);
+        req_done.signal(1);
+        quit.wait(1);                 // keep the vCPU alive during deletion
+        if (native) {
+            EXPECT_EQ(0, native->close());
+        }
+    });
+    req_done.wait(1);
+    // Retire the worker's dialer while its checked-out stream is still alive.
+    delete client;
+    quit.signal(1);
+    th.join();
+}
+
+TEST(http_client, response_and_native_stream_outlive_client) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SimpleHandler, true, "/simple");
+    tcp->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcp->start_loop());
+    auto url = to_url(tcp.get(), "/simple");
+
+    std::unique_ptr<Client> client(new_http_client());
+    Client::OperationOnStack<> op(client.get(), Verb::GET, url);
+    ASSERT_EQ(0, op.call());
+    std::unique_ptr<ISocketStream> native(client->native_connect(
+        "127.0.0.1", tcp->getsockname().port));
+    ASSERT_NE(nullptr, native);
+    client.reset();
+
+    char body[7];
+    ASSERT_EQ(7, op.resp.read(body, sizeof(body)));
+    EXPECT_EQ("/simple", std::string(body, sizeof(body)));
+    const char request[] = "GET /simple HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    ASSERT_EQ(sizeof(request) - 1, native->write(request, sizeof(request) - 1));
+    native->timeout(5ULL * 1000 * 1000);
+    struct NativeResponse final : Response {
+        using Response::Response;
+        using Response::receive_header;
+    };
+    char buffer[8 * 1024];
+    NativeResponse response(buffer, sizeof(buffer));
+    response.reset(native.get(), false);
+    ASSERT_EQ(0, response.receive_header());
+    EXPECT_EQ(200, response.status_code());
+    ASSERT_EQ(7, response.read(body, sizeof(body)));
+    EXPECT_EQ("/simple", std::string(body, sizeof(body)));
+}
+
+// A proxy serves a plaintext origin by forwarding an absolute-URI request, but a
+// TLS origin is reached through a CONNECT tunnel, inside which the request is
+// written in origin-form, exactly as if there were no proxy at all.
+TEST(http_client, proxy_request_line) {
+    auto client = new_http_client();
+    DEFER(delete client);
+    client->set_proxy("http://127.0.0.1:8888");
+
+    Client::OperationOnStack<4096> plain(client, Verb::GET, "http://example.com/a?b=c");
+    EXPECT_TRUE(plain.req.target() == "http://example.com/a?b=c");
+    EXPECT_FALSE(plain.req.secure());
+
+    Client::OperationOnStack<4096> tls(client, Verb::GET, "https://example.com/a?b=c");
+    EXPECT_TRUE(tls.req.target() == "/a?b=c");
+    EXPECT_TRUE(tls.req.secure());
+    EXPECT_TRUE(tls.req.host() == "example.com");   // ...and Host still names the origin
+}
+
+// Reports which of the headers meant for the proxy the origin got to see. A
+// tunneled request is read by the origin, so none of them may reach it -- unlike
+// a forwarded one, which the proxy itself reads.
+class ProxyAuthEchoHandler : public http::HTTPHandler {
+public:
+    int handle_request(http::Request& req, http::Response& resp, std::string_view) {
+        estring body;
+        if (!req.headers["Proxy-Authorization"].empty()) body.appends("auth ");
+        if (!req.headers["X-Tenant"].empty()) body.appends("tenant ");
+        if (body.empty()) body = "none";
+        resp.set_result(200);
+        resp.headers.content_length(body.size());
+        if (resp.write(body.data(), body.size()) != (ssize_t)body.size())
+            LOG_ERRNO_RETURN(0, -1, "send body failed");
+        return 0;
+    }
+};
+
+// Answers with a redirect to `location`, so that one operation continues on a
+// second hop -- which may well be reached in a different way than the first.
+class RedirectHandler : public http::HTTPHandler {
+public:
+    std::string location;
+    RedirectHandler(std::string_view loc) : location(loc) { }
+    int handle_request(http::Request&, http::Response& resp, std::string_view) {
+        resp.set_result(302);
+        resp.headers.insert("Location", location);
+        resp.headers.content_length(0);
+        return 0;
+    }
+};
+
+static std::string get_body(Client* client, std::string_view target) {
+    Client::OperationOnStack<> op(client, Verb::GET, target);
+    op.req.headers.content_length(0);
+    if (op.call() != 0) return "<call failed>";
+    EXPECT_EQ(200, op.resp.status_code());
+    std::string body(op.resp.body_size(), '\0');
+    if (!body.empty() &&
+        op.resp.read(&body[0], body.size()) != (ssize_t)body.size())
+        return "<read failed>";
+    return body;
+}
+
+// A CONNECT proxy: answers the tunnel request, then relays bytes to the origin
+// named in the request-target, so that the client's TLS handshake -- and
+// everything after it -- reaches the origin instead of the proxy.
+struct FakeConnectProxy {
+    ISocketServer* srv = new_tcp_socket_server();
+    ISocketClient* cli = new_tcp_socket_client();
+    std::string want_auth;   // if set, demand this Proxy-Authorization header line
+    std::string authority;   // the request-target of the last CONNECT
+    std::string redirect_to; // if set, a forwarded request is answered with a 302 to here
+    bool serve_forwards = false; // answer forwarded requests with a plain 200
+    bool secure = false;
+    TLSContext* tls_context = nullptr;
+    estring last_head;       // the head of the last request, forwarded or CONNECT
+    int connects = 0;        // tunnels established
+    int forwards = 0;        // forwarded (non-CONNECT) requests answered
+    int denials = 0;         // CONNECTs answered with 407
+    int live = 0;            // handlers currently relaying
+
+    ~FakeConnectProxy() {
+        delete srv;   // stops accepting; the tunnels in flight are the client's
+        photon::thread_yield(); // let already accepted handlers enter live
+        for (int i = 0; live > 0 && i < 10000; ++i)
+            photon::thread_usleep(1000);
+        EXPECT_EQ(0, live);
+        delete cli;
+    }
+
+    int start(TLSContext* context = nullptr) {
+        tls_context = context;
+        secure = (context != nullptr);
+        srv->set_handler({this, &FakeConnectProxy::handle});
+        if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
+        return srv->start_loop();
+    }
+
+    estring url(std::string_view user_passwd = {},
+                 std::string_view host = "127.0.0.1") {
+        return estring().appends(secure ? "https://" : "http://",
+            estring::make_conditional_cat_list(!user_passwd.empty(), user_passwd, "@"),
+            host, ":", srv->getsockname().port);
+    }
+
+    int handle(ISocketStream* s) {
+        live++;
+        DEFER(live--);
+        // Count TLS handshakes too: a failed peer verification can leave an
+        // accepted handshake running after the client's call has returned.
+        std::unique_ptr<ISocketStream> tls;
+        if (tls_context) {
+            tls.reset(new_tls_stream(tls_context, s, SecurityRole::Server, false));
+            if (!tls) return 0;
+            s = tls.get();
+        }
+        char buf[4096];
+        size_t n = 0, end;
+        while (true) {
+            auto r = s->recv(buf + n, sizeof(buf) - n);
+            if (r <= 0) return 0;
+            n += (size_t)r;
+            end = estring_view(buf, n).find("\r\n\r\n");
+            if (end != estring_view::npos) break;
+            if (n == sizeof(buf)) return 0;
+        }
+        estring_view head(buf, end);   // "CONNECT host:port HTTP/1.1\r\n..."
+        last_head.assign(head.data(), head.size());
+        if (!head.starts_with("CONNECT ")) {
+            // A forwarded request, in absolute-URI form. Answering it right here is
+            // all a test needs of a forwarding proxy: with a redirect, so that the
+            // very same operation carries on as a tunneled one, or with a plain 200.
+            if (redirect_to.empty() && !serve_forwards)
+                LOG_ERROR_RETURN(0, 0, "not a CONNECT request, ", VALUE(head));
+            forwards++;
+            estring resp;
+            if (!redirect_to.empty())
+                resp.appends("HTTP/1.1 302 Found\r\nLocation: ", redirect_to, "\r\n");
+            else
+                resp.appends("HTTP/1.1 200 OK\r\n");
+            resp.appends("Content-Length: 0\r\nConnection: close\r\n\r\n");
+            s->write(resp.data(), resp.size());
+            return 0;
+        }
+        auto sp1 = head.find(' ');
+        auto sp2 = head.find(' ', sp1 + 1);
+        if (sp2 == estring_view::npos)
+            LOG_ERROR_RETURN(0, 0, "malformed CONNECT request, ", VALUE(head));
+        authority.assign(head.data() + sp1 + 1, sp2 - sp1 - 1);
+
+        if (!want_auth.empty() && head.find(want_auth.c_str()) == estring_view::npos) {
+            denials++;
+            static const char kDenied[] = "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                "Proxy-Authenticate: Basic realm=\"test\"\r\nContent-Length: 0\r\n\r\n";
+            s->write(kDenied, sizeof(kDenied) - 1);
+            return 0;
+        }
+
+        auto colon = estring_view(authority).find_last_of(':');
+        EndPoint origin(IPAddr::V4Loopback(),
+            (uint16_t)estring_view(authority).substr(colon + 1).to_uint64());
+        auto up = cli->connect(origin);
+        if (!up) {
+            static const char kBadGateway[] = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+            s->write(kBadGateway, sizeof(kBadGateway) - 1);
+            LOG_ERRNO_RETURN(0, 0, "failed to reach the origin `", origin);
+        }
+        DEFER(delete up);
+        static const char kEstablished[] = "HTTP/1.1 200 Connection Established\r\n\r\n";
+        if (s->write(kEstablished, sizeof(kEstablished) - 1) < 0)
+            LOG_ERRNO_RETURN(0, 0, "failed to answer CONNECT");
+        connects++;
+        relay(s, up);
+        return 0;
+    }
+
+    static void copy(ISocketStream* from, ISocketStream* to) {
+        char buf[16 * 1024];
+        while (true) {
+            auto r = from->recv(buf, sizeof(buf));
+            if (r <= 0) break;
+            if (to->write(buf, r) != r) break;
+        }
+    }
+
+    void relay(ISocketStream* down, ISocketStream* up) {
+        bool stopped = false;
+        auto th = photon::thread_enable_join(photon::thread_create11(
+            [&, other = photon::CURRENT] {
+                copy(up, down);
+                if (!stopped) photon::thread_interrupt(other, ECANCELED);
+            }));
+        copy(down, up);
+        stopped = true;
+        photon::thread_interrupt((photon::thread*)th, ECANCELED);
+        photon::thread_join(th);
+    }
+};
+
+// Brings up a TLS origin server on localhost, serving `handler`.
+struct TLSOrigin {
+    TLSContext* ctx;
+    ISocketServer* srv = nullptr;
+    HTTPServer* http = new_http_server();
+    int live = 0;
+
+    explicit TLSOrigin(TLSContext* context = nullptr)
+        : ctx(context ? context : new_tls_context(cert_str, key_str, passphrase_str)) {}
+
+    ~TLSOrigin() {
+        delete srv;
+        photon::thread_yield();
+        while (live > 0) photon::thread_usleep(1000);
+        delete http;
+        delete ctx;
+    }
+
+    int start(HTTPHandler* handler) {
+        if (!ctx) return -1;
+        srv = new_tcp_socket_server();
+        if (!srv) return -1;
+        http->add_handler(handler, true, "/simple");
+        srv->set_handler({this, &TLSOrigin::handle});
+        if (srv->bind_v4localhost() < 0 || srv->listen() < 0) return -1;
+        return srv->start_loop();
+    }
+
+    int handle(ISocketStream* stream) {
+        ++live;
+        DEFER(--live);
+        std::unique_ptr<ISocketStream> tls(new_tls_stream(
+            ctx, stream, SecurityRole::Server, false));
+        if (!tls) return 0;
+        return http->get_connection_handler().fire(tls.get());
+    }
+
+    estring url(std::string_view path) {
+        return estring().appends("https://127.0.0.1:", srv->getsockname().port, path);
+    }
+    estring authority() {
+        return estring().appends("127.0.0.1:", srv->getsockname().port);
+    }
+};
+
+// the test origin is self-signed, so the client must not verify it
+static TLSContext* new_unverifying_context() {
+    auto ctx = new_tls_context(nullptr, nullptr, nullptr);
+    if (ctx) ctx->set_verify_mode(VerifyMode::NONE);
+    return ctx;
+}
+
+TEST(http_client, connect_tunnel) {
+    FakeConnectProxy proxy;      // destroyed last, after the tunnels are gone
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());
+
+    // SimpleHandler echoes the request-target back, which is how we see that the
+    // request travelled through the tunnel in origin-form
+    EXPECT_EQ("/simple", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(origin.authority(), proxy.authority);
+
+    // the tunnel is pooled, so the next request through it costs no CONNECT
+    EXPECT_EQ("/simple", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+}
+
+TEST(http_client, secure_proxy_forwarding_verifies_proxy_hostname) {
+    auto chain = generate_ca_signed_cert({"DNS:localhost"}, "localhost");
+    std::unique_ptr<TLSContext> proxy_context(new_tls_context(
+        chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr));
+    ASSERT_NE(nullptr, proxy_context);
+    FakeConnectProxy proxy;
+    proxy.serve_forwards = true;
+    ASSERT_EQ(0, proxy.start(proxy_context.get()));
+    std::unique_ptr<TLSContext> client_context(new_tls_context());
+    ASSERT_NE(nullptr, client_context);
+    ASSERT_EQ(0, client_context->set_ca_cert(chain.ca_pem.c_str()));
+    std::unique_ptr<Client> client(new_http_client(nullptr, client_context.get()));
+    client->set_proxy(proxy.url({}, "localhost"));
+    // The origin name intentionally differs from the proxy certificate.
+    EXPECT_EQ("", get_body(client.get(), "http://origin.invalid/simple"));
+    EXPECT_EQ(1, proxy.forwards);
+    EXPECT_EQ(0, proxy.connects);
+    EXPECT_NE(std::string::npos, proxy.last_head.find(
+        "GET http://origin.invalid/simple HTTP/1.1"));
+
+    client->set_proxy(proxy.url({}, "127.0.0.1"));
+    Client::OperationOnStack<> mismatch(client.get(), Verb::GET,
+                                       "http://localhost/simple");
+    mismatch.retry = 0;
+    EXPECT_NE(0, mismatch.call()); // proxy cert has no IP SAN
+    EXPECT_EQ(1, proxy.forwards);
+}
+
+TEST(http_client, secure_proxy_connect_verifies_both_hostnames) {
+    auto proxy_chain = generate_ca_signed_cert({"DNS:localhost"}, "localhost",
+                                                "ProxyTestCA");
+    auto origin_chain = generate_ca_signed_cert({"DNS:origin.test"}, "origin.test",
+                                                 "OriginTestCA");
+    std::unique_ptr<TLSContext> proxy_context(new_tls_context(
+        proxy_chain.cert_pem.c_str(), proxy_chain.key_pem.c_str(), nullptr));
+    ASSERT_NE(nullptr, proxy_context);
+    FakeConnectProxy proxy;
+    ASSERT_EQ(0, proxy.start(proxy_context.get()));
+    TLSOrigin origin(new_tls_context(origin_chain.cert_pem.c_str(),
+                                     origin_chain.key_pem.c_str(), nullptr));
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+    std::unique_ptr<TLSContext> client_context(new_tls_context());
+    ASSERT_NE(nullptr, client_context);
+    auto roots = proxy_chain.ca_pem + origin_chain.ca_pem;
+    ASSERT_EQ(0, client_context->set_ca_cert(roots.c_str()));
+    std::unique_ptr<Client> client(new_http_client(nullptr, client_context.get()));
+    client->set_proxy(proxy.url({}, "localhost"));
+    auto port = origin.srv->getsockname().port;
+    auto target = estring().appends("https://origin.test:", port, "/simple");
+    EXPECT_EQ("/simple", get_body(client.get(), target));
+    EXPECT_EQ(1, proxy.connects); // decrypted CONNECT preceded origin TLS
+    EXPECT_EQ(0, proxy.forwards);
+    EXPECT_EQ(estring().appends("origin.test:", port), proxy.authority);
+
+    Client::OperationOnStack<> wrong_origin(client.get(), Verb::GET,
+        estring().appends("https://wrong-origin.test:", port, "/simple"));
+    wrong_origin.retry = 0;
+    EXPECT_NE(0, wrong_origin.call());
+    EXPECT_EQ(2, proxy.connects); // proxy TLS succeeded; origin identity failed
+
+    client->set_proxy(proxy.url({}, "127.0.0.1"));
+    Client::OperationOnStack<> wrong_proxy(client.get(), Verb::GET, target);
+    wrong_proxy.retry = 0;
+    EXPECT_NE(0, wrong_proxy.call());
+    EXPECT_EQ(2, proxy.connects); // rejected before emitting another CONNECT
+}
+
+TEST(http_client, connect_tunnel_auth) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic dXNlcjpwYXNz";   // user:pass
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url("user:pass"));
+
+    // the credentials authenticate the CONNECT, and stop at the proxy
+    EXPECT_EQ("none", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(0, proxy.denials);
+}
+
+TEST(http_client, request_proxy_auth_is_consumed_by_connect) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic ZXhwbGljaXQ=";
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());
+
+    Client::OperationOnStack<> op(client, Verb::GET, origin.url("/simple"));
+    op.req.headers.content_length(0);
+    ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization",
+                                       "Basic ZXhwbGljaXQ="));
+    auto configured = std::string(op.req.headers.serialized());
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+    std::string body(op.resp.body_size(), '\0');
+    if (!body.empty()) {
+        ASSERT_EQ((ssize_t)body.size(), op.resp.read(&body[0], body.size()));
+    }
+    EXPECT_EQ("none", body);
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(0, proxy.denials);
+}
+
+TEST(http_client, connect_tunnel_refused) {
+    FakeConnectProxy proxy;
+    proxy.want_auth = "Proxy-Authorization: Basic dXNlcjpwYXNz";
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());   // no credentials: every CONNECT gets a 407
+
+    Client::OperationOnStack<> op(client, Verb::GET, origin.url("/simple"));
+    op.req.headers.content_length(0);
+    op.retry = 1;
+    EXPECT_EQ(-1, op.call());
+    EXPECT_EQ(0, proxy.connects);
+    EXPECT_GT(proxy.denials, 0);
+}
+
+// A tunnel is authenticated once, by the CONNECT that opened it, so it may only
+// be reused by the credentials that authenticated it -- two users of the same
+// proxy must not end up sharing one tunnel.
+TEST(http_client, connect_tunnel_distinct_credentials) {
+    FakeConnectProxy proxy;   // want_auth unset: any credentials are accepted
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new SimpleHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+
+    auto target = origin.url("/simple");
+    for (auto user_passwd : {"alice:pw1", "bob:pw2"}) {
+        Client::OperationOnStack<> op(client, Verb::GET, target);
+        op.req.headers.content_length(0);
+        op.set_proxy(proxy.url(user_passwd));
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(200, op.resp.status_code());
+    }
+    // one tunnel each, rather than the second borrowing the first
+    EXPECT_EQ(2, proxy.connects);
+}
+
+// The authenticator decides what the proxy gets to read, and which part of it
+// means identity: only that part keys the tunnel pool. Headers that merely vary
+// per request must not multiply tunnels, and two identities must not share one.
+TEST(http_client, proxy_authenticator_headers_and_pool_key) {
+    FakeConnectProxy proxy;
+    ASSERT_EQ(0, proxy.start());
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url());
+
+    estring tenant, trace;
+    auto authenticate = [&](const DialTarget& t, ProxyAuth& pa) -> int {
+        EXPECT_EQ(origin.authority(), estring().appends(t.host, ":", t.port));
+        pa.headers.insert("X-Tenant", tenant);
+        pa.headers.insert("X-Trace", trace);   // per-request noise, not an identity...
+        pa.pool_key = tenant;                  // ...so only the tenant keys the pool
+        return 0;
+    };
+    client->set_proxy_authenticator(authenticate);
+
+    auto target = origin.url("/simple");
+    tenant = "alice";
+    trace = "t1";
+    // the origin echoes which proxy headers reached it: none may have
+    EXPECT_EQ("none", get_body(client, target));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: alice"));
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Trace: t1"));
+
+    // a new trace id is no new identity, so the tunnel is reused as it is
+    trace = "t2";
+    EXPECT_EQ("none", get_body(client, target));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Trace: t1"));   // still the first CONNECT
+
+    // a new tenant is, and gets a tunnel of its own
+    tenant = "bob";
+    EXPECT_EQ("none", get_body(client, target));
+    EXPECT_EQ(2, proxy.connects);
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: bob"));
+}
+
+// A forwarded request is the one the proxy reads, so it carries the headers meant
+// for the proxy. Redirected to a TLS origin, that very operation continues inside
+// a CONNECT tunnel, where it is the origin that reads them -- so they must be
+// decided per hop, and never be left behind in the caller's request.
+TEST(http_client, proxy_headers_do_not_follow_a_redirect_into_a_tunnel) {
+    FakeConnectProxy proxy;
+    TLSOrigin origin;
+    ASSERT_EQ(0, origin.start(new ProxyAuthEchoHandler));
+    proxy.redirect_to = origin.url("/simple");
+    ASSERT_EQ(0, proxy.start());
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url("user:pass"));
+
+    auto authenticate = [&](const DialTarget&, ProxyAuth& pa) -> int {
+        pa.headers.insert("X-Tenant", "alice");
+        return 0;
+    };
+    client->set_proxy_authenticator(authenticate);
+
+    // a plaintext origin is forwarded, and the proxy answers with a redirect to
+    // the TLS one, which is reached by tunneling instead
+    EXPECT_EQ("none", get_body(client, "http://plaintext.origin/x"));
+    EXPECT_EQ(1, proxy.forwards);
+    EXPECT_EQ(1, proxy.connects);
+    // the proxy did read them on the hop that was its to read
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: alice"));
+    EXPECT_NE(estring::npos, proxy.last_head.find("Proxy-Authorization: Basic"));
+}
+
+// And the mirror case: an operation that starts inside a tunnel, where the origin
+// is the one reading the headers, and is then redirected to a plaintext origin,
+// which is forwarded -- so the proxy reads them again. Deciding by the scheme of
+// the first URL leaves this second hop with no credentials at all, and a 407.
+TEST(http_client, proxy_headers_come_back_when_a_redirect_leaves_the_tunnel) {
+    FakeConnectProxy proxy;
+    TLSOrigin origin;
+    proxy.serve_forwards = true;
+    ASSERT_EQ(0, proxy.start());
+    ASSERT_EQ(0, origin.start(new RedirectHandler("http://plaintext.origin/y")));
+
+    auto ctx = new_unverifying_context();
+    ASSERT_NE(nullptr, ctx);
+    DEFER(delete ctx);
+    auto client = new_http_client(nullptr, ctx);
+    DEFER(delete client);
+    client->set_proxy(proxy.url("user:pass"));
+
+    auto authenticate = [&](const DialTarget&, ProxyAuth& pa) -> int {
+        pa.headers.insert("X-Tenant", "alice");
+        return 0;
+    };
+    client->set_proxy_authenticator(authenticate);
+
+    // the TLS origin is tunneled to, and its redirect to a plaintext one is forwarded
+    EXPECT_EQ("", get_body(client, origin.url("/simple")));
+    EXPECT_EQ(1, proxy.connects);
+    EXPECT_EQ(1, proxy.forwards);
+    // the forwarded hop is the proxy's to read, so it does carry them
+    EXPECT_NE(estring::npos, proxy.last_head.find("X-Tenant: alice"));
+    EXPECT_NE(estring::npos, proxy.last_head.find("Proxy-Authorization: Basic"));
 }
 
 int main(int argc, char** arg) {

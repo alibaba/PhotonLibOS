@@ -90,7 +90,10 @@ public:
         assert(ret.end() <= m_buf + m_buf_size);
         return ret;
     }
+    // With duplicates enabled, append fields in their original wire order.
+    // The source and destination buffers must be disjoint in that mode.
     int merge(const HeadersBase &h, int allow_dup = 0) {
+        if (allow_dup) return merge_duplicates(h);
         for (auto kv : h)
             if (insert(kv.first, kv.second, allow_dup) < 0)
                 return -1;
@@ -98,6 +101,7 @@ public:
     }
 
     int insert(std::string_view key, std::string_view value, int allow_dup=0);
+    int erase(std::string_view key);
     bool value_append(std::string_view value);
 
     template<size_t BufCap = 64, typename...Ts>
@@ -110,12 +114,17 @@ public:
 
     uint16_t kv_size() const { return m_kv_size * sizeof(KV); }
     uint16_t size() const { return m_buf_size; }
+    // the headers as they go on the wire ("K: V\r\n" each, in insertion order),
+    // so that one set of headers can be appended to another's message
+    std::string_view serialized() const;
     size_t space_remain() const {
         return m_buf_capacity - size() - kv_size();
     }
     int reset_host(int delta, std::string_view host);
 
 protected:
+    // Append disjoint source storage in wire order, including duplicate fields.
+    int merge_duplicates(const HeadersBase& source);
     char* m_buf;
     uint16_t m_buf_size = 0, m_kv_size = 0, m_buf_capacity = 0, m_last_kv = 0;
     friend class HeaderAssistant;

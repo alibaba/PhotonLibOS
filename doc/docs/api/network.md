@@ -271,6 +271,23 @@ Similarly, we also encapsulated its fs in `<photon/fs/httpfs/httpfs.h>`, which i
 | `client.h` | `Client` (abstract): `call(Operation*)` with follow redirects, retry, timeout, body_writer delegate. `OperationOnStack<N>` for stack allocation. |
 | `server.h` | `HTTPServer`: `handle_connection()`, pattern-matched `add_handler()`. Built-in: `new_fs_handler()`, `new_proxy_handler()`. |
 
+For HTTP client operations, `op.req.headers` stores caller configuration. Each hop
+first selects its route and proxy authentication, then composes a separate outgoing
+message from proxy, caller, common, default and cookie headers. Caller headers take
+precedence over common headers; all occurrences of a repeated field from the chosen
+source retain their wire order. Common and default headers are not written back to
+caller configuration. Cookies are selected again for each redirect.
+
+`Proxy-Authorization` in caller or common headers is proxy configuration: it is used
+for a forwarded proxy request or CONNECT and is never sent to the origin. The
+configuration remains available for later calls, retries and redirects. A body writer
+still receives `&op.req` and sees the final outgoing headers and body framing during
+its callback; the caller configuration is restored when body transmission finishes.
+
+When space permits, the outgoing message and then the response reuse the unused
+region of the configured request buffer. Tight buffers and cookie composition use
+a separate outgoing buffer without changing the caller's header storage.
+
 ## HTTP/2
 
 Defined in `<photon/net/http/streams.h>`. Full RFC 9113 / 7541 implementation:
