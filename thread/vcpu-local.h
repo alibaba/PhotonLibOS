@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <type_traits>
 #include <vector>
 #include <photon/common/callback.h>
@@ -64,7 +65,8 @@ public:
     VCPULocalBase& operator=(const VCPULocalBase&) = delete;
 
 protected:
-    explicit VCPULocalBase(void (*destroyer)(void*));
+    explicit VCPULocalBase(void (*destroyer)(void*, void*),
+                          std::shared_ptr<void> destroyerState = {});
     ~VCPULocalBase();
 
     // built by the derived VCPULocal<T>, which knows the type. Construction runs
@@ -87,7 +89,8 @@ private:
     // creation, so the copy stays valid until we win the race for the slot.
     struct SlotRef { Slot* slot; Table* table; vcpu_base* vcpu; uint64_t epoch; };
 
-    void (*m_destroyer)(void*);     // deletes a T*; stamped onto each slot
+    void (*m_destroyer)(void*, void*); // stamped onto each slot
+    std::shared_ptr<void> m_destroyer_state;
     photon::spinlock m_lock;        // guards m_refs; taken cross-vCPU at teardown
     std::vector<SlotRef> m_refs;    // one entry per vCPU that built a T for us
     bool m_drained = false;
@@ -110,6 +113,16 @@ public:
     // nullptr is not cached -- the next get() tries again.
     explicit VCPULocal(Delegate<T*> factory)
         : VCPULocalBase(&destroy_impl), m_factory(factory) {}
+    // Copy/move the callable into owned state retained by every slot. Unlike
+    // the factory's borrowed Delegate, a deleter may outlive this instance.
+    // It runs on the value's owner vCPU and is never called for a null value.
+    // Calls on distinct vCPUs may overlap. Borrowed captures must outlive all
+    // values, including those deferred until owner fini.
+    template<typename Deleter>
+    VCPULocal(Delegate<T*> factory, Deleter deleter)
+        : VCPULocalBase(&destroy_custom<Deleter>,
+                        std::make_shared<Deleter>(std::move(deleter))),
+          m_factory(factory) {}
     ~VCPULocal() { drain(); }
 
     void set_factory(Delegate<T*> factory) { m_factory = factory; }
@@ -132,7 +145,11 @@ protected:
 private:
     static void* default_construct(std::true_type)  { return (void*)new T(); }
     static void* default_construct(std::false_type) { return nullptr; }
-    static void destroy_impl(void* p) { delete (T*)p; }
+    static void destroy_impl(void* p, void*) { delete (T*)p; }
+    template<typename Deleter>
+    static void destroy_custom(void* p, void* state) {
+        if (p) (*(Deleter*)state)((T*)p);
+    }
     Delegate<T*> m_factory;
 };
 

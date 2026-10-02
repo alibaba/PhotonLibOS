@@ -39,7 +39,8 @@ struct VCPULocalBase::Slot : intrusive_list_node<Slot> {
     vcpu_base* vcpu = nullptr;      // the owning vCPU
     VCPULocalBase* key = nullptr;   // the instance (map key); never deref if disowned
     Table* table = nullptr;         // the owning vCPU's table
-    void (*destroy)(void*) = nullptr;
+    void (*destroy)(void*, void*) = nullptr;
+    std::shared_ptr<void> destroyer_state;
 };
 
 // One vCPU's set of slots. `map` is the O(1) lookup for get() and is touched
@@ -87,8 +88,9 @@ VCPULocalBase::Table& VCPULocalBase::current_table() {
     return t;
 }
 
-VCPULocalBase::VCPULocalBase(void (*destroyer)(void*))
-    : m_destroyer(destroyer) {
+VCPULocalBase::VCPULocalBase(void (*destroyer)(void*, void*),
+                           std::shared_ptr<void> destroyerState)
+    : m_destroyer(destroyer), m_destroyer_state(std::move(destroyerState)) {
     SCOPED_LOCK(g_instances_lock);
     if (!g_atfork_registered) {
         auto ret = pthread_atfork(&VCPULocalBase::atfork_prepare,
@@ -157,7 +159,7 @@ void* VCPULocalBase::get_or_create() {
                 if (t.contains_locked(s)) t.live.erase(s);
             }
             if (s->vcpu == photon::get_vcpu()) {
-                s->destroy(s->ptr);
+                s->destroy(s->ptr, s->destroyer_state.get());
                 delete s;
             }
             // Otherwise its original vCPU has already gone away. Leak the old
@@ -183,6 +185,7 @@ void* VCPULocalBase::get_or_create() {
     s->key = this;
     s->table = &t;
     s->destroy = m_destroyer;
+    s->destroyer_state = m_destroyer_state;
     t.map[this] = s;
     {
         SCOPED_LOCK(t.lock);
@@ -222,7 +225,7 @@ void* VCPULocalBase::destroy_entry(void* arg) {
     auto c = (DestroyCtx*)arg;
     auto s = c->s;
     s->table->map.erase(s->key);   // on the owning vCPU: structural change is safe
-    s->destroy(s->ptr);
+    s->destroy(s->ptr, s->destroyer_state.get());
     delete s;
     c->done.signal(1);
     return nullptr;
@@ -230,7 +233,7 @@ void* VCPULocalBase::destroy_entry(void* arg) {
 void VCPULocalBase::destroy_slot(Slot* s, vcpu_base* v) {
     if (v == photon::get_vcpu()) {
         s->table->map.erase(s->key);
-        s->destroy(s->ptr);
+        s->destroy(s->ptr, s->destroyer_state.get());
         delete s;
         return;
     }
@@ -348,7 +351,9 @@ void VCPULocalBase::Table::at_fini() {
                 SCOPED_LOCK(s->key->m_lock);
                 s->key->remove_ref(s);
             }
-            delete s;
+            // Deleter captures may own parent-only resources too. Abandon
+            // that state together with the inherited value in the child.
+            if (!s->destroyer_state) delete s;
             continue;
         }
         if (!s->disowned.load(std::memory_order_acquire)) {
@@ -358,7 +363,7 @@ void VCPULocalBase::Table::at_fini() {
             s->key->remove_ref(s);
         }
         map.erase(s->key);
-        s->destroy(s->ptr);
+        s->destroy(s->ptr, s->destroyer_state.get());
         delete s;
     }
     // The list is empty and every claimed handoff has landed (or returned its

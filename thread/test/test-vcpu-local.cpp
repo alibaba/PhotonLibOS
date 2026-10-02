@@ -209,6 +209,64 @@ TEST(vcpu_local, address_reuse_after_disown) {
     EXPECT_EQ(2, g_dtor.load());
 }
 
+TEST(vcpu_local, custom_deleter_survives_native_instance_destruction) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    reset();
+    auto pool = std::make_unique<WorkPool>(
+        1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+    auto state = std::make_shared<int>(42);
+    std::weak_ptr<int> retained = state;
+    int calls = 0;
+    struct Local final : VCPULocal<Value> { using VCPULocal<Value>::VCPULocal; };
+    auto local = new Local({}, [state, &calls](Value* value) {
+        EXPECT_EQ(42, *state);
+        EXPECT_EQ(value->built_on, photon::get_vcpu());
+        ++calls;
+        delete value;
+    });
+    state.reset();
+    pool->call([&] { ASSERT_NE(nullptr, local->get()); });
+    std::thread destroyer([&] { delete local; });
+    destroyer.join();
+    EXPECT_EQ(0, calls);
+    EXPECT_FALSE(retained.expired());
+    pool.reset();
+    EXPECT_EQ(1, calls);
+    EXPECT_EQ(1, g_dtor.load());
+    EXPECT_TRUE(retained.expired());
+}
+
+TEST(vcpu_local, custom_deleter_on_owner_and_not_for_failed_factory) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    reset();
+    WorkPool pool(1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+    int calls = 0;
+    bool succeed = false;
+    auto factory = [&]() -> Value* { return succeed ? new Value : nullptr; };
+    {
+        VCPULocal<Value> local(factory, [&](Value* value) {
+            EXPECT_EQ(value->built_on, photon::get_vcpu());
+            ++calls;
+            delete value;
+        });
+        pool.call([&] { EXPECT_EQ(nullptr, local.get()); });
+    }
+    EXPECT_EQ(0, calls);
+    succeed = true;
+    {
+        VCPULocal<Value> local(factory, [&](Value* value) {
+            EXPECT_EQ(value->built_on, photon::get_vcpu());
+            ++calls;
+            delete value;
+        });
+        pool.call([&] { ASSERT_NE(nullptr, local.get()); });
+    }
+    EXPECT_EQ(1, calls);
+    EXPECT_EQ(1, g_dtor.load());
+}
+
 TEST(vcpu_local, rebuild_after_fork) {
     photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
     DEFER(photon::fini());
@@ -232,6 +290,37 @@ TEST(vcpu_local, rebuild_after_fork) {
     EXPECT_EQ(0, WEXITSTATUS(status));
     EXPECT_EQ(parent_value, local.get());
     EXPECT_EQ(1, g_ctor.load());
+}
+
+TEST(vcpu_local, inherited_custom_deleter_state_is_abandoned_in_child) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    reset();
+    int captureDestroyed = 0;
+    auto state = std::shared_ptr<int>(new int(42), [&](int* p) {
+        ++captureDestroyed;
+        delete p;
+    });
+    struct Local final : VCPULocal<Value> { using VCPULocal<Value>::VCPULocal; };
+    auto local = new Local({}, [state](Value* value) { delete value; });
+    state.reset();
+    ASSERT_NE(nullptr, local->get());
+    auto pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        delete local;
+        bool ok = g_dtor.load() == 0 && captureDestroyed == 0;
+        ok = photon::fini() == 0 && g_dtor.load() == 0 &&
+             captureDestroyed == 0 && ok;
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    ASSERT_EQ(pid, waitpid(pid, &status, 0));
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(0, WEXITSTATUS(status));
+    delete local;
+    EXPECT_EQ(1, g_dtor.load());
+    EXPECT_EQ(1, captureDestroyed);
 }
 
 TEST(vcpu_local, destroy_then_fini_after_fork_without_get) {
