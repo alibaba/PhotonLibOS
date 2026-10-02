@@ -299,6 +299,38 @@ TEST(dialer, tunnel_failure_releases_stream) {
     EXPECT_EQ(1, destroyed);
 }
 
+TEST(dialer, tunnel_validates_response_status_line) {
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+
+    auto dial = [&](const std::string& response) {
+        StreamDialer transport;
+        transport.input = response + "\r\n\r\n";
+        std::unique_ptr<IDialer> tunnel(
+            new_connect_tunnel_dialer(&transport));
+        return std::unique_ptr<ISocketStream>(tunnel->dial(target));
+    };
+
+    EXPECT_NE(nullptr, dial("HTTP/1.1 200 Connection Established"));
+    EXPECT_NE(nullptr, dial("HTTP/1.0 204"));
+
+    for (auto response : {"HTTP/1.1 2000 Invalid", "HTTP/1.1 20x Invalid",
+                          "HTTP/1.x 200 Invalid", "HTTP/1.1200 Invalid",
+                          "HTTP/1.1 200\tInvalid"}) {
+        errno = 0;
+        EXPECT_EQ(nullptr, dial(response)) << response;
+        EXPECT_EQ(EPROTO, errno) << response;
+    }
+
+    errno = 0;
+    EXPECT_EQ(nullptr, dial("HTTP/1.1 407 Proxy Authentication Required"));
+    EXPECT_EQ(ECONNREFUSED, errno);
+}
+
 TEST(dialer, tunnel_preserves_duplicate_proxy_header_order) {
     StreamDialer transport;
     transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";

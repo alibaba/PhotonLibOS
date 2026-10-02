@@ -428,12 +428,19 @@ public:
             LOG_ERROR_RETURN(EPROTO, -1,
                              "proxy sent ` byte(s) past CONNECT response",
                              size - end - 4);
-        estring_view status(response, end);
-        if (status.size() < 12 || !status.starts_with("HTTP/1."))
+        auto response_headers = estring_view(response, end);
+        auto status = response_headers.substr(0, response_headers.find("\r\n"));
+        auto is_digit = [](char ch) { return ch >= '0' && ch <= '9'; };
+        if (status.size() < 12 || !status.starts_with("HTTP/1.") ||
+            !is_digit(status[7]) || status[8] != ' ' ||
+            !is_digit(status[9]) || !is_digit(status[10]) ||
+            !is_digit(status[11]) ||
+            (status.size() > 12 && status[12] != ' '))
             LOG_ERROR_RETURN(EPROTO, -1,
                              "malformed CONNECT response from proxy `:`",
                              target.proxy_host, target.proxy_port);
-        auto code = status.substr(9, 3).to_uint64();
+        auto code = (status[9] - '0') * 100 + (status[10] - '0') * 10 +
+                    status[11] - '0';
         if (code / 100 != 2)
             LOG_ERROR_RETURN(ECONNREFUSED, -1,
                              "proxy refused to tunnel to `:`, ", target.host,
