@@ -281,6 +281,8 @@ TEST(VqNotify, the_first_decision_on_a_ring_notifies_and_the_second_follows_the_
 constexpr uint64_t CHAIN_CAPACITY = 1 << 20;
 constexpr uint64_t CHAIN_SECTOR = 4;
 constexpr uint8_t SENTINEL = 0xcc;
+// shorter than VIRTIO_BLK_ID_BYTES on purpose, so a GET_ID has padding to write
+constexpr const char* CHAIN_SERIAL = "photon-vq-test";
 
 // A flat "guest" memory plus a descriptor table pointing into it. The translate
 // hook below turns a descriptor address into a local pointer, which is what a
@@ -346,7 +348,7 @@ public:
     uint8_t serve(GuestChain& c, bool read_only, uint32_t* written) {
         VirtioBlkTranslate tr;
         tr.bind(&c, &chain_translate);
-        return virtio_blk_serve_chain(img.file, read_only, "photon-vq-test", "vq",
+        return virtio_blk_serve_chain(img.file, read_only, CHAIN_SERIAL, "vq",
                                       c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
                                       tr, written);
     }
@@ -520,6 +522,57 @@ TEST_F(ChainFixture, a_chain_too_short_to_hold_a_header_is_refused) {
     EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written));
     EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
     EXPECT_EQ(1u, written);   // refused, but the guest still gets its status byte
+}
+
+// VIRTIO_BLK_T_GET_ID fills a fixed-width field, so the device writes the whole
+// buffer the guest offered -- NUL-padded past the end of the serial -- and the
+// used length covers it. Writing only strlen(serial) leaves the rest of the
+// guest's buffer holding whatever the guest prefilled there, and reports a used
+// length that does not reach the end of the field the guest asked about.
+TEST_F(ChainFixture, get_id_fills_the_whole_fixed_width_field_with_nul_padding) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_GET_ID);
+    size_t ioff = c.place(nullptr, VIRTIO_BLK_ID_BYTES);
+    memset(c.at(ioff), SENTINEL, VIRTIO_BLK_ID_BYTES);
+    c.add(ioff, VIRTIO_BLK_ID_BYTES, VRING_DESC_F_WRITE);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    // the whole field, plus the status byte the guest also gets back
+    EXPECT_EQ((uint32_t) VIRTIO_BLK_ID_BYTES + 1, written);
+
+    const size_t slen = strlen(CHAIN_SERIAL);
+    ASSERT_LT(slen, (size_t) VIRTIO_BLK_ID_BYTES);
+    EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), slen));
+    for (size_t i = slen; i < (size_t) VIRTIO_BLK_ID_BYTES; i++)
+        EXPECT_EQ(0, c.at(ioff)[i]);
+}
+
+// A guest may offer less than the field's width, and the padding must stop at
+// what it offered. The canary sits in guest memory immediately behind the
+// described buffer -- reachable by an over-long scatter, described by nothing.
+TEST_F(ChainFixture, get_id_into_a_shorter_buffer_writes_only_what_was_offered) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_GET_ID);
+    const size_t offered = 8;
+    size_t ioff = c.place(nullptr, offered);
+    size_t coff = c.place(nullptr, offered);
+    memset(c.at(ioff), SENTINEL, offered);
+    memset(c.at(coff), SENTINEL, offered);
+    c.add(ioff, offered, VRING_DESC_F_WRITE);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    EXPECT_EQ((uint32_t) offered + 1, written);
+    EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), offered));
+    for (size_t i = 0; i < offered; i++)
+        EXPECT_EQ(SENTINEL, c.at(coff)[i]);
 }
 
 int main(int argc, char** argv) {

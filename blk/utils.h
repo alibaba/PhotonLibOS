@@ -352,6 +352,9 @@ struct GenlSock {
 //                   guest memory stays writable while the request is served.
 //   push            each stream's iovec array is MAX_DESC_CHAIN deep and push
 //                   reports full instead of storing past the end.
+//   fill            bounded by the stream's own elements and their lengths, so
+//                   the fixed-width ID field is truncated to what the guest
+//                   offered rather than written past it.
 //   status          tail(1) hands out the writable stream's last byte only
 //                   when it lies wholly inside the final element, so the
 //                   status is never written through a pointer spanning two --
@@ -420,6 +423,11 @@ struct GenlSock {
 #define VIRTIO_BLK_T_OUT    1
 #define VIRTIO_BLK_T_FLUSH  4
 #define VIRTIO_BLK_T_GET_ID 8
+
+// the width of the field VIRTIO_BLK_T_GET_ID fills, and so the number of bytes
+// a device writes for it however short the serial is: the tail is NUL, not
+// whatever the guest's buffer already held
+#define VIRTIO_BLK_ID_BYTES 20
 
 #define VIRTIO_BLK_S_OK     0
 #define VIRTIO_BLK_S_IOERR  1
@@ -518,7 +526,8 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t>;
 // status (VIRTIO_BLK_S_*); *written receives the total bytes filled into
 // device-writable buffers (request data + the status byte) -- the value the
 // used-ring element's len wants. `tag` prefixes the error logs (the device
-// identity); `serial` answers VIRTIO_BLK_T_GET_ID.
+// identity); `serial` answers VIRTIO_BLK_T_GET_ID, which fills the guest's whole
+// VIRTIO_BLK_ID_BYTES buffer and NUL-pads past the end of the string.
 //
 // `ring_num` is the ring's descriptor count. `head` and every `next` the chain
 // visits are guest-written, so each is checked against it: without that a chain

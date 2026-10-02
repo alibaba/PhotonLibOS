@@ -563,6 +563,20 @@ struct DescStream {
         compact();
         return true;
     }
+    // scatter `len` bytes from src into the front of the stream without
+    // consuming it; returns how many went in, which is fewer than len only when
+    // the stream is shorter than that
+    size_t fill(const void* src, size_t len) {
+        const char* p = (const char*) src;
+        size_t left = std::min<uint64_t>(len, bytes);
+        size_t done = 0;
+        for (int i = 0; done < left && i < n; i++) {
+            size_t k = std::min<size_t>(iov[i].iov_len, left - done);
+            memcpy(iov[i].iov_base, p + done, k);
+            done += k;
+        }
+        return done;
+    }
     // the last `len` bytes, or nullptr when they are not wholly inside the
     // final element: a status byte split across two descriptors is not
     // something this engine can write through a pointer
@@ -738,17 +752,14 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
             }
             break;
         case VIRTIO_BLK_T_GET_ID: {
-            size_t n = std::min<uint64_t>(want, strlen(serial));
-            if (n && data.n) {
-                // the serial may span descs; copy through the ioview
-                size_t done = 0;
-                for (int i = 0; i < data.n && done < n; i++) {
-                    size_t k = std::min<size_t>(data.iov[i].iov_len, n - done);
-                    memcpy(data.iov[i].iov_base, serial + done, k);
-                    done += k;
-                }
-                data_written = (uint32_t)n;
-            }
+            // The ID is a fixed-width field: a guest that offered
+            // VIRTIO_BLK_ID_BYTES of writable buffer expects all of it back,
+            // NUL past the end of the serial. Writing only strlen(serial)
+            // leaves that tail holding whatever the guest prefilled there, and
+            // reports a used length stopping short of the field it asked about.
+            char id[VIRTIO_BLK_ID_BYTES] = {};
+            memcpy(id, serial, std::min(strlen(serial), sizeof(id)));
+            data_written = (uint32_t) data.fill(id, sizeof(id));
             break;
         }
         default:
