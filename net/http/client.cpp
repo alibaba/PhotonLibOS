@@ -294,7 +294,8 @@ public:
                 outgoing.headers.insert(item.first, item.second) < 0)
                 return -1;
         }
-        if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&outgoing) != 0)
+        if (m_cookie_jar && outgoing.headers.find("Cookie") == outgoing.headers.end() &&
+            m_cookie_jar->set_cookies_to_headers(&outgoing) != 0)
             LOG_ERROR_RETURN(0, -1, "failed to set cookies on outgoing request");
         if (outgoing.headers.content_length() != 0 && outgoing.headers.chunked())
             LOG_ERROR_RETURN(EINVAL, -1, "Content-Length and Transfer-Encoding conflicted");

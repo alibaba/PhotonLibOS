@@ -1493,6 +1493,39 @@ TEST(http_client, per_hop_headers_validate_merged_body_framing) {
     EXPECT_EQ(configured, op.req.headers.serialized());
 }
 
+TEST(http_client, per_hop_headers_preserve_explicit_cookie_precedence) {
+    for (int source = 0; source < 3; ++source) {
+        for (auto value : {"manual=value", ""}) {
+            HeaderCaptureDialer dialer;
+            std::unique_ptr<ICookieJar> cookies(new_simple_cookie_jar());
+            std::unique_ptr<Client> client(new_http_client(cookies.get()));
+            client->set_dialer(&dialer);
+            dialer.responses = {
+                "HTTP/1.1 200 OK\r\nSet-Cookie: fresh=value; Path=/\r\nContent-Length: 0\r\n\r\n"};
+            {
+                Client::OperationOnStack<> seed(client.get(), Verb::GET, "http://origin.example/");
+                ASSERT_EQ(0, seed.call());
+            }
+            if (source != 0) {
+                ASSERT_EQ(0, client->common_headers()->insert("Cookie", source == 1 ? value : "common=value"));
+            }
+            Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/");
+            if (source != 1) {
+                ASSERT_EQ(0, op.req.headers.insert("cOoKiE", value));
+            }
+            auto configured = std::string(op.req.headers.serialized());
+            auto common = std::string(client->common_headers()->serialized());
+            ASSERT_EQ(0, op.call());
+            auto expected = std::string(source == 1 ? "Cookie: " : "cOoKiE: ") + value + "\r\n";
+            EXPECT_NE(std::string::npos, dialer.last->output().find(expected));
+            EXPECT_NE(std::string::npos, dialer.last->output().find("Connection: keep-alive\r\n"));
+            EXPECT_EQ(std::string::npos, dialer.last->output().find("fresh=value"));
+            EXPECT_EQ(configured, op.req.headers.serialized());
+            EXPECT_EQ(common, client->common_headers()->serialized());
+        }
+    }
+}
+
 TEST(http_client, per_hop_headers_refresh_cookies_after_redirect) {
     HeaderCaptureDialer dialer;
     std::unique_ptr<ICookieJar> cookies(new_simple_cookie_jar());
