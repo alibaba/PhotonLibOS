@@ -1148,8 +1148,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
         case VHOST_USER_GET_FEATURES:
             if (reply(conn_fd, m->request, offer_features) < 0) return false;
             return true;
-        case VHOST_USER_SET_FEATURES:
-            negotiated = m->payload.u64;
+        case VHOST_USER_SET_FEATURES: {
+            const uint64_t f = m->payload.u64;
+            // A bit this device never offered is a claim about behaviour it does
+            // not implement, and the cost is concrete rather than tidy: FLUSH
+            // accepted without being offered clears write_through below, so writes
+            // stop being synced on the strength of a flush this backend was never
+            // asked to support. Refused rather than masked off -- masking would
+            // settle a different word than the peer asked for and leave it no way
+            // to learn what we settled on.
+            if (f & ~offer_features) {
+                LOG_ERROR("vhost-user SET_FEATURES refused: bits ` are outside the offer `",
+                          HEX(f & ~offer_features), HEX(offer_features));
+                ack = 1;
+                break;
+            }
+            negotiated = f;
             // From the NEGOTIATED word, not from offer_features: if the frontend
             // masked bit 29 off we must keep the flags semantics. Deciding from
             // our own offer would have us read a used_event nobody wrote.
@@ -1167,7 +1181,26 @@ struct VhostUserDeviceImpl : IBlkDevice {
                                                 std::memory_order_relaxed);
             }
             LOG_INFO("vhost-user negotiated features ", HEX(negotiated));
+            // Ring enablement is tied to this bit: SET_VRING_ENABLE "should be sent
+            // only when VHOST_USER_F_PROTOCOL_FEATURES has been negotiated", and a
+            // SET_FEATURES without it means the "back-end must enable all rings
+            // immediately". A frontend that declined the bit never sends the enable,
+            // so waiting for one leaves every request sitting in an avail ring
+            // nobody drains -- and the session gives no sign anything is wrong,
+            // because every control message it did send was answered normally.
+            // Enabled here rather than at construction: this is the message that
+            // tells us which of the two regimes the peer is in. vq_start is a no-op
+            // until the ring is actually configured, and the later SET_VRING_*
+            // handlers call it again.
+            if (!(negotiated & (1ULL << VHOST_USER_F_PROTOCOL_FEATURES))) {
+                for (uint32_t i = 0; i < nqueues; i++) {
+                    vqs[i]->x.enabled.store(true, std::memory_order_relaxed);
+                    vq_start(i);
+                }
+                LOG_INFO("vhost-user protocol features not negotiated, every ring enabled");
+            }
             break;
+        }
         case VHOST_USER_GET_PROTOCOL_FEATURES: {
             uint64_t pf = (1ULL << VHOST_USER_PROTOCOL_F_REPLY_ACK) |
                           (1ULL << VHOST_USER_PROTOCOL_F_BACKEND_REQ) |
@@ -1195,8 +1228,28 @@ struct VhostUserDeviceImpl : IBlkDevice {
             }
             break;
         case VHOST_USER_SET_OWNER:
+            break;
         case VHOST_USER_RESET_OWNER:
+            // Deprecated, and the recommendation is explicit: a back-end should
+            // "either ignore this message, or use it to disable all rings". This
+            // device ignores it, and that is a choice rather than an omission --
+            // the other reading is unavailable to a frontend that never negotiated
+            // bit 30, because such a frontend has no SET_VRING_ENABLE to re-enable
+            // a ring with, so disabling here would strand it for the rest of the
+            // session. The spec also records that the ambiguity arose from
+            // back-ends that discarded connection state on this message; that is a
+            // third reading and must not be inferred from an empty arm.
+            break;
         case VHOST_USER_RESET_DEVICE:
+            // "Only valid if the VHOST_USER_PROTOCOL_F_RESET_DEVICE protocol feature
+            // is set by the back-end", and GET_PROTOCOL_FEATURES does not set it.
+            // Acking success would promise that every ring is disabled and all
+            // internal state is back to initial, none of which happens, and a peer
+            // that believed it would reinitialize a device still mid-session. If
+            // that protocol bit is ever advertised, this arm has to become the real
+            // reset rather than a refusal.
+            LOG_ERROR("vhost-user RESET_DEVICE refused: the reset protocol feature is not advertised");
+            ack = 1;
             break;
         case VHOST_USER_GET_QUEUE_NUM:
             if (reply(conn_fd, m->request, nqueues) < 0) return false;

@@ -74,6 +74,7 @@ enum : int32_t {
     MU_GET_FEATURES = 1,
     MU_SET_FEATURES = 2,
     MU_SET_OWNER = 3,
+    MU_RESET_OWNER = 4,
     MU_SET_MEM_TABLE = 5,
     MU_SET_VRING_NUM = 8,
     MU_SET_VRING_ADDR = 9,
@@ -87,6 +88,7 @@ enum : int32_t {
     MU_SET_VRING_ENABLE = 18,
     MU_SET_BACKEND_REQ_FD = 21,
     MU_GET_CONFIG = 24,
+    MU_RESET_DEVICE = 34,
     MU_SET_STATUS = 39,
 };
 #define MU_VERSION       1
@@ -149,6 +151,14 @@ static_assert(offsetof(mu_msg, payload) == 12,
 // num_queues, answer GET_QUEUE_NUM with the real count, and still be undrivable as
 // multiqueue: every channel agrees except the one the peer gates on.
 #define P_VHU_MQ        0
+// Bit 3 of the PROTOCOL word: only once it is settled does the back-end answer a
+// message that carries no reply of its own, so a frontend without it must send its
+// setters and not wait. Queries are answered either way.
+#define P_VHU_REPLY_ACK 3
+// Bit 13 of the PROTOCOL word: the gate on RESET_DEVICE being a valid message at
+// all. This backend does not offer it, and the case that sends RESET_DEVICE asserts
+// that fact before asserting the refusal.
+#define P_VHU_RESET_DEVICE 13
 struct blk_outhdr { uint32_t type, ioprio; uint64_t sector; };
 struct blk_config { uint64_t capacity; uint32_t size_max, seg_max;
                     uint16_t cyl; uint8_t heads, sectors; uint32_t blk_size;
@@ -236,6 +246,16 @@ struct MockFrontend {
     // reading `queue_num` has to be paired with one that saw the bit settled.
     uint64_t proto_features = 0;
     uint32_t queue_num = 1;
+    // Models a frontend that declines bit 30 of the DEVICE word and therefore never
+    // negotiates protocol features at all. That is legal -- the bit is an offer, not
+    // a requirement -- and it changes two things this mock has to follow: no reply
+    // ever comes back for a setter, because REPLY_ACK lives in the protocol word it
+    // never settled, and no SET_VRING_ENABLE is sent, because the spec says that
+    // request "should be sent only when VHOST_USER_F_PROTOCOL_FEATURES has been
+    // negotiated". A backend that waits for the enable then serves nothing forever.
+    // negotiate() masks the bit off the feature word itself when this is set, so the
+    // two halves of the mock cannot disagree.
+    bool no_protocol_features = false;
     std::string err;
 
     bool fail(const char* what) {
@@ -356,6 +376,21 @@ struct MockFrontend {
         return true;
     }
 
+    // Settles a SET_* message the way this frontend's negotiated word allows. With
+    // REPLY_ACK settled it is transact(); without it the back-end sends no reply at
+    // all, so waiting for one would block until the socket dies. Queries keep using
+    // transact() directly: GET_* is answered whether or not REPLY_ACK was settled,
+    // and routing them through here would hide a backend that stopped answering them.
+    // `check_ack` cannot be honored on the silent path -- there is no ack to read --
+    // so a case that needs an ack assertion has to settle REPLY_ACK first.
+    bool settle(mu_msg* m, const int* fds = nullptr, int nfds = 0, bool check_ack = false) {
+        if (proto_features & (1ULL << P_VHU_REPLY_ACK)) {
+            mu_msg r;
+            return transact(m, &r, fds, nfds, check_ack);
+        }
+        return send(m, fds, nfds);
+    }
+
     // ---- connection ----
     bool connect_to(const char* path) {
         fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -402,6 +437,12 @@ struct MockFrontend {
         m.request = MU_GET_FEATURES; m.size = 0;
         if (!transact(&m, &r)) return false;
         features = r.payload.u64 & ~decline;
+        // One knob, not two: declining bit 30 and skipping the protocol exchange
+        // are the same decision, and letting a caller make only half of it would
+        // leave SET_FEATURES carrying a bit this frontend then behaves as though it
+        // had never negotiated.
+        if (no_protocol_features)
+            features &= ~(1ULL << F_VHU_PROTOCOL_FEATURES);
 
         // A conformant frontend negotiates protocol features ONLY if the device
         // feature word offered bit 30: vhost-user.rst defines that bit, in both
@@ -412,33 +453,42 @@ struct MockFrontend {
         // mock used to send the two messages below unconditionally, so REPLY_ACK
         // got negotiated and every ack-based test passed against a frontend no
         // real one would be.
-        if (!(features & (1ULL << F_VHU_PROTOCOL_FEATURES))) {
+        //
+        // Declining the bit is a third thing again, and a legal one: an offer is
+        // not an obligation, and no_protocol_features models the frontend that
+        // declines. It sends neither message below and settles no protocol word,
+        // which is why every setter further down goes through settle().
+        if (!(features & (1ULL << F_VHU_PROTOCOL_FEATURES)) && !no_protocol_features) {
             errno = EPROTONOSUPPORT;
             return fail("GET_FEATURES did not offer bit 30 (VHOST_USER_F_PROTOCOL_FEATURES), "
                         "so the protocol features are unreachable");
         }
-        memset(&m, 0, sizeof(m));
-        m.request = MU_GET_PROTOCOL_FEATURES; m.size = 0;
-        if (!transact(&m, &r)) return false;
-        // Settled word, not the raw offer, and the settled word is what goes back
-        // in SET_PROTOCOL_FEATURES: sending the offer after masking bits off it
-        // locally would be a frontend lying about what it negotiated.
-        proto_features = r.payload.u64 & ~proto_decline;
+        if (no_protocol_features) {
+            // neither protocol message is sent; proto_features stays 0
+        } else {
+            memset(&m, 0, sizeof(m));
+            m.request = MU_GET_PROTOCOL_FEATURES; m.size = 0;
+            if (!transact(&m, &r)) return false;
+            // Settled word, not the raw offer, and the settled word is what goes back
+            // in SET_PROTOCOL_FEATURES: sending the offer after masking bits off it
+            // locally would be a frontend lying about what it negotiated.
+            proto_features = r.payload.u64 & ~proto_decline;
 
-        memset(&m, 0, sizeof(m));
-        m.request = MU_SET_PROTOCOL_FEATURES; m.size = 8;
-        m.payload.u64 = proto_features;
-        if (!transact(&m, &r)) return false;
+            memset(&m, 0, sizeof(m));
+            m.request = MU_SET_PROTOCOL_FEATURES; m.size = 8;
+            m.payload.u64 = proto_features;
+            if (!transact(&m, &r)) return false;
+        }
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_OWNER; m.size = 0;
-        if (!transact(&m, &r)) return false;
+        if (!settle(&m)) return false;
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_FEATURES; m.size = 8;
         m.payload.u64 = features;   // the word this frontend settled on above,
                                     // which is the offer minus whatever it declined
-        if (!transact(&m, &r)) return false;
+        if (!settle(&m)) return false;
 
         // Asked ONLY once protocol MQ is settled, which is what a primary does:
         // without the bit the backend's maximum queue count is taken to be 1 and
@@ -468,20 +518,22 @@ struct MockFrontend {
         m.size = offsetof(mu_mem, regions) + sizeof(mu_mem_region);
         m.payload.memory.nregions = 1;
         m.payload.memory.regions[0] = mu_mem_region{0, MEM_SIZE, (uint64_t)mem, 0};
-        if (!transact(&m, &r, &memfd, 1)) return false;
+        if (!settle(&m, &memfd, 1)) return false;
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_VRING_NUM; m.size = sizeof(mu_vring_state);
         m.payload.state = {0, VQ_NUM};
         // Require ack == 0: this NUM is protocol-legal, so a backend that
         // error-acks it must fail the negotiation rather than be silently
-        // tolerated (the mock never used to inspect the ack payload).
-        if (!transact(&m, &r, nullptr, 0, /*check_ack=*/true)) return false;
+        // tolerated (the mock never used to inspect the ack payload). A frontend
+        // that declined REPLY_ACK gets no ack to inspect, so the check is skipped
+        // for it -- the case that drives that frontend asserts on I/O instead.
+        if (!settle(&m, nullptr, 0, /*check_ack=*/true)) return false;
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_VRING_BASE; m.size = sizeof(mu_vring_state);
         m.payload.state = {0, 0};
-        if (!transact(&m, &r)) return false;
+        if (!settle(&m)) return false;
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_VRING_ADDR; m.size = sizeof(mu_vring_addr);
@@ -489,17 +541,17 @@ struct MockFrontend {
                                        (uint64_t)(mem + L_USED),
                                        (uint64_t)(mem + L_AVAIL), 0};
         // Same: these addresses fit the region, so a correct backend acks 0.
-        if (!transact(&m, &r, nullptr, 0, /*check_ack=*/true)) return false;
+        if (!settle(&m, nullptr, 0, /*check_ack=*/true)) return false;
 
         kickfd = ::eventfd(0, EFD_NONBLOCK);
         callfd = ::eventfd(0, EFD_NONBLOCK);
         if (kickfd < 0 || callfd < 0) return fail("eventfd");
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_VRING_KICK; m.size = 8; m.payload.u64 = 0;   // idx 0
-        if (!transact(&m, &r, &kickfd, 1)) return false;
+        if (!settle(&m, &kickfd, 1)) return false;
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
-        if (!transact(&m, &r, &callfd, 1)) return false;
+        if (!settle(&m, &callfd, 1)) return false;
 
         if (with_backend_channel) {
             int sp[2];
@@ -507,7 +559,7 @@ struct MockFrontend {
             backend_fd = sp[0];
             memset(&m, 0, sizeof(m));
             m.request = MU_SET_BACKEND_REQ_FD; m.size = 0;
-            if (!transact(&m, &r, &sp[1], 1)) { ::close(sp[1]); return false; }
+            if (!settle(&m, &sp[1], 1)) { ::close(sp[1]); return false; }
             ::close(sp[1]);
         }
 
@@ -519,10 +571,17 @@ struct MockFrontend {
         m.payload.config.size = sizeof(blk_config);
         if (!transact(&m, &r)) return false;
 
-        memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
-        m.payload.state = {0, 1};
-        if (!transact(&m, &r)) return false;
+        // Not sent at all without bit 30: the spec says this request "should be
+        // sent only when VHOST_USER_F_PROTOCOL_FEATURES has been negotiated", and
+        // says of the same condition that the "back-end must enable all rings
+        // immediately". So this is the message whose absence the backend has to
+        // notice -- sending it anyway would test nothing.
+        if (!no_protocol_features) {
+            memset(&m, 0, sizeof(m));
+            m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
+            m.payload.state = {0, 1};
+            if (!transact(&m, &r)) return false;
+        }
 
         (void)fds; (void)nfds;
         return true;
@@ -3734,6 +3793,206 @@ TEST_F(VhostUserTest, pool_without_an_event_engine_is_refused) {
     EXPECT_EQ(EINVAL, errno);
     EXPECT_EQ(0u, rec.vcpu_count());
     EXPECT_NE(0, ::access(SOCK_PATH, F_OK));   // start failed: no live socket left behind
+}
+
+// The spec makes SET_VRING_ENABLE conditional -- it "should be sent only when
+// VHOST_USER_F_PROTOCOL_FEATURES has been negotiated" -- and for that same
+// condition says a SET_FEATURES "without VHOST_USER_F_PROTOCOL_FEATURES set,
+// back-end must enable all rings immediately". A backend that waits for the enable
+// therefore serves nothing at all to a frontend that declined bit 30, and it fails
+// silently: every control message it did receive was answered normally, so the only
+// symptom is I/O that never completes.
+TEST_F(VhostUserTest, a_frontend_that_never_negotiates_protocol_features_still_serves) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto w = pattern(0x3C, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        fe.no_protocol_features = true;
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // A precondition on the mock, not a claim about the device: this frontend
+        // settled no protocol word, which is what makes the absence of
+        // SET_VRING_ENABLE legal rather than an oversight. If the mock ever sends
+        // the enable again this case stops testing anything, and this is the line
+        // that says so instead of reporting a green that means nothing.
+        if (fe.proto_features != 0) {
+            LOG_ERROR("the frontend settled a protocol word, so it did send SET_VRING_ENABLE");
+            return EPROTO;
+        }
+        if (fe.write_dev(13 << 20, w.data(), w.size()) != S_OK) return EIO;
+        std::vector<char> rb(w.size());
+        if (fe.read_dev(13 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(w.data(), rb.data(), w.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(13 << 20, w));
+}
+
+// A frontend that sets a feature the device never offered is claiming behaviour
+// that does not exist, and the concrete cost is durability rather than tidiness:
+// FLUSH accepted without being offered clears write_through, so writes stop being
+// synced on the strength of a flush the backend was never asked to support. The
+// refusal has to cost the peer its message and not its connection -- a bad value in
+// a well-formed message is a semantic violation, not a framing one -- so the case
+// also asserts that the session carries on and that a SUBSET of the offer is still
+// accepted, which is what keeps the guard from passing by rejecting everything.
+TEST_F(VhostUserTest, set_features_rejects_a_bit_the_device_never_offered) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto w = pattern(0x5E, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features == 0) return EPROTO;   // nothing to subtract from
+
+        mu_msg m, r;
+        // Bit 63: reserved, and far from anything this device offers, so the
+        // rejection can only be about it being unoffered.
+        memset(&m, 0, sizeof(m));
+        m.request = MU_SET_FEATURES; m.size = 8;
+        m.payload.u64 = fe.features | (1ULL << 63);
+        if (!fe.transact(&m, &r)) return EPROTO;
+        if (r.payload.u64 == 0) {
+            LOG_ERROR("SET_FEATURES accepted a bit outside the offer, word=", HEX(m.payload.u64));
+            return EINVAL;
+        }
+
+        // The refused word must not have been applied: the one settled during
+        // negotiate() is still in force, so I/O still works on the same session.
+        if (fe.write_dev(14 << 20, w.data(), w.size()) != S_OK) return EIO;
+        std::vector<char> rb(w.size());
+        if (fe.read_dev(14 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        if (memcmp(w.data(), rb.data(), w.size())) return EILSEQ;
+
+        // And a strict subset is still accepted, or the guard above proves nothing.
+        // F_RING_EVENT_IDX is already a mask, unlike the F_VHU_* bit numbers.
+        memset(&m, 0, sizeof(m));
+        m.request = MU_SET_FEATURES; m.size = 8;
+        m.payload.u64 = fe.features & ~F_RING_EVENT_IDX;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        if (r.payload.u64 != 0) {
+            LOG_ERROR("SET_FEATURES refused a subset of the offer, word=", HEX(m.payload.u64));
+            return EINVAL;
+        }
+        // Re-settle the full word: leaving the device on the subset would change
+        // what the I/O below means, and the case is about the guard, not the subset.
+        memset(&m, 0, sizeof(m));
+        m.request = MU_SET_FEATURES; m.size = 8;
+        m.payload.u64 = fe.features;
+        if (!fe.transact(&m, &r, nullptr, 0, /*check_ack=*/true)) return EPROTO;
+        if (fe.write_dev(15 << 20, w.data(), w.size()) != S_OK) return EIO;
+        if (fe.read_dev(15 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(w.data(), rb.data(), w.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(14 << 20, w));
+    EXPECT_EQ(0, verify_backend(15 << 20, w));
+}
+
+// The spec marks RESET_OWNER deprecated and recommends a back-end "either ignore
+// this message, or use it to disable all rings", recording that the ambiguity arose
+// because some back-ends also discarded connection state. Ignoring it is one of the
+// two recommended readings and the only one compatible with a frontend that never
+// negotiated bit 30: such a frontend has no way to re-enable a ring, so disabling
+// here would strand it permanently. This case pins the choice, so that switching to
+// the other reading is a decision somebody makes deliberately and sees fail.
+TEST_F(VhostUserTest, reset_owner_leaves_the_device_serving) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto first = pattern(0x71, 4096);
+    auto second = pattern(0xB2, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(16 << 20, first.data(), first.size()) != S_OK) return EIO;
+
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_RESET_OWNER; m.size = 0;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        if (r.payload.u64 != 0) {
+            LOG_ERROR("RESET_OWNER was refused; the spec recommends ignoring it");
+            return EINVAL;
+        }
+
+        // Still serving, on the same session, and the bytes written before the
+        // reset are still there: "ignore" means neither the rings nor the memory
+        // table moved.
+        if (fe.write_dev(17 << 20, second.data(), second.size()) != S_OK) return EIO;
+        std::vector<char> rb(first.size());
+        if (fe.read_dev(16 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(first.data(), rb.data(), rb.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(16 << 20, first));
+    EXPECT_EQ(0, verify_backend(17 << 20, second));
+}
+
+// RESET_DEVICE is "only valid if the VHOST_USER_PROTOCOL_F_RESET_DEVICE protocol
+// feature is set by the back-end", and this backend does not set it -- so no
+// conformant frontend sends the message. Acking it as a success would tell the peer
+// that all rings were disabled and all internal state returned to initial, none of
+// which happened, and a frontend that believed it would reinitialize a device that
+// is still mid-session. Refusing costs the peer nothing: a bad value in a
+// well-formed message is a semantic violation here too, so the session carries on.
+TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_advertised) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto w = pattern(0x9D, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // The precondition this whole case rests on: the protocol word the device
+        // offered does not carry the reset feature. Asserted, not assumed, because
+        // the day it does is the day refusing this message becomes wrong.
+        if (fe.proto_features & (1ULL << P_VHU_RESET_DEVICE)) {
+            LOG_ERROR("the device advertises the reset protocol feature, so refusing "
+                      "RESET_DEVICE is no longer correct");
+            return EINVAL;
+        }
+        if (fe.write_dev(18 << 20, w.data(), w.size()) != S_OK) return EIO;
+
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_RESET_DEVICE; m.size = 0;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        if (r.payload.u64 == 0) {
+            LOG_ERROR("RESET_DEVICE was acked as a success without the protocol feature");
+            return EINVAL;
+        }
+
+        // Nothing was reset: the same session still serves, and what it wrote
+        // before the refused message is still on the backend.
+        std::vector<char> rb(w.size());
+        if (fe.read_dev(18 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(w.data(), rb.data(), w.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(18 << 20, w));
 }
 
 }  // namespace blk
