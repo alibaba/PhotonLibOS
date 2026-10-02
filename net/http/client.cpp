@@ -387,6 +387,12 @@ public:
             DEFER(exchangeBuffers());
             req.m_stream = sock.get();
             req.m_body_stream = std::move(outgoing.m_body_stream);
+            // The body stream borrows sock. Destroy it while sock is still in
+            // scope on success and on every early-return failure path.
+            DEFER({
+                req.m_body_stream.reset();
+                req.m_stream = nullptr;
+            });
             req.reset_status(HEADER_SENT);
             if (op->body_buffer_size > 0) {
                 // send body_buffer

@@ -1337,6 +1337,93 @@ public:
     }
 };
 
+struct BodyCleanupState {
+    bool closed = false;
+    bool cleanupWhileAlive = false;
+    bool destroyed = false;
+};
+
+class BodyCleanupStream : public ISocketStream {
+public:
+    std::unique_ptr<StringSocketStream> inner;
+    BodyCleanupState* state;
+
+    explicit BodyCleanupStream(BodyCleanupState* state)
+        : inner(new_string_socket_stream()), state(state) {}
+    ~BodyCleanupStream() override { state->destroyed = true; }
+    int close() override {
+        state->closed = true;
+        return 0;
+    }
+    ssize_t writev(const iovec* iov, int count) override {
+        if (state->closed) {
+            state->cleanupWhileAlive = true;
+            errno = ECANCELED;
+            return -1;
+        }
+        return inner->writev(iov, count);
+    }
+    ssize_t read(void* buffer, size_t count) override {
+        return inner->read(buffer, count);
+    }
+    ssize_t readv(const iovec* iov, int count) override {
+        return inner->readv(iov, count);
+    }
+    ssize_t write(const void* buffer, size_t count) override {
+        return inner->write(buffer, count);
+    }
+    ssize_t recv(void* buffer, size_t count, int flags = 0) override {
+        return inner->recv(buffer, count, flags);
+    }
+    ssize_t recv(const iovec* iov, int count, int flags = 0) override {
+        return inner->recv(iov, count, flags);
+    }
+    ssize_t send(const void* buffer, size_t count, int flags = 0) override {
+        return inner->send(buffer, count, flags);
+    }
+    ssize_t send(const iovec* iov, int count, int flags = 0) override {
+        return inner->send(iov, count, flags);
+    }
+    ssize_t sendfile(int fd, off_t offset, size_t count) override {
+        return inner->sendfile(fd, offset, count);
+    }
+    uint64_t timeout() const override { return inner->timeout(); }
+    void timeout(uint64_t value) override { inner->timeout(value); }
+    Object* get_underlay_object(uint64_t recursion = 0) override {
+        return inner->get_underlay_object(recursion);
+    }
+    int setsockopt(int level, int name, const void* value,
+                   socklen_t length) override {
+        return inner->setsockopt(level, name, value, length);
+    }
+    int getsockopt(int level, int name, void* value,
+                   socklen_t* length) override {
+        return inner->getsockopt(level, name, value, length);
+    }
+    int getsockname(EndPoint& address) override {
+        return inner->getsockname(address);
+    }
+    int getpeername(EndPoint& address) override {
+        return inner->getpeername(address);
+    }
+    int getsockname(char* path, size_t count) override {
+        return inner->getsockname(path, count);
+    }
+    int getpeername(char* path, size_t count) override {
+        return inner->getpeername(path, count);
+    }
+};
+
+class BodyCleanupDialer : public IDialer {
+public:
+    BodyCleanupState* state;
+
+    explicit BodyCleanupDialer(BodyCleanupState* state) : state(state) {}
+    ISocketStream* dial(const DialTarget&, uint64_t) override {
+        return new BodyCleanupStream(state);
+    }
+};
+
 TEST(http_client, per_hop_headers_preserve_configuration_and_body_callback) {
     for (int route = 0; route < 3; ++route) {
         for (bool tightBuffer : {false, true}) {
@@ -1476,6 +1563,28 @@ TEST(http_client, per_hop_headers_restore_configuration_on_body_failure) {
     };
     op.body_writer = retryWriter;
     ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, chunked_body_cleanup_precedes_failed_socket_destruction) {
+    BodyCleanupState state;
+    BodyCleanupDialer dialer(&state);
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    Client::OperationOnStack<> op(client.get(), Verb::POST,
+                                  "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("Transfer-Encoding", "chunked"));
+    auto configured = std::string(op.req.headers.serialized());
+    auto writer = [](Request*) -> ssize_t {
+        errno = EIO;
+        return -1;
+    };
+    op.body_writer = writer;
+    op.retry = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_TRUE(state.closed);
+    EXPECT_TRUE(state.cleanupWhileAlive);
+    EXPECT_TRUE(state.destroyed);
     EXPECT_EQ(configured, op.req.headers.serialized());
 }
 
