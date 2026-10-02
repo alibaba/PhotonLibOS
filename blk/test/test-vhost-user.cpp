@@ -781,16 +781,90 @@ struct MockFrontend {
     }
 
     // declare `nregions` but attach only `nfds` of them
-    bool set_mem_table_mismatched(uint32_t nregions, int nfds, uint64_t* ack) {
+    // Send a SET_MEM_TABLE whose three numbers disagree, so each of the handler's
+    // agreement checks can be violated on its own: `nregions` is what the payload
+    // declares, `nfds` is how many descriptors actually travel with it, and
+    // `payload_regions` is how many of them the declared length covers. All the fds
+    // are the same memfd -- nothing here is meant to be mapped, only rejected --
+    // and the region itself is the mock's real one, so a message that got as far as
+    // mapping would succeed and the rejection is the only thing under test.
+    bool set_mem_table_mismatched(uint32_t nregions, int nfds, uint64_t* ack,
+                                  uint32_t payload_regions = 1) {
         mu_msg m, r;
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_MEM_TABLE;
-        m.size = offsetof(mu_mem, regions) + sizeof(mu_mem_region);
+        m.size = offsetof(mu_mem, regions) + payload_regions * sizeof(mu_mem_region);
         m.payload.memory.nregions = nregions;
         m.payload.memory.regions[0] = mu_mem_region{0, MEM_SIZE, (uint64_t)mem, 0};
-        if (!transact(&m, &r, &memfd, nfds)) return false;
+        int fds[8];
+        for (int i = 0; i < nfds && i < 8; i++) fds[i] = memfd;
+        if (!transact(&m, &r, fds, nfds)) return false;
         *ack = r.payload.u64;
         return true;
+    }
+
+    // Send a SET_MEM_TABLE that declares `nregions` but maps one of them with a
+    // length of zero, which is the only way to make the backend's mmap fail from
+    // this side of a socket: every descriptor arriving over SCM_RIGHTS is a valid
+    // one by construction, and an offset past the end of a memfd still maps. The
+    // count, the fd count and the payload length all agree, so this reaches the
+    // mapping and nothing else.
+    bool set_mem_table_unmappable(uint32_t nregions, uint64_t* ack) {
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_SET_MEM_TABLE;
+        m.size = offsetof(mu_mem, regions) + nregions * sizeof(mu_mem_region);
+        m.payload.memory.nregions = nregions;
+        m.payload.memory.regions[0] = mu_mem_region{0, 0, (uint64_t)mem, 0};
+        int fds[8];
+        for (uint32_t i = 0; i < nregions && i < 8; i++) fds[i] = memfd;
+        if (!transact(&m, &r, fds, (int)nregions)) return false;
+        *ack = r.payload.u64;
+        return true;
+    }
+
+    // Send a request whose declared payload is SHORTER than the fields its handler
+    // reads, without waiting for a reply -- the point is that none comes. `size`
+    // bytes of the zeroed union go out after the header, which is what a truncated
+    // message looks like on the wire and, before recv_msg grew a minimum, exactly
+    // what a well-formed message declaring zero also looked like.
+    bool send_truncated(int32_t request, uint32_t size) {
+        mu_msg m;
+        memset(&m, 0, sizeof(m));
+        m.request = request;
+        m.flags = MU_NEED_REPLY;   // send() adds the version
+        m.size = size;
+        return send(&m);
+    }
+
+    // Wait for the peer to close, bounded, and report WHICH outcome arrived: 0 on
+    // a close, EPROTO if a reply came instead, ETIMEDOUT if the session simply
+    // stayed up. A refusal that ends the session and one that error-acks are
+    // different behaviours and a test for one must not accept the other, so "no
+    // reply yet" is not the answer -- and the wait has to be bounded, because a
+    // backend stuck reading a payload that never arrives also sends no reply and
+    // would otherwise be indistinguishable from one that closed.
+    int expect_eof(int ms = 5000) {
+        for (int waited = 0; waited < ms; waited += 100) {
+            pollfd pfd{fd, POLLIN, 0};
+            if (::poll(&pfd, 1, 100) < 0) return errno;
+            char b;
+            ssize_t r = ::recv(fd, &b, 1, MSG_DONTWAIT);
+            if (r == 0) return 0;
+            if (r > 0) return EPROTO;
+            // ECONNRESET is the peer closing too, and not a second outcome to
+            // distinguish: a refusal that rejects a message WITHOUT reading its
+            // payload leaves those bytes unread, and closing a socket with unread
+            // data makes the kernel send RST where it would otherwise send FIN. So
+            // which of the two this sees depends only on whether the rejected
+            // message declared a payload at all -- measured, not assumed: the rows
+            // declaring zero bytes read as a clean EOF and the rows declaring four
+            // or eight read as ECONNRESET. Both mean the session is over; only a
+            // reply means it is not.
+            if (errno == ECONNRESET) return 0;
+            if (errno != EAGAIN) return errno;
+        }
+        return ETIMEDOUT;
     }
 
     // Publish a chain the CALLER built and return the device's status byte, or -1
@@ -2874,7 +2948,11 @@ TEST_F(VhostUserTest, detach_waits_for_the_avail_backlog) {
 // SET_MEM_TABLE used to clear the live mappings BEFORE validating, so a rejected
 // message left addr_set true over unmapped regions and the next SET_VRING_ENABLE
 // dispatched into freed memory. The real assertion is therefore not the ack -- it
-// is that IO STILL WORKS afterwards.
+// is that IO STILL WORKS afterwards, which every row below is measured against.
+//
+// The rows disagree about one thing each, so a rejection says which check did it:
+// the count against the fds, the count against the ceiling, the count against the
+// floor, the count against the payload length that actually arrived.
 TEST_F(VhostUserTest, bad_mem_table) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -2888,16 +2966,31 @@ TEST_F(VhostUserTest, bad_mem_table) {
     int rc = run_frontend([&](MockFrontend& fe) -> int {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
         if (!fe.negotiate(false)) return EPROTO;
-        struct { uint32_t nregions; int nfds; } bad[] = {
-            {2, 1},   // fewer fds than declared regions
-            {9, 1},   // past the 8-region payload
-            {0, 1},   // and the other direction
+        // Fields in declaration order: the region count the payload DECLARES, the
+        // number of regions its declared LENGTH covers, and the number of
+        // descriptors actually sent with it.
+        struct { uint32_t nregions, payload_regions; int nfds; } bad[] = {
+            {2, 1, 1},   // fewer fds than declared regions
+            {9, 1, 1},   // past the 8-region payload
+            {0, 1, 1},   // and the other direction
+            // Zero regions, zero fds, and a payload exactly the size of the fixed
+            // prefix: the literal empty memory table. Every count agrees with every
+            // other count, so the floor on nregions is the ONLY thing that rejects
+            // it -- this is the row that gives that floor a witness. Drop the floor
+            // and the message is accepted, the live table is unmapped, and the IO
+            // below never completes.
+            {0, 0, 0},
+            // Two regions declared, two fds sent, and a payload long enough for one.
+            // Every count agrees, so this is the row that reads the declared count
+            // against the length that actually arrived.
+            {2, 1, 2},
         };
         for (auto& b : bad) {
             uint64_t ack = 0;
-            if (!fe.set_mem_table_mismatched(b.nregions, b.nfds, &ack)) return EPROTO;
+            if (!fe.set_mem_table_mismatched(b.nregions, b.nfds, &ack, b.payload_regions))
+                return EPROTO;
             if (ack == 0) {
-                LOG_ERROR("SET_MEM_TABLE `/` was accepted", b.nregions, b.nfds);
+                LOG_ERROR("SET_MEM_TABLE was accepted with ` regions, ` fds and a ` region payload", b.nregions, b.nfds, b.payload_regions);
                 return EINVAL;
             }
         }
@@ -3048,20 +3141,13 @@ TEST_F(VhostUserTest, oversized_payload) {
         size_t hdr = offsetof(mu_msg, payload);
         if (::send(fe.fd, &m, hdr, 0) != (ssize_t)hdr) return EPROTO;
 
-        // The backend must end the session ITSELF, and promptly. Polling for EOF
+        // The backend must end the session ITSELF, and promptly. Waiting for EOF
         // rather than for a missing reply is the whole test: an unbounded payload
         // read also produces no reply, it just blocks forever waiting for bytes
-        // that never come, so "no reply" cannot tell the two apart.
-        bool eof = false;
-        for (int i = 0; i < 50 && !eof; i++) {
-            pollfd pfd{fe.fd, POLLIN, 0};
-            if (::poll(&pfd, 1, 100) < 0) return errno;
-            char b;
-            ssize_t r = ::recv(fe.fd, &b, 1, MSG_DONTWAIT);
-            if (r == 0) { eof = true; break; }
-            if (r < 0 && errno != EAGAIN) return errno;
-        }
-        if (!eof) return ETIMEDOUT;   // still blocked on the phantom payload
+        // that never come, so "no reply" cannot tell the two apart and the wait has
+        // to distinguish a close from a stall.
+        int eofrc = fe.expect_eof();
+        if (eofrc) return eofrc;   // ETIMEDOUT: still blocked on the phantom payload
         fe.close_conn();
 
         // a fresh connection must be accepted and served
@@ -3075,6 +3161,170 @@ TEST_F(VhostUserTest, oversized_payload) {
     });
     EXPECT_EQ(0, rc);
     EXPECT_EQ(0, verify_backend(5 << 20, w));
+}
+
+// The finding's own repro: SET_MEM_TABLE declaring a zero-length payload. recv_msg
+// bounded only the MAXIMUM, so the union arrived zeroed and nregions read back as
+// 0 -- which agreed with the zero fds travelling with it, passed the handler's
+// region/fd check, unmapped the live table, and was acked as a SUCCESS. The device
+// was then left with nothing to translate a vring address through, and the frontend
+// had been told the table was installed.
+//
+// A payload too short to hold the field about to be read is a disagreement about
+// FRAMING and not a bad value, so it ends the session the way an oversized payload
+// already did. The assertions are the two halves of that: no reply at all, and a
+// reconnect that is served normally -- reading back, on the new session, what the
+// old one wrote.
+TEST_F(VhostUserTest, a_truncated_mem_table_ends_the_session_and_a_reconnect_still_serves) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto w = pattern(0x5C, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // Live and serving FIRST: the unguarded backend did not merely reject this
+        // message badly, it destroyed a device that was working.
+        if (fe.write_dev(3 << 20, w.data(), w.size()) != S_OK) return EIO;
+        if (!fe.send_truncated(MU_SET_MEM_TABLE, 0)) return EPROTO;
+        int e = fe.expect_eof();
+        if (e) {
+            LOG_ERROR("SET_MEM_TABLE with a zero-length payload did not end the session: `", e);
+            return e;
+        }
+        fe.close_conn();
+
+        MockFrontend fe2;
+        if (!fe2.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe2.negotiate(false)) return EPROTO;
+        std::vector<char> rb(w.size());
+        if (fe2.read_dev(3 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(w.data(), rb.data(), w.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(3 << 20, w));
+}
+
+// The same bound on every other message whose handler reads a fixed structure. Each
+// row connects fresh, because the previous row ended its session, and sends a
+// payload shorter than the fields the handler is about to read.
+//
+// Each row negotiates first, and not only to reach a realistic state: REPLY_ACK is
+// what makes an accepted message answer at all, so without it an accepted row would
+// sit silent and be indistinguishable from a backend that hung. Negotiated, the two
+// refusals come apart cleanly -- a reply means the message was processed, EOF means
+// the framing was rejected -- and only the second is correct for a message whose
+// payload does not contain the field its handler reads.
+//
+// Rows whose message would have been REJECTED on its contents are in the table too,
+// a vring num of zero and an address that translates to nothing among them. Their
+// error ack is a different observable from a closed session, and it is the wrong one
+// here.
+TEST_F(VhostUserTest, truncated_payloads_end_the_session) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    struct Row { int32_t request; uint32_t size; const char* what; };
+    static const Row rows[] = {
+        {MU_SET_FEATURES,     0, "the feature word"},
+        {MU_SET_VRING_NUM,    4, "the index but not the num"},
+        {MU_SET_VRING_ADDR,   8, "the index and flags but none of the addresses"},
+        {MU_SET_VRING_ENABLE, 0, "the index"},
+        {MU_GET_CONFIG,       4, "the offset but not the size"},
+    };
+    auto w = pattern(0xB4, 4096);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        for (auto& r : rows) {
+            MockFrontend t;
+            if (!t.connect_to(SOCK_PATH)) return ECONNREFUSED;
+            if (!t.negotiate(false)) return EPROTO;
+            if (!t.send_truncated(r.request, r.size)) return EPROTO;
+            int e = t.expect_eof();
+            if (e) {
+                LOG_ERROR("` truncated to ` bytes did not end the session: `", r.what, r.size, e);
+                return e;
+            }
+        }
+        // Five sessions ended mid-message. The listener, the device and its queue
+        // have to be untouched by all of them, which is what makes this a test of
+        // the framing check rather than of the teardown that follows one.
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(9 << 20, w.data(), w.size()) != S_OK) return EIO;
+        std::vector<char> rb(w.size());
+        if (fe.read_dev(9 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(w.data(), rb.data(), w.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(9 << 20, w));
+}
+
+// The finding's second half. mem.clear() ran BEFORE the new regions were mapped, so
+// an mmap failure could not honour the promise the validation above it was written
+// to keep -- that a rejected message leaves the device serving exactly as it was. It
+// stopped every queue, unmapped the live table, and then error-acked a message whose
+// only defect was that ONE region of the replacement could not be mapped.
+//
+// The replacement is now built complete and switched in only once every region is
+// mapped, so a failure costs nothing but itself: no queue is stopped, no mapping is
+// dropped, and the error ack means what it says. The assertions are the ones
+// bad_mem_table established as the real ones -- not the ack, but that IO still works
+// afterwards, here on the SAME session and against the table it already had.
+//
+// A zero-length region is the lever, and it is deliberately not rejected earlier as
+// a bad value: one failure path is easier to reason about than two, and this is the
+// same path a real ENOMEM, or a process at its mapping limit, takes.
+TEST_F(VhostUserTest, a_region_that_cannot_be_mapped_leaves_the_running_table_alone) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto first = pattern(0x31, 4096);
+    auto second = pattern(0x62, 4096);
+    int leaked = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.write_dev(11 << 20, first.data(), first.size()) != S_OK) return EIO;
+
+        int fds_before = MockFrontend::count_fds();
+        if (fds_before <= 0) return ENOSYS;
+        uint64_t ack = 0;
+        if (!fe.set_mem_table_unmappable(1, &ack)) return EPROTO;
+        if (ack == 0) {
+            LOG_ERROR("SET_MEM_TABLE with a zero-length region was accepted");
+            return EINVAL;
+        }
+        // Counted here, with no wait: the descriptor is closed inside the handler,
+        // which runs to completion before this ack is written, so receiving the ack
+        // is already the synchronisation the count needs. That is NOT true of a
+        // message closed by msg_loop's own cleanup, which runs after the reply --
+        // see unrecognised_message_fds for why that one has to wait.
+        leaked = MockFrontend::count_fds() - fds_before;
+
+        if (fe.write_dev(12 << 20, second.data(), second.size()) != S_OK) return EIO;
+        std::vector<char> rb(first.size());
+        if (fe.read_dev(11 << 20, rb.data(), rb.size()) != S_OK) return EIO;
+        return memcmp(first.data(), rb.data(), rb.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, leaked);
+    EXPECT_EQ(0, verify_backend(11 << 20, first));
+    EXPECT_EQ(0, verify_backend(12 << 20, second));
 }
 
 // The backend signals the callfd once when SET_VRING_CALL installs it, so that a

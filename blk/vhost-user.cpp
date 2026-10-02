@@ -250,6 +250,57 @@ static_assert(offsetof(vhost_vring_addr, avail_user_addr) == 24, "vhost_vring_ad
 
 #define VHU_MSG_MAX_FDS 8
 
+// The smallest payload each request's handler reads, and 0 for the requests that
+// read none. recv_msg bounded only the MAXIMUM, so a message declaring a shorter
+// payload arrived with the union zeroed and every field reading back as 0 -- and
+// for SET_MEM_TABLE that zero looked exactly like a frontend saying "no
+// regions": nregions=0, which satisfied the handler's own region/fd agreement
+// check, unmapped the live table, and was acked as a success. The device then had
+// no memory to translate through and the frontend no reason to suspect it.
+//
+// A payload too short to hold the fields about to be read is a disagreement about
+// FRAMING, not a bad value. It is caught here, before any handler runs, because a
+// handler is handed a union that has already been zeroed and then partly filled: it
+// cannot tell a truncated message from a well-formed one that declares zero unless
+// it goes back to m->size and re-derives the framing itself. Doing that once, where
+// the declared length is already in hand, is what keeps the handlers from each
+// needing to know it. Ending the session matches the treatment of an oversized
+// payload, and for the same reason: the peer's idea of the message layout and ours
+// disagree, and nothing downstream can be trusted until that is settled.
+//
+// Semantic violations stay where they are: a region count that disagrees with the fd
+// count, a vring num that is not a power of two, an index past the queue count.
+// Those are readable, and their handlers reject them with an error ack and let the
+// session carry on, so one bad message does not cost the peer its connection.
+//
+// SET_MEM_TABLE is the one request that needs both halves, because its payload is
+// variable-length: the fixed prefix is checked here and the region count against the
+// length that actually arrived is checked there, where the count is known.
+static uint32_t payload_min(int32_t request) {
+    switch (request) {
+    case VHOST_USER_SET_FEATURES:
+    case VHOST_USER_SET_PROTOCOL_FEATURES:
+    case VHOST_USER_SET_VRING_NUM:
+    case VHOST_USER_SET_VRING_BASE:
+    case VHOST_USER_GET_VRING_BASE:
+    case VHOST_USER_SET_VRING_ENABLE:
+    case VHOST_USER_SET_VRING_KICK:
+    case VHOST_USER_SET_VRING_CALL:
+        return sizeof(uint64_t);            // u64, or vhost_vring_state: both 8
+    case VHOST_USER_SET_VRING_ADDR:
+        return sizeof(vhost_vring_addr);    // memcpy'd out whole
+    case VHOST_USER_GET_CONFIG:
+        return offsetof(vhost_user_config, flags);   // the offset and size it reads
+    case VHOST_USER_SET_MEM_TABLE:
+        // The fixed prefix only. How many regions follow is the handler's business,
+        // because the count itself has to be on the wire before it can be checked
+        // against the length -- see handle_mem_table.
+        return offsetof(vhost_user_memory, regions);
+    default:
+        return 0;   // reads no payload: GET_*, OWNER/RESET, and the tolerated no-ops
+    }
+}
+
 // ----------------------------------------------------------------------------
 
 // a unix socket path lives in sockaddr_un::sun_path (108 bytes including the
@@ -637,13 +688,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
         DEFER(if (!ok) { for (int i = 0; i < *nfds; i++) ::close(fds[i]); *nfds = 0; });
         if (recv_exact(fd, m, offsetof(vhost_user_msg, payload), fds, nfds) < 0)
             return -1;
-        if (m->size > sizeof(m->payload)) {
-            // copied out first: m is not const here, and alog's forwarding
-            // reference cannot bind a packed field (see the access rule above)
-            int32_t req = m->request;
-            uint32_t sz = m->size;
+        // copied out first: m is not const here, and alog's forwarding
+        // reference cannot bind a packed field (see the access rule above)
+        int32_t req = m->request;
+        uint32_t sz = m->size;
+        if (sz > sizeof(m->payload))
             LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, the largest this protocol has is `", req, sz, (uint32_t)sizeof(m->payload));
-        }
+        // Both bounds belong here rather than in the handlers: this is the one
+        // place that runs before the ambiguity exists. Past the memset below,
+        // bytes after the declared length read as zeroes, exactly like ones a
+        // well-formed message would have carried. A handler can still read
+        // m->size -- handle_mem_table does, for its variable-length tail --
+        // but only a bound checked here refuses a message before any of its
+        // fields has been read out of that zeroed region.
+        uint32_t need = payload_min(req);
+        if (sz < need)
+            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, its handler reads at least `", req, sz, need);
         memset(&m->payload, 0, sizeof(m->payload));   // no stale union bytes from
                                                       // the previous message
         if (m->size && recv_exact(fd, &m->payload, m->size, fds, nfds) < 0)
@@ -995,14 +1055,60 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // Takes ownership of EVERY fd in fds[], marking the ones it keeps as -1 so
     // msg_loop closes only what is left over.
     int handle_mem_table(const vhost_user_msg* m, int* fds, int nfds) {
-        uint32_t n = m->payload.memory.nregions;
+        vhost_user_memory t;   // memcpy out, per the access rule on vhost_user_msg
+        memcpy(&t, &m->payload.memory, sizeof(t));
+        uint32_t n = t.nregions;
+        uint32_t sz = m->size;
         // Validate BEFORE anything is torn down: a rejected message must leave
-        // the device serving exactly as it was. Clearing the table first (as
-        // this used to) unmapped the live regions while addr_set stayed
-        // true, and since a failed SET_MEM_TABLE only sets ack=1 and the session
-        // carries on, the next SET_VRING_ENABLE resumed dispatch into them.
-        if (n > 8 || (int)n != nfds)
+        // the device serving exactly as it was, since a failed SET_MEM_TABLE
+        // only sets ack=1 and the session carries on. Unmapping first does not
+        // leave a device that merely stops serving -- see vq_invalidate() for
+        // the mechanism, and note it was measured: clearing the table without
+        // also invalidating the queue addresses took the process down.
+        //
+        // n has a floor and not just a ceiling: zero regions satisfies every
+        // agreement check below -- it matches a fd count of zero, and it needs
+        // no region bytes past the prefix -- and before this floor existed it
+        // went on to unmap the running table while acking success. An empty
+        // table is not a state this device can serve, so a message declaring
+        // one is either truncated (recv_msg catches that before it gets here)
+        // or lying, and both are rejections.
+        if (n < 1 || n > 8 || (int)n != nfds)
             LOG_ERROR_RETURN(EPROTO, -1, "vhost-user mem table: ` regions vs ` fds", n, nfds);
+        // recv_msg proved only the fixed prefix arrived, so the declared count has
+        // to be re-checked against the length that actually came: regions past it
+        // would be read out of the zeroed union and fail several steps later as a
+        // zero-length mmap, naming a cause that is not the real one.
+        uint32_t need = (uint32_t)(offsetof(vhost_user_memory, regions) +
+                                   (size_t)n * sizeof(vhost_user_memory_region));
+        if (sz < need)
+            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user mem table: ` regions need ` payload bytes, the message carried `", n, need, sz);
+
+        // Mapped COMPLETE before the running table is touched, and that order is
+        // the other half of the promise above. Clearing first and mapping second
+        // meant an mmap failure -- ENOMEM, a region of zero length, one more
+        // mapping than the process is allowed -- left the device with no memory at
+        // all, and the error ack told the frontend only that the NEW table was
+        // refused, not that the old one was already gone. Nothing below this
+        // loop returns an error, so from here the swap is unconditional.
+        MemTable next;
+        bool ok = false;
+        DEFER(if (!ok) next.clear());
+        next.regions.reserve(n);
+        for (uint32_t i = 0; i < n; i++) {
+            vhost_user_memory_region& r = t.regions[i];
+            int fd = fds[i];
+            fds[i] = -1;   // ours from here: the mmap failure below closes it,
+                           // and anything past it belongs to the region table
+            void* base = ::mmap(nullptr, (size_t)r.memory_size, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, fd, (off_t)r.mmap_offset);
+            if (base == MAP_FAILED) {
+                ::close(fd);   // not in `next` yet, so its cleanup will not see it
+                LOG_ERRNO_RETURN(0, -1, "vhost-user region mmap failed, size `", r.memory_size);
+            }
+            next.regions.push_back(MemTable::Region{r.guest_phys_addr, r.userspace_addr,
+                                                    r.memory_size, (char*)base, fd});
+        }
 
         // the old mappings back the vring HVAs (and possibly in-flight request
         // iovs): stop dispatch, drain, then swap the table and retranslate.
@@ -1017,22 +1123,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
             vq_drain(i);   // in-flight iovs point into the OLD mappings
         }
         mem.clear();
-        for (uint32_t i = 0; i < n; i++) {
-            vhost_user_memory_region r;   // memcpy out, per the access rule on vhost_user_msg
-            memcpy(&r, &m->payload.memory.regions[i], sizeof(r));
-            void* base = ::mmap(nullptr, (size_t)r.memory_size, PROT_READ | PROT_WRITE,
-                                MAP_SHARED, fds[i], (off_t)r.mmap_offset);
-            if (base == MAP_FAILED) {
-                mem.clear();   // munmaps and closes the regions already stored
-                // those mappings backed every vring: drop them all
-                for (uint32_t j = 0; j < nqueues; j++)
-                    vq_invalidate(j);
-                LOG_ERRNO_RETURN(0, -1, "vhost-user region mmap failed, size `", r.memory_size);
-            }
-            mem.regions.push_back(MemTable::Region{r.guest_phys_addr, r.userspace_addr,
-                                                   r.memory_size, (char*)base, fds[i]});
-            fds[i] = -1;   // owned by mem now; msg_loop must not close it
-        }
+        mem.regions = std::move(next.regions);
+        ok = true;         // cancels the cleanup above, which therefore never
+                           // inspects the moved-from vector
         LOG_INFO("vhost-user mem table: ` regions", n);
         for (uint32_t i = 0; i < nqueues; i++) {
             vq_retranslate(i);
