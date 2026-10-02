@@ -1541,6 +1541,33 @@ TEST(http_client, per_hop_headers_keep_duplicate_order_and_common_proxy_auth) {
     EXPECT_NE(std::string::npos, wire.find("Proxy-Authorization: Basic common\r\n"));
 }
 
+TEST(http_client, empty_proxy_authorization_overrides_url_credentials) {
+    for (bool callerHeader : {false, true}) {
+        HeaderCaptureDialer dialer;
+        std::unique_ptr<Client> client(new_http_client());
+        client->set_dialer(&dialer);
+        client->set_proxy("http://url:credentials@proxy.example:8080");
+        ASSERT_EQ(0, client->common_headers()->insert(
+                         "Proxy-Authorization",
+                         callerHeader ? "Basic common" : ""));
+        Client::OperationOnStack<> op(client.get(), Verb::GET,
+                                      "http://origin.example/");
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        if (callerHeader) {
+            ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization", ""));
+        }
+        auto configured = std::string(op.req.headers.serialized());
+        auto common = std::string(client->common_headers()->serialized());
+        ASSERT_EQ(0, op.call());
+        ASSERT_EQ(1U, dialer.auth.size());
+        EXPECT_TRUE(dialer.auth[0].empty());
+        EXPECT_EQ(std::string::npos,
+                  dialer.last->output().find("Proxy-Authorization:"));
+        EXPECT_EQ(configured, op.req.headers.serialized());
+        EXPECT_EQ(common, client->common_headers()->serialized());
+    }
+}
+
 TEST(http_client, per_hop_headers_restore_configuration_on_body_failure) {
     HeaderCaptureDialer dialer;
     std::unique_ptr<Client> client(new_http_client());

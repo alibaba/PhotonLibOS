@@ -453,9 +453,16 @@ public:
         auto proxy_auth = proxy_auth_of(op);
         auto& proxy = op->proxy_url.empty() ? m_proxy_url : op->proxy_url;
         auto auth = op->req.headers.find("Proxy-Authorization");
-        auto header_proxy_auth = auth == op->req.headers.end() ?
-            m_common_headers["Proxy-Authorization"] : auth.second();
-        if (op->enable_proxy && !proxy.empty() && !header_proxy_auth.empty()) {
+        std::string_view header_proxy_auth;
+        bool has_header_proxy_auth = auth != op->req.headers.end();
+        if (has_header_proxy_auth) {
+            header_proxy_auth = auth.second();
+        } else {
+            auto common_auth = m_common_headers.find("Proxy-Authorization");
+            has_header_proxy_auth = common_auth != m_common_headers.end();
+            if (has_header_proxy_auth) header_proxy_auth = common_auth.second();
+        }
+        if (op->enable_proxy && !proxy.empty() && has_header_proxy_auth) {
             proxy_auth.assign(header_proxy_auth.data(), header_proxy_auth.size());
         }
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
