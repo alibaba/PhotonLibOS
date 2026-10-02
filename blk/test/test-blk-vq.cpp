@@ -769,12 +769,17 @@ TEST_F(ChainFixture, a_write_carrying_no_payload_does_not_persist) {
 // ---------------------------------------------------------------------------
 // Ring generations
 //
-// `ready` answers "is there a usable ring right now", which is not the question
-// a request suspended inside the backend needs answered. The transport clears
-// ready when a reset or an unmap retires a ring and sets it true again for the
-// replacement, so a request that suspended across that window passes the check
-// and appends its completion to a used ring whose negotiation it never belonged
-// to. The generation token is what distinguishes "a ring" from "that ring".
+// What a request suspended inside the backend needs to know is whether the ring it
+// was dispatched against is still the published one, and `ready` cannot answer
+// that: it says whether a ring is usable NOW, and a transport that retires one sets
+// it true again for the replacement, so a request suspended across that window
+// would append its completion to a used ring whose negotiation it never belonged
+// to. The generation token is what distinguishes "a ring" from "that ring", and it
+// is the whole of that identity check -- `ready` is not consulted on the completion
+// path at all, because it is the DISPATCH gate, and a frontend can pause a queue
+// whose ring is perfectly good. That is not a reason to throw away a request already
+// taken. The cases immediately below pin the first half of that distinction --
+// a retired ring is declined -- and DepthFixture's two pause cases pin the second.
 // ---------------------------------------------------------------------------
 
 // lay a FLUSH chain into `r`'s descriptor table: a readable header at `hoff`
@@ -971,6 +976,12 @@ public:
     // create() has run. Destroyed in TearDown, before `img` goes.
     std::unique_ptr<test::RecordingFile> rf;
     size_t soff = 0;
+    // `ready` as a state this fixture owns instead of the always-true thunk the
+    // other fixtures bind: one case below has to clear it while requests are parked
+    // inside the backend, which is what a transport does when its frontend pauses a
+    // queue, and the engine's answer to that is what the case measures.
+    bool ready_state = true;
+    static bool ready_thunk(void* a) { return ((DepthFixture*)a)->ready_state; }
 
     // Under the ring size, so no avail entry is overwritten by the publish loop,
     // and far enough under it that a cap reading `num` instead of `queue_depth`
@@ -986,7 +997,7 @@ public:
         srv.capacity.store(CHAIN_CAPACITY, std::memory_order_relaxed);
         srv.serial = CHAIN_SERIAL;
         srv.tag = "vq-depth";
-        srv.hooks.ready.bind(nullptr, &ready_true);
+        srv.hooks.ready.bind(this, &ready_thunk);
         srv.hooks.notify.bind(nullptr, &notify_thunk);
         srv.hooks.translate.bind(&guest, &chain_translate);
         srv.event_idx.store(false, std::memory_order_relaxed);
@@ -1164,6 +1175,59 @@ TEST_F(DepthFixture, a_ring_cleared_under_a_parked_request_is_not_dispatched_int
     EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
     EXPECT_EQ(0, vring_used_idx(ring.used));
     EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+}
+
+// The complement of the case above, and the difference between the two is the whole
+// of a pause. `ready` answers "may the loop take more work from this ring", which is
+// what a transport clears when its frontend pauses a queue; the ring itself is still
+// published, still mapped and still at the same generation. A request already
+// dispatched holds a chain that was CONSUMED from the avail ring -- last_avail moved
+// past it at dispatch, and no driver re-publishes a buffer it is still waiting on --
+// so refusing that request's completion loses it outright: the backend IO lands and
+// the guest is never told. That is why handle_req gates on `stopping` and the
+// generation, the two facts that say the ring this request belongs to is GONE, and
+// never on `ready`.
+//
+// Clearing the ring (above) and pausing the queue (here) must therefore stay
+// distinguishable, and the counts below are what keep them so: a cleared ring
+// publishes nothing, a paused one publishes everything it already took.
+TEST_F(DepthFixture, a_paused_ring_still_receives_the_completions_it_owes) {
+    srv.dispatch_avail();
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    ASSERT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+
+    ready_state = false;      // the pause, as the engine sees it
+    rf->release_gate(1024);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+
+    // Both owed completions landed, and NEITHER admitted a successor: dispatching
+    // more work is exactly what a pause does forbid, and redispatch_backlog is the
+    // one completion-side path that consults `ready`. So the four chains still in
+    // the avail ring stay there, which is what makes arrivals an equality here
+    // rather than a lower bound.
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) DEPTH, vring_used_idx(ring.used));
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+}
+
+// The same pause landing EARLIER: after dispatch_avail queued the coroutines but
+// before either of them ran. handle_req gates twice -- once before it serves and
+// once before it publishes -- and a pause can fall inside either window. The case
+// above can only reach the second, because its requests are already parked inside
+// the backend by the time `ready` is cleared; this one reaches the first, and both
+// have to answer the same way or a pause would drop a request on nothing more than
+// how far the scheduler had happened to get.
+TEST_F(DepthFixture, a_pause_before_a_queued_request_runs_still_lets_it_complete) {
+    srv.dispatch_avail();     // thread_create only queues: nothing has run yet
+    ready_state = false;      // the pause, before either coroutine is scheduled
+    rf->release_gate(1024);   // open, so they run straight through instead of parking
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) DEPTH, vring_used_idx(ring.used));
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
 }
 
 int main(int argc, char** argv) {

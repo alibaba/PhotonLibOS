@@ -1171,20 +1171,40 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     // whoever takes it look at a count that says it is free.
     DEFER(redispatch_backlog());
     DEFER(in_flight--);
-    // Readiness has to gate serve_chain too, not just the completion below: this
-    // coroutine was queued by dispatch_avail and may run long after, by which
-    // time a transport hook can have invalidated the ring. serve_chain bounds the
-    // descriptor INDEX against num but cannot tell a null desc from a valid one.
-    // Leaving the request uncompleted is the documented handover behaviour:
-    // whoever serves next resumes from used->idx and re-serves it (virtio-blk ops
-    // are idempotent).
+    // What neither gate consults is `hooks.ready`, and that absence is the point.
+    // ready answers "may the loop take more work from this ring", and false does
+    // NOT imply the ring is gone: a frontend pausing a queue clears it with the
+    // ring published and every mapping intact, and so does the quiesce a transport
+    // runs around an interrupt-fd swap. A request standing here holds a chain
+    // dispatch_avail already consumed: last_avail moved past it, and no driver
+    // re-publishes a buffer it is still waiting on. Declining it therefore loses it
+    // outright -- the backend IO lands, the status byte is written, used->idx never
+    // advances, and the frontend waits for an interrupt that cannot come.
+    // Re-enabling does not recover it either, because the restart re-derives
+    // last_avail from the used ring and the wrap-safe comparison there refuses to
+    // rewind it.
     //
-    // The generation answers a question `ready` cannot. ready says a ring is
-    // usable now; the transport clears it when a reset or an unmap retires the
-    // ring and then sets it true again for the replacement, so a request that
-    // suspended across that window passes the ready check and would append its
-    // completion to a used ring whose negotiation it never belonged to.
-    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire() ||
+    // The two facts that DO retire a request are the ones tested below. `stopping`
+    // is this engine's own teardown, set before the transport unmaps anything the
+    // request holds. The generation says the ring this request was dispatched
+    // against is still the published one: every path that nulls or replaces those
+    // four fields goes through set_ring()/clear_ring(), and both bump it. A ring
+    // that is gone declines here; a ring that is merely paused does not.
+    //
+    // This gates serve_chain and not only the completion below, because this
+    // coroutine was queued by dispatch_avail and may run long after. serve_chain
+    // bounds the descriptor INDEX against num but cannot tell a null desc from a
+    // valid one; no transport assigns those three directly -- set_ring() and
+    // clear_ring() are the only writers -- so the bump above is also what retires a
+    // request in front of a null one, and no separate validity hook is needed.
+    // (`num` is the exception: a transport may write it directly, and then the
+    // engine is relying on that transport to have quiesced this queue first, since
+    // num bounds serve_chain's descriptor index and divides in vring_used_append.
+    // Both current direct writers do -- a ring resize quiesces in its own handler,
+    // and a session reset's callers quiesce every queue before they call it.)
+    // Leaving a request uncompleted is the documented handover: whoever serves next
+    // resumes from used->idx and re-serves it (virtio-blk ops are idempotent).
+    if (stopping.load(std::memory_order_relaxed) ||
         gen != generation.load(std::memory_order_acquire))
         return;
     uint32_t written = 0;
@@ -1194,8 +1214,10 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
                            num, capacity.load(std::memory_order_relaxed),
                            hooks.translate, &written);
     // and again after: serve_chain yields inside preadv/pwritev, and complete_req
-    // dereferences used and avail
-    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire() ||
+    // dereferences used and avail. Same two facts, for the same reason -- a ring
+    // retired while this request was inside the backend is not one it may publish
+    // into, whatever the transport's dispatch gate now says.
+    if (stopping.load(std::memory_order_relaxed) ||
         gen != generation.load(std::memory_order_acquire))
         return;   // tearing down, or the ring this request came from is gone
     complete_req(head, written);

@@ -718,6 +718,13 @@ struct VhostUserDeviceImpl : IBlkDevice {
             LOG_WARN("vhost-user callfd signal failed, ", ERRNO());
     }
 
+    // Bound to Hooks::ready, so this is the engine's DISPATCH gate: may the loop
+    // take more work from this ring. `enabled` belongs here and only here -- it
+    // tracks the frontend's SET_VRING_ENABLE state, and the transport also clears it
+    // while quiescing a queue for a remap, a resize or a teardown. What clearing it
+    // must not do is retire the requests already dispatched: a frontend pause leaves
+    // the ring published and every mapping intact, which is why the engine's
+    // completion path does not read this hook at all. See handle_req.
     bool vq_may_dispatch(uint32_t idx) {
         auto* q = vqs[idx];
         return q->x.enabled.load(std::memory_order_relaxed) && q->x.addr_set &&

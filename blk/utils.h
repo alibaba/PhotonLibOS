@@ -682,9 +682,15 @@ public:
         Delegate<void*, uint64_t, size_t> translate;
         // the used ring advanced and the driver asked for an interrupt
         Delegate<void> notify;
-        // may the loop dispatch, and may completions be published, right now?
-        // Unbound means "never" (fire() returns false), which is the safe
-        // default before the ring is configured.
+        // May the loop take more work from this ring right now? Unbound means
+        // "never" (fire() returns false), the safe default before the ring is
+        // configured. This is a DISPATCH gate and nothing else, and keeping it that
+        // way is load-bearing: false does NOT imply the ring is gone. A frontend
+        // pausing a queue clears it with the ring published and every mapping
+        // intact, and the requests already dispatched must still be able to complete
+        // -- see handle_req for what retiring one of those costs. Whether a ring is
+        // still there to complete INTO is the generation counter's answer, not this
+        // hook's. loop() and redispatch_backlog() are the only readers.
         Delegate<bool> ready;
         // top of every loop iteration: deferred ring refresh, release of
         // mappings invalidated while requests were in flight, ...
@@ -697,12 +703,14 @@ public:
     const char* tag = "";         // device identity; prefixes the logs
 
     // Bumped by set_ring()/clear_ring(). A request snapshots it at dispatch and
-    // re-checks it before publishing, because `ready` alone cannot answer the
-    // question: the transport clears ready when a reset or an unmap invalidates
-    // the ring, then sets it true again for the NEW one, so a request that
-    // suspended across that window passes a ready check and would append its
-    // completion to a used ring whose negotiation it never belonged to,
-    // advancing used->idx on a ring whose avail->idx is still 0.
+    // re-checks it before publishing, and it is the ONLY ring-identity check on that
+    // path: a readiness flag cannot answer the question, because a transport that
+    // retires a ring raises its flag again for the replacement, so a request that
+    // suspended across that window would append its completion to a used ring whose
+    // negotiation it never belonged to, advancing used->idx on a ring whose
+    // avail->idx is still 0. `ready` is not consulted there at all -- it is the
+    // dispatch gate, and a frontend can pause a queue with the ring still perfectly
+    // good, which is not a reason to drop a request already taken.
     // Not atomic against the four fields it protects: set_ring() writes them and
     // then bumps, so a request that reads the new generation is guaranteed to
     // see the new ring, and one that reads the old generation declines either

@@ -829,6 +829,24 @@ struct MockFrontend {
         return true;
     }
 
+    // Same shape for the interrupt fd, but OUR descriptor for the old one is
+    // handed back instead of closed: it still refers to the same eventfd, so a
+    // caller can read the counter the device left in it and tell which of the two
+    // descriptors a completion was signalled on. The device closes its own
+    // descriptor for the old one either way, and the destructor now owns only the
+    // replacement.
+    bool replace_callfd(int* old_callfd) {
+        int nfd = ::eventfd(0, EFD_NONBLOCK);
+        if (nfd < 0) return fail("eventfd");
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
+        if (!transact(&m, &r, &nfd, 1)) { ::close(nfd); return false; }
+        *old_callfd = callfd;
+        callfd = nfd;   // SCM_RIGHTS gave the device its own descriptor
+        return true;
+    }
+
     // Revoke the kick fd the protocol's way: SET_VRING_KICK with the NOFD flag
     // and no fd attached. The device closes what it had and is left with none, so
     // from here on it can only find work by its own fallback re-scan -- which is
@@ -2400,6 +2418,209 @@ TEST_F(VhostUserTest, configured_queue_depth_caps_in_flight) {
     EXPECT_EQ(DEPTH, seen);
     EXPECT_EQ((uint64_t) N, rf.arrivals.load());
 }
+
+// A pause is not a teardown, and the difference is exactly the requests already
+// dispatched. SET_VRING_ENABLE(false) stops the queue's loop, but the chains that
+// loop took off the avail ring are still inside the backend, and nothing will ever
+// offer them again: last_avail moved past them at dispatch, and the driver has no
+// reason to re-publish a buffer it is waiting on. So a pause that also refuses
+// their completions loses them outright -- the write reaches the image, the status
+// byte is set to OK, and used->idx never advances, leaving the frontend waiting for
+// an interrupt that cannot come. Re-enabling does not recover them: vq_start
+// re-derives last_avail from the used ring, and the wrap-safe comparison there
+// deliberately refuses to rewind it, so the chain stays consumed and unserved.
+//
+// The gate makes this a state rather than a race. The request is provably inside
+// the backend before the pause lands and provably still there afterwards, so what
+// the pause did to it is the only variable.
+//
+// The other half of the separation is asserted by the same case: a paused queue
+// takes no NEW work either. Both halves together are what "separate stopping new
+// dispatch from allowing existing requests to complete" has to mean, and a fix that
+// delivered only the first would be indistinguishable from ignoring the pause.
+TEST_F(VhostUserTest, a_paused_queue_completes_what_it_took_and_takes_nothing_more) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    // Declared before `dev`: RecordingFile does not own the backend, so its
+    // destruction has to come after the device's shutdown DEFER and its delete.
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    // Runs BEFORE the shutdown above -- guards fire in reverse declaration order.
+    // An orderly teardown waits out in-flight work, and a request parked in a gate
+    // nobody is going to open makes that wait out a timeout instead of finishing.
+    DEFER(rf.release_gate(1024));
+
+    constexpr uint64_t OFF1 = 9 << 20, OFF2 = 10 << 20;
+    auto w1 = pattern(0x5a, 4096);
+    auto w2 = pattern(0x3c, 4096);
+    // Read inside the body and asserted outside it: the mapping dies with
+    // run_frontend, and a count that came back wrong should be reported as the
+    // number it was rather than collapsed into an errno.
+    uint64_t arrivals_paused = 0;
+    uint16_t used_paused = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        constexpr uint16_t SLOT = SLOTS - 1;
+        memcpy(fe.mem + MockFrontend::data_off(SLOT), w1.data(), w1.size());
+        fe.submit(SLOT, T_OUT, OFF1 >> 9, (uint32_t)w1.size(), false);
+        if (!fe.kick()) return EIO;
+        // Bounded, and the bound is the assertion's precondition rather than a
+        // hope: a request that never reached the backend would make everything
+        // below pass for the wrong reason.
+        for (int i = 0; i < 5000 && !rf.arrivals.load(); i++)
+            ::usleep(1000);
+        if (!rf.arrivals.load()) return EIO;
+
+        if (!fe.set_vring_enable(false)) return EPROTO;
+        rf.release_gate(1024);
+
+        // The completion has to land while the queue is STILL paused. Waiting for
+        // a re-enable first would not separate the two halves of the pause at all:
+        // a restarted loop re-reads the ring, and this chain is no longer in it.
+        uint32_t head = VQ_NUM, ulen = 0;
+        if (!fe.collect(&head, &ulen, 5000)) return ETIMEDOUT;
+        // do_request's own errno for a used elem id that is not this slot's
+        if (head >= VQ_NUM || fe.slot_of_head[head] != (int16_t)SLOT)
+            return EPROTO;
+        if (*(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) != S_OK) return EIO;
+
+        // And a pause must leave the queue usable, which is the other way this
+        // could have been broken: served but never restarted. The second chain goes
+        // in while the queue is STILL paused, so the same case pins both halves of
+        // the separation -- what was already taken completes, and nothing new is
+        // taken -- instead of leaving the second half to be assumed.
+        constexpr uint16_t SLOT2 = SLOTS - 2;
+        memcpy(fe.mem + MockFrontend::data_off(SLOT2), w2.data(), w2.size());
+        fe.submit(SLOT2, T_OUT, OFF2 >> 9, (uint32_t)w2.size(), false);
+        if (!fe.kick()) return EIO;
+        // 100 ms is twenty of the engine's own KICK_FALLBACK_US re-reads, so a loop
+        // that was somehow still alive would have found this chain many times over.
+        // A negative needs a window the positive would have fitted in, and this is
+        // the window; the kick above is what makes the chain findable at all.
+        ::usleep(100 * 1000);
+        arrivals_paused = rf.arrivals.load();
+        used_paused = fe.used_idx_now();
+
+        if (!fe.set_vring_enable(true)) return EPROTO;
+        head = VQ_NUM;
+        ulen = 0;
+        if (!fe.collect(&head, &ulen, 5000)) return ETIMEDOUT;
+        if (head >= VQ_NUM || fe.slot_of_head[head] != (int16_t)SLOT2)
+            return EPROTO;
+        if (*(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT2)) != S_OK) return EIO;
+        return 0;
+    });
+    EXPECT_EQ(0, rc);
+    // The whole of the reported defect is that the backend and the guest disagree:
+    // the write landed and the guest was never told. Both halves are checked.
+    EXPECT_EQ(0, verify_backend(OFF1, w1));
+    EXPECT_EQ(0, verify_backend(OFF2, w2));
+    // Neither the backend nor the ring saw the second chain while the queue was
+    // paused. FLUSH is negotiated on this connection, so a WRITE is one recorded IO
+    // and not two, which is what makes 1 the number rather than a lower bound.
+    EXPECT_EQ(1u, (uint32_t)arrivals_paused);
+    EXPECT_EQ(1, (int)used_paused);
+}
+
+// The reconfiguration paths quiesce a queue before they replace something its
+// in-flight requests are using, and "quiesce" only means what the requests do next.
+// SET_VRING_CALL is the case where the difference is directly observable: the
+// handler stops the loop, drains, and only then closes the interrupt fd and installs
+// the replacement. A request that finishes during that drain must publish into the
+// ring and signal the fd that was installed when it was DISPATCHED. Dropping the
+// drain would not lose the completion -- the ring survives a call-fd swap -- but it
+// would move the interrupt to a descriptor the request never belonged to, and a
+// frontend that already closed its end of the old one would never see it.
+//
+// The gate is opened from a photon coroutine rather than from the frontend body,
+// because the frontend is blocked inside transact() for as long as the handler
+// drains: nothing on that thread can release the request the handler is waiting for.
+TEST_F(VhostUserTest, in_flight_requests_finish_before_a_call_fd_swap) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    DEFER(rf.release_gate(1024));
+
+    // Signalled by the frontend once the request is parked, so the 50 ms runs from
+    // the moment the handler can possibly be inside its drain, not from the start
+    // of the case.
+    photon::semaphore armed(0);
+    auto rth = photon::thread_create11([&] {
+        armed.wait(1);
+        photon::thread_usleep(50 * 1000);
+        rf.release_gate(4096);
+    });
+    photon::thread_enable_join(rth);
+
+    constexpr uint64_t OFF = 11 << 20;
+    auto w = pattern(0x77, 4096);
+    int old_callfd = -1;
+    uint64_t old_signalled = 0, new_signalled = 0;
+    // Ours from replace_callfd() on: the mock's destructor closes only the
+    // replacement it now holds.
+    DEFER(if (old_callfd >= 0) ::close(old_callfd));
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // negotiate()'s own SET_VRING_CALL is answered with one signal on the fd it
+        // installed, which is not this case's subject. Discard it so that the count
+        // below can only have come from the completion.
+        (void)fe.callfd_drain();
+        constexpr uint16_t SLOT = SLOTS - 1;
+        memcpy(fe.mem + MockFrontend::data_off(SLOT), w.data(), w.size());
+        fe.submit(SLOT, T_OUT, OFF >> 9, (uint32_t)w.size(), false);
+        if (!fe.kick()) return EIO;
+        for (int i = 0; i < 5000 && !rf.arrivals.load(); i++)
+            ::usleep(1000);
+        if (!rf.arrivals.load()) return EIO;
+
+        armed.signal(1);
+        // Returns only once the handler has drained, swapped and restarted.
+        if (!fe.replace_callfd(&old_callfd)) return EPROTO;
+        // The handler drained before it replied, so the completion is already in the
+        // ring and has already signalled whichever descriptor it belonged to. Read
+        // BOTH counters before collect(): collect() drains the interrupt fd it polls,
+        // which would eat the one signal that installing a call fd is itself
+        // documented to send (see vring_call_signals_once).
+        uint64_t v = 0;
+        while (::read(old_callfd, &v, sizeof(v)) == (ssize_t)sizeof(v)) old_signalled += v;
+        v = 0;
+        while (::read(fe.callfd, &v, sizeof(v)) == (ssize_t)sizeof(v)) new_signalled += v;
+        uint32_t head = VQ_NUM, ulen = 0;
+        if (!fe.collect(&head, &ulen, 5000)) return ETIMEDOUT;
+        // do_request's own errno for a used elem id that is not this slot's
+        if (head >= VQ_NUM || fe.slot_of_head[head] != (int16_t)SLOT)
+            return EPROTO;
+        if (*(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) != S_OK) return EIO;
+        return 0;
+    });
+    photon::thread_join((photon::join_handle*)rth);
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(OFF, w));
+    ASSERT_GE(old_callfd, 0);
+    // Two-sided, and both sides are equalities on an eventfd counter, so neither can
+    // pass by never having been signalled at all. The completion belongs to the
+    // descriptor that was installed when it was DISPATCHED: exactly one signal there.
+    // The replacement gets exactly the one its own install sends, and no more -- a
+    // handler that swapped the fd before draining would move the completion's signal
+    // across, and both counts would be wrong at once.
+    EXPECT_EQ(1u, (uint32_t)old_signalled);
+    EXPECT_EQ(1u, (uint32_t)new_signalled);
+}
+
+// detach(true) promises to wait out the pending work, and the teardown order that
 // delivers it -- drain the avail backlog WHILE the queue's loop is still live, then
 // stop the queue -- was invisible to every other case here: nothing else holds work
 // in the ring while a detach runs, so dropping the guard that keeps the loop alive
@@ -2409,13 +2630,21 @@ TEST_F(VhostUserTest, configured_queue_depth_caps_in_flight) {
 // every backend IO parked, the VQ_NUM requests the dispatch cap let through never
 // retire, so in_flight stays AT the cap and the 8 entries behind it stay unconsumed
 // for as long as we like -- not for one KICK_FALLBACK_US interval. (This case sets
-// no queue_depth, so the cap is the ring.) Draining first therefore completes all N:
-// the queue is still enabled while the drain runs, so the parked requests publish
-// their completions and each completion admits the next of the rest, with the loop's
-// own re-read behind it. Stopping the queue first sets the engine's `stopping` and
-// clears `enabled`, which between them stop completions being published and stop
-// redispatch_backlog admitting anything behind them, so the backlog is stranded for
-// good and the used ring advances by 0.
+// no queue_depth, so the cap is the ring.) Draining first therefore completes all N,
+// and each half of that depends on state the drain has not touched yet: the queue is
+// still enabled, so the loop and every completion's redispatch go on admitting the
+// rest, and the engine's `stopping` is still clear, so what they admit publishes.
+// Stopping the queue first advances the used ring by 0 and not by VQ_NUM -- measured
+// over five repeats of the order mutant, because the reasoning that predicted VQ_NUM
+// was wrong. The stop sets the engine's `stopping` before it waits out in-flight
+// work, and `stopping` is the one fact that legitimately retires a request, so the
+// parked ones are declined as well: the 8 behind the cap are stranded and the VQ_NUM
+// in front of it go unpublished.
+// What the completion path's change DID move is which term produces that 0. It used
+// to be the transport's enable flag too, so the wrong order was detected twice over;
+// now it is `stopping` alone. Dropping that term from both gates is therefore not
+// witnessed here -- with the order correct nothing sets `stopping` until after the
+// drain -- and the teardown case in the engine's own suite is what pins it.
 // N vs 0 is decided by the ORDER, never by how long R sleeps: those 50 ms only set
 // WHEN the gate opens, not what the final count is.
 TEST_F(VhostUserTest, detach_waits_for_the_avail_backlog) {
