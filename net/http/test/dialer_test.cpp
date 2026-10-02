@@ -263,6 +263,30 @@ TEST(dialer, tunnel_failure_releases_stream) {
     EXPECT_EQ(1, destroyed);
 }
 
+TEST(dialer, tunnel_preserves_duplicate_proxy_header_order) {
+    StreamDialer transport;
+    transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    std::unique_ptr<IDialer> tunnel(new_connect_tunnel_dialer(&transport));
+    CommonHeaders<512> headers;
+    ASSERT_EQ(0, headers.insert("X-Proxy-Z", "first"));
+    ASSERT_EQ(0, headers.insert("X-Proxy-Repeat", "one", 1));
+    ASSERT_EQ(0, headers.insert("x-proxy-repeat", "two", 1));
+    ASSERT_EQ(0, headers.insert("X-Proxy-A", "last"));
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+    target.proxy_headers = &headers;
+    target.proxy_auth = "Basic credentials";
+    std::unique_ptr<ISocketStream> stream(tunnel->dial(target));
+    ASSERT_NE(nullptr, stream);
+    EXPECT_NE(std::string::npos, transport.last->output().find(
+        headers.serialized().data(), 0, headers.serialized().size()));
+    EXPECT_NE(std::string::npos, transport.last->output().find("Proxy-Authorization: Basic credentials\r\n"));
+}
+
 TEST(dialer, ownership_deletes_underlay) {
     int destroyed = 0;
     auto underlay = new StreamDialer(&destroyed);

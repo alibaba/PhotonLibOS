@@ -394,7 +394,7 @@ public:
             LOG_ERRNO_RETURN(0, -1, "failed to make a CONNECT for `:`",
                              target.host, target.port);
         if (target.proxy_headers &&
-            request.headers.merge(*target.proxy_headers) < 0)
+            request.headers.merge(*target.proxy_headers, 1) < 0)
             LOG_ERRNO_RETURN(0, -1,
                              "failed to put proxy headers into CONNECT");
         if (!target.proxy_auth.empty()) {

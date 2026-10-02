@@ -97,6 +97,37 @@ int HeadersBase::insert(std::string_view key, std::string_view value, int allow_
     return 0;
 }
 
+int HeadersBase::merge_duplicates(const HeadersBase& source) {
+    if (source.empty()) return 0;
+    if (&source == this)
+        LOG_ERROR_RETURN(EINVAL, -1, "cannot merge headers with themselves");
+    size_t bytes = 0;
+    uint16_t lastOffset = 0;
+    for (uint16_t i = 0; i < source.m_kv_size; ++i) {
+        auto entry = source.kv(i);
+        bytes = std::max(bytes, size_t(entry.second.offset()) + entry.second.size() + 2);
+        lastOffset = std::max(lastOffset, entry.first.offset());
+    }
+    if (size_t(m_buf_size) + bytes + kv_size() + source.kv_size() > m_buf_capacity)
+        LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer for merged headers");
+    auto delta = m_buf_size;
+    memcpy(m_buf + delta, source.m_buf, bytes);
+    for (uint16_t i = 0; i < source.m_kv_size; ++i) {
+        auto entry = source.kv(i);
+        entry.first += delta;
+        entry.second += delta;
+        kv_add_sort(entry); // capacity was checked before modifying the buffer
+    }
+    m_buf_size += bytes;
+    for (uint16_t i = 0; i < m_kv_size; ++i) {
+        if (kv(i).first.offset() == delta + lastOffset) {
+            m_last_kv = i;
+            break;
+        }
+    }
+    return 0;
+}
+
 int HeadersBase::erase(std::string_view key) {
     int erased = 0;
     while (true) {

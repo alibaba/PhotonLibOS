@@ -62,6 +62,42 @@ TEST(headers, send_header_terminator) {
     EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
 }
 
+TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
+    CommonHeaders<256> source, destination;
+    ASSERT_EQ(0, source.insert("Z-Last", "first", 1));
+    ASSERT_EQ(0, source.insert("X-Repeated", "one", 1));
+    ASSERT_EQ(0, source.insert("x-repeated", "two", 1));
+    ASSERT_EQ(0, source.insert("A-First", "last", 1));
+    ASSERT_EQ(0, destination.insert("X-Repeated", "existing"));
+    auto expected = std::string(destination.serialized()) + std::string(source.serialized());
+    ASSERT_EQ(0, destination.merge(source, 1));
+    EXPECT_EQ(expected, destination.serialized());
+    auto duplicates = destination.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    ASSERT_TRUE(destination.value_append(" appended"));
+    EXPECT_EQ("last appended", destination["A-First"]);
+    EXPECT_EQ("first", destination["Z-Last"]);
+
+    CommonHeaders<64> tight;
+    ASSERT_EQ(0, tight.insert("Keep", "retained"));
+    auto before = std::string(tight.serialized());
+    errno = 0;
+    EXPECT_EQ(-1, tight.merge(source, 1));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ(before, tight.serialized());
+    EXPECT_EQ("retained", tight["Keep"]);
+    EXPECT_EQ(0, tight.erase("missing"));
+    CommonHeaders<16> empty;
+    EXPECT_EQ(0, tight.merge(empty, 1));
+
+    char parsed[128] = "X-Dup: first\r\nx-dup: second\r\n\r\n";
+    Headers input;
+    ASSERT_EQ(0, input.reset(parsed, sizeof(parsed), strlen(parsed)));
+    CommonHeaders<128> output;
+    ASSERT_EQ(0, output.merge(input, 1));
+    EXPECT_EQ("X-Dup: first\r\nx-dup: second\r\n", output.serialized());
+}
+
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"

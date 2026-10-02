@@ -255,11 +255,11 @@ public:
         // Highest priority first: per-hop proxy headers, caller headers, common
         // headers, then defaults. Classify proxy input before inserting origin
         // fields into the outgoing Message; configuration buffers stay intact.
-        auto appendSource = [&](const HeadersBase& source, bool originFields) {
+        auto appendSource = [&](const HeadersBase& source) {
             for (auto item = source.begin(); item != source.end(); ) {
                 auto range = source.equal_range(item.first());
                 item = range.second;
-                if (originFields && estring_view(range.first.first()).icmp("Proxy-Authorization") == 0)
+                if (estring_view(range.first.first()).icmp("Proxy-Authorization") == 0)
                     continue; // this configuration belongs to DialTarget's proxy
                 if (outgoing.headers.find(range.first.first()) != outgoing.headers.end())
                     continue;
@@ -282,10 +282,10 @@ public:
             }
             return 0;
         };
-        if (proxyHeaders && appendSource(*proxyHeaders, false) < 0) return -1;
+        if (proxyHeaders && outgoing.headers.merge(*proxyHeaders, 1) < 0) return -1;
         for (auto source : {static_cast<const HeadersBase*>(&configured.headers),
                             static_cast<const HeadersBase*>(&m_common_headers)}) {
-            if (appendSource(*source, true) < 0) return -1;
+            if (appendSource(*source) < 0) return -1;
         }
         auto agent = m_user_agent.empty() ? std::string_view(USERAGENT) : std::string_view(m_user_agent);
         for (auto item : {std::make_pair(std::string_view("User-Agent"), agent),

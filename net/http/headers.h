@@ -90,7 +90,10 @@ public:
         assert(ret.end() <= m_buf + m_buf_size);
         return ret;
     }
+    // With duplicates enabled, append fields in their original wire order.
+    // The source and destination buffers must be disjoint in that mode.
     int merge(const HeadersBase &h, int allow_dup = 0) {
+        if (allow_dup) return merge_duplicates(h);
         for (auto kv : h)
             if (insert(kv.first, kv.second, allow_dup) < 0)
                 return -1;
@@ -120,6 +123,8 @@ public:
     int reset_host(int delta, std::string_view host);
 
 protected:
+    // Append disjoint source storage in wire order, including duplicate fields.
+    int merge_duplicates(const HeadersBase& source);
     char* m_buf;
     uint16_t m_buf_size = 0, m_kv_size = 0, m_buf_capacity = 0, m_last_kv = 0;
     friend class HeaderAssistant;
