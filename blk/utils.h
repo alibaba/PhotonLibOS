@@ -360,10 +360,15 @@ struct GenlSock {
 //                   what refuses a chain that never terminates -- longer
 //                   than MAX_DESC_CHAIN, or circular.
 //   de->addr,       an address goes to the translate delegate together with
-//   de->len         its length, and translate must fail unless the whole
-//                   [addr, addr + len) is mapped with no wrap in the sum.
-//                   A zero len asks for one byte, so a zero-length desc
-//                   gets that answer instead of a vacuous success.
+//   de->len,        its length and the access the walk is about to make of
+//   de->flags       it -- writable when the descriptor carries
+//                   VRING_DESC_F_WRITE, readable otherwise. translate must
+//                   fail unless the whole [addr, addr + len) is mapped with
+//                   no wrap in the sum, and mapped for that access: a VA
+//                   whose mapping forbids it is not a translation, it is a
+//                   fault the engine would take on the guest's behalf. A
+//                   zero len asks for one byte, so a zero-length desc gets
+//                   that answer instead of a vacuous success.
 //   hdr             gather-copied off the front of the readable stream by
 //                   take_front, which refuses a stream shorter than
 //                   sizeof(hdr): a header split across two descriptors is
@@ -539,10 +544,39 @@ struct virtio_blk_outhdr {
 
 // ----------------------------------------------------------------------------
 
+// Wrap-free containment of the half-open request [iova, iova + len) inside the
+// INCLUSIVE mapped range [start, last]. This is the predicate the translate
+// obligation above is discharged with, and it lives here rather than in one
+// transport because both answer that obligation against a range somebody else
+// chose: vduse against the range the kernel's iotlb lookup hands back, vhost-user
+// against one of the frontend's memory regions.
+//
+// Distances, never endpoints. `iova + len - 1 <= last` wraps for an iova near
+// UINT64_MAX, and the wrapped sum then SATISFIES the bound -- which is how a
+// peer-written address used to come back as an arbitrarily large negative offset
+// into our own mappings, usable as a readv destination and a writev source. Every
+// subtraction here is guarded by the comparison before it, and `len` is refused at
+// zero so a zero-length request cannot pass as a vacuous success.
+//
+// vhost-user keeps its own MemTable::contains rather than calling this, and the
+// two must not be merged: its inputs are a base and a SIZE, so expressing them as
+// an inclusive `last` would need `base + size - 1` -- the endpoint sum this form
+// exists to avoid. Same question, different input shape, and the difference is
+// load-bearing.
+inline bool iova_range_covers(uint64_t start, uint64_t last, uint64_t iova, size_t len) {
+    return len && start <= iova && iova <= last && len - 1 <= last - iova;
+}
+
 // translates a descriptor's buffer address (GPA / IOVA -- only the transport
-// knows which) to a local VA of `len` bytes; nullptr when unmappable. Used
-// synchronously within virtio_blk_serve_chain.
-using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t>;
+// knows which) to a local VA of `len` bytes; nullptr when unmappable. `writable`
+// is the access the caller is about to make of those bytes, taken from the
+// descriptor's VRING_DESC_F_WRITE, and a transport whose mappings carry a
+// permission has to refuse one that forbids it. A transport whose mappings carry
+// no per-buffer permission -- vhost-user's regions are guest RAM, mapped
+// read-write whole -- answers the same VA for either value, which discharges the
+// obligation rather than ignoring the argument.
+// Used synchronously within virtio_blk_serve_chain.
+using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t, bool>;
 
 // Walk the descriptor chain starting at `head`, dispatch the virtio-blk
 // request to `backend`, and write the chain's status byte. Returns the virtio
@@ -678,8 +712,11 @@ class VirtQueueServer {
 public:
     struct Hooks {
         // a descriptor buffer address (GPA / IOVA -- only the transport knows
-        // which) -> a local VA of `len` bytes; nullptr when unmappable
-        Delegate<void*, uint64_t, size_t> translate;
+        // which) -> a local VA of `len` bytes; nullptr when unmappable. The bool
+        // is the access serve_chain is about to make of those bytes, and a
+        // transport whose mappings carry a permission has to refuse one that
+        // forbids it -- see VirtioBlkTranslate.
+        Delegate<void*, uint64_t, size_t, bool> translate;
         // the used ring advanced and the driver asked for an interrupt
         Delegate<void> notify;
         // May the loop take more work from this ring right now? Unbound means

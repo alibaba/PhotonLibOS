@@ -38,6 +38,7 @@ limitations under the License.
 #include <photon/thread/thread.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -320,13 +321,81 @@ struct GuestChain {
     uint8_t* at(size_t off) { return (uint8_t*) mem.data() + off; }
 };
 
-void* chain_translate(void* a, uint64_t addr, size_t len) {
+void* chain_translate(void* a, uint64_t addr, size_t len, bool writable) {
     auto* c = (GuestChain*) a;
+    // `writable` is not consulted here: this mock's guest memory is one read-write
+    // buffer, so it has no per-buffer permission for the direction to disagree with.
+    // DirectedGuest below is the one that models a transport whose mappings carry a
+    // permission, which is what vduse's are.
     // wrap-safe, the spelling the engine's own bounds checks use: an address
     // near the top of the space must not be admitted by an overflowing sum
     if (addr > c->mem.size() || len > c->mem.size() - addr)
         return nullptr;
     return c->mem.data() + addr;
+}
+
+// A translate that models what a transport whose mappings carry a permission has to
+// do: refuse an access the mapping forbids, and record every direction it was asked
+// for. The recording is the point -- without it a case cannot tell "the engine
+// forwarded the descriptor's own flag" from "the engine forwarded a constant", and a
+// constant is what the plumbing would degrade to if the flag were dropped anywhere.
+struct DirectedGuest {
+    GuestChain c;
+    uint64_t ro_end = 0;    // [0, ro_end) is mapped read-only
+    std::vector<uint64_t> asked_addr;
+    std::vector<uint8_t> asked_writable;
+};
+
+void* directed_translate(void* a, uint64_t addr, size_t len, bool writable) {
+    auto* g = (DirectedGuest*) a;
+    g->asked_addr.push_back(addr);
+    g->asked_writable.push_back(writable ? 1 : 0);
+    if (writable && addr < g->ro_end)
+        return nullptr;   // the mapping forbids the access that was asked for
+    return chain_translate(&g->c, addr, len, writable);
+}
+
+// The containment predicate the translate obligation is discharged with, against the
+// two rows the review that added it demonstrated: a mapping of [0x2000,0x2fff] was
+// being accepted both for a request that ran past its end and for one that started
+// below it. Pure integers, so the table can also hold the top-of-space rows that no
+// live mapping can be made to produce -- and those are the rows that catch the
+// endpoint form, whose overflow SATISFIES the bound it was supposed to fail.
+TEST(IovaRangeCovers, containment_is_wrap_free_and_refuses_a_zero_length) {
+    struct Row { uint64_t start, last, iova; size_t len; bool want; const char* why; };
+    static const Row rows[] = {
+        {0x2000, 0x2fff, 0x2000, 0x1000, true,  "exact fit"},
+        {0x2000, 0x2fff, 0x2800, 0x0800, true,  "ends exactly at last"},
+        {0x2000, 0x2fff, 0x2800, 0x1000, false, "runs past last: the review's first row"},
+        {0x2000, 0x2fff, 0x1000, 0x2000, false, "starts below start: the review's second row"},
+        {0x2000, 0x2fff, 0x3000, 0x0010, false, "wholly above the range"},
+        {0x2000, 0x2fff, 0x1000, 0x0010, false, "wholly below the range"},
+        {0x2000, 0x2fff, 0x2000, 0,      false, "zero length is not a vacuous success"},
+        {UINT64_MAX, UINT64_MAX, UINT64_MAX, 1, true, "one byte at the top of the space"},
+        {0, UINT64_MAX, 0, 1, true,  "the whole space, one byte at its start"},
+        {0, UINT64_MAX - 1, UINT64_MAX - 1, 1, true, "one byte at the range's own end"},
+        {0x1000, 0x1fff, 0x1fff, 2, false, "one byte past the end of the range"},
+        {0, UINT64_MAX, UINT64_MAX, 2, false, "len 2 at UINT64_MAX would wrap the sum"},
+        // The one input where the leading `len` test is the ONLY thing refusing: for
+        // every narrower range a zero length is caught by the size comparison
+        // underflowing to SIZE_MAX, so without this row dropping `len &&` from the
+        // predicate changes no answer and the mutation survives.
+        {0, UINT64_MAX, 0, 0, false, "zero length against the whole space"},
+        {UINT64_MAX - 3, UINT64_MAX, UINT64_MAX - 3, 4, true, "the widest fit at the top"},
+        {UINT64_MAX - 3, UINT64_MAX, UINT64_MAX - 3, 5, false, "one byte too wide at the top"},
+    };
+    // A control on the table itself: a predicate stuck at one value passes every row
+    // that wants that value, so a table wanting only one answer proves nothing.
+    int want_true = 0, want_false = 0;
+    for (const auto& r : rows) {
+        r.want ? want_true++ : want_false++;
+        EXPECT_EQ(r.want, iova_range_covers(r.start, r.last, r.iova, r.len))
+            << r.why << ": [" << r.start << "," << r.last << "] iova " << r.iova
+            << " len " << r.len;
+    }
+    EXPECT_GT(want_true, 0);
+    EXPECT_GT(want_false, 0);
+    EXPECT_EQ((int) (sizeof(rows) / sizeof(rows[0])), want_true + want_false);
 }
 
 // non-repeating, so a misplaced or partial write shows up in the bytes and not
@@ -383,6 +452,15 @@ public:
     void put_write_payload(GuestChain& c) {
         size_t off = c.place(pattern.data(), pattern.size());
         c.add(off, (uint32_t) pattern.size(), 0);
+    }
+    // The same walk through a translate that models a permission-carrying mapping:
+    // it refuses a write into [0, ro_end) and records the direction of every call.
+    uint8_t serve_directed(DirectedGuest& g, uint32_t* written) {
+        VirtioBlkTranslate tr;
+        tr.bind(&g, &directed_translate);
+        return virtio_blk_serve_chain(img.file, false, false, CHAIN_SERIAL, "vq",
+                                      g.c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
+                                      tr, written);
     }
 };
 
@@ -782,6 +860,70 @@ TEST_F(ChainFixture, a_write_carrying_no_payload_does_not_persist) {
 // a retired ring is declined -- and DepthFixture's two pause cases pin the second.
 // ---------------------------------------------------------------------------
 
+// The direction the engine will make of a buffer travels with the translate call,
+// and these two cases are what keeps it travelling. Without them a translate handed a
+// constant would pass every other case in this suite: the mock's guest memory is
+// read-write, so nothing before these could tell the difference -- and that
+// difference is the whole of a permission-carrying transport's protection against
+// writing through a mapping the driver made read-only.
+TEST_F(ChainFixture, translate_is_told_the_access_the_engine_will_make_of_each_buffer) {
+    DirectedGuest g;
+    put_header(g.c, VIRTIO_BLK_T_OUT);      // readable
+    put_write_payload(g.c);                 // readable: a WRITE's payload
+    size_t st = put_status(g.c);            // writable
+    g.c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_directed(g, &written));
+    // one call per descriptor, in chain order, each carrying its own direction: a
+    // constant in either direction fails this, and so does dropping the flag
+    ASSERT_EQ(3u, g.asked_writable.size());
+    EXPECT_EQ(0, g.asked_writable[0]);
+    EXPECT_EQ(0, g.asked_writable[1]);
+    EXPECT_EQ(1, g.asked_writable[2]);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *g.c.at(st));
+}
+
+TEST_F(ChainFixture, a_buffer_whose_mapping_forbids_the_access_is_refused_as_ioerr) {
+    // A READ's destination is device-writable. Placing it inside the window this
+    // translate reports as read-only is the disagreement that, left unrefused, becomes
+    // a write through a mapping that forbids it -- a fault in our own process rather
+    // than a status the guest can be told about.
+    DirectedGuest g;
+    put_header(g.c, VIRTIO_BLK_T_IN);       // readable
+    size_t doff = g.c.place(nullptr, 512);  // the destination
+    g.c.add(doff, 512, VRING_DESC_F_WRITE);
+    size_t st = put_status(g.c);
+    g.c.finish();
+
+    // The control first, on this same chain: with nothing marked read-only it is
+    // served, so the refusal below is the window's doing and not the chain's.
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_directed(g, &written));
+    g.asked_addr.clear();
+    g.asked_writable.clear();
+
+    g.ro_end = doff + 512;
+    *g.c.at(st) = SENTINEL;
+    written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve_directed(g, &written));
+    // The guest's own status byte is left alone, and that is the documented half of a
+    // refusal detected MID-WALK rather than after it: the status is the writable
+    // stream's last byte, and a walk that broke at the second of three descriptors
+    // never reached the one holding it, so the only "last writable byte" it saw was
+    // somewhere in the middle of the chain. Writing IOERR there would corrupt a data
+    // byte and leave the real status saying whatever the guest left in it. The other
+    // refusal cases in this fixture assert the opposite -- IOERR written -- because
+    // they are refused after the walk finished and the status is located.
+    EXPECT_EQ(SENTINEL, *g.c.at(st));
+    // And the refusal is the direction check firing rather than a bounds failure: the
+    // address refused is the very one that was served a moment earlier, and it was
+    // refused on a call that asked to write.
+    ASSERT_FALSE(g.asked_addr.empty());
+    EXPECT_EQ((uint64_t) doff, g.asked_addr.back());
+    EXPECT_EQ(1, g.asked_writable.back());
+}
+
 // lay a FLUSH chain into `r`'s descriptor table: a readable header at `hoff`
 // and a writable status byte at `soff`, both offsets into whatever guest memory
 // the translate hook is bound to. A FLUSH needs no data buffer, so the whole
@@ -870,11 +1012,11 @@ public:
 // pointers here and still retires the request: comparing ring addresses would
 // not have caught this, and a driver that renegotiates onto the same buffers is
 // not a hypothetical.
-void* gen_translate_thunk(void* a, uint64_t addr, size_t len) {
+void* gen_translate_thunk(void* a, uint64_t addr, size_t len, bool writable) {
     auto* f = (GenFixture*) a;
     if (++f->translate_calls == 2)
         f->renegotiate();
-    return chain_translate(&f->guest, addr, len);
+    return chain_translate(&f->guest, addr, len, writable);
 }
 
 TEST_F(GenFixture, a_request_dispatched_before_a_renegotiation_does_not_complete_into_the_new_ring) {

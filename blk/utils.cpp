@@ -687,13 +687,19 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             bad = true;
             break;
         }
-        void* va = translate(de->addr, de->len ? de->len : 1);
+        // Read once, used twice: it tells translate which access to expect, and it
+        // is the same bit that sorts the descriptor into a stream below. Deriving
+        // it in one place is what keeps the permission a mapping is checked
+        // against from being able to disagree with the stream the bytes land in.
+        bool writable = de->flags & VRING_DESC_F_WRITE;
+        void* va = translate(de->addr, de->len ? de->len : 1, writable);
         if (!va) {
-            LOG_ERROR("virtio-blk `: unmappable buffer address ` len `", tag, de->addr, de->len);
+            LOG_ERROR("virtio-blk `: unmappable buffer address ` len ` writable `",
+                      tag, de->addr, de->len, (int)writable);
             bad = true;
             break;
         }
-        DescStream& s = (de->flags & VRING_DESC_F_WRITE) ? wr : rd;
+        DescStream& s = writable ? wr : rd;
         if (!s.push(va, de->len)) {
             LOG_ERROR("virtio-blk `: chain overflows the `-element scatter list", tag, MAX_DESC_CHAIN);
             bad = true;

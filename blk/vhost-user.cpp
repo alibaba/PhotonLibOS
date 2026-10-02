@@ -773,7 +773,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     // ----- the virtqueue: the shared engine plus the vhost-user hooks -----
 
-    void* vq_translate(uint64_t addr, size_t len) {
+    // `writable` is not consulted, and that is an answer rather than an omission: the
+    // frontend's memory regions are the guest's RAM, mmap'd read-write whole, so there
+    // is no per-buffer permission here that could disagree with the access, and every
+    // direction is servable. vduse is the transport whose mappings carry one, because
+    // theirs come from the kernel's DMA mapping of one specific buffer.
+    void* vq_translate(uint64_t addr, size_t len, bool writable) {
         // descriptor contents are guest-written GPAs (the vring addresses
         // themselves were QVAs -- two different spaces, see the header)
         return mem.gpa2va(addr, len);
@@ -819,9 +824,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
         auto* q = (Vq*)a;
         return q->impl->vq_may_dispatch(q->qid);
     }
-    static void* translate_thunk(void* a, uint64_t addr, size_t len) {
+    static void* translate_thunk(void* a, uint64_t addr, size_t len, bool writable) {
         // the memory table is device-wide, not per queue
-        return ((Vq*)a)->impl->vq_translate(addr, len);
+        return ((Vq*)a)->impl->vq_translate(addr, len, writable);
     }
     static void* loop_thunk(void* a) {
         auto* q = (Vq*)a;

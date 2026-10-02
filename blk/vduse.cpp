@@ -107,11 +107,24 @@ static constexpr uint32_t MAX_VQ_SIZE = 1024;
 
 // IOVA -> VA cache over VDUSE_IOTLB_GET_FD. Ranges are few (the vring's direct
 // map + the kernel's bounce region); a linear scan is fine.
+
+// Does a mapping the kernel reported as `perm` allow the access the caller wants?
+// RW satisfies both; the two one-way values satisfy one each. Checked on the way out
+// of a fetch and again on every cache HIT, because a hit is served from an mmap whose
+// protection was fixed when it was fetched for somebody else's access -- and a write
+// into a PROT_READ mapping is a fault in our own process, not an error the guest can
+// be told about.
+static bool iotlb_perm_allows(uint8_t perm, bool writable) {
+    return writable ? (perm & VDUSE_ACCESS_WO) : (perm & VDUSE_ACCESS_RO);
+}
+
 struct Iotlb {
     int dev_fd = -1;
     struct Map {
         uint64_t start, last;
         char* base;
+        uint8_t perm;   // as the kernel reported it: what `base` was mmap'd for,
+                        // and therefore what a later hit on this entry may do
     };
     std::vector<Map> maps;
     std::vector<Map> stale;   // invalidated but not yet munmapped
@@ -132,19 +145,28 @@ struct Iotlb {
     // drain are for (see invalidate).
     photon::mutex lock;
 
-    void* resolve(uint64_t iova, size_t len) {
+    void* resolve(uint64_t iova, size_t len, bool writable) {
+        // Both arguments are hostile: iova and len come from a descriptor the peer or
+        // the guest wrote, or from a ring address the kernel reported. The sum is
+        // refused here rather than left to the ioctl. The ioctl does reject an end
+        // below its start, so a wrapped `iova + len - 1` fails there too -- but that
+        // is a fact about this kernel and not a contract, and one wrap it cannot catch
+        // is iova 0 with len 0, where `iova + len - 1` is UINT64_MAX and the request
+        // reads as the whole address space. A cache hit never reaches the ioctl at
+        // all, so it needs the guard regardless.
+        if (!len || len - 1 > UINT64_MAX - iova)
+            LOG_ERROR_RETURN(EINVAL, nullptr, "vduse iotlb resolve of an overflowing range, iova ` len `", iova, len);
         uint64_t gen0 = 0;
         {
             SCOPED_LOCK(lock);
             gen0 = gen;
-            // Wrap-free, and the cache is the only place that needs it: a wrapped
-            // `iova + len - 1` in the ioctl below produces an end below its start,
-            // which the ioctl rejects -- but a cache HIT never reaches the ioctl, so
-            // the old endpoint form handed out base + (iova - m.start) for a
-            // guest-written desc.addr near UINT64_MAX: an arbitrarily negative offset
-            // into our own mappings. iova <= m.last makes the subtraction below safe.
+            // The permission is part of the hit, not a property of the range: `base`
+            // was mmap'd for whatever access the fetch that cached it asked for, so a
+            // hit that ignores it can hand a write a PROT_READ mapping and take the
+            // fault in our own process instead of refusing the request.
             for (auto& m : maps)
-                if (iova >= m.start && iova <= m.last && len <= m.last - iova + 1)
+                if (iova_range_covers(m.start, m.last, iova, len) &&
+                    iotlb_perm_allows(m.perm, writable))
                     return m.base + (iova - m.start);
         }
         // The slow path runs OUTSIDE the lock: the ioctl and the mmap both block,
@@ -153,16 +175,39 @@ struct Iotlb {
         vduse_iotlb_entry e;
         memset(&e, 0, sizeof(e));
         e.start = iova;
-        e.last = iova + len - 1;
+        e.last = iova + len - 1;   // cannot wrap: refused above
         int fd = (int)::ioctl(dev_fd, VDUSE_IOTLB_GET_FD, &e);
         if (fd < 0)
             LOG_ERRNO_RETURN(0, nullptr, "vduse IOTLB_GET_FD failed, iova ` len `", iova, len);
+        DEFER(::close(fd));   // the mapping keeps its own reference
+        // The lookup answers with the first mapping that OVERLAPS what was asked for
+        // and overwrites start/last/perm/offset with that mapping's own, and nothing
+        // on the kernel side checks that the mapping covers the request. So the answer
+        // can be narrower than the question, and it can begin above it -- and both are
+        // silently fatal downstream rather than merely wrong: `e.start > iova`
+        // underflows the offset in the return below into a wild pointer, and a short
+        // range hands back a VA whose last bytes lie past the mmap, which the engine
+        // then reads or writes through. This is also where a request spanning two
+        // mappings is answered, and it is refused rather than split: one descriptor's
+        // buffer is one element of the engine's scatter list, so splitting it across
+        // mappings would mean inventing a second element the chain walk never saw.
+        if (!iova_range_covers(e.start, e.last, iova, len))
+            LOG_ERROR_RETURN(EINVAL, nullptr, "vduse iotlb `[`,`] does not cover iova ` len `",
+                             e.start, e.last, iova, len);
+        // `perm` says which way the driver mapped these pages, and `prot` below is
+        // derived from it, so the mmap itself always succeeds -- which is exactly why
+        // the direction has to be checked here rather than left to the mapping. A
+        // read-only mapping fetched on behalf of a write comes back as a VA the engine
+        // will write through, and that surfaces as a fault in our own process instead
+        // of as a status the guest can be told about.
+        if (!iotlb_perm_allows(e.perm, writable))
+            LOG_ERROR_RETURN(EACCES, nullptr, "vduse iotlb `[`,`] perm ` forbids the access asked for, iova ` len ` writable `",
+                             e.start, e.last, (int)e.perm, iova, len, (int)writable);
         size_t sz = (size_t)(e.last - e.start + 1);
         int prot = PROT_READ;
         if (e.perm & VDUSE_ACCESS_WO) prot = PROT_WRITE;
         if (e.perm & VDUSE_ACCESS_RO) prot |= PROT_READ;
         void* base = ::mmap(nullptr, sz, prot, MAP_SHARED, fd, (off_t)e.offset);
-        ::close(fd);   // the mapping keeps its own reference
         if (base == MAP_FAILED)
             LOG_ERRNO_RETURN(0, nullptr, "vduse iotlb mmap failed, iova ` map [`,`] off `",
                              iova, e.start, e.last, e.offset);
@@ -171,11 +216,17 @@ struct Iotlb {
         {
             SCOPED_LOCK(lock);
             // Re-scan before inserting: another coroutine can have fetched and
-            // published this same range while the ioctl and mmap above ran. Its
-            // mapping answers the request just as well, so keep that one and drop
-            // ours rather than cache two copies of the same IOVA range.
+            // published this same range while the ioctl and mmap above ran. When its
+            // entry allows our access too, it answers the request just as well, so
+            // keep that one and drop ours rather than cache two copies of the same
+            // IOVA range. When it does not -- it was fetched for the other direction,
+            // the driver having mapped those pages one-way -- ours is published
+            // alongside it, and the two entries for one range are told apart by the
+            // permission every hit now checks. That costs a second mapping of pages we
+            // could already reach; it does not give one question two answers.
             for (auto& m : maps)
-                if (iova >= m.start && iova <= m.last && len <= m.last - iova + 1) {
+                if (iova_range_covers(m.start, m.last, iova, len) &&
+                    iotlb_perm_allows(m.perm, writable)) {
                     hit = m.base + (iova - m.start);
                     break;
                 }
@@ -207,12 +258,14 @@ struct Iotlb {
             // only covers the request side; the ring side is covered there.
             invalidated = (gen != gen0);
             if (!hit && !invalidated)
-                maps.push_back(Map{e.start, e.last, (char*)base});
+                maps.push_back(Map{e.start, e.last, (char*)base, e.perm});
         }
         if (hit || invalidated) {
             ::munmap(base, sz);
             return hit;   // nullptr when the range was invalidated under us
         }
+        // Safe because containment was checked against these same bounds: e.start
+        // cannot exceed iova, so this offset cannot go negative.
         return (char*)base + (iova - e.start);
     }
 
@@ -750,10 +803,16 @@ struct VduseDeviceImpl : IBlkDevice {
             q->x.clear_ready();
             return 0;
         }
-        auto* d = (vring_desc*)iotlb.resolve(vi.desc_addr, (size_t)vi.num * sizeof(vring_desc));
-        auto* a = (vring_avail*)iotlb.resolve(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num));
+        // The three directions are not the same, and getting one wrong is not a
+        // refused ring: a used ring resolved as read-only is published anyway, and the
+        // first completion written into it faults in our own process.
+        auto* d = (vring_desc*)iotlb.resolve(vi.desc_addr, (size_t)vi.num * sizeof(vring_desc),
+                                             false);   // the device reads descriptors
+        auto* a = (vring_avail*)iotlb.resolve(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num),
+                                              false);   // and the avail ring
         auto* u = (vring_used*)iotlb.resolve(vi.device_addr,
-                        sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * vi.num);
+                        sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * vi.num,
+                        true);   // but writes the used ring
         // set_ring rather than four assignments, on the failure path as much as
         // on the success one: a ring that did not resolve is a ring that
         // changed, and the generation bump is what stops a request still in
@@ -863,7 +922,9 @@ struct VduseDeviceImpl : IBlkDevice {
 
     // ----- VirtQueueServer hooks: the vduse half of serving -----
 
-    void* vq_translate(uint64_t addr, size_t len) { return iotlb.resolve(addr, len); }
+    void* vq_translate(uint64_t addr, size_t len, bool writable) {
+        return iotlb.resolve(addr, len, writable);
+    }
 
     void vq_notify(uint32_t idx) {   // the used ring advanced and the driver asked for an IRQ
         if (::ioctl(dev_fd, VDUSE_VQ_INJECT_IRQ, &idx) < 0 && errno != EBADF && errno != ENODEV)
@@ -914,9 +975,9 @@ struct VduseDeviceImpl : IBlkDevice {
         auto* q = (Vq*)a;
         q->impl->vq_tick(q->qid);
     }
-    static void* translate_thunk(void* a, uint64_t addr, size_t len) {
+    static void* translate_thunk(void* a, uint64_t addr, size_t len, bool writable) {
         auto* q = (Vq*)a;
-        return q->impl->vq_translate(addr, len);   // the iotlb is device-wide
+        return q->impl->vq_translate(addr, len, writable);   // the iotlb is device-wide
     }
     static void* loop_thunk(void* a) {
         auto* q = (Vq*)a;
