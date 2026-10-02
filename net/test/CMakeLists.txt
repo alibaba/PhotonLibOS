@@ -1,6 +1,7 @@
 photon_add_test(test-socket test.cpp)
 photon_add_test(test-dg-socket test-udp.cpp)
 photon_add_test(test-sockpool test_sockpool.cpp)
+photon_add_test(test-sockpool-failure pooled_socket_failure_test.cpp)
 
 if (PHOTON_ENABLE_LIBCURL)
     photon_add_test(test-curl test_curl.cpp)

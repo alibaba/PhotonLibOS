@@ -114,7 +114,7 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
 
 struct StreamListHead : public StreamListNode {
     StreamListHead* _key_next = this;
-    // total # of sockets, including those in use, not including the head
+    // References from idle/checked-out streams, connectors and collector pins.
     uint32_t _refcnt = 0;
     uint16_t _key_len;
     char _key[0];
@@ -290,7 +290,16 @@ public:
             head->_refcnt++;
             stream = connector();
             if (!stream) {
-                head->_refcnt--;
+                if (--head->_refcnt == 0) {
+                    // Connectors may yield and other calls can prepend keys or
+                    // pin this head. Unlink only after its final reference drops.
+                    ERRNO err;
+                    auto link = &_key_head;
+                    while (*link != head) link = &(*link)->_key_next;
+                    *link = head->_key_next;
+                    sockmap.erase(head->key());
+                    errno = err.no;
+                }
                 return nullptr;
             }
             if (args.enable_tcp_keepalive)
@@ -351,6 +360,9 @@ public:
     Timeout check_expire_heartbeat() {
         Timeout near_expire(args.expiration);
         for (auto h = _key_head; h; h = h->_key_next) {
+            // Stream destructors and heartbeats can yield or reenter connect().
+            // Pin the traversal head until all accesses to its nodes finish.
+            ++h->_refcnt;
             // Expire timed-out nodes
             auto ptr = h->next();
             while (ptr != h) {
@@ -385,6 +397,7 @@ public:
                     }
                 }
             }
+            --h->_refcnt;
         }
         // Erase empty entries, unlinking from key list as we go
         auto *prev_next = &_key_head;
