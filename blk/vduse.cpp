@@ -127,6 +127,14 @@ static bool iotlb_perm_allows(uint8_t perm, bool writable) {
 // in either direction costs one quiesce or one retained 64 MiB, and changes no answer.
 static constexpr size_t VDUSE_STALE_FLUSH_BYTES = 64ull << 20;
 
+// How long that quiesce gives the queues to run out of requests before it holds the
+// mappings and lets a later tick try again. Not derived from anything either: the
+// retire that precedes the wait stops every queue admitting work, so the expected wait
+// is one request latency and this is a ceiling on a wait that has no other bound, not a
+// tuning knob. Being wrong in either direction costs one deferred flush or one longer
+// stall of a device that is already not answering.
+static constexpr uint64_t VDUSE_QUIESCE_DRAIN_US = 1000ull * 1000;
+
 struct Iotlb {
     int dev_fd = -1;
     struct Map {
@@ -294,10 +302,17 @@ struct Iotlb {
     // flush_stale's caller performs.
     // The range is whatever the driver replaced, and it is not ours to predict:
     // a full replacement arrives as the whole address space and a partial one as
-    // any subrange, including the single byte at IOVA 0. Callers that have to
-    // know which of their own ranges were touched ask with
-    // iova_ranges_intersect rather than by comparing against a spelling of
-    // "all of it".
+    // any subrange, including the single byte at IOVA 0.
+    //
+    // The handler that answers that message does NOT call this: it holds the lock
+    // across the drop and the retire together, using invalidate_locked, because an
+    // entry is the driver's mapping and not our request. One mapping can cover the
+    // whole address space, so an update to a subrange no ring lies in still drops
+    // the entry the rings were resolved from -- asking whether the message's range
+    // covers a ring answers no, and the VAs that were handed out are gone all the
+    // same. What was actually dropped is the only thing that says whose mappings
+    // went, and telling the queues has to be part of the same step: see the
+    // handler.
     void invalidate(uint64_t start, uint64_t last) {
         SCOPED_LOCK(lock);
         invalidate_locked(start, last);
@@ -325,12 +340,16 @@ struct Iotlb {
     }
     // Unlocked halves for clear(): photon::mutex is not recursive, so clear()
     // cannot call the lock-taking members above it. `lock` is already held.
-    void invalidate_locked(uint64_t start, uint64_t last) {
+    void invalidate_locked(uint64_t start, uint64_t last,
+                           std::vector<Map>* dropped = nullptr) {
         gen++;   // resolve()'s in-flight slow path must not publish what this drops
         for (size_t i = maps.size(); i-- > 0; ) {
             auto& m = maps[i];
             if (m.start > last || m.last < start)
                 continue;
+            // copied before the erase below invalidates the reference into `maps`
+            if (dropped)
+                dropped->push_back(m);
             stale.push_back(m);
             maps.erase(maps.begin() + i);
         }
@@ -506,12 +525,18 @@ struct VduseDeviceImpl : IBlkDevice {
                 ring_last[i].store(0, std::memory_order_relaxed);
             }
         }
-        // Does a replaced [start, last] cover any of this queue's rings? The
+        // Does a mapping the update dropped cover any of this queue's rings? The
         // question an UPDATE_IOTLB has to answer per queue, and the reason the
         // answer is not "retire them all": retiring raises the ring generation,
         // and a request whose generation moved declines to complete, so retiring
         // a queue whose rings were untouched drops completions the guest is
         // waiting for.
+        //
+        // Asked about the dropped mapping and not about the message's own range,
+        // because a mapping is the driver's and can be far wider than the range
+        // that replaced it: one driver mapping over the whole address space is
+        // dropped by an update to any byte of it, and every ring resolved through
+        // that mapping loses its VA whether or not the byte lies in the ring.
         bool rings_in(uint64_t start, uint64_t last) const {
             for (int i = 0; i < 3; i++)
                 if (iova_ranges_intersect(ring_start[i].load(std::memory_order_relaxed),
@@ -783,33 +808,55 @@ struct VduseDeviceImpl : IBlkDevice {
         case VDUSE_UPDATE_IOTLB: {
             uint64_t s = req->iova.start, l = req->iova.last;
             LOG_DEBUG("vduse ` iotlb update [`, `]", name, s, l);
-            // Invalidate FIRST. It bumps the cache generation, which is what makes
-            // a refresh already in flight withhold its publish, and the intersect
-            // test below has to run against ranges that refresh will not be
-            // allowed to publish. Both orders retire the same queues; only this
-            // one also silences the refresh that is resolving them.
-            iotlb.invalidate(s, l);
-            // Retire every queue whose RINGS this range covers, and arm the refresh
-            // that re-resolves them from whatever the driver put there instead.
+            // Invalidate FIRST, and retire inside the same critical section. Two
+            // reasons, and neither is about ordering the message.
             //
-            // Not every queue, because retiring raises the ring generation and a
-            // request whose generation moved declines to complete: retiring a queue
-            // whose rings were untouched drops completions its guest is waiting
-            // for. Arming is not optional either -- nothing else sets that flag
-            // except a DRIVER_OK, which a replacement brings no later one of, so
-            // without the arm the queue stays not-ready for good.
+            // First, the invalidation bumps the cache generation, which is what
+            // makes a refresh already in flight withhold its publish; the test
+            // below has to run against ranges that refresh will not be allowed to
+            // publish. Both orders retire the same queues, but only this one also
+            // silences the refresh that is resolving them.
             //
-            // And not only a full replacement. The kernel's whole-address-space
-            // update is one shape of this message and a subrange covering one
-            // queue's vring is another; the single byte at IOVA 0 is a third, and
-            // it is a legal update that must retire only a ring starting there.
-            // Deciding by intersection answers all three, and answers a kernel
-            // that batches ranges without being told about it.
-            for (uint32_t i = 0; i < nqueues; i++) {
-                if (!vqs[i]->x.rings_in(s, l))
-                    continue;
-                vqs[i]->x.retire();
-                vqs[i]->x.needs_refresh.store(true, std::memory_order_relaxed);
+            // Second, and the reason this holds the lock instead of calling
+            // invalidate(): the flush in vq_tick takes this same lock, so doing the
+            // drop and the retire as one step is what makes them one step for the
+            // flush too. Split them -- drop, release, then retire -- and a tick on
+            // another vcpu can flush in between, releasing pages a queue that is
+            // still ready then dispatches into. Nothing in the loop yields: it is
+            // atomic loads and one compare-exchange per queue.
+            std::vector<Iotlb::Map> dropped;
+            {
+                SCOPED_LOCK(iotlb.lock);
+                iotlb.invalidate_locked(s, l, &dropped);
+                // Retire every queue whose RINGS a dropped entry covers, and arm the
+                // refresh that re-resolves them from whatever the driver put there
+                // instead.
+                //
+                // Not every queue, because retiring raises the ring generation and a
+                // request whose generation moved declines to complete: retiring a
+                // queue whose rings were untouched drops completions its guest is
+                // waiting for. Arming is not optional either -- nothing else sets
+                // that flag except a DRIVER_OK, which a replacement brings no later
+                // one of, so without the arm the queue stays not-ready for good.
+                //
+                // Intersection and not containment: the entry a ring was resolved
+                // from covers the ring's whole range, so it always intersects it,
+                // and a second entry over the same IOVAs carrying the other
+                // permission answers yes as well. That over-answer is the safe
+                // direction -- it costs one queue one refresh -- while an
+                // under-answer leaves a ready queue pointing into released pages.
+                for (uint32_t i = 0; i < nqueues; i++) {
+                    bool covered = false;
+                    for (auto& m : dropped)
+                        if (vqs[i]->x.rings_in(m.start, m.last)) {
+                            covered = true;
+                            break;
+                        }
+                    if (!covered)
+                        continue;
+                    vqs[i]->x.retire();
+                    vqs[i]->x.needs_refresh.store(true, std::memory_order_relaxed);
+                }
             }
             reply(req->request_id, VDUSE_REQ_RESULT_OK, 0, 0);
             break;
@@ -905,10 +952,15 @@ struct VduseDeviceImpl : IBlkDevice {
             // raise its generation and drop completions for nothing. What this
             // leaves behind -- the previous ring's pointers still in `srv`, with
             // readiness cleared and no set_ring to bump the generation -- is only
-            // safe because nothing dereferences a ring pointer without first
-            // reading readiness: dispatch is gated on it, and so is the teardown
-            // backlog wait. The flush in vq_tick is the other half of that
-            // argument, and it waits for in_flight rather than for readiness.
+            // safe because nothing can start a new dereference of them: the two
+            // paths that admit work into a ring, loop()'s dispatch and the
+            // redispatch a completion triggers, both consult readiness first. The
+            // third reader is the completion of a request already dispatched,
+            // which deliberately does NOT consult readiness -- a paused ring still
+            // owes its completions -- and it is covered by the other half of the
+            // argument instead: the flush in vq_tick releases mappings only while
+            // every queue's in_flight is zero, and that request is counted in it
+            // for as long as it runs.
             q->x.clear_rings();
             q->x.clear_ready();
             return 0;
@@ -1093,11 +1145,14 @@ struct VduseDeviceImpl : IBlkDevice {
         // the flush reachable at all: a device that is serving has ready queues, so
         // the old condition amounted to "never, while working". What made readiness
         // look necessary was a ready queue holding ring pointers into a mapping
-        // that had been invalidated. That state is now unreachable -- the
-        // invalidation that could create it retires the queue whose rings it
-        // covers -- so the two readers of a ring pointer are both gated on
-        // readiness (dispatch, and the teardown backlog wait) and neither can meet
-        // a released mapping.
+        // that had been invalidated. That state is what the message handler now
+        // rules out, in one step with the invalidation that could create it: an
+        // entry that leaves the lookup retires every queue whose rings it covered,
+        // under the same lock this flush takes. So the invariant the flush relies on
+        // is that a ready queue's ring mappings are still in the lookup, and the
+        // three readers of a ring pointer are covered by two different facts -- the
+        // two that admit work into a ring consult readiness, and the third, a
+        // completion already running, is counted in the in_flight this waits for.
         if (!any_in_flight()) {
             iotlb.flush_stale();
             return;
@@ -1107,9 +1162,9 @@ struct VduseDeviceImpl : IBlkDevice {
         // as the driver keeps replacing ranges. Past the cap this stops dispatch
         // device-wide, waits the requests out and releases the mappings. It costs
         // one request latency of throughput on this device, it cannot deadlock --
-        // readiness is cleared before the wait, so in_flight can only fall, and
-        // drain() yields rather than spinning -- and it is bounded by the cap
-        // rather than by the driver's behaviour.
+        // readiness is cleared before the wait and stays cleared for the whole of
+        // it, so in_flight can only fall, and the wait has a deadline of its own --
+        // and it is bounded by the cap rather than by the driver's behaviour.
         if (iotlb.stale_bytes() >= VDUSE_STALE_FLUSH_BYTES)
             quiesce_and_flush();
     }
@@ -1130,16 +1185,49 @@ struct VduseDeviceImpl : IBlkDevice {
             return;
         DEFER(quiescing.store(false));
         size_t held = iotlb.stale_bytes();
+        // Retire every queue AND consume its refresh flag, so nothing re-publishes
+        // readiness while the wait below is running. Readiness is what both paths
+        // into a ring consult -- the loop's dispatch and the redispatch a completion
+        // triggers -- so from here no queue admits another request and the counts
+        // can only fall, which is the whole reason this terminates.
+        //
+        // Arming the flag here instead, which is where the first version of this had
+        // it, hands the device straight back: every other queue's loop calls its own
+        // tick, sees the flag, re-resolves and is ready again within a millisecond,
+        // and a guest that keeps the ring full then holds in_flight above zero for
+        // as long as it likes. The wait below would never end, this coroutine would
+        // never return to its own loop, and `quiescing` would stay set so that no
+        // later tick could try again -- one queue permanently out of service and the
+        // bound it existed to enforce gone with it.
         for (auto* o : vqs) {
-            // readiness first, so no queue dispatches another request into the
-            // count the drains below are waiting to reach zero
             o->x.retire();
-            o->x.needs_refresh.store(true, std::memory_order_relaxed);
+            o->x.needs_refresh.store(false, std::memory_order_relaxed);
         }
+        // Bounded rather than VirtQueueServer::drain(), which waits without a
+        // deadline. Retiring first makes the deadline a formality in every case this
+        // can be reached for, and what it is really for is the interleaving that can
+        // still add work -- a renegotiation landing mid-quiesce sets the flag this
+        // just consumed -- and a backend that has stopped answering. Giving up is the
+        // cheap outcome: the mappings stay where they were, and the cap is still
+        // exceeded, so a later tick tries again.
+        uint64_t deadline = photon::now + VDUSE_QUIESCE_DRAIN_US;
         for (auto* o : vqs)
-            o->srv.drain();
-        iotlb.flush_stale();
-        LOG_INFO("vduse ` quiesced every queue to release ` bytes of invalidated mappings", name, held);
+            while (o->srv.in_flight.load() && photon::now < deadline)
+                photon::thread_usleep(1000);
+        bool drained = !any_in_flight();
+        if (drained)
+            iotlb.flush_stale();
+        // Every queue was retired, so every queue needs its ring re-resolved -- the
+        // ones that drained and the ones that did not. This is also what lets the
+        // queue whose loop is running here come back: it is inside its own tick, and
+        // will not call vq_refresh until the flag is set.
+        for (auto* o : vqs)
+            o->x.needs_refresh.store(true, std::memory_order_relaxed);
+        if (drained)
+            LOG_INFO("vduse ` quiesced every queue to release ` bytes of invalidated mappings", name, held);
+        else
+            LOG_WARN("vduse ` quiesce still had requests in flight after ` us, holding ` bytes of invalidated mappings",
+                     name, VDUSE_QUIESCE_DRAIN_US, held);
     }
 
     // The hooks are bound with the Vq* as their context, so one allocation

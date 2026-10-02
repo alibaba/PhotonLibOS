@@ -573,10 +573,10 @@ inline bool iova_range_covers(uint64_t start, uint64_t last, uint64_t iova, size
 // start, and an empty range overlaps nothing -- which is what makes "never
 // resolved" expressible as {1, 0} rather than as a separate flag.
 //
-// This is the question an iotlb invalidation has to answer about a ring: whether
-// the range the driver just replaced is one the ring's addresses lie in. Testing
-// for a particular range instead -- a full replacement as {0, UINT64_MAX} -- gets
-// both directions wrong at once, because one legal update is the single byte at
+// This is the question an iotlb invalidation has to answer about a ring: whether a
+// mapping the update took out of the lookup is one the ring's addresses lie in.
+// Testing for a particular range instead -- a full replacement as {0, UINT64_MAX} --
+// gets both directions wrong at once, because one legal update is the single byte at
 // IOVA 0 and another is a partial replacement that covers the ring exactly.
 inline bool iova_ranges_intersect(uint64_t a_start, uint64_t a_last,
                                   uint64_t b_start, uint64_t b_last) {

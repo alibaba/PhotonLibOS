@@ -398,14 +398,15 @@ TEST(IovaRangeCovers, containment_is_wrap_free_and_refuses_a_zero_length) {
     EXPECT_EQ((int) (sizeof(rows) / sizeof(rows[0])), want_true + want_false);
 }
 
-// The other half of an iotlb invalidation: which rings a replaced range covers. The
-// ring is `a` and the update is `b`. The rows that carry the finding are the three
-// shapes one message type can arrive in -- the kernel's whole-address-space
-// replacement, a subrange that covers one queue's vring, and the single byte at
-// IOVA 0, which is a legal update that a test for "start == 0 && last == 0" reads as
-// the first of the three. Deciding by intersection answers all three, and the empty
-// range {1, 0} is how "this queue has no ring published" says it does not intersect
-// anything, including the whole space.
+// The other half of an iotlb invalidation: which rings a range covers. The ring is
+// `a` and the range asked about is `b` -- in the transport, the range of a mapping
+// the update took out of its lookup, which is the driver's mapping and not the
+// message's own range. The rows that carry the finding are the three shapes such a
+// range arrives in -- the whole address space, a subrange that covers one queue's
+// vring, and the single byte at IOVA 0, which is a legal update that a test for
+// "start == 0 && last == 0" reads as the first of the three. Deciding by
+// intersection answers all three, and the empty range {1, 0} is how "this queue has
+// no ring published" says it does not intersect anything, including the whole space.
 TEST(IovaRangesIntersect, an_invalidated_range_finds_the_rings_it_covers) {
     struct Row { uint64_t a0, a1, b0, b1; bool want; const char* why; };
     static const Row rows[] = {
@@ -416,9 +417,9 @@ TEST(IovaRangesIntersect, an_invalidated_range_finds_the_rings_it_covers) {
         {0x2000, 0x2fff, 0x2800, 0x2900, true,  "wholly inside the ring"},
         {0x2000, 0x2fff, 0x1000, 0x1fff, false, "ends one below the ring"},
         {0x2000, 0x2fff, 0x3000, 0x3fff, false, "starts one above the ring"},
-        // The row the old spelling got wrong in the other direction: a one-byte
-        // update at IOVA 0 is not a full replacement, and retiring every queue for
-        // it drops completions on rings that are nowhere near it.
+        // The row the old spelling got wrong in the other direction: a one-byte range
+        // at IOVA 0 is not a whole-address-space replacement, and a predicate that
+        // cannot tell the two apart answers the same way for both.
         {0x2000, 0x2fff, 0, 0, false, "one byte at IOVA 0 misses a ring above it"},
         {0, 0x0fff, 0, 0, true,  "one byte at IOVA 0 does cover a ring starting there"},
         {1, 0, 0, UINT64_MAX, false, "no ring published, so not even the whole space hits"},
