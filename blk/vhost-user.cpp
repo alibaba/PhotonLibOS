@@ -1184,10 +1184,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // Ring enablement is tied to this bit: SET_VRING_ENABLE "should be sent
             // only when VHOST_USER_F_PROTOCOL_FEATURES has been negotiated", and a
             // SET_FEATURES without it means the "back-end must enable all rings
-            // immediately". A frontend that declined the bit never sends the enable,
-            // so waiting for one leaves every request sitting in an avail ring
-            // nobody drains -- and the session gives no sign anything is wrong,
-            // because every control message it did send was answered normally.
+            // immediately". A frontend that declined the bit does not send the
+            // enable, the "should be sent only when" above being what stops it, so
+            // waiting for one leaves every request sitting in an avail ring nobody
+            // drains -- and the session gives no sign anything is wrong, because
+            // every control message it did send was answered normally.
             // Enabled here rather than at construction: this is the message that
             // tells us which of the two regimes the peer is in. vq_start is a no-op
             // until the ring is actually configured, and the later SET_VRING_*
@@ -1234,11 +1235,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // "either ignore this message, or use it to disable all rings". This
             // device ignores it, and that is a choice rather than an omission --
             // the other reading is unavailable to a frontend that never negotiated
-            // bit 30, because such a frontend has no SET_VRING_ENABLE to re-enable
-            // a ring with, so disabling here would strand it for the rest of the
-            // session. The spec also records that the ambiguity arose from
-            // back-ends that discarded connection state on this message; that is a
-            // third reading and must not be inferred from an empty arm.
+            // bit 30: such a frontend is not supposed to send SET_VRING_ENABLE at
+            // all, so it has no protocol-legal way to re-enable a ring, and
+            // disabling here would leave it unable to recover except by breaking
+            // the protocol itself. The spec also records that the ambiguity arose
+            // from back-ends that discarded connection state on this message; that
+            // is a third reading and must not be inferred from an empty arm.
             break;
         case VHOST_USER_RESET_DEVICE:
             // "Only valid if the VHOST_USER_PROTOCOL_F_RESET_DEVICE protocol feature
