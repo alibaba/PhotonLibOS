@@ -114,14 +114,13 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     EXPECT_EQ("last", exact["A-First"]);
     EXPECT_EQ("first", exact["Z-Last"]);
 
-    std::string parsedText = "X: value\r\n\r\n";
-    std::vector<char> parsedExactBuffer(parsedText.size() +
-                                        sizeof(HeadersBase::KV));
-    memcpy(parsedExactBuffer.data(), parsedText.data(), parsedText.size());
+    constexpr char parsedText[] = "X: value\r\n\r\n";
+    char parsedExactBuffer[sizeof(parsedText) - 1 + sizeof(HeadersBase::KV)];
+    memcpy(parsedExactBuffer, parsedText, sizeof(parsedText) - 1);
     Headers parsedExact;
-    ASSERT_EQ(0, parsedExact.reset(parsedExactBuffer.data(),
-                                  parsedExactBuffer.size(),
-                                  parsedText.size()));
+    ASSERT_EQ(0, parsedExact.reset(parsedExactBuffer,
+                                  sizeof(parsedExactBuffer),
+                                  sizeof(parsedText) - 1));
     EXPECT_EQ("X: value\r\n", parsedExact.serialized());
     EXPECT_EQ("value", parsedExact["X"]);
     EXPECT_EQ(0U, parsedExact.space_remain());
