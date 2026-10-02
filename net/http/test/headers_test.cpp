@@ -99,6 +99,40 @@ TEST(headers, req_header) {
     EXPECT_EQ(req_proxy.target(), "http://HostName/targetName");
 }
 
+TEST(headers, erase_preserves_index_offsets_and_serialization) {
+    // Insertion order deliberately differs from the sorted index order.
+    for (auto victim : {"A", "M", "Z"}) {
+        CommonHeaders<256> headers;
+        ASSERT_EQ(0, headers.insert("M", "middle"));
+        ASSERT_EQ(0, headers.insert("Z", "last"));
+        ASSERT_EQ(0, headers.insert("A", "first"));
+        ASSERT_EQ(1, headers.erase(victim));
+        std::string expected;
+        for (auto item : {std::make_pair("M", "middle"),
+                          std::make_pair("Z", "last"),
+                          std::make_pair("A", "first")}) {
+            if (std::string_view(item.first) == victim) continue;
+            EXPECT_EQ(item.second, headers[item.first]);
+            expected += std::string(item.first) + ": " + item.second + "\r\n";
+        }
+        EXPECT_EQ(expected, headers.serialized());
+        ASSERT_EQ(0, headers.insert("B", "new"));
+        EXPECT_EQ("new", headers["B"]);
+        EXPECT_EQ(0, headers.erase("missing"));
+    }
+    CommonHeaders<256> headers;
+    ASSERT_EQ(0, headers.insert("X-Dup", "one", 1));
+    ASSERT_EQ(0, headers.insert("Keep", "value"));
+    ASSERT_EQ(0, headers.insert("x-dup", "two", 1));
+    ASSERT_EQ(2, headers.erase("X-DUP"));
+    EXPECT_EQ("Keep: value\r\n", headers.serialized());
+    ASSERT_EQ(1, headers.erase("Keep"));
+    EXPECT_TRUE(headers.empty());
+    EXPECT_TRUE(headers.serialized().empty());
+    ASSERT_EQ(0, headers.insert("Again", "works"));
+    EXPECT_EQ("Again: works\r\n", headers.serialized());
+}
+
 class test_stream : public net::SocketStreamBase {
 public:
     string rand_stream;

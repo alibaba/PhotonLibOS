@@ -109,21 +109,20 @@ int HeadersBase::erase(std::string_view key) {
         auto bytes = last - first;
 
         memmove(m_buf + first, m_buf + last, m_buf_size - last);
-        std::vector<KV> retained;
-        retained.reserve(m_kv_size - 1);
-        for (uint16_t i = 0; i < m_kv_size; ++i) {
-            if (i == index) continue;
-            auto item = kv(i);
-            if (item.first.offset() >= last) {
-                item.first += -(int)bytes;
-                item.second += -(int)bytes;
+        // The index ends at a fixed buffer address. Removing an entry moves
+        // kv_begin() right by one: shift its prefix right, leaving its suffix
+        // in place. Assignment preserves KV's std::pair semantics in C++14.
+        auto begin = kv_begin();
+        if (index != 0)
+            std::copy_backward(begin, begin + index, begin + index + 1);
+        --m_kv_size;
+        for (auto item = kv_begin(); item != kv_end(); ++item) {
+            if (item->first.offset() >= last) {
+                item->first += -(int)bytes;
+                item->second += -(int)bytes;
             }
-            retained.push_back(item);
         }
         m_buf_size -= bytes;
-        m_kv_size = retained.size();
-        if (!retained.empty())
-            std::copy(retained.begin(), retained.end(), kv_begin());
         m_last_kv = m_kv_size;
         ++erased;
     }
