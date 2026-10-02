@@ -102,8 +102,6 @@ constexpr static std::bitset<10>
 
 static constexpr size_t kMinimalHeadersSize = 8 * 1024 - 1;
 
-Client::~Client() = default;
-
 void Client::set_resolver(Resolver* resolver, bool ownership) {
     // Keep the old lease outside the lock scope: resolver destruction can yield
     // or reenter set_resolver(), and must never run while the spinlock is held.

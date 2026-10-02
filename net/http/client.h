@@ -43,8 +43,6 @@ public:
 
 class Client : public Object {
 public:
-    ~Client() override;
-
     class Operation;
     Operation* new_operation(Verb v, std::string_view url, uint16_t buf_size = UINT16_MAX) {
         return Operation::create(this, v, url, buf_size);
