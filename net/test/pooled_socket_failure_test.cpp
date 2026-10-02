@@ -174,6 +174,86 @@ TEST(socket_pool_failure, collector_pins_head_during_reentrant_destruction) {
     EXPECT_EQ(nullptr, pool._key_head);
 }
 
+TEST(socket_pool_failure, collector_restarts_after_reentrant_destruction) {
+    SocketPoolArgs args;
+    args.expiration = 1000;
+    TCPSocketPool pool(args);
+    int reentries = 0;
+    auto onDestroy = [&] {
+        ++reentries;
+        auto grabbed = pool.connect("expiring", []() -> ISocketStream* {
+            return nullptr;
+        });
+        EXPECT_NE(nullptr, grabbed);
+        if (grabbed) {
+            grabbed->close();
+            delete grabbed;
+        }
+    };
+    auto first = pool.connect("expiring", [&]() -> ISocketStream* {
+        return new ReentrantStream(onDestroy);
+    });
+    auto second = pool.connect("expiring", []() -> ISocketStream* {
+        return new_string_socket_stream();
+    });
+    ASSERT_NE(nullptr, first);
+    ASSERT_NE(nullptr, second);
+    delete first;
+    delete second;
+    ASSERT_EQ(2U, pool._key_head->_refcnt);
+    pool._key_head->next()->timeout.timeout(0);
+    pool._key_head->next()->next()->timeout.timeout(0);
+    pool.check_expire_heartbeat();
+    EXPECT_EQ(1, reentries);
+    EXPECT_TRUE(pool.sockmap.empty());
+    EXPECT_EQ(nullptr, pool._key_head);
+}
+
+TEST(socket_pool_failure, collector_detaches_batch_before_reentrant_heartbeat) {
+    TCPSocketPool* poolPtr = nullptr;
+    int heartbeats = 0;
+    int connectors = 0;
+    auto heartbeater = [&](ISocketStream*) -> int {
+        ++heartbeats;
+        if (heartbeats != 1) return 0;
+        auto grabbed = poolPtr->connect("heartbeat", [&]() -> ISocketStream* {
+            ++connectors;
+            return nullptr;
+        });
+        EXPECT_EQ(nullptr, grabbed);
+        if (grabbed) {
+            grabbed->close();
+            delete grabbed;
+        }
+        return 0;
+    };
+    SocketPoolArgs args;
+    args.heartbeater = heartbeater;
+    TCPSocketPool pool(args);
+    poolPtr = &pool;
+    auto first = pool.connect("heartbeat", []() -> ISocketStream* {
+        return new_string_socket_stream();
+    });
+    auto second = pool.connect("heartbeat", []() -> ISocketStream* {
+        return new_string_socket_stream();
+    });
+    ASSERT_NE(nullptr, first);
+    ASSERT_NE(nullptr, second);
+    delete first;
+    delete second;
+    pool.check_expire_heartbeat();
+    EXPECT_EQ(2, heartbeats);
+    EXPECT_EQ(1, connectors);
+    ASSERT_EQ(1U, pool.sockmap.size());
+    ASSERT_NE(nullptr, pool._key_head);
+    EXPECT_EQ(2U, pool._key_head->_refcnt);
+    size_t idle = 0;
+    for (auto node = pool._key_head->next(); node != pool._key_head;
+         node = node->next())
+        ++idle;
+    EXPECT_EQ(2U, idle);
+}
+
 int main(int argc, char** argv) {
     if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE)) return 1;
     DEFER(photon::fini());

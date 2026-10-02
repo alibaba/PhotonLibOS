@@ -361,40 +361,45 @@ public:
         Timeout near_expire(args.expiration);
         for (auto h = _key_head; h; h = h->_key_next) {
             // Stream destructors and heartbeats can yield or reenter connect().
-            // Pin the traversal head until all accesses to its nodes finish.
+            // Pin the head and always restart expiration from its first node,
+            // so a destructor may remove another node without invalidating a
+            // retained traversal pointer.
             ++h->_refcnt;
-            // Expire timed-out nodes
-            auto ptr = h->next();
-            while (ptr != h) {
+            while (!h->single()) {
+                auto ptr = h->next();
                 if (now < ptr->timeout.expiration()) {
                     near_expire = std::min(near_expire, ptr->timeout);
                     break;
                 }
-                auto next = ptr->remove_from_list();
+                ptr->remove_from_list();
                 rm_watch(ptr);
                 assert(h->_refcnt > 0);
                 h->_refcnt--;
                 delete ptr;
-                ptr = next;
             }
-            // Heartbeat remaining nodes
             if (args.heartbeater) {
-                while (ptr != h) {
-                    // Take node out of the list so connect() cannot grab it
-                    // while the heartbeater yields (I/O).
-                    auto next = ptr->remove_from_list();
+                // Detach the whole heartbeat batch. A callback can then
+                // reenter connect(), but it cannot remove any node retained
+                // by this traversal.
+                StreamListNode pending(nullptr, h, 0);
+                while (!h->single()) {
+                    auto ptr = h->next();
+                    ptr->remove_from_list();
                     rm_watch(ptr);
-                    int ret = args.heartbeater(ptr->stream.get());
-                    if (ret == 0) {
+                    pending.insert_before(ptr);
+                }
+                while (!pending.single()) {
+                    auto ptr = pending.next();
+                    ptr->remove_from_list();
+                    near_expire = std::min(near_expire, ptr->timeout);
+                    if (args.heartbeater(ptr->stream.get()) == 0) {
                         h->insert_before(ptr);
                         add_watch(ptr->stream->get_underlay_fd(), ptr);
-                        ptr = next;
-                    } else {
-                        assert(h->_refcnt > 0);
-                        h->_refcnt--;
-                        delete ptr;
-                        ptr = next;
+                        continue;
                     }
+                    assert(h->_refcnt > 0);
+                    h->_refcnt--;
+                    delete ptr;
                 }
             }
             --h->_refcnt;
