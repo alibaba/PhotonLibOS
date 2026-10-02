@@ -49,8 +49,11 @@ limitations under the License.
 //   the backend channel fd from SET_BACKEND_REQ_FD (PROTOCOL_F_BACKEND_REQ).
 //
 // P1 scope: BlkConfig::queues virtqueues -- 0 means one, over MAX_QUEUES means
-// clamped to it -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
-// than one, split ring, no
+// clamped to it -- and multiqueue offered exactly when that count is more than one,
+// in BOTH words: VIRTIO_BLK_F_MQ in the device features and
+// VHOST_USER_PROTOCOL_F_MQ in the protocol features. Neither alone is enough -- the
+// device bit is what tells the guest driver to use the queues, the protocol bit is
+// what lets the primary find out how many there are. Split ring, no
 // indirect descriptors offered (F_RING_INDIRECT_DESC not in our feature set),
 // IN/OUT/FLUSH/GET_ID served; FEATURE_DISCARD/WRITE_ZEROES accepted in cfg
 // but not offered. Each queue serves on one vcpu -- the caller's, or a pool
@@ -145,6 +148,17 @@ enum : int32_t {
 #define VHOST_USER_VRING_NOFD_MASK  0x100u
 
 // protocol features we negotiate
+//
+// Bit 0 is multiple-queue support. vhost-user.rst states the feature "is supported
+// only when the protocol feature VHOST_USER_PROTOCOL_F_MQ (bit 0) is set", and
+// GET_QUEUE_NUM is how the primary learns the count -- so a primary that has not
+// settled the bit has no count to work from and takes it to be 1. That is what
+// QEMU does, and it is what made a backend offering VIRTIO_BLK_F_MQ, publishing a
+// truthful virtio_blk_config::num_queues and answering GET_QUEUE_NUM correctly
+// still come up as a single queue: every channel agreed except the one the peer
+// gates on. Offered exactly when the device-level F_MQ is, so the two cannot
+// disagree; see that offer for why the boundary is 2 and not 1.
+#define VHOST_USER_PROTOCOL_F_MQ          0
 #define VHOST_USER_PROTOCOL_F_REPLY_ACK   3
 #define VHOST_USER_PROTOCOL_F_BACKEND_REQ 5
 #define VHOST_USER_PROTOCOL_F_CONFIG      9
@@ -1061,13 +1075,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
             }
             LOG_INFO("vhost-user negotiated features ", HEX(negotiated));
             break;
-        case VHOST_USER_GET_PROTOCOL_FEATURES:
-            if (reply(conn_fd, m->request,
-                      (1ULL << VHOST_USER_PROTOCOL_F_REPLY_ACK) |
-                      (1ULL << VHOST_USER_PROTOCOL_F_BACKEND_REQ) |
-                      (1ULL << VHOST_USER_PROTOCOL_F_CONFIG)) < 0)
+        case VHOST_USER_GET_PROTOCOL_FEATURES: {
+            uint64_t pf = (1ULL << VHOST_USER_PROTOCOL_F_REPLY_ACK) |
+                          (1ULL << VHOST_USER_PROTOCOL_F_BACKEND_REQ) |
+                          (1ULL << VHOST_USER_PROTOCOL_F_CONFIG);
+            // The same gate as the device-level VIRTIO_BLK_F_MQ offer, and the two
+            // have to move together: this bit is what lets the primary ask how many
+            // queues there are, that one is what tells the guest driver to use them.
+            // Either offered alone is a device that advertises a count nobody can
+            // act on. nqueues is fixed at construction, so the answer is stable
+            // across a reconnect.
+            if (nqueues >= 2)
+                pf |= (1ULL << VHOST_USER_PROTOCOL_F_MQ);
+            if (reply(conn_fd, m->request, pf) < 0)
                 return false;
             return true;
+        }
         case VHOST_USER_SET_PROTOCOL_FEATURES:
             proto_features = m->payload.u64;
             // REPLY_ACK just took effect -- honor it for THIS message too

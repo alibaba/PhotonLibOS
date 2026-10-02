@@ -140,6 +140,15 @@ static_assert(offsetof(mu_msg, payload) == 12,
 // vhost-user's own bit in the device feature word: the gate on whether the
 // frontend negotiates protocol features at all
 #define F_VHU_PROTOCOL_FEATURES 30
+// Bit 0 of the PROTOCOL feature word, which is a different word from the one above
+// and is settled by GET/SET_PROTOCOL_FEATURES. It is multiple-queue support, and the
+// protocol makes the feature supported ONLY when it is set -- so without it the
+// backend's maximum queue count is 1 by definition and GET_QUEUE_NUM has nothing to
+// answer. A primary models that by not asking, which is what QEMU does and what this
+// mock now does. That is why a device can offer virtio F_MQ, publish a truthful
+// num_queues, answer GET_QUEUE_NUM with the real count, and still be undrivable as
+// multiqueue: every channel agrees except the one the peer gates on.
+#define P_VHU_MQ        0
 struct blk_outhdr { uint32_t type, ioprio; uint64_t sector; };
 struct blk_config { uint64_t capacity; uint32_t size_max, seg_max;
                     uint16_t cyl; uint8_t heads, sectors; uint32_t blk_size;
@@ -215,6 +224,18 @@ struct MockFrontend {
     // which is what the assertions in the EVENT_IDX cases read. Zero by default:
     // a permissive guest accepts everything offered.
     uint64_t decline = 0;
+    // The same knob for the PROTOCOL word, which is negotiated separately and is a
+    // different set of bits. Declining P_VHU_MQ models a primary that will not
+    // drive more than one queue, and the observable consequence is that it never
+    // asks the count -- so this is how the gate in negotiate() gets teeth.
+    uint64_t proto_decline = 0;
+    // What SET_PROTOCOL_FEATURES settled on, and the queue count this frontend
+    // ended up with. The count keeps its default 1 when P_VHU_MQ was not
+    // negotiated, because the query that would have raised it is gated on that bit
+    // -- which is exactly the cap a real primary applies, and the reason a case
+    // reading `queue_num` has to be paired with one that saw the bit settled.
+    uint64_t proto_features = 0;
+    uint32_t queue_num = 1;
     std::string err;
 
     bool fail(const char* what) {
@@ -399,10 +420,14 @@ struct MockFrontend {
         memset(&m, 0, sizeof(m));
         m.request = MU_GET_PROTOCOL_FEATURES; m.size = 0;
         if (!transact(&m, &r)) return false;
-        uint64_t proto = r.payload.u64;
+        // Settled word, not the raw offer, and the settled word is what goes back
+        // in SET_PROTOCOL_FEATURES: sending the offer after masking bits off it
+        // locally would be a frontend lying about what it negotiated.
+        proto_features = r.payload.u64 & ~proto_decline;
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_PROTOCOL_FEATURES; m.size = 8; m.payload.u64 = proto;
+        m.request = MU_SET_PROTOCOL_FEATURES; m.size = 8;
+        m.payload.u64 = proto_features;
         if (!transact(&m, &r)) return false;
 
         memset(&m, 0, sizeof(m));
@@ -415,10 +440,21 @@ struct MockFrontend {
                                     // which is the offer minus whatever it declined
         if (!transact(&m, &r)) return false;
 
-        memset(&m, 0, sizeof(m));
-        m.request = MU_GET_QUEUE_NUM; m.size = 0;
-        if (!transact(&m, &r)) return false;
-        if (r.payload.u64 < 1) { errno = EPROTO; return fail("queue num"); }
+        // Asked ONLY once protocol MQ is settled, which is what a primary does:
+        // without the bit the backend's maximum queue count is taken to be 1 and
+        // this query never happens. Sending it unconditionally is what let this
+        // suite pass against a device that offered virtio F_MQ, published a
+        // truthful num_queues and answered GET_QUEUE_NUM with the real count, yet
+        // could not be driven as multiqueue -- the mock was reading a number no
+        // conformant peer would have asked for, so the two disagreed and only the
+        // peer was right.
+        if (proto_features & (1ULL << P_VHU_MQ)) {
+            memset(&m, 0, sizeof(m));
+            m.request = MU_GET_QUEUE_NUM; m.size = 0;
+            if (!transact(&m, &r)) return false;
+            if (r.payload.u64 < 1) { errno = EPROTO; return fail("queue num"); }
+            queue_num = (uint32_t)r.payload.u64;
+        }
 
         // guest memory: one memfd region, GPA base 0, QVA = our mapping
         memfd = ::memfd_create("vhu-guest", 0);
@@ -2007,8 +2043,15 @@ static constexpr uint32_t PEER_MAX_QUEUES = 64;
 // VIRTIO_BLK_F_MQ exactly when the count is more than one. virtio 1.2 §5.2.4
 // makes num_queues meaningful only when F_MQ is set, and a frontend that reads
 // one count while the device serves another addresses queues nobody is
-// listening on, so its requests vanish. Asserting all three together is what
-// stops the two channels from drifting apart.
+// listening on, so its requests vanish.
+//
+// A fourth channel has to agree with those three, and it is the one a real
+// primary gates on: bit 0 of the vhost-user PROTOCOL feature word. The count
+// query above is only sent once that bit is settled, so a device that offers
+// virtio F_MQ, publishes a truthful num_queues and answers GET_QUEUE_NUM with
+// the real count can still be driven as a single queue -- the peer never asked.
+// Asserting all four together is what stops them drifting apart, and the
+// `queue_num` assertion at the end reads the consequence rather than the bit.
 //
 // An over-large request is CLAMPED, not rejected: that is what the ublk
 // transport already does with the same field, and a library that failed the
@@ -2033,8 +2076,9 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
         ASSERT_EQ(0, dev->start(file)) << "queues=" << c.ask;
         DEFER(dev->shutdown());
 
-        uint64_t want = c.want, got_qn = 0, got_feat = 0;
+        uint64_t want = c.want, got_qn = 0, got_feat = 0, got_proto = 0;
         uint16_t got_nq = 0;
+        uint32_t fe_queues = 0;
         int rc = run_frontend([&](MockFrontend& fe) -> int {
             if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
             // Negotiate first, the way a conformant frontend does: this suite was
@@ -2044,6 +2088,8 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
             // teardown at the end of the iteration exercises every queue slot --
             // including the ones this frontend never addressed.
             if (!fe.negotiate(false)) return EPROTO;
+            got_proto = fe.proto_features;
+            fe_queues = fe.queue_num;
             mu_msg m, r;
             memset(&m, 0, sizeof(m));
             m.request = MU_GET_FEATURES; m.size = 0;
@@ -2070,7 +2116,90 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
         EXPECT_EQ(want, got_qn) << "GET_QUEUE_NUM, queues=" << c.ask;
         EXPECT_EQ((uint16_t)want, got_nq) << "num_queues, queues=" << c.ask;
         EXPECT_EQ(c.mq, !!(got_feat & F_BLK_MQ)) << "F_MQ, queues=" << c.ask;
+        // The fourth channel, and the one a primary actually gates on. Same column
+        // as F_MQ, because the two have to agree: virtio F_MQ is what tells the
+        // guest driver the device has N queues, and protocol MQ is what lets the
+        // frontend build them. Offering one without the other is the
+        // incompatibility this case exists to catch -- a device that offers F_MQ
+        // and answers GET_QUEUE_NUM truthfully, and that a real primary still
+        // drives as a single queue.
+        EXPECT_EQ(c.mq, !!(got_proto & (1ULL << P_VHU_MQ)))
+            << "PROTOCOL_F_MQ, queues=" << c.ask;
+        // And the consequence, read off the mock's own gated query rather than
+        // asserted about it: with the bit settled the primary learns the true
+        // count, and without it the count it ends up with is 1 no matter how many
+        // queues the device serves. Both halves are in this table, so a gate that
+        // never fired and one that always fired would each be caught by a row.
+        EXPECT_EQ(c.mq ? (uint32_t)want : 1u, fe_queues) << "queues=" << c.ask;
     }
+}
+
+// The table above asserts the bit is offered at the right counts. This asserts
+// what the bit is FOR, on one device, with the negotiated protocol word as the
+// only variable: a primary that settles it learns the true queue count, and one
+// that does not ends up with 1 -- while the device serves the same four queues
+// and answers a direct GET_QUEUE_NUM with 4 in both halves.
+//
+// The second half is not a hypothetical. It is what a conformant primary does
+// when the backend fails to offer the bit, which is the state this device was in:
+// virtio F_MQ offered, num_queues truthful, GET_QUEUE_NUM answered, and a real
+// frontend still refusing to instantiate more than one queue because the count
+// query that would have told it otherwise is gated on a bit that was never
+// offered. Asserting only the declined half would pass against exactly that
+// broken device, so the accepted half is here too and the two are compared.
+TEST_F(VhostUserTest, protocol_mq_is_what_lets_a_frontend_learn_the_queue_count) {
+    constexpr uint32_t QUEUES = 4;
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = QUEUES;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    uint64_t offered = 0, served = 0;
+    uint32_t learned = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        offered = fe.proto_features;
+        learned = fe.queue_num;
+        // Asked straight from the device, so the count it SERVES is on the record
+        // independently of what the gated query inside negotiate() concluded.
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_GET_QUEUE_NUM; m.size = 0;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        served = r.payload.u64;
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_NE(0u, offered & (1ULL << P_VHU_MQ))
+        << "a device serving " << QUEUES << " queues must offer protocol MQ";
+    EXPECT_EQ((uint64_t)QUEUES, served);
+    EXPECT_EQ(QUEUES, learned);
+
+    // Same device, same four queues, one bit declined.
+    uint64_t served_again = 0;
+    uint32_t capped = 0;
+    rc = run_frontend([&](MockFrontend& fe) -> int {
+        fe.proto_decline = (1ULL << P_VHU_MQ);
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        capped = fe.queue_num;
+        mu_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = MU_GET_QUEUE_NUM; m.size = 0;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        served_again = r.payload.u64;
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    // The cap, and the fact that it is the frontend's doing and not the device's.
+    EXPECT_EQ(1u, capped);
+    EXPECT_EQ((uint64_t)QUEUES, served_again);
+    EXPECT_EQ(served, served_again);
 }
 
 // `gpa + len - 1 < base + size` wraps: addr = 2^64 - 101 with len = 200 sums to
