@@ -320,26 +320,73 @@ struct VduseDeviceImpl : IBlkDevice {
         // Cross-vcpu state: the control plane (the msg loop and teardown, on the
         // caller's vcpu) writes these and this queue's loop reads them on `home`,
         // which BlkConfig::pool can make another OS thread. vq_refresh is the
-        // exception -- it runs on the loop's side, where it reads `gen`, consumes
-        // reset_pending and re-arms needs_refresh. Relaxed only: nothing else is
-        // published through them. `ready` is the one field with two writers of
-        // opposite intent -- the control plane clears it, vq_refresh sets it --
-        // which is an ordering problem, not a data race, and `gen` is what settles
-        // the order: an invalidation bumps the generation before it clears, and a
-        // refresh that finds the generation moved while it was resolving withholds
-        // its own publish. Stopping the queue around the clear instead is not
-        // available here: the kernel blocks the sender of a message until that
-        // message is answered, for msg_timeout seconds, so nothing the message
-        // loop waits for may be as unbounded as the in-flight requests are.
-        std::atomic<bool> ready{false};          // the ring is resolved and
-                                                 // dispatch may run
+        // exception -- it runs on the loop's side, where it reads the generation,
+        // consumes reset_pending and re-arms needs_refresh. Relaxed only: nothing
+        // else is published through them.
+        //
+        // Readiness and its generation are ONE word because they are two halves of
+        // one state transition, and two objects cannot be written as one. The
+        // control plane invalidates by bumping the generation and clearing
+        // readiness; a refresh publishes readiness only if the generation has not
+        // moved while it was resolving. Kept apart, an invalidation that lands
+        // between the refresh's load of the generation and its store of readiness
+        // is overtaken by that store, and the queue then reports ready for a ring
+        // that is gone. No memory order fixes that: ordering two accesses is not
+        // making them atomic together. So both moves are one compare-exchange
+        // each, in the members below, and every caller goes through those.
+        //
+        // Bit 0 is readiness, bits 1..31 the generation. 31 bits is enough because
+        // this token never outlives a single vq_refresh -- it is snapshotted on
+        // entry and compared only at that call's two exits -- so a wrap would need
+        // 2^31 invalidations inside one resolve. A request, which does outlive the
+        // refresh that dispatched it, carries the engine's own 64-bit generation
+        // instead; that is a different token answering a different question.
+        //
+        // Stopping the queue around an invalidation instead is not available here:
+        // the kernel blocks the sender of a message until that message is
+        // answered, for msg_timeout seconds, so nothing the message loop waits for
+        // may be as unbounded as the in-flight requests are.
+        std::atomic<uint32_t> ready_gen{0};
         std::atomic<bool> reset_pending{false};  // a status-0 reset: zero the ring
                                                  // counters at the next refresh
                                                  // (vs adoption resume)
         std::atomic<bool> needs_refresh{false};  // DRIVER_OK seen; the loop resolves
-        // The generation of this queue's readiness. A refresh snapshots it
-        // before it resolves anything and publishes only if it has not moved.
-        std::atomic<uint32_t> gen{0};
+
+        bool ready() const {
+            return ready_gen.load(std::memory_order_relaxed) & 1u;
+        }
+        uint32_t gen() const {
+            return ready_gen.load(std::memory_order_relaxed) >> 1;
+        }
+        // Drop readiness alone. The ring did not resolve, which is not an
+        // invalidation, so the generation must stay where it is: the refresh that
+        // retries has to recognise its own snapshot.
+        void clear_ready() {
+            ready_gen.fetch_and(~1u, std::memory_order_relaxed);
+        }
+        // Invalidate: bump the generation AND clear readiness as one step. The
+        // mask is what makes it both -- adding 2 alone would leave a ready bit set.
+        void retire() {
+            uint32_t s = ready_gen.load(std::memory_order_relaxed);
+            while (!ready_gen.compare_exchange_weak(s, (s + 2u) & ~1u,
+                                                    std::memory_order_relaxed))
+                ;
+        }
+        // Publish readiness against the generation this refresh snapshotted. False
+        // means that generation moved while the resolve was in flight, so the
+        // publish is withheld and the caller re-arms instead. The loop re-tests the
+        // GENERATION, not the readiness bit, and that is deliberate: a word already
+        // ready at an unchanged generation publishes successfully instead of being
+        // mistaken for an invalidation, which would re-arm the refresh forever.
+        bool publish_ready(uint32_t g) {
+            uint32_t s = ready_gen.load(std::memory_order_relaxed);
+            while ((s >> 1) == g) {
+                if (ready_gen.compare_exchange_weak(s, s | 1u,
+                                                    std::memory_order_relaxed))
+                    return true;
+            }
+            return false;
+        }
         // The vcpu this queue's loop coroutine runs on, recorded by vq_start
         // immediately after the migration: photon::get_vcpu(thread*) reads the field
         // do_thread_migrate stores under the thread's own lock before it returns, so
@@ -551,16 +598,16 @@ struct VduseDeviceImpl : IBlkDevice {
             if (dev_status == 0) {          // reset: stop serving, keep the session
                 for (uint32_t i = 0; i < nqueues; i++) {
                     auto* q = vqs[i];
-                    // Bump BEFORE clearing. A refresh already in flight snapshots
-                    // the generation as its first act and re-reads it immediately
-                    // before it publishes, so an increment that has landed by then
-                    // makes it stay silent and this clear is the last word on
-                    // `ready`. Incrementing after the clear would instead leave the
-                    // whole resolve -- an ioctl and up to three mmap round trips --
-                    // as a window in which a refresh publishes over the clear, and
-                    // dispatch then runs on a ring the driver has torn down.
-                    q->x.gen.fetch_add(1, std::memory_order_relaxed);
-                    q->x.ready.store(false, std::memory_order_relaxed);
+                    // One step, so a refresh already in flight cannot be overtaken:
+                    // it snapshots the generation as its first act and its publish
+                    // is a compare-exchange against that snapshot, so an
+                    // invalidation that has landed by then makes the publish fail
+                    // and this retire is the last word on readiness. Bumping and
+                    // clearing as two stores would instead leave the whole resolve
+                    // -- an ioctl and up to three mmap round trips -- as a window
+                    // in which a refresh publishes over the clear, and dispatch
+                    // then runs on a ring the driver has torn down.
+                    q->x.retire();
                     // the coming negotiation restarts the ring counters at 0
                     q->x.reset_pending.store(true, std::memory_order_relaxed);
                 }
@@ -604,11 +651,8 @@ struct VduseDeviceImpl : IBlkDevice {
                 // those ranges is not this handler's problem either -- flush_stale
                 // only unmaps once every queue is neither ready nor holding a
                 // request.
-                for (uint32_t i = 0; i < nqueues; i++) {
-                    auto* q = vqs[i];
-                    q->x.gen.fetch_add(1, std::memory_order_relaxed);
-                    q->x.ready.store(false, std::memory_order_relaxed);
-                }
+                for (uint32_t i = 0; i < nqueues; i++)
+                    vqs[i]->x.retire();
             }
             reply(req->request_id, VDUSE_REQ_RESULT_OK, 0, 0);
             break;
@@ -673,7 +717,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // are blocking syscalls, which park the OS thread rather than handing the
         // vcpu over), but a snapshot taken after that mutex would miss an
         // invalidation that landed inside it.
-        uint32_t gen_snapshot = q->x.gen.load(std::memory_order_relaxed);
+        uint32_t gen_snapshot = q->x.gen();
         // The cache's counter, for the EFAULT branch below. The queue's own is not
         // enough there: a PARTIAL UPDATE_IOTLB bumps the cache's only -- it leaves
         // the queue's untouched, clears no readiness and sets no needs_refresh --
@@ -695,7 +739,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // as the addresses do. It is a modulo divisor in dispatch_avail and in
         // vring_used_append; a 0 here with ready set divides by zero.
         if (!vi.ready || !vi.num || !vi.desc_addr || !vi.driver_addr || !vi.device_addr) {
-            q->x.ready.store(false, std::memory_order_relaxed);
+            q->x.clear_ready();
             return 0;
         }
         auto* d = (vring_desc*)iotlb.resolve(vi.desc_addr, (size_t)vi.num * sizeof(vring_desc));
@@ -709,7 +753,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // next.
         q->srv.set_ring(d, a, u, vi.num);
         if (!d || !a || !u) {
-            q->x.ready.store(false, std::memory_order_relaxed);
+            q->x.clear_ready();
             // Two causes land here and only one of them is retryable, so they have
             // to be told apart. The cache's generation guard is coarse -- it cannot
             // tell our range from some other one that moved -- so an invalidation
@@ -743,14 +787,14 @@ struct VduseDeviceImpl : IBlkDevice {
             // when an invalidation really landed, so the rate is the driver's, not
             // the tick's.
             if (iotlb.generation() != iotlb_gen_snapshot ||
-                q->x.gen.load(std::memory_order_relaxed) != gen_snapshot) {
+                q->x.gen() != gen_snapshot) {
                 q->x.needs_refresh.store(true, std::memory_order_relaxed);
                 LOG_DEBUG("vduse vq` refresh raced an iotlb invalidation, retrying, dev `", idx, name);
                 return 0;
             }
             LOG_ERROR_RETURN(EFAULT, -1, "vduse vring iova resolution failed, dev `", name);
         }
-        if (!q->x.ready.load(std::memory_order_relaxed)) {
+        if (!q->x.ready()) {
             // exchange, not load-then-store: the flag is set by the control plane
             // and consumed here, and a plain pair would drop a reset that lands
             // between the two accesses -- the ring counters would then not be
@@ -786,26 +830,18 @@ struct VduseDeviceImpl : IBlkDevice {
         // without this would leave the queue permanently not-ready -- the device
         // silently stops serving.
         //
-        // This narrows the publish/clear conflict from the whole resolve down to
-        // the two adjacent instructions below; it does not close it. `gen` and
-        // `ready` are two objects, so an invalidation whose bump and clear land
-        // between the load and the store is still overtaken by the publish, and no
-        // memory order fixes that -- seq_cst would order the two accesses, it
-        // would not make them atomic together. Closing it formally means packing
-        // the token and the readiness bit into one word and settling both with a
-        // single compare-exchange. Accepted as it stands, for what the residue
-        // costs: a queue reporting ready a little longer into a reset or an
-        // unmap-all, so the requests it dispatches fail their resolve and complete
-        // to the guest with an error -- wrong completions, inside a window where
-        // the guest is already losing the ring, not corruption. Its mirror image
-        // is flush_stale declining to munmap while ready is true, which errs
-        // conservative. Neither is what this token exists to prevent, which is a
-        // queue pinned not-ready and silent. The same two-objects residue is
-        // already carried by event_idx, capacity and notify_valid. Task 10
-        // re-weighs the packing: putting the loops on a WorkPool is what makes
-        // this window reachable across OS threads at all.
-        if (q->x.gen.load(std::memory_order_relaxed) == gen_snapshot) {
-            q->x.ready.store(true, std::memory_order_relaxed);
+        // The test and the store are one compare-exchange, so nothing can land
+        // between them and be overtaken by the publish. That is the whole reason
+        // readiness and its generation share a word: as two objects this was a
+        // check followed by a store, and an invalidation landing in between was
+        // silently overwritten -- no memory order would have helped, because
+        // ordering two accesses is not making them atomic together.
+        //
+        // An invalidation landing AFTER a successful publish needs no handling
+        // here: retire() clears readiness itself, which is the right answer,
+        // because the ring really was current at the moment it became ready. What
+        // a publish can no longer do is survive one.
+        if (q->x.publish_ready(gen_snapshot)) {
             LOG_INFO("vduse ` vq` ready: num ` desc ` avail ` used ` resume at `",
                      name, idx, q->srv.num, HEX(vi.desc_addr), HEX(vi.driver_addr),
                      HEX(vi.device_addr), q->srv.last_avail);
@@ -827,7 +863,7 @@ struct VduseDeviceImpl : IBlkDevice {
     }
 
     bool vq_may_dispatch(uint32_t idx) {
-        return vqs[idx]->x.ready.load(std::memory_order_relaxed);
+        return vqs[idx]->x.ready();
     }
 
     // top of every engine loop iteration: resolve a deferred ring refresh, and
@@ -843,7 +879,7 @@ struct VduseDeviceImpl : IBlkDevice {
             if (vq_refresh(idx) < 0)
                 LOG_ERROR("vduse vq refresh failed on `, ", name, ERRNO());
         }
-        if (q->x.ready.load(std::memory_order_relaxed))
+        if (q->x.ready())
             return;
         // `stale` is device-wide -- one address space, one cache -- while the
         // readiness and the in-flight count that make a munmap safe are per queue.
@@ -851,7 +887,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // one queue that is the same test this always was, and with more it is the
         // only form that cannot take a mapping away from another queue's request.
         for (auto* o : vqs)
-            if (o->x.ready.load(std::memory_order_relaxed) || o->srv.in_flight.load())
+            if (o->x.ready() || o->srv.in_flight.load())
                 return;
         iotlb.flush_stale();
     }
@@ -973,7 +1009,7 @@ struct VduseDeviceImpl : IBlkDevice {
     // interrupt/join.
     void vq_stop_here(uint32_t idx) {
         auto* q = vqs[idx];
-        // Deliberately does NOT touch x.ready: that flag reports whether the ring
+        // Deliberately does NOT touch readiness: that bit reports whether the ring
         // is resolved, which is not what stopping the coroutine says. Its clears
         // belong to the invalidation points and to stop_serving, which places them
         // around its own backlog wait.
@@ -1015,7 +1051,7 @@ struct VduseDeviceImpl : IBlkDevice {
             if (!q->th)
                 return;
             while (q->srv.in_flight.load() ||
-                   (drain_backlog && q->x.ready.load(std::memory_order_relaxed) &&
+                   (drain_backlog && q->x.ready() &&
                     q->srv.last_avail != vring_avail_idx(q->srv.avail)))
                 photon::thread_usleep(1000);
         });
@@ -1230,7 +1266,7 @@ struct VduseDeviceImpl : IBlkDevice {
             for (auto* q : vqs)
                 // stop dispatching NOW; the un-dispatched avail backlog stays in
                 // the ring for the next daemon
-                q->x.ready.store(false, std::memory_order_relaxed);
+                q->x.clear_ready();
         for (uint32_t i = 0; i < nqueues; i++) {
             // The backlog wait comes first and the engine-level `stopping` second,
             // and that order is load-bearing: the wait expects the loop to keep
@@ -1275,7 +1311,7 @@ struct VduseDeviceImpl : IBlkDevice {
             // VAs into the mappings, so wait for them here -- unmapping under a
             // live request would be a use-after-free
             vq_drain(i);
-            vqs[i]->x.ready.store(false, std::memory_order_relaxed);
+            vqs[i]->x.clear_ready();
             if (vqs[i]->srv.kickfd >= 0) {
                 vduse_vq_eventfd ev;
                 memset(&ev, 0, sizeof(ev));
