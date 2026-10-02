@@ -54,18 +54,12 @@ public:
 protected:
     char _buffer[BUF_CAPACITY];
 };
-TEST(headers, send_without_extra_headers) {
-    auto send = [](const HeadersBase* extra) {
-        RequestHeadersStored<> req(Verb::GET, "http://example.com/");
-        req.headers.content_length(0);
-        std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
-        EXPECT_EQ(0, req.send_header(stream.get(), extra));
-        EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
-    };
-
-    send(nullptr);
-    CommonHeaders<64> empty;
-    send(&empty);
+TEST(headers, send_header_terminator) {
+    RequestHeadersStored<> req(Verb::GET, "http://example.com/");
+    req.headers.content_length(0);
+    std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+    EXPECT_EQ(0, req.send_header(stream.get()));
+    EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
 }
 
 TEST(headers, req_header) {

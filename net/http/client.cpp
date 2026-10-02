@@ -250,6 +250,57 @@ public:
         return "Basic " + encoded;
     }
 
+    int compose_request_headers(Request& outgoing, const Request& configured,
+                                const HeadersBase* proxyHeaders) {
+        // Highest priority first: per-hop proxy headers, caller headers, common
+        // headers, then defaults. Classify proxy input before inserting origin
+        // fields into the outgoing Message; configuration buffers stay intact.
+        auto appendSource = [&](const HeadersBase& source, bool originFields) {
+            for (auto item = source.begin(); item != source.end(); ) {
+                auto range = source.equal_range(item.first());
+                item = range.second;
+                if (originFields && estring_view(range.first.first()).icmp("Proxy-Authorization") == 0)
+                    continue; // this configuration belongs to DialTarget's proxy
+                if (outgoing.headers.find(range.first.first()) != outgoing.headers.end())
+                    continue;
+                // Keep all occurrences from the winning source. A lower
+                // priority source cannot replace or append to that field. Equal
+                // keys in the index can be reordered; use their buffer offsets
+                // to retain wire order without allocating a temporary index.
+                const char* previous = nullptr;
+                for (auto remaining = range.first; remaining != range.second; ++remaining) {
+                    auto next = range.second;
+                    for (auto entry = range.first; entry != range.second; ++entry) {
+                        auto address = entry.first().data();
+                        if (previous && address <= previous) continue;
+                        if (next == range.second || address < next.first().data()) next = entry;
+                    }
+                    if (outgoing.headers.insert(next.first(), next.second(), 1) < 0)
+                        return -1;
+                    previous = next.first().data();
+                }
+            }
+            return 0;
+        };
+        if (proxyHeaders && appendSource(*proxyHeaders, false) < 0) return -1;
+        for (auto source : {static_cast<const HeadersBase*>(&configured.headers),
+                            static_cast<const HeadersBase*>(&m_common_headers)}) {
+            if (appendSource(*source, true) < 0) return -1;
+        }
+        auto agent = m_user_agent.empty() ? std::string_view(USERAGENT) : std::string_view(m_user_agent);
+        for (auto item : {std::make_pair(std::string_view("User-Agent"), agent),
+                          std::make_pair(std::string_view("Connection"), std::string_view("keep-alive"))}) {
+            if (outgoing.headers.find(item.first) == outgoing.headers.end() &&
+                outgoing.headers.insert(item.first, item.second) < 0)
+                return -1;
+        }
+        if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&outgoing) != 0)
+            LOG_ERROR_RETURN(0, -1, "failed to set cookies on outgoing request");
+        if (outgoing.headers.content_length() != 0 && outgoing.headers.chunked())
+            LOG_ERROR_RETURN(EINVAL, -1, "Content-Length and Transfer-Encoding conflicted");
+        return 0;
+    }
+
     int do_roundtrip(Operation* op, Timeout tmo, std::string_view proxy_auth) {
         op->status_code = -1;
         if (tmo.timeout() == 0)
@@ -289,44 +340,84 @@ public:
             }
             proxy_headers = &pa.headers;
         }
+
+        // Use configuration's unused buffer region for the outgoing Message.
+        // Its bytes/index never overlap the retained configuration. Fall back
+        // to an owned buffer when capacity is tight or a cookie jar can add an
+        // unknown amount of header data. The original free region remains the
+        // response buffer after sending, preserving the existing reuse path.
+        auto space = req.get_remain_space();
+        size_t required = req.m_buf_size + req.headers.size() + req.headers.kv_size() +
+            m_common_headers.size() + m_common_headers.kv_size() + m_user_agent.size() +
+            sizeof(USERAGENT) + 128;
+        if (proxy_headers) required += proxy_headers->size() + proxy_headers->kv_size();
+        std::unique_ptr<char, decltype(&free)> ownedBuffer(nullptr, &free);
+        char* buffer = space.first;
+        auto capacity = space.second;
+        if (capacity < required || m_cookie_jar) {
+            capacity = req.m_buf_capacity;
+            ownedBuffer.reset((char*)malloc(capacity));
+            if (!ownedBuffer)
+                LOG_ERROR_RETURN(ENOMEM, ROUNDTRIP_FAILED, "failed to allocate outgoing request buffer");
+            buffer = ownedBuffer.get();
+        }
+        Request outgoing(buffer, capacity);
+        if (outgoing.copy_request_line(req) < 0 ||
+            compose_request_headers(outgoing, req, proxy_headers) < 0)
+            return ROUNDTRIP_FAILED;
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
-        if (req.send_header(sock.get(), proxy_headers) < 0) {
+        if (outgoing.send_header(sock.get()) < 0) {
             sock->close();
             req.reset_status();
             LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send header failed, retry");
         }
         sock->timeout(tmo.timeout());
-        if (op->body_buffer_size > 0) {
-            // send body_buffer
-            if (req.write(op->body_buffer, op->body_buffer_size) < 0) {
-                sock->close();
-                req.reset_status();
-                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body buffer failed, retry");
+        {
+            // Body callbacks keep their established Request* and see the final
+            // headers/framing. Restore caller configuration on every return path.
+            auto exchangeBuffers = [&] {
+                std::swap(req.headers, outgoing.headers);
+                std::swap(req.m_buf, outgoing.m_buf);
+                std::swap(req.m_buf_size, outgoing.m_buf_size);
+                std::swap(req.m_buf_capacity, outgoing.m_buf_capacity);
+                std::swap(req.m_buf_ownership, outgoing.m_buf_ownership);
+            };
+            exchangeBuffers();
+            DEFER(exchangeBuffers());
+            req.m_stream = sock.get();
+            req.m_body_stream = std::move(outgoing.m_body_stream);
+            req.reset_status(HEADER_SENT);
+            if (op->body_buffer_size > 0) {
+                // send body_buffer
+                if (req.write(op->body_buffer, op->body_buffer_size) < 0) {
+                    sock->close();
+                    req.reset_status();
+                    LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body buffer failed, retry");
+                }
+            } else if (op->body_stream) {
+                // send body_stream
+                if (req.write_stream(op->body_stream) < 0) {
+                    sock->close();
+                    req.reset_status();
+                    LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body stream failed, retry");
+                }
+            } else {
+                // call body_writer
+                if (op->body_writer(&req) < 0) {
+                    sock->close();
+                    req.reset_status();
+                    LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "failed to call body writer, retry");
+                }
             }
-        } else if (op->body_stream) {
-            // send body_stream
-            if (req.write_stream(op->body_stream) < 0) {
-                sock->close();
-                req.reset_status();
-                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "send body stream failed, retry");
-            }
-        } else {
-            // call body_writer
-            if (op->body_writer(&req) < 0) {
-                sock->close();
-                req.reset_status();
-                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "failed to call body writer, retry");
-            }
-        }
 
-        if (req.send() < 0) {
-            sock->close();
-            req.reset_status();
-            LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "failed to ensure send");
+            if (req.send() < 0) {
+                sock->close();
+                req.reset_status();
+                LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "failed to ensure send");
+            }
         }
 
         LOG_DEBUG("Request sent, wait for response ` `", req.verb(), req.target());
-        auto space = req.get_remain_space();
         auto &resp = op->resp;
 
         if (space.second > kMinimalHeadersSize) {
@@ -352,26 +443,14 @@ public:
     }
 
     int call(Operation* /*IN, OUT*/ op) override {
-        auto content_length = op->req.headers.content_length();
-        auto encoding = op->req.headers["Transfer-Encoding"];
-        if ((content_length != 0) && (encoding == "chunked")) {
-            op->status_code = -1;
-            LOG_ERROR_RETURN(EINVAL, ROUNDTRIP_FAILED,
-                            "Content-Length and Transfer-Encoding conflicted");
-        }
-        op->req.headers.merge(m_common_headers);
-        op->req.headers.insert("User-Agent", m_user_agent.empty() ? std::string_view(USERAGENT)
-                                                                  : std::string_view(m_user_agent));
-        op->req.headers.insert("Connection", "keep-alive");
         auto proxy_auth = proxy_auth_of(op);
         auto& proxy = op->proxy_url.empty() ? m_proxy_url : op->proxy_url;
-        auto header_proxy_auth = op->req.headers["Proxy-Authorization"];
+        auto auth = op->req.headers.find("Proxy-Authorization");
+        auto header_proxy_auth = auth == op->req.headers.end() ?
+            m_common_headers["Proxy-Authorization"] : auth.second();
         if (op->enable_proxy && !proxy.empty() && !header_proxy_auth.empty()) {
             proxy_auth.assign(header_proxy_auth.data(), header_proxy_auth.size());
-            op->req.headers.erase("Proxy-Authorization");
         }
-        if (m_cookie_jar && m_cookie_jar->set_cookies_to_headers(&op->req) != 0)
-            LOG_ERROR_RETURN(0, -1, "set_cookies_to_headers failed");
         Timeout tmo(std::min(op->timeout.timeout(), m_timeout));
         int retry = 0, followed = 0, ret = 0;
         uint64_t sleep_interval = 0;

@@ -132,22 +132,18 @@ int Message::append_bytes(uint16_t size) {
     return 0;
 }
 
-int Message::send_header(net::ISocketStream* stream, const HeadersBase* extra) {
+int Message::send_header(net::ISocketStream* stream) {
     if (stream != nullptr) m_stream = stream; // update stream if needed
 
     using SV = std::string_view;
     headers.insert("Connection", m_keep_alive ? SV("keep-alive") :
                                                 SV("close"));
-    auto ex = extra ? extra->serialized() : SV();
-    if (headers.space_remain() < ex.size() + 2)
+    if (headers.space_remain() < 2)
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
-    // `extra` goes on the wire without becoming part of `headers`, so that a
-    // redirect of this message cannot carry it to the next hop
     auto tail = m_buf + m_buf_size + headers.size();
-    if (!ex.empty()) memcpy(tail, ex.data(), ex.size());
-    memcpy(tail + ex.size(), "\r\n", 2);
-    std::string_view sv = {m_buf, m_buf_size + headers.size() + ex.size() + 2};
+    memcpy(tail, "\r\n", 2);
+    std::string_view sv = {m_buf, size_t(m_buf_size) + headers.size() + 2};
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
     if (ret < (ssize_t)sv.size())
@@ -420,6 +416,24 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
 
     m_buf_size = new_request_line_size;
     make_request_line(v, u, enable_proxy);
+    return 0;
+}
+
+int Request::copy_request_line(const Request& source) {
+    if (source.m_buf_size > m_buf_capacity)
+        LOG_ERROR_RETURN(ENOBUFS, -1, "request line does not fit outgoing buffer");
+    Message::reset();
+    memcpy(m_buf, source.m_buf, source.m_buf_size);
+    m_buf_size = source.m_buf_size;
+    m_verb = source.m_verb;
+    m_version = source.m_version;
+    m_target = source.m_target;
+    m_path = source.m_path;
+    m_query = source.m_query;
+    m_port = source.m_port;
+    m_secure = source.m_secure;
+    m_keep_alive = source.m_keep_alive;
+    headers.reset(m_buf + m_buf_size, m_buf_capacity - m_buf_size);
     return 0;
 }
 

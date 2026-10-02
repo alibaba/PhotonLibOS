@@ -122,10 +122,7 @@ protected:
     // return 1 if end of stream
     // return negative if an error occured
     int receive_header(uint64_t timeout = -1ULL);
-    // `extra` is written after our own headers, on the wire only: no entry of it
-    // is registered in `headers`, so it belongs to this message alone and cannot
-    // be carried over by a redirect. Used for the headers of one proxy hop.
-    int send_header(net::ISocketStream* stream = nullptr, const HeadersBase* extra = nullptr);
+    int send_header(net::ISocketStream* stream = nullptr);
     // return 0 if whole header recvd
     // return 1 if end of stream
     // return 2 if partial header recvd
@@ -213,6 +210,9 @@ public:
         return m_stream;
     }
 protected:
+    // Initialize a per-hop outgoing message from caller configuration. Headers
+    // are composed separately, after route and proxy authentication decisions.
+    int copy_request_line(const Request& source);
     int parse_request_line(Parser &p);
     int parse_start_line(Parser &p) override {
         return parse_request_line(p);
@@ -222,6 +222,7 @@ protected:
     rstring_view16 m_target, m_path, m_query;
     uint16_t m_port = 80;
     bool m_secure = false;
+    friend class ClientImpl;
 };
 
 class Response : public Message {

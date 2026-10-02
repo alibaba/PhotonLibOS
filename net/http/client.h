@@ -56,7 +56,11 @@ public:
 
     class Operation {
     public:
-        Request req;                              // request
+        // Request configuration is retained across calls, retries and redirects.
+        // The client composes a separate outgoing header buffer for each hop.
+        // Proxy-Authorization here is proxy input, never an origin header.
+        // During body_writer, req exposes the actual outgoing message.
+        Request req;
         Timeout timeout = {-1ULL};                 // default timeout: unlimited
         uint16_t follow = 8;                      // default follow: 8 at most
         uint16_t retry = 5;                       // default retry: 5 at most

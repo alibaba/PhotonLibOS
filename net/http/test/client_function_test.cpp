@@ -32,6 +32,7 @@ limitations under the License.
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
+#include <photon/common/memory-stream/memory-stream.h>
 #include <photon/fs/localfs.h>
 #include "../../../test/gtest.h"
 #include "../../test/cert-key.cpp"
@@ -1320,6 +1321,195 @@ static void simple_get(Client* client, std::string_view target) {
     EXPECT_EQ((ssize_t)op.resp.body_size(), n);
 }
 
+class HeaderCaptureDialer : public IDialer {
+public:
+    std::vector<std::string> responses;
+    std::vector<std::string> auth;
+    int calls = 0;
+    StringSocketStream* last = nullptr;
+    ISocketStream* dial(const DialTarget& target, uint64_t) override {
+        auth.emplace_back(target.proxy_auth);
+        last = new_string_socket_stream();
+        last->set_input(calls < (int)responses.size() ? responses[calls] :
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        ++calls;
+        return last;
+    }
+};
+
+TEST(http_client, per_hop_headers_preserve_configuration_and_body_callback) {
+    for (int route = 0; route < 3; ++route) {
+        for (bool tightBuffer : {false, true}) {
+            HeaderCaptureDialer dialer;
+            std::unique_ptr<Client> client(new_http_client());
+            client->set_dialer(&dialer);
+            client->set_user_agent("staged-agent");
+            if (route != 0) client->set_proxy("http://url:credentials@proxy.example:8080");
+            ASSERT_EQ(0, client->common_headers()->insert("X-Priority", "common"));
+            ASSERT_EQ(0, client->common_headers()->content_length(7));
+            ASSERT_EQ(0, client->common_headers()->insert("Proxy-Authorization", "Basic common"));
+            auto authenticate = [](const DialTarget&, ProxyAuth& auth) -> int {
+                return auth.headers.insert("X-Priority", "proxy");
+            };
+            client->set_proxy_authenticator(authenticate);
+            auto target = route == 2 ? "https://origin.example/body" : "http://origin.example/body";
+            auto op = client->new_operation(Verb::POST, target, tightBuffer ? 4096 : UINT16_MAX);
+            DEFER(client->destroy_operation(op));
+            ASSERT_EQ(0, op->req.headers.insert("X-Priority", "caller"));
+            ASSERT_EQ(0, op->req.headers.insert("Proxy-Authorization", "Basic manual"));
+            std::string padding(tightBuffer ? 2500 : 0, 'p');
+            if (!padding.empty()) {
+                ASSERT_EQ(0, op->req.headers.insert("X-Padding", padding));
+            }
+            auto before = std::string(op->req.headers.serialized());
+            auto commonBefore = std::string(client->common_headers()->serialized());
+            auto freeRegion = op->req.get_remain_space();
+            int writes = 0;
+            auto writer = [&](Request* request) -> ssize_t {
+                EXPECT_EQ(&op->req, request);
+                EXPECT_EQ(7U, request->headers.content_length());
+                EXPECT_EQ("staged-agent", request->headers["User-Agent"]);
+                EXPECT_EQ(route == 1 ? "proxy" : "caller", request->headers["X-Priority"]);
+                auto address = uintptr_t(request->headers.serialized().data());
+                if (!tightBuffer) {
+                    EXPECT_GE(address, uintptr_t(freeRegion.first));
+                    EXPECT_LT(address, uintptr_t(freeRegion.first) + freeRegion.second);
+                }
+                ++writes;
+                return request->write("payload", 7) == 7 ? 0 : -1;
+            };
+            op->body_writer = writer;
+            op->retry = 0;
+            ASSERT_EQ(0, op->call());
+            EXPECT_EQ(1, writes);
+            EXPECT_EQ(before, op->req.headers.serialized());
+            EXPECT_EQ(commonBefore, client->common_headers()->serialized());
+            EXPECT_EQ(route == 0 ? "" : "Basic manual", dialer.auth.back());
+            auto sentAuth = dialer.last->output().find("Proxy-Authorization:");
+            if (route == 1) {
+                EXPECT_NE(std::string::npos, sentAuth);
+                EXPECT_EQ(std::string::npos, dialer.last->output().find("Proxy-Authorization:", sentAuth + 1));
+            } else {
+                EXPECT_EQ(std::string::npos, sentAuth);
+            }
+            EXPECT_EQ("payload", dialer.last->output().substr(dialer.last->output().size() - 7));
+        }
+    }
+}
+
+TEST(http_client, per_hop_headers_are_rebuilt_on_retry_and_redirect) {
+    for (bool redirect : {false, true}) {
+        HeaderCaptureDialer dialer;
+        dialer.responses = {redirect ?
+            "HTTP/1.1 302 Found\r\nLocation: https://other.example/next\r\nContent-Length: 0\r\n\r\n" : "",
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"};
+        std::unique_ptr<Client> client(new_http_client());
+        client->set_dialer(&dialer);
+        client->set_proxy("http://proxy.example:8080");
+        ASSERT_EQ(0, client->common_headers()->insert("X-Common", "retained"));
+        Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/first");
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization", "Basic manual"));
+        auto before = std::string(op.req.headers.serialized());
+        op.retry = 1;
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(2, dialer.calls);
+        EXPECT_EQ("Basic manual", dialer.auth[0]);
+        EXPECT_EQ("Basic manual", dialer.auth[1]);
+        EXPECT_EQ("Basic manual", op.req.headers["Proxy-Authorization"]);
+        EXPECT_EQ(std::string::npos, op.req.headers.serialized().find("X-Common"));
+        EXPECT_NE(std::string::npos, dialer.last->output().find("X-Common: retained\r\n"));
+        if (redirect) {
+            EXPECT_EQ("other.example", op.req.host());
+            EXPECT_EQ(std::string::npos, dialer.last->output().find("Proxy-Authorization:"));
+        } else {
+            EXPECT_EQ(before, op.req.headers.serialized());
+            EXPECT_NE(std::string::npos, dialer.last->output().find("Proxy-Authorization: Basic manual\r\n"));
+        }
+    }
+}
+
+TEST(http_client, per_hop_headers_keep_duplicate_order_and_common_proxy_auth) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    client->set_proxy("http://url:credentials@proxy.example:8080");
+    ASSERT_EQ(0, client->common_headers()->insert("Proxy-Authorization", "Basic common"));
+    ASSERT_EQ(0, client->common_headers()->insert("X-Repeated", "common"));
+    Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    ASSERT_EQ(0, op.req.headers.insert("X-Repeated", "first", 1));
+    ASSERT_EQ(0, op.req.headers.insert("x-repeated", "second", 1));
+    auto configured = std::string(op.req.headers.serialized());
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+    EXPECT_EQ("Basic common", dialer.auth.back());
+    auto& wire = dialer.last->output();
+    auto first = wire.find("X-Repeated: first\r\n");
+    auto second = wire.find("x-repeated: second\r\n");
+    EXPECT_NE(std::string::npos, first);
+    EXPECT_NE(std::string::npos, second);
+    EXPECT_LT(first, second);
+    EXPECT_EQ(std::string::npos, wire.find("X-Repeated: common\r\n"));
+    EXPECT_NE(std::string::npos, wire.find("Proxy-Authorization: Basic common\r\n"));
+}
+
+TEST(http_client, per_hop_headers_restore_configuration_on_body_failure) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    ASSERT_EQ(0, client->common_headers()->content_length(7));
+    Client::OperationOnStack<> op(client.get(), Verb::POST, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("X-Configured", "retained"));
+    auto configured = std::string(op.req.headers.serialized());
+    auto writer = [&](Request* request) -> ssize_t {
+        EXPECT_EQ(7U, request->headers.content_length());
+        errno = EIO;
+        return -1;
+    };
+    op.body_writer = writer;
+    op.retry = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+    auto retryWriter = [](Request* request) -> ssize_t {
+        return request->write("payload", 7) == 7 ? 0 : -1;
+    };
+    op.body_writer = retryWriter;
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, per_hop_headers_validate_merged_body_framing) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<Client> client(new_http_client());
+    client->set_dialer(&dialer);
+    ASSERT_EQ(0, client->common_headers()->content_length(7));
+    Client::OperationOnStack<> op(client.get(), Verb::POST, "http://origin.example/");
+    ASSERT_EQ(0, op.req.headers.insert("Transfer-Encoding", "chunked"));
+    auto configured = std::string(op.req.headers.serialized());
+    errno = 0;
+    EXPECT_NE(0, op.call());
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(configured, op.req.headers.serialized());
+}
+
+TEST(http_client, per_hop_headers_refresh_cookies_after_redirect) {
+    HeaderCaptureDialer dialer;
+    std::unique_ptr<ICookieJar> cookies(new_simple_cookie_jar());
+    std::unique_ptr<Client> client(new_http_client(cookies.get()));
+    client->set_dialer(&dialer);
+    dialer.responses = {
+        "HTTP/1.1 302 Found\r\nLocation: /next\r\nSet-Cookie: fresh=value; Path=/\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"};
+    Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/first");
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(2, dialer.calls);
+    EXPECT_NE(std::string::npos, dialer.last->output().find("Cookie: fresh=value\r\n"));
+    EXPECT_TRUE(op.req.headers["Cookie"].empty());
+    EXPECT_EQ("/next", op.req.abs_path());
+}
+
 TEST(http_client, dialer_injection) {
     auto tcpserver = new_tcp_socket_server();
     tcpserver->bind_v4localhost();
@@ -2038,7 +2228,9 @@ TEST(http_client, request_proxy_auth_is_consumed_by_connect) {
     op.req.headers.content_length(0);
     ASSERT_EQ(0, op.req.headers.insert("Proxy-Authorization",
                                        "Basic ZXhwbGljaXQ="));
+    auto configured = std::string(op.req.headers.serialized());
     ASSERT_EQ(0, op.call());
+    EXPECT_EQ(configured, op.req.headers.serialized());
     std::string body(op.resp.body_size(), '\0');
     if (!body.empty()) {
         ASSERT_EQ((ssize_t)body.size(), op.resp.read(&body[0], body.size()));
