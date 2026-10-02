@@ -75,9 +75,10 @@ enum class TLSLayer : uint8_t {
 
 // The components below are bound to the vCPU on which they are created and
 // must be used and destroyed there. `ownership` transfers ownership of the
-// underlay to the returned decorator. A TLS context must outlive its dialer
-// unless `context_ownership` is true; when layers share one context, only the
-// outermost owning layer may take that ownership.
+// underlay to the returned decorator. A borrowed TLS context must outlive its
+// dialer and every stream created by it unless `context_ownership` is true;
+// when layers share one context, only the outermost owning layer may take that
+// ownership.
 IDialer* new_transport_dialer(const std::vector<IPAddr>& bind_ips = {});
 IDialer* new_tls_dialer(TLSContext* context, IDialer* underlay, TLSLayer layer,
                         bool ownership = false,
@@ -94,7 +95,8 @@ IDialer* new_pool_dialer(IDialer* underlay, bool ownership = false,
 
 // Build the standard single-vCPU stack. If context is null, a default context
 // is created and owned by the returned stack. Otherwise the caller owns the
-// context and must keep it alive until the returned stack is destroyed.
+// context and must keep it alive until the returned stack and every stream
+// checked out from its outer pool are destroyed.
 IDialer* new_http_dialer(TLSContext* context = nullptr,
                          const std::vector<IPAddr>& bind_ips = {});
 
