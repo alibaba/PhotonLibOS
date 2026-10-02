@@ -343,20 +343,36 @@ struct GenlSock {
 //                   [addr, addr + len) is mapped with no wrap in the sum.
 //                   A zero len asks for one byte, so a zero-length desc
 //                   gets that answer instead of a vacuous success.
-//   sizeof(*hdr)    the first device-readable desc must be large enough to
-//                   hold a virtio_blk_outhdr before it is cast to one.
-//   ndata           the payload iovec array is MAX_DESC_CHAIN deep and the
-//                   count is tested before every store into it.
+//   hdr             gather-copied off the front of the readable stream by
+//                   take_front, which refuses a stream shorter than
+//                   sizeof(hdr): a header split across two descriptors is
+//                   served, and a short chain is never cast to a struct. The
+//                   copy is also why the header cannot differ between the
+//                   bound check below and the dispatch that relies on it --
+//                   guest memory stays writable while the request is served.
+//   push            each stream's iovec array is MAX_DESC_CHAIN deep and push
+//                   reports full instead of storing past the end.
+//   status          tail(1) hands out the writable stream's last byte only
+//                   when it lies wholly inside the final element, so the
+//                   status is never written through a pointer spanning two --
+//                   and only for a chain the walk finished, so a refusal is
+//                   never written over a half-walked chain's data.
+//   stray           bytes left in the stream a T_IN, T_OUT or T_GET_ID does
+//                   not carry data in are refused: a WRITE would pwritev()
+//                   memory the guest never filled in, and a READ would
+//                   silently ignore memory it did.
+//   want & 511      a READ's or WRITE's payload must be a whole number of
+//                   sectors -- the LBA and the backend offset both are.
 //   VRING_DESC_F_INDIRECT
 //                   refused outright: an indirect table carries a second
 //                   peer-supplied length, and this core does not walk it.
-//   hdr->sector,    the sector bound is compared in SECTORS, because sector
+//   hdr.sector,     the sector bound is compared in SECTORS, because sector
 //   want            is a full 64 bits and (sector << 9) can wrap back into
 //                   the range it was just tested against; only once that
 //                   holds is the sector's byte offset subtracted from
 //                   capacity, and the byte sum compared against the
 //                   remainder.
-//   hdr->type       dispatched by a switch whose default is UNSUPP, so an
+//   hdr.type        dispatched by a switch whose default is UNSUPP, so an
 //                   unknown type never reaches a length it would consume.
 //   avail->idx      a free-running peer-written counter. dispatch_avail caps
 //                   itself at in_flight >= num and reaches the avail ring
@@ -513,10 +529,18 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t>;
 // refused: a short read is harmless, but a write past EOF on a regular-file
 // backend EXTENDS it, so an unbounded guest could grow the image at will.
 //
-// Chain layout (virtio 1.0, no indirect -- callers should not offer
-// VRING_F_INDIRECT_DESC): first device-readable desc = virtio_blk_outhdr;
-// further readable descs = the WRITE payload; writable descs = the READ
-// destination(s); the last desc, if writable and 1 byte, is the status.
+// Chain layout (no indirect -- callers should not offer VRING_F_INDIRECT_DESC).
+// A chain is two byte streams, not one role per descriptor: the device-readable
+// stream is the virtio_blk_outhdr followed by a WRITE's payload, and the
+// device-writable stream is a READ's or GET_ID's destination followed by the
+// one-byte status. virtio does not require a driver to begin a new descriptor at
+// either boundary, so the header, the payload and the status are all located by
+// byte offset within their stream. A WRITE that leaves bytes in the writable
+// stream, or a READ or GET_ID that leaves bytes in the readable one, describes a
+// buffer whose meaning is not defined, and is refused rather than served on a
+// guess; so is a READ's or WRITE's payload that is not a whole number of sectors.
+// A refusal is written into the status byte whenever the chain was walked to its
+// end, so the driver is told instead of being left with whatever it put there.
 uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
                                const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,

@@ -37,6 +37,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 
 #include <atomic>
+#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -257,6 +258,268 @@ TEST(VqNotify, the_first_decision_on_a_ring_notifies_and_the_second_follows_the_
     EXPECT_TRUE(srv.notify_valid.load(std::memory_order_relaxed));
     // Same inputs, rule now spent: the arithmetic decides, and it says no.
     EXPECT_FALSE(srv.should_notify(5));
+}
+
+// ---------------------------------------------------------------------------
+// Request parsing
+//
+// A descriptor chain carries two byte streams, not one role per descriptor:
+// everything device-readable is the header followed by a WRITE's payload, and
+// everything device-writable is a READ's destination followed by the one-byte
+// status. virtio 1.2 does not require a driver to start a new descriptor at
+// those boundaries, so a parser that assigns roles to whole descriptors drops
+// whatever shares one -- and a WRITE whose payload shared the header's
+// descriptor was answered VIRTIO_BLK_S_OK having written nothing.
+//
+// These cases build the chain by hand and serve it against a real backend image,
+// so the oracle is the bytes that reached the backend rather than a mock's
+// opinion of what a legal request looks like. Reaching the engine through a
+// transport means the transport's own frontend mock picks the shapes, and a
+// wrong assumption shared by the engine and its mock survives every such test.
+// ---------------------------------------------------------------------------
+
+constexpr uint64_t CHAIN_CAPACITY = 1 << 20;
+constexpr uint64_t CHAIN_SECTOR = 4;
+constexpr uint8_t SENTINEL = 0xcc;
+
+// A flat "guest" memory plus a descriptor table pointing into it. The translate
+// hook below turns a descriptor address into a local pointer, which is what a
+// transport's mapping does in production.
+struct GuestChain {
+    std::vector<char> mem;
+    std::vector<vring_desc> desc;
+    uint16_t ndesc = 0;
+    size_t bump = 0;
+
+    GuestChain() : mem(64 * 1024, 0), desc(RING_NUM) {}
+
+    // reserve `len` bytes of guest memory, optionally filled; returns the
+    // address a descriptor would carry
+    size_t place(const void* src, size_t len) {
+        size_t off = bump;
+        bump += (len + 7) & ~(size_t) 7;
+        EXPECT_LE(bump, mem.size());
+        if (src && len)
+            memcpy(mem.data() + off, src, len);
+        return off;
+    }
+    void add(size_t off, uint32_t len, uint16_t flags) {
+        EXPECT_LT((size_t) ndesc, desc.size());
+        desc[ndesc].addr = off;
+        desc[ndesc].len = len;
+        desc[ndesc].flags = flags | VRING_DESC_F_NEXT;
+        desc[ndesc].next = ndesc + 1;
+        ndesc++;
+    }
+    // add() marks every descriptor as having a successor; the last one does not
+    void finish() { desc[ndesc - 1].flags &= ~VRING_DESC_F_NEXT; }
+    uint8_t* at(size_t off) { return (uint8_t*) mem.data() + off; }
+};
+
+void* chain_translate(void* a, uint64_t addr, size_t len) {
+    auto* c = (GuestChain*) a;
+    // wrap-safe, the spelling the engine's own bounds checks use: an address
+    // near the top of the space must not be admitted by an overflowing sum
+    if (addr > c->mem.size() || len > c->mem.size() - addr)
+        return nullptr;
+    return c->mem.data() + addr;
+}
+
+// non-repeating, so a misplaced or partial write shows up in the bytes and not
+// only in a count
+void fill_pattern(uint8_t* p, size_t n, uint8_t seed) {
+    for (size_t i = 0; i < n; i++)
+        p[i] = (uint8_t) (seed + i * 7 + (i >> 3));
+}
+
+class ChainFixture : public ::testing::Test {
+public:
+    test::TestImage img;
+    std::vector<uint8_t> pattern;
+
+    void SetUp() override {
+        ASSERT_EQ(0, img.create("/tmp/photon-blk-vq-chain.img", CHAIN_CAPACITY));
+        pattern.resize(512);
+        fill_pattern(pattern.data(), pattern.size(), 0x11);
+    }
+
+    uint8_t serve(GuestChain& c, bool read_only, uint32_t* written) {
+        VirtioBlkTranslate tr;
+        tr.bind(&c, &chain_translate);
+        return virtio_blk_serve_chain(img.file, read_only, "photon-vq-test", "vq",
+                                      c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
+                                      tr, written);
+    }
+    ssize_t read_back(void* dst, size_t n) {
+        return img.file->pread(dst, n, (off_t) (CHAIN_SECTOR << 9));
+    }
+    // a header for a request that carries `sector`, placed and described
+    size_t put_header(GuestChain& c, uint32_t type) {
+        virtio_blk_outhdr hdr{};
+        hdr.type = type;
+        hdr.sector = CHAIN_SECTOR;
+        size_t off = c.place(&hdr, sizeof(hdr));
+        c.add(off, sizeof(hdr), 0);
+        return off;
+    }
+    size_t put_status(GuestChain& c) {
+        size_t off = c.place(nullptr, 1);
+        *c.at(off) = SENTINEL;
+        c.add(off, 1, VRING_DESC_F_WRITE);
+        return off;
+    }
+};
+
+// The shape the reviewer measured: header and WRITE payload in ONE
+// device-readable descriptor, status in its own. A whole-descriptor parser
+// takes the header and discards the 512 bytes behind it, so the payload list is
+// empty, the request writes nothing, and it is still answered OK.
+TEST_F(ChainFixture, a_write_whose_payload_shares_the_header_descriptor_reaches_the_backend) {
+    GuestChain c;
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_OUT;
+    hdr.sector = CHAIN_SECTOR;
+    size_t off = c.place(nullptr, sizeof(hdr) + pattern.size());
+    memcpy(c.at(off), &hdr, sizeof(hdr));
+    memcpy(c.at(off) + sizeof(hdr), pattern.data(), pattern.size());
+    c.add(off, sizeof(hdr) + pattern.size(), 0);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    EXPECT_EQ(1u, written);      // the guest gets the status byte back, no data
+
+    uint8_t back[512] = {};
+    ASSERT_EQ((ssize_t) sizeof(back), read_back(back, sizeof(back)));
+    EXPECT_EQ(0, memcmp(pattern.data(), back, sizeof(back)));
+}
+
+// The mirror image: a READ whose destination and status share ONE
+// device-writable descriptor. The status is the last byte of the writable
+// stream, not necessarily a descriptor of its own, so a parser that only
+// recognises a 1-byte tail descriptor leaves the byte the driver polls at
+// whatever the driver put there.
+TEST_F(ChainFixture, a_read_whose_payload_shares_the_status_descriptor_gets_its_status_byte) {
+    ASSERT_EQ((ssize_t) pattern.size(),
+              img.file->pwrite(pattern.data(), pattern.size(),
+                               (off_t) (CHAIN_SECTOR << 9)));
+    // The backend byte behind the payload is a third distinct value, because
+    // VIRTIO_BLK_S_OK is zero: a parser that reads one byte too far would leave
+    // a zero in the guest's status slot, and a zero left by an over-read is
+    // indistinguishable from a status that was actually written.
+    const uint8_t behind = 0xee;
+    ASSERT_EQ(1, img.file->pwrite(&behind, 1,
+                                  (off_t) ((CHAIN_SECTOR << 9) + pattern.size())));
+
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_IN);
+    const size_t total = pattern.size() + 1;
+    size_t woff = c.place(nullptr, total);
+    memset(c.at(woff), SENTINEL, total);
+    c.add(woff, total, VRING_DESC_F_WRITE);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
+    EXPECT_EQ((uint32_t) total, written);
+    EXPECT_EQ(0, memcmp(pattern.data(), c.at(woff), pattern.size()));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, c.at(woff)[pattern.size()]);
+}
+
+// Nothing requires the header to sit inside one descriptor either. A parser
+// that demands a whole header from the first readable descriptor answers IOERR
+// to a request it could have served.
+TEST_F(ChainFixture, a_header_split_across_two_readable_descriptors_is_still_served) {
+    GuestChain c;
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_OUT;
+    hdr.sector = CHAIN_SECTOR;
+    const uint8_t* hp = (const uint8_t*) &hdr;
+    size_t h1 = c.place(hp, 8);
+    c.add(h1, 8, 0);
+    size_t h2 = c.place(hp + 8, sizeof(hdr) - 8);
+    c.add(h2, sizeof(hdr) - 8, 0);
+    size_t doff = c.place(pattern.data(), pattern.size());
+    c.add(doff, pattern.size(), 0);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+
+    uint8_t back[512] = {};
+    ASSERT_EQ((ssize_t) sizeof(back), read_back(back, sizeof(back)));
+    EXPECT_EQ(0, memcmp(pattern.data(), back, sizeof(back)));
+}
+
+// A WRITE's payload is device-readable. A writable data buffer on a write
+// request has no defined meaning, and serving it would pwritev() from memory
+// the guest never filled in, so it is refused rather than guessed at.
+TEST_F(ChainFixture, a_write_request_carrying_a_writable_data_buffer_is_refused) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    size_t doff = c.place(pattern.data(), pattern.size());
+    c.add(doff, pattern.size(), 0);
+    size_t bogus = c.place(nullptr, 512);
+    c.add(bogus, 512, VRING_DESC_F_WRITE);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+
+    // refused means the backend was left alone
+    uint8_t back[512] = {};
+    ASSERT_EQ((ssize_t) sizeof(back), read_back(back, sizeof(back)));
+    EXPECT_NE(0, memcmp(pattern.data(), back, sizeof(back)));
+}
+
+// The LBA and the backend offset are both in 512-byte units, so a payload that
+// is not a whole number of sectors names a range the engine cannot express.
+// Serving it would write past the sector the guest named.
+TEST_F(ChainFixture, a_payload_that_is_not_a_whole_number_of_sectors_is_refused) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    size_t doff = c.place(pattern.data(), 100);
+    c.add(doff, 100, 0);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+
+    // refused means the backend was left alone -- and "left alone" here has to
+    // be spelled as all-zero rather than as "differs from the pattern", because
+    // the buggy parser writes only the first 100 of the 512 bytes read back and
+    // so differs from the pattern too
+    uint8_t back[512] = {};
+    ASSERT_EQ((ssize_t) sizeof(back), read_back(back, sizeof(back)));
+    const uint8_t zeros[512] = {};
+    EXPECT_EQ(0, memcmp(zeros, back, sizeof(back)));
+}
+
+// The header is gather-copied out of the readable stream, so the bound that
+// refuses a stream too short to hold one is a length test on the STREAM, not on
+// the first descriptor: half a header is refused even though the descriptor
+// that carries it is perfectly valid.
+TEST_F(ChainFixture, a_chain_too_short_to_hold_a_header_is_refused) {
+    GuestChain c;
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_FLUSH;
+    size_t off = c.place(&hdr, sizeof(hdr) / 2);
+    c.add(off, sizeof(hdr) / 2, 0);
+    size_t st = put_status(c);
+    c.finish();
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+    EXPECT_EQ(1u, written);   // refused, but the guest still gets its status byte
 }
 
 int main(int argc, char** argv) {

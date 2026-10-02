@@ -515,19 +515,84 @@ int GenlSock::recv_notifications(TempDelegate<void, uint16_t, uint8_t, const cha
 
 static constexpr int MAX_DESC_CHAIN = 64;
 
+// One of the two byte streams a descriptor chain carries. The role boundaries
+// fall INSIDE the streams rather than on descriptor boundaries, so a stream has
+// to be addressable by byte offset and not only by element.
+struct DescStream {
+    iovec iov[MAX_DESC_CHAIN];
+    int n = 0;
+    uint64_t bytes = 0;
+
+    bool push(void* base, uint32_t len) {
+        if (!len)
+            return true;   // a zero-length descriptor carries no bytes
+        if (n == MAX_DESC_CHAIN)
+            return false;
+        iov[n].iov_base = base;
+        iov[n].iov_len = len;
+        n++;
+        bytes += len;
+        return true;
+    }
+    // drop the emptied elements at both ends and recount
+    void compact() {
+        int b = 0, e = n;
+        while (b < e && !iov[b].iov_len) b++;
+        while (e > b && !iov[e - 1].iov_len) e--;
+        if (b || e < n) {
+            memmove(iov, iov + b, (e - b) * sizeof(iovec));
+            n = e - b;
+        }
+        bytes = 0;
+        for (int i = 0; i < n; i++) bytes += iov[i].iov_len;
+    }
+    // gather-copy `len` bytes off the front into dst and consume them; false
+    // and no change when the stream is shorter than that
+    bool take_front(void* dst, size_t len) {
+        if (bytes < len)
+            return false;
+        char* p = (char*) dst;
+        for (int i = 0; len && i < n; i++) {
+            size_t k = std::min<size_t>(iov[i].iov_len, len);
+            memcpy(p, iov[i].iov_base, k);
+            p += k;
+            len -= k;
+            iov[i].iov_base = (char*) iov[i].iov_base + k;
+            iov[i].iov_len -= k;
+        }
+        compact();
+        return true;
+    }
+    // the last `len` bytes, or nullptr when they are not wholly inside the
+    // final element: a status byte split across two descriptors is not
+    // something this engine can write through a pointer
+    uint8_t* tail(size_t len) {
+        if (!n || len > iov[n - 1].iov_len)
+            return nullptr;
+        return (uint8_t*) iov[n - 1].iov_base + (iov[n - 1].iov_len - len);
+    }
+    void drop_back(size_t len) {
+        if (n && len <= iov[n - 1].iov_len) {
+            iov[n - 1].iov_len -= len;
+            compact();
+        }
+    }
+};
+
 uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
                                const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,
                                uint32_t ring_num, uint64_t capacity,
                                VirtioBlkTranslate translate, uint32_t* written) {
     *written = 0;
-    // walk the chain: outhdr (readable) -> payload descs -> status (the last
-    // writable 1-byte desc). A WRITE's payload descs are device-READABLE --
-    // only the first readable desc is the header, the rest carry data.
-    const virtio_blk_outhdr* hdr = nullptr;
-    iovec data[MAX_DESC_CHAIN];
-    int ndata = 0;
-    uint8_t* status = nullptr;
+    // Collect the chain's two byte streams first and split them into roles
+    // afterwards. The device-readable stream is the header followed by a
+    // WRITE's payload; the device-writable stream is a READ's destination
+    // followed by the one-byte status. Nothing requires a driver to start a new
+    // descriptor at either boundary, and handing a whole descriptor one role
+    // drops whatever shares it -- a WRITE whose payload shared the header's
+    // descriptor used to be answered VIRTIO_BLK_S_OK having written nothing.
+    DescStream rd, wr;
     uint16_t d = head;
     bool bad = false;
     bool chain_end = false;
@@ -553,23 +618,12 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
             bad = true;
             break;
         }
-        bool writable = de->flags & VRING_DESC_F_WRITE;
-        if (!writable) {
-            if (!hdr) {
-                if (de->len < sizeof(*hdr)) { bad = true; break; }
-                hdr = (const virtio_blk_outhdr*)va;
-            } else if (ndata < MAX_DESC_CHAIN) {
-                data[ndata].iov_base = va;
-                data[ndata].iov_len = de->len;
-                ndata++;
-            } else { bad = true; break; }
-        } else if (de->len == 1 && !(de->flags & VRING_DESC_F_NEXT)) {
-            status = (uint8_t*)va;
-        } else if (ndata < MAX_DESC_CHAIN) {
-            data[ndata].iov_base = va;
-            data[ndata].iov_len = de->len;
-            ndata++;
-        } else { bad = true; break; }
+        DescStream& s = (de->flags & VRING_DESC_F_WRITE) ? wr : rd;
+        if (!s.push(va, de->len)) {
+            LOG_ERROR("virtio-blk `: chain overflows the `-element scatter list", tag, MAX_DESC_CHAIN);
+            bad = true;
+            break;
+        }
         if (!(de->flags & VRING_DESC_F_NEXT)) {
             chain_end = true;
             break;
@@ -583,16 +637,55 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
         bad = true;
     }
 
+    virtio_blk_outhdr hdr{};
+    uint8_t* status = nullptr;
+    if (!bad) {
+        // The status is the writable stream's last byte, and it is located
+        // BEFORE the header is parsed so that a request this engine refuses
+        // still says so. A driver that leaves its status byte at success reads
+        // a refusal the device never wrote as a completed request -- the same
+        // silence that answering OK to an unserved WRITE would have been.
+        //
+        // Only for a chain the walk finished: when it stopped early the last
+        // writable byte seen is somewhere in the middle of the chain, and
+        // writing IOERR over a data byte would leave the real status untouched.
+        status = wr.tail(1);
+        if (status)
+            wr.drop_back(1);
+        // the header is copied out rather than read in place: it may span two
+        // descriptors, and a copy is what keeps the fields the bound check
+        // below reads identical to the ones the dispatch acts on -- guest
+        // memory stays writable while its request is being served
+        if (!rd.take_front(&hdr, sizeof(hdr))) {
+            LOG_ERROR("virtio-blk `: ` readable bytes leave no room for a `-byte header",
+                      tag, rd.bytes, sizeof(hdr));
+            bad = true;
+        }
+    }
+
     uint32_t data_written = 0;
     uint8_t st = VIRTIO_BLK_S_OK;
-    if (bad || !hdr) {
+    if (bad) {
         st = VIRTIO_BLK_S_IOERR;
     } else {
-        uint64_t off = hdr->sector << 9;   // virtio sectors are always 512B
-        uint64_t want = 0;
-        for (int i = 0; i < ndata; i++) want += data[i].iov_len;
+        uint64_t off = hdr.sector << 9;   // virtio sectors are always 512B
+        // what is left of each stream is payload: the WRITE's in the readable
+        // one, a READ's or a GET_ID's in the writable one
+        DescStream& data = (hdr.type == VIRTIO_BLK_T_OUT) ? rd : wr;
+        uint64_t want = data.bytes;
+        bool lba = (hdr.type == VIRTIO_BLK_T_IN || hdr.type == VIRTIO_BLK_T_OUT);
+        // Bytes left in the stream this request type does not carry data in
+        // describe a buffer with no defined meaning: a WRITE with writable
+        // bytes left over would have pwritev() run over memory the guest never
+        // filled in, and a READ or GET_ID with readable ones would silently
+        // drop what the guest did fill in. Refuse rather than guess which the
+        // driver meant. A FLUSH and an unknown type have no data phase at all,
+        // so for those neither stream is stray and the bytes are ignored.
+        uint64_t stray = (hdr.type == VIRTIO_BLK_T_OUT) ? wr.bytes
+                       : (hdr.type == VIRTIO_BLK_T_IN || hdr.type == VIRTIO_BLK_T_GET_ID) ? rd.bytes
+                       : 0;
         // Bound the two ops that carry an LBA, and compare in SECTORS:
-        // hdr->sector is a full 64 bits, so `sector << 9` can wrap back into
+        // hdr.sector is a full 64 bits, so `sector << 9` can wrap back into
         // range (the same trick tcmu's lba_to_off guards against). capacity is
         // a multiple of 512 -- validate_info(virtio=true) enforces it.
         //
@@ -600,15 +693,25 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
         // IOERR anyway), but a WRITE past EOF on a regular-file backend
         // EXTENDS it, so without this a guest grows the image without bound.
         // tcmu (out_of_bounds) and nbd (oob) both gate it; this core did not.
-        bool oob = (hdr->type == VIRTIO_BLK_T_IN || hdr->type == VIRTIO_BLK_T_OUT) &&
-                   (hdr->sector > (capacity >> 9) || want > capacity - (hdr->sector << 9));
-        if (oob) {
-            LOG_ERROR("virtio-blk `: ` bytes at sector ` past the `-byte end",
-                      tag, want, hdr->sector, capacity);
+        bool oob = lba && (hdr.sector > (capacity >> 9) || want > capacity - (hdr.sector << 9));
+        if (stray) {
+            LOG_ERROR("virtio-blk `: request type ` carries ` bytes the wrong way",
+                      tag, hdr.type, stray);
             st = VIRTIO_BLK_S_IOERR;
-        } else switch (hdr->type) {
+        } else if (lba && (want & 511)) {
+            // the LBA and the backend offset are both in 512-byte units, so a
+            // payload that is not a whole number of sectors names a range this
+            // engine cannot express without writing outside the sectors named
+            LOG_ERROR("virtio-blk `: request type ` carries ` bytes, not a whole sector count",
+                      tag, hdr.type, want);
+            st = VIRTIO_BLK_S_IOERR;
+        } else if (oob) {
+            LOG_ERROR("virtio-blk `: ` bytes at sector ` past the `-byte end",
+                      tag, want, hdr.sector, capacity);
+            st = VIRTIO_BLK_S_IOERR;
+        } else switch (hdr.type) {
         case VIRTIO_BLK_T_IN: {
-            ssize_t r = ndata ? backend->preadv(data, ndata, (off_t)off) : 0;
+            ssize_t r = data.n ? backend->preadv(data.iov, data.n, (off_t)off) : 0;
             if (r == (ssize_t)want)
                 data_written = (uint32_t)r;
             else {
@@ -620,7 +723,7 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
         }
         case VIRTIO_BLK_T_OUT: {
             if (read_only) { st = VIRTIO_BLK_S_IOERR; break; }
-            ssize_t w = ndata ? backend->pwritev(data, ndata, (off_t)off) : 0;
+            ssize_t w = data.n ? backend->pwritev(data.iov, data.n, (off_t)off) : 0;
             if (w != (ssize_t)want) {
                 if (w < 0)
                     LOG_ERROR("virtio-blk `: write backend failed, off `, ", tag, off, ERRNO());
@@ -636,12 +739,12 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
             break;
         case VIRTIO_BLK_T_GET_ID: {
             size_t n = std::min<uint64_t>(want, strlen(serial));
-            if (n && ndata) {
+            if (n && data.n) {
                 // the serial may span descs; copy through the ioview
                 size_t done = 0;
-                for (int i = 0; i < ndata && done < n; i++) {
-                    size_t k = std::min<size_t>(data[i].iov_len, n - done);
-                    memcpy(data[i].iov_base, serial + done, k);
+                for (int i = 0; i < data.n && done < n; i++) {
+                    size_t k = std::min<size_t>(data.iov[i].iov_len, n - done);
+                    memcpy(data.iov[i].iov_base, serial + done, k);
                     done += k;
                 }
                 data_written = (uint32_t)n;
@@ -649,7 +752,7 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
             break;
         }
         default:
-            LOG_WARN("virtio-blk `: unsupported request type `", tag, hdr->type);
+            LOG_WARN("virtio-blk `: unsupported request type `", tag, hdr.type);
             st = VIRTIO_BLK_S_UNSUPP;
             break;
         }
