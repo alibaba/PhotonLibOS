@@ -608,6 +608,13 @@ public:
         return {cat_item_filter(xs)...};
     }
 
+    // Explicit encoding for composite keys: decimal byte length, ':', payload.
+    // Ordinary appends(string_view) keeps its plain concatenation semantics.
+    static CatList<uint64_t, std::string_view, std::string_view>
+    length_prefixed(std::string_view value) {
+        return {uint64_t(value.size()), ":", value};
+    }
+
     template<typename...Ts> static
     auto make_conditional_cat_list(bool cond, const Ts&...xs) ->
         ConditionalCatList<decltype(cat_item_filter(xs))...>

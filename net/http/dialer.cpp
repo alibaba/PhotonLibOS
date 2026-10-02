@@ -513,47 +513,27 @@ public:
 protected:
     std::shared_ptr<PoolDialerState> m_state;
 
-    static void append_u8(std::string& key, uint8_t value) {
-        key.push_back((char)value);
-    }
-    static void append_u16(std::string& key, uint16_t value) {
-        key.append((const char*)&value, sizeof(value));
-    }
-    static void append_string(std::string& key, std::string_view value) {
-        uint64_t size = value.size();
-        key.append((const char*)&size, sizeof(size));
-        if (!value.empty()) key.append(value.data(), value.size());
-    }
     static std::string make_key(const DialTarget& target) {
-        std::string key;
-        append_u8(key, 1); // key format version
+        estring key;
+        key.appends(uint32_t(2), "/"); // key format version
         if (!target.uds_path.empty()) {
-            append_u8(key, 1);
-            append_string(key, target.uds_path);
-            append_u8(key, target.secure);
-            append_string(key, target.host);
-            append_u16(key, target.port);
+            key.appends(uint32_t(1), "/", estring::length_prefixed(target.uds_path),
+                        uint32_t(target.secure), "/",
+                        estring::length_prefixed(target.host), uint32_t(target.port), "/");
         } else if (target.need_tunnel()) {
-            append_u8(key, 4);
-            append_u8(key, target.proxy_secure);
-            append_string(key, target.proxy_host);
-            append_u16(key, target.proxy_port);
-            append_string(key, target.host);
-            append_u16(key, target.port);
-            append_string(key, target.proxy_auth);
-            append_string(key, target.proxy_pool_key);
+            key.appends(uint32_t(4), "/", uint32_t(target.proxy_secure), "/",
+                        estring::length_prefixed(target.proxy_host), uint32_t(target.proxy_port), "/",
+                        estring::length_prefixed(target.host), uint32_t(target.port), "/",
+                        estring::length_prefixed(target.proxy_auth),
+                        estring::length_prefixed(target.proxy_pool_key));
         } else if (target.via_proxy()) {
-            append_u8(key, 3);
-            append_u8(key, target.proxy_secure);
-            append_string(key, target.proxy_host);
-            append_u16(key, target.proxy_port);
-            append_string(key, target.proxy_auth);
-            append_string(key, target.proxy_pool_key);
+            key.appends(uint32_t(3), "/", uint32_t(target.proxy_secure), "/",
+                        estring::length_prefixed(target.proxy_host), uint32_t(target.proxy_port), "/",
+                        estring::length_prefixed(target.proxy_auth),
+                        estring::length_prefixed(target.proxy_pool_key));
         } else {
-            append_u8(key, 2);
-            append_u8(key, target.secure);
-            append_string(key, target.host);
-            append_u16(key, target.port);
+            key.appends(uint32_t(2), "/", uint32_t(target.secure), "/",
+                        estring::length_prefixed(target.host), uint32_t(target.port), "/");
         }
         return key;
     }

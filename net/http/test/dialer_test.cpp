@@ -346,8 +346,8 @@ TEST(dialer, pool_rejects_oversized_route_keys_before_connect) {
     std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
     ASSERT_NE(nullptr, pool);
 
-    // Direct keys contain three tag bytes, one string length and one port.
-    constexpr size_t direct_key_overhead = 3 + sizeof(uint64_t) + sizeof(uint16_t);
+    // "2/2/0/", a five-digit byte length plus ':', and "80/".
+    constexpr size_t direct_key_overhead = 6 + 6 + 3;
     std::string host(UINT16_MAX - direct_key_overhead - 1, 'h');
     DialTarget target;
     target.host = host;
@@ -396,6 +396,39 @@ TEST(dialer, pool_rejects_oversized_route_keys_before_connect) {
     ASSERT_NE(nullptr, stream);
     delete stream;
     EXPECT_EQ(1, underlay->calls);
+}
+
+TEST(dialer, textual_key_fields_have_unambiguous_boundaries) {
+    const char bytes[] = {'a', '\0', ':', '/', '2'};
+    auto encoded = estring().appends("prefix/", estring::length_prefixed(
+        std::string_view(bytes, sizeof(bytes))), estring::length_prefixed({}));
+    std::string expected = "prefix/5:";
+    expected.append(bytes, sizeof(bytes));
+    expected += "0:";
+    EXPECT_EQ(expected, encoded);
+    EXPECT_EQ("plain12", estring().appends("plain", uint32_t(12)));
+
+    auto underlay = new StreamDialer;
+    std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
+    DialTarget route;
+    route.proxy_host = "proxy";
+    route.proxy_port = 8080;
+    route.host = "origin";
+    route.port = 80;
+    auto use = [&]() {
+        std::unique_ptr<ISocketStream> stream(pool->dial(route));
+        ASSERT_NE(nullptr, stream);
+    };
+    route.proxy_auth = "a";
+    route.proxy_pool_key = "bc";
+    use();
+    route.proxy_auth = "ab";
+    route.proxy_pool_key = "c";
+    use();
+    route.proxy_auth = std::string_view(bytes, sizeof(bytes));
+    use();
+    use();
+    EXPECT_EQ(3, underlay->calls);
 }
 
 TEST(dialer, pool_updates_timeout_on_reuse) {
