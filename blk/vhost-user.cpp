@@ -912,9 +912,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
         size_t dsz = (size_t)q->srv.num * sizeof(vring_desc);
         size_t asz = sizeof(uint16_t) * (3 + q->srv.num);
         size_t usz = sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * q->srv.num;
-        q->srv.desc = (vring_desc*)mem.qva2va(q->x.desc_qva, dsz);
-        q->srv.avail = (vring_avail*)mem.qva2va(q->x.avail_qva, asz);
-        q->srv.used = (vring_used*)mem.qva2va(q->x.used_qva, usz);
+        auto* d = (vring_desc*)mem.qva2va(q->x.desc_qva, dsz);
+        auto* a = (vring_avail*)mem.qva2va(q->x.avail_qva, asz);
+        auto* u = (vring_used*)mem.qva2va(q->x.used_qva, usz);
+        // set_ring rather than four assignments: the HVAs just moved under any
+        // request still in flight against the old ones, and the generation bump
+        // is what retires it. num is passed through in both arms, so a failed
+        // translation cannot lose the resize this retranslation came from.
+        q->srv.set_ring(d, a, u, q->srv.num);
         q->x.addr_set = q->srv.desc && q->srv.avail && q->srv.used;
     }
 
@@ -924,9 +929,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // freed memory
     void vq_invalidate(uint32_t idx) {
         auto* q = vqs[idx];
-        q->srv.desc = nullptr;
-        q->srv.avail = nullptr;
-        q->srv.used = nullptr;
+        // same reason as vq_retranslate, and num survives here too: it is the
+        // frontend's SET_VRING_NUM value, not a property of the lost mapping
+        q->srv.set_ring(nullptr, nullptr, nullptr, q->srv.num);
         q->x.addr_set = false;
     }
 

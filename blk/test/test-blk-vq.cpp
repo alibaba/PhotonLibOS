@@ -35,6 +35,7 @@ limitations under the License.
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>
+#include <photon/thread/thread.h>
 
 #include <atomic>
 #include <cstring>
@@ -573,6 +574,168 @@ TEST_F(ChainFixture, get_id_into_a_shorter_buffer_writes_only_what_was_offered) 
     EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), offered));
     for (size_t i = 0; i < offered; i++)
         EXPECT_EQ(SENTINEL, c.at(coff)[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Ring generations
+//
+// `ready` answers "is there a usable ring right now", which is not the question
+// a request suspended inside the backend needs answered. The transport clears
+// ready when a reset or an unmap retires a ring and sets it true again for the
+// replacement, so a request that suspended across that window passes the check
+// and appends its completion to a used ring whose negotiation it never belonged
+// to. The generation token is what distinguishes "a ring" from "that ring".
+// ---------------------------------------------------------------------------
+
+// lay a FLUSH chain into `r`'s descriptor table: a readable header at `hoff`
+// and a writable status byte at `soff`, both offsets into whatever guest memory
+// the translate hook is bound to. A FLUSH needs no data buffer, so the whole
+// request fits in two small ranges.
+void put_flush_chain(MemVring& r, size_t hoff, size_t soff) {
+    r.desc[0].addr = hoff;
+    r.desc[0].len = sizeof(virtio_blk_outhdr);
+    r.desc[0].flags = VRING_DESC_F_NEXT;
+    r.desc[0].next = 1;
+    r.desc[1].addr = soff;
+    r.desc[1].len = 1;
+    r.desc[1].flags = VRING_DESC_F_WRITE;
+    r.desc[1].next = 0;
+    r.avail->ring[0] = 0;
+    __atomic_store_n(&r.avail->idx, (uint16_t) 1, __ATOMIC_RELEASE);
+}
+
+class GenFixture : public ::testing::Test {
+public:
+    test::TestImage img;
+    MemVring old_ring{RING_NUM};
+    MemVring new_ring{RING_NUM};
+    GuestChain guest;
+    VirtQueueServer srv;
+    virtio_blk_outhdr hdr{};
+    size_t hoff = 0;
+    size_t soff = 0;
+    int translate_calls = 0;
+
+    void SetUp() override {
+        ASSERT_EQ(0, img.create("/tmp/photon-blk-vq-gen.img", CHAIN_CAPACITY));
+        srv.backend = img.file;
+        srv.capacity.store(CHAIN_CAPACITY, std::memory_order_relaxed);
+        srv.serial = CHAIN_SERIAL;
+        srv.tag = "vq-gen";
+        srv.hooks.ready.bind(nullptr, &ready_true);
+        srv.hooks.notify.bind(nullptr, &notify_thunk);
+        srv.hooks.translate.bind(&guest, &chain_translate);
+        srv.event_idx.store(false, std::memory_order_relaxed);
+        srv.notify_valid.store(true, std::memory_order_relaxed);
+
+        hdr.type = VIRTIO_BLK_T_FLUSH;
+        hoff = guest.place(&hdr, sizeof(hdr));
+        soff = guest.place(nullptr, 1);
+        *guest.at(soff) = SENTINEL;
+        put_flush_chain(new_ring, hoff, soff);
+    }
+    // what dispatch_avail does: one increment, then a coroutine holding the
+    // generation current at that moment
+    uint64_t dispatch_against(MemVring& r) {
+        srv.set_ring(r.desc, r.avail, r.used, RING_NUM);
+        srv.in_flight++;
+        return srv.generation.load(std::memory_order_acquire);
+    }
+    // the driver reset and renegotiated onto a different ring: new addresses,
+    // and the counters restart at zero the way a reset_pending refresh does
+    void renegotiate() {
+        srv.set_ring(new_ring.desc, new_ring.avail, new_ring.used, RING_NUM);
+        srv.used_idx = 0;
+        srv.last_avail = 0;
+        srv.notify_valid.store(false, std::memory_order_relaxed);
+    }
+};
+
+// translate, except that the call resolving the status descriptor renegotiates
+// the ring first -- by which point serve_chain is already running, which is the
+// only place a test can put the change between handle_req's two checks without
+// a backend that yields. Note that renegotiate() republishes the SAME three
+// pointers here and still retires the request: comparing ring addresses would
+// not have caught this, and a driver that renegotiates onto the same buffers is
+// not a hypothetical.
+void* gen_translate_thunk(void* a, uint64_t addr, size_t len) {
+    auto* f = (GenFixture*) a;
+    if (++f->translate_calls == 2)
+        f->renegotiate();
+    return chain_translate(&f->guest, addr, len);
+}
+
+TEST_F(GenFixture, a_request_dispatched_before_a_renegotiation_does_not_complete_into_the_new_ring) {
+    uint64_t gen = dispatch_against(old_ring);
+    renegotiate();
+    ASSERT_NE(gen, srv.generation.load(std::memory_order_acquire));
+
+    srv.handle_req(0, gen);
+
+    // the completion belongs to a negotiation that no longer exists, so it
+    // appears in neither ring, the guest's status byte is left alone, and the
+    // request is accounted for exactly as the uncompleted handover documents
+    EXPECT_EQ(0, vring_used_idx(new_ring.used));
+    EXPECT_EQ(0, vring_used_idx(old_ring.used));
+    EXPECT_EQ(SENTINEL, *guest.at(soff));
+    EXPECT_EQ(0u, srv.in_flight.load());
+}
+
+// The control the case above needs: without it, a handle_req that declined
+// everything would pass too. Same ring, same chain, the generation it was
+// actually dispatched at -- this one completes.
+TEST_F(GenFixture, a_request_at_the_current_generation_still_completes) {
+    uint64_t gen = dispatch_against(new_ring);
+
+    srv.handle_req(0, gen);
+
+    EXPECT_EQ(1, vring_used_idx(new_ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+    EXPECT_EQ(0u, srv.in_flight.load());
+}
+
+// The case above is refused by the check that runs BEFORE serve_chain, so on its
+// own it says nothing about the check that runs after -- which is the one that
+// matters in production, because that is where a request that suspended inside
+// the backend lands. This one moves the ring while the request is between the
+// two: the translate hook renegotiates on the call that resolves the status
+// descriptor, by which point serve_chain is already running.
+TEST_F(GenFixture, a_ring_that_changes_mid_request_does_not_receive_its_completion) {
+    uint64_t gen = dispatch_against(new_ring);
+    srv.hooks.translate.bind(this, &gen_translate_thunk);
+
+    srv.handle_req(0, gen);
+
+    // serve_chain ran to the end: it resolved both descriptors, flushed the
+    // backend and wrote the guest's status byte, all against the ring it was
+    // dispatched from. Only the completion is refused.
+    EXPECT_EQ(2, translate_calls);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+    EXPECT_EQ(0, vring_used_idx(new_ring.used));
+    EXPECT_EQ(0, vring_used_idx(old_ring.used));
+    EXPECT_EQ(0u, srv.in_flight.load());
+}
+
+// The two cases above hand handle_req a generation they read themselves, so
+// neither witnesses the other half of the binding: that dispatch_avail snapshots
+// the CURRENT generation when it creates the request. Get that wrong and every
+// request a real device dispatches is born stale and silently never completes.
+// The transport suites do catch it, but only by failing most of their cases
+// after long timeouts; this goes through dispatch_avail so the engine suite
+// catches it in milliseconds.
+TEST_F(GenFixture, dispatch_binds_the_generation_current_when_it_created_the_request) {
+    srv.set_ring(new_ring.desc, new_ring.avail, new_ring.used, RING_NUM);
+    srv.last_avail = 0;
+
+    srv.dispatch_avail();
+    // bounded: a request that is never completed must fail the assertions below
+    // rather than hang the suite
+    for (int i = 0; i < 2000 && srv.in_flight.load(); i++)
+        photon::thread_usleep(1000);
+
+    EXPECT_EQ(0u, srv.in_flight.load());
+    EXPECT_EQ(1, vring_used_idx(new_ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
 }
 
 int main(int argc, char** argv) {

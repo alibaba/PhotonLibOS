@@ -698,12 +698,17 @@ struct VduseDeviceImpl : IBlkDevice {
             q->x.ready.store(false, std::memory_order_relaxed);
             return 0;
         }
-        q->srv.num = vi.num;
-        q->srv.desc = (vring_desc*)iotlb.resolve(vi.desc_addr, (size_t)vi.num * sizeof(vring_desc));
-        q->srv.avail = (vring_avail*)iotlb.resolve(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num));
-        q->srv.used = (vring_used*)iotlb.resolve(vi.device_addr,
+        auto* d = (vring_desc*)iotlb.resolve(vi.desc_addr, (size_t)vi.num * sizeof(vring_desc));
+        auto* a = (vring_avail*)iotlb.resolve(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num));
+        auto* u = (vring_used*)iotlb.resolve(vi.device_addr,
                         sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * vi.num);
-        if (!q->srv.desc || !q->srv.avail || !q->srv.used) {
+        // set_ring rather than four assignments, on the failure path as much as
+        // on the success one: a ring that did not resolve is a ring that
+        // changed, and the generation bump is what stops a request still in
+        // flight against the previous one from completing into whatever comes
+        // next.
+        q->srv.set_ring(d, a, u, vi.num);
+        if (!d || !a || !u) {
             q->x.ready.store(false, std::memory_order_relaxed);
             // Two causes land here and only one of them is retryable, so they have
             // to be told apart. The cache's generation guard is coarse -- it cannot
@@ -1284,9 +1289,10 @@ struct VduseDeviceImpl : IBlkDevice {
         }
         iotlb.clear();
         for (uint32_t i = 0; i < nqueues; i++) {
-            vqs[i]->srv.desc = nullptr;
-            vqs[i]->srv.avail = nullptr;
-            vqs[i]->srv.used = nullptr;
+            // the mappings every ring pointer was translated through are gone;
+            // clear_ring drops the size with them, so nothing is left describing
+            // a ring that no longer exists
+            vqs[i]->srv.clear_ring();
         }
         if (dev_fd >= 0) {
             ::close(dev_fd);   // connected = false: the registration survives

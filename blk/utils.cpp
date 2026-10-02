@@ -820,9 +820,25 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old) {
 
 void* VirtQueueServer::req_trampoline(void* a) {
     auto arg = (ReqArg*)a;
-    arg->q->handle_req(arg->head);
+    arg->q->handle_req(arg->head, arg->gen);
     delete arg;
     return nullptr;
+}
+
+void VirtQueueServer::set_ring(vring_desc* d, vring_avail* a, vring_used* u, uint32_t n) {
+    desc = d;
+    avail = a;
+    used = u;
+    num = n;
+    // Written before the bump and released by it, so a request whose acquire
+    // load sees the new generation also sees the ring that goes with it. The
+    // other direction needs no ordering: a request still holding the old
+    // generation declines, which is what the token is for.
+    generation.fetch_add(1, std::memory_order_release);
+}
+
+void VirtQueueServer::clear_ring() {
+    set_ring(nullptr, nullptr, nullptr, 0);
 }
 
 bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
@@ -998,7 +1014,7 @@ void VirtQueueServer::dispatch_avail() {
         // reached num nothing would ever dispatch again. Returning without
         // advancing leaves the chain available for the next pass -- the same
         // recovery the cap above relies on.
-        auto* arg = new ReqArg{this, head};
+        auto* arg = new ReqArg{this, head, generation.load(std::memory_order_acquire)};
         if (!photon::thread_create(&VirtQueueServer::req_trampoline, arg, stack_size)) {
             delete arg;
             LOG_ERROR("` virtqueue: cannot create the request coroutine for head `, leaving it available",
@@ -1019,7 +1035,7 @@ void VirtQueueServer::dispatch_avail() {
     }
 }
 
-void VirtQueueServer::handle_req(uint16_t head) {
+void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     DEFER(in_flight--);
     // Readiness has to gate serve_chain too, not just the completion below: this
     // coroutine was queued by dispatch_avail and may run long after, by which
@@ -1028,15 +1044,23 @@ void VirtQueueServer::handle_req(uint16_t head) {
     // Leaving the request uncompleted is the documented handover behaviour:
     // whoever serves next resumes from used->idx and re-serves it (virtio-blk ops
     // are idempotent).
-    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire())
+    //
+    // The generation answers a question `ready` cannot. ready says a ring is
+    // usable now; the transport clears it when a reset or an unmap retires the
+    // ring and then sets it true again for the replacement, so a request that
+    // suspended across that window passes the ready check and would append its
+    // completion to a used ring whose negotiation it never belonged to.
+    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire() ||
+        gen != generation.load(std::memory_order_acquire))
         return;
     uint32_t written = 0;
     virtio_blk_serve_chain(backend, read_only, serial, tag, desc, head,
                            num, capacity.load(std::memory_order_relaxed), hooks.translate, &written);
     // and again after: serve_chain yields inside preadv/pwritev, and complete_req
     // dereferences used and avail
-    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire())
-        return;   // tearing down (or the ring went away under us)
+    if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire() ||
+        gen != generation.load(std::memory_order_acquire))
+        return;   // tearing down, or the ring this request came from is gone
     complete_req(head, written);
 }
 

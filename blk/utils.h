@@ -660,7 +660,24 @@ public:
     const char* serial = "";      // answers VIRTIO_BLK_T_GET_ID
     const char* tag = "";         // device identity; prefixes the logs
 
-    // the ring, set up by the transport once the frontend/driver published it
+    // Bumped by set_ring()/clear_ring(). A request snapshots it at dispatch and
+    // re-checks it before publishing, because `ready` alone cannot answer the
+    // question: the transport clears ready when a reset or an unmap invalidates
+    // the ring, then sets it true again for the NEW one, so a request that
+    // suspended across that window passes a ready check and would append its
+    // completion to a used ring whose negotiation it never belonged to,
+    // advancing used->idx on a ring whose avail->idx is still 0.
+    // Not atomic against the four fields it protects: set_ring() writes them and
+    // then bumps, so a request that reads the new generation is guaranteed to
+    // see the new ring, and one that reads the old generation declines either
+    // way. Atomic only because the transport's control plane and the serving
+    // vcpu are not necessarily the same one.
+    std::atomic<uint64_t> generation{0};
+
+    // the ring, set up by the transport once the frontend/driver published it.
+    // Change these four through set_ring()/clear_ring(), not by assignment: the
+    // pair bumps `generation` above, which is what tells an in-flight request
+    // that the ring it was dispatched against is gone.
     vring_desc* desc = nullptr;
     vring_avail* avail = nullptr;
     vring_used* used = nullptr;
@@ -719,10 +736,19 @@ public:
 
     void loop();                  // the serving coroutine body
     void dispatch_avail();        // one coroutine per available chain
-    void handle_req(uint16_t head);
+    // `gen` is the generation the request was dispatched at. One that has moved
+    // is neither served nor completed: the ring it names is gone.
+    void handle_req(uint16_t head, uint64_t gen);
     void complete_req(uint16_t head, uint32_t written);
     void drain();                 // wait until in_flight reaches 0
     void wake();                  // nudge loop() out of its kickfd wait
+
+    // Publish a resolved ring, or drop the current one. Both bump `generation`,
+    // which is the only thing that retires the requests still in flight against
+    // the ring being replaced -- `ready` cannot, because the transport sets it
+    // true again for the new one.
+    void set_ring(vring_desc* d, vring_avail* a, vring_used* u, uint32_t n);
+    void clear_ring();
 
     // Decide whether the used element just appended warrants a notification.
     // `old_used_idx` is the used index BEFORE the append -- §2.7.7.2's "the idx
@@ -738,7 +764,7 @@ public:
     void publish_avail_event();
 
 private:
-    struct ReqArg { VirtQueueServer* q; uint16_t head; };
+    struct ReqArg { VirtQueueServer* q; uint16_t head; uint64_t gen; };
     static void* req_trampoline(void* a);
 };
 
