@@ -199,6 +199,75 @@ private:
     RecordingFile& operator=(const RecordingFile&) = delete;
 };
 
+// ---------------------------------------------------------------------------
+// durability observation
+//
+// Write-through and write-back are indistinguishable in the bytes that land -- a
+// write into the page cache is already visible to the next read -- so the only
+// oracle for the difference is whether a sync was asked for before the completion
+// went back. RecordingFile already forwards both sync calls; this counts them.
+// Two counters and not one, so that "persisted" cannot be satisfied by either
+// call: the engine's explicit FLUSH path uses fdatasync, and a write-through write
+// has to match it rather than reach for the heavier one.
+//
+// `short_write_by` is the other half. A regular file writes everything or fails,
+// and a failure returns -1 -- which a durability guard's own "did anything get
+// written" test already excludes. Only a count that is short but positive reaches
+// that guard still holding bytes it wrote, so without this knob "do not persist a
+// write the backend rejected" is a guard no case can turn red. A short count is a
+// legal pwritev result; what is artificial is that the bytes did in fact all land.
+//
+// `fail_syncs` covers the third thing neither can reach: a persist that was asked
+// for and did not happen. The counters still count it, so a case can tell "never
+// tried" from "tried and failed" -- which is the distinction a durability contract
+// turns on.
+// ---------------------------------------------------------------------------
+class BackendProbe : public RecordingFile {
+public:
+    // does NOT own f, exactly as RecordingFile does not
+    explicit BackendProbe(fs::IFile* f) : RecordingFile(f) {}
+
+    int fdatasync() override {
+        datasyncs.fetch_add(1, std::memory_order_relaxed);
+        if (fail_syncs) {
+            errno = EIO;
+            return -1;
+        }
+        return RecordingFile::fdatasync();
+    }
+    int fsync() override {
+        syncs.fetch_add(1, std::memory_order_relaxed);
+        if (fail_syncs) {
+            errno = EIO;
+            return -1;
+        }
+        return RecordingFile::fsync();
+    }
+    ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override {
+        ssize_t r = RecordingFile::pwritev(iov, iovcnt, offset);
+        if (r > 0) {
+            writes.fetch_add(1, std::memory_order_relaxed);
+            if (short_write_by) {
+                r -= (ssize_t) short_write_by;
+                if (r < 0)
+                    r = 0;
+            }
+        }
+        return r;
+    }
+
+    // Counting the writes too is what makes a durability assertion exact instead of
+    // a lower bound: in write-through the two counts are equal, one sync per write
+    // that reached the backend, and in write-back the sync count is zero while this
+    // one is not. A `> 0` on the syncs alone would also pass for a device that
+    // synced once and then stopped.
+    size_t short_write_by = 0;
+    std::atomic<int> datasyncs{0};
+    std::atomic<int> syncs{0};
+    std::atomic<int> writes{0};
+    bool fail_syncs = false;
+};
+
 // The engine masks every blk suite passes to photon::init(), and the ones TestPool
 // builds its pool with. One pair used on both sides is what makes a pool
 // "matching": photon has no query for the engine a vcpu actually installed --

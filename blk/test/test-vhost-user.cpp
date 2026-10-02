@@ -209,6 +209,11 @@ struct MockFrontend {
     int backend_fd = -1;         // our end of the SET_BACKEND_REQ_FD pair
     uint16_t avail_idx = 0, used_idx = 0, desc_head = 0;
     uint64_t features = 0;
+    // Bits this frontend declines, masked off the offered word as soon as it
+    // arrives -- so `features` always means "the word this frontend settled on",
+    // which is what the assertions in the EVENT_IDX cases read. Zero by default:
+    // a permissive guest accepts everything offered.
+    uint64_t decline = 0;
     std::string err;
 
     bool fail(const char* what) {
@@ -374,7 +379,7 @@ struct MockFrontend {
 
         m.request = MU_GET_FEATURES; m.size = 0;
         if (!transact(&m, &r)) return false;
-        features = r.payload.u64;
+        features = r.payload.u64 & ~decline;
 
         // A conformant frontend negotiates protocol features ONLY if the device
         // feature word offered bit 30: vhost-user.rst defines that bit, in both
@@ -405,7 +410,8 @@ struct MockFrontend {
 
         memset(&m, 0, sizeof(m));
         m.request = MU_SET_FEATURES; m.size = 8;
-        m.payload.u64 = features;   // the "guest" accepts everything offered
+        m.payload.u64 = features;   // the word this frontend settled on above,
+                                    // which is the offer minus whatever it declined
         if (!transact(&m, &r)) return false;
 
         memset(&m, 0, sizeof(m));
@@ -1039,6 +1045,73 @@ TEST_F(VhostUserTest, server_basic_io) {
     ASSERT_EQ(0, rc);
     EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
     EXPECT_EQ(0, verify_backend(IMG_SIZE - (1 << 20), pattern(0xa5)));
+}
+
+// The control for the case below, and the reason that case's count is a
+// measurement rather than a blind instrument. FLUSH is accepted here, so a write
+// is not persisted on its own account and the FLUSH the frontend sends afterwards
+// is what asks for it: exactly one sync for the two requests. Had write-through
+// been switched on by mistake, the write would have added a second.
+TEST_F(VhostUserTest, accepting_flush_leaves_the_device_in_write_back) {
+    test::BackendProbe probe(file);
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x5a);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // A precondition, not a claim about the device: make_info() offers FLUSH,
+        // and declining a bit that was never offered would change nothing -- which
+        // is exactly what would make the case below stop testing the negotiated
+        // word while still passing.
+        if (!(fe.features & F_BLK_FLUSH)) return EPROTONOSUPPORT;
+        if (fe.write_dev(1 << 20, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        if (fe.flush_dev() != S_OK) return EIO;
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
+    EXPECT_EQ(1, probe.datasyncs.load());   // the FLUSH's, not the write's
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
+// The same device and the same offer, with one difference: the frontend declines
+// FLUSH. A driver that did so has no command with which to ask for persistence, so
+// the device has to make the write durable before it completes it. The count is the
+// whole oracle here -- the bytes that land are identical in both modes, and the
+// engine-level cases in test-blk-vq are what pin the flag's meaning; this one pins
+// where the flag comes from.
+TEST_F(VhostUserTest, declining_flush_puts_the_device_in_write_through) {
+    test::BackendProbe probe(file);
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x37);
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        fe.decline = F_BLK_FLUSH;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features & F_BLK_FLUSH) return EPROTO;   // the mask did not take
+        if (fe.write_dev(1 << 20, wbuf.data(), wbuf.size()) != S_OK) return EIO;
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
+    // no FLUSH was sent, so the only thing that could have asked for this sync is
+    // the write itself
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
 }
 
 TEST_F(VhostUserTest, client_role) {

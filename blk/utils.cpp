@@ -593,7 +593,7 @@ struct DescStream {
     }
 };
 
-uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
+uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_through,
                                const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,
                                uint32_t ring_num, uint64_t capacity,
@@ -741,6 +741,25 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
             if (w != (ssize_t)want) {
                 if (w < 0)
                     LOG_ERROR("virtio-blk `: write backend failed, off `, ", tag, off, ERRNO());
+                st = VIRTIO_BLK_S_IOERR;
+                break;   // nothing was persisted, so there is nothing to persist
+            }
+            // Write-through: the bytes have to be on stable storage before this
+            // returns, because the caller publishes the completion next and a
+            // driver that did not negotiate FLUSH will never send one to ask.
+            // A failed persist is reported, not logged and dropped -- the
+            // completion is the device's word that the data is where it promised.
+            //
+            // fdatasync rather than pwritev2(RWF_DSYNC): pwritev2 is not pure
+            // virtual, and the base implementation discards `flags` and forwards
+            // to pwritev, so a backend that does not override it would silently
+            // turn this back into a cached write. fdatasync is pure virtual, so
+            // every backend answers it. It costs a second syscall, and one that
+            // waits for the whole file's dirty data rather than only this range,
+            // which is why a device that can afford write-back offers FLUSH and
+            // lets the driver batch.
+            if (w > 0 && write_through && backend->fdatasync() < 0) {
+                LOG_ERROR("virtio-blk `: write-through persist failed, off `, ", tag, off, ERRNO());
                 st = VIRTIO_BLK_S_IOERR;
             }
             break;
@@ -1054,8 +1073,11 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
         gen != generation.load(std::memory_order_acquire))
         return;
     uint32_t written = 0;
-    virtio_blk_serve_chain(backend, read_only, serial, tag, desc, head,
-                           num, capacity.load(std::memory_order_relaxed), hooks.translate, &written);
+    virtio_blk_serve_chain(backend, read_only,
+                           write_through.load(std::memory_order_relaxed),
+                           serial, tag, desc, head,
+                           num, capacity.load(std::memory_order_relaxed),
+                           hooks.translate, &written);
     // and again after: serve_chain yields inside preadv/pwritev, and complete_req
     // dereferences used and avail
     if (stopping.load(std::memory_order_relaxed) || !hooks.ready.fire() ||

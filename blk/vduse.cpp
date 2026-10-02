@@ -622,9 +622,17 @@ struct VduseDeviceImpl : IBlkDevice {
                     // the serving side, this handler writes it from the control
                     // plane. The negotiation is device-wide, so every queue gets
                     // the same word.
-                    for (uint32_t i = 0; i < nqueues; i++)
+                    for (uint32_t i = 0; i < nqueues; i++) {
                         vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                                     std::memory_order_relaxed);
+                        // FLUSH absent from the negotiated word leaves the driver
+                        // with no command that asks for persistence, so we cannot
+                        // lean on one arriving later: a write has to be durable
+                        // before its completion goes out. Decided here, where the
+                        // word is known; the engine only acts on the decision.
+                        vqs[i]->srv.write_through.store(!(negotiated & (1ULL << VIRTIO_BLK_F_FLUSH)),
+                                                        std::memory_order_relaxed);
+                    }
                 }
             }
             if (dev_status & VIRTIO_CONFIG_S_DRIVER_OK) {
@@ -1460,12 +1468,16 @@ struct VduseDeviceImpl : IBlkDevice {
             // over from, so this is the negotiated subset. A fresh device reaches
             // here too and gets a word that is not yet negotiated; that is
             // harmless because no ring can go live before the FEATURES_OK handler
-            // re-derives event_idx, and every consumer of event_idx needs a live
-            // ring. A store, not an assign: the consumer reads it from the
+            // re-derives these, and every consumer of them -- should_notify, and
+            // the write path in handle_req -- needs a live ring to be reached at
+            // all. A store, not an assign: the consumer reads it from the
             // serving side, this runs on the control plane.
-            for (uint32_t i = 0; i < nqueues; i++)
+            for (uint32_t i = 0; i < nqueues; i++) {
                 vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                             std::memory_order_relaxed);
+                vqs[i]->srv.write_through.store(!(negotiated & (1ULL << VIRTIO_BLK_F_FLUSH)),
+                                                std::memory_order_relaxed);
+            }
         }
         // EVERY queue, not just queue 0: an adopted device receives no further
         // SET_STATUS, so nothing re-arms needs_refresh and this call is the only

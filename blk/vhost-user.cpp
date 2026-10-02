@@ -1005,9 +1005,17 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // our own offer would have us read a used_event nobody wrote.
             // A store, not an assign: should_notify reads event_idx from the
             // serving side, this handler writes it from the control plane.
-            for (uint32_t i = 0; i < nqueues; i++)
+            for (uint32_t i = 0; i < nqueues; i++) {
                 vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                             std::memory_order_relaxed);
+                // FLUSH absent from the negotiated word leaves the frontend with
+                // no command that asks for persistence, so a write cannot be
+                // completed on the strength of a FLUSH that may never come.
+                // Offered is not enough -- this reads the word the peer accepted,
+                // which is the one that says whether it will send FLUSH.
+                vqs[i]->srv.write_through.store(!(negotiated & (1ULL << VIRTIO_BLK_F_FLUSH)),
+                                                std::memory_order_relaxed);
+            }
             LOG_INFO("vhost-user negotiated features ", HEX(negotiated));
             break;
         case VHOST_USER_GET_PROTOCOL_FEATURES:
@@ -1508,6 +1516,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // unconditional notification.
             q->srv.event_idx.store(false, std::memory_order_relaxed);
             q->srv.notify_valid.store(false, std::memory_order_relaxed);
+            // write_through goes the other way, back to the engine's default: with
+            // no negotiated word in hand, the safe assumption is that no FLUSH will
+            // arrive. Being wrong here costs a sync per write until SET_FEATURES
+            // re-derives it; defaulting the other way would cost durability.
+            q->srv.write_through.store(true, std::memory_order_relaxed);
             q->x.enabled.store(false, std::memory_order_relaxed);
         }
     }

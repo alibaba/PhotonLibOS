@@ -474,6 +474,86 @@ TEST_F(VduseTest, basic_io) {
     EXPECT_EQ(0, device_io(node, pattern(0xa5), true, IMG_SIZE - IO_OFF - IO_LEN));
 }
 
+// The engine suite pins what write_through does and the vhost-user suite pins where
+// it comes from on that transport. This pair pins the same derivation here, which
+// has two sites of its own -- the FEATURES_OK handler and the adoption resync, the
+// second resting on an argument the first does not need -- and neither is reachable
+// from a socket test.
+//
+// The oracle is the stress path and not device_io, and the reason is worth keeping
+// because it cost a red run to find: device_io's consumer child fsyncs the node
+// after every write, so on a device that negotiated FLUSH that fsync arrives as a
+// flush request and the daemon's sync count is 1 either way. The count measured a
+// sync, just not the one the assertion claimed. StressCfg::flush is false by
+// default, so the stress child writes without ever asking for persistence and every
+// sync the daemon performs is one it decided to perform.
+//
+// This is the control half: FLUSH is offered, the driver negotiates it, and the
+// device stays in write-back.
+TEST_F(VduseTest, write_back_when_flush_is_negotiated) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    test::BackendProbe probe(file);   // declared before dev: it does not own what it
+                                      // wraps, and the device's last IO must land
+                                      // while it is alive
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());          // fires LAST (declared first)
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+
+    test::StressCfg sc;
+    sc.node = node;
+    sc.size = IMG_SIZE;
+    sc.threads = 2;
+    sc.iters = 4;
+    test::StressResult sr = test::stress_off_vcpu(sc);
+    // the success counter first: a phase that wrote nothing would satisfy every
+    // count below by doing nothing at all
+    ASSERT_GT(sr.ios, 0u) << sr.first_error;
+    ASSERT_EQ(0, sr.failures) << sr.first_error;
+    EXPECT_GT(probe.writes.load(), 0);
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
+// The experiment half: FLUSH is not offered, so no driver can negotiate it, and a
+// driver with no flush command has no way to ask for persistence. Every write has to
+// be durable before its completion, which makes the two counts equal.
+TEST_F(VduseTest, write_through_when_flush_is_not_offered) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    cfg.info.features = 0;   // nothing offered, so nothing for a driver to accept
+    test::BackendProbe probe(file);
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());          // fires LAST (declared first)
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+
+    test::StressCfg sc;
+    sc.node = node;
+    sc.size = IMG_SIZE;
+    sc.threads = 2;
+    sc.iters = 4;
+    test::StressResult sr = test::stress_off_vcpu(sc);
+    ASSERT_GT(sr.ios, 0u) << sr.first_error;
+    ASSERT_EQ(0, sr.failures) << sr.first_error;
+    // one persist per write that reached the backend, and nothing asked for any of
+    // them: the child never fsyncs, and no flush command was negotiable
+    EXPECT_GT(probe.writes.load(), 0);
+    EXPECT_EQ(probe.writes.load(), probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
 // High-concurrency stress through the vdpa/virtio-blk driver: many O_DIRECT
 // threads keep the single virtqueue full, the driver splits the larger blocks
 // into multi-descriptor chains, and every completion comes back through the

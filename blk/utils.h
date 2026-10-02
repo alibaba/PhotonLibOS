@@ -538,6 +538,15 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t>;
 // refused: a short read is harmless, but a write past EOF on a regular-file
 // backend EXTENDS it, so an unbounded guest could grow the image at will.
 //
+// `read_only` and `write_through` are the device's caching and access policy,
+// both derived by the caller from the NEGOTIATED features. read_only turns every
+// WRITE into VIRTIO_BLK_S_IOERR. write_through makes a WRITE that reached the
+// backend durable before this returns, so the caller may publish its completion
+// without the driver ever sending a FLUSH -- which is what a driver that declined
+// VIRTIO_BLK_F_FLUSH is entitled to, having no command to ask with. A failed
+// persist is reported as VIRTIO_BLK_S_IOERR: a completion says the data is where
+// the driver was promised, and in this mode that promise includes stable storage.
+//
 // Chain layout (no indirect -- callers should not offer VRING_F_INDIRECT_DESC).
 // A chain is two byte streams, not one role per descriptor: the device-readable
 // stream is the virtio_blk_outhdr followed by a WRITE's payload, and the
@@ -550,7 +559,7 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t>;
 // guess; so is a READ's or WRITE's payload that is not a whole number of sectors.
 // A refusal is written into the status byte whenever the chain was walked to its
 // end, so the driver is told instead of being left with whatever it put there.
-uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only,
+uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_through,
                                const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,
                                uint32_t ring_num, uint64_t capacity,
@@ -607,9 +616,9 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // only they touch. What IS cross-vcpu is the control plane: BlkConfig::pool lets
 // a caller run this queue's loop on a pool vcpu while the transport's message
 // loop stays on the caller's, so every field the two sides share is atomic --
-// event_idx, capacity and notify_valid (control plane writes, serving side
-// reads), run and stopping (teardown writes, loop reads), in_flight (the request
-// coroutines bump it, teardown polls it). The ones published as a group
+// event_idx, write_through, capacity and notify_valid (control plane writes,
+// serving side reads), run and stopping (teardown writes, loop reads), in_flight
+// (the request coroutines bump it, teardown polls it). The ones published as a group
 // (desc/avail/used/num, the kick/call fds) and the ones only the serving side
 // advances (last_avail, used_idx) cannot be made atomic -- a request coroutine
 // holds those pointers across the backend IO, so a lock would have to span the
@@ -700,6 +709,28 @@ public:
     uint16_t last_avail = 0;
     uint16_t used_idx = 0;
     bool read_only = false;
+    // Set by the transport from the NEGOTIATED features, never from what we
+    // offered -- the same rule as event_idx below, and for the same reason: the
+    // peer gets the last word. A driver that declined VIRTIO_BLK_F_FLUSH has no
+    // command with which to ask for its writes to reach stable storage, so the
+    // device must not tell it a write completed until it has. Offering the bit is
+    // what makes the driver's FLUSH exist; negotiating it is what makes leaning on
+    // that FLUSH legal.
+    //
+    // The transport decides this and the engine only acts on it, because the
+    // negotiation is the transport's. VIRTIO_BLK_F_CONFIG_WCE would add a second
+    // input -- the config `wce` field -- but neither virtio transport offers that
+    // bit, so a conforming driver never reads `wce` here and FLUSH is the only
+    // input. Offering CONFIG_WCE later has to widen this to "wce is 0, or FLUSH
+    // was not negotiated".
+    //
+    // Atomic for the reason event_idx gives: written from the control plane, read
+    // from the serving vcpu. Relaxed is enough -- it orders nothing else.
+    //
+    // Defaults to write-through, which is the wrong-way-round-looking choice: a
+    // transport that never derives this is slow, whereas one that defaults the
+    // other way is lossy, and the slow one is the one a test notices.
+    std::atomic<bool> write_through{true};
     // VIRTIO_RING_F_EVENT_IDX state, per queue. Set by the transport from the
     // NEGOTIATED features, never from what we offered: if the peer masks bit 29
     // off we must fall back to the flags semantics, and deciding from our own

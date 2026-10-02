@@ -346,12 +346,17 @@ public:
         fill_pattern(pattern.data(), pattern.size(), 0x11);
     }
 
-    uint8_t serve(GuestChain& c, bool read_only, uint32_t* written) {
+    // `backend` defaults to the image itself; the caching cases pass a
+    // test::BackendProbe so the sync becomes observable. `write_through` defaults
+    // to false because every case that predates the caching policy asserts on the
+    // bytes and none on persistence -- the ones that do pass it by name.
+    uint8_t serve(GuestChain& c, bool read_only, uint32_t* written,
+                  bool write_through = false, fs::IFile* backend = nullptr) {
         VirtioBlkTranslate tr;
         tr.bind(&c, &chain_translate);
-        return virtio_blk_serve_chain(img.file, read_only, CHAIN_SERIAL, "vq",
-                                      c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
-                                      tr, written);
+        return virtio_blk_serve_chain(backend ? backend : img.file, read_only, write_through,
+                                      CHAIN_SERIAL, "vq", c.desc.data(), 0, RING_NUM,
+                                      CHAIN_CAPACITY, tr, written);
     }
     ssize_t read_back(void* dst, size_t n) {
         return img.file->pread(dst, n, (off_t) (CHAIN_SECTOR << 9));
@@ -370,6 +375,13 @@ public:
         *c.at(off) = SENTINEL;
         c.add(off, 1, VRING_DESC_F_WRITE);
         return off;
+    }
+    // the WRITE payload as its own device-readable descriptor, following a header
+    // placed by put_header(). The cases above deliberately share one descriptor
+    // between header and payload; this is the ordinary split a driver emits.
+    void put_write_payload(GuestChain& c) {
+        size_t off = c.place(pattern.data(), pattern.size());
+        c.add(off, (uint32_t) pattern.size(), 0);
     }
 };
 
@@ -574,6 +586,183 @@ TEST_F(ChainFixture, get_id_into_a_shorter_buffer_writes_only_what_was_offered) 
     EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), offered));
     for (size_t i = 0; i < offered; i++)
         EXPECT_EQ(SENTINEL, c.at(coff)[i]);
+}
+
+// ---------------------------------------------------------------------------
+// Caching policy
+//
+// A driver that did not negotiate VIRTIO_BLK_F_FLUSH has no command with which to
+// ask for its writes to reach stable storage, so the device has to make them
+// durable before it completes them. The engine learns that as one flag the
+// transport derives from the NEGOTIATED feature word; what is tested here is what
+// the engine does with it. The oracle is the sync count, because the bytes are the
+// same either way.
+// ---------------------------------------------------------------------------
+
+TEST_F(ChainFixture, a_write_in_write_through_mode_is_persisted_before_it_completes) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    const bool write_through = true;
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written, write_through, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    std::vector<uint8_t> back(pattern.size());
+    EXPECT_EQ((ssize_t) pattern.size(), read_back(back.data(), back.size()));
+    EXPECT_EQ(0, memcmp(back.data(), pattern.data(), pattern.size()));
+    // the whole point: the data landing is not what distinguishes the two modes
+    EXPECT_EQ(1, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
+}
+
+TEST_F(ChainFixture, a_write_in_write_back_mode_leaves_persistence_to_an_explicit_flush) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    const bool write_through = false;
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written, write_through, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    std::vector<uint8_t> back(pattern.size());
+    EXPECT_EQ((ssize_t) pattern.size(), read_back(back.data(), back.size()));
+    EXPECT_EQ(0, memcmp(back.data(), pattern.data(), pattern.size()));
+    // write-back is not "do not write", it is "do not promise stable storage yet".
+    // This zero is the other half of the oracle: a counter that could only read 1
+    // would prove nothing in the case above.
+    EXPECT_EQ(0, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
+}
+
+TEST_F(ChainFixture, an_explicit_flush_does_not_become_two_syncs_in_write_through_mode) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_FLUSH);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    // FLUSH carries no data phase, so the write-through path has nothing of its own
+    // to persist and must not add a second sync to the one FLUSH is
+    EXPECT_EQ(1, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
+}
+
+TEST_F(ChainFixture, a_write_refused_by_read_only_does_not_persist) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, true, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+    // nothing reached the backend, so there is nothing to make durable
+    EXPECT_EQ(0, backend.datasyncs.load());
+}
+
+TEST_F(ChainFixture, a_write_refused_as_out_of_bounds_does_not_persist) {
+    GuestChain c;
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_OUT;
+    hdr.sector = CHAIN_CAPACITY >> 9;   // the first sector past the end
+    size_t hoff = c.place(&hdr, sizeof(hdr));
+    c.add(hoff, sizeof(hdr), 0);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+    // a refused write must not be persisted, and must not grow the image either:
+    // the sync is what would have made a partial or extending write durable
+    EXPECT_EQ(0, backend.datasyncs.load());
+}
+
+TEST_F(ChainFixture, a_write_that_landed_short_does_not_persist) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    backend.short_write_by = 1;   // 511 of the 512 bytes asked for
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+    // The count is positive, so this is the one rejected write that reaches the
+    // sync still holding bytes it wrote: without the exit after the short count,
+    // write-through would persist a request it is about to report as failed.
+    EXPECT_EQ(0, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
+}
+
+TEST_F(ChainFixture, a_write_whose_persist_fails_is_reported_as_failed) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    put_write_payload(c);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    backend.fail_syncs = true;
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, *c.at(st));
+    // The bytes DID reach the backend, which is what makes reporting success
+    // actively wrong here rather than merely optimistic: the completion is the
+    // device's word that the data is where it promised, and in write-through mode
+    // that promise is stable storage. One count, so this says "asked and failed"
+    // and not "never asked".
+    EXPECT_EQ(1, backend.datasyncs.load());
+}
+
+TEST_F(ChainFixture, a_read_in_write_through_mode_does_not_persist) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_IN);
+    size_t p = c.place(nullptr, pattern.size());
+    c.add(p, (uint32_t) pattern.size(), VRING_DESC_F_WRITE);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    // write-through is a promise about writes; a read has nothing to persist and
+    // syncing for one would cost a whole-file flush per request
+    EXPECT_EQ(0, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
+}
+
+TEST_F(ChainFixture, a_write_carrying_no_payload_does_not_persist) {
+    GuestChain c;
+    put_header(c, VIRTIO_BLK_T_OUT);
+    size_t st = put_status(c);
+    c.finish();
+
+    test::BackendProbe backend(img.file);
+    uint32_t written = 0;
+    // zero bytes is a whole number of sectors and in bounds, so the request is
+    // served; it just wrote nothing, and there is nothing to make durable
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written, true, &backend));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    EXPECT_EQ(0, backend.datasyncs.load());
+    EXPECT_EQ(0, backend.syncs.load());
 }
 
 // ---------------------------------------------------------------------------
