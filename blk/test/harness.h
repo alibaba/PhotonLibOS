@@ -147,6 +147,24 @@ public:
         gated = false;
         gate.signal(n);
     }
+    // Hand `n` tokens to the IOs already parked WITHOUT opening the gate, so the
+    // next one to arrive parks too. release_gate() ends an experiment; this is a
+    // step inside one, and it is the only way to observe a device with exactly one
+    // in-flight slot freed rather than with its cap gone -- which is what a case
+    // about what a COMPLETION does next needs. The caller still owes a
+    // release_gate(): TearDown's is the backstop, because a coroutine left parked
+    // here holds references to everything the fixture owns.
+    void poke_gate(uint64_t n = 1) { gate.signal(n); }
+
+    // IO entry points that reached record(), counted BEFORE the gate can park
+    // them. With `gated` that makes it the number of requests which ENTERED the
+    // backend, and it is the only place a dispatch cap is visible from outside the
+    // engine: a request held back in the ring leaves no trace anywhere, so the cap
+    // can only be read off what got through. It counts IOs, not requests -- a
+    // write-through request records twice, once for the write and once for the
+    // fdatasync that persists it -- so a case equating this with a request count
+    // has to use a request that issues exactly one recorded IO.
+    std::atomic<uint64_t> arrivals{0};
 
     // The 17 pure virtuals of IStream + IFile, each a one-line forward, plus the
     // two non-pure virtuals the transports do reach (see below). The IO entry

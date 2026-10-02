@@ -930,6 +930,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // the LBA bound serve_chain enforces
         q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
         q->srv.stack_size = cfg.stack_size;
+        q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
         q->srv.serial = "photon-vduse";
         q->srv.tag = name;
@@ -1228,7 +1229,12 @@ struct VduseDeviceImpl : IBlkDevice {
     }
 
     // VQ_SETUP + kickfd; safe on both fresh and adopted devices (the kernel
-    // only records max_size; the driver's negotiated size comes via GET_INFO)
+    // only records max_size; the driver's negotiated size comes via GET_INFO).
+    // So queue_depth reaches this device twice and the two are not redundant:
+    // max_size is what the driver is OFFERED, and therefore bounds the ring it
+    // may negotiate, while the engine's own cap bounds the requests in flight
+    // inside whatever ring actually arrived. The second binds on its own only
+    // if that ring came back deeper than the offer.
     int setup_vq(uint32_t idx) {
         vduse_vq_config vqc;
         memset(&vqc, 0, sizeof(vqc));

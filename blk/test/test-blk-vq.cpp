@@ -39,6 +39,7 @@ limitations under the License.
 
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -838,6 +839,23 @@ public:
         srv.last_avail = 0;
         srv.notify_valid.store(false, std::memory_order_relaxed);
     }
+
+    // Wait out any request coroutine this case left running, while the memory it
+    // holds is still alive. Every case here drives handle_req() directly and so
+    // creates none of its own -- but a completion can admit a successor
+    // (redispatch_backlog), and `run` being false in this fixture is the ONLY thing
+    // that stops it. A case that returned with a coroutine still in flight would
+    // free three std::vectors and a VirtQueueServer out from under it, and the
+    // damage lands in whichever case runs NEXT rather than in the one that caused
+    // it. That is not hypothetical: dropping `run` from the redispatch guard reddens
+    // exactly the three cases below that leave a backlog behind, but only when each
+    // runs in its own process -- in one process the first of them corrupts the rest
+    // and the suite reports a different set, including a case that detects nothing.
+    void TearDown() override {
+        for (int i = 0; i < 3000 && srv.in_flight.load(); i++)
+            photon::thread_usleep(1000);
+        EXPECT_EQ(0u, srv.in_flight.load());
+    }
 };
 
 // translate, except that the call resolving the status descriptor renegotiates
@@ -925,6 +943,227 @@ TEST_F(GenFixture, dispatch_binds_the_generation_current_when_it_created_the_req
     EXPECT_EQ(0u, srv.in_flight.load());
     EXPECT_EQ(1, vring_used_idx(new_ring.used));
     EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+}
+
+// ---------------------------------------------------------------------------
+// the in-flight cap
+//
+// BlkConfig::queue_depth is documented as a per-queue in-flight limit. Both
+// virtio transports hand it to the engine, and dispatch_avail's cap is the lesser
+// of it and the ring size. Driven here rather than through a transport because the
+// cap is the engine's: a transport can only get the plumbing wrong, and the shape
+// of the defect that matters -- a device admitting more requests than its caller
+// allowed -- is a property of this loop.
+//
+// There is no loop() coroutine and no kickfd in this fixture. That is deliberate
+// and it is what makes the second case a count rather than a timing guess: with no
+// external event source, anything that reaches the backend after the first batch
+// got there because a COMPLETION put it there.
+// ---------------------------------------------------------------------------
+class DepthFixture : public ::testing::Test {
+public:
+    test::TestImage img;
+    MemVring ring{RING_NUM};
+    GuestChain guest;
+    VirtQueueServer srv;
+    // Created in SetUp rather than declared with an initializer: RecordingFile
+    // takes the backend handle in its constructor and TestImage only has one once
+    // create() has run. Destroyed in TearDown, before `img` goes.
+    std::unique_ptr<test::RecordingFile> rf;
+    size_t soff = 0;
+
+    // Under the ring size, so no avail entry is overwritten by the publish loop,
+    // and far enough under it that a cap reading `num` instead of `queue_depth`
+    // cannot be mistaken for one reading the depth.
+    static constexpr uint32_t DEPTH = 2;
+    static constexpr int PUBLISHED = 6;
+
+    void SetUp() override {
+        ASSERT_EQ(0, img.create("/tmp/photon-blk-vq-depth.img", CHAIN_CAPACITY));
+        rf.reset(new test::RecordingFile(img.file));
+        rf->gated = true;
+        srv.backend = rf.get();
+        srv.capacity.store(CHAIN_CAPACITY, std::memory_order_relaxed);
+        srv.serial = CHAIN_SERIAL;
+        srv.tag = "vq-depth";
+        srv.hooks.ready.bind(nullptr, &ready_true);
+        srv.hooks.notify.bind(nullptr, &notify_thunk);
+        srv.hooks.translate.bind(&guest, &chain_translate);
+        srv.event_idx.store(false, std::memory_order_relaxed);
+        srv.notify_valid.store(true, std::memory_order_relaxed);
+        // No loop coroutine runs here, but this is still what a serving queue has,
+        // and the completion-side redispatch reads it.
+        srv.run.store(true, std::memory_order_relaxed);
+        srv.queue_depth = DEPTH;
+
+        // One READ chain at head 0, and every avail entry names it -- the same
+        // device the vhost-user suite's cap cases use: the entries are
+        // indistinguishable, so sharing one chain costs nothing and keeps the
+        // descriptor table at three. A read is also exactly one recorded IO, which
+        // is what lets `arrivals` be read as a request count; a write in
+        // write-through mode would record twice, once for the write and once for
+        // the sync that persists it.
+        virtio_blk_outhdr hdr{};
+        hdr.type = VIRTIO_BLK_T_IN;
+        hdr.sector = CHAIN_SECTOR;
+        size_t hoff = guest.place(&hdr, sizeof(hdr));
+        size_t doff = guest.place(nullptr, 512);
+        soff = guest.place(nullptr, 1);
+        *guest.at(soff) = SENTINEL;
+        ring.desc[0].addr = hoff;
+        ring.desc[0].len = sizeof(hdr);
+        ring.desc[0].flags = VRING_DESC_F_NEXT;
+        ring.desc[0].next = 1;
+        ring.desc[1].addr = doff;
+        ring.desc[1].len = 512;
+        ring.desc[1].flags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
+        ring.desc[1].next = 2;
+        ring.desc[2].addr = soff;
+        ring.desc[2].len = 1;
+        ring.desc[2].flags = VRING_DESC_F_WRITE;
+        ring.desc[2].next = 0;
+        for (int i = 0; i < PUBLISHED; i++)
+            ring.avail->ring[i] = 0;
+        __atomic_store_n(&ring.avail->idx, (uint16_t) PUBLISHED, __ATOMIC_RELEASE);
+        srv.set_ring(ring.desc, ring.avail, ring.used, RING_NUM);
+    }
+
+    void TearDown() override {
+        // Nothing may stay parked in the gate: a coroutine left there holds
+        // references to rf and to img, and both go away with this fixture.
+        rf->release_gate(1024);
+        settle_until([&] { return srv.in_flight.load() == 0; });
+        srv.run.store(false, std::memory_order_relaxed);
+        rf.reset();
+    }
+
+    // Yield until `cond` holds, or the budget runs out and the caller's assertion
+    // reports the failure. Bounded everywhere: a request that never arrives has to
+    // fail a case, not hang the suite.
+    template <typename F>
+    bool settle_until(F cond, int tries = 3000) {
+        for (int i = 0; i < tries && !cond(); i++)
+            photon::thread_usleep(1000);
+        return cond();
+    }
+};
+
+// The shape measured in review: a device configured for a depth of 1 admitted four
+// blocked requests, all four into the backend at once, because the only bound the
+// engine had was `num` -- which for vhost-user is the frontend's SET_VRING_NUM and
+// has nothing to do with what the caller asked for.
+//
+// The gate makes this a state rather than a race: every admitted request parks
+// inside the backend, and nothing completes while the gate is shut, so the count
+// cannot be read too early. Only too late, which the budget covers.
+TEST_F(DepthFixture, dispatch_stops_at_the_configured_depth_not_at_the_ring_size) {
+    srv.dispatch_avail();
+
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+    // Held back means exactly that: last_avail did not advance over them, so the
+    // four the cap refused are still the peer's to keep, and nothing completed.
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+    EXPECT_EQ(0, vring_used_idx(ring.used));
+    EXPECT_EQ(SENTINEL, *guest.at(soff));
+
+    // And they are still served. A cap that stranded the overflow would be a worse
+    // defect than no cap at all -- which is what dispatch_cap_recovery asserts from
+    // the transport side at the ring-size cap.
+    rf->release_gate(1024);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+    EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) PUBLISHED, vring_used_idx(ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+}
+
+// The cap's own recovery, and the reason honouring queue_depth is not a throughput
+// trap. Chains the cap held back are not the peer's to re-announce: the driver
+// already put them in the ring and already kicked, and with EVENT_IDX it will not
+// kick again for a buffer whose index sits behind the avail_event we published.
+// loop() would find them on its next KICK_FALLBACK_US re-read -- 5 ms later, every
+// time, so a depth of 1 would hold the device to roughly 200 requests a second no
+// matter how fast the backend is.
+//
+// So a completion frees its slot AND takes the next chain. poke_gate rather than
+// release_gate is what keeps that observable: exactly one parked IO resumes, so
+// exactly one slot frees, and the next arrival still parks. With the gate open the
+// cap stops binding and every count below becomes a race.
+TEST_F(DepthFixture, a_completion_admits_the_next_request_without_another_kick) {
+    srv.dispatch_avail();
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    ASSERT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+
+    rf->poke_gate(1);
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() > DEPTH; }));
+    EXPECT_EQ((uint64_t) DEPTH + 1, rf->arrivals.load());
+    // Back AT the cap rather than below it: the slot that freed was filled, and the
+    // request still parked from the first batch is the other one.
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+    EXPECT_EQ(1, vring_used_idx(ring.used));
+
+    rf->release_gate(1024);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+    EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) PUBLISHED, vring_used_idx(ring.used));
+}
+
+// The other direction of the same guard. A teardown that did NOT ask to drain must
+// leave the backlog stranded -- that is the documented handover, and the next
+// daemon resumes from used->idx. So once `stopping` is set, a completion may free
+// its slot but must not fill it again.
+//
+// Waiting on in_flight rather than sleeping makes this deterministic: the
+// decrement and the redispatch are two guards in one DEFER chain with no yield
+// between them, so a test coroutine that sees the count drop has already missed
+// the redispatch that would have followed it.
+TEST_F(DepthFixture, a_teardown_that_declined_to_drain_leaves_the_backlog_stranded) {
+    srv.dispatch_avail();
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    ASSERT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+
+    srv.stopping.store(true, std::memory_order_relaxed);
+    rf->poke_gate(1);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == DEPTH - 1; }));
+
+    // The resumed request neither completed nor was replaced. It got as far as
+    // handle_req's SECOND check, the one that runs after the backend IO returns,
+    // and that is what makes this case differ from the stale-generation ones above:
+    // those are declined by the first check, before serve_chain is ever entered, so
+    // the guest's buffer is untouched. This one is declined with the status byte
+    // ALREADY WRITTEN. Invisible to a conforming driver and stays so -- a driver may
+    // only read a buffer once it sees that descriptor's head in the used ring, no
+    // used element was published, so the descriptor is still ours and whoever serves
+    // next writes the byte again.
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ(0, vring_used_idx(ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+}
+
+// The redispatch reads the avail ring, so it needs the same proof the loop has that
+// there is one to read. A transport clears the ring when a reset or an unmap retires
+// it -- vhost-user on a memory-table change, vduse on a device reset -- and a
+// request that was parked in the backend across that window completes into a queue
+// whose ring is gone. `ready` goes false alongside it in both transports today, so
+// the null test is what keeps the engine safe on its own terms rather than only as
+// safe as the two ready hooks that happen to exist.
+TEST_F(DepthFixture, a_ring_cleared_under_a_parked_request_is_not_dispatched_into) {
+    srv.dispatch_avail();
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    ASSERT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+
+    srv.clear_ring();
+    rf->poke_gate(1);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == DEPTH - 1; }));
+
+    // Nothing admitted and nothing published. Reading the avail index of a cleared
+    // ring is the part that would crash rather than merely fail, so this case's
+    // first assertion is that it got here at all.
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ(0, vring_used_idx(ring.used));
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
 }
 
 int main(int argc, char** argv) {

@@ -2015,6 +2015,9 @@ bool BackgroundWriter::wait_iters(uint64_t n, uint64_t timeout_us) {
 // The critical section is a linear scan of a <= 64-element vector plus at most
 // one push_back, so contention is not a concern either way.
 void RecordingFile::record() {
+    // Before the gate, and that ordering is the whole use of the counter: it has
+    // to count what ARRIVED, including everything the gate is holding.
+    arrivals.fetch_add(1, std::memory_order_relaxed);
     // Ahead of m_lock, deliberately: the gate's whole point is that every gated IO
     // parks AT THE SAME TIME, so a caller can observe a device with its in-flight
     // count pinned at a cap. Waiting under the mutex would let them through one at

@@ -399,12 +399,14 @@ struct GenlSock {
 //   hdr.type        dispatched by a switch whose default is UNSUPP, so an
 //                   unknown type never reaches a length it would consume.
 //   avail->idx      a free-running peer-written counter. dispatch_avail caps
-//                   itself at in_flight >= num and reaches the avail ring
-//                   through last_avail % num, so one kick cannot fan out
-//                   more coroutines than the ring is deep.
-//   num             the modulo divisor for both rings, the in-flight cap,
-//                   and the index of the event slot one element past the end
-//                   of each ring -- which is why the transports size the
+//                   itself at in_flight >= min(num, queue_depth) and reaches
+//                   the avail ring through last_avail % num, so one kick cannot
+//                   fan out more coroutines than the ring is deep -- nor than
+//                   the caller asked for.
+//   num             the modulo divisor for both rings, the OUTER bound on the
+//                   in-flight cap (queue_depth is the inner one), and the index
+//                   of the event slot one element past the end of each ring --
+//                   which is why the transports size the
 //                   avail region as 3 + num uint16s and the used region
 //                   as 3 uint16s plus num vring_used_elems. Not re-validated
 //                   here: the transport publishes it, and both reject the
@@ -661,11 +663,15 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // clears, so a refresh already resolving that ring withholds its own publish.
 // loop()'s readiness re-check after its one yield is the backstop on top.
 //
-// Bound: dispatch_avail() stops at `num` outstanding chains. avail->idx is a
-// guest-written free-running counter, so without a cap a single kick could fan
-// out 65535 coroutines; `num` is the natural limit because every chain consumes
-// at least one descriptor, so a correct driver never reaches it. What the cap
-// leaves pending, loop()'s next KICK_FALLBACK_US re-read picks up.
+// Bound: dispatch_avail() stops at min(num, queue_depth) outstanding chains.
+// avail->idx is a guest-written free-running counter, so without a cap a single
+// kick could fan out 65535 coroutines; `num` is the outer limit because every
+// chain consumes at least one descriptor, so a correct driver never reaches it,
+// and queue_depth is the caller's own when the caller set one -- without it the
+// two virtio transports would bound concurrency by whatever ring the peer chose.
+// What the cap leaves pending, redispatch_backlog takes as soon as a request
+// completes; loop()'s next KICK_FALLBACK_US re-read is the backstop behind that,
+// and the only recovery a queue with no kickfd has.
 // ----------------------------------------------------------------------------
 
 class VirtQueueServer {
@@ -712,6 +718,14 @@ public:
     vring_avail* avail = nullptr;
     vring_used* used = nullptr;
     uint32_t num = 0;
+    // BlkConfig::queue_depth as the transport received it: the caller's own bound
+    // on in-flight requests, 0 = none, in which case the ring's size is the whole
+    // bound. Kept apart from `num` rather than folded into it, because num is the
+    // ring GEOMETRY -- the modulo divisor for both rings and the index of each
+    // ring's event slot -- and clamping it to a depth would corrupt all three.
+    // dispatch_avail's cap is the lesser of the two and is recomputed every pass,
+    // since a frontend may resize the ring under a live device.
+    uint32_t queue_depth = 0;
     uint32_t stack_size = DEFAULT_STACK_SIZE;   // per-request coroutine stack, copied
                                                 // from BlkConfig::stack_size by the
                                                 // transport
@@ -794,6 +808,11 @@ public:
     void complete_req(uint16_t head, uint32_t written);
     void drain();                 // wait until in_flight reaches 0
     void wake();                  // nudge loop() out of its kickfd wait
+    // Take the next chain the in-flight cap held back, now that this request has
+    // freed a slot. Runs from handle_req's DEFER, AFTER the decrement. See the .cpp
+    // for why the completion path dispatches instead of waking the loop, and for
+    // why this checks `ready` but not the generation token.
+    void redispatch_backlog();
 
     // Publish a resolved ring, or drop the current one. Both bump `generation`,
     // which is the only thing that retires the requests still in flight against

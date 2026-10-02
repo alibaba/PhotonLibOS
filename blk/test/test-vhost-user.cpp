@@ -2135,10 +2135,10 @@ TEST_F(VhostUserTest, lba_past_capacity) {
 }
 
 // num reaches two modulo divisors (avail->ring[last_avail % num] and
-// used->ring[used_idx % num]) and sizes the in-flight coroutine cap. 65536 used to
-// sail through vq_may_dispatch() -- which rejects only 0 -- and truncate to 0 in
-// vring_used_append's uint16_t parameter: SIGFPE on the first completion. A
-// rejected message must also leave the live queue exactly as it was.
+// used->ring[used_idx % num]) and bounds the in-flight coroutine cap from above.
+// 65536 used to sail through vq_may_dispatch() -- which rejects only 0 -- and
+// truncate to 0 in vring_used_append's uint16_t parameter: SIGFPE on the first
+// completion. A rejected message must also leave the live queue exactly as it was.
 TEST_F(VhostUserTest, bad_vring_num) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -2211,8 +2211,9 @@ TEST_F(VhostUserTest, vring_addr_that_does_not_fit) {
 // A blocking kickfd is not hypothetical. loop() drains it with
 // `while (::read(kickfd, &n, 8) == 8);`, which on a blocking fd parks the whole
 // serving vcpu until the next kick -- silently defeating KICK_FALLBACK_US, and
-// with it the recovery the in-flight cap depends on. QEMU always sends
-// EFD_NONBLOCK, which is why this half of harden_recv_fd had never run.
+// with it the only bound on how long the in-flight cap's overflow waits. QEMU
+// always sends EFD_NONBLOCK, which is why this half of harden_recv_fd had never
+// run.
 // SCM_RIGHTS shares the open file description and both ends live in this process,
 // so the flag is directly observable on our own descriptor rather than inferred
 // from behaviour. FD_CLOEXEC is per-descriptor and is NOT observable this way.
@@ -2280,12 +2281,19 @@ TEST_F(VhostUserTest, kickfd_revoked_still_serves) {
     EXPECT_EQ(0, verify_backend(7 << 20, w));
 }
 
-// dispatch_avail caps in-flight at `num` and leaves the rest pending without
-// advancing last_avail; loop()'s KICK_FALLBACK_US re-read is what picks them up.
-// So ONE kick for more than `num` requests must still complete all of them -- the
-// cap alone would silently strand the overflow. Measured on the free-running used
-// INDEX rather than by counting elements, because 264 completions legitimately lap
-// the 256-entry used ring.
+// dispatch_avail caps in-flight at the lesser of `num` and the caller's
+// queue_depth and leaves the rest pending without advancing last_avail. This case
+// sets no queue_depth, so the cap here is `num` -- VQ_NUM -- and that is worth
+// saying out loud, because mutate-vhost-user.py's `noprogress` record names this
+// case as its detector and the detection depends on the cap BINDING: a smaller cap
+// still binds, a larger one would let all 264 through at once and the record would
+// go stale.
+//
+// What picks the overflow up is a completion freeing a slot (redispatch_backlog),
+// with loop()'s KICK_FALLBACK_US re-read behind it. So ONE kick for more than the
+// cap must still complete all of them -- the cap alone would silently strand the
+// overflow. Measured on the free-running used INDEX rather than by counting
+// elements, because 264 completions legitimately lap the 256-entry used ring.
 TEST_F(VhostUserTest, dispatch_cap_recovery) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -2321,7 +2329,77 @@ TEST_F(VhostUserTest, dispatch_cap_recovery) {
     EXPECT_EQ(0, rc);
 }
 
-// detach(true) promises to wait out the pending work, and the teardown order that
+// BlkConfig::queue_depth is a per-queue in-flight limit, and the cap itself is
+// pinned at the engine level in test-blk-vq. This is the other half, the one only
+// a transport can get wrong: a config field nobody copies into the engine is
+// indistinguishable from one that is copied and then ignored. Until it was plumbed,
+// the only bound vhost-user had was the frontend's SET_VRING_NUM -- VQ_NUM here --
+// so a caller that asked for 2 got 256.
+//
+// Same gated-backend shape as the two cases around it, so the count is a state and
+// not a race. The release runs inside the frontend body: semaphore::signal is
+// documented as callable from any std thread, and the DEFER in the test body is the
+// backstop for the paths that return before reaching it.
+TEST_F(VhostUserTest, configured_queue_depth_caps_in_flight) {
+    constexpr uint64_t DEPTH = 2;
+    constexpr int N = 8;   // far under VQ_NUM, so only the depth can hold this at 2
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queue_depth = (uint32_t) DEPTH;
+    // Declared before `dev`: RecordingFile does not own the backend, so its
+    // destruction has to come after the device's shutdown DEFER and its delete.
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    // Runs BEFORE the shutdown above -- guards fire in reverse declaration order.
+    // An orderly teardown drains the avail backlog, and a request parked in a gate
+    // nobody is going to open makes that drain wait out a timeout instead of
+    // finishing.
+    DEFER(rf.release_gate(1024));
+
+    uint64_t seen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        constexpr uint16_t SLOT = SLOTS - 1;
+        auto* desc = (vdesc*)(fe.mem + L_DESC);
+        desc[0] = vdesc{MockFrontend::hdr_off(SLOT), sizeof(blk_outhdr), DESC_F_NEXT, 1};
+        desc[1] = vdesc{MockFrontend::data_off(SLOT), 512,
+                        (uint16_t)(DESC_F_WRITE | DESC_F_NEXT), 2};
+        desc[2] = vdesc{MockFrontend::status_off(SLOT), 1, DESC_F_WRITE, 0};
+        *(blk_outhdr*)(fe.mem + MockFrontend::hdr_off(SLOT)) = blk_outhdr{T_IN, 0, 0};
+        *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) = 0xff;
+
+        // every avail entry names the SAME head, as in dispatch_cap_recovery
+        uint16_t u0 = fe.used_idx_now();
+        for (int i = 0; i < N; i++)
+            fe.publish(0);
+        if (!fe.kick()) return EIO;   // ONE kick for all N
+
+        for (int i = 0; i < 2000 && rf.arrivals.load() < DEPTH; i++)
+            ::usleep(1000);
+        // A settle window, and it can only strengthen the assertion: the gate is
+        // shut, so nothing completes and nothing frees a slot, which means the
+        // count can only ever rise here. Waiting can therefore never turn a device
+        // that over-admitted into one that looks like it did not. 50 ms is ten of
+        // the engine's own KICK_FALLBACK_US re-reads, so any further dispatch that
+        // was going to happen has.
+        ::usleep(50 * 1000);
+        seen = rf.arrivals.load();
+        rf.release_gate(1024);
+        if (!fe.wait_used_advance(u0, (uint16_t) N, 20000)) return ETIMEDOUT;
+        return *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) == S_OK ? 0 : EIO;
+    });
+    // Asserted out here rather than inside the body: a count that came back wrong
+    // should be reported as the number it was, not collapsed into an errno.
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(DEPTH, seen);
+    EXPECT_EQ((uint64_t) N, rf.arrivals.load());
+}
 // delivers it -- drain the avail backlog WHILE the queue's loop is still live, then
 // stop the queue -- was invisible to every other case here: nothing else holds work
 // in the ring while a detach runs, so dropping the guard that keeps the loop alive
@@ -2330,11 +2408,14 @@ TEST_F(VhostUserTest, dispatch_cap_recovery) {
 // The gate is what makes this deterministic instead of a race we hope to win. With
 // every backend IO parked, the VQ_NUM requests the dispatch cap let through never
 // retire, so in_flight stays AT the cap and the 8 entries behind it stay unconsumed
-// for as long as we like -- not for one KICK_FALLBACK_US interval. Draining first
-// therefore completes all N: the queue is still enabled while the drain runs, so the
-// parked requests publish their completions and the loop goes on to dispatch the
-// rest. Stopping the queue first clears `enabled`, which both stops completions
-// being published and strands the backlog for good, so the used ring advances by 0.
+// for as long as we like -- not for one KICK_FALLBACK_US interval. (This case sets
+// no queue_depth, so the cap is the ring.) Draining first therefore completes all N:
+// the queue is still enabled while the drain runs, so the parked requests publish
+// their completions and each completion admits the next of the rest, with the loop's
+// own re-read behind it. Stopping the queue first sets the engine's `stopping` and
+// clears `enabled`, which between them stop completions being published and stop
+// redispatch_backlog admitting anything behind them, so the backlog is stranded for
+// good and the used ring advances by 0.
 // N vs 0 is decided by the ORDER, never by how long R sleeps: those 50 ms only set
 // WHEN the gate opens, not what the final count is.
 TEST_F(VhostUserTest, detach_waits_for_the_avail_backlog) {

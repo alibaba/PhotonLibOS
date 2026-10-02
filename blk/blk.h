@@ -180,18 +180,26 @@ struct BlkConfig {
                                   // (32 MiB) requests at most 16 are in flight however high this
                                   // is set -- raising it helps small-request concurrency, not
                                   // large-block throughput
+                                  // vhost-user: the in-flight cap is the lesser of this and the
+                                  // ring the frontend chose in SET_VRING_NUM. 0 leaves that ring
+                                  // size as the whole bound, so a caller who wants a limit has to
+                                  // ask for one -- the frontend will not set it for you
+                                  // vduse: also offered to the driver as the ring capacity
+                                  // (VDUSE_VQ_SETUP's max_size; default 256, never above 1024), so
+                                  // there it bounds the ring as well as the requests inside it
 
     uint32_t stack_size = DEFAULT_STACK_SIZE;
                                   // Stack of each serving coroutine named above, handed
                                   // straight to photon::thread_create -- so 0 asks for the
                                   // same thing this default already is. How MANY of them
-                                  // there are is the peer's decision, not yours: one per
-                                  // virtqueue entry, per tcmu ring command, per nbd
-                                  // connection. Each costs a VMA and address space, which
-                                  // is what vm.max_map_count runs out of first. Raise it
-                                  // for a backend IFile that recurses deeply or keeps
-                                  // large buffers on its own stack; lower it when the
-                                  // count above is high and address space is what binds.
+                                  // there are follows the in-flight limits described above
+                                  // rather than anything set here: one per request in
+                                  // flight, plus one per nbd client connection. Each costs
+                                  // a VMA and address space, which is what
+                                  // vm.max_map_count runs out of first. Raise it for a
+                                  // backend IFile that recurses deeply or keeps large
+                                  // buffers on its own stack; lower it when the count above
+                                  // is high and address space is what binds.
 
     uint32_t spin_us = 0;         // how long a serving loop keeps busy-polling after the
                                   // last completion before it blocks on the kernel's event

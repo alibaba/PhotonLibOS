@@ -1079,11 +1079,21 @@ void VirtQueueServer::dispatch_avail() {
             return;
         // avail->idx is a guest-written free-running counter, so this loop needs
         // a bound of its own: without one a single kick spawns up to 65535
-        // coroutines. `num` is the natural cap -- every chain consumes at least
-        // one descriptor, so a correct driver can never exceed it. Anything left
-        // pending stays pending (last_avail is not advanced) and loop() picks it
-        // up on its next KICK_FALLBACK_US re-read of the avail ring, kick or not.
-        if (in_flight.load() >= num)
+        // coroutines. `num` is the outer bound -- every chain consumes at least
+        // one descriptor, so a correct driver can never exceed it -- and
+        // queue_depth is the caller's, when the caller set one. Taking the lesser
+        // is what makes BlkConfig::queue_depth mean here what it already means in
+        // tcmu and nbd; without it the two virtio transports bound concurrency by
+        // the ring the PEER chose, which on vhost-user is the frontend's
+        // SET_VRING_NUM and has nothing to do with what was asked for. Recomputed
+        // every pass rather than cached, because a frontend may resize the ring
+        // under a live device. Anything left pending stays pending (last_avail is
+        // not advanced): redispatch_backlog takes it as soon as a slot frees, and
+        // loop()'s KICK_FALLBACK_US re-read is the backstop behind that.
+        uint32_t cap = num;
+        if (queue_depth && queue_depth < cap)
+            cap = queue_depth;
+        if (in_flight.load() >= cap)
             return;
         uint16_t head = avail->ring[last_avail % num];
         // Commit last_avail and in_flight only once the create has succeeded.
@@ -1115,7 +1125,51 @@ void VirtQueueServer::dispatch_avail() {
     }
 }
 
+// A completion is the only event that can free a slot under a binding cap, and by
+// then loop() is parked in its kickfd wait until either a kick arrives or
+// KICK_FALLBACK_US expires. The chains the cap held back are not the peer's to
+// re-announce -- the driver already put them in the ring and already kicked, and
+// under EVENT_IDX it will not kick again for a buffer whose index sits behind the
+// avail_event we published -- so without this the fallback re-read is the whole
+// recovery: 5 ms per request, which at a depth of 1 is a ceiling of roughly 200
+// requests a second that no backend slowness explains.
+//
+// Dispatching rather than wake()-ing the loop, so this costs no syscall and still
+// works when there is no kickfd at all -- a SET_VRING_KICK that carried NOFD, which
+// is exactly the configuration loop() has no other event source in. It rests on the
+// single-vcpu invariant complete_req already rests on: request coroutines are
+// created by dispatch_avail on the loop's vcpu and nothing migrates them, so this
+// reads last_avail where the loop writes it. dispatch_avail is yield-free and
+// thread_create only queues, so there is no recursion -- the coroutine this admits
+// runs after this one has unwound.
+void VirtQueueServer::redispatch_backlog() {
+    // `stopping` and `run` are what keep a teardown honest: one that did not ask to
+    // drain must leave the backlog STRANDED, which is the documented handover --
+    // whoever serves next resumes from used->idx -- and filling a slot here would
+    // take it back. `run` is the same flag loop() gates on, so a queue the
+    // transport has stopped cannot be dispatched into by a completion either.
+    //
+    // No generation check, deliberately. This is loop()'s own dispatch precondition
+    // and no stricter: ready is what says the ring now published is one that may be
+    // dispatched into, and `avail` non-null is what makes reading it safe. Adding
+    // the token here would decline a redispatch after a retranslate that republished
+    // a perfectly good ring -- the request that just completed belonged to the OLD
+    // one, which is why handle_req checks it, but the chains still pending belong
+    // to whichever ring is published now, exactly as they would on loop()'s next
+    // pass.
+    if (!run.load(std::memory_order_relaxed) || stopping.load(std::memory_order_relaxed) || !avail)
+        return;
+    if (!hooks.ready.fire())
+        return;
+    if (vring_avail_idx(avail) != last_avail)
+        dispatch_avail();
+}
+
 void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
+    // Reverse order, and the order is the point: DEFER guards run last-declared
+    // first, so this one fires AFTER the decrement below. Free the slot, then let
+    // whoever takes it look at a count that says it is free.
+    DEFER(redispatch_backlog());
     DEFER(in_flight--);
     // Readiness has to gate serve_chain too, not just the completion below: this
     // coroutine was queued by dispatch_avail and may run long after, by which

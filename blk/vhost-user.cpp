@@ -246,9 +246,10 @@ static constexpr size_t SUN_PATH_MAX = sizeof(((sockaddr_un*)nullptr)->sun_path)
 // maximum (the highest power of two that fits in 16 bits). Enforced on
 // SET_VRING_NUM because the frontend's num reaches two modulo divisors
 // (avail->ring[last_avail % num] in dispatch_avail, used->ring[used_idx % num]
-// in vring_used_append) and sizes both the vring translation and the in-flight
-// coroutine cap. Nonzero is not optional either, for the same reason: a zero
-// divisor in either place.
+// in vring_used_append) and sizes both the vring translation and the OUTER bound
+// on the in-flight coroutine cap -- the caller's queue_depth is the inner one, so
+// this is what a caller who never set it gets. Nonzero is not optional either, for
+// the same reason: a zero divisor in either place.
 static constexpr uint32_t MAX_VRING_NUM = 32768;
 
 // the frontend's memory regions, mmap'd by us: translates BOTH address
@@ -753,6 +754,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // the LBA bound serve_chain enforces
         q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
         q->srv.stack_size = cfg.stack_size;
+        q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
         q->srv.serial = "photon-vhost-user";
         q->srv.tag = sock_path;
@@ -1089,10 +1091,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
             }
             uint32_t n = m->payload.state.num;
             // num is a modulo divisor in dispatch_avail and in
-            // vring_used_append, and it sizes the in-flight coroutine cap, so
-            // it is checked here instead of trusted: 65536 used to sail through
-            // vq_may_dispatch() (which rejects only 0) and then divide by zero
-            // on the first completion -- SIGFPE, whole process down.
+            // vring_used_append, and it bounds the in-flight coroutine cap from
+            // above, so it is checked here instead of trusted: 65536 used to sail
+            // through vq_may_dispatch() (which rejects only 0) and then divide by
+            // zero on the first completion -- SIGFPE, whole process down.
             if (n < 2 || n > MAX_VRING_NUM || (n & (n - 1))) {
                 LOG_ERROR("vhost-user SET_VRING_NUM rejected: num `, need a power of two in [2, `]",
                           n, MAX_VRING_NUM);
