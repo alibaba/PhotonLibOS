@@ -23,12 +23,12 @@ limitations under the License.
 // performs no NBD negotiation and expects a socket already in the
 // transmission phase, which a brand-new socketpair trivially is.
 //
-// Concurrency: conns, Conn::in_flight and stopping are guarded -- a spinlock and
-// two atomics -- so that serve_conn can run on a different vcpu from accept_loop
-// and the API calls, which is what BlkConfig::pool is for. They used to need no
-// guard, and three separate comments said so, on the strength of every serving
-// coroutine sharing the vcpu that called start(). What still needs no guard is
-// noted where it is relied on (workers, depth/bytes, Conn::wlock).
+// Concurrency: conns, workers, Conn::in_flight and stopping are guarded -- a spinlock,
+// a second spinlock and two atomics -- so that serve_conn can run on a different vcpu
+// from accept_loop and the API calls, which is what BlkConfig::pool is for. They used
+// to need no guard, and three separate comments said so, on the strength of every
+// serving coroutine sharing the vcpu that called start(). What still needs no guard is
+// noted where it is relied on (depth/bytes, Conn::wlock).
 
 #include "blk.h"
 #include "utils.h"
@@ -65,10 +65,6 @@ limitations under the License.
 #include <sys/ioctl.h>
 #endif
 
-#ifndef RWF_DSYNC
-#define RWF_DSYNC 0x00000002
-#endif
-
 namespace photon {
 namespace blk {
 
@@ -100,6 +96,7 @@ static constexpr uint32_t NBD_REP_LIST     = 2;
 static constexpr uint32_t NBD_REP_INFO     = 3;
 static constexpr uint32_t NBD_REP_ACK      = 1;
 static constexpr uint32_t NBD_REP_ERR_UNSUP = (1u << 31) | 1;
+static constexpr uint32_t NBD_REP_ERR_INVALID = (1u << 31) | 3;
 static constexpr uint16_t NBD_INFO_EXPORT  = 0;
 // transmission flags; renamed NBD_TRANS_* to avoid <linux/nbd.h> macros of the
 // same NBD_FLAG_* names
@@ -148,6 +145,12 @@ static constexpr uint64_t MAX_INFLIGHT_BYTES  = 512ull << 20;
 static_assert(MAX_BLOCK_SIZE <= MAX_INFLIGHT_BYTES,
               "a single maximum-size nbd request must fit the whole byte budget");
 static constexpr uint32_t MAX_OPTION_LEN      = 1u << 20;
+// The stack of the coroutine whose only job is to join a finished connection
+// coroutine (retire_self). It calls one function and blocks in it, so it needs
+// none of the 8 MiB a serving coroutine gets for request buffers and backend
+// call depth -- and one of these is created per connection ever made, which is
+// exactly the count the reaping keeps from accumulating stacks.
+static constexpr uint32_t REAPER_STACK_SIZE   = 64u << 10;
 
 // Protocol structs, laid out exactly as the packed big-endian wire form
 // (sizeof == wire size): streams read/write them whole, and encode()/decode()
@@ -261,6 +264,30 @@ static uint32_t errno_to_nbd(int e) {
     }
 }
 
+// Bounds the reads that must not wait forever. A photon socket stream applies its
+// timeout to a read() as a whole -- one deadline for the entire count -- so a WRITE
+// payload read under this guard either arrives or fails within `us`. skip_read is
+// weaker and this says so rather than pretending otherwise: it loops over 1 KiB
+// read()s, so what the guard bounds there is each chunk, and a client that dribbles
+// a byte every `us` keeps it alive. That costs nothing where it is used with
+// skip_read, because neither of those two sites holds a gate while draining.
+// us == 0 means no deadline, and the stream's own timeout is restored rather than
+// assumed to have been unlimited.
+struct stall_guard {
+    net::ISocketStream* s;
+    uint64_t saved;
+    bool armed;
+    stall_guard(net::ISocketStream* stream, uint64_t us)
+        : s(stream), saved(stream->timeout()), armed(us != 0) {
+        if (armed)
+            s->timeout(us);
+    }
+    ~stall_guard() {
+        if (armed)
+            s->timeout(saved);
+    }
+};
+
 struct NbdDeviceImpl : NbdDevice {
     struct Conn {
         // The positional inits below ({s, negotiate}) pin the first two members:
@@ -308,17 +335,27 @@ struct NbdDeviceImpl : NbdDevice {
     photon::thread* uds_accept_th = nullptr;
     photon::thread* tcp_accept_th = nullptr;
     std::vector<Conn*> conns;
-    std::vector<photon::thread*> workers;  // joined only at cleanup; churned
-                                           // workers accumulate until then
+    std::vector<photon::thread*> workers;  // the connection coroutines still to be
+                                           // reaped; one leaves it as it finishes
+                                           // (see retire_self), so this tracks LIVE
+                                           // connections rather than every one ever
+                                           // made -- a joinable photon thread keeps
+                                           // its 8 MiB stack until somebody joins it
     bool own_backend = false;
     bool started = false;
     std::atomic<bool> stopping{false};
-    // Guards conns. A spinlock, not a photon::mutex: every critical section is
-    // yield-free (the longest is a vector erase and a raw ::shutdown), so no
-    // holder can be preempted while another vcpu spins.
+    // Connection coroutines that have not finished retiring. cleanup_runtime joins
+    // the handles it took out of `workers` and then waits for this to reach zero,
+    // which covers a worker that left the list on its own way out: after that
+    // departure its only remaining touches of this object are the departure itself.
+    std::atomic<uint32_t> live_workers{0};
+    // Guards conns AND workers. A spinlock, not a photon::mutex: every critical
+    // section is yield-free (the longest is a vector erase and a raw ::shutdown),
+    // so no holder can be preempted while another vcpu spins.
     photon::spinlock conns_lock;
     uint16_t trans_flags = 0;
     uint32_t stack_size = DEFAULT_STACK_SIZE;   // copied from cfg at start()
+    uint64_t stall_us = 0;                      // cfg.stall_timeout in us; 0 = none
 
 #ifdef __linux__
     // Loopback-attach state. Attaching an nbd device is Linux-only -- ioctls on
@@ -349,8 +386,21 @@ struct NbdDeviceImpl : NbdDevice {
     ~NbdDeviceImpl() {
         if (started)
             shutdown();
+        // shutdown() already released an owned backend; this covers the paths that
+        // did not -- a detach() followed by destruction, and an unowned one, which
+        // release_backend() leaves alone
+        release_backend();
+    }
+
+    // Delete a backend this object owns and forget it either way, so that neither
+    // the destructor nor a later start() can see it. Legal only once no serving
+    // coroutine can touch it, i.e. after detach(true) has drained every connection
+    // and cleanup_runtime has joined every worker.
+    void release_backend() {
         if (own_backend)
             delete backend;
+        backend = nullptr;
+        own_backend = false;
     }
 
     int start(fs::IFile* bk, bool ownership) override {
@@ -393,6 +443,7 @@ struct NbdDeviceImpl : NbdDevice {
         if (bytes.count() == 0)
             bytes.signal(MAX_INFLIGHT_BYTES);
         stack_size = cfg.stack_size;
+        stall_us = (uint64_t)cfg.stall_timeout * 1000 * 1000;
 
         if (!cfg.unix_path.empty()) {
             // blk.h start() contract: EBUSY when another live server holds the
@@ -467,11 +518,20 @@ struct NbdDeviceImpl : NbdDevice {
         return 0;
     }
 
-    // nbd has no kernel-side registration: shutdown() is detach(true), there
-    // is nothing to destroy (a connected client cannot block it -- we close
-    // the connections, which is the nbd version of "release the device")
+    // nbd has no kernel-side registration: shutdown() is detach(true) plus
+    // releasing the backend, which is what blk.h's start() contract promises --
+    // "ownership = this object deletes it (on shutdown and in the destructor)".
+    // There is nothing to destroy (a connected client cannot block it -- we close
+    // the connections, which is the nbd version of "release the device"), and after
+    // it returns the object is started=false with no backend, so a later start()
+    // serves a different one instead of overwriting the pointer and leaking it.
+    //
+    // detach() alone must NOT release: it is also the rollback path of a failed
+    // start(), where the caller keeps the backend.
     int shutdown() override {
-        return detach(true);
+        int r = detach(true);
+        release_backend();
+        return r;
     }
 
     SocketServers get_server_sockets() override {
@@ -531,11 +591,14 @@ struct NbdDeviceImpl : NbdDevice {
             return;
         }
         photon::thread_enable_join(th);
+        // counted before the migration, i.e. before this coroutine can run at all:
+        // from here on cleanup_runtime owes it either a join or a wait
+        live_workers.fetch_add(1, std::memory_order_relaxed);
         {
             SCOPED_LOCK(conns_lock);
             conns.push_back(c);
+            workers.push_back(th);
         }
-        workers.push_back(th);
         // The connection coroutine is the fan-out unit here: nbd has no queue count
         // to declare, its parallelism is however many clients connect. Safe to move
         // because nothing in the socket path caches a vcpu -- wait_for_fd_readable
@@ -586,6 +649,7 @@ struct NbdDeviceImpl : NbdDevice {
             }
             delete c->s;
             delete c;
+            retire_self();
         });
 
         if (c->negotiate && negotiate(c->s) < 0)
@@ -607,8 +671,11 @@ struct NbdDeviceImpl : NbdDevice {
             char* buf = nullptr;
             bool need_buf = req.type == NBD_CMD_READ || req.type == NBD_CMD_WRITE;
             if (need_buf && req.length > MAX_BLOCK_SIZE) {
-                if (req.type == NBD_CMD_WRITE && !c->s->skip_read(req.length))
-                    break;
+                if (req.type == NBD_CMD_WRITE) {
+                    stall_guard stall(c->s, stall_us);
+                    if (!c->s->skip_read(req.length))
+                        break;
+                }
                 send_reply(c, req.handle, NBD_EINVAL, nullptr, 0);
                 continue;
             }
@@ -643,17 +710,31 @@ struct NbdDeviceImpl : NbdDevice {
                 if (!buf) {
                     bytes.signal(cost);
                     depth.signal(1);
-                    if (req.type == NBD_CMD_WRITE && !c->s->skip_read(req.length))
-                        break;
+                    if (req.type == NBD_CMD_WRITE) {
+                        stall_guard stall(c->s, stall_us);
+                        if (!c->s->skip_read(req.length))
+                            break;
+                    }
                     send_reply(c, req.handle, NBD_ENOMEM, nullptr, 0);
                     continue;
                 }
-                if (req.type == NBD_CMD_WRITE && req.length &&
-                    c->s->read(buf, req.length) != (ssize_t)req.length) {
-                    free(buf);
-                    bytes.signal(cost);
-                    depth.signal(1);
-                    break;
+                if (req.type == NBD_CMD_WRITE && req.length) {
+                    // Bounded because BOTH gates are already held: a client that
+                    // sent this header and then stopped would hold a queue-depth
+                    // slot and its share of the byte budget until it felt like
+                    // finishing, so queue_depth would end up bounding the honest
+                    // clients only. A read() gets one deadline for its whole
+                    // count, so this either arrives or fails within stall_timeout.
+                    // Dropping the connection is the answer: the client still owes
+                    // bytes this request will never receive, so the stream is out
+                    // of step from here on whatever we replied.
+                    stall_guard stall(c->s, stall_us);
+                    if (c->s->read(buf, req.length) != (ssize_t)req.length) {
+                        free(buf);
+                        bytes.signal(cost);
+                        depth.signal(1);
+                        break;
+                    }
                 }
             }
 
@@ -683,6 +764,56 @@ struct NbdDeviceImpl : NbdDevice {
                 send_reply(c, req.handle, NBD_ENOMEM, nullptr, 0);
             }
         }
+    }
+
+    static void reap_worker(photon::thread* w) {
+        photon::thread_join((photon::join_handle*)w);
+    }
+
+    // Last act of a connection coroutine: leave the list cleanup_runtime joins, and
+    // only if that departure really happened, hand its own handle to a throwaway
+    // coroutine that does nothing but join it.
+    //
+    // A connection coroutine has to be joinable -- cleanup_runtime must be able to
+    // interrupt one that is parked in a gate wait, and only a joinable thread can
+    // be joined afterwards -- but a joinable photon thread keeps its stack until
+    // somebody joins it, and a coroutine cannot join itself. Leaving all of them to
+    // cleanup_runtime therefore made the list grow with connection HISTORY rather
+    // than with live connections: stack_size per connection ever made, which is
+    // 8 MiB each at the default. The reaper is created WITHOUT join enabled, so
+    // photon frees it when it exits.
+    //
+    // WHETHER THE HANDLE WAS FOUND is what decides who joins it, and the lock is
+    // what makes that one owner: cleanup_runtime takes the whole list under this
+    // same lock, so either it swapped first -- this departure then finds nothing,
+    // the handle is in the list it is joining, and no reaper is made -- or this
+    // departure ran first and that swap never sees the handle. Creating the reaper
+    // before asking the question lets both sides join it, and a second thread_join
+    // on a handle the first one disposed dereferences freed memory.
+    //
+    // live_workers is decremented last, whichever side owns the join, because
+    // cleanup_runtime waits on it only after joining everything it did take.
+    void retire_self() {
+        photon::thread* self = photon::CURRENT;
+        bool ours;
+        {
+            SCOPED_LOCK(conns_lock);
+            auto it = std::find(workers.begin(), workers.end(), self);
+            ours = it != workers.end();
+            if (ours)
+                workers.erase(it);
+        }
+        if (ours && !photon::thread_create11(REAPER_STACK_SIZE, &reap_worker, self)) {
+            // No reaper, so put the handle back for cleanup_runtime to join. If that
+            // swap has already happened in between, nothing ever joins it and one
+            // stack leaks -- which is what an out-of-memory thread creation costs
+            // here, and is why this branch hands the handle back instead of dropping
+            // it: dropping it would leak the stack on EVERY failure, not just the one
+            // that races a shutdown.
+            SCOPED_LOCK(conns_lock);
+            workers.push_back(self);
+        }
+        live_workers.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void execute(Conn* c, uint16_t type, uint16_t cflags, uint64_t handle, uint64_t offset, uint32_t len, char* buf) {
@@ -717,11 +848,24 @@ struct NbdDeviceImpl : NbdDevice {
             if (oob) { err = NBD_EINVAL; break; }
             {
                 struct iovec iov{buf, len};
-                ssize_t w = (cflags & NBD_REQ_FUA)
-                        ? backend->pwritev2(&iov, 1, offset, RWF_DSYNC)
-                        : backend->pwritev(&iov, 1, offset);
-                if (w != (ssize_t)len)
+                ssize_t w = backend->pwritev(&iov, 1, offset);
+                if (w != (ssize_t)len) {
                     err = errno_to_nbd(w < 0 ? errno : EIO);
+                    break;   // nothing landed, so there is nothing to make durable
+                }
+                // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is
+                // not pure virtual, and its base body discards `flags` and forwards
+                // to pwritev, so a backend that does not override it would have
+                // acked this write before it was durable -- and the reply below is
+                // the device's word that it is. fdatasync IS pure virtual, so every
+                // backend answers it. Same choice and same reasoning as the shared
+                // virtio engine's write-through path, which this must not disagree
+                // with. It costs a second syscall, and one that waits for the whole
+                // file's dirty data rather than only this range, which is what the
+                // client asked for by setting FUA on this request instead of
+                // batching a FLUSH.
+                if ((cflags & NBD_REQ_FUA) && backend->fdatasync() < 0)
+                    err = errno_to_nbd(errno);
             }
             break;
         case NBD_CMD_FLUSH:
@@ -732,7 +876,14 @@ struct NbdDeviceImpl : NbdDevice {
 #ifdef __linux__
             if (cfg.read_only) { err = NBD_EPERM; break; }
             if (oob) { err = NBD_EINVAL; break; }
-            if (backend->trim(offset, len) < 0)
+            if (backend->trim(offset, len) < 0) {
+                err = errno_to_nbd(errno);
+                break;
+            }
+            // FUA is legal on TRIM as well, and a punch-hole the client asked to be
+            // durable is not durable until the filesystem's metadata is: the same
+            // fdatasync as the WRITE path, for the same reason.
+            if ((cflags & NBD_REQ_FUA) && backend->fdatasync() < 0)
                 err = errno_to_nbd(errno);
 #else
             err = NBD_ENOTSUP;  // IFile::trim is fallocate-based, Linux-only
@@ -743,7 +894,13 @@ struct NbdDeviceImpl : NbdDevice {
             if (cfg.read_only) { err = NBD_EPERM; break; }
             if (oob) { err = NBD_EINVAL; break; }
             if (backend->zero_range(offset, len) < 0) {
-                if (errno != EOPNOTSUPP) {
+                // Both spellings of "this backend has no hole-punch": a filesystem
+                // whose fallocate lacks ZERO_RANGE answers EOPNOTSUPP, and an IFile
+                // that does not forward fallocate at all answers ENOSYS. Only those
+                // two fall back to writing zeroes -- an EIO or ENOSPC from a real
+                // attempt is the backend's own answer and has to reach the client
+                // unchanged, or a failing device would look like a slow one.
+                if (errno != EOPNOTSUPP && errno != ENOSYS) {
                     err = errno_to_nbd(errno);
                     break;
                 }
@@ -771,8 +928,15 @@ struct NbdDeviceImpl : NbdDevice {
         while (len) {
             uint32_t k = len > sizeof(zeros) ? sizeof(zeros) : len;
             struct iovec iov{(void*)zeros, k};
-            if (backend->pwritev(&iov, 1, offset) != (ssize_t)k)
-                return errno_to_nbd(errno);
+            ssize_t w = backend->pwritev(&iov, 1, offset);
+            // A short count is a legal pwritev result and leaves errno alone, so
+            // translating with errno here would report "wrote k-1 of k bytes" as
+            // whatever the last unrelated failure happened to leave behind -- and
+            // errno_to_nbd(0) is NBD_SUCCESS, which would ack the rest of the range
+            // as zeroed when it was not. Same shape as the READ and WRITE paths:
+            // negative means errno, non-negative but short means EIO.
+            if (w != (ssize_t)k)
+                return errno_to_nbd(w < 0 ? errno : EIO);
             offset += k;
             len -= k;
         }
@@ -790,7 +954,89 @@ struct NbdDeviceImpl : NbdDevice {
         return 0;
     }
 
+    // What the export name in an option payload turned out to be.
+    enum class Name { MATCH, MISMATCH, MALFORMED };
+
+    // Parse the payload of NBD_OPT_EXPORT_NAME, NBD_OPT_INFO or NBD_OPT_GO,
+    // consuming exactly `length` bytes: a 32-bit export-name length, the name, and
+    // -- for INFO and GO only -- a 16-bit count of requested information items,
+    // each a 16-bit type, a 16-bit length and that many bytes. `length` is the
+    // option header's, already bounded by MAX_OPTION_LEN.
+    //
+    // A payload that does not parse is refused rather than skipped. Skipping is
+    // what let a 4-byte OPT_GO through, although even an empty name with no items
+    // needs 6, and it left the item list unread, so nothing in it could be honoured
+    // or even seen.
+    //
+    // The name is compared as it is read instead of being buffered: only a name
+    // whose length equals the identity's can match, and the identity IS this
+    // export's name, so a client asking for a different export is refused rather
+    // than served this one. An empty name asks for the default export and matches.
+    //
+    // The requested items are parsed and dropped. They are a request, not a
+    // requirement -- the server answers with the items it chooses, and this one
+    // always answers NBD_INFO_EXPORT alone. NBD_INFO_BLOCK_SIZE in particular
+    // cannot be honoured: the geometry is cfg.info's for the whole export, not
+    // something one connection can renegotiate.
+    Name read_export_option(net::ISocketStream* s, uint32_t length, bool with_items) {
+        const std::string& id = cfg.info.identity;
+        if (length < (with_items ? 6u : 4u))
+            return Name::MALFORMED;
+        uint32_t name_len;
+        if (s->read(&name_len, sizeof(name_len)) != (ssize_t)sizeof(name_len))
+            return Name::MALFORMED;
+        name_len = __builtin_bswap32(name_len);
+        uint32_t used = sizeof(name_len);
+        if (name_len > length - used)
+            return Name::MALFORMED;
+        // An empty name asks for the default export, which is the only one there is,
+        // so it matches whatever the identity happens to be.
+        bool match = name_len == 0 || name_len == (uint32_t)id.size();
+        for (uint32_t off = 0; off < name_len; ) {
+            char chunk[256];
+            uint32_t k = name_len - off;
+            if (k > sizeof(chunk))
+                k = (uint32_t)sizeof(chunk);
+            if (s->read(chunk, k) != (ssize_t)k)
+                return Name::MALFORMED;
+            if (match && memcmp(chunk, id.data() + off, k) != 0)
+                match = false;
+            off += k;
+        }
+        used += name_len;
+        if (!with_items)
+            return used == length ? (match ? Name::MATCH : Name::MISMATCH) : Name::MALFORMED;
+        uint16_t items;
+        if (s->read(&items, sizeof(items)) != (ssize_t)sizeof(items))
+            return Name::MALFORMED;
+        items = __builtin_bswap16(items);
+        used += sizeof(items);
+        for (uint16_t i = 0; i < items; i++) {
+            uint16_t hdr[2];   // the item's type, which nothing here acts on, then its length
+            if (length - used < sizeof(hdr) || s->read(hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr))
+                return Name::MALFORMED;
+            uint16_t ilen = __builtin_bswap16(hdr[1]);
+            used += sizeof(hdr);
+            if (ilen > length - used || !s->skip_read(ilen))
+                return Name::MALFORMED;
+            used += ilen;
+        }
+        // The walk has to land exactly on the option's own length. Anything else
+        // means this side and the client disagree about the framing, and going on
+        // would read the next option out of the middle of this one.
+        if (used != length)
+            return Name::MALFORMED;
+        return match ? Name::MATCH : Name::MISMATCH;
+    }
+
     int negotiate(net::ISocketStream* s) {
+        // Every read of the handshake is bounded: a client that connects and then
+        // stops mid-handshake holds a connection slot and this coroutine's stack
+        // for as long as it likes, and cfg.timeout releases neither -- that one is
+        // the kernel's request timeout for the loopback device. Restored on the way
+        // out, because the transmission phase that follows has to leave an idle
+        // client alone: waiting for its next request is the job, not a stall.
+        stall_guard stall(s, stall_us);
         NbdGreeting greeting{NBD_FLAG_FIXED_NEWSTYLE | NBD_FLAG_NO_ZEROES};
         greeting.encode();
         if (s->write(&greeting, sizeof(greeting)) != (ssize_t)sizeof(greeting))
@@ -821,8 +1067,16 @@ struct NbdDeviceImpl : NbdDevice {
 
             switch (opt.opt) {
             case NBD_OPT_EXPORT_NAME: {
-                if (!s->skip_read(opt.length))
+                // The protocol allows no reply to EXPORT_NAME -- the server either
+                // sends the export meta or closes -- so a refusal here is a close.
+                Name v = read_export_option(s, opt.length, false);
+                if (v != Name::MATCH) {
+                    if (v == Name::MALFORMED)
+                        LOG_WARN("nbd OPT_EXPORT_NAME payload does not parse, closing");
+                    else
+                        LOG_WARN("nbd client asked for an export this device does not serve, closing");
                     return -1;
+                }
                 NbdExportMeta meta{cfg.info.size, trans_flags};
                 meta.encode();
                 if (s->write(&meta, sizeof(meta)) != (ssize_t)sizeof(meta))
@@ -854,8 +1108,19 @@ struct NbdDeviceImpl : NbdDevice {
             }
             case NBD_OPT_INFO:
             case NBD_OPT_GO: {
-                if (!s->skip_read(opt.length))
+                Name v = read_export_option(s, opt.length, true);
+                if (v != Name::MATCH) {
+                    if (v == Name::MALFORMED) {
+                        // a packed field cannot bind to the logger's reference
+                        uint32_t which = opt.opt;
+                        LOG_WARN("nbd option ` payload does not parse, closing", which);
+                    } else
+                        LOG_WARN("nbd client asked for an export this device does not serve, closing");
+                    // best-effort: an error reply ends the option phase, so this
+                    // connection closes whether the reply went out or not
+                    send_opt_reply(s, opt.opt, NBD_REP_ERR_INVALID, nullptr, 0);
                     return -1;
+                }
                 NbdExportInfo info{NBD_INFO_EXPORT, {cfg.info.size, trans_flags}};
                 info.encode();
                 if (send_opt_reply(s, opt.opt, NBD_REP_INFO, &info, sizeof(info)) < 0 ||
@@ -923,8 +1188,13 @@ struct NbdDeviceImpl : NbdDevice {
                 c->s->shutdown(ShutdownHow::ReadWrite);
             std::vector<Conn*>().swap(conns);  // each Conn is closed+deleted by its worker
         }
-        auto ws = std::move(workers);
-        workers.clear();
+        std::vector<photon::thread*> ws;
+        {
+            // taken under the same lock a finishing worker uses to leave the list,
+            // so this snapshot and a departure cannot interleave
+            SCOPED_LOCK(conns_lock);
+            ws.swap(workers);
+        }
         for (auto w : ws)
             photon::thread_interrupt(w);
         // join, and let the workers close their own streams: an interrupted
@@ -934,6 +1204,13 @@ struct NbdDeviceImpl : NbdDevice {
         // join would dereference Conns the workers already deleted
         for (auto w : ws)
             photon::thread_join((photon::join_handle*)w);
+        // A worker that finished on its own left the list before this snapshot was
+        // taken, so the joins above never saw it. It is now between that departure
+        // and its own exit, which has no yield in it, and this wait is what keeps
+        // the object alive until it is through -- the departure itself was its last
+        // touch of anything here.
+        while (live_workers.load(std::memory_order_relaxed))
+            photon::thread_usleep(1000);
         disconnect_loopback();
         if (uds_server) {
             delete uds_server;
@@ -956,6 +1233,23 @@ struct NbdDeviceImpl : NbdDevice {
         struct dirent* e;
         while ((e = readdir(d))) {
             if (strncmp(e->d_name, "nbd", 3) != 0)
+                continue;
+            // What follows "nbd" has to be the device index and nothing else:
+            // /sys/block holds every disk on the box and "nbd" is only a prefix,
+            // so a name like "nbd_backup" would otherwise be probed as though it
+            // named a device. Bounding it to digits is also what keeps the two
+            // snprintf's below inside the caller's buffer by construction rather
+            // than by their precision alone.
+            const char* p = e->d_name + 3;
+            if (!*p)
+                continue;
+            bool index_only = true;
+            for (; *p; p++)
+                if (*p < '0' || *p > '9') {
+                    index_only = false;
+                    break;
+                }
+            if (!index_only)
                 continue;
             // /sys/block holds one entry per disk and a disk name is at most 31
             // characters, so these never truncate into our caller's node buffer;
@@ -1040,8 +1334,17 @@ struct NbdDeviceImpl : NbdDevice {
         // the config even if a later step fails
         snprintf(loopback_node, sizeof(loopback_node), "%s", node);
         uint64_t ss = 1ull << cfg.info.sector_size_shift;
+        // NBD_SET_FLAGS carries the same word the netlink path passes as
+        // NBD_ATTR_SERVER_FLAGS, and the flag bits are the same ones the handshake
+        // sends: this is the legacy path's only chance to tell the kernel that the
+        // export is read-only and that it may send flushes, FUA writes and trims.
+        // Without it a legacy attach and a netlink attach of the same config
+        // disagree about all four, and silently: the kernel is never told it may
+        // ask for durability, so it stops asking, and never told the export is
+        // read-only, so it accepts writes locally that this server then refuses.
         if (ioctl(nbd_fd, NBD_SET_BLKSIZE, ss) < 0 ||
             ioctl(nbd_fd, NBD_SET_SIZE_BLOCKS, (unsigned long)(cfg.info.size / ss)) < 0 ||
+            ioctl(nbd_fd, NBD_SET_FLAGS, (unsigned long)trans_flags) < 0 ||
             ioctl(nbd_fd, NBD_SET_TIMEOUT, (unsigned long)cfg.timeout) < 0)
             LOG_ERRNO_RETURN(0, -1, "NBD_SET_* ioctls failed on ", node);
 

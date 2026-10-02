@@ -105,10 +105,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#ifndef RWF_DSYNC
-#define RWF_DSYNC 0x00000002
-#endif
-
 namespace photon {
 namespace blk {
 
@@ -479,9 +475,17 @@ struct UblkDeviceImpl : IBlkDevice {
         // outlive this object. devlock_release() is a no-op on -1, so the paths
         // that did release it are unaffected.
         release_lock();
+        release_backend();
+        ctrl.fini();
+    }
+
+    // Delete a backend this object owns and forget it either way, so that neither
+    // the destructor nor a later start() can see it.
+    void release_backend() {
         if (own_backend)
             delete backend;
-        ctrl.fini();
+        backend = nullptr;
+        own_backend = false;
     }
 
     // ----- the IO path -----
@@ -518,9 +522,21 @@ struct UblkDeviceImpl : IBlkDevice {
             // UBLK_IO_F_* constants are numbered in the raw op_flags space
             // (bit >= 8); the kernel sets them directly, so no >> 8 here
             bool fua = iod->op_flags & UBLK_IO_F_FUA;   // set only if we advertised FUA
-            ssize_t w = fua ? backend->pwritev2(&v, 1, off, RWF_DSYNC)
-                            : backend->pwritev(&v, 1, off);
-            res = (w == (ssize_t)len) ? (int32_t)len : -EIO;
+            ssize_t w = backend->pwritev(&v, 1, off);
+            if (w != (ssize_t)len) {
+                res = -EIO;
+                break;   // nothing landed, so there is nothing to make durable
+            }
+            // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is not
+            // pure virtual and its base body discards `flags` and forwards to
+            // pwritev, so a backend that does not override it would complete this
+            // request before the bytes were durable -- and the completion is the
+            // device's word that they are. fdatasync is pure virtual, so every
+            // backend answers it. Same choice and same reasoning as the shared
+            // virtio engine's write-through path and nbd's FUA write, which is what
+            // keeps a backend that does override pwritev2 from behaving differently
+            // per transport.
+            res = (!fua || backend->fdatasync() == 0) ? (int32_t)len : -EIO;
             break;
         }
         case UBLK_IO_OP_FLUSH:
@@ -1110,6 +1126,20 @@ struct UblkDeviceImpl : IBlkDevice {
     }
 
     int shutdown() override {
+        int r = do_shutdown();
+        // blk.h's start() contract: an owned backend is deleted on shutdown, not
+        // only by the destructor. The object outlives a shutdown() and the next
+        // start() overwrites the pointer, so releasing it only at destruction
+        // leaks the first backend. Gated on success because every failure path in
+        // do_shutdown() leaves a live device or a surviving kernel registration
+        // behind, and either can still be served through this backend -- the
+        // destructor deletes it once the object itself goes.
+        if (r == 0)
+            release_backend();
+        return r;
+    }
+
+    int do_shutdown() {
         if (!started && dev_id < 0)
             return 0;
         if (!started) {

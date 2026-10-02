@@ -716,14 +716,22 @@ struct VduseDeviceImpl : IBlkDevice {
                 started = false;
             }
         }
-        if (own_backend)
-            delete backend;
+        release_backend();
         // Only here, never in rollback(): a rolled-back device must stay able to
         // start again, and these are the slots it starts.
         for (auto* q : vqs)
             delete q;
         vqs.clear();
         if (ctrl_fd >= 0) { ::close(ctrl_fd); ctrl_fd = -1; }
+    }
+
+    // Delete a backend this object owns and forget it either way, so that neither
+    // the destructor nor a later start() can see it.
+    void release_backend() {
+        if (own_backend)
+            delete backend;
+        backend = nullptr;
+        own_backend = false;
     }
 
     // ----- the message loop (must stay prompt: msg_timeout bricks the dev) --
@@ -1869,6 +1877,20 @@ struct VduseDeviceImpl : IBlkDevice {
     }
 
     int shutdown() override {
+        int r = do_shutdown();
+        // blk.h's start() contract: an owned backend is deleted on shutdown, not
+        // only by the destructor. The object outlives a shutdown() and the next
+        // start() overwrites the pointer, so releasing it only at destruction
+        // leaks the first backend. Gated on success because do_shutdown()'s
+        // failures leave either a live consumer or a surviving registration
+        // behind, and either can still be served through this backend -- the
+        // destructor deletes it once the object itself goes, after stop_serving().
+        if (r == 0)
+            release_backend();
+        return r;
+    }
+
+    int do_shutdown() {
         if (!started && dev_fd < 0 && !registered)
             return 0;
         // keep_lock carries the ublk invariant: a device we are STILL serving

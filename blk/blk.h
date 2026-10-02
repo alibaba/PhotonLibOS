@@ -823,6 +823,22 @@ struct NbdConfig : BlkConfig {
                                     // not a socket (EINVAL), or when probing it reached no
                                     // verdict -- as for VhostUserController::SockRole.
 
+    uint32_t stall_timeout = 30;    // seconds; how long an INCOMPLETE message may stall
+                                    // before its connection is dropped. Two reads are
+                                    // bounded by it: the handshake, which holds a
+                                    // connection slot and that connection's coroutine
+                                    // stack, and the payload of a WRITE whose header has
+                                    // already arrived, which holds a queue-depth slot and
+                                    // its share of the byte budget -- so a client that
+                                    // sends a header and then nothing would otherwise
+                                    // hold both until it felt like finishing, and
+                                    // queue_depth would bound honest clients only.
+                                    // `timeout` does not cover this: that one is the
+                                    // kernel's request timeout for the loopback device
+                                    // and releases nothing on this side of the socket.
+                                    // Idle time BETWEEN requests is not a stall and is
+                                    // not bounded. 0 = no deadline.
+
     NbdConfig() = default;
     explicit NbdConfig(const BlkDevInfo& i) : BlkConfig(i) {}
 };

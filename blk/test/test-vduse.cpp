@@ -479,6 +479,40 @@ TEST_F(VduseTest, config_validation) {
     EXPECT_EQ(0, dev->shutdown());
 }
 
+// blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
+// backend is deleted on shutdown, not only by the destructor. Both shutdowns must
+// succeed for the release to be owed -- vduse's propagates a DESTROY_DEV failure, and
+// a registration that survives is one an adopter can re-serve, so it keeps its backend.
+TEST_F(VduseTest, shutdown_releases_a_backend_it_owns) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+
+    // Usable again, which is the transition the leak hid behind: a second start()
+    // registers a second device and serves a second backend, instead of overwriting
+    // a pointer to a live one.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(1, destroyed.load());
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+
+    // An UNOWNED backend stays the caller's to delete.
+    fs::IFile* mine = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(mine));
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+    delete mine;
+    EXPECT_EQ(3, destroyed.load());
+}
+
 TEST_F(VduseTest, basic_io) {
     if (skip_reason) return;
     BlkConfig cfg(make_info());

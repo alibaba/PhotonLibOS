@@ -69,10 +69,6 @@ limitations under the License.
 #include <utility>
 #include <vector>
 
-#ifndef RWF_DSYNC
-#define RWF_DSYNC 0x00000002
-#endif
-
 namespace photon {
 namespace blk {
 
@@ -943,11 +939,22 @@ struct TcmuServer {
             return;
         }
         bool fua = (op != OPC_WRITE_6) && (cdb[1] & 0x08);
-        ssize_t w = fua ? backend->pwritev2(iov, iov_cnt, off, RWF_DSYNC)
-                        : backend->pwritev(iov, iov_cnt, off);
-        if (w == (ssize_t)data_len)   set_status(ent, SAM_GOOD);
-        else if (errno == EROFS)      set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0);
-        else                          set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+        ssize_t w = backend->pwritev(iov, iov_cnt, off);
+        if (w != (ssize_t)data_len) {
+            if (errno == EROFS)      set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0);
+            else                     set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+            return;   // nothing landed, so there is nothing to make durable
+        }
+        // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is not pure
+        // virtual and its base body discards `flags` and forwards to pwritev, so a
+        // backend that does not override it would report GOOD for this command
+        // before the bytes were durable. fdatasync is pure virtual, so every backend
+        // answers it. Same choice and same reasoning as the shared virtio engine's
+        // write-through path, nbd's FUA write and ublk's.
+        if (fua && backend->fdatasync() < 0)
+            set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+        else
+            set_status(ent, SAM_GOOD);
     }
 
     void emul_sync(tcmu_cmd_entry* ent) {
@@ -1512,8 +1519,16 @@ struct TcmuDeviceImpl : IBlkDevice {
         }
         if (reg)
             reg->unregister_link(&link);
+        release_backend();
+    }
+
+    // Delete a backend this object owns and forget it either way, so that neither
+    // the destructor nor a later start() can see it.
+    void release_backend() {
         if (own_backend)
             delete backend;
+        backend = nullptr;
+        own_backend = false;
     }
 
     int start(fs::IFile* bk, bool ownership) override {
@@ -1624,6 +1639,20 @@ struct TcmuDeviceImpl : IBlkDevice {
     // live pump answers. EBUSY from the lock means another live process took the
     // identity over -- leave its device alone.
     int shutdown() override {
+        int r = do_shutdown();
+        // blk.h's start() contract: an owned backend is deleted on shutdown, not
+        // only by the destructor. The object outlives a shutdown() and the next
+        // start() overwrites the pointer, so releasing it only at destruction leaks
+        // the first backend. Gated on success because do_shutdown()'s failures leave
+        // the backstore registered -- and a registration this server can re-serve
+        // is a registration that still needs its backend. The destructor deletes it
+        // once the object itself goes.
+        if (r == 0)
+            release_backend();
+        return r;
+    }
+
+    int do_shutdown() {
         // An operator-driven removal: its rmdir/enable=0 is blocked inside the
         // kernel waiting for our answer, so do NOT re-serve to detach a LUN or
         // write to configfs -- that would deadlock against the very write we have

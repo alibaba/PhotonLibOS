@@ -1202,6 +1202,39 @@ TEST_F(VhostUserTest, config_validation) {
     EXPECT_NE(0, ::access(SOCK_PATH, F_OK));   // SERVER shutdown unlinks
 }
 
+// blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
+// backend is deleted on shutdown, not only by the destructor. No frontend takes part
+// -- this is about the pointer, not about serving.
+TEST_F(VhostUserTest, shutdown_releases_a_backend_it_owns) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+
+    // Usable again, which is the transition the leak hid behind: a second start()
+    // serves a second backend instead of overwriting a pointer to a live one.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(1, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+
+    // An UNOWNED backend stays the caller's to delete, through shutdown and through
+    // the destructor alike.
+    fs::IFile* mine = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(mine));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+    delete mine;
+    EXPECT_EQ(3, destroyed.load());
+}
+
 TEST_F(VhostUserTest, server_basic_io) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -3970,8 +4003,7 @@ TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_a
         // offered does not carry the reset feature. Asserted, not assumed, because
         // the day it does is the day refusing this message becomes wrong.
         if (fe.proto_features & (1ULL << P_VHU_RESET_DEVICE)) {
-            LOG_ERROR("the device advertises the reset protocol feature, so refusing "
-                      "RESET_DEVICE is no longer correct");
+            LOG_ERROR("the device advertises the reset protocol feature, so refusing RESET_DEVICE is no longer correct");
             return EINVAL;
         }
         if (fe.write_dev(18 << 20, w.data(), w.size()) != S_OK) return EIO;

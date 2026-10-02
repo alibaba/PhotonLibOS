@@ -24,6 +24,7 @@ limitations under the License.
 #include <photon/common/utility.h>
 #include <photon/fs/localfs.h>
 #include <photon/net/socket.h>
+#include <photon/thread/stack-allocator.h>   // the default stack allocator, wrapped to count
 #include <photon/thread/thread.h>
 #include <photon/thread/thread11.h>   // thread_create11 for the stress clients
 
@@ -49,9 +50,12 @@ static constexpr uint32_t NBD_REQ_MAGIC    = 0x25609513;
 static constexpr uint32_t NBD_SIMPLE_REP_MAGIC = 0x67446698;
 static constexpr uint32_t NBD_FLAG_C_FIXED_NEWSTYLE = 1u << 0;
 static constexpr uint32_t NBD_FLAG_C_NO_ZEROES      = 1u << 1;
+static constexpr uint32_t NBD_OPT_EXPORT_NAME = 1;
+static constexpr uint32_t NBD_OPT_INFO        = 6;
 static constexpr uint32_t NBD_OPT_GO          = 7;
 static constexpr uint32_t NBD_REP_ACK         = 1;
 static constexpr uint32_t NBD_REP_INFO        = 3;
+static constexpr uint32_t NBD_REP_ERR_INVALID = (1u << 31) | 3;
 static constexpr uint16_t NBD_INFO_EXPORT     = 0;
 static constexpr uint16_t NBD_TRANS_READ_ONLY         = 1u << 1;
 static constexpr uint16_t NBD_TRANS_SEND_FLUSH        = 1u << 2;
@@ -67,6 +71,9 @@ static constexpr uint16_t NBD_CMD_FLUSH        = 3;
 #ifdef __linux__
 static constexpr uint16_t NBD_CMD_TRIM         = 4;
 static constexpr uint16_t NBD_CMD_WRITE_ZEROES = 6;
+// Gated with the command rather than with the other status codes because the only case
+// that asks for it is the WRITE_ZEROES one, which is Linux-only along with its handler.
+static constexpr uint32_t NBD_EIO              = 5;
 #endif
 static constexpr uint16_t NBD_REQ_FUA     = 1u << 0;
 static constexpr uint32_t NBD_SUCCESS = 0;
@@ -113,7 +120,9 @@ struct NbdTestClient {
         return s ? 0 : -1;
     }
 
-    int handshake(const char* export_name = "") {
+    // the greeting and the client flags, stopping short of the OPT_GO that
+    // handshake() sends -- the cases that need a payload of their own start here
+    int handshake_front() {
         char hdr[18];
         if (read_exact(hdr, sizeof(hdr)) < 0)
             return -1;
@@ -121,14 +130,89 @@ struct NbdTestClient {
             return -1;
         char cf[4];
         be32wr(cf, NBD_FLAG_C_FIXED_NEWSTYLE | NBD_FLAG_C_NO_ZEROES);
-        if (write_exact(cf, sizeof(cf)) < 0)
+        return write_exact(cf, sizeof(cf));
+    }
+
+    // A well-formed OPT_GO / OPT_INFO payload: a 32-bit export-name length, the
+    // name, then a 16-bit count of requested information items. `items` only sets
+    // the count -- a count with no items behind it is itself one of the malformed
+    // payloads a case needs to be able to send.
+    static std::vector<char> go_payload(const char* export_name, uint16_t items = 0) {
+        size_t n = strlen(export_name);
+        std::vector<char> d(4 + n + 2);
+        be32wr(d.data(), (uint32_t)n);
+        memcpy(d.data() + 4, export_name, n);
+        be16wr(d.data() + 4 + n, items);
+        return d;
+    }
+
+    // OPT_EXPORT_NAME's payload is the name and nothing else: no item count, and
+    // its answer is the export meta rather than an option reply.
+    static std::vector<char> name_payload(const char* export_name) {
+        size_t n = strlen(export_name);
+        std::vector<char> d(4 + n);
+        be32wr(d.data(), (uint32_t)n);
+        memcpy(d.data() + 4, export_name, n);
+        return d;
+    }
+
+    // A payload whose name MATCHES and whose item count parses, with bytes left over
+    // behind it. Every individual read in the walk succeeds and the name is the right
+    // one, so the only thing that can refuse it is the requirement that the walk land
+    // exactly on the option's own declared length. That is what makes this the payload
+    // which witnesses that check: with a name that did not match, the name policy
+    // would refuse it on its own and the length check could be deleted unnoticed.
+    static std::vector<char> go_payload_with_trailer(const char* export_name,
+                                                     size_t trailer) {
+        std::vector<char> d = go_payload(export_name);
+        d.insert(d.end(), trailer, '\0');
+        return d;
+    }
+
+    int read_raw(void* buf, size_t n) { return read_exact(buf, n); }
+
+    int send_raw_option(uint32_t opt, const void* data, uint32_t len) {
+        return send_option(opt, data, len);
+    }
+
+    // One option reply: its type in *type_out and its payload in *data_out.
+    // Returns -1 on a transport error, which is what a server that closed the
+    // connection without replying looks like from here.
+    int read_opt_reply(uint32_t* type_out, std::vector<char>* data_out) {
+        char rh[20];
+        if (read_exact(rh, sizeof(rh)) < 0)
+            return -1;
+        if (be64rd(rh) != NBD_REP_MAGIC)
+            return -1;
+        *type_out = be32rd(rh + 12);
+        uint32_t len = be32rd(rh + 16);
+        data_out->resize(len);
+        if (len && read_exact(data_out->data(), len) < 0)
+            return -1;
+        return 0;
+    }
+
+    // A request header with no payload behind it: exactly what a client that
+    // stalls mid-WRITE has sent, and what makes the server wait for bytes while
+    // holding both of its device-wide gates.
+    int send_header_only(uint16_t type, uint64_t offset, uint32_t len, uint16_t flags = 0) {
+        char req[28];
+        encode_req(req, type, flags, next_handle++, offset, len);
+        return write_exact(req, sizeof(req));
+    }
+
+    // bound this client's own reads and writes, so that a server which never
+    // answers fails the case instead of hanging it
+    void set_timeout(uint64_t us) { s->timeout(us); }
+
+    int handshake(const char* export_name = "") {
+        if (handshake_front() < 0)
             return -1;
 
-        size_t n = strlen(export_name);
-        std::vector<char> data(2 + n + 2);
-        be16wr(data.data(), (uint16_t)n);
-        memcpy(data.data() + 2, export_name, n);
-        be16wr(data.data() + 2 + n, 0);
+        // the name length is 32 bits on the wire. Encoding it as 16 was the same
+        // wrong assumption the server made when it skipped the payload instead of
+        // parsing it, so a 4-byte OPT_GO looked well formed to both sides.
+        std::vector<char> data = go_payload(export_name);
         if (send_option(NBD_OPT_GO, data.data(), (uint32_t)data.size()) < 0)
             return -1;
 
@@ -759,15 +843,19 @@ TEST_F(NbdTest, connections_spread_over_the_pool) {
         EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size()));
         EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, base, rbuf.data(), rbuf.size()));
         EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
-        // an FUA write is issued as pwritev2(RWF_DSYNC): this asserts the probe
-        // forwards it instead of letting the base default drop the flag
+        // An FUA write, so this connection drives the durability branch too. What it
+        // asserts here is only that a write asking for durability still succeeds on a
+        // pool vcpu; the case that counts the sync itself, and so can tell "persisted"
+        // from "acked", is an_fua_write_is_durable_before_its_reply.
         EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size(), NBD_REQ_FUA));
 #ifdef __linux__
-        // TRIM and WRITE_ZEROES both land on the VIRTUAL fallocate, because
-        // IFile::trim / IFile::zero_range are plain methods that call it -- a
-        // pass-through backend that forgot to forward it would answer ENOSYS
-        // here, which nbd reports to the client as NBD_ENOTSUP. Offsets are
-        // inside this client's own region, disjoint from the pair above.
+        // TRIM lands on the VIRTUAL fallocate, because IFile::trim is a plain
+        // method that calls it: a pass-through backend that forgot to forward
+        // fallocate would answer ENOSYS, and nbd reports that to the client as
+        // NBD_ENOTSUP. WRITE_ZEROES proves nothing on its own any more -- ENOSYS
+        // is one of the two "no hole-punch" answers nbd falls back on, so it
+        // would succeed by writing zeroes instead. Offsets are inside this
+        // client's own region, disjoint from the pair above.
         EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, base + 16384, nullptr, 8192));
         EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, base + 16384, nullptr, 8192));
 #endif
@@ -973,6 +1061,348 @@ TEST_F(NbdTest, pool_without_an_event_engine_is_refused) {
     EXPECT_EQ(-1, dev->start(&rec));
     EXPECT_EQ(EINVAL, errno);
     EXPECT_EQ(0u, rec.vcpu_count());
+}
+
+// ---------------------------------------------------------------------------
+// backends and instruments the cases below need and the harness does not have
+// ---------------------------------------------------------------------------
+
+// No hole-punch, and zero writes that come back one byte short with errno clean --
+// the shape that used to be acked as NBD_SUCCESS, because a short count does not set
+// errno and errno_to_nbd(0) is NBD_SUCCESS.
+class ShortZeroFile : public test::BackendProbe {
+public:
+    explicit ShortZeroFile(fs::IFile* f) : test::BackendProbe(f) {}
+    int fallocate(int mode, off_t offset, off_t len) override {
+        errno = EOPNOTSUPP;   // no ZERO_RANGE: the fallback is the path under test
+        return -1;
+    }
+    ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override {
+        ssize_t r = test::BackendProbe::pwritev(iov, iovcnt, offset);
+        if (r > 1) {
+            r -= 1;
+            errno = 0;   // nothing failed, which is exactly what a short count means
+        }
+        return r;
+    }
+};
+
+// Counts coroutine stacks rather than measuring the process: whether a freed stack's
+// address space goes back to the OS is the allocator's business, while a stack that
+// was allocated and never freed IS the leak. Forwards to the default allocator, so
+// nothing else about allocation changes while it is installed.
+struct StackCounter {
+    std::atomic<long> allocs{0}, deallocs{0};
+    long live() const { return allocs.load() - deallocs.load(); }
+    void* alloc(size_t size) {
+        allocs.fetch_add(1);
+        return photon::default_photon_thread_stack_alloc(nullptr, size);
+    }
+    void dealloc(void* ptr, size_t size) {
+        deallocs.fetch_add(1);
+        photon::default_photon_thread_stack_dealloc(nullptr, ptr, size);
+    }
+    // stack-allocator.h calls trim() and stats() optional, but the
+    // set_photon_thread_stack_allocator(T&) convenience binds an object by taking
+    // the address of all four members, so an object without these two does not
+    // compile. The default allocator this forwards to pools nothing, so a zeroed
+    // answer from both is the honest one rather than a stub.
+    size_t trim(size_t) { return 0; }
+    photon::StackPoolStats stats() { return {}; }
+};
+
+// The device object outlives a shutdown(), and start() overwrites the backend
+// pointer, so a backend released only by the destructor is leaked by the next
+// start() -- which is what blk.h's contract means by deleting it on shutdown.
+TEST_F(NbdTest, shutdown_releases_a_backend_it_owns) {
+    std::atomic<int> destroyed{0};
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+
+    // Usable again, which is the transition the leak hid behind: a second start()
+    // serves a second backend instead of overwriting a pointer to a live one.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(1, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+
+    // An UNOWNED backend stays the caller's to delete, through shutdown and through
+    // the destructor alike.
+    fs::IFile* mine = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(mine, false));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+    delete mine;
+    EXPECT_EQ(3, destroyed.load());
+}
+
+// FUA means the bytes are durable before the reply, and the reply is the device's
+// word that they are. pwritev2(RWF_DSYNC) cannot carry that word: IFile::pwritev2 is
+// not pure virtual and its base body discards `flags` and forwards to pwritev, so a
+// backend that does not override it acks a cached write. The probe counts syncs, and
+// xfer() returns only once the reply has arrived, so a count read here is a count
+// read after the ack.
+TEST_F(NbdTest, an_fua_write_is_durable_before_its_reply) {
+    test::BackendProbe probe(file);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(8192, 0x5a);
+
+    // a write without FUA persists nothing on its own
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(1, probe.writes.load());
+    EXPECT_EQ(0, probe.datasyncs.load());
+
+    // with FUA it is one more write and exactly one more fdatasync -- fdatasync and
+    // not fsync, because the request is for data, and the WRITE_ZEROES branch has
+    // always synced this way, so the two branches have to agree
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size(), NBD_REQ_FUA));
+    EXPECT_EQ(2, probe.writes.load());
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+#ifdef __linux__
+    // TRIM and WRITE_ZEROES carry FUA too, and neither syncs without it
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 16384, nullptr, 8192, NBD_REQ_FUA));
+    EXPECT_EQ(2, probe.datasyncs.load());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 32768, nullptr, 8192, NBD_REQ_FUA));
+    EXPECT_EQ(3, probe.datasyncs.load());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 16384, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 32768, nullptr, 8192));
+    EXPECT_EQ(3, probe.datasyncs.load());
+#endif
+}
+
+// A short count is a legal pwritev result and leaves errno alone. Translating it with
+// errno therefore reported whatever the last unrelated failure happened to leave
+// behind -- and errno_to_nbd(0) is NBD_SUCCESS, so a zero-fill that wrote 8191 of
+// 8192 bytes was acked as complete and the last byte was never anybody's problem.
+TEST_F(NbdTest, a_short_zero_fill_is_not_success) {
+#ifndef __linux__
+    // A skip has to be a preprocessor branch here, not an early return: the body below
+    // names NBD_CMD_WRITE_ZEROES, which this file defines only where the server has a
+    // WRITE_ZEROES handler at all, so on another platform it would not compile.
+    report_skip("IFile::zero_range is fallocate-based, so WRITE_ZEROES is Linux-only");
+#else
+    ShortZeroFile probe(file);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_EQ((int)NBD_EIO, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 8192));
+    // the fallback really did run and really did write: this is a short write, not a
+    // refused one, and the distinction is the whole finding
+    EXPECT_GT(probe.writes.load(), 0);
+#endif
+}
+
+// An option payload used to be skip_read and discarded, which let a 4-byte OPT_GO
+// through although even an empty name with no items needs 6, and left the export name
+// unread -- so any name at all was served this export. It is parsed now: the framing
+// has to add up exactly, and the name has to be this export's, or empty, which asks
+// for the default export.
+TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    const std::string& id = cfg.info.identity;
+    struct Row {
+        uint32_t opt;
+        std::vector<char> payload;
+        bool reply_comes;   // the protocol allows none for EXPORT_NAME
+        const char* why;
+    };
+    const Row rows[] = {
+        {NBD_OPT_GO, std::vector<char>(4, 0), true,
+         "four bytes: a name length, and no room for the item count"},
+        {NBD_OPT_GO, NbdTestClient::go_payload("", 1), true,
+         "one information item requested and no bytes behind the count"},
+        {NBD_OPT_GO, NbdTestClient::go_payload("some-other-export"), true,
+         "an export this device does not serve"},
+        {NBD_OPT_INFO, NbdTestClient::go_payload("some-other-export"), true,
+         "the same refusal on OPT_INFO"},
+        {NBD_OPT_GO, NbdTestClient::go_payload_with_trailer(id.c_str(), 2), true,
+         "the name matches and every read succeeds, but two bytes are left over"},
+        {NBD_OPT_EXPORT_NAME, NbdTestClient::name_payload("some-other-export"), false,
+         "EXPORT_NAME is answered with the export meta or with a close, never a reply"},
+    };
+    for (const auto& r : rows) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake_front());
+        ASSERT_EQ(0, cli.send_raw_option(r.opt, r.payload.data(), (uint32_t)r.payload.size()));
+        uint32_t type = 0;
+        std::vector<char> data;
+        int got = cli.read_opt_reply(&type, &data);
+        if (r.reply_comes) {
+            ASSERT_EQ(0, got) << r.why;
+            EXPECT_EQ(NBD_REP_ERR_INVALID, type) << r.why;
+        } else {
+            EXPECT_EQ(-1, got) << r.why;
+        }
+    }
+
+    // Both ways in still work, which is what keeps the rows above from passing on a
+    // server that refuses everything. A matching name on OPT_GO reaches the
+    // transmission phase through INFO + ACK ...
+    {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake(id.c_str()));
+        EXPECT_EQ(IMG_SIZE, cli.export_size);
+        std::vector<char> rbuf(4096);
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }
+    // ... and on OPT_EXPORT_NAME through the export meta, with no option reply at all.
+    {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake_front());
+        std::vector<char> name = NbdTestClient::name_payload(id.c_str());
+        ASSERT_EQ(0, cli.send_raw_option(NBD_OPT_EXPORT_NAME, name.data(), (uint32_t)name.size()));
+        char meta[10];
+        ASSERT_EQ(0, cli.read_raw(meta, sizeof(meta)));
+        EXPECT_EQ(IMG_SIZE, be64rd(meta));
+        EXPECT_TRUE(be16rd(meta + 8) & NBD_TRANS_SEND_FLUSH);
+        std::vector<char> rbuf(4096);
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }
+}
+
+// Every connection coroutine is joinable, because cleanup_runtime has to be able to
+// interrupt one that is parked in a gate wait -- and a joinable photon thread keeps
+// its stack until somebody joins it. Reaping them only at cleanup therefore made the
+// device hold one stack per connection ever MADE rather than per connection live:
+// 8 MiB each at the default stack_size, which is how 40 connect/disconnect cycles
+// came to 320 MiB of address space. Each worker now hands its own handle to a
+// throwaway coroutine that joins it, so the count comes back.
+TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
+    StackCounter counter;
+    auto saved = photon::get_photon_thread_stack_allocator();
+    ASSERT_EQ(0, photon::set_photon_thread_stack_allocator(counter));
+    // restored LAST: a stack has to be freed by the allocator that created it, and
+    // the DEFERs below destroy the device -- and with it its workers -- first
+    DEFER(photon::set_photon_thread_stack_allocator(saved));
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    const int CYCLES = 24;
+    long base = counter.live();
+    std::vector<char> rbuf(4096);
+    for (int i = 0; i < CYCLES; i++) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        ASSERT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }   // each client's destructor sends DISC and closes, so its worker finishes
+
+    // Retiring a worker is asynchronous against this vcpu -- a reaper coroutine joins
+    // it -- so wait for the stacks to come back, bounded, instead of sampling once.
+    long live = counter.live();
+    for (int i = 0; i < 250 && live > base; i++) {
+        photon::thread_usleep(20 * 1000);
+        live = counter.live();
+    }
+    EXPECT_LE(live, base) << CYCLES << " connections came and went and are still "
+                             "holding stacks; each one holds stack_size bytes";
+    // the control: a counter that never saw an allocation would report live == base
+    // and pass the assertion above without measuring anything
+    EXPECT_GT(counter.allocs.load(), (long)CYCLES);
+}
+
+// A WRITE's payload is read while the request holds BOTH device-wide gates, so a
+// client that sends the header and then stops holds a queue-depth slot and its share
+// of the byte budget for as long as it likes -- with queue_depth 1 that is every slot
+// there is, and the honest client behind it waits. cfg.timeout releases nothing here:
+// it is the kernel's request timeout for the loopback device.
+TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.queue_depth = 1;      // one slot, so the stall is total rather than partial
+    cfg.stall_timeout = 1;    // seconds
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient stalled;
+    ASSERT_EQ(0, stalled.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, stalled.handshake());
+    // the header of a 64 KiB write, and then nothing: the server has taken both gates
+    // and is waiting for bytes that are not coming
+    ASSERT_EQ(0, stalled.send_header_only(NBD_CMD_WRITE, 0, 65536));
+
+    NbdTestClient honest;
+    ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, honest.handshake());
+    // bounded well past stall_timeout, so a device that never releases the gate fails
+    // this case instead of hanging the suite
+    honest.set_timeout(10 * 1000 * 1000);
+    std::vector<char> wbuf(4096, 0x33);
+    EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    // the stalled connection is the one that went: the honest client still works
+    std::vector<char> rbuf(4096);
+    EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    EXPECT_EQ(1u, dev->get_client_connections().size());
 }
 
 }  // namespace blk

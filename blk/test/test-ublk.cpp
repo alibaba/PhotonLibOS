@@ -142,13 +142,23 @@ static uint64_t node_inflight(const std::string& node) {
     return rd + wr;
 }
 
-// forwards to the wrapped file, counting pwritev2 calls that ask for
-// RWF_DSYNC -- the observable signature of the FUA dispatch path
-class CountingFile : public fs::IFile {
+// Forwards to the wrapped file and counts the three things an FUA dispatch can be told
+// apart by. It is NOT the harness's test::CountingFile, which counts destructions for
+// the ownership contract; this one counts syncs, and the two are named differently
+// because both appear in this file.
+//
+// `writes` and `datasyncs` are what ublk's FUA path does now: pwritev, then fdatasync.
+// `dsync_writes` is the prohibition half and must stay zero, because IFile::pwritev2 is
+// not pure virtual and its base default drops `flags` -- a durability request sent that
+// way reached only the backends that overrode it, and every other one discarded it
+// while still reporting success.
+class SyncCountingFile : public fs::IFile {
 public:
     fs::IFile* const f;
+    std::atomic<uint64_t> writes{0};
+    std::atomic<uint64_t> datasyncs{0};
     std::atomic<uint64_t> dsync_writes{0};
-    explicit CountingFile(fs::IFile* file) : f(file) {}
+    explicit SyncCountingFile(fs::IFile* file) : f(file) {}
 
     int close() override { return 0; }   // ownership stays with the fixture
     ssize_t read(void*, size_t) override { errno = ENOSYS; return -1; }
@@ -159,7 +169,10 @@ public:
     ssize_t pread(void* buf, size_t count, off_t off) override { return f->pread(buf, count, off); }
     ssize_t preadv(const iovec* iov, int n, off_t off) override { return f->preadv(iov, n, off); }
     ssize_t pwrite(const void* buf, size_t count, off_t off) override { return f->pwrite(buf, count, off); }
-    ssize_t pwritev(const iovec* iov, int n, off_t off) override { return f->pwritev(iov, n, off); }
+    ssize_t pwritev(const iovec* iov, int n, off_t off) override {
+        writes++;
+        return f->pwritev(iov, n, off);
+    }
     ssize_t pwritev2(const iovec* iov, int n, off_t off, int flags) override {
         if (flags & RWF_DSYNC)
             dsync_writes++;
@@ -167,7 +180,10 @@ public:
     }
     off_t lseek(off_t off, int whence) override { return f->lseek(off, whence); }
     int fsync() override { return f->fsync(); }
-    int fdatasync() override { return f->fdatasync(); }
+    int fdatasync() override {
+        datasyncs++;
+        return f->fdatasync();
+    }
     int fchmod(mode_t m) override { return f->fchmod(m); }
     int fchown(uid_t u, gid_t g) override { return f->fchown(u, g); }
     int fstat(struct stat* st) override { return f->fstat(st); }
@@ -362,6 +378,40 @@ TEST_F(UblkTest, config_validation) {
     EXPECT_EQ(-1, dev->start(file));
     EXPECT_EQ(EALREADY, errno);
     ASSERT_EQ(0, dev->shutdown());
+}
+
+// blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
+// backend is deleted on shutdown, not only by the destructor. Both shutdowns must
+// succeed for the release to be owed -- ublk's propagates a DEL_DEV failure, and a
+// registration that survives is one this server can re-serve, so it keeps its backend.
+TEST_F(UblkTest, shutdown_releases_a_backend_it_owns) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+
+    // Usable again, which is the transition the leak hid behind: a second start()
+    // registers a second device and serves a second backend, instead of overwriting
+    // a pointer to a live one.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(1, destroyed.load());
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+
+    // An UNOWNED backend stays the caller's to delete.
+    fs::IFile* mine = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(mine));
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+    delete mine;
+    EXPECT_EQ(3, destroyed.load());
 }
 
 TEST_F(UblkTest, basic_io) {
@@ -1550,8 +1600,23 @@ TEST_F(UblkTest, fua) {
     // to a write plus a separate FLUSH. It is filesystems that put REQ_FUA on
     // writes -- jbd2 writes every ext4 journal commit record with FUA, and
     // the flag only survives to the daemon because we advertised
-    // UBLK_ATTR_FUA. CountingFile observes the resulting RWF_DSYNC dispatch.
-    CountingFile cf(file);
+    // UBLK_ATTR_FUA.
+    //
+    // What SyncCountingFile can and cannot see now that durability is pwritev plus
+    // fdatasync rather than one pwritev2(RWF_DSYNC) call: it CANNOT attribute a sync
+    // to the write that asked for it. A FLUSH op produces the same fdatasync, and the
+    // kernel is free to put one straight after a write, so no ordering observable from
+    // the backend separates the two. The ext4 sequence below is therefore a regression
+    // guard -- advertising FUA must not break a real filesystem workload, and that
+    // workload's writes and syncs must reach the backend -- and not an FUA
+    // discriminator. The per-request discrimination lives in
+    // NbdTest.an_fua_write_is_durable_before_its_reply, where the client sets the flag
+    // itself rather than leaving it to a filesystem.
+    //
+    // dsync_writes is the half that IS decisive, and it decides in the negative: it has
+    // to stay zero, which is what keeps the pwritev2 base default from swallowing a
+    // durability request here again.
+    SyncCountingFile cf(file);
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -1560,9 +1625,13 @@ TEST_F(UblkTest, fua) {
     DEFER(dev->shutdown());
     std::string node = node_of(dev);
 
-    // control: raw-node buffered write + fsync dispatches plain writes plus
-    // a FLUSH op; neither carries FUA
+    // control: a raw-node buffered write + fsync dispatches plain writes plus a FLUSH
+    // op. Both counters have to move here, or the two comparisons after the ext4
+    // sequence would be comparing a zero against a zero and reporting a pass.
     EXPECT_EQ(0, device_io(node, pattern(0xe1), /*verify_backend=*/false));
+    uint64_t w0 = cf.writes.load(), d0 = cf.datasyncs.load();
+    EXPECT_GT(w0, 0u);
+    EXPECT_GT(d0, 0u) << "the fsync's FLUSH never reached the backend";
     EXPECT_EQ(0u, cf.dsync_writes.load());
 
     // the mkfs/mount/umount sequence must run off the vcpu: it does IO
@@ -1592,7 +1661,9 @@ TEST_F(UblkTest, fua) {
     if (rc == -2)
         return report_skip("mkfs.ext4 or mount not available here");
     ASSERT_EQ(0, rc);
-    EXPECT_GT(cf.dsync_writes.load(), 0u);
+    EXPECT_GT(cf.writes.load(), w0);
+    EXPECT_GT(cf.datasyncs.load(), d0);
+    EXPECT_EQ(0u, cf.dsync_writes.load());
 }
 
 // One controller = one scope. This one builds a SECOND controller on a custom dir

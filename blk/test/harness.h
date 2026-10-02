@@ -175,11 +175,14 @@ public:
     ssize_t preadv(const struct iovec* iov, int iovcnt, off_t offset) override;
     ssize_t pwrite(const void* buf, size_t count, off_t offset) override;
     ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override;
-    // nbd, tcmu and ublk all issue an FUA write as pwritev2(..., RWF_DSYNC). The
-    // base default discards `flags` and calls pwritev, which would still record
-    // the placement but silently drop the durability request -- and a placement
-    // probe that quietly changes what the backend was asked to do is a trap for
-    // whoever asserts on it next.
+    // Nothing in blk/ routes a durability request through pwritev2 any more: FUA is
+    // pwritev plus fdatasync, because IFile::pwritev2 is not pure virtual and its base
+    // default discards `flags` -- so a write sent that way reached only the backends
+    // that happened to override it, and every other one dropped the request while
+    // still reporting success. The forward stays anyway, for the reason it was added:
+    // the base default would still drop `flags` and call pwritev, and a placement probe
+    // that quietly changes what the backend was asked to do is a trap for whoever
+    // asserts on it next.
     ssize_t pwritev2(const struct iovec* iov, int iovcnt, off_t offset, int flags) override;
     ssize_t read  (void* buf, size_t count) override;
     ssize_t readv (const struct iovec* iov, int iovcnt) override;
@@ -197,8 +200,10 @@ public:
     // (fs/virtual-file.cpp), and every transport uses them (nbd TRIM /
     // WRITE_ZEROES, tcmu and ublk UNMAP / WRITE_ZEROES, the shared virtio path
     // in utils.cpp). The inherited UNIMPLEMENTED default answers ENOSYS, which
-    // nbd maps to NBD_ENOTSUP -- so TRIM would fail and WRITE_ZEROES would not
-    // even take its EOPNOTSUPP fallback.
+    // every zero-fill path and both SCSI/ublk trim paths treat as "no
+    // hole-punch" and tolerate -- so WRITE_ZEROES would still succeed, by
+    // writing zeroes. Only nbd's TRIM has no fallback and would report it to
+    // the client as NBD_ENOTSUP.
     int fallocate(int mode, off_t offset, off_t len) override;
     int close() override;
 
@@ -284,6 +289,25 @@ public:
     std::atomic<int> syncs{0};
     std::atomic<int> writes{0};
     bool fail_syncs = false;
+};
+
+// Counts its own destructions, which is the only oracle that separates blk.h's
+// start() contract -- an OWNED backend is deleted by shutdown() -- from the weaker
+// reading a device that never deletes anything would also satisfy, namely that the
+// backend goes away eventually, when the device object itself does. The device
+// outlives a shutdown() and the next start() overwrites the pointer, so a backend
+// released only at destruction is leaked across a restart and the leak is invisible
+// to every other assertion. One copy here because all five transports carry the
+// same contract and need the same case; `destroyed` is the caller's counter, so a
+// case can count across several backends handed to one device.
+class CountingFile : public BackendProbe {
+public:
+    // does NOT own f, exactly as BackendProbe does not
+    CountingFile(fs::IFile* f, std::atomic<int>* destroyed)
+        : BackendProbe(f), m_destroyed(destroyed) {}
+    ~CountingFile() override { m_destroyed->fetch_add(1); }
+private:
+    std::atomic<int>* m_destroyed;
 };
 
 // The engine masks every blk suite passes to photon::init(), and the ones TestPool

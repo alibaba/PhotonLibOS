@@ -576,14 +576,23 @@ struct VhostUserDeviceImpl : IBlkDevice {
     ~VhostUserDeviceImpl() {
         if (started)
             shutdown();
-        if (own_backend)
-            delete backend;
+        // the backstop for a session ended by detach() rather than shutdown()
+        release_backend();
         // Only here, never in rollback(): a rolled-back device must stay able to
         // start again, and these are the slots it starts.
         for (auto* q : vqs)
             delete q;
         vqs.clear();
         if (listen_fd >= 0) ::close(listen_fd);
+    }
+
+    // Delete a backend this object owns and forget it either way, so that neither
+    // the destructor nor a later start() can see it.
+    void release_backend() {
+        if (own_backend)
+            delete backend;
+        backend = nullptr;
+        own_backend = false;
     }
 
     // ----- raw socket layer (recvmsg/sendmsg for the SCM_RIGHTS fds; photon
@@ -1841,14 +1850,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
     }
 
     int shutdown() override {
-        if (!started)
-            return 0;
-        detach(true);
-        if (cfg.sock_role == VhostUserController::SockRole::SERVER)
-            ::unlink(sock_path);   // remove the tombstone; a CLIENT frontend
-                                   // owns its socket and is left alone
-        LOG_INFO("vhost-user device shut down, ",
-                 make_named_value("sock_path", (const char*)sock_path));
+        if (started) {
+            detach(true);
+            if (cfg.sock_role == VhostUserController::SockRole::SERVER)
+                ::unlink(sock_path);   // remove the tombstone; a CLIENT frontend
+                                       // owns its socket and is left alone
+            LOG_INFO("vhost-user device shut down, ",
+                     make_named_value("sock_path", (const char*)sock_path));
+        }
+        // blk.h's start() contract: an owned backend is deleted on shutdown, not
+        // only by the destructor. The object outlives a shutdown() and the next
+        // start() overwrites the pointer, so releasing it only at destruction leaks
+        // the first backend. Outside the `started` test on purpose: a detach()
+        // leaves the backend held while the device is not started, and shutdown()
+        // is still the call that ends the session. detach(true) has joined every
+        // serving coroutine by now, so nothing can touch it again.
+        release_backend();
         return 0;
     }
 
