@@ -97,6 +97,14 @@ int HeadersBase::insert(std::string_view key, std::string_view value, int allow_
     return 0;
 }
 
+std::string_view HeadersBase::serialized() const {
+    if (empty()) return {};
+    size_t bytes = 0;
+    for (auto entry = kv_begin(); entry != kv_end(); ++entry)
+        bytes = std::max(bytes, size_t(entry->second.offset()) + entry->second.size() + 2);
+    return {m_buf, bytes};
+}
+
 int HeadersBase::merge_duplicates(const HeadersBase& source) {
     if (source.empty()) return 0;
     if (&source == this)

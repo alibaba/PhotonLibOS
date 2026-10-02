@@ -98,6 +98,31 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     EXPECT_EQ("X-Dup: first\r\nx-dup: second\r\n", output.serialized());
 }
 
+TEST(headers, serialized_excludes_terminator_and_partial_body) {
+    for (auto fields : {"", "Z: last\r\nA: first\r\nX-Dup: one\r\nx-dup: two\r\nEmpty: \r\n"}) {
+        for (auto body : {"", "partial-body"}) {
+            char requestBuffer[1024], responseBuffer[1024];
+            Request request(requestBuffer, sizeof(requestBuffer));
+            auto requestText = std::string("POST / HTTP/1.1\r\n") + fields + "\r\n" + body;
+            memcpy(requestBuffer, requestText.data(), requestText.size());
+            ASSERT_EQ(0, request.append_bytes(requestText.size()));
+            EXPECT_EQ(fields, request.headers.serialized());
+            EXPECT_EQ(body, request.partial_body());
+
+            Response response(responseBuffer, sizeof(responseBuffer));
+            auto responseText = std::string("HTTP/1.1 200 OK\r\n") + fields + "\r\n" + body;
+            memcpy(responseBuffer, responseText.data(), responseText.size());
+            ASSERT_EQ(0, response.append_bytes(responseText.size()));
+            EXPECT_EQ(fields, response.headers.serialized());
+            EXPECT_EQ(body, response.partial_body());
+
+            CommonHeaders<1024> copied;
+            ASSERT_EQ(0, copied.merge(response.headers, 1));
+            EXPECT_EQ(fields, copied.serialized());
+        }
+    }
+}
+
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"
