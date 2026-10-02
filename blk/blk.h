@@ -642,7 +642,10 @@ class VhostUserController : public Object {
 public:
     enum class SockRole : uint8_t {
         SERVER,     // this process listens on sock_path; a path held by a LIVE backend is
-                    // EBUSY, a stale socket (dead listener) is unlinked and re-bound
+                    // EBUSY, a socket whose listener is CONFIRMED gone is unlinked and
+                    // re-bound. A probe that was denied or that timed out is not
+                    // confirmation, and neither is a node that is not a socket (EINVAL) --
+                    // start() refuses both rather than remove what it cannot prove is dead.
         CLIENT      // the initiator (e.g. QEMU with server=on) holds the listener; this process
                     // connects to it -- needed when the socket dir is owned/privileged (libvirt)
     };
@@ -701,6 +704,12 @@ public:
 // new_device() requires cfg.sock_path to sit inside it. There is no default: it names
 // a host-wide namespace (see the note at the top of this file). Bounded to 255 bytes,
 // so that what the controller stores is what it uses.
+//
+// A SERVER start also leaves one small non-socket file per socket in this
+// directory: the identity lock that keeps two daemons from taking over the same
+// path at once. It is created at start and is not removed at shutdown, and
+// list_orphans() does not report it, because that scan reads this directory as a
+// set of sockets.
 // nullptr/"" + errno (EINVAL), or too long + errno (ENAMETOOLONG).
 VhostUserController* new_vhost_user_controller(const char* sock_dir);
 
@@ -800,7 +809,11 @@ struct NbdConfig : BlkConfig {
                                     // set. port 0 lets the kernel choose; the listener
                                     // get_server_sockets() returns then carries it.
 
-    std::string unix_path;          // the unix socket path to serve on; empty = no UDS
+    std::string unix_path;          // the unix socket path to serve on; empty = no UDS.
+                                    // start() refuses the path rather than clear it when a
+                                    // live server holds it (EBUSY), when what is there is
+                                    // not a socket (EINVAL), or when probing it reached no
+                                    // verdict -- as for VhostUserController::SockRole.
 
     NbdConfig() = default;
     explicit NbdConfig(const BlkDevInfo& i) : BlkConfig(i) {}

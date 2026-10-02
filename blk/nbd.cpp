@@ -398,13 +398,18 @@ struct NbdDeviceImpl : NbdDevice {
             // blk.h start() contract: EBUSY when another live server holds the
             // endpoint. Unlinking a LIVE backend's socket would steal the path:
             // it keeps serving the orphaned inode while new clients come to us.
-            int live = unix_listener_live(cfg.unix_path.c_str());
-            if (live < 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd listener probe failed on ", cfg.unix_path);
-            if (live > 0)
-                LOG_ERROR_RETURN(EBUSY, -1, "nbd unix socket ` is served by another live backend",
-                                 cfg.unix_path);
-            ::unlink(cfg.unix_path.c_str());  // stale socket from a previous run
+            // A verdict that cannot be reached is refused the same way, and so is
+            // a node that is not a socket -- neither is evidence this path is ours.
+            int r = unix_endpoint_replaceable(cfg.unix_path.c_str());
+            if (r < 0)
+                LOG_ERRNO_RETURN(0, -1, "nbd reached no verdict on the unix socket ", cfg.unix_path);
+            if (r == 0)
+                LOG_ERRNO_RETURN(0, -1, "nbd refuses to take over the unix socket ", cfg.unix_path);
+            // No unlink of our own: bind() below goes through photon's socket
+            // server with autoremove on, which clears an existing node itself and
+            // only if it is a socket. So the removal inherits a type check this
+            // function would otherwise have to repeat, and a regular file at the
+            // path survives to fail the bind instead of being deleted.
             uds_server = net::new_uds_server(true);
             if (start_server(uds_server, uds_accept_th, [&] {
                     if (uds_server->bind(cfg.unix_path.c_str()) < 0)

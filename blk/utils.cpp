@@ -159,6 +159,18 @@ int devlock_unlink(const char* dir, const char* name) {
     return 0;
 }
 
+// Only these two prove that nobody is listening. Everything else a connect can
+// report leaves the question open, and an open question answered as "dead" is
+// what lets a caller unlink a socket another process is serving.
+static bool probe_says_no_listener(int err) {
+    return err == ECONNREFUSED || err == ENOENT;
+}
+
+// How long a connect may stay pending before the probe gives up. Long enough
+// that a listener which is merely slow to accept is still answered, short
+// enough that start() does not appear to hang.
+static constexpr uint64_t PROBE_TIMEOUT_US = 1000 * 1000;
+
 int unix_listener_live(const char* path) {
     size_t n = strlen(path);
     if (!n || n >= sizeof(sockaddr_un::sun_path))
@@ -176,14 +188,63 @@ int unix_listener_live(const char* path) {
     memcpy(un.sun_path, path, n + 1);
     if (::connect(fd, (sockaddr*)&un, sizeof(un)) == 0)
         return 1;
-    if (errno != EINPROGRESS && errno != EAGAIN)
-        return 0;   // ECONNREFUSED (dead listener), ENOENT, ENOTDIR, ...
-    if (wait_for_fd_writable(fd, Timeout(1000 * 1000)) < 0)
+    int err = errno;
+    if (probe_says_no_listener(err))
         return 0;
-    int err = 0;
+    if (err != EINPROGRESS && err != EAGAIN)
+        return -1;   // EACCES on a node whose mode denies us, ENOTDIR, ... Left
+                     // unlogged, as devlock_acquire leaves EBUSY: every caller has
+                     // an identity to name and this has only a path.
+    // A full accept queue is what EAGAIN means here, measured on a listener that
+    // was never accepting: the connect is refused this way rather than held, the
+    // socket stays unconnected, and its pending error stays clear -- so the answer
+    // cannot come from SO_ERROR below, which reads 0 on a socket that getpeername
+    // reports as ENOTCONN. It has to come from the refusal itself. Reading EAGAIN
+    // as live is also the safe reading if it ever means something else: it refuses
+    // a takeover instead of licensing a removal.
+    if (err == EAGAIN)
+        return 1;
+    // A connect genuinely in flight. Running the clock out is NOT the
+    // dead-listener answer, so it is refused rather than acted on. EBUSY rather
+    // than ETIMEDOUT because that is the refusal blk.h's start() contract
+    // documents, and "occupied by something we could not reach" is what a caller
+    // can act on.
+    if (wait_for_fd_writable(fd, Timeout(PROBE_TIMEOUT_US)) < 0) {
+        if (errno == ETIMEDOUT)
+            errno = EBUSY;
+        return -1;
+    }
+    err = 0;
     socklen_t el = sizeof(err);
-    ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
-    return err == 0 ? 1 : 0;
+    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) != 0)
+        return -1;
+    if (err == 0)
+        return 1;
+    if (probe_says_no_listener(err))
+        return 0;
+    errno = err;
+    return -1;
+}
+
+int unix_endpoint_replaceable(const char* path) {
+    struct stat st;
+    if (::stat(path, &st) != 0) {
+        if (errno == ENOENT)
+            return 1;   // nothing there, so nothing to preserve
+        return -1;      // cannot even stat it: no verdict, and no removal either
+    }
+    if (!S_ISSOCK(st.st_mode)) {
+        errno = EINVAL;
+        return 0;       // not a socket, so not a node this library ever made
+    }
+    int live = unix_listener_live(path);
+    if (live < 0)
+        return -1;
+    if (live > 0) {
+        errno = EBUSY;
+        return 0;
+    }
+    return 1;
 }
 
 int run_off_vcpu(TempDelegate<int> fn) {

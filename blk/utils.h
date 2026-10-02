@@ -137,12 +137,33 @@ int validate_scope_dir(const char* dir, const char* what);
 // unix socket endpoint probing
 // ----------------------------------------------------------------------------
 
-// Is a LIVE listener behind this unix socket path? 1 = live, 0 = stale or
-// absent, -1 = a local error (errno set). blk.h's start() contract needs the
-// distinction: a live endpoint is EBUSY (never steal another backend's socket
-// path), a stale one may be unlinked and re-bound. Runs on the photon vcpu
-// (nonblocking connect + fd wait).
+// Is a LIVE listener behind this unix socket path? 1 = live, 0 = CONFIRMED
+// absent or confirmed dead (nothing at the path, or a socket node with nobody
+// behind it), -1 = the probe reached no verdict and errno says why.
+//
+// That 0 / -1 boundary is the whole contract, and it is what makes the answer
+// safe to act on: only a proof that nobody is listening may licence removing the
+// node. A permission denial is not one -- it says nothing about what is behind
+// the mode bits -- and neither is a connect that never completes. A listener
+// whose accept queue is full does give a proof, but of a listener rather than of
+// its absence: it refuses the connect with EAGAIN at once.
+//
+// Runs on the photon vcpu (nonblocking connect + fd wait).
 int unix_listener_live(const char* path);
+
+// May this process take `path` over for its own listener? 1 = yes: nothing is
+// there, or a socket node whose listener is confirmed gone. 0 = no, and errno
+// says which refusal it is: EBUSY when a live listener is behind it, EINVAL
+// when the node is not a socket and so is not one this library ever made. -1 =
+// no verdict, with the probe's errno.
+//
+// Removes nothing, on purpose. What replacing a node means differs by caller:
+// one binds by hand and has to unlink first, the other binds through photon's
+// socket server, which unlinks an existing node itself and only if it is a
+// socket. The decision is the shared part; the action belongs to whoever knows
+// how it binds. So -1 means "remove nothing", which is the one answer a caller
+// about to unlink needs and cannot get from the probe alone.
+int unix_endpoint_replaceable(const char* path);
 
 // ----------------------------------------------------------------------------
 // blocking syscalls this process's own coroutines must answer

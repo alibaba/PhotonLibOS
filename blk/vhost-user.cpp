@@ -293,6 +293,33 @@ struct MemTable {
     }
 };
 
+// The identity lock file name for a socket path, inside the controller's
+// directory. The socket's own basename cannot serve as it is: devlock_acquire
+// opens with O_CREAT|O_RDWR, and opening a unix socket node that way fails ENXIO.
+// So the name is affixed, in the same shape vduse gives its tombstones.
+//
+// Derived from the BASENAME, which assumes what this controller already assumes
+// everywhere else -- that its directory is one flat level of sockets, which is
+// exactly what its orphan scan reads it as. Two sockets with the same basename in
+// different subdirectories of one scope would share a lock and refuse each other.
+// That is a false refusal rather than a missed one, and it errs the way a lock
+// should.
+static constexpr size_t VHU_LOCK_BUF = 256;
+
+static int vhu_lock_name(const char* sock_path, char* buf, size_t n) {
+    const char* base = strrchr(sock_path, '/');
+    base = base ? base + 1 : sock_path;
+    if (!*base)
+        LOG_ERROR_RETURN(EINVAL, -1, "vhost-user socket path has no basename: ", sock_path);
+    // A basename is at most SUN_PATH_MAX-1 and the affixes add nine bytes, so the
+    // digest case vduse needs for over-long names cannot arise here. The bound is
+    // checked anyway: a truncated name would lock a DIFFERENT identity, which is
+    // the one failure a lock must not have.
+    if (snprintf(buf, n, "vhu-%s.lock", base) >= (int)n)
+        LOG_ERROR_RETURN(ENAMETOOLONG, -1, "vhost-user socket basename too long to lock: ", base);
+    return 0;
+}
+
 struct VhostUserDeviceImpl : IBlkDevice {
     VhostUserController::Config cfg;
 
@@ -406,6 +433,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // char array deduces a reference to the whole array and alog then emits all
     // SUN_PATH_MAX bytes, path followed by NUL padding (measured).
     char sock_path[SUN_PATH_MAX] = {};   // bounded by sockaddr_un::sun_path
+    // The controller's directory, which is where this device's identity lock
+    // lives. A copy, not a back-pointer: a device may outlive the controller that
+    // made it, and do_listen() needs the directory for as long as serving does.
+    char lock_dir[SCOPE_DIR_BUF] = {};
 
     bool own_backend = false;
     bool started = false;
@@ -417,11 +448,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // plus wake/interrupt/join instead. So this needs no atomic.
     bool stopping = false;
 
-    explicit VhostUserDeviceImpl(const VhostUserController::Config& c) : cfg(c) {
+    explicit VhostUserDeviceImpl(const VhostUserController::Config& c, const char* dir) : cfg(c) {
         sector_shift = cfg.info.sector_size_shift;
         read_only = cfg.read_only;
         capacity_sectors = cfg.info.size >> 9;
         snprintf(sock_path, sizeof(sock_path), "%s", cfg.sock_path.c_str());
+        // bounded: the factory checked the length before it got here, and a
+        // truncated directory would lock in a DIFFERENT one than the scan reads
+        snprintf(lock_dir, sizeof(lock_dir), "%s", dir);
 
         // Clamped, not rejected, and 0 means "you choose" -- the same reading the
         // ublk transport gives this field, so one BlkConfig means the same thing
@@ -1357,33 +1391,62 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // ----- connection setup -----
 
     int do_listen() {
-        // blk.h start() contract: EBUSY when another live process is serving
-        // this identity -- do NOT steal a live backend's socket path (it would
-        // keep serving the orphaned inode while new frontends come to us). A
-        // full backlog or a dead-slow listener times out and counts as stale,
-        // the same heuristic the controller's list_orphans() uses.
-        int live = unix_listener_live(sock_path);
-        if (live < 0)
-            LOG_ERRNO_RETURN(0, -1, "vhost-user listener probe failed on ", sock_path);
-        if (live > 0)
-            LOG_ERROR_RETURN(EBUSY, -1, "vhost-user socket ` is served by another live backend",
-                             sock_path);
-        ::unlink(sock_path);   // stale or absent: ours to (re)create
+        // The identity lock, taken by EVERY server start -- including the ones that
+        // go on to bind a path nothing held. A lock that only the takeover path
+        // took would not be held by the process that WON the path, so a loser would
+        // still be free to read that node as dead and remove it.
+        //
+        // Held until listen() has succeeded, not merely until bind() has: a socket
+        // that is bound but not yet listening answers the probe with ECONNREFUSED,
+        // which is indistinguishable from a listener that died. EBUSY here is the
+        // same refusal blk.h documents for a live identity -- another daemon is
+        // between claiming this name and listening on it.
+        char lname[VHU_LOCK_BUF];
+        if (vhu_lock_name(sock_path, lname, sizeof(lname)) < 0)
+            return -1;   // vhu_lock_name logged it
+        int lock_fd = -1;
+        if (devlock_acquire(lock_dir, lname, &lock_fd) < 0)
+            LOG_ERRNO_RETURN(0, -1, "vhost-user cannot claim the socket ", sock_path);
+        DEFER(devlock_release(lock_fd));
+
         int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0)
             LOG_ERRNO_RETURN(0, -1, "vhost-user socket failed");
+        bool owned = false;
+        DEFER({ if (!owned) ::close(fd); });
         sockaddr_un un;
         memset(&un, 0, sizeof(un));
         un.sun_family = AF_UNIX;
         memcpy(un.sun_path, sock_path, strlen(sock_path) + 1);   // start() bounded it
+        // Bind BEFORE asking whether the path is ours, because bind() is the one
+        // atomic step available here. When it succeeds nothing was probed and
+        // nothing was removed, which is the whole of the absent-path case and the
+        // common one. Only a path something else already holds answers EADDRINUSE,
+        // and only then does this have to decide whether that node may be taken
+        // over at all.
         if (::bind(fd, (sockaddr*)&un, sizeof(un)) < 0) {
-            ::close(fd);
-            LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed: ", sock_path);
+            if (errno != EADDRINUSE)
+                LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed: ", sock_path);
+            // blk.h start() contract: EBUSY when another live process is serving
+            // this identity. Do NOT steal a live backend's socket path -- it keeps
+            // serving the orphaned inode while new frontends come to us. A verdict
+            // that cannot be reached is refused the same way, and so is a node that
+            // is not a socket: neither is evidence that this path is ours to take.
+            int r = unix_endpoint_replaceable(sock_path);
+            if (r < 0)
+                LOG_ERRNO_RETURN(0, -1, "vhost-user reached no verdict on the socket ", sock_path);
+            if (r == 0)
+                LOG_ERRNO_RETURN(0, -1, "vhost-user refuses to take over the socket ", sock_path);
+            // A socket node with no listener behind it. ENOENT here is a race --
+            // something else removed it since the verdict -- and is the state the
+            // bind below wants anyway.
+            if (::unlink(sock_path) != 0 && errno != ENOENT)
+                LOG_ERRNO_RETURN(0, -1, "failed to remove the stale vhost-user socket ", sock_path);
+            if (::bind(fd, (sockaddr*)&un, sizeof(un)) < 0)
+                LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed after clearing ", sock_path);
         }
-        if (::listen(fd, 1) < 0) {
-            ::close(fd);
+        if (::listen(fd, 1) < 0)
             LOG_ERRNO_RETURN(0, -1, "vhost-user listen failed: ", sock_path);
-        }
         // bind() created the node with 0777 & ~umask; chmod it to what the caller
         // asked for. Not derived from umask: that has no read-only query, and the
         // set-and-restore which emulates one changes the mask of the whole process
@@ -1391,6 +1454,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // is unmasked.
         if (::chmod(sock_path, (mode_t)cfg.sock_mode) < 0)
             LOG_WARN("vhost-user chmod failed on `, ", sock_path, ERRNO());
+        owned = true;
         listen_fd = fd;
         return 0;
     }
@@ -1666,9 +1730,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
         if (listen_fd >= 0) {
             ::close(listen_fd);
             listen_fd = -1;
-            // only OUR listener's socket file: when do_listen failed at the
-            // live-probe/bind, the path belongs to another backend -- do not
-            // unlink it (same invariant as ublk's rollback-vs-DEL_DEV)
+            // only OUR listener's socket file: when do_listen refused the path or
+            // failed to bind it, listen_fd is still -1 and the node there belongs
+            // to someone else -- do not unlink it (same invariant as ublk's
+            // rollback-vs-DEL_DEV)
             if (cfg.sock_role == VhostUserController::SockRole::SERVER)
                 ::unlink(sock_path);
         }
@@ -1714,7 +1779,7 @@ struct VhostUserControllerImpl : VhostUserController {
         if (!inside(sock_dir, cfg.sock_path.c_str()))
             LOG_ERROR_RETURN(EINVAL, nullptr, "socket ` is not inside this controller's directory ",
                              cfg.sock_path.c_str(), sock_dir);
-        return new VhostUserDeviceImpl(cfg);
+        return new VhostUserDeviceImpl(cfg, sock_dir);
     }
 
     // Orphan scan: a vhost-user tombstone is a socket file in our directory whose

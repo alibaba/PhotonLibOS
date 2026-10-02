@@ -28,6 +28,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>   // thread_create11 for the stress clients
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -429,6 +430,43 @@ TEST_F(NbdTest, unix_path_mode) {
     EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
     EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+}
+
+// The same refusal on the nbd side, where the removal used to be an explicit
+// unlink of our own rather than something bind() did. A caller's ordinary file
+// at unix_path was deleted and a socket bound in its place, and start() then
+// reported success -- so the assertion is not only that the file survived but
+// that the start was refused.
+TEST_F(NbdTest, unix_path_holding_a_regular_file_is_refused_and_preserved) {
+    static const char WANT[] = "not a socket, and not ours to remove";
+    const char* path = "/tmp/photon-blk-nbd-regular-file";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    int fd = ::open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ((ssize_t) sizeof(WANT), ::write(fd, WANT, sizeof(WANT)));
+    ::close(fd);
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EINVAL, errno);
+
+    struct stat st;
+    ASSERT_EQ(0, ::stat(path, &st));
+    EXPECT_TRUE(S_ISREG(st.st_mode));
+    EXPECT_EQ(sizeof(WANT), (size_t) st.st_size);
+    fd = ::open(path, O_RDONLY);
+    ASSERT_GE(fd, 0);
+    DEFER(::close(fd));
+    char back[sizeof(WANT)] = {};
+    EXPECT_EQ((ssize_t) sizeof(WANT), ::read(fd, back, sizeof(back)));
+    EXPECT_EQ(0, memcmp(WANT, back, sizeof(WANT)));
 }
 
 TEST_F(NbdTest, both_endpoints) {

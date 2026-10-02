@@ -46,6 +46,7 @@ limitations under the License.
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/eventfd.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -1298,6 +1299,171 @@ TEST_F(VhostUserTest, stale_socket_takeover) {
         return 0;
     });
     EXPECT_EQ(0, rc);
+}
+
+// ---------------------------------------------------------------------------
+// What start() may remove, and what it must leave alone
+//
+// Taking over a path means unlinking whatever is there, so the question "is this
+// node a dead listener of our own?" has to be answered before the unlink and not
+// after it. The probe alone cannot answer it: a connect to a regular file gives
+// ECONNREFUSED, which is exactly what a dead listener gives, so "nobody answered"
+// is not the same fact as "this is a socket we may delete". These cases hold the
+// two apart, and each one asserts the node SURVIVED -- the refusal is worth
+// nothing if the removal already happened.
+// ---------------------------------------------------------------------------
+
+// The reviewer's first repro. A caller's ordinary file at the configured path
+// was deleted and a socket bound in its place, because a connect to a regular
+// file reads as "no listener".
+TEST_F(VhostUserTest, a_regular_file_at_the_socket_path_is_refused_and_preserved) {
+    static const char WANT[] = "not a socket, and not ours to remove";
+    int fd = ::open(SOCK_PATH, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ((ssize_t) sizeof(WANT), ::write(fd, WANT, sizeof(WANT)));
+    ::close(fd);
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EINVAL, errno);
+
+    // survived, same type, same bytes -- not merely "a node is still there"
+    struct stat st;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &st));
+    EXPECT_TRUE(S_ISREG(st.st_mode));
+    EXPECT_EQ(sizeof(WANT), (size_t) st.st_size);
+    fd = ::open(SOCK_PATH, O_RDONLY);
+    ASSERT_GE(fd, 0);
+    DEFER(::close(fd));
+    char back[sizeof(WANT)] = {};
+    EXPECT_EQ((ssize_t) sizeof(WANT), ::read(fd, back, sizeof(back)));
+    EXPECT_EQ(0, memcmp(WANT, back, sizeof(WANT)));
+}
+
+// Same shape, and a different errno before the type check existed: the unlink of
+// a directory fails EISDIR, so the old path reached bind() and reported its
+// EADDRINUSE rather than naming the real problem.
+TEST_F(VhostUserTest, a_directory_at_the_socket_path_is_refused_and_preserved) {
+    ::rmdir(SOCK_PATH);
+    ASSERT_EQ(0, ::mkdir(SOCK_PATH, 0755));
+    DEFER(::rmdir(SOCK_PATH));   // the fixture's cleanup unlinks, which a dir survives
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EINVAL, errno);
+
+    struct stat st;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &st));
+    EXPECT_TRUE(S_ISDIR(st.st_mode));
+}
+
+// The reviewer's second repro: a bound, listening socket whose mode denies the
+// connect. The probe is refused, and a refusal is not a verdict -- the old code
+// read it as "dead" and replaced a socket another process was serving.
+//
+// Which refusal this witnesses depends on the uid, and the assertions are chosen
+// so that they do not: root is allowed through the mode bits, so under root the
+// probe reaches the listener and the answer is EBUSY, and this case then pins
+// the outcome rather than reproducing the failure. Under any other uid the
+// connect is denied, the answer is "no verdict", and the case is red against the
+// old code. What both have to agree on is that the node was not replaced, which
+// is what the inode identity states.
+TEST_F(VhostUserTest, a_listener_the_probe_cannot_reach_is_not_taken_over) {
+    int lfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_GE(lfd, 0);
+    DEFER(::close(lfd));
+    sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", SOCK_PATH);
+    ASSERT_EQ(0, ::bind(lfd, (sockaddr*)&un, sizeof(un)));
+    ASSERT_EQ(0, ::listen(lfd, 1));
+    ASSERT_EQ(0, ::chmod(SOCK_PATH, 0000));
+    DEFER(::chmod(SOCK_PATH, 0600));   // so the fixture's cleanup can remove it
+
+    struct stat before;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &before));
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_TRUE(errno == EBUSY || errno == EACCES) << "errno=" << errno;
+
+    struct stat after;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &after));
+    EXPECT_TRUE(S_ISSOCK(after.st_mode));
+    EXPECT_EQ(before.st_ino, after.st_ino);   // not replaced, whatever the refusal
+}
+
+// The identity lock, witnessed without naming it: what a start leaves behind in
+// the controller's directory is discovered by looking rather than by restating
+// the naming rule, so a change to that rule cannot quietly make this case
+// vacuous. Holding a POSIX exclusive lock on the discovered entry then has to
+// make the next start of the same identity fail, which is the whole of what stops
+// two daemons -- both told the same path is confirmed dead -- from each unlinking
+// the other's fresh node.
+TEST_F(VhostUserTest, start_claims_an_identity_lock_and_refuses_a_held_one) {
+    auto nonsockets = [](std::vector<std::string>& out) {
+        out.clear();
+        if (DIR* d = ::opendir(SOCK_DIR)) {
+            struct dirent* e;
+            char p[PATH_MAX];
+            struct stat st;
+            while ((e = readdir(d))) {
+                if (e->d_name[0] == '.') continue;
+                snprintf(p, sizeof(p), "%s/%s", SOCK_DIR, e->d_name);
+                if (::stat(p, &st) == 0 && !S_ISSOCK(st.st_mode))
+                    out.push_back(p);
+            }
+            ::closedir(d);
+        }
+    };
+    std::vector<std::string> before, after;
+    nonsockets(before);
+    ASSERT_TRUE(before.empty());   // the fixture cleared the directory
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    nonsockets(after);
+    ASSERT_EQ((size_t) 1, after.size());   // exactly one claim, and it is no socket
+    std::string lock = after[0];
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(0, ::access(lock.c_str(), F_OK));   // the claim outlives the session
+
+    // Held the way another daemon would hold it: a bare POSIX exclusive lock, not
+    // a call into the implementation, so this is an independent peer of it rather
+    // than a restatement.
+    int lfd = ::open(lock.c_str(), O_RDWR);
+    ASSERT_GE(lfd, 0);
+    DEFER(::close(lfd));
+    ASSERT_EQ(0, ::flock(lfd, LOCK_EX | LOCK_NB));
+
+    auto dev2 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    errno = 0;
+    EXPECT_EQ(-1, dev2->start(file));
+    EXPECT_EQ(EBUSY, errno);
+    // and the refused start bound nothing: the loser leaves the path alone
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
 }
 
 // The default is a fixed 0600, not a umask-derived 0666. The observation point
