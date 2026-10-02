@@ -1298,22 +1298,27 @@ struct VduseDeviceImpl : IBlkDevice {
             // while dev_fd is still open); with drain_backlog the vq loop also
             // keeps fetching until the avail ring is empty (orderly handover)
             vq_backlog_drain(i, drain_backlog);
-            // The device-level flag, and deliberately not at the top of this
-            // function: it is what makes msg_loop exit, so from here until that
-            // loop is joined the kernel's messages go unanswered. Hoisting it
-            // above the wait would spend an unbounded wait with nobody replying,
-            // which the destructor's fallback cannot afford -- it is the one
-            // caller that still has a consumer attached, so the kernel really is
-            // waiting on us, for msg_timeout seconds per message. It still has to
-            // precede the msg_th interrupt: msg_loop treats an interrupt that
-            // finds the flag false as EINTR and loops again, so the join would
-            // never return.
-            stopping = true;
             // from here the engine leaves in-flight requests uncompleted
             // (handover contract)
             vqs[i]->srv.stopping.store(true, std::memory_order_relaxed);
             vq_stop(i);   // join the vq loop: no further dispatch
         }
+        // The device-level flag, deliberately after EVERY queue has drained and
+        // deliberately not at the top of this function: it is what makes msg_loop
+        // exit, so from here until that loop is joined the kernel's messages go
+        // unanswered. Hoisting it above the waits would spend an unbounded wait
+        // with nobody replying, which the destructor's fallback cannot afford -- it
+        // is the one caller that still has a consumer attached, so the kernel really
+        // is waiting on us, for msg_timeout seconds per message.
+        //
+        // "Above the waits" includes inside the loop they are in. Per queue this
+        // used to be drain, then flag, then stop, so the flag was set on the first
+        // iteration and every later queue drained with msg_loop already silent --
+        // the same unbounded wait with nobody replying, reached by a loop rather
+        // than by a hoist, and only on a multiqueue device. It still has to precede
+        // the msg_th interrupt: msg_loop treats an interrupt that finds the flag
+        // false as EINTR and loops again, so the join would never return.
+        stopping = true;
         if (msg_th) {
             photon::thread_interrupt(msg_th);
             photon::thread_join((photon::join_handle*)msg_th);

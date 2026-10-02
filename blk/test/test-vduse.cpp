@@ -259,6 +259,27 @@ static int virtio_feature_bit(const std::string& kname, uint32_t bit) {
     return strlen(buf) > bit ? (buf[bit] == '1' ? 1 : 0) : -1;
 }
 
+// The kernel's own per-device bound on how long it waits for a daemon that has gone
+// quiet, in microseconds. Read rather than spelled: the transport writes
+// BlkConfig::timeout into this same attribute at start(), so what comes back is the
+// value the device under test is actually running with, and it is the length of the
+// stall that silencing the message loop early can produce. Returns 0 when the
+// attribute is missing or unreadable, which the one caller treats as a failed case
+// rather than substituting a constant -- a bound that was never measured cannot
+// witness anything.
+static uint64_t msg_timeout_us(const char* name) {
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/vduse/%s/msg_timeout", name);
+    FILE* f = ::fopen(path, "r");
+    if (!f)
+        return 0;
+    DEFER(::fclose(f));
+    char buf[32] = {};
+    if (!::fgets(buf, sizeof(buf), f))
+        return 0;
+    return strtoull(buf, nullptr, 10) * 1000 * 1000;
+}
+
 // virtio-blk's multiqueue feature bit (virtio 1.2 §5.2) and the transport's
 // queue clamp, spelled out here on purpose -- the suite family's standing rule
 // (see test-vhost-user.cpp's PEER_MAX_QUEUES): a suite must not reach into
@@ -1424,6 +1445,90 @@ TEST_F(VduseTest, multiqueue_without_a_pool) {
     EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse mq, no pool", 8));
     EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// The handover this suite already trusts for ONE queue (daemon_restart_io), on four
+// queues over a pool: a consumer attached, a writer with completed iterations behind
+// it, then detach(false) and a second daemon adopting and serving again. What it adds
+// is the per-queue teardown loop on a multiqueue device -- the loop whose device-level
+// `stopping` assignment C1 moved out of it -- with real in-flight requests to wait for
+// and a real run_on_home hop per queue between the serving vcpus.
+//
+// IT DOES NOT DETECT C1, and the reason is worth stating rather than leaving to be
+// found. C1's symptom is that the message loop goes quiet while the queues after the
+// first are still draining, and the only thing that notices a quiet message loop is
+// the kernel, waiting on a message nobody answers. Witnessing it needs a message to
+// arrive inside that window and a wait that outlasts msg_timeout -- and a wait that
+// outlasts msg_timeout with a consumer attached is the shape that puts a task in D
+// state on this host, which no case may produce. So this asserts the weaker thing that
+// IS safe: the multiqueue handover completes, and completes inside the kernel's own
+// tolerance, so a teardown that spends even one msg_timeout stalled goes red. The
+// ordering itself is pinned separately, by a structural check over stop_serving that
+// is proven able to fail on each of the shapes it rejects.
+//
+// detach(false), not detach(true): vq_backlog_drain re-reads the avail index on every
+// pass, so while a writer is still submitting the target keeps moving and the wait has
+// no end. daemon_restart_io makes the same choice for the same reason. A quiesced
+// consumer would make detach(true) bounded, but with nothing left in the ring its drain
+// branch exits on the first test, so it would cover the argument being passed and not
+// the wait -- not worth a third daemon.
+TEST_F(VduseTest, multiqueue_shutdown_hands_over_inflight_io_promptly) {
+    if (skip_reason) return;
+    test::TestPool pool(4);
+    test::RecordingFile rec(file);
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;
+    cfg.pool = pool;
+    auto dev1 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev1);
+    DEFER(delete dev1);
+    ASSERT_EQ(0, dev1->start(&rec));
+    // Read after start(), which is the call that writes it: this is the value the
+    // device under test is actually running with, not a constant copied from the
+    // default. A kernel without the attribute fails the case instead of substituting
+    // one, because a bound nobody measured cannot witness a stall.
+    uint64_t bound_us = msg_timeout_us(TEST_NAME);
+    ASSERT_NE(0u, bound_us);
+    DEFER(vdpa_detach(TEST_NAME));   // registered BEFORE the attach: vdpa_attach's
+                                     // timeout branch returns "" with the consumer
+                                     // already added, so the ASSERT below is itself
+                                     // inside the window
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    ASSERT_EQ(4, test::count_mq_dirs(kname));
+
+    test::BackgroundWriter w;
+    ASSERT_EQ(0, w.start(node, {IO_OFF, IMG_SIZE - IO_OFF, 64 << 10}));
+    DEFER(w.stop());   // safety net; the explicit stop below is what normally runs
+    // A writer that provably reached the device. Without the iteration count this case
+    // could pass with the child never having submitted anything, and a teardown with
+    // nothing in flight is not the teardown under test.
+    ASSERT_TRUE(w.wait_iters(4));
+    uint64_t before = w.iters();
+
+    uint64_t t0 = photon::now;
+    ASSERT_EQ(0, dev1->detach(false));
+    uint64_t elapsed_us = photon::now - t0;
+    LOG_INFO("vduse multiqueue handover across 4 queues: ", VALUE(elapsed_us), VALUE(bound_us));
+    EXPECT_LT(elapsed_us, bound_us);
+
+    BlkConfig cfg2(make_info());
+    cfg2.queues = 4;
+    cfg2.pool = pool;
+    auto dev2 = ctl->new_device(cfg2);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    DEFER(dev2->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // fires BEFORE dev2->shutdown: the consumer goes
+                                     // while the daemon still serves
+    ASSERT_EQ(0, dev2->start(file));   // adoption: the blocked writes resume
+    ASSERT_TRUE(w.wait_iters(before + 4));
+    EXPECT_EQ(0, w.errors());
+    // stop the writer BEFORE the DEFERs fire: it holds the device open, and the
+    // consumer detach + shutdown must not race a live writer
+    w.stop();
 }
 
 // WorkPool's cursor is `vcpu_index++ % size`, so a zero-size pool is a SIGFPE the
