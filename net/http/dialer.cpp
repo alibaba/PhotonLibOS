@@ -185,7 +185,7 @@ public:
         delete gen;
     }
 
-protected:
+public:
     photon::spinlock m_lock;
     Gen* m_current = nullptr;
     Gen* m_generations = nullptr; // includes unpublished generations draining
@@ -255,7 +255,7 @@ public:
         if (m_ownership) delete m_underlay;
     }
 
-protected:
+public:
     IDialer* m_underlay;
     bool m_ownership;
 };
@@ -301,7 +301,7 @@ public:
                          VALUE(host));
     }
 
-protected:
+public:
     std::vector<IPAddr> m_bind_ips;
     std::unique_ptr<ISocketClient> m_tcp;
     std::unique_ptr<ISocketClient> m_uds;
@@ -347,7 +347,7 @@ public:
         return tls;
     }
 
-protected:
+public:
     TLSContext* m_context;
     IDialer* m_underlay;
     TLSLayer m_layer;
@@ -383,7 +383,7 @@ public:
         return owner.release();
     }
 
-protected:
+public:
     int handshake(ISocketStream* stream, const DialTarget& target) {
         char buf[kTunnelReqSize];
         Request request(buf, sizeof(buf));
@@ -482,7 +482,7 @@ public:
         // Preserve the pooled stream's original introspection/FD semantics.
         return m_underlay->get_underlay_object(recursion);
     }
-private:
+public:
     std::shared_ptr<PoolDialerState> m_state;
 };
 
@@ -510,7 +510,7 @@ public:
         return result;
     }
 
-protected:
+public:
     std::shared_ptr<PoolDialerState> m_state;
 
     static std::string make_key(const DialTarget& target) {
@@ -551,7 +551,7 @@ public:
         return dialer->dial(target, timeout);
     }
 
-protected:
+public:
     VCPULocal<IDialer> m_local;
 };
 

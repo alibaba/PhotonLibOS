@@ -82,7 +82,7 @@ public:
     ~OwnedResolverLease() {
         m_state->released.store(true, std::memory_order_release);
     }
-private:
+public:
     std::shared_ptr<ResolverOwnership> m_state;
     OwnedResolverSlot* make_slot() { return new OwnedResolverSlot(m_state); }
 };

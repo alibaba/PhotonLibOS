@@ -113,7 +113,7 @@ public:
         return inner->getpeername(path, count);
     }
 
-private:
+public:
     std::unique_ptr<StringSocketStream> inner;
     int* destroyed;
     uint64_t timeout_value = -1ULL;
@@ -127,30 +127,38 @@ public:
         return new TrackedStream(destroyed);
     }
 
-private:
+public:
     int* destroyed;
 };
 
-struct LocalState;
-
-class LocalDialer : public IDialer {
-public:
-    LocalState* state;
-    vcpu_base* owner;
-
-    explicit LocalDialer(LocalState* state);
-    ~LocalDialer() override;
-    ISocketStream* dial(const DialTarget&, uint64_t) override;
-};
-
-struct LocalState {
+struct LocalCounters {
     std::atomic<int> attempts{0};
     std::atomic<int> created{0};
     std::atomic<int> destroyed{0};
     std::atomic<int> calls{0};
     std::atomic<int> wrong_vcpu_destructions{0};
     std::atomic<bool> fail{false};
+};
 
+class LocalDialer : public IDialer {
+public:
+    LocalCounters* state;
+    vcpu_base* owner;
+
+    explicit LocalDialer(LocalCounters* state)
+        : state(state), owner(photon::get_vcpu()) {}
+    ~LocalDialer() override {
+        if (owner != photon::get_vcpu())
+            state->wrong_vcpu_destructions.fetch_add(1, std::memory_order_relaxed);
+        state->destroyed.fetch_add(1, std::memory_order_relaxed);
+    }
+    ISocketStream* dial(const DialTarget&, uint64_t) override {
+        state->calls.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+};
+
+struct LocalState : LocalCounters {
     IDialer* make() {
         attempts.fetch_add(1, std::memory_order_relaxed);
         if (fail.load(std::memory_order_relaxed)) return nullptr;
@@ -158,20 +166,6 @@ struct LocalState {
         return new LocalDialer(this);
     }
 };
-
-LocalDialer::LocalDialer(LocalState* state)
-    : state(state), owner(photon::get_vcpu()) {}
-
-LocalDialer::~LocalDialer() {
-    if (owner != photon::get_vcpu())
-        state->wrong_vcpu_destructions.fetch_add(1, std::memory_order_relaxed);
-    state->destroyed.fetch_add(1, std::memory_order_relaxed);
-}
-
-ISocketStream* LocalDialer::dial(const DialTarget&, uint64_t) {
-    state->calls.fetch_add(1, std::memory_order_relaxed);
-    return nullptr;
-}
 
 } // namespace
 
