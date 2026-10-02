@@ -216,7 +216,7 @@ int HeadersBase::reset_host(int delta, std::string_view host) {
 
 HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
     auto begin = kv_begin();
-    if ((char*)(begin - 1) <= m_buf + m_buf_size)
+    if ((char*)(begin - 1) < m_buf + m_buf_size)
         LOG_ERROR_RETURN(ENOBUFS, nullptr, "no buffer");
     auto it = std::lower_bound(begin, kv_end(), kv, HA(this));
 #ifndef __clang__
@@ -234,7 +234,7 @@ HeadersBase::KV* HeadersBase::kv_add_sort(KV kv) {
 
 HeadersBase::KV* HeadersBase::kv_add(KV kv) {
     auto begin = kv_begin();
-    if ((char*)(begin - 1) <= m_buf + m_buf_size)
+    if ((char*)(begin - 1) < m_buf + m_buf_size)
         LOG_ERROR_RETURN(ENOBUFS, nullptr, "no buffer");
     m_kv_size++;
     *(begin - 1) = kv;

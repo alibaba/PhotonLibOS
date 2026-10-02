@@ -29,6 +29,7 @@ limitations under the License.
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <gflags/gflags.h>
 
 #include "../../socket.h"
@@ -96,6 +97,34 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     CommonHeaders<128> output;
     ASSERT_EQ(0, output.merge(input, 1));
     EXPECT_EQ("X-Dup: first\r\nx-dup: second\r\n", output.serialized());
+
+    CommonHeaders<256> seed;
+    ASSERT_EQ(0, seed.insert("X-Repeated", "existing"));
+    auto exactCapacity = seed.size() + source.serialized().size() +
+                         seed.kv_size() + source.kv_size();
+    std::vector<char> exactBuffer(exactCapacity);
+    Headers exact;
+    ASSERT_EQ(0, exact.reset(exactBuffer.data(), exactBuffer.size()));
+    ASSERT_EQ(0, exact.insert("X-Repeated", "existing"));
+    ASSERT_EQ(0, exact.merge(source, 1));
+    EXPECT_EQ(expected, exact.serialized());
+    EXPECT_EQ(0U, exact.space_remain());
+    duplicates = exact.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    EXPECT_EQ("last", exact["A-First"]);
+    EXPECT_EQ("first", exact["Z-Last"]);
+
+    std::string parsedText = "X: value\r\n\r\n";
+    std::vector<char> parsedExactBuffer(parsedText.size() +
+                                        sizeof(HeadersBase::KV));
+    memcpy(parsedExactBuffer.data(), parsedText.data(), parsedText.size());
+    Headers parsedExact;
+    ASSERT_EQ(0, parsedExact.reset(parsedExactBuffer.data(),
+                                  parsedExactBuffer.size(),
+                                  parsedText.size()));
+    EXPECT_EQ("X: value\r\n", parsedExact.serialized());
+    EXPECT_EQ("value", parsedExact["X"]);
+    EXPECT_EQ(0U, parsedExact.space_remain());
 }
 
 TEST(headers, serialized_excludes_terminator_and_partial_body) {
