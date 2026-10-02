@@ -398,6 +398,53 @@ TEST(IovaRangeCovers, containment_is_wrap_free_and_refuses_a_zero_length) {
     EXPECT_EQ((int) (sizeof(rows) / sizeof(rows[0])), want_true + want_false);
 }
 
+// The other half of an iotlb invalidation: which rings a replaced range covers. The
+// ring is `a` and the update is `b`. The rows that carry the finding are the three
+// shapes one message type can arrive in -- the kernel's whole-address-space
+// replacement, a subrange that covers one queue's vring, and the single byte at
+// IOVA 0, which is a legal update that a test for "start == 0 && last == 0" reads as
+// the first of the three. Deciding by intersection answers all three, and the empty
+// range {1, 0} is how "this queue has no ring published" says it does not intersect
+// anything, including the whole space.
+TEST(IovaRangesIntersect, an_invalidated_range_finds_the_rings_it_covers) {
+    struct Row { uint64_t a0, a1, b0, b1; bool want; const char* why; };
+    static const Row rows[] = {
+        {0x2000, 0x2fff, 0, UINT64_MAX, true,  "the kernel's full replacement covers any ring"},
+        {0x2000, 0x2fff, 0x2000, 0x2fff, true,  "a subrange that is exactly the ring"},
+        {0x2000, 0x2fff, 0x1000, 0x2000, true,  "overlaps only the ring's first byte"},
+        {0x2000, 0x2fff, 0x2fff, 0x4000, true,  "overlaps only the ring's last byte"},
+        {0x2000, 0x2fff, 0x2800, 0x2900, true,  "wholly inside the ring"},
+        {0x2000, 0x2fff, 0x1000, 0x1fff, false, "ends one below the ring"},
+        {0x2000, 0x2fff, 0x3000, 0x3fff, false, "starts one above the ring"},
+        // The row the old spelling got wrong in the other direction: a one-byte
+        // update at IOVA 0 is not a full replacement, and retiring every queue for
+        // it drops completions on rings that are nowhere near it.
+        {0x2000, 0x2fff, 0, 0, false, "one byte at IOVA 0 misses a ring above it"},
+        {0, 0x0fff, 0, 0, true,  "one byte at IOVA 0 does cover a ring starting there"},
+        {1, 0, 0, UINT64_MAX, false, "no ring published, so not even the whole space hits"},
+        {1, 0, 1, 0, false, "two empty ranges do not intersect each other"},
+        {0, 0, 0, 0, true,  "one byte at IOVA 0 against itself"},
+        {UINT64_MAX - 3, UINT64_MAX, 0, UINT64_MAX, true, "a ring at the top of the space"},
+        {UINT64_MAX, UINT64_MAX - 1, 0, UINT64_MAX, false, "a reversed ring range is empty"},
+        {0x2000, 0x2fff, 0x2fff, 0x2000, false, "the update's own range reversed is empty"},
+    };
+    int want_true = 0, want_false = 0;
+    for (const auto& r : rows) {
+        r.want ? want_true++ : want_false++;
+        EXPECT_EQ(r.want, iova_ranges_intersect(r.a0, r.a1, r.b0, r.b1))
+            << r.why << ": ring [" << r.a0 << "," << r.a1 << "] update ["
+            << r.b0 << "," << r.b1 << "]";
+        // Symmetry is part of the claim: "the update covers the ring" and "the ring
+        // lies in the update" are one question, and an asymmetric answer would mean
+        // the predicate is really testing containment of one side.
+        EXPECT_EQ(r.want, iova_ranges_intersect(r.b0, r.b1, r.a0, r.a1))
+            << "not symmetric: " << r.why;
+    }
+    EXPECT_GT(want_true, 0);
+    EXPECT_GT(want_false, 0);
+    EXPECT_EQ((int) (sizeof(rows) / sizeof(rows[0])), want_true + want_false);
+}
+
 // non-repeating, so a misplaced or partial write shows up in the bytes and not
 // only in a count
 void fill_pattern(uint8_t* p, size_t n, uint8_t seed) {

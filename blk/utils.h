@@ -567,6 +567,22 @@ inline bool iova_range_covers(uint64_t start, uint64_t last, uint64_t iova, size
     return len && start <= iova && iova <= last && len - 1 <= last - iova;
 }
 
+// Do two INCLUSIVE ranges overlap? Same input shape as the predicate above and the
+// same rule: comparisons, never endpoint sums, so a range that runs to UINT64_MAX
+// cannot wrap into an answer. Both ranges are empty when their end is below their
+// start, and an empty range overlaps nothing -- which is what makes "never
+// resolved" expressible as {1, 0} rather than as a separate flag.
+//
+// This is the question an iotlb invalidation has to answer about a ring: whether
+// the range the driver just replaced is one the ring's addresses lie in. Testing
+// for a particular range instead -- a full replacement as {0, UINT64_MAX} -- gets
+// both directions wrong at once, because one legal update is the single byte at
+// IOVA 0 and another is a partial replacement that covers the ring exactly.
+inline bool iova_ranges_intersect(uint64_t a_start, uint64_t a_last,
+                                  uint64_t b_start, uint64_t b_last) {
+    return a_start <= a_last && b_start <= b_last && a_start <= b_last && b_start <= a_last;
+}
+
 // translates a descriptor's buffer address (GPA / IOVA -- only the transport
 // knows which) to a local VA of `len` bytes; nullptr when unmappable. `writable`
 // is the access the caller is about to make of those bytes, taken from the
