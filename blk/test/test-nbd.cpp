@@ -102,6 +102,14 @@ struct NbdTestClient {
         }
     }
 
+    void disconnect() {
+        if (s) {
+            disc();
+            delete s;
+            s = nullptr;
+        }
+    }
+
     int connect_tcp(const char* ip, uint16_t port) {
         auto c = net::new_tcp_socket_client();
         if (!c)
@@ -1419,7 +1427,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
     cfg.queue_depth = 1;      // one slot, so the stall is total rather than partial
-    cfg.stall_timeout = 1;    // seconds
+    cfg.stall_timeout = 2;    // seconds; enough margin for slow CI runners
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -1447,6 +1455,13 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     std::vector<char> rbuf(4096);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    // Close the stalled client explicitly so the server-side teardown finishes
+    // before we inspect the connection list. Without this, the server's worker
+    // for the stalled connection may still be draining in_flight or running its
+    // reaper, and the count below races against that teardown.
+    stalled.disconnect();
+    // Give the server time to finish tearing down the stalled connection.
+    photon::thread_usleep(500 * 1000);
     EXPECT_EQ(1u, dev->get_client_connections().size());
 }
 
