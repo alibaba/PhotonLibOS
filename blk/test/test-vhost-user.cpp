@@ -18,8 +18,8 @@ limitations under the License.
 // kernel consumer for this transport: the test embeds a MOCK FRONTEND (the
 // QEMU side of vhost-user-blk) that negotiates over the unix socket, shares
 // guest memory via memfd + SCM_RIGHTS, builds virtio-blk requests in the
-// vring, kicks, and checks the used ring. The mock keeps its own copy of the
-// wire constants -- it is an independent implementation of the other end.
+// vring, kicks, and checks the used ring. The wire protocol constants and
+// structs are shared with the backend via vhost-user-wire.h.
 //
 // The mock runs entirely on a std::thread (blocking syscalls); the photon
 // vcpu stays free to run the backend's coroutines -- the vduse/tcmu lesson.
@@ -29,6 +29,7 @@ limitations under the License.
 #endif
 
 #include "../blk.h"
+#include "../vhost-user-wire.h"
 
 #include "../../test/gtest.h"
 #include "harness.h"
@@ -68,60 +69,7 @@ limitations under the License.
 namespace photon {
 namespace blk {
 
-// ---- vhost-user wire format (mirrors vhost-user.cpp; independent copy on
-// ---- purpose: the mock is the other end of the protocol)
-enum : int32_t {
-    MU_GET_FEATURES = 1,
-    MU_SET_FEATURES = 2,
-    MU_SET_OWNER = 3,
-    MU_RESET_OWNER = 4,
-    MU_SET_MEM_TABLE = 5,
-    MU_SET_VRING_NUM = 8,
-    MU_SET_VRING_ADDR = 9,
-    MU_SET_VRING_BASE = 10,
-    MU_GET_VRING_BASE = 11,
-    MU_SET_VRING_KICK = 12,
-    MU_SET_VRING_CALL = 13,
-    MU_GET_PROTOCOL_FEATURES = 15,
-    MU_SET_PROTOCOL_FEATURES = 16,
-    MU_GET_QUEUE_NUM = 17,
-    MU_SET_VRING_ENABLE = 18,
-    MU_SET_BACKEND_REQ_FD = 21,
-    MU_GET_CONFIG = 24,
-    MU_RESET_DEVICE = 34,
-    MU_SET_STATUS = 39,
-};
-#define MU_VERSION       1
-#define MU_REPLY_MASK    (0x1u << 2)
-#define MU_NEED_REPLY    (0x1u << 3)
-// in the u64 index field of SET_VRING_KICK / SET_VRING_CALL: "no fd attached"
-#define MU_VRING_NOFD    0x100u
-
-struct mu_mem_region { uint64_t gpa, size, qva, mmap_offset; };
-struct mu_mem { uint32_t nregions, padding; mu_mem_region regions[8]; };
-struct mu_vring_state { uint32_t index, num; };
-struct mu_vring_addr {
-    uint32_t index, flags;
-    uint64_t desc_user_addr, used_user_addr, avail_user_addr, log_guest_addr;
-};
-struct mu_config { uint32_t offset, size, flags; uint8_t region[256]; };
-// packed for the same reason the transport's vhost_user_msg is: the header is 12
-// bytes and the payload follows immediately. Sharing the defect is exactly how
-// this suite stayed green against a wire format no real frontend speaks.
-struct __attribute__((packed)) mu_msg {
-    int32_t request;
-    uint32_t flags;
-    uint32_t size;
-    union {
-        uint64_t u64;
-        mu_vring_state state;
-        mu_vring_addr addr;
-        mu_mem memory;
-        mu_config config;
-    } payload;
-};
-static_assert(offsetof(mu_msg, payload) == 12,
-              "vhost-user payload must follow the 12-byte header with no padding");
+// vhost-user wire protocol constants and structs are in vhost-user-wire.h
 
 // ---- virtio-blk (mirrors the transport) ----
 #define T_IN 0
@@ -141,26 +89,7 @@ static_assert(offsetof(mu_msg, payload) == 12,
 // virtio 1.2 §2.7.7.2 / §2.7.10.1: negotiate this and both sides stop looking
 // at the flags low bit and suppress by index instead
 #define F_RING_EVENT_IDX  (1ULL << 29)
-// vhost-user's own bit in the device feature word: the gate on whether the
-// frontend negotiates protocol features at all
-#define F_VHU_PROTOCOL_FEATURES 30
-// Bit 0 of the PROTOCOL feature word, which is a different word from the one above
-// and is settled by GET/SET_PROTOCOL_FEATURES. It is multiple-queue support, and the
-// protocol makes the feature supported ONLY when it is set -- so without it the
-// backend's maximum queue count is 1 by definition and GET_QUEUE_NUM has nothing to
-// answer. A primary models that by not asking, which is what QEMU does and what this
-// mock now does. That is why a device can offer virtio F_MQ, publish a truthful
-// num_queues, answer GET_QUEUE_NUM with the real count, and still be undrivable as
-// multiqueue: every channel agrees except the one the peer gates on.
-#define P_VHU_MQ        0
-// Bit 3 of the PROTOCOL word: only once it is settled does the back-end answer a
-// message that carries no reply of its own, so a frontend without it must send its
-// setters and not wait. Queries are answered either way.
-#define P_VHU_REPLY_ACK 3
-// Bit 13 of the PROTOCOL word: the gate on RESET_DEVICE being a valid message at
-// all. This backend does not offer it, and the case that sends RESET_DEVICE asserts
-// that fact before asserting the refusal.
-#define P_VHU_RESET_DEVICE 13
+// vhost-user protocol feature constants are in vhost-user-wire.h
 struct blk_outhdr { uint32_t type, ioprio; uint64_t sector; };
 struct blk_config { uint64_t capacity; uint32_t size_max, seg_max;
                     uint16_t cyl; uint8_t heads, sectors; uint32_t blk_size;
@@ -237,12 +166,12 @@ struct MockFrontend {
     // a permissive guest accepts everything offered.
     uint64_t decline = 0;
     // The same knob for the PROTOCOL word, which is negotiated separately and is a
-    // different set of bits. Declining P_VHU_MQ models a primary that will not
+    // different set of bits. Declining VHOST_USER_PROTOCOL_F_MQ models a primary that will not
     // drive more than one queue, and the observable consequence is that it never
     // asks the count -- so this is how the gate in negotiate() gets teeth.
     uint64_t proto_decline = 0;
     // What SET_PROTOCOL_FEATURES settled on, and the queue count this frontend
-    // ended up with. The count keeps its default 1 when P_VHU_MQ was not
+    // ended up with. The count keeps its default 1 when VHOST_USER_PROTOCOL_F_MQ was not
     // negotiated, because the query that would have raised it is gated on that bit
     // -- which is exactly the cap a real primary applies, and the reason a case
     // reading `queue_num` has to be paired with one that saw the bit settled.
@@ -266,9 +195,9 @@ struct MockFrontend {
     }
 
     // ---- raw message IO (blocking; runs off the photon vcpu) ----
-    bool send(mu_msg* m, const int* fds = nullptr, int nfds = 0) {
-        m->flags |= MU_VERSION;
-        size_t total = offsetof(mu_msg, payload) + m->size;
+    bool send(vhost_user_msg* m, const int* fds = nullptr, int nfds = 0) {
+        m->flags |= VHOST_USER_VERSION;
+        size_t total = offsetof(vhost_user_msg, payload) + m->size;
         size_t off = 0;
         while (off < total) {
             iovec iov{(char*)m + off, total - off};
@@ -301,11 +230,11 @@ struct MockFrontend {
     // GET_FEATURES back to back) and what the kernel then hands the backend as a
     // single chunk. Flattened into a buffer rather than an iovec list so no
     // address of a packed struct's member is ever taken.
-    bool send_pipeline(const std::vector<mu_msg*>& ms) {
+    bool send_pipeline(const std::vector<vhost_user_msg*>& ms) {
         std::vector<char> wire;
         for (auto* m : ms) {
-            m->flags |= MU_VERSION;
-            size_t total = offsetof(mu_msg, payload) + m->size;
+            m->flags |= VHOST_USER_VERSION;
+            size_t total = offsetof(vhost_user_msg, payload) + m->size;
             wire.insert(wire.end(), (char*)m, (char*)m + total);
         }
         size_t off = 0;
@@ -317,7 +246,7 @@ struct MockFrontend {
         return true;
     }
     // Read exactly n bytes (short reads loop) and accumulate every SCM_RIGHTS fd
-    // delivered along the way. The mock used to ask recvmsg for sizeof(mu_msg) in
+    // delivered along the way. The mock used to ask recvmsg for sizeof(vhost_user_msg) in
     // one go, which is the same over-read the backend had: on SOCK_STREAM the
     // kernel glues consecutive messages from one writer into a single chunk, so
     // everything past the first reply's `size` was silently dropped and two
@@ -350,9 +279,9 @@ struct MockFrontend {
         return true;
     }
     // receive a message, waiting up to `ms`; returns false on timeout/close
-    bool recv(mu_msg* m, int* fds, int* nfds, int ms = 5000) {
+    bool recv(vhost_user_msg* m, int* fds, int* nfds, int ms = 5000) {
         *nfds = 0;
-        if (!recv_exact(m, offsetof(mu_msg, payload), fds, nfds, ms)) return false;
+        if (!recv_exact(m, offsetof(vhost_user_msg, payload), fds, nfds, ms)) return false;
         if (m->size > sizeof(m->payload)) { errno = EPROTO; return fail("oversized reply"); }
         memset(&m->payload, 0, sizeof(m->payload));
         if (m->size && !recv_exact(&m->payload, m->size, fds, nfds, ms)) return false;
@@ -361,13 +290,13 @@ struct MockFrontend {
     // a request that expects one reply (GET_* or NEED_REPLY acks). `check_ack`
     // opts into requiring the REPLY_ACK payload to be 0 (accepted); it defaults
     // off so callers that read the ack themselves, or do not care, are untouched.
-    bool transact(mu_msg* m, mu_msg* reply, const int* fds = nullptr, int nfds = 0,
+    bool transact(vhost_user_msg* m, vhost_user_msg* reply, const int* fds = nullptr, int nfds = 0,
                   bool check_ack = false) {
-        m->flags |= MU_NEED_REPLY;
+        m->flags |= VHOST_USER_NEED_REPLY_MASK;
         if (!send(m, fds, nfds)) return false;
         int got = 0;
         if (!recv(reply, nullptr, &got)) return false;
-        if (!(reply->flags & MU_REPLY_MASK) || reply->request != m->request) {
+        if (!(reply->flags & VHOST_USER_REPLY_MASK) || reply->request != m->request) {
             errno = EPROTO;
             return fail("unexpected reply");
         }
@@ -385,9 +314,9 @@ struct MockFrontend {
     // and routing them through here would hide a backend that stopped answering them.
     // `check_ack` cannot be honored on the silent path -- there is no ack to read --
     // so a case that needs an ack assertion has to settle REPLY_ACK first.
-    bool settle(mu_msg* m, const int* fds = nullptr, int nfds = 0, bool check_ack = false) {
-        if (proto_features & (1ULL << P_VHU_REPLY_ACK)) {
-            mu_msg r;
+    bool settle(vhost_user_msg* m, const int* fds = nullptr, int nfds = 0, bool check_ack = false) {
+        if (proto_features & (1ULL << VHOST_USER_PROTOCOL_F_REPLY_ACK)) {
+            vhost_user_msg r;
             return transact(m, &r, fds, nfds, check_ack);
         }
         return send(m, fds, nfds);
@@ -432,11 +361,11 @@ struct MockFrontend {
 
     // ---- negotiation (the QEMU sequence) ----
     bool negotiate(bool with_backend_channel) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         int fds[8], nfds;
         memset(&m, 0, sizeof(m));
 
-        m.request = MU_GET_FEATURES; m.size = 0;
+        m.request = VHOST_USER_GET_FEATURES; m.size = 0;
         if (!transact(&m, &r)) return false;
         features = r.payload.u64 & ~decline;
         // One knob, not two: declining bit 30 and skipping the protocol exchange
@@ -444,7 +373,7 @@ struct MockFrontend {
         // leave SET_FEATURES carrying a bit this frontend then behaves as though it
         // had never negotiated.
         if (no_protocol_features)
-            features &= ~(1ULL << F_VHU_PROTOCOL_FEATURES);
+            features &= ~(1ULL << VHOST_USER_F_PROTOCOL_FEATURES);
 
         // A conformant frontend negotiates protocol features ONLY if the device
         // feature word offered bit 30: vhost-user.rst defines that bit, in both
@@ -460,7 +389,7 @@ struct MockFrontend {
         // not an obligation, and no_protocol_features models the frontend that
         // declines. It sends neither message below and settles no protocol word,
         // which is why every setter further down goes through settle().
-        if (!(features & (1ULL << F_VHU_PROTOCOL_FEATURES)) && !no_protocol_features) {
+        if (!(features & (1ULL << VHOST_USER_F_PROTOCOL_FEATURES)) && !no_protocol_features) {
             errno = EPROTONOSUPPORT;
             return fail("GET_FEATURES did not offer bit 30 (VHOST_USER_F_PROTOCOL_FEATURES), "
                         "so the protocol features are unreachable");
@@ -469,7 +398,7 @@ struct MockFrontend {
             // neither protocol message is sent; proto_features stays 0
         } else {
             memset(&m, 0, sizeof(m));
-            m.request = MU_GET_PROTOCOL_FEATURES; m.size = 0;
+            m.request = VHOST_USER_GET_PROTOCOL_FEATURES; m.size = 0;
             if (!transact(&m, &r)) return false;
             // Settled word, not the raw offer, and the settled word is what goes back
             // in SET_PROTOCOL_FEATURES: sending the offer after masking bits off it
@@ -477,17 +406,17 @@ struct MockFrontend {
             proto_features = r.payload.u64 & ~proto_decline;
 
             memset(&m, 0, sizeof(m));
-            m.request = MU_SET_PROTOCOL_FEATURES; m.size = 8;
+            m.request = VHOST_USER_SET_PROTOCOL_FEATURES; m.size = 8;
             m.payload.u64 = proto_features;
             if (!transact(&m, &r)) return false;
         }
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_OWNER; m.size = 0;
+        m.request = VHOST_USER_SET_OWNER; m.size = 0;
         if (!settle(&m)) return false;
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_FEATURES; m.size = 8;
+        m.request = VHOST_USER_SET_FEATURES; m.size = 8;
         m.payload.u64 = features;   // the word this frontend settled on above,
                                     // which is the offer minus whatever it declined
         if (!settle(&m)) return false;
@@ -500,9 +429,9 @@ struct MockFrontend {
         // could not be driven as multiqueue -- the mock was reading a number no
         // conformant peer would have asked for, so the two disagreed and only the
         // peer was right.
-        if (proto_features & (1ULL << P_VHU_MQ)) {
+        if (proto_features & (1ULL << VHOST_USER_PROTOCOL_F_MQ)) {
             memset(&m, 0, sizeof(m));
-            m.request = MU_GET_QUEUE_NUM; m.size = 0;
+            m.request = VHOST_USER_GET_QUEUE_NUM; m.size = 0;
             if (!transact(&m, &r)) return false;
             if (r.payload.u64 < 1) { errno = EPROTO; return fail("queue num"); }
             queue_num = (uint32_t)r.payload.u64;
@@ -516,14 +445,14 @@ struct MockFrontend {
         if (mem == MAP_FAILED) return fail("mmap guest");
         memset(mem, 0, MEM_SIZE);
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_MEM_TABLE;
-        m.size = offsetof(mu_mem, regions) + sizeof(mu_mem_region);
+        m.request = VHOST_USER_SET_MEM_TABLE;
+        m.size = offsetof(vhost_user_memory, regions) + sizeof(vhost_user_memory_region);
         m.payload.memory.nregions = 1;
-        m.payload.memory.regions[0] = mu_mem_region{0, MEM_SIZE, (uint64_t)mem, 0};
+        m.payload.memory.regions[0] = vhost_user_memory_region{0, MEM_SIZE, (uint64_t)mem, 0};
         if (!settle(&m, &memfd, 1)) return false;
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_NUM; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_NUM; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, VQ_NUM};
         // Require ack == 0: this NUM is protocol-legal, so a backend that
         // error-acks it must fail the negotiation rather than be silently
@@ -533,13 +462,13 @@ struct MockFrontend {
         if (!settle(&m, nullptr, 0, /*check_ack=*/true)) return false;
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_BASE; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_BASE; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, 0};
         if (!settle(&m)) return false;
 
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ADDR; m.size = sizeof(mu_vring_addr);
-        m.payload.addr = mu_vring_addr{0, 0, (uint64_t)(mem + L_DESC),
+        m.request = VHOST_USER_SET_VRING_ADDR; m.size = sizeof(vhost_vring_addr);
+        m.payload.addr = vhost_vring_addr{0, 0, (uint64_t)(mem + L_DESC),
                                        (uint64_t)(mem + L_USED),
                                        (uint64_t)(mem + L_AVAIL), 0};
         // Same: these addresses fit the region, so a correct backend acks 0.
@@ -549,10 +478,10 @@ struct MockFrontend {
         callfd = ::eventfd(0, EFD_NONBLOCK);
         if (kickfd < 0 || callfd < 0) return fail("eventfd");
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_KICK; m.size = 8; m.payload.u64 = 0;   // idx 0
+        m.request = VHOST_USER_SET_VRING_KICK; m.size = 8; m.payload.u64 = 0;   // idx 0
         if (!settle(&m, &kickfd, 1)) return false;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
+        m.request = VHOST_USER_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
         if (!settle(&m, &callfd, 1)) return false;
 
         if (with_backend_channel) {
@@ -560,15 +489,15 @@ struct MockFrontend {
             if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0) return fail("socketpair");
             backend_fd = sp[0];
             memset(&m, 0, sizeof(m));
-            m.request = MU_SET_BACKEND_REQ_FD; m.size = 0;
+            m.request = VHOST_USER_SET_BACKEND_REQ_FD; m.size = 0;
             if (!settle(&m, &sp[1], 1)) { ::close(sp[1]); return false; }
             ::close(sp[1]);
         }
 
         // the device config: capacity check happens in the test body
         memset(&m, 0, sizeof(m));
-        m.request = MU_GET_CONFIG;
-        m.size = offsetof(mu_config, region) + sizeof(blk_config);
+        m.request = VHOST_USER_GET_CONFIG;
+        m.size = offsetof(vhost_user_config, region) + sizeof(blk_config);
         m.payload.config.offset = 0;
         m.payload.config.size = sizeof(blk_config);
         if (!transact(&m, &r)) return false;
@@ -580,7 +509,7 @@ struct MockFrontend {
         // notice -- sending it anyway would test nothing.
         if (!no_protocol_features) {
             memset(&m, 0, sizeof(m));
-            m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
+            m.request = VHOST_USER_SET_VRING_ENABLE; m.size = sizeof(vhost_vring_state);
             m.payload.state = {0, 1};
             if (!transact(&m, &r)) return false;
         }
@@ -590,10 +519,10 @@ struct MockFrontend {
     }
 
     uint64_t config_capacity() {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_GET_CONFIG;
-        m.size = offsetof(mu_config, region) + sizeof(blk_config);
+        m.request = VHOST_USER_GET_CONFIG;
+        m.size = offsetof(vhost_user_config, region) + sizeof(blk_config);
         m.payload.config.offset = 0;
         m.payload.config.size = sizeof(blk_config);
         if (!transact(&m, &r)) return UINT64_MAX;
@@ -801,9 +730,9 @@ struct MockFrontend {
     // the ack payload is 0 (accepted). Left at its default it does not look at
     // the payload, so a non-zero ack -- rejected -- is the caller's to interpret.
     bool set_vring_num(uint32_t n, uint64_t* ack) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_NUM; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_NUM; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, n};
         if (!transact(&m, &r)) return false;
         *ack = r.payload.u64;
@@ -812,9 +741,9 @@ struct MockFrontend {
 
     // same shape as set_vring_num above: the reply carries the REPLY_ACK payload
     bool set_vring_base(uint32_t base, uint64_t* ack) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_BASE; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_BASE; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, base};
         if (!transact(&m, &r)) return false;
         *ack = r.payload.u64;
@@ -822,9 +751,9 @@ struct MockFrontend {
     }
 
     bool set_vring_enable(bool on) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_ENABLE; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, (uint32_t)(on ? 1 : 0)};
         return transact(&m, &r);
     }
@@ -833,24 +762,24 @@ struct MockFrontend {
     // need a ring whose used_idx does not start at 0 -- a fresh setup() cannot
     // produce one, and both handover and uint16 wraparound need it.
     bool restart_with_base(uint16_t base) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_ENABLE; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, 0};
         if (!transact(&m, &r)) return false;
         uint64_t ack = 0;
         if (!set_vring_base(base, &ack)) return false;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ENABLE; m.size = sizeof(mu_vring_state);
+        m.request = VHOST_USER_SET_VRING_ENABLE; m.size = sizeof(vhost_vring_state);
         m.payload.state = {0, 1};
         return transact(&m, &r);
     }
 
     bool set_vring_addr(uint64_t desc_qva, uint64_t avail_qva, uint64_t used_qva, uint64_t* ack) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_ADDR; m.size = sizeof(mu_vring_addr);
-        m.payload.addr = mu_vring_addr{0, 0, desc_qva, used_qva, avail_qva, 0};
+        m.request = VHOST_USER_SET_VRING_ADDR; m.size = sizeof(vhost_vring_addr);
+        m.payload.addr = vhost_vring_addr{0, 0, desc_qva, used_qva, avail_qva, 0};
         if (!transact(&m, &r)) return false;
         *ack = r.payload.u64;
         return true;
@@ -870,12 +799,12 @@ struct MockFrontend {
     // mapping would succeed and the rejection is the only thing under test.
     bool set_mem_table_mismatched(uint32_t nregions, int nfds, uint64_t* ack,
                                   uint32_t payload_regions = 1) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_MEM_TABLE;
-        m.size = offsetof(mu_mem, regions) + payload_regions * sizeof(mu_mem_region);
+        m.request = VHOST_USER_SET_MEM_TABLE;
+        m.size = offsetof(vhost_user_memory, regions) + payload_regions * sizeof(vhost_user_memory_region);
         m.payload.memory.nregions = nregions;
-        m.payload.memory.regions[0] = mu_mem_region{0, MEM_SIZE, (uint64_t)mem, 0};
+        m.payload.memory.regions[0] = vhost_user_memory_region{0, MEM_SIZE, (uint64_t)mem, 0};
         int fds[8];
         for (int i = 0; i < nfds && i < 8; i++) fds[i] = memfd;
         if (!transact(&m, &r, fds, nfds)) return false;
@@ -890,12 +819,12 @@ struct MockFrontend {
     // count, the fd count and the payload length all agree, so this reaches the
     // mapping and nothing else.
     bool set_mem_table_unmappable(uint32_t nregions, uint64_t* ack) {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_MEM_TABLE;
-        m.size = offsetof(mu_mem, regions) + nregions * sizeof(mu_mem_region);
+        m.request = VHOST_USER_SET_MEM_TABLE;
+        m.size = offsetof(vhost_user_memory, regions) + nregions * sizeof(vhost_user_memory_region);
         m.payload.memory.nregions = nregions;
-        m.payload.memory.regions[0] = mu_mem_region{0, 0, (uint64_t)mem, 0};
+        m.payload.memory.regions[0] = vhost_user_memory_region{0, 0, (uint64_t)mem, 0};
         int fds[8];
         for (uint32_t i = 0; i < nregions && i < 8; i++) fds[i] = memfd;
         if (!transact(&m, &r, fds, (int)nregions)) return false;
@@ -909,10 +838,10 @@ struct MockFrontend {
     // message looks like on the wire and, before recv_msg grew a minimum, exactly
     // what a well-formed message declaring zero also looked like.
     bool send_truncated(int32_t request, uint32_t size) {
-        mu_msg m;
+        vhost_user_msg m;
         memset(&m, 0, sizeof(m));
         m.request = request;
-        m.flags = MU_NEED_REPLY;   // send() adds the version
+        m.flags = VHOST_USER_NEED_REPLY_MASK;   // send() adds the version
         m.size = size;
         return send(&m);
     }
@@ -1010,9 +939,9 @@ struct MockFrontend {
     bool replace_kickfd_blocking() {
         int nfd = ::eventfd(0, 0);
         if (nfd < 0) return fail("eventfd");
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_KICK; m.size = 8; m.payload.u64 = 0;
+        m.request = VHOST_USER_SET_VRING_KICK; m.size = 8; m.payload.u64 = 0;
         if (!transact(&m, &r, &nfd, 1)) { ::close(nfd); return false; }
         if (kickfd >= 0) ::close(kickfd);
         kickfd = nfd;   // SCM_RIGHTS gave the device its own descriptor
@@ -1028,9 +957,9 @@ struct MockFrontend {
     bool replace_callfd(int* old_callfd) {
         int nfd = ::eventfd(0, EFD_NONBLOCK);
         if (nfd < 0) return fail("eventfd");
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
+        m.request = VHOST_USER_SET_VRING_CALL; m.size = 8; m.payload.u64 = 0;
         if (!transact(&m, &r, &nfd, 1)) { ::close(nfd); return false; }
         *old_callfd = callfd;
         callfd = nfd;   // SCM_RIGHTS gave the device its own descriptor
@@ -1042,10 +971,10 @@ struct MockFrontend {
     // from here on it can only find work by its own fallback re-scan -- which is
     // what a NOFD kick means. Our own end goes too, so submit() cannot kick.
     bool drop_kickfd_nofd() {
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_VRING_KICK; m.size = 8;
-        m.payload.u64 = 0 | MU_VRING_NOFD;   // idx 0, no fd
+        m.request = VHOST_USER_SET_VRING_KICK; m.size = 8;
+        m.payload.u64 = 0 | VHOST_USER_VRING_NOFD_MASK;   // idx 0, no fd
         if (!transact(&m, &r, nullptr, 0)) return false;
         if (kickfd >= 0) ::close(kickfd);
         kickfd = -1;
@@ -2237,13 +2166,13 @@ TEST_F(VhostUserTest, vring_index_out_of_range_is_rejected) {
     // {message, does it take a vring_state, does it take a vring_addr}
     struct Msg { uint32_t req; bool state; bool addr; const char* name; };
     static const Msg msgs[] = {
-        {MU_SET_VRING_NUM,    true,  false, "SET_VRING_NUM"},
-        {MU_SET_VRING_ADDR,   false, true,  "SET_VRING_ADDR"},
-        {MU_SET_VRING_BASE,   true,  false, "SET_VRING_BASE"},
-        {MU_GET_VRING_BASE,   true,  false, "GET_VRING_BASE"},
-        {MU_SET_VRING_KICK,   false, false, "SET_VRING_KICK"},
-        {MU_SET_VRING_CALL,   false, false, "SET_VRING_CALL"},
-        {MU_SET_VRING_ENABLE, true,  false, "SET_VRING_ENABLE"},
+        {VHOST_USER_SET_VRING_NUM,    true,  false, "SET_VRING_NUM"},
+        {VHOST_USER_SET_VRING_ADDR,   false, true,  "SET_VRING_ADDR"},
+        {VHOST_USER_SET_VRING_BASE,   true,  false, "SET_VRING_BASE"},
+        {VHOST_USER_GET_VRING_BASE,   true,  false, "GET_VRING_BASE"},
+        {VHOST_USER_SET_VRING_KICK,   false, false, "SET_VRING_KICK"},
+        {VHOST_USER_SET_VRING_CALL,   false, false, "SET_VRING_CALL"},
+        {VHOST_USER_SET_VRING_ENABLE, true,  false, "SET_VRING_ENABLE"},
     };
     int rc = run_frontend([&](MockFrontend& fe) -> int {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
@@ -2252,26 +2181,26 @@ TEST_F(VhostUserTest, vring_index_out_of_range_is_rejected) {
         for (const auto& t : msgs) {
             // GET_VRING_BASE only at 0xffff -- see the comment above
             const uint32_t idxs[2] = {1u, 0xffffu};
-            for (int k = (t.req == MU_GET_VRING_BASE ? 1 : 0); k < 2; k++) {
-                mu_msg m, r;
+            for (int k = (t.req == VHOST_USER_GET_VRING_BASE ? 1 : 0); k < 2; k++) {
+                vhost_user_msg m, r;
                 memset(&m, 0, sizeof(m));
                 m.request = t.req;
                 if (t.state) {
-                    m.size = sizeof(mu_vring_state);
+                    m.size = sizeof(vhost_vring_state);
                     // num is legal in every case: a power of two in range for NUM,
                     // 0 for BASE, and 1 (enable) for ENABLE -- so a rejection can
                     // only have been caused by the index
-                    m.payload.state = {idxs[k], t.req == MU_SET_VRING_NUM ? VQ_NUM
-                                       : (t.req == MU_SET_VRING_ENABLE ? 1u : 0u)};
+                    m.payload.state = {idxs[k], t.req == VHOST_USER_SET_VRING_NUM ? VQ_NUM
+                                       : (t.req == VHOST_USER_SET_VRING_ENABLE ? 1u : 0u)};
                 } else if (t.addr) {
-                    m.size = sizeof(mu_vring_addr);
+                    m.size = sizeof(vhost_vring_addr);
                     // Real QVAs, not the bare L_* offsets: negotiate() declared one
                     // region whose qva base is fe.mem, so a bare offset does not
                     // resolve. Sending an address that cannot be translated would
                     // make the backend reject this message for a DIFFERENT reason,
                     // the ack would be 1 either way, and deleting the index guard
                     // would no longer turn this case red.
-                    mu_vring_addr a{idxs[k], 0, (uint64_t)(fe.mem + L_DESC),
+                    vhost_vring_addr a{idxs[k], 0, (uint64_t)(fe.mem + L_DESC),
                                     (uint64_t)(fe.mem + L_USED),
                                     (uint64_t)(fe.mem + L_AVAIL), 0};
                     memcpy(&m.payload.addr, &a, sizeof(a));
@@ -2279,7 +2208,7 @@ TEST_F(VhostUserTest, vring_index_out_of_range_is_rejected) {
                     // KICK/CALL: the index is the low 8 bits of the u64 and NOFD
                     // says "no fd attached", so no SCM_RIGHTS is needed
                     m.size = 8;
-                    m.payload.u64 = idxs[k] | MU_VRING_NOFD;
+                    m.payload.u64 = idxs[k] | VHOST_USER_VRING_NOFD_MASK;
                 }
                 if (!fe.transact(&m, &r)) return EPROTO;
                 if (r.size != 8) {
@@ -2369,20 +2298,20 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
             if (!fe.negotiate(false)) return EPROTO;
             got_proto = fe.proto_features;
             fe_queues = fe.queue_num;
-            mu_msg m, r;
+            vhost_user_msg m, r;
             memset(&m, 0, sizeof(m));
-            m.request = MU_GET_FEATURES; m.size = 0;
+            m.request = VHOST_USER_GET_FEATURES; m.size = 0;
             if (!fe.transact(&m, &r)) return EPROTO;
             got_feat = r.payload.u64;
 
             memset(&m, 0, sizeof(m));
-            m.request = MU_GET_QUEUE_NUM; m.size = 0;
+            m.request = VHOST_USER_GET_QUEUE_NUM; m.size = 0;
             if (!fe.transact(&m, &r)) return EPROTO;
             got_qn = r.payload.u64;
 
             memset(&m, 0, sizeof(m));
-            m.request = MU_GET_CONFIG;
-            m.size = offsetof(mu_config, region) + sizeof(blk_config);
+            m.request = VHOST_USER_GET_CONFIG;
+            m.size = offsetof(vhost_user_config, region) + sizeof(blk_config);
             m.payload.config.offset = 0;
             m.payload.config.size = sizeof(blk_config);
             if (!fe.transact(&m, &r)) return EPROTO;
@@ -2402,7 +2331,7 @@ TEST_F(VhostUserTest, queue_count_follows_config) {
         // incompatibility this case exists to catch -- a device that offers F_MQ
         // and answers GET_QUEUE_NUM truthfully, and that a real primary still
         // drives as a single queue.
-        EXPECT_EQ(c.mq, !!(got_proto & (1ULL << P_VHU_MQ)))
+        EXPECT_EQ(c.mq, !!(got_proto & (1ULL << VHOST_USER_PROTOCOL_F_MQ)))
             << "PROTOCOL_F_MQ, queues=" << c.ask;
         // And the consequence, read off the mock's own gated query rather than
         // asserted about it: with the bit settled the primary learns the true
@@ -2446,15 +2375,15 @@ TEST_F(VhostUserTest, protocol_mq_is_what_lets_a_frontend_learn_the_queue_count)
         learned = fe.queue_num;
         // Asked straight from the device, so the count it SERVES is on the record
         // independently of what the gated query inside negotiate() concluded.
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_GET_QUEUE_NUM; m.size = 0;
+        m.request = VHOST_USER_GET_QUEUE_NUM; m.size = 0;
         if (!fe.transact(&m, &r)) return EPROTO;
         served = r.payload.u64;
         return 0;
     });
     ASSERT_EQ(0, rc);
-    EXPECT_NE(0u, offered & (1ULL << P_VHU_MQ))
+    EXPECT_NE(0u, offered & (1ULL << VHOST_USER_PROTOCOL_F_MQ))
         << "a device serving " << QUEUES << " queues must offer protocol MQ";
     EXPECT_EQ((uint64_t)QUEUES, served);
     EXPECT_EQ(QUEUES, learned);
@@ -2463,13 +2392,13 @@ TEST_F(VhostUserTest, protocol_mq_is_what_lets_a_frontend_learn_the_queue_count)
     uint64_t served_again = 0;
     uint32_t capped = 0;
     rc = run_frontend([&](MockFrontend& fe) -> int {
-        fe.proto_decline = (1ULL << P_VHU_MQ);
+        fe.proto_decline = (1ULL << VHOST_USER_PROTOCOL_F_MQ);
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
         if (!fe.negotiate(false)) return EPROTO;
         capped = fe.queue_num;
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_GET_QUEUE_NUM; m.size = 0;
+        m.request = VHOST_USER_GET_QUEUE_NUM; m.size = 0;
         if (!fe.transact(&m, &r)) return EPROTO;
         served_again = r.payload.u64;
         return 0;
@@ -3230,7 +3159,7 @@ TEST_F(VhostUserTest, unrecognised_message_fds) {
         for (int i = 0; i < 8; i++) {
             int efd = ::eventfd(0, EFD_CLOEXEC);
             if (efd < 0) return EMFILE;
-            mu_msg m, r;
+            vhost_user_msg m, r;
             memset(&m, 0, sizeof(m));
             m.request = 9999;   // no such request: handle_msg's default arm
             m.size = 8;
@@ -3247,7 +3176,7 @@ TEST_F(VhostUserTest, unrecognised_message_fds) {
         // (measured: 16 of 50 repeats failed). One more unrecognised message
         // carrying NO fd is the barrier -- its ack cannot be written until the
         // previous iteration has ended, and it adds nothing of its own to count.
-        mu_msg b, br;
+        vhost_user_msg b, br;
         memset(&b, 0, sizeof(b));
         b.request = 9999;
         b.size = 8;
@@ -3283,24 +3212,24 @@ TEST_F(VhostUserTest, pipelined_messages) {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
         if (!fe.negotiate(false)) return EPROTO;
 
-        mu_msg a, b, c;
+        vhost_user_msg a, b, c;
         memset(&a, 0, sizeof(a));
         memset(&b, 0, sizeof(b));
         memset(&c, 0, sizeof(c));
-        a.request = MU_SET_OWNER;      a.size = 0;   // asks for nothing
-        b.request = MU_GET_FEATURES;   b.size = 0;   b.flags = MU_NEED_REPLY;
-        c.request = MU_GET_QUEUE_NUM;  c.size = 0;   c.flags = MU_NEED_REPLY;
+        a.request = VHOST_USER_SET_OWNER;      a.size = 0;   // asks for nothing
+        b.request = VHOST_USER_GET_FEATURES;   b.size = 0;   b.flags = VHOST_USER_NEED_REPLY_MASK;
+        c.request = VHOST_USER_GET_QUEUE_NUM;  c.size = 0;   c.flags = VHOST_USER_NEED_REPLY_MASK;
         if (!fe.send_pipeline({&a, &b, &c})) return EPROTO;
 
-        mu_msg r;
+        vhost_user_msg r;
         int got = 0;
         // the two replies must both arrive, and in order: under the over-read the
         // second one never came at all and this timed out
         if (!fe.recv(&r, nullptr, &got, 3000)) return ETIMEDOUT;
-        if (r.request != MU_GET_FEATURES || !(r.flags & MU_REPLY_MASK)) return EPROTO;
+        if (r.request != VHOST_USER_GET_FEATURES || !(r.flags & VHOST_USER_REPLY_MASK)) return EPROTO;
         if (r.size != 8 || r.payload.u64 != fe.features) return EPROTO;
         if (!fe.recv(&r, nullptr, &got, 3000)) return ETIMEDOUT;
-        if (r.request != MU_GET_QUEUE_NUM || !(r.flags & MU_REPLY_MASK)) return EPROTO;
+        if (r.request != VHOST_USER_GET_QUEUE_NUM || !(r.flags & VHOST_USER_REPLY_MASK)) return EPROTO;
         if (r.size != 8 || r.payload.u64 != 1) return EPROTO;
         // SET_OWNER asked for no reply, so anything still readable here means we
         // answered a message we should have stayed silent on
@@ -3336,14 +3265,14 @@ TEST_F(VhostUserTest, oversized_payload) {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
         if (!fe.negotiate(false)) return EPROTO;
 
-        mu_msg m;
+        vhost_user_msg m;
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_MEM_TABLE;
-        m.flags = MU_VERSION;
+        m.request = VHOST_USER_SET_MEM_TABLE;
+        m.flags = VHOST_USER_VERSION;
         m.size = 0xFFFFFFF0u;
         // the 12-byte header alone, deliberately: send() would try to write
         // m.size bytes of payload that does not exist
-        size_t hdr = offsetof(mu_msg, payload);
+        size_t hdr = offsetof(vhost_user_msg, payload);
         if (::send(fe.fd, &m, hdr, 0) != (ssize_t)hdr) return EPROTO;
 
         // The backend must end the session ITSELF, and promptly. Waiting for EOF
@@ -3396,7 +3325,7 @@ TEST_F(VhostUserTest, a_truncated_mem_table_ends_the_session_and_a_reconnect_sti
         // Live and serving FIRST: the unguarded backend did not merely reject this
         // message badly, it destroyed a device that was working.
         if (fe.write_dev(3 << 20, w.data(), w.size()) != S_OK) return EIO;
-        if (!fe.send_truncated(MU_SET_MEM_TABLE, 0)) return EPROTO;
+        if (!fe.send_truncated(VHOST_USER_SET_MEM_TABLE, 0)) return EPROTO;
         int e = fe.expect_eof();
         if (e) {
             LOG_ERROR("SET_MEM_TABLE with a zero-length payload did not end the session: `", e);
@@ -3441,11 +3370,11 @@ TEST_F(VhostUserTest, truncated_payloads_end_the_session) {
 
     struct Row { int32_t request; uint32_t size; const char* what; };
     static const Row rows[] = {
-        {MU_SET_FEATURES,     0, "the feature word"},
-        {MU_SET_VRING_NUM,    4, "the index but not the num"},
-        {MU_SET_VRING_ADDR,   8, "the index and flags but none of the addresses"},
-        {MU_SET_VRING_ENABLE, 0, "the index"},
-        {MU_GET_CONFIG,       4, "the offset but not the size"},
+        {VHOST_USER_SET_FEATURES,     0, "the feature word"},
+        {VHOST_USER_SET_VRING_NUM,    4, "the index but not the num"},
+        {VHOST_USER_SET_VRING_ADDR,   8, "the index and flags but none of the addresses"},
+        {VHOST_USER_SET_VRING_ENABLE, 0, "the index"},
+        {VHOST_USER_GET_CONFIG,       4, "the offset but not the size"},
     };
     auto w = pattern(0xB4, 4096);
     int rc = run_frontend([&](MockFrontend& fe) -> int {
@@ -4003,11 +3932,11 @@ TEST_F(VhostUserTest, set_features_rejects_a_bit_the_device_never_offered) {
         if (!fe.negotiate(false)) return EPROTO;
         if (fe.features == 0) return EPROTO;   // nothing to subtract from
 
-        mu_msg m, r;
+        vhost_user_msg m, r;
         // Bit 63: reserved, and far from anything this device offers, so the
         // rejection can only be about it being unoffered.
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_FEATURES; m.size = 8;
+        m.request = VHOST_USER_SET_FEATURES; m.size = 8;
         m.payload.u64 = fe.features | (1ULL << 63);
         if (!fe.transact(&m, &r)) return EPROTO;
         if (r.payload.u64 == 0) {
@@ -4023,9 +3952,9 @@ TEST_F(VhostUserTest, set_features_rejects_a_bit_the_device_never_offered) {
         if (memcmp(w.data(), rb.data(), w.size())) return EILSEQ;
 
         // And a strict subset is still accepted, or the guard above proves nothing.
-        // F_RING_EVENT_IDX is already a mask, unlike the F_VHU_* bit numbers.
+        // F_RING_EVENT_IDX is already a mask, unlike the VHOST_USER_* bit numbers.
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_FEATURES; m.size = 8;
+        m.request = VHOST_USER_SET_FEATURES; m.size = 8;
         m.payload.u64 = fe.features & ~F_RING_EVENT_IDX;
         if (!fe.transact(&m, &r)) return EPROTO;
         if (r.payload.u64 != 0) {
@@ -4035,7 +3964,7 @@ TEST_F(VhostUserTest, set_features_rejects_a_bit_the_device_never_offered) {
         // Re-settle the full word: leaving the device on the subset would change
         // what the I/O below means, and the case is about the guard, not the subset.
         memset(&m, 0, sizeof(m));
-        m.request = MU_SET_FEATURES; m.size = 8;
+        m.request = VHOST_USER_SET_FEATURES; m.size = 8;
         m.payload.u64 = fe.features;
         if (!fe.transact(&m, &r, nullptr, 0, /*check_ack=*/true)) return EPROTO;
         if (fe.write_dev(15 << 20, w.data(), w.size()) != S_OK) return EIO;
@@ -4070,9 +3999,9 @@ TEST_F(VhostUserTest, reset_owner_leaves_the_device_serving) {
         if (!fe.negotiate(false)) return EPROTO;
         if (fe.write_dev(16 << 20, first.data(), first.size()) != S_OK) return EIO;
 
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_RESET_OWNER; m.size = 0;
+        m.request = VHOST_USER_RESET_OWNER; m.size = 0;
         if (!fe.transact(&m, &r)) return EPROTO;
         if (r.payload.u64 != 0) {
             LOG_ERROR("RESET_OWNER was refused; the spec recommends ignoring it");
@@ -4115,15 +4044,15 @@ TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_a
         // The precondition this whole case rests on: the protocol word the device
         // offered does not carry the reset feature. Asserted, not assumed, because
         // the day it does is the day refusing this message becomes wrong.
-        if (fe.proto_features & (1ULL << P_VHU_RESET_DEVICE)) {
+        if (fe.proto_features & (1ULL << VHOST_USER_PROTOCOL_F_RESET_DEVICE)) {
             LOG_ERROR("the device advertises the reset protocol feature, so refusing RESET_DEVICE is no longer correct");
             return EINVAL;
         }
         if (fe.write_dev(18 << 20, w.data(), w.size()) != S_OK) return EIO;
 
-        mu_msg m, r;
+        vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
-        m.request = MU_RESET_DEVICE; m.size = 0;
+        m.request = VHOST_USER_RESET_DEVICE; m.size = 0;
         if (!fe.transact(&m, &r)) return EPROTO;
         if (r.payload.u64 == 0) {
             LOG_ERROR("RESET_DEVICE was acked as a success without the protocol feature");

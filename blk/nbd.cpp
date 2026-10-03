@@ -31,6 +31,7 @@ limitations under the License.
 // noted where it is relied on (depth/bytes, Conn::wlock).
 
 #include "blk.h"
+#include "nbd-proto.h"
 #include "utils.h"
 
 #include <photon/common/alog.h>
@@ -68,63 +69,21 @@ limitations under the License.
 namespace photon {
 namespace blk {
 
-// NBD protocol constants
-// (github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md). All on-wire
-// integers are big-endian; the protocol structs' encode()/decode() convert
-// them with the __builtin_bswap family (little-endian hosts only).
-
-static constexpr uint64_t NBD_INIT_MAGIC     = 0x4e42444d41474943ull;  // "NBDMAGIC"
-static constexpr uint64_t NBD_OPTS_MAGIC     = 0x49484156454f5054ull;  // "IHAVEOPT"
-static constexpr uint64_t NBD_REP_MAGIC      = 0x0003e889045565a9ull;
-static constexpr uint32_t NBD_REQ_MAGIC      = 0x25609513;
-static constexpr uint32_t NBD_SIMPLE_REP_MAGIC = 0x67446698;
-
+// NBD protocol constants not shared with the test (see nbd-proto.h for the rest)
 // server handshake flags
 static constexpr uint16_t NBD_FLAG_FIXED_NEWSTYLE = 1u << 0;
 static constexpr uint16_t NBD_FLAG_NO_ZEROES      = 1u << 1;
-// client handshake flags
-static constexpr uint32_t NBD_FLAG_C_FIXED_NEWSTYLE = 1u << 0;
-static constexpr uint32_t NBD_FLAG_C_NO_ZEROES      = 1u << 1;
 // options
-static constexpr uint32_t NBD_OPT_EXPORT_NAME      = 1;
-static constexpr uint32_t NBD_OPT_ABORT            = 2;
-static constexpr uint32_t NBD_OPT_LIST             = 3;
-static constexpr uint32_t NBD_OPT_INFO             = 6;
-static constexpr uint32_t NBD_OPT_GO               = 7;
+static constexpr uint32_t NBD_OPT_ABORT = 2;
+static constexpr uint32_t NBD_OPT_LIST  = 3;
 // option replies
-static constexpr uint32_t NBD_REP_LIST     = 2;
-static constexpr uint32_t NBD_REP_INFO     = 3;
-static constexpr uint32_t NBD_REP_ACK      = 1;
+static constexpr uint32_t NBD_REP_LIST      = 2;
 static constexpr uint32_t NBD_REP_ERR_UNSUP = (1u << 31) | 1;
-static constexpr uint32_t NBD_REP_ERR_INVALID = (1u << 31) | 3;
-static constexpr uint16_t NBD_INFO_EXPORT  = 0;
-// transmission flags; renamed NBD_TRANS_* to avoid <linux/nbd.h> macros of the
-// same NBD_FLAG_* names
-static constexpr uint16_t NBD_TRANS_HAS_FLAGS         = 1u << 0;
-static constexpr uint16_t NBD_TRANS_READ_ONLY         = 1u << 1;
-static constexpr uint16_t NBD_TRANS_SEND_FLUSH        = 1u << 2;
-static constexpr uint16_t NBD_TRANS_SEND_FUA          = 1u << 3;
-static constexpr uint16_t NBD_TRANS_SEND_TRIM         = 1u << 5;
-static constexpr uint16_t NBD_TRANS_SEND_WRITE_ZEROES = 1u << 6;
-// commands
-static constexpr uint16_t NBD_CMD_READ         = 0;
-static constexpr uint16_t NBD_CMD_WRITE        = 1;
-static constexpr uint16_t NBD_CMD_DISC         = 2;
-static constexpr uint16_t NBD_CMD_FLUSH        = 3;
-static constexpr uint16_t NBD_CMD_TRIM         = 4;
-static constexpr uint16_t NBD_CMD_WRITE_ZEROES = 6;
-// per-request command-flags field (16 bits at request offset 4). The kernel
-// client packs these into the upper 16 bits of its 32-bit `type` word, so FUA
-// lands on bit 0 here. Named NBD_REQ_* to avoid the <linux/nbd.h> macro.
-static constexpr uint16_t NBD_REQ_FUA     = 1u << 0;
+// transmission flags
+static constexpr uint16_t NBD_TRANS_HAS_FLAGS = 1u << 0;
 // errors
-static constexpr uint32_t NBD_SUCCESS = 0;
-static constexpr uint32_t NBD_EPERM   = 1;
-static constexpr uint32_t NBD_EIO     = 5;
-static constexpr uint32_t NBD_ENOMEM  = 12;
-static constexpr uint32_t NBD_EINVAL  = 22;
-static constexpr uint32_t NBD_ENOSPC  = 28;
-static constexpr uint32_t NBD_ENOTSUP = 95;
+static constexpr uint32_t NBD_ENOMEM = 12;
+static constexpr uint32_t NBD_ENOSPC = 28;
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
 static constexpr uint32_t MAX_BLOCK_SIZE      = 32u << 20;
