@@ -758,6 +758,20 @@ struct MockFrontend {
             fail("used elem id");
             return -1;
         }
+        // virtio-blk requires the used element's len to reflect what the device
+        // actually wrote. For successful reads and GET_IDs that is data + status;
+        // for successful writes and flushes it is just the status byte. Error
+        // responses may write only the status byte regardless of request type,
+        // so the length check applies only to successful completions.
+        uint8_t st = *(uint8_t*)(mem + status_off(slot));
+        if (st == 0) {
+            uint32_t expected = (type == T_IN || type == T_GET_ID) ? (uint32_t)len + 1 : 1;
+            if (ulen != expected) {
+                errno = EPROTO;
+                fail("used elem len");
+                return -1;
+            }
+        }
         if (data && len && data_write) memcpy(data, mem + data_off(slot), len);
         return *(uint8_t*)(mem + status_off(slot));
     }
