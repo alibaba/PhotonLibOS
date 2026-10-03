@@ -24,6 +24,7 @@ limitations under the License.
 #include <gflags/gflags.h>
 #include <photon/io/fd-events.h>
 #include <photon/common/utility.h>
+#include <photon/common/alog-stdstring.h>
 #include <photon/io/signal.h>
 #include <photon/fs/localfs.h>
 #include <photon/fs/filesystem.h>

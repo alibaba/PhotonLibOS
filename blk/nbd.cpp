@@ -79,11 +79,6 @@ static constexpr uint32_t NBD_OPT_LIST  = 3;
 // option replies
 static constexpr uint32_t NBD_REP_LIST      = 2;
 static constexpr uint32_t NBD_REP_ERR_UNSUP = (1u << 31) | 1;
-// transmission flags
-static constexpr uint16_t NBD_TRANS_HAS_FLAGS = 1u << 0;
-// errors
-static constexpr uint32_t NBD_ENOMEM = 12;
-static constexpr uint32_t NBD_ENOSPC = 28;
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
 static constexpr uint32_t MAX_BLOCK_SIZE      = 32u << 20;
