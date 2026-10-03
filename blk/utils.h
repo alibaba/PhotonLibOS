@@ -876,9 +876,24 @@ public:
     // it does not wake the loop, which is what wake() + interrupt + join are for.
     std::atomic<bool> run{false};        // the loop coroutine may live
     std::atomic<bool> stopping{false};   // teardown: stop dispatching and leave the
-                                         // in-flight requests UNCOMPLETED, so the next
-                                         // daemon resumes from used->idx and re-serves
-                                         // them (virtio-blk ops are idempotent)
+                                         // in-flight requests UNCOMPLETED. The next
+                                         // daemon does NOT recover them from the ring:
+                                         // a split ring is a circular buffer of width
+                                         // num, so entry i and entry i+num share a
+                                         // slot and the outstanding set can span more
+                                         // indices than the buffer holds -- which
+                                         // means no window over the ring identifies
+                                         // exactly the entries that were dispatched
+                                         // but never completed. vhost-user resumes
+                                         // from the frontend's SET_VRING_BASE (the
+                                         // previous backend's own last_avail for a
+                                         // clean handover) and accepts that loss;
+                                         // vduse refuses to adopt a non-quiescent
+                                         // ring outright. Either way, re-serving an
+                                         // uncompleted entry would publish a second
+                                         // used element for a head the driver has
+                                         // already reclaimed, which is worse than
+                                         // losing it.
 
     // the kickfd is the primary wakeup; this bounds how long the loop sleeps
     // before re-checking the avail ring anyway. A kick that races the loop is

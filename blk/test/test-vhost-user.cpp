@@ -4126,6 +4126,82 @@ TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_a
     EXPECT_EQ(0, verify_backend(18 << 20, w));
 }
 
+// The resume cursor on adoption is the one the frontend gave us in SET_VRING_BASE,
+// not used->idx. used->idx counts completions and out-of-order completion means it
+// is not a contiguous prefix of consumed avail entries: resuming from it both loses
+// uncompleted entries below it and re-serves completed ones above it, producing
+// duplicate used elements for heads the driver has already reclaimed. BASE is the
+// previous backend's own last_avail for a clean handover -- GET_VRING_BASE drains,
+// stops and returns it -- so resuming there accepts that dispatched-but-uncompleted
+// entries are genuinely unrecoverable without publishing duplicates.
+//
+// Discriminating by construction: BASE (7) differs from used_idx (5), so a device
+// that resumed from used_idx would dispatch slot 5 again while one that honours
+// BASE skips it. The assertion is on what was SERVED, not on an internal counter,
+// so a mutant that silently ignored BASE cannot pass by accident.
+TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+
+        // Drive five requests to completion so used_idx advances to 5.
+        char buf[512];
+        for (int i = 0; i < 5; i++)
+            ASSERT_EQ(0, fe.write_dev((uint64_t)i * 512, buf, sizeof(buf)));
+
+        ASSERT_TRUE(fe.set_vring_enable(false));   // vq_stop() JOINS the loop
+
+        const uint16_t BASE = 7;
+        ((vused*)(fe.mem + L_USED))->idx = 5;
+        ((vavail*)(fe.mem + L_AVAIL))->idx = BASE;
+        fe.used_idx = 5;
+        fe.avail_idx = BASE;
+        fe.set_used_event(BASE);
+        ASSERT_TRUE(fe.restart_with_base(BASE));
+        (void)fe.callfd_drain();
+
+        // Submit ONE request at slot BASE. A device that resumed from used_idx (5)
+        // would serve slot 5 again before reaching BASE; one that honours BASE
+        // serves exactly slot BASE.
+        ASSERT_EQ(0, fe.submit(BASE, T_OUT, 0, sizeof(buf), false));
+        ASSERT_TRUE(fe.kick());
+
+        bool served = false;
+        for (int i = 0; i < 2000 && !served; i++) {
+            served = (*(uint8_t*)(fe.mem + fe.status_off(BASE)) != 0xff);
+            if (!served) ::usleep(1000);
+        }
+        ASSERT_TRUE(served) << "the request at BASE was not served";
+        EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(BASE)))
+            << "served, but with a nonzero virtio-blk status";
+
+        // And the slot that would have been re-served under used_idx resume was
+        // NOT touched after the restart. Its status byte is still whatever the
+        // first round left it as -- which is 0 (VIRTIO_BLK_S_OK). So this check
+        // only works because we know the first round succeeded. What makes it
+        // discriminate is the AVAIL idx: ring-side avail->idx is BASE, so a
+        // device that resumed from used_idx would have consumed slots 5 and 6
+        // BEFORE BASE, advancing last_avail past them. We catch that by reading
+        // the ring back: if last_avail moved past BASE, the device did not honour
+        // the base.
+        uint16_t avail_after = ((vavail*)(fe.mem + L_AVAIL))->idx;
+        EXPECT_EQ((uint16_t)(BASE + 1), avail_after)
+            << "last_avail did not advance by exactly one from BASE; the device"
+               " either skipped BASE or re-consumed entries below it";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
 }  // namespace blk
 }  // namespace photon
 

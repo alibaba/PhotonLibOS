@@ -1090,9 +1090,10 @@ struct VduseDeviceImpl : IBlkDevice {
                 // unconditional notification
                 q->srv.notify_valid.store(false, std::memory_order_relaxed);
             } else {
-                // adoption of a live ring (no reset seen): resume where the
-                // previous daemon left off; anything fetched-not-completed is
-                // re-served (virtio-blk ops are idempotent)
+                // Adoption of a live ring. The cursor was validated in start():
+                // either the ring is quiescent (avail idx == used idx) and both
+                // resume points are correct, or start() refused. There is no third
+                // outcome here -- a non-quiescent adopt never reaches this line.
                 q->srv.used_idx = vring_used_idx(q->srv.used);
                 q->srv.last_avail = q->srv.used_idx;
             }
@@ -1885,6 +1886,55 @@ struct VduseDeviceImpl : IBlkDevice {
             // assuming cfg.queues describes it.
             if (adopt_queue_count() < 0)
                 return -1;
+            // The cursor half of what an adopt validates, and why it can only be a
+            // refusal rather than a reconstruction. A split ring is a circular
+            // buffer of width num: entry i and entry i+num share a slot, so
+            // publishing the newer destroys the older one's head. The outstanding
+            // set has at most num members but can span num+1 indices, which means
+            // every width-num window misses at least one member -- and the one it
+            // misses is exactly the one whose slot was overwritten, so its head
+            // exists nowhere in shared memory. This is not a property of any one
+            // assumption about used_event or the driver; it is a property of the
+            // ring itself, and no ioctl gives back what the ring lost. The kernel's
+            // own reported avail_index was measured on 2026-10-03 to be 0 after a
+            // daemon that had consumed one entry died, while used_idx was 1 and the
+            // driver had published 2 -- resuming from it would have re-served
+            // everything and published duplicate completions for heads the driver
+            // had already reclaimed. So there is no cursor to resume from when the
+            // previous daemon left work outstanding, and the only sound answer is
+            // to refuse and let the operator decide. When the ring IS quiescent --
+            // the driver has published nothing the previous daemon did not consume
+            // -- both counters agree and resuming from either is correct.
+            uint16_t aidx = 0, uidx = 0;
+            for (uint32_t i = 0; i < nqueues; i++) {
+                vduse_vq_info vi;
+                memset(&vi, 0, sizeof(vi));
+                vi.index = i;
+                if (::ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) < 0)
+                    LOG_ERRNO_RETURN(0, -1, "vduse VQ_GET_INFO failed while checking the adopted ring state, dev `", name);
+                if (!vi.ready)
+                    continue;   // no ring yet; vq_refresh below will pick it up
+                auto* a = (vring_avail*)iotlb.resolve(vi.driver_addr,
+                                                      sizeof(uint16_t) * (3 + vi.num), false);
+                auto* u = (vring_used*)iotlb.resolve(vi.device_addr,
+                                                     sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * vi.num,
+                                                     true);
+                // No mapping means no consumer is attached: the previous daemon
+                // died and its IOTLB entries were reclaimed. A ring with no live
+                // backing memory cannot have outstanding work that we would
+                // duplicate, so there is nothing to refuse. When a new consumer
+                // connects, vq_refresh will re-resolve the ring from scratch.
+                if (!a || !u)
+                    continue;
+                aidx = __atomic_load_n(&a->idx, __ATOMIC_ACQUIRE);
+                uidx = __atomic_load_n(&u->idx, __ATOMIC_ACQUIRE);
+                if (aidx != uidx)
+                    LOG_ERROR_RETURN(EINVAL, -1,
+                                     "vduse ` vq` is not quiescent on adopt (avail idx `, used idx `): "
+                                     "the previous daemon left dispatched-but-uncompleted entries that cannot be "
+                                     "recovered from a split ring; refusing to adopt it",
+                                     name, i, aidx, uidx);
+            }
         }
         iotlb.dev_fd = dev_fd;
         registered = true;   // created or adopted: shutdown() may destroy it

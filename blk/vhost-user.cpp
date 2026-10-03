@@ -1009,15 +1009,26 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // case, which is the only way work can be discovered. Refusing to start
         // here made the device silently serve nothing forever.
         q->srv.used_idx = vring_used_idx(q->srv.used);
-        // Wrap-safe, not a plain `<`: both are free-running uint16 counters, so a
-        // crash adoption whose BASE is a stale non-zero value from BEFORE a 65536
-        // wrap of the dead daemon's counters (BASE 65530 against used_idx 3)
-        // would skip the bump, and dispatch would then re-consume ~65530
-        // already-served avail entries -- duplicate completions on possibly
-        // recycled descriptor heads.
-        if ((uint16_t)(q->srv.used_idx - q->srv.last_avail) < 0x8000)
-            q->srv.last_avail = q->srv.used_idx;   // the frontend's BASE is stale; the
-                                                   // used ring is authoritative
+        // Honour the cursor the frontend gave us in SET_VRING_BASE. For a clean
+        // handover between two of our daemons it is exact: GET_VRING_BASE drains,
+        // stops and returns our own last_avail, which the frontend stores and hands
+        // back on the next start. The previous daemon's dispatched-but-uncompleted
+        // entries are genuinely unrecoverable -- they lived in its memory -- and
+        // resuming at BASE accepts that loss without publishing duplicate
+        // completions for heads the driver has already reclaimed.
+        //
+        // used->idx is NOT a substitute: it counts completions, not consumed avail
+        // entries, and out-of-order completion means the set of completed entries
+        // is not a contiguous prefix of the avail ring. Resuming from it both loses
+        // uncompleted entries below it and re-serves completed ones above it,
+        // producing duplicate used elements for heads the driver no longer owns.
+        // The wrap-safe comparison here defends only against a stale BASE that
+        // wrapped past used_idx by more than half the counter space -- an artefact
+        // of a very old frontend record combined with a 16-bit turn -- and even
+        // then it raises to used_idx rather than adopting a cursor known to be
+        // wrong. A sane frontend never supplies one.
+        if ((uint16_t)(q->srv.last_avail - q->srv.used_idx) >= 0x8000)
+            q->srv.last_avail = q->srv.used_idx;
         // Establish avail_event == last_avail before the loop can sleep on the
         // kickfd. SET_VRING_BASE lets the frontend put last_avail anywhere
         // (handle_msg's SET_VRING_BASE branch), and the two lines above can raise
