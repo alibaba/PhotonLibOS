@@ -110,6 +110,33 @@ int devlock_free(const char* dir, const char* name);
 // means for the registration it already took down.
 int devlock_unlink(const char* dir, const char* name);
 
+// A tombstone can carry a payload: a fact about the registration that the
+// registration's own kernel interface does not give back, so that a daemon
+// adopting it later has something to compare its config against. vduse is the
+// transport that needs one -- its uapi can write the device config but has no
+// readback of it -- and what it stores is the capacity.
+//
+// Written through the fd devlock_acquire returned, so only the holder of a claim
+// writes; read back by path, so an orphan scan reads without claiming. Both ends
+// are byte-exact: the write is a single pwrite at offset 0 and the read reports
+// how many bytes it got, which is what lets a caller require an exact length.
+//
+// ZERO BYTES IS "NO RECORD", and is a different answer from a recorded zero. A
+// tombstone is empty between being created and being written, stays empty when
+// the start() that claimed it fails before reaching the write, and a DIRECTORY
+// standing in for one reads EISDIR and reports 0 as well -- the same way
+// devlock_free() reports a directory as free. A caller that turned 0 into "the
+// registration holds nothing" would refuse every adoption of a device whose
+// record never got written.
+// The byte count read, or -1 with errno when the file cannot be opened at all.
+ssize_t devlock_read_payload(const char* dir, const char* name, void* buf, size_t n);
+
+// 0, or -1 with errno after logging. `fd` must be one devlock_acquire returned.
+// What a failure costs is the caller's to weigh: it loses a LATER adopter the
+// comparison and changes nothing about the registration already in place, so it
+// is worth a warning rather than an undo of work that succeeded.
+int devlock_write_payload(int fd, const void* buf, size_t n);
+
 // The bound a controller puts on its scope directory (the lock dir; the socket
 // dir for vhost-user) so that what it STORES is what it USES: devlock_acquire and
 // devlock_free snprintf into a PATH_MAX path, so an over-long dir would be

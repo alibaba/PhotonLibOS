@@ -63,12 +63,20 @@ enum class BlkShutdownRefusal : uint8_t { Disconnects, Unconditional, RefusesWhe
 // "seen there". Unsupported: resize() is not implemented.
 enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOrFailed };
 
-// How much of an existing registration start() validates before adopting it. Full
-// checks geometry and the registered feature set. IdentityAndSize checks only those
-// two. QueueCountOnly checks the queue count and nothing else, so a new daemon can
-// adopt with different geometry while the consumer keeps the old one. NoRegistration
-// means the transport keeps no kernel-side registration that could drift, so there
-// is nothing to validate and adoption cannot happen.
+// How much of an existing registration start() validates before adopting it, graded by what
+// the transport can ASK the registration: Full checks geometry and the registered feature set,
+// IdentityAndSize checks only those two, QueueCountOnly checks the queue count and asks
+// nothing else of it. A transport may also keep a record of its own and check against it,
+// and that does not raise the grade, because its own record can be missing where the
+// registration's answer cannot. vduse is the case in point: its uapi can write the device
+// config but has no readback of it, so QueueCountOnly is the ceiling on what it can ask, and
+// its identity is the name the registration is opened by rather than a field that could
+// differ from the config. It does record the capacity in its own tombstone and refuses an
+// adoption that disagrees with it -- but a tombstone carrying no record, which is what a
+// start() that failed after claiming the name leaves behind, has nothing to compare, and then
+// a new daemon adopts with different geometry while the consumer keeps the old one.
+// NoRegistration means the transport keeps no kernel-side registration that could drift, so
+// there is nothing to validate and adoption cannot happen.
 enum class BlkAdoption : uint8_t { NoRegistration, QueueCountOnly, IdentityAndSize, Full };
 
 // The single descriptor of an exported block device: what it is called, what it
@@ -145,9 +153,12 @@ struct BlkDevInfo {
 // How much "reconciling" verifies is NOT common, and info().adoption is this
 // transport's answer. Full validates geometry and the registered feature set and
 // rejects a mismatch with EINVAL. IdentityAndSize validates only those two.
-// QueueCountOnly validates the queue count and nothing else, so an adoption can
-// succeed with different geometry while the consumer keeps the config it already
-// has. NoRegistration means the transport keeps no registration that could
+// QueueCountOnly validates the queue count and asks the registration nothing else,
+// so an adoption can succeed with different geometry while the consumer keeps the
+// config it already has; a transport that also checks a record of its own against
+// the config says so where it documents that record, and keeps this grade anyway,
+// because a record can be missing where the registration's answer cannot.
+// NoRegistration means the transport keeps no registration that could
 // drift, so there is nothing to validate and every start() begins its own
 // session. Whether a backlog exists to harvest at all is info().backlog, on the
 // same principle: a transport that keeps no queue across detach() has nothing to
@@ -855,9 +866,16 @@ public:
     // tombstone in this lock_dir whose flock is free -- it scopes the scan the way
     // the HBA directory scopes tcmu's. Liveness: the char device admits a single
     // opener, so a successful probe open still catches a foreign daemon that takes
-    // no tombstone. identity is the device name; the capacity is not recoverable
-    // (the kernel never learns it), so the record carries size 0 plus best-effort
-    // features and the recovery cfg must declare the size itself.
+    // no tombstone. identity is the device name. size is the capacity the
+    // registration serves, read out of that tombstone rather than out of the
+    // kernel: the uapi can write the device config but has no readback of it, so
+    // the tombstone is the only source there is. It is 0 when the tombstone
+    // carries no record, and 0 then means "not recorded" rather than a capacity.
+    // Building the recovery cfg from it is what start() expects -- an adoption
+    // whose recorded capacity disagrees with the config is refused with EINVAL, so
+    // a loop that invented a size would strand the orphans it could have
+    // recovered. Features are best-effort, and only reflect a consumer that is
+    // still attached.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
 
     // Remove one orphan: the vduse registration (DESTROY_DEV) and the tombstone
@@ -874,8 +892,10 @@ public:
     // succeed against a directory that is no device at all and the call would go on
     // to report success about nothing. All three are EINVAL with nothing deleted.
     // The geometry checks new_device() also runs are deliberately NOT repeated: a
-    // record from list_orphans() carries size 0 because the capacity is not
-    // recoverable, so requiring it would make every orphan undestroyable.
+    // record from list_orphans() can carry size 0, meaning its tombstone held no
+    // capacity record, so requiring a geometry would make exactly those orphans
+    // undestroyable. Nothing here needs one either -- the registration goes by
+    // name.
     //
     // EBUSY is the live refusal and it has three sources, checked in this order:
     // a live server holds the tombstone; a FOREIGN daemon is connected to the

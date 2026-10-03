@@ -21,8 +21,9 @@ limitations under the License.
 // virtio device model), and an EXTERNAL consumer attaches it to a /dev/vdX:
 // `vdpa dev add mgmtdev vduse name <name>` (+ the virtio_vdpa driver) locally,
 // or QEMU's vhost-vdpa for a guest. The identity is the device name; there is
-// no config readback ioctl, so an orphan record carries the name only
-// (tombstone, like vhost-user).
+// no config readback ioctl, so an orphan record carries the name plus what our
+// own tombstone recorded for it -- the capacity, which is what lets start()
+// refuse an adoption whose size drifted (tombstone, like vhost-user).
 //
 // Protocol (validated live against kernel 7.0 + the probe/rescue runs):
 // - /dev/vduse/control: VDUSE_{GET,SET}_API_VERSION (we use 0), VDUSE_CREATE_DEV
@@ -686,10 +687,20 @@ struct VduseDeviceImpl : IBlkDevice {
         // was asked for -- that is what makes `features & ~offered` show a caller the
         // requests this transport accepted and cannot honour. The offer_features word
         // above is the negotiation input and stays conditional; this is the capability.
-        // Adoption checks the queue count and nothing else, which is why the value is
-        // QueueCountOnly rather than Full: geometry and the registered feature set go
-        // unchecked, so an adopt can succeed with a different capacity while the guest
-        // keeps the config it already has.
+        // Adoption asks the registration for its queue count and nothing else, which is
+        // why the value is QueueCountOnly rather than Full -- and that is a ceiling the
+        // interface sets, not an omission here. The uapi can WRITE the device config
+        // (VDUSE_DEV_SET_CONFIG, which is all the resize path uses it for) but offers no
+        // readback of it, so a registration's capacity cannot be recovered from the
+        // registration. Identity is not a comparable field either: the registration is
+        // opened BY name, so a different name is a different registration rather than a
+        // drifted one. What start() does compare against cfg.info.size is our OWN record,
+        // the capacity the tombstone carries, and it refuses a disagreement. That is a
+        // weaker source than asking the kernel would have been, and it does not raise the
+        // grade, because a tombstone with no record in it leaves nothing to compare -- an
+        // adopt then succeeds with a capacity other than the one the guest already has,
+        // and the guest keeps its own. The descriptor says so instead of leaving it to be
+        // discovered.
         cfg.info.offered = FEATURE_FLUSH;
         cfg.info.backlog = BlkBacklog::KernelSide;
         cfg.info.shutdown_refusal = BlkShutdownRefusal::RefusesWhenAttached;
@@ -1752,6 +1763,76 @@ struct VduseDeviceImpl : IBlkDevice {
         lock_fd = -1;
     }
 
+    // ----- the tombstone payload: the capacity the registration serves -----
+    //
+    // The uapi can WRITE the device config and cannot read it back, so the one
+    // fact an adopting daemon needs about a registration it did not create -- the
+    // capacity the consumer was told -- has no kernel-side source. Our own
+    // tombstone is the only place it can be kept, which is why it carries one and
+    // why the record is written by this implementation rather than asked of the
+    // device. It is the capacity in BYTES, the unit BlkDevInfo::size and resize()
+    // both use, and it equals capacity_sectors << 9 because validate_info refuses
+    // a size that is not a multiple of 512.
+    //
+    // Best-effort, and the direction of that is the point: a record that fails to
+    // be written costs a LATER adopter the comparison and nothing else, so it
+    // degrades to the behaviour every registration had before there were records
+    // rather than to a wrong answer. That is why both writers warn instead of
+    // failing the start() or the resize() that already did its real work.
+
+    // 1 when the tombstone carries a record, 0 when it does not. A tombstone with
+    // no record is REACHABLE and is not an error: acquire_lock plants the file
+    // before start() knows whether it is creating or adopting, so a start() that
+    // fails after that -- the queue-count refusal is one, and rollback destroys
+    // only what WE created -- leaves a live registration behind an empty file.
+    int read_capacity_record(uint64_t* out) {
+        char ln[VDUSE_LOCK_BUF];
+        vduse_lock_name(name, ln, sizeof(ln));
+        uint64_t v = 0;
+        if (devlock_read_payload(lock_dir, ln, &v, sizeof(v)) != (ssize_t)sizeof(v))
+            return 0;
+        *out = v;
+        return 1;
+    }
+    void record_capacity() {
+        char ln[VDUSE_LOCK_BUF];
+        vduse_lock_name(name, ln, sizeof(ln));
+        uint64_t bytes = capacity_sectors << 9;
+        if (devlock_write_payload(lock_fd, &bytes, sizeof(bytes)) < 0)
+            LOG_WARN("failed to record the capacity of vduse `, so a daemon adopting it later may not detect a size drift", name);
+    }
+
+    // The size half of what an adopt validates, and the reason it can only be a
+    // refusal rather than a reconciliation: the consumer reads the capacity out of
+    // the REGISTRATION's config space while this server bounds every request by
+    // its OWN, so the two being different means one of them is serving a disk the
+    // other does not agree about. Neither direction is benign. Ours smaller turns
+    // every request past it into an I/O error the consumer has no way to explain;
+    // ours larger is invisible until something asks for space the consumer was
+    // never told it had. Rewriting the registration's config to match ours is not
+    // the alternative either -- that changes the size of a disk a consumer is
+    // already using, which is what resize() exists to do with its own contract.
+    //
+    // No record means nothing to compare and the adoption proceeds. Reading an
+    // empty tombstone as capacity 0 instead would refuse every device whose
+    // record never got written; see read_capacity_record.
+    int validate_adopted_capacity() {
+        uint64_t rec = 0;
+        if (!read_capacity_record(&rec))
+            return 0;
+        uint64_t mine = capacity_sectors << 9;
+        if (rec == mine)
+            return 0;
+        // The registration survives, as it does for adopt_queue_count()'s refusal
+        // of a registration wider than this transport: rollback destroys only what
+        // WE created, so this leaves it standing for whoever does own it -- and
+        // leaves the name listed as an orphan, since acquire_lock planted a
+        // tombstone that release never unlinks. A recovery loop that keeps asking
+        // for this size is refused again on every run.
+        LOG_ERROR_RETURN(EINVAL, -1, "vduse ` is registered with capacity ` while this config asks for `; refusing to adopt it",
+                         name, rec, mine);
+    }
+
     int start(fs::IFile* bk, bool ownership) override {
         if (started)
             LOG_ERROR_RETURN(EALREADY, -1, "vduse device already started");
@@ -1793,6 +1874,12 @@ struct VduseDeviceImpl : IBlkDevice {
             }
         } else {
             LOG_INFO("vduse adopting the existing registration `", name);
+            // Capacity first: it is the cheaper question, and it is the one about
+            // whether this registration is the device this config describes at all
+            // rather than about how much of it we can serve. Both refuse the
+            // adoption, and only this one is answerable without the kernel.
+            if (validate_adopted_capacity() < 0)
+                return -1;
             // create_dev, the only place a queue count is declared, did not run
             // for this registration -- so ask the kernel what it holds instead of
             // assuming cfg.queues describes it.
@@ -1801,6 +1888,12 @@ struct VduseDeviceImpl : IBlkDevice {
         }
         iotlb.dev_fd = dev_fd;
         registered = true;   // created or adopted: shutdown() may destroy it
+        // Both branches land here and both need the same thing recorded: a create
+        // writes the capacity create_dev just declared, while an adopt that got
+        // this far either matched the record or found none -- so writing ours
+        // upgrades a tombstone that carried nothing and repeats a value that
+        // already agreed.
+        record_capacity();
 
         // After the DEFER, so a rejected pool unwinds through the same rollback as
         // every other start() failure, and before anything is bound or spawned.
@@ -2058,6 +2151,13 @@ struct VduseDeviceImpl : IBlkDevice {
         for (uint32_t i = 0; i < nqueues; i++)
             vqs[i]->srv.capacity.store(new_size, std::memory_order_relaxed);
         cfg.info.size = new_size;
+        // The record follows the registration rather than lagging it: it is what a
+        // later adopter compares against, and a stale one makes the next start()
+        // refuse the very size this call just published. resize() only grows, so a
+        // record that fails to be written holds less than the truth and the
+        // refusal it costs later is the safe direction -- which is why this warns
+        // from inside record_capacity() and resize() still returns 0.
+        record_capacity();
         LOG_INFO("vduse device resized, ", make_named_value("name", (const char*)name), VALUE(cur), VALUE(new_size));
         return 0;
     }
@@ -2137,13 +2237,20 @@ struct VduseControllerImpl : VduseController {
     // our lock_dir whose flock is free -- without it this would list every unheld
     // vduse device on the host, another tenant's included. Liveness: the
     // single-opener char device admits a probing open, which still catches a
-    // foreign daemon that takes no tombstone. The vduse uapi has NO config
-    // readback, so size is unspecified (0) and features are best-effort
-    // (DEV_GET_FEATURES only reflects a still-attached consumer's negotiation):
-    // the record is a tombstone like vhost-user's -- recovery re-opens by name and
-    // the caller supplies the geometry (start() rewrites the config space via
-    // SET_CONFIG only through resize(); a size mismatch against the registered
-    // capacity is NOT detectable here).
+    // foreign daemon that takes no tombstone.
+    //
+    // size is the tombstone's payload, and the tombstone is the only source there
+    // is: the uapi has no config readback, so a registration's capacity cannot be
+    // recovered from the registration itself. A tombstone carrying no record --
+    // one a start() left behind when it failed after claiming the name -- reports
+    // 0, which reads as "not recorded" and never as a capacity. That value is what
+    // a recovery loop feeds back into its cfg, and feeding it back is what makes
+    // the loop work: start() refuses an adoption whose recorded capacity
+    // disagrees with the config, so a caller that invented a size instead would
+    // strand every orphan it could otherwise have recovered.
+    //
+    // Features stay best-effort: DEV_GET_FEATURES only reflects a still-attached
+    // consumer's negotiation.
     std::vector<BlkDevInfo> list_orphans() override {
         std::vector<BlkDevInfo> ret;
         DIR* dd = ::opendir("/dev/vduse");
@@ -2165,8 +2272,10 @@ struct VduseControllerImpl : VduseController {
                 continue;   // EBUSY: a live daemon; ENOENT/EPERM: raced away
             BlkDevInfo bi;
             bi.identity = e->d_name;
-            bi.size = 0;
             bi.sector_size_shift = 9;
+            uint64_t rec = 0;
+            if (devlock_read_payload(lock_dir, ln, &rec, sizeof(rec)) == (ssize_t)sizeof(rec))
+                bi.size = rec;   // left at the descriptor's 0 when there is no record
             uint64_t f = 0;
             if (::ioctl(fd, VDUSE_DEV_GET_FEATURES, &f) == 0) {
                 if (f & (1ULL << VIRTIO_BLK_F_FLUSH)) bi.features |= FEATURE_FLUSH;
@@ -2185,8 +2294,10 @@ struct VduseControllerImpl : VduseController {
     // sanitize() -- so the two checks validate() runs on a name are run again on this
     // one. They are duplicated rather than shared because validate() takes a
     // BlkConfig and goes on to require a geometry, while a record from
-    // list_orphans() carries size 0: the capacity is not recoverable, so requiring
-    // it would make every orphan undestroyable.
+    // list_orphans() may carry size 0 -- what a tombstone with no capacity record
+    // reports -- so requiring a geometry would make exactly those orphans
+    // undestroyable. Nothing here needs one either: the registration is destroyed
+    // by name.
     //
     // Registration first, tombstone second, so a failure leaves something a later
     // scan still reports.

@@ -239,6 +239,27 @@ static std::string residue() {
         "} | sort");
 }
 
+// The capacity record inside one of this suite's tombstones, read with plain POSIX
+// rather than through the transport. Two reasons: the suite's standing rule is that
+// it must not reach into blk/'s internals to learn the values it asserts against,
+// and a witness that shared the implementation's own reader would agree with it by
+// construction. Returns false for anything that is not exactly one eight-byte
+// record -- an empty file, a missing one, a longer one -- because "no record" has
+// to be an answer the implementation can distinguish from a recorded capacity, and
+// this is how the cases below tell the two apart.
+static bool tombstone_capacity(const std::string& name, uint64_t* out) {
+    std::string p = std::string(SUITE_LOCKS) + "/vduse-" + name + ".lock";
+    int fd = ::open(p.c_str(), O_RDONLY);
+    if (fd < 0)
+        return false;
+    DEFER(::close(fd));
+    char buf[64];
+    if (::read(fd, buf, sizeof(buf)) != (ssize_t)sizeof(uint64_t))
+        return false;
+    *out = *(const uint64_t*)buf;
+    return true;
+}
+
 // The virtio bus publishes the consumer's NEGOTIATED feature set as a
 // bitstring -- one char per bit, bit 0 first -- in the sysfs of the virtio
 // device the gendisk hangs off. That is the kernel's record of what arrived
@@ -393,8 +414,14 @@ public:
                 continue;   // never touch devices we did not create
             BlkConfig cfg;
             cfg.info.identity = rec.identity;
-            cfg.info.size = 4 << 20;   // tombstone record: the size is ours to
-                                       // choose; adoption does not validate it
+            // The recorded capacity when the tombstone carries one: start() refuses
+            // an adoption that disagrees with it, so a fixed size here would strand
+            // every orphan this suite created, and a stranded vduse registration is
+            // what wedges the machine. 4 MiB when it carries none, which is what
+            // raw_vduse_create's registrations look like until a start() claims one
+            // -- and it is the capacity that helper declares, so a sweep adopting
+            // one serves the size the registration was built with.
+            cfg.info.size = rec.size ? rec.size : (4 << 20);
             auto d = c->new_device(cfg);
             if (!d)
                 continue;
@@ -523,8 +550,11 @@ TEST_F(VduseTest, capabilities_descriptor) {
     // The ring lives in the kernel's vduse device and outlives this process, so a later
     // start() has something to harvest. DESTROY_DEV answers EBUSY on a bound device
     // rather than tearing it down. INJECT_CONFIG_IRQ failing only logs, so a successful
-    // resize() does not mean the guest was told. Adoption checks the queue count and
-    // nothing else -- geometry and the registered feature set go unverified.
+    // resize() does not mean the guest was told. Adoption asks the registration for its
+    // queue count and nothing else -- the uapi has no config readback -- and the grade
+    // stays at that even though start() also refuses a capacity its own tombstone record
+    // disagrees with, because a record can be missing and then the geometry goes
+    // unverified. The registered feature set is never checked.
     EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
     EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
     EXPECT_EQ(BlkResizeEffect::BestEffortNotify, i.resize_effect);
@@ -1485,6 +1515,165 @@ TEST_F(VduseTest, adoption_refuses_a_registration_wider_than_the_transport) {
     EXPECT_GE(fd, 0);
     if (fd >= 0)
         ::close(fd);
+}
+
+// The size half of what an adoption validates, and the only half vduse can validate
+// at all: the uapi writes the device config and has no readback of it, so the
+// registration cannot be asked what it serves. Our own tombstone is the record.
+//
+// Why a mismatch is refused rather than reconciled: the consumer reads the capacity
+// out of the REGISTRATION's config space while the daemon bounds every request by
+// its OWN, so the two disagreeing means one of them is serving a disk the other does
+// not agree about. An adopter that is smaller turns every request past its bound
+// into an I/O error the consumer has no way to explain; one that is larger serves
+// space the consumer was never told it had. Neither is a warning.
+TEST_F(VduseTest, adoption_refuses_a_capacity_drift) {
+    if (skip_reason) return;
+    const std::string reg = std::string("/dev/vduse/") + TEST_NAME;
+
+    BlkConfig cfg(make_info());
+    auto dev1 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev1);
+    DEFER(delete dev1);
+    ASSERT_EQ(0, dev1->start(file));
+    // detach, not shutdown: the registration has to survive for there to be anything
+    // to adopt. No consumer is attached, so nothing here can wedge.
+    ASSERT_EQ(0, dev1->detach(false));
+
+    BlkConfig small(make_info());
+    small.info.size = IMG_SIZE / 2;
+    auto dev2 = ctl->new_device(small);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    errno = 0;
+    EXPECT_EQ(-1, dev2->start(file));
+    EXPECT_EQ(EINVAL, errno);
+    // Refused with nothing torn down, as the queue-count refusal above is: rollback
+    // destroys only what WE created, so the registration is still there for whoever
+    // does own it.
+    EXPECT_EQ(0, ::access(reg.c_str(), F_OK));
+    // And the refusal left the record ALONE. This is the assertion that keeps the
+    // check from being self-erasing: a write placed before the comparison would
+    // record the refused size, and every later adopter would then agree with a
+    // registration whose capacity it had just overwritten in the only place the fact
+    // is kept.
+    uint64_t rec = 0;
+    EXPECT_TRUE(tombstone_capacity(TEST_NAME, &rec));
+    EXPECT_EQ(IMG_SIZE, rec);
+
+    // The agreeing size still adopts, which is what makes the refusal above a
+    // comparison rather than "an orphan cannot be adopted at all".
+    BlkConfig cfg3(make_info());
+    auto dev3 = ctl->new_device(cfg3);
+    ASSERT_NE(nullptr, dev3);
+    DEFER(delete dev3);
+    DEFER(dev3->shutdown());
+    ASSERT_EQ(0, dev3->start(file));
+}
+
+// No record is NOT a mismatch, and this is the case that pins it. The state is
+// reachable without any legacy build: acquire_lock plants the tombstone before
+// start() knows whether it is creating or adopting, so a start() that fails after
+// that -- the queue-count refusal above is one, and rollback destroys only what it
+// created -- leaves a live registration behind an empty file. Reading that file as
+// "capacity 0" would refuse every such adoption, and since this fixture's sweep()
+// recovers orphans by adopting them, it would strand a registration in the kernel on
+// every later run.
+TEST_F(VduseTest, adoption_without_a_capacity_record_is_not_a_refusal) {
+    if (skip_reason) return;
+    const std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
+
+    BlkConfig cfg(make_info());
+    auto dev1 = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev1);
+    DEFER(delete dev1);
+    ASSERT_EQ(0, dev1->start(file));
+    ASSERT_EQ(0, dev1->detach(false));
+    uint64_t rec = 0;
+    ASSERT_TRUE(tombstone_capacity(TEST_NAME, &rec));   // the premise: a record exists
+    ASSERT_EQ(0, ::truncate(lp.c_str(), 0));
+    ASSERT_FALSE(tombstone_capacity(TEST_NAME, &rec));  // and now it does not
+
+    BlkConfig small(make_info());
+    small.info.size = IMG_SIZE / 2;
+    auto dev2 = ctl->new_device(small);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    ASSERT_EQ(0, dev2->start(file));
+    DEFER(dev2->shutdown());
+    // The adoption wrote the record it found missing, so the NEXT adopter of this
+    // registration has something to compare against.
+    ASSERT_EQ(0, dev2->detach(false));
+    EXPECT_TRUE(tombstone_capacity(TEST_NAME, &rec));
+    EXPECT_EQ(IMG_SIZE / 2, rec);
+}
+
+// list_orphans() reports the recorded capacity, which is what makes it usable as the
+// input to a recovery: start() refuses an adoption that disagrees with the record, so
+// a loop that had to invent a size would strand the orphans it could otherwise have
+// taken. The 0 it reports for a tombstone with no record is a distinct answer from a
+// recorded capacity, and the scan still lists the device -- ownership is the flock,
+// not the payload.
+TEST_F(VduseTest, list_orphans_reports_the_recorded_capacity) {
+    if (skip_reason) return;
+    const std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, dev->detach(false));
+    DEFER(dev->shutdown());
+
+    // -1 for "not listed", so the second assertion cannot be satisfied by the device
+    // dropping out of the scan instead of reporting 0.
+    auto orphan_size = [&]() -> int64_t {
+        for (auto& i : ctl->list_orphans())
+            if (i.identity == TEST_NAME)
+                return (int64_t)i.size;
+        return -1;
+    };
+    EXPECT_EQ((int64_t)IMG_SIZE, orphan_size());
+    ASSERT_EQ(0, ::truncate(lp.c_str(), 0));
+    EXPECT_EQ(0, orphan_size());
+}
+
+// resize() has to move the record with the registration. One that lagged it would
+// refuse the only config that describes the device as it now stands -- the drift
+// check turned into a way of stranding a resized device.
+TEST_F(VduseTest, resize_refreshes_the_capacity_record) {
+    if (skip_reason) return;
+    constexpr uint64_t NEW_SIZE = 96ull << 20;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, file->ftruncate(NEW_SIZE));
+    ASSERT_EQ(0, dev->start(file));
+    // No consumer attached: resize() writes the config space and only logs a failed
+    // INJECT_CONFIG_IRQ, so what is under test is the record, not the guest.
+    ASSERT_EQ(0, dev->resize(NEW_SIZE));
+    ASSERT_EQ(0, dev->detach(false));
+    uint64_t rec = 0;
+    ASSERT_TRUE(tombstone_capacity(TEST_NAME, &rec));
+    EXPECT_EQ(NEW_SIZE, rec);
+
+    // The size the registration was CREATED with is now the drift.
+    BlkConfig stale(make_info());
+    auto dev2 = ctl->new_device(stale);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    errno = 0;
+    EXPECT_EQ(-1, dev2->start(file));
+    EXPECT_EQ(EINVAL, errno);
+
+    BlkConfig grown(make_info());
+    grown.info.size = NEW_SIZE;
+    auto dev3 = ctl->new_device(grown);
+    ASSERT_NE(nullptr, dev3);
+    DEFER(delete dev3);
+    DEFER(dev3->shutdown());
+    ASSERT_EQ(0, dev3->start(file));
 }
 
 // The tombstone is vduse's ONLY ownership test -- the char device answers "is a

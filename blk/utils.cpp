@@ -159,6 +159,33 @@ int devlock_unlink(const char* dir, const char* name) {
     return 0;
 }
 
+ssize_t devlock_read_payload(const char* dir, const char* name, void* buf, size_t n) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    DEFER(::close(fd));
+    ssize_t r = ::read(fd, buf, n);
+    // A read that fails is reported as 0, the "no record" answer, rather than
+    // propagated: EISDIR from a directory standing in for the tombstone is the
+    // reachable case, and every caller's action on "nothing recorded" and on
+    // "unreadable" is the same one -- proceed without the comparison.
+    return r < 0 ? 0 : r;
+}
+
+int devlock_write_payload(int fd, const void* buf, size_t n) {
+    if (fd < 0)
+        LOG_ERROR_RETURN(EINVAL, -1, "a tombstone payload needs the fd devlock_acquire returned");
+    ssize_t w = ::pwrite(fd, buf, n, 0);
+    if (w != (ssize_t)n) {
+        if (w >= 0)
+            errno = EIO;   // a short write leaves no errno worth printing
+        LOG_ERRNO_RETURN(0, -1, "failed to write ` bytes of tombstone payload", n);
+    }
+    return 0;
+}
+
 // Only these two prove that nobody is listening. Everything else a connect can
 // report leaves the question open, and an open question answered as "dead" is
 // what lets a caller unlink a socket another process is serving.
