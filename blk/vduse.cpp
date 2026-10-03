@@ -681,6 +681,21 @@ struct VduseDeviceImpl : IBlkDevice {
             q->qid = i;
             vqs.push_back(q);
         }
+        // The effective half of the descriptor; blk.h documents each axis. `offered`
+        // is what this implementation can serve at all, so it does NOT depend on what
+        // was asked for -- that is what makes `features & ~offered` show a caller the
+        // requests this transport accepted and cannot honour. The offer_features word
+        // above is the negotiation input and stays conditional; this is the capability.
+        // Adoption checks the queue count and nothing else, which is why the value is
+        // QueueCountOnly rather than Full: geometry and the registered feature set go
+        // unchecked, so an adopt can succeed with a different capacity while the guest
+        // keeps the config it already has.
+        cfg.info.offered = FEATURE_FLUSH;
+        cfg.info.backlog = BlkBacklog::KernelSide;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::RefusesWhenAttached;
+        cfg.info.resize_effect = BlkResizeEffect::BestEffortNotify;
+        cfg.info.adoption = BlkAdoption::QueueCountOnly;
+        cfg.info.detach_no_wait = false;
     }
 
     // pure config validation -- no I/O, no kernel access. The factory runs it
@@ -696,6 +711,17 @@ struct VduseDeviceImpl : IBlkDevice {
     }
 
     const BlkDevInfo& get_info() const override { return cfg.info; }
+
+    // The single writer for the descriptor's copy of the negotiated word, called only
+    // where a negotiation was OBSERVED -- the FEATURES_OK handler. The engine's own
+    // `negotiated` member is written in one more place, the adoption resync in start(),
+    // which deliberately does not come through here: see the comment there.
+    // Only VIRTIO_BLK_F_FLUSH maps to a FEATURE_* bit, because that is the only one of
+    // the three this transport offers.
+    void publish_negotiated(uint64_t f) {
+        negotiated = f;
+        cfg.info.negotiated = (f & (1ULL << VIRTIO_BLK_F_FLUSH)) ? FEATURE_FLUSH : 0;
+    }
 
     // Always nullptr: the /dev/vdX is created by an EXTERNAL consumer (`vdpa dev
     // add mgmtdev vduse`, or QEMU's vhost-vdpa) asynchronously and outside our
@@ -780,7 +806,7 @@ struct VduseDeviceImpl : IBlkDevice {
             } else if (dev_status & VIRTIO_CONFIG_S_FEATURES_OK) {
                 uint64_t f = 0;
                 if (::ioctl(dev_fd, VDUSE_DEV_GET_FEATURES, &f) == 0) {
-                    negotiated = f;
+                    publish_negotiated(f);
                     // DEV_GET_FEATURES returns the NEGOTIATED subset and is only
                     // valid once FEATURES_OK is set (<linux/vduse.h>:94-99), which
                     // is exactly where we are.
@@ -1270,7 +1296,12 @@ struct VduseDeviceImpl : IBlkDevice {
         q->srv.stack_size = cfg.stack_size;
         q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
-        q->srv.serial = "photon-vduse";
+        // The device name, which is the identity and is unique in the transport's own
+        // namespace -- two registrations cannot share it. A fixed per-transport string
+        // made every device this daemon served report the same serial to its guest.
+        // GET_ID truncates to VIRTIO_BLK_ID_BYTES, so names sharing that prefix still
+        // collide; the field is 20 bytes wide and nothing here can widen it.
+        q->srv.serial = name;
         q->srv.tag = name;
         q->srv.hooks.translate.bind(q, &translate_thunk);
         q->srv.hooks.notify.bind(q, &notify_thunk);
@@ -1795,7 +1826,7 @@ struct VduseDeviceImpl : IBlkDevice {
 
         stopping = false;
         dev_status = 0;
-        negotiated = 0;
+        publish_negotiated(0);
         for (uint32_t i = 0; i < nqueues; i++) {
             vq_bind(i);
             vqs[i]->srv.stopping.store(false, std::memory_order_relaxed);
@@ -1812,6 +1843,15 @@ struct VduseDeviceImpl : IBlkDevice {
         // for the SET_STATUS handshake.
         uint64_t f = 0;
         if (::ioctl(dev_fd, VDUSE_DEV_GET_FEATURES, &f) == 0) {
+            // The engine's member only, NOT publish_negotiated(): the descriptor must
+            // not claim a negotiation we did not observe. DEV_GET_FEATURES returns the
+            // negotiated subset only once FEATURES_OK is set, and there is no ioctl
+            // that tells us whether it is -- so on a fresh device this word is not a
+            // negotiated one. Feeding it to the engine is safe and is what the comment
+            // below argues; feeding it to a caller through get_info() would be a claim
+            // about the guest that nothing here witnessed. An adopted, already-driven
+            // device therefore reports negotiated=0 until it re-negotiates, which is
+            // under-reporting rather than guessing.
             negotiated = f;
             // An adopted device is already FEATURES_OK from the daemon we took
             // over from, so this is the negotiated subset. A fresh device reaches

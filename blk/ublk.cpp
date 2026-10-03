@@ -446,6 +446,18 @@ struct UblkDeviceImpl : IBlkDevice {
             queue_depth = (uint16_t)std::min<uint32_t>(cfg.queue_depth, UBLK_MAX_QUEUE_DEPTH);
         if (cfg.queues)
             nr_queues = (uint16_t)std::min<uint32_t>(cfg.queues, MAX_QUEUES);
+        // The effective half of the descriptor; blk.h documents each axis. ublk is the
+        // transport whose detach(false) really does skip the I/O wait: stop_serving
+        // drains in_flight only when asked to flush, and queue teardown abandons rather
+        // than waits, so what is left is the QUIESCED poll -- a bounded wait on the
+        // kernel. Its own destroy path has no liveness check to consult (DEL_DEV is
+        // unconditional), which is the absence of a refusal rather than a force option.
+        cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+        cfg.info.backlog = BlkBacklog::KernelSide;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::Unconditional;
+        cfg.info.resize_effect = BlkResizeEffect::NotifiedOrFailed;
+        cfg.info.adoption = BlkAdoption::Full;
+        cfg.info.detach_no_wait = true;
     }
 
     // pure config validation -- no I/O, no kernel access. The factory runs it
@@ -1085,6 +1097,12 @@ struct UblkDeviceImpl : IBlkDevice {
         if (ret < 0)
             return -1;
 
+        // On the common tail, not in create_new(): the recovery path re-attaches a
+        // registration whose attrs the drift check above already compared against this
+        // config, so both routes end with the kernel holding what was asked for. A
+        // refusal anywhere above is a failed start(), which is what makes the derived
+        // value sound rather than optimistic.
+        cfg.info.negotiated = cfg.info.features & cfg.info.offered;
         started = true;
         ok = true;
         return 0;

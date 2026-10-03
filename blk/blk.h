@@ -34,10 +34,54 @@ static constexpr uint64_t FEATURE_FLUSH         = 1ull << 0;
 static constexpr uint64_t FEATURE_DISCARD       = 1ull << 1;
 static constexpr uint64_t FEATURE_WRITE_ZEROES  = 1ull << 2;
 
-// The single descriptor of an exported block device: what it is called and
-// what it looks like. Used both as the element of list_xxx_orphans() and as
-// BlkConfig::info -- so it is what a recovery loop carries from an orphan
-// record back into a config.
+// The four lifecycle axes below exist because the transports do not agree, and a
+// caller used to have to know which factory built its device to predict what
+// detach(), shutdown(), resize() and an adopting start() would do. Each names the
+// spread rather than promising a common behaviour. Every one of them is a property
+// of the transport, so all four are valid on a constructed device, before start().
+
+// Where a request backlog survives detach() -- that is, what a later start(),
+// possibly in another process, has to harvest. KernelSide: our own registration
+// retains it and start() picks it up. PeerSide: the frontend retains it, so only a
+// reconnecting peer can bring it back and there is nothing for us to harvest. None:
+// the transport keeps no queue across a detach(), so "left pending for the next
+// start()" describes nothing.
+enum class BlkBacklog : uint8_t { None, KernelSide, PeerSide };
+
+// What shutdown() does while a consumer is still attached. RefusesWhenAttached
+// answers EBUSY and leaves the device alone. Disconnects ends the session itself,
+// and the consumer's next request fails. Unconditional destroys the registration
+// regardless, because this transport's destroy path has no liveness check to
+// consult -- that is the absence of a refusal, not a force option.
+enum class BlkShutdownRefusal : uint8_t { Disconnects, Unconditional, RefusesWhenAttached };
+
+// What a successful resize() delivered. NotifiedOrFailed: the new capacity went
+// through the mechanism that tells the consumer, and a failure there is an error
+// return. BestEffortNotify: our capacity and the bound every queue enforces were
+// updated and the notification was attempted, but a failed notification -- or no
+// notification channel at all -- only logs, so success means "updated here" and not
+// "seen there". Unsupported: resize() is not implemented.
+enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOrFailed };
+
+// How much of an existing registration start() validates before adopting it. Full
+// checks geometry and the registered feature set. IdentityAndSize checks only those
+// two. QueueCountOnly checks the queue count and nothing else, so a new daemon can
+// adopt with different geometry while the consumer keeps the old one. NoRegistration
+// means the transport keeps no kernel-side registration that could drift, so there
+// is nothing to validate and adoption cannot happen.
+enum class BlkAdoption : uint8_t { NoRegistration, QueueCountOnly, IdentityAndSize, Full };
+
+// The single descriptor of an exported block device: what it is called, what it
+// looks like, and what its transport can actually do. Used both as the element of
+// list_xxx_orphans() and as BlkConfig::info -- so it is what a recovery loop carries
+// from an orphan record back into a config.
+//
+// Two halves share this struct. identity, size, features and sector_size_shift are
+// the REQUESTED config: the caller writes them and the factory validates them. The
+// rest is the EFFECTIVE view: the transport writes it and a caller's value is
+// ignored, so a config built by hand may leave all of it at its default. The defaults
+// are the weakest value on every axis, which makes an unfilled descriptor promise
+// nothing rather than promise the common case.
 struct BlkDevInfo {
     // The RECOVERY KEY: the transport-relative string naming the kernel-side
     // registration, stable across daemon restarts and unique within its
@@ -51,9 +95,38 @@ struct BlkDevInfo {
     uint64_t size = 0;              // bytes; always declared here, never fstat-ed from the backend
                                     // (backends may be sparse/layered virtual files)
 
-    uint64_t features = 0;          // FEATURE_*
+    uint64_t features = 0;          // FEATURE_*, REQUESTED -- see offered/negotiated below
 
-    uint8_t sector_size_shift = 9;  // 2^9 = 512 bytes
+    // `features` is what was asked for; these are what exists. `offered` is what this
+    // implementation can serve at all, and the two differ: vhost-user and vduse accept
+    // FEATURE_DISCARD and FEATURE_WRITE_ZEROES in a config and offer neither, because
+    // their virtio command set serves IN/OUT/FLUSH/GET_ID only. `offered` does not
+    // depend on what was asked for, which is what makes `features & ~offered` show the
+    // requests a transport accepted and cannot honour.
+    //
+    // `negotiated` is the set actually IN FORCE for this session. How it settles differs
+    // by transport: a virtio frontend accepts a subset of the offer, so a frontend that
+    // declines VIRTIO_BLK_F_FLUSH leaves the engine writing through and that is readable
+    // here instead of inferable; nbd's client cannot decline a transmission flag, so the
+    // advertised set is the set in force; ublk's and tcmu's kernels carry what the
+    // registration was built with, and a refusal there fails start(). It is 0 until the
+    // transport has something to report -- before start(), and where a transport did not
+    // witness the settling at all, which is vduse adopting an already-driven device whose
+    // guest never re-negotiates. Under-reporting is the deliberate direction: 0 means
+    // "not witnessed", never "known to be absent".
+    uint64_t offered = 0;           // FEATURE_*, effective
+    uint64_t negotiated = 0;        // FEATURE_*, effective
+
+    uint8_t sector_size_shift = 9;  // 2^9 = 512 bytes, REQUESTED
+
+    BlkBacklog backlog = BlkBacklog::None;
+    BlkShutdownRefusal shutdown_refusal = BlkShutdownRefusal::Disconnects;
+    BlkResizeEffect resize_effect = BlkResizeEffect::Unsupported;
+    BlkAdoption adoption = BlkAdoption::NoRegistration;
+    // detach(false) returns without waiting for I/O it already dispatched. False does
+    // not mean detach(false) blocks forever -- it means the wait it does perform is on
+    // the backend, which is not ours to bound. See IBlkDevice::detach().
+    bool detach_no_wait = false;
 };
 
 // A serving session of one exported virtual block device. Device ownership is
@@ -62,17 +135,23 @@ struct BlkDevInfo {
 //
 // start() contract, common to all transports: bring the device to serving
 // state, reconciling kernel-side state with the config it was built from. If a
-// registration under info().identity exists: validate the config against it
-// (mismatch, i.e. config drift, is a hard EINVAL error) and attach, then
-// harvest any backlog left by a previous process through the same dispatch path
-// as fresh requests. Otherwise create the registration first. Returns 0 once
-// serving. On failure returns -1 with errno set and rolls back kernel-side
-// residue; the object returns to its virgin state and start() may be retried on
-// it. ENOENT/EEXIST races are retried once internally; EBUSY means another live
-// process is serving this identity. What is left for start() to reject is only
-// what needs the backend or the kernel: a null backend (EINVAL), a second
-// concurrent start (EALREADY), config drift, a foreign live daemon, a missing
-// kernel feature.
+// registration under info().identity exists, attach to it and harvest whatever
+// backlog survived through the same dispatch path as fresh requests; otherwise
+// create the registration first. Returns 0 once serving. On failure returns -1
+// with errno set and rolls back kernel-side residue; the object returns to its
+// virgin state and start() may be retried on it. ENOENT/EEXIST races are retried
+// once internally; EBUSY means another live process is serving this identity.
+//
+// How much "reconciling" verifies is NOT common, and info().adoption is this
+// transport's answer. Full validates geometry and the registered feature set and
+// rejects a mismatch with EINVAL. IdentityAndSize validates only those two.
+// QueueCountOnly validates the queue count and nothing else, so an adoption can
+// succeed with different geometry while the consumer keeps the config it already
+// has. NoRegistration means the transport keeps no registration that could
+// drift, so there is nothing to validate and every start() begins its own
+// session. Whether a backlog exists to harvest at all is info().backlog, on the
+// same principle: a transport that keeps no queue across detach() has nothing to
+// harvest, and saying so is what stops a caller from relying on one.
 //
 // Identity and geometry are FIXED AT CONSTRUCTION: every new_xxx_device() takes
 // its transport's config and validates it, so a constructed object is always
@@ -83,10 +162,18 @@ class IBlkDevice : public Object {
 public:
     // Serve `backend`. ownership = this object deletes it (on shutdown and in
     // the destructor); a FAILED start() hands it back to the caller either way.
+    // What start() rejects is only what needs the backend or the kernel: a null
+    // backend (EINVAL), a second concurrent start (EALREADY), config drift to the
+    // extent info().adoption detects it, a foreign live daemon, a missing kernel
+    // feature.
     virtual int start(fs::IFile* backend, bool ownership = false) = 0;
 
-    // The identity and geometry this device was built from, kept current by
-    // resize(). What a recovery loop matches an orphan record against.
+    // The descriptor this device was built from, plus its effective view. identity,
+    // size, features and sector_size_shift are the requested config, kept current by
+    // resize(), and are what a recovery loop matches an orphan record against. The
+    // rest -- offered, negotiated and the four lifecycle axes -- is what this
+    // transport does; the axes are valid as soon as the object exists, while
+    // negotiated stays 0 until start() has something to report.
     virtual const BlkDevInfo& get_info() const = 0;
 
     // The local block device node this object created and can name (ublk's
@@ -102,26 +189,50 @@ public:
     virtual const char* get_device_node() = 0;
 
     // Stop serving but keep the kernel-side registration, so that a later
-    // start() (possibly in another process) can take over.
+    // start() (possibly in another process) can take over. Whether anything
+    // survives to be taken over is info().backlog.
     // wait_pending=true: drain in-flight IO before returning (orderly handover).
     //   This wait has NO deadline, deliberately. What it waits on is the peer's
     //   IO arrival rate, which is not ours to bound: a busy guest, initiator or
     //   client keeps refilling, so detach(true) returns when the peer goes
     //   quiet, not when a timer expires. Contrast ublk's quiesce_timeout_ms and
     //   stop_timeout_ms, which bound waits on the KERNEL and so can have a
-    //   deadline. A caller that cannot wait indefinitely must pass false.
-    // wait_pending=false: return immediately, leaving pending requests
-    // kernel-side for the next start() to harvest (crash-recovery style).
+    //   deadline.
+    // wait_pending=false: stop consuming the backlog and leave it for the next
+    //   start(). This is NOT a promise to return immediately, and reading it as an
+    //   escape from an unbounded wait is the mistake this paragraph exists to
+    //   prevent. Most transports still wait here for requests they have already
+    //   dispatched, because abandoning those would strand them with nobody left to
+    //   complete them -- on nbd, against a backend operation of roughly 200ms,
+    //   detach(false) was measured at 201699 microseconds. Ask
+    //   info().detach_no_wait: it is true only where false really does skip the I/O
+    //   wait, and what is left to wait on there is bounded, because it is a wait on
+    //   the kernel rather than on a backend.
     virtual int detach(bool wait_pending) = 0;
 
-    // detach() + destroy the kernel-side registration. Fails with EBUSY if the
-    // initiator still holds the device (fs mounted / client connected); no
-    // force option -- tearing down an in-use device is data corruption.
+    // detach() + destroy the kernel-side registration. What happens while a
+    // consumer is still attached is info().shutdown_refusal, and the three answers
+    // are not interchangeable: RefusesWhenAttached fails with EBUSY and leaves the
+    // device alone, Disconnects ends the session itself so that the consumer's next
+    // request fails, and Unconditional destroys the registration because this
+    // transport's destroy path has no liveness check to consult. No transport has a
+    // force option. Tearing down an in-use device is data corruption, which is why
+    // the refusing transports refuse -- so a caller that depends on the refusal has
+    // to check for it rather than assume it, and a caller that must not drop a live
+    // consumer has to check before calling at all.
     virtual int shutdown() = 0;
 
-    // Notify the initiator of a capacity change. Enlarge the backend first; to
-    // shrink, resize() must succeed BEFORE shrinking the backend. Shrink is
-    // rejected by default. Not supported by nbd (size fixed at handshake).
+    // Change the exported capacity. Enlarge the backend first; to shrink, resize()
+    // must succeed BEFORE shrinking the backend. Shrink is rejected by default.
+    // What success delivered is info().resize_effect. NotifiedOrFailed puts the
+    // change through the mechanism that tells the consumer, and a failure there is
+    // an error return. BestEffortNotify updates our own capacity and the bound every
+    // queue enforces, attempts the notification, and still returns success when the
+    // consumer was never told -- either the notification failed and only logged, or
+    // there is no channel to notify on -- so a caller that needs the consumer to see
+    // the new size cannot rely on the return value alone. Unsupported means resize()
+    // is not implemented at all, which is what nbd reports: its size is fixed at
+    // handshake.
     UNIMPLEMENTED(int resize(uint64_t new_size));
 };
 

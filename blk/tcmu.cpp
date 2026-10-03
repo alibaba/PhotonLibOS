@@ -1445,6 +1445,21 @@ struct TcmuDeviceImpl : IBlkDevice {
         sanitize(bs_name, sizeof(bs_name), cfg.info.identity.c_str());
         reg->register_link(&link, bs_name);
         link.added_id = reg->take_added(bs_name);
+        // The effective half of the descriptor; blk.h documents each axis. tcmu honours
+        // all three FEATURE_* operations, so offered is the full set and a request is
+        // never silently dropped here. The ring lives in the uio mapping and outlives
+        // this process, which is what makes the backlog KernelSide and adoption worth
+        // validating at all -- though start() checks the identity and the size and
+        // nothing else, so the value is IdentityAndSize rather than Full. detach(false)
+        // does NOT skip the I/O wait: serve_stop gates only its ring drain on the flag
+        // and waits out in_flight unconditionally, which is the clearest case of the two
+        // promises in blk.h being different promises.
+        cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+        cfg.info.backlog = BlkBacklog::KernelSide;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::RefusesWhenAttached;
+        cfg.info.resize_effect = BlkResizeEffect::NotifiedOrFailed;
+        cfg.info.adoption = BlkAdoption::IdentityAndSize;
+        cfg.info.detach_no_wait = false;
     }
 
     // clear a device's registry pointer -- the HBA is going away: stop calling into it
@@ -1608,6 +1623,13 @@ struct TcmuDeviceImpl : IBlkDevice {
 
         started = true;
         ok = true;
+        // There is no handshake here that could decline a feature: the capability set
+        // is published through the configfs attribs and the inquiry pages above, and a
+        // failed publish is a failed start(). So what is in force is what was asked for
+        // minus anything this transport does not offer -- which, for tcmu, is nothing.
+        // An initiator that never sends UNMAP has chosen not to use a capability, not
+        // negotiated it away.
+        cfg.info.negotiated = cfg.info.features & cfg.info.offered;
         link.serving = true;   // the listener hands REMOVED events over from now on
         LOG_INFO("tcmu device started, ", VALUE(cfg.info.identity), VALUE(cfg.info.size),
                  make_named_value("bs_path", (const char*)bs_path), node, "loopback_lun=", (int)cfg.loopback_lun);

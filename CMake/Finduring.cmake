@@ -36,5 +36,9 @@ unset(CMAKE_REQUIRED_INCLUDES)
 unset(CMAKE_REQUIRED_LIBRARIES)
 
 if (NOT URING_SUPPORTS_URING_CMD)
-    message(FATAL_ERROR "The liburing at ${URING_LIBRARIES} has no io_uring_prep_uring_cmd / IORING_SETUP_SQE128, which PHOTON_ENABLE_URING needs for blk's ublk backend. Install liburing 2.3 or newer, or build it from source with -D PHOTON_BUILD_DEPENDENCIES=ON.")
+    # No release number here, deliberately: this file probes the capability instead,
+    # so a version named in the failure would be a second, unenforced requirement that
+    # drifts from the pin in the top-level CMakeLists -- the previous text recommended
+    # "2.3 or newer" against a 2.15 pin.
+    message(FATAL_ERROR "The liburing at ${URING_LIBRARIES} has no io_uring_prep_uring_cmd / IORING_SETUP_SQE128, which PHOTON_ENABLE_URING needs for blk's ublk backend. Install a liburing that provides both, or let photon build the pinned one with -D PHOTON_BUILD_DEPENDENCIES=ON (PHOTON_URING_SOURCE in the top-level CMakeLists names it).")
 endif ()

@@ -342,6 +342,45 @@ public:
     std::vector<char> pattern(uint8_t seed, size_t n = IO_LEN) { return test::pattern(seed, n); }
 };
 
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. The axes are properties of the
+// transport, so they are already correct on a constructed device; `negotiated` is the
+// one member start() has to fill in.
+TEST_F(UblkTest, capabilities_descriptor) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // The registration survives detach() in QUIESCED and a later start() re-attaches
+    // through START_USER_RECOVERY, so the backlog is kernel-side. start() compares the
+    // registered size, sector shift and attrs against this config and refuses a mismatch
+    // with EINVAL, which is what makes adoption Full rather than partial.
+    EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
+    EXPECT_EQ(BlkAdoption::Full, i.adoption);
+    // DEL_DEV has no liveness check to consult: an initiator holding /dev/ublkbN is not
+    // a refusal, so this is the absence of one rather than a force option.
+    EXPECT_EQ(BlkShutdownRefusal::Unconditional, i.shutdown_refusal);
+    // UPDATE_SIZE goes through the control channel and a refusal there fails resize()
+    EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
+    // The one transport where detach(false) really does skip the I/O wait: stop_serving
+    // drains in_flight only when asked to flush, and queue teardown abandons rather than
+    // waits. What is left is the QUIESCED poll, bounded by quiesce_timeout_ms because it
+    // waits on the kernel and not on a backend. Every other transport answers false.
+    EXPECT_EQ(true, i.detach_no_wait);
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
+    EXPECT_EQ(0ull, i.negotiated);   // no registration yet
+
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    // Spelled out rather than derived from `features & offered`, which is how the
+    // implementation computes it and would therefore agree with itself if it were wrong.
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES,
+              dev->get_info().negotiated);
+}
+
 TEST_F(UblkTest, config_validation) {
     if (skip_reason) return;
     // the pure geometry checks are construction-time now: no object at all

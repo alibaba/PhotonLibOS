@@ -127,6 +127,8 @@ static_assert(offsetof(mu_msg, payload) == 12,
 #define T_IN 0
 #define T_OUT 1
 #define T_FLUSH 4
+#define T_GET_ID 8
+#define ID_BYTES 20        // the fixed width a GET_ID fills, however short the serial
 #define S_OK 0
 #define S_IOERR 1
 #define F_VERSION_1     (1ULL << 32)
@@ -769,6 +771,11 @@ struct MockFrontend {
     int flush_dev() {
         return do_request(T_FLUSH, 0, nullptr, 0, false);
     }
+    // `len` is the writable buffer this guest offers, which for a GET_ID must be the
+    // whole fixed-width field: the device fills all of it and NUL-pads past the serial.
+    int get_id(char* buf, size_t len) {
+        return do_request(T_GET_ID, 0, buf, len, true);
+    }
 
     // ---- raw and malformed messages ----
     // Everything below exists to send what a well-behaved frontend never would.
@@ -1202,6 +1209,55 @@ TEST_F(VhostUserTest, config_validation) {
     EXPECT_NE(0, ::access(SOCK_PATH, F_OK));   // SERVER shutdown unlinks
 }
 
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. Every axis pinned here is a property
+// of the transport, so all of them are already correct on a constructed device, before
+// any frontend exists.
+TEST_F(VhostUserTest, capabilities_descriptor) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // The rings live in the frontend's memory and detach() closes the connection, so
+    // whatever survives a detach is held by the peer and comes back only when it
+    // reconnects -- there is nothing on this side for a later start() to harvest.
+    // shutdown() is detach(true) plus unlinking the socket: it ends the session rather
+    // than refusing it. A resize() that cannot deliver its config-change notification
+    // still returns success, which is what BestEffortNotify records. And there is no
+    // kernel-side registration, so there is nothing to adopt and nothing to drift.
+    EXPECT_EQ(BlkBacklog::PeerSide, i.backlog);
+    EXPECT_EQ(BlkShutdownRefusal::Disconnects, i.shutdown_refusal);
+    EXPECT_EQ(BlkResizeEffect::BestEffortNotify, i.resize_effect);
+    EXPECT_EQ(BlkAdoption::NoRegistration, i.adoption);
+    // stop_session() drains the requests it already dispatched on BOTH paths; only the
+    // avail backlog is what wait_pending controls
+    EXPECT_EQ(false, i.detach_no_wait);
+
+    // This transport's virtio command set serves IN/OUT/FLUSH/GET_ID, so FLUSH is all it
+    // can offer -- and it accepts the other two in a config without serving them. That
+    // gap is the point of keeping `offered` independent of what was requested.
+    EXPECT_EQ(FEATURE_FLUSH, i.offered);
+    EXPECT_EQ(0ull, i.negotiated);   // no frontend has settled anything yet
+}
+
+// The requested/offered split as a caller sees it: asking for DISCARD and WRITE_ZEROES
+// is accepted at construction, and the descriptor is what says they will not be served.
+TEST_F(VhostUserTest, offered_exposes_requests_the_transport_cannot_honour) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.info.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);   // accepted: validate_info checks geometry, not features
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+    EXPECT_EQ(FEATURE_FLUSH, i.offered);
+    EXPECT_EQ(cfg.info.features, i.features);   // the request is recorded, not rewritten
+    EXPECT_EQ(FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.features & ~i.offered);
+}
+
 // blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
 // backend is deleted on shutdown, not only by the destructor. No frontend takes part
 // -- this is about the pointer, not about serving.
@@ -1268,6 +1324,38 @@ TEST_F(VhostUserTest, server_basic_io) {
     EXPECT_EQ(0, verify_backend(IMG_SIZE - (1 << 20), pattern(0xa5)));
 }
 
+// #208: the serial a guest reads back must identify THIS device, not the transport.
+// A fixed per-transport string made every device one daemon serves report the same
+// serial to its guest, which is what a guest uses to tell two disks apart. The value
+// is spelled out rather than derived from SOCK_PATH's basename: deriving it would
+// repeat the rule the implementation uses and so agree with itself if the rule were
+// wrong. What the fixed-width fill itself does -- all 20 bytes written, NUL past the
+// end, used length covering the field -- is witnessed against the shared engine in
+// test-blk-vq.cpp, so this case is about the value the transport supplies to it.
+TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    char want[ID_BYTES] = {};
+    memcpy(want, "vhu.sock", sizeof("vhu.sock") - 1);
+    char got[ID_BYTES];
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        memset(got, 0xA5, sizeof(got));   // so an unwritten tail cannot read as NUL
+        if (fe.get_id(got, sizeof(got)) != S_OK) return EIO;
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0, memcmp(want, got, sizeof(want)));
+    EXPECT_STREQ("vhu.sock", got);
+}
+
 // The control for the case below, and the reason that case's count is a
 // measurement rather than a blind instrument. FLUSH is accepted here, so a write
 // is not persisted on its own account and the FLUSH the frontend sends afterwards
@@ -1297,6 +1385,11 @@ TEST_F(VhostUserTest, accepting_flush_leaves_the_device_in_write_back) {
         return 0;
     });
     ASSERT_EQ(0, rc);
+    // The caller's view of the same settlement: the descriptor reports the word this
+    // frontend accepted, which is the word that decided write-back above. Asserted here
+    // rather than inside the frontend because SET_FEATURES is only guaranteed processed
+    // once the requests that follow it have been served.
+    EXPECT_EQ(FEATURE_FLUSH, dev->get_info().negotiated);
     EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
     EXPECT_EQ(1, probe.datasyncs.load());   // the FLUSH's, not the write's
     EXPECT_EQ(0, probe.syncs.load());
@@ -1328,6 +1421,12 @@ TEST_F(VhostUserTest, declining_flush_puts_the_device_in_write_through) {
         return 0;
     });
     ASSERT_EQ(0, rc);
+    // The descriptor's half of the same fact, and the reason `offered` and `negotiated`
+    // are two fields rather than one: this transport still OFFERS FLUSH, while what the
+    // frontend accepted is a subset that excludes it. A caller that could read only the
+    // request or only the offer would conclude the device is in write-back.
+    EXPECT_EQ(FEATURE_FLUSH, dev->get_info().offered);
+    EXPECT_EQ(0ull, dev->get_info().negotiated);
     EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
     // no FLUSH was sent, so the only thing that could have asked for this sync is
     // the write itself

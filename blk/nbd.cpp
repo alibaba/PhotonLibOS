@@ -369,7 +369,19 @@ struct NbdDeviceImpl : NbdDevice {
     char loopback_node[64] = {};    // "/dev/nbdN" while attached; empty = detached
 #endif
 
-    explicit NbdDeviceImpl(const NbdConfig& c) : cfg(c) {}
+    explicit NbdDeviceImpl(const NbdConfig& c) : cfg(c) {
+        // The effective half of the descriptor; blk.h documents each axis. nbd keeps
+        // no queue across detach() -- the connections ARE the queue, and cleanup_runtime
+        // closes them on both paths -- so there is no backlog to harvest and no
+        // registration for a later start() to drift against. detach(false) still joins
+        // workers that are waiting on backend I/O, which is why detach_no_wait is false.
+        cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+        cfg.info.backlog = BlkBacklog::None;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::Disconnects;
+        cfg.info.resize_effect = BlkResizeEffect::Unsupported;
+        cfg.info.adoption = BlkAdoption::NoRegistration;
+        cfg.info.detach_no_wait = false;
+    }
 
     // pure config validation -- no I/O, no kernel access. The factory runs it
     // before constructing, so a constructed device is always config-valid.
@@ -484,6 +496,15 @@ struct NbdDeviceImpl : NbdDevice {
 
         started = true;
         ok = true;
+        // At the success tail, not where trans_flags is built: a start() that fails
+        // afterwards must leave the descriptor saying "nothing negotiated", which is
+        // what blk.h promises. Read back off trans_flags rather than re-derived from
+        // the request, so there is one source of truth for what went on the wire. The
+        // handshake lets a client accept these flags or not connect at all -- it cannot
+        // decline one and keep the session -- so what we advertised is what was settled.
+        cfg.info.negotiated = ((trans_flags & NBD_TRANS_SEND_FLUSH) ? FEATURE_FLUSH : 0) |
+                              ((trans_flags & NBD_TRANS_SEND_TRIM) ? FEATURE_DISCARD : 0) |
+                              ((trans_flags & NBD_TRANS_SEND_WRITE_ZEROES) ? FEATURE_WRITE_ZEROES : 0);
 #ifdef __linux__
         LOG_INFO("nbd device started, ", VALUE(cfg.info.identity), VALUE(cfg.info.size), make_named_value("loopback_node", (const char*)loopback_node));
 #else

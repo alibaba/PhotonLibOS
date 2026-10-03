@@ -259,6 +259,35 @@ static int virtio_feature_bit(const std::string& kname, uint32_t bit) {
     return strlen(buf) > bit ? (buf[bit] == '1' ? 1 : 0) : -1;
 }
 
+// What the guest reads back as this disk's serial -- the far end of the wire from our
+// own `serial` member, not a readback of it.
+//
+// Read through sh_off_vcpu and NOT with fopen, because the attribute is not cached:
+// reading it makes the kernel issue a live GET_ID and block until the device answers.
+// This device is served by this process's own photon vcpu, so reading it from that
+// vcpu deadlocks the daemon against itself. That is measured, not conjecture: the
+// reader sat in uninterruptible sleep in the block layer's request wait, a udev worker
+// that later closed the node blocked behind it, neither could be killed, and the
+// machine needed a hard reset. sh_off_vcpu runs the read in a child of another OS
+// thread, which leaves the vcpu free to serve the GET_ID the read asks for. kname is
+// a kernel-assigned node name (vdX), never caller text.
+// Returns false when the attribute is missing or unreadable, which the caller treats
+// as a failed case rather than substituting a value.
+static bool sysfs_serial(const std::string& kname, std::string* out) {
+    std::string cmd = "cat /sys/block/";
+    cmd += kname;
+    cmd += "/serial 2>/dev/null || echo VDUSE_TEST_SERIAL_UNREADABLE";
+    std::string s = test::sh_off_vcpu(cmd);
+    if (s.find("VDUSE_TEST_SERIAL_UNREADABLE") != std::string::npos)
+        return false;
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
+        s.pop_back();
+    if (s.empty())
+        return false;
+    *out = s;
+    return true;
+}
+
 // The kernel's own per-device bound on how long it waits for a daemon that has gone
 // quiet, in microseconds. Read rather than spelled: the transport writes
 // BlkConfig::timeout into this same attribute at start(), so what comes back is the
@@ -479,6 +508,63 @@ TEST_F(VduseTest, config_validation) {
     EXPECT_EQ(0, dev->shutdown());
 }
 
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. Every axis pinned here is a property
+// of the transport, so all of them are already correct on a constructed device, before
+// anything touches the kernel.
+TEST_F(VduseTest, capabilities_descriptor) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // The ring lives in the kernel's vduse device and outlives this process, so a later
+    // start() has something to harvest. DESTROY_DEV answers EBUSY on a bound device
+    // rather than tearing it down. INJECT_CONFIG_IRQ failing only logs, so a successful
+    // resize() does not mean the guest was told. Adoption checks the queue count and
+    // nothing else -- geometry and the registered feature set go unverified.
+    EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
+    EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
+    EXPECT_EQ(BlkResizeEffect::BestEffortNotify, i.resize_effect);
+    EXPECT_EQ(BlkAdoption::QueueCountOnly, i.adoption);
+    // stop_serving() drains the requests it already dispatched on BOTH paths; only the
+    // avail backlog is what wait_pending controls
+    EXPECT_EQ(false, i.detach_no_wait);
+    // Nothing has settled yet, and a fresh start() does not change that: the word the
+    // adoption resync reads is only negotiated once FEATURES_OK is set, and no ioctl
+    // says whether it is, so the descriptor stays at "not witnessed" rather than guess.
+    EXPECT_EQ(0ull, i.negotiated);
+
+    // The second half of that claim, and the half that makes the publish mapping
+    // testable: start() with no guest attached still reports 0. It cannot be witnessed
+    // the other way round, because a real guest ALWAYS negotiates FLUSH here -- it is
+    // the only feature this transport offers -- so a writer that published FLUSH
+    // unconditionally would be indistinguishable after an attach. The reset is the one
+    // moment where the correct value and a stuck-on value differ.
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    EXPECT_EQ(0ull, dev->get_info().negotiated);
+}
+
+// The requested/offered split. This transport accepts DISCARD and WRITE_ZEROES in a
+// config and serves neither; before the split a caller could only learn that by reading
+// the constructor, and now it is arithmetic on the descriptor.
+TEST_F(VduseTest, offered_exposes_requests_the_transport_cannot_honour) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    cfg.info.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    auto dev = ctl->new_device(cfg);
+    // accepted: validate_info checks geometry, not the feature set
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+    EXPECT_EQ(FEATURE_FLUSH, i.offered);
+    EXPECT_EQ(cfg.info.features, i.features);   // the request is recorded, not rewritten
+    EXPECT_EQ(FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.features & ~i.offered);
+}
+
 // blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
 // backend is deleted on shutdown, not only by the destructor. Both shutdowns must
 // succeed for the release to be owed -- vduse's propagates a DESTROY_DEV failure, and
@@ -527,6 +613,32 @@ TEST_F(VduseTest, basic_io) {
     ASSERT_FALSE(node.empty());
     EXPECT_EQ(0, device_io(node, pattern(0x5a), true));
     EXPECT_EQ(0, device_io(node, pattern(0xa5), true, IMG_SIZE - IO_OFF - IO_LEN));
+}
+
+// #208: what the guest reads back as this disk's serial has to identify THIS
+// registration. A fixed per-transport string made every device one daemon served
+// report the same serial to its guest, and that serial is what a guest uses to tell
+// two disks apart. The expected value is spelled out rather than read out of
+// make_info().identity, so this cannot agree with the transport by repeating its
+// rule. What the fixed-width fill itself does -- all 20 bytes written, NUL past the
+// end of the serial -- is witnessed against the shared engine in test-blk-vq.cpp, so
+// this case is about the value the transport hands it.
+TEST_F(VduseTest, get_id_reports_this_device_not_the_transport) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());          // fires LAST (declared first)
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    std::string serial;
+    ASSERT_TRUE(sysfs_serial(kname, &serial)) << "no serial attribute under " << kname;
+    EXPECT_EQ("photon-vduse-test", serial);
 }
 
 // The engine suite pins what write_through does and the vhost-user suite pins where

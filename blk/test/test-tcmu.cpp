@@ -465,6 +465,48 @@ public:
     std::vector<char> pattern(uint8_t seed, size_t n = IO_LEN) { return test::pattern(seed, n); }
 };
 
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. The axes are properties of the
+// transport, so they are already correct on a constructed device; `negotiated` is the
+// one member start() has to fill in.
+TEST_F(TcmuTest, capabilities_descriptor) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/false);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // The ring lives in the uio mapping and outlives this process, so a later start()
+    // takes over and harvests it. The backstore rmdir refuses while an initiator holds
+    // the device, which is a real refusal rather than the absence of one. resize()
+    // writes the dev_size attrib and a failure there is an error return, with the kernel
+    // raising the UNIT ATTENTION that tells the initiator.
+    EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
+    EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
+    EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
+    // start() compares the registered identity and size against this config and refuses
+    // a mismatch with EINVAL, and stops there: the feature set is not compared, which is
+    // why this is IdentityAndSize and not Full.
+    EXPECT_EQ(BlkAdoption::IdentityAndSize, i.adoption);
+    // The sharpest illustration of blk.h's two detach() promises being different:
+    // serve_stop gates only its ring drain on wait_pending, and its in_flight wait runs
+    // unconditionally -- so detach(false) leaves the backlog alone and still waits for
+    // the requests already dispatched.
+    EXPECT_EQ(false, i.detach_no_wait);
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
+    EXPECT_EQ(0ull, i.negotiated);   // nothing registered yet
+
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    // There is no handshake that could decline a feature here: the set is published
+    // through the configfs attribs and the inquiry pages, and a failed publish is a
+    // failed start(). Spelled out rather than derived from `features & offered`, which
+    // is how the implementation computes it and would agree with itself if it were wrong.
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES,
+              dev->get_info().negotiated);
+}
+
 TEST_F(TcmuTest, config_validation) {
     if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/false);

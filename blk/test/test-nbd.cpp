@@ -368,6 +368,51 @@ public:
     }
 };
 
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. The axes are properties of the
+// transport, so they are already correct on a constructed device; `negotiated` is the
+// one member that start() has to fill in.
+TEST_F(NbdTest, capabilities_descriptor) {
+    NbdConfig cfg(make_info());
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.loopback_device = false;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // nbd's connections ARE its queue and detach() closes them on both paths, so there
+    // is no backlog for a later start() to harvest and no registration to adopt or
+    // drift against. shutdown() closes the connections rather than refusing a client.
+    // The export's size is fixed at handshake, so resize() is not implemented at all.
+    EXPECT_EQ(BlkBacklog::None, i.backlog);
+    EXPECT_EQ(BlkShutdownRefusal::Disconnects, i.shutdown_refusal);
+    EXPECT_EQ(BlkResizeEffect::Unsupported, i.resize_effect);
+    EXPECT_EQ(BlkAdoption::NoRegistration, i.adoption);
+    // detach(false) skips the in_flight poll but still runs cleanup_runtime(), which
+    // joins workers that are waiting on backend I/O -- the measurement behind blk.h no
+    // longer promising an immediate return
+    EXPECT_EQ(false, i.detach_no_wait);
+    // `offered` describes this transport's command set, not what any given backend can
+    // do: it serves TRIM and WRITE_ZEROES by translating them, and a backend without
+    // them answers per-request.
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
+    EXPECT_EQ(0ull, i.negotiated);   // nothing advertised yet
+
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    // A client cannot decline an individual transmission flag -- it accepts the set or
+    // does not connect -- so what start() advertised is what is in force. Spelled out
+    // per platform rather than derived from `features & offered`, which is how the
+    // implementation computes it and would therefore agree with itself if it were wrong.
+    uint64_t want = FEATURE_FLUSH;
+#ifdef __linux__
+    want |= FEATURE_DISCARD | FEATURE_WRITE_ZEROES;   // make_info() requests them here
+#endif
+    EXPECT_EQ(want, dev->get_info().negotiated);
+}
+
 TEST_F(NbdTest, config_validation) {
     // the pure config checks are construction-time now: no object at all
     NbdConfig cfg(make_info());

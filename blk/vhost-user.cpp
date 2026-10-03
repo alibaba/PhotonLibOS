@@ -503,6 +503,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // lives. A copy, not a back-pointer: a device may outlive the controller that
     // made it, and do_listen() needs the directory for as long as serving does.
     char lock_dir[SCOPE_DIR_BUF] = {};
+    // What VIRTIO_BLK_T_GET_ID answers with. The socket's basename, so that two
+    // devices served by one daemon do not report the same serial to their guests --
+    // a fixed per-transport string did. It is as unique as this controller's identity
+    // lock, and for the same reason: vhu_lock_name() derives that from the basename
+    // too, on the flat-one-level-of-sockets assumption the orphan scan already makes,
+    // so a basename collision inside one scope is refused by the lock before it can
+    // become two devices with one serial.
+    char serial[SUN_PATH_MAX] = {};
 
     bool own_backend = false;
     bool started = false;
@@ -519,6 +527,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
         read_only = cfg.read_only;
         capacity_sectors = cfg.info.size >> 9;
         snprintf(sock_path, sizeof(sock_path), "%s", cfg.sock_path.c_str());
+        // The same basename vhu_lock_name() locks on. A path with no basename leaves
+        // this empty, and such a device is refused later by that function -- so an
+        // empty serial is never served, only constructed.
+        const char* base = strrchr(sock_path, '/');
+        snprintf(serial, sizeof(serial), "%s", base ? base + 1 : sock_path);
         // bounded: the factory checked the length before it got here, and a
         // truncated directory would lock in a DIFFERENT one than the scan reads
         snprintf(lock_dir, sizeof(lock_dir), "%s", dir);
@@ -554,6 +567,20 @@ struct VhostUserDeviceImpl : IBlkDevice {
             vqs.push_back(q);
         }
         fill_config();
+        // The effective half of the descriptor; blk.h documents each axis. `offered`
+        // is what this implementation can serve at all and does not depend on what was
+        // asked for, so `features & ~offered` shows a caller the requests this transport
+        // accepted and cannot honour. The backlog is PeerSide: the rings live in the
+        // frontend's memory and detach() closes the connection, so what survives a
+        // detach is held by the peer and comes back only when it reconnects -- there is
+        // nothing on this side for a later start() to harvest. shutdown() is detach(true)
+        // plus unlinking the socket, i.e. it ends the session rather than refusing.
+        cfg.info.offered = FEATURE_FLUSH;
+        cfg.info.backlog = BlkBacklog::PeerSide;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::Disconnects;
+        cfg.info.resize_effect = BlkResizeEffect::BestEffortNotify;
+        cfg.info.adoption = BlkAdoption::NoRegistration;
+        cfg.info.detach_no_wait = false;
     }
 
     // pure config validation -- no I/O, no kernel access. The factory runs it
@@ -851,7 +878,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         q->srv.stack_size = cfg.stack_size;
         q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
-        q->srv.serial = "photon-vhost-user";
+        q->srv.serial = serial;
         q->srv.tag = sock_path;
         q->srv.hooks.translate.bind(q, &translate_thunk);
         q->srv.hooks.notify.bind(q, &notify_thunk);
@@ -1178,6 +1205,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 break;
             }
             negotiated = f;
+            // The descriptor's copy of the same word, so that get_info() reports what
+            // the peer accepted rather than what we offered. Written here and nowhere
+            // else: this is the only place the session learns the settled features.
+            cfg.info.negotiated = (f & (1ULL << VIRTIO_BLK_F_FLUSH)) ? FEATURE_FLUSH : 0;
             // From the NEGOTIATED word, not from offer_features: if the frontend
             // masked bit 29 off we must keep the flags semantics. Deciding from
             // our own offer would have us read a used_event nobody wrote.
