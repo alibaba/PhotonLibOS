@@ -646,11 +646,8 @@ TEST(uring_cmd, cmd_len_bound) {
     // Notice-and-return rather than GTEST_SKIP, which the gtest a host finds may
     // predate (see test-iouring-uaf.cpp).
     auto installed = photon::get_vcpu()->master_event_engine->get_engine_name();
-    if (installed != "iouring") {
-        fprintf(stderr, "  [ SKIPPED ] uring_cmd needs the io_uring event engine, this vcpu has %.*s\n",
-                (int) installed.size(), installed.data());
-        return;
-    }
+    if (installed != "iouring")
+        LOG_ERROR_RETURN(0, , "uring_cmd needs the io_uring event engine, this vcpu has `", installed);
 
     int fd = eventfd(0, EFD_CLOEXEC);
     ASSERT_GE(fd, 0);
