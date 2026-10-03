@@ -1780,7 +1780,7 @@ int stress_node_both_modes(const std::string& node, uint64_t size, const char* l
 // ---------------------------------------------------------------------------
 
 void SkippableTest::report_skip(const char* why) {
-    fprintf(stderr, "  [ SKIPPED ] %s\n", why);
+    LOG_INFO("[ SKIPPED ] `", why);
     skip_reason = why;
 }
 
