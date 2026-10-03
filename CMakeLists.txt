@@ -45,7 +45,7 @@ photon_source(AIO_SOURCE        "https://codeberg.org/jmoyer/libaio/releases/dow
 photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
 photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
 photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")
-photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz")
+photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.15.tar.gz")
 photon_source(FUSE_SOURCE       "")
 photon_source(GSASL_SOURCE      "")
 photon_source(DPDK_SOURCE       "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz")
@@ -219,6 +219,25 @@ photon_module(ecosystem
         REQUIRES http
         SOURCES  ecosystem/*.cpp
         OBJ_LINK ecosystem_deps)
+photon_module(blk
+        SOURCES blk/nbd.cpp)
+photon_module(blk_utils
+        SOURCES blk/utils.cpp)   # shared blk internals: the portable leaf helpers
+                                 # (needed by all-platform nbd.cpp) plus, under
+                                 # #ifdef __linux__, the genetlink client and the
+                                 # virtio-blk core of vduse/vhost-user
+photon_module(blk_vhost_user
+        ENABLE  LINUX   # eventfd + SCM_RIGHTS fd passing + memfd guest memory
+        SOURCES blk/vhost-user.cpp)
+photon_module(blk_tcmu
+        ENABLE  LINUX
+        SOURCES blk/tcmu.cpp)
+photon_module(blk_ublk
+        ENABLE  LINUX AND PHOTON_ENABLE_URING   # ublk's rings go through the iouring engine
+        SOURCES blk/ublk.cpp)
+photon_module(blk_vduse
+        ENABLE  LINUX
+        SOURCES blk/vduse.cpp)
 photon_module(testing
         OPTION    PHOTON_BUILD_TESTING
         FETCH     gflags googletest)
@@ -381,6 +400,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(net/http/test)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
+    add_subdirectory(blk/test)
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
         add_subdirectory(fs/cache/test)
