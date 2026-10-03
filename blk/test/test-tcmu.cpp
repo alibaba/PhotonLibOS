@@ -2117,6 +2117,35 @@ TEST_F(TcmuTest, passive_daemon_scan) {
     EXPECT_TRUE(lock_free(PASSIVE_BS));
 }
 
+// BlkConfig::spin_us has three modes that select what the pump does when idle:
+//   0          — block immediately (zero idle CPU)
+//   UINT32_MAX — spin forever (lowest latency, burns a vCPU)
+//   other      — spin for that many µs after last work, then block
+// All three must produce correct I/O; a broken predicate (wrong comparison,
+// dropped UINT32_MAX case) will hang or fail in at least one mode.
+TEST_F(TcmuTest, spin_us_modes) {
+    if (skip_reason) return;
+    const uint32_t modes[] = {0, UINT32_MAX, 50000};
+    for (uint32_t sp : modes) {
+        auto cfg = make_cfg(/*loopback=*/true);
+        cfg.spin_us = sp;
+        auto dev = sys->new_device(cfg);
+        ASSERT_NE(nullptr, dev) << "spin_us=" << sp;
+        DEFER(delete dev);
+        ASSERT_EQ(0, dev->start(file)) << "spin_us=" << sp;
+        DEFER(dev->shutdown());
+
+        std::string sd = wait_photon_sd(IMG_SIZE / 512);
+        ASSERT_FALSE(sd.empty()) << "spin_us=" << sp;
+
+        auto wbuf = pattern((uint8_t)(sp & 0xff));
+        EXPECT_EQ(0, device_io(sd, wbuf, /*verify_backend=*/true))
+            << "I/O failed under spin_us=" << sp;
+
+        dev->shutdown();
+    }
+}
+
 }  // namespace blk
 }  // namespace photon
 

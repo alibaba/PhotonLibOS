@@ -1831,6 +1831,31 @@ TEST_F(UblkTest, timeout_knobs) {
     ASSERT_EQ(0, dev3->shutdown());
 }
 
+// BlkConfig::spin_us has three modes that select what the pump does when idle:
+//   0          — block immediately (zero idle CPU)
+//   UINT32_MAX — spin forever (lowest latency, burns a vCPU)
+//   other      — spin for that many µs after last work, then block
+// All three must produce correct I/O; a broken predicate (wrong comparison,
+// dropped UINT32_MAX case) will hang or fail in at least one mode.
+TEST_F(UblkTest, spin_us_modes) {
+    if (skip_reason) return;
+    const uint32_t modes[] = {0, UINT32_MAX, 50000};
+    for (uint32_t sp : modes) {
+        UblkController::Config cfg(make_info());
+        cfg.spin_us = sp;
+        auto dev = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev) << "spin_us=" << sp;
+        DEFER(delete dev);
+        ASSERT_EQ(0, dev->start(file)) << "spin_us=" << sp;
+        DEFER(dev->shutdown());
+        std::string node = node_of(dev);
+        ASSERT_FALSE(node.empty()) << "spin_us=" << sp;
+        EXPECT_EQ(0, device_io(node, pattern((uint8_t)(sp & 0xff)), true))
+            << "I/O failed under spin_us=" << sp;
+        dev->shutdown();
+    }
+}
+
 }  // namespace blk
 }  // namespace photon
 
