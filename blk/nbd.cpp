@@ -787,8 +787,15 @@ struct NbdDeviceImpl : NbdDevice {
         }
     }
 
-    static void reap_worker(photon::thread* w) {
-        photon::thread_join((photon::join_handle*)w);
+    struct ReaperArg {
+        NbdDeviceImpl* dev;
+        photon::thread* worker;
+    };
+
+    static void reap_worker(ReaperArg* arg) {
+        photon::thread_join((photon::join_handle*)arg->worker);
+        arg->dev->live_workers.fetch_sub(1, std::memory_order_relaxed);
+        delete arg;
     }
 
     // Last act of a connection coroutine: leave the list cleanup_runtime joins, and
@@ -824,17 +831,23 @@ struct NbdDeviceImpl : NbdDevice {
             if (ours)
                 workers.erase(it);
         }
-        if (ours && !photon::thread_create11(REAPER_STACK_SIZE, &reap_worker, self)) {
-            // No reaper, so put the handle back for cleanup_runtime to join. If that
-            // swap has already happened in between, nothing ever joins it and one
-            // stack leaks -- which is what an out-of-memory thread creation costs
-            // here, and is why this branch hands the handle back instead of dropping
-            // it: dropping it would leak the stack on EVERY failure, not just the one
-            // that races a shutdown.
-            SCOPED_LOCK(conns_lock);
-            workers.push_back(self);
+        if (ours) {
+            // Keep live_workers elevated: the reaper decrements it after joining,
+            // so cleanup_runtime's wait covers both the worker AND its reaper.
+            // Without this, cleanup_runtime could tear down the device while the
+            // reaper is still running, and the reaper would dereference freed memory.
+            auto* arg = new ReaperArg{this, self};
+            if (!photon::thread_create11(REAPER_STACK_SIZE, &reap_worker, arg)) {
+                // No reaper: put the handle back for cleanup_runtime to join,
+                // and decrement now since nobody else will.
+                delete arg;
+                SCOPED_LOCK(conns_lock);
+                workers.push_back(self);
+                live_workers.fetch_sub(1, std::memory_order_relaxed);
+            }
+        } else {
+            live_workers.fetch_sub(1, std::memory_order_relaxed);
         }
-        live_workers.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void execute(Conn* c, uint16_t type, uint16_t cflags, uint64_t handle, uint64_t offset, uint32_t len, char* buf) {
