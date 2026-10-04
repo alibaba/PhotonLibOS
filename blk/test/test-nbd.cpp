@@ -23,6 +23,8 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
+
+#include <csignal>
 #include <photon/fs/localfs.h>
 #include <photon/net/socket.h>
 #include <photon/thread/stack-allocator.h>   // the default stack allocator, wrapped to count
@@ -1445,6 +1447,11 @@ int main(int argc, char** arg) {
                      photon::blk::test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
+    // photon's signalfd clears the signal mask after init, so SIGPIPE's
+    // default disposition (terminate) is still in effect. NBD test clients
+    // send DISC on sockets the server may have already closed; without
+    // MSG_NOSIGNAL (macOS) this delivers SIGPIPE and kills the process.
+    signal(SIGPIPE, SIG_IGN);
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }
