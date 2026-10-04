@@ -1396,9 +1396,7 @@ TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
 // of the byte budget for as long as it likes -- with queue_depth 1 that is every slot
 // there is, and the honest client behind it waits. cfg.timeout releases nothing here:
 // it is the kernel's request timeout for the loopback device.
-// DISABLED: SEGFAULT/abort during scope exit on CI (all platforms);
-// root cause is an async coroutine cleanup race, not SIGPIPE (#183/#230).
-TEST_F(NbdTest, DISABLED_a_stalled_write_payload_cannot_starve_another_client) {
+TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     NbdConfig cfg(make_info());
     cfg.loopback_device = false;
     cfg.enable_tcp = true;
