@@ -1388,35 +1388,29 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     cfg.loopback_device = false;
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
-    cfg.queue_depth = 1;      // one slot, so the stall is total rather than partial
-    cfg.stall_timeout = 2;    // seconds; enough margin for slow CI runners
+    cfg.queue_depth = 1;
+    cfg.stall_timeout = 2;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
-    DEFER(delete dev);
+    DEFER({ LOG_INFO("diag: delete dev"); delete dev; LOG_INFO("diag: deleted dev"); });
     ASSERT_EQ(0, dev->start(file));
-    DEFER(dev->shutdown());
+    DEFER({ LOG_INFO("diag: shutdown"); dev->shutdown(); LOG_INFO("diag: shutdown done"); });
     net::EndPoint ep;
     ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
 
     NbdTestClient stalled;
     ASSERT_EQ(0, stalled.connect_tcp("127.0.0.1", ep.port));
     ASSERT_EQ(0, stalled.handshake());
-    // the header of a 64 KiB write, and then nothing: the server has taken both gates
-    // and is waiting for bytes that are not coming
     ASSERT_EQ(0, stalled.send_header_only(NBD_CMD_WRITE, 0, 65536));
-    LOG_INFO("diag: A");
 
     NbdTestClient honest;
     ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
     ASSERT_EQ(0, honest.handshake());
     honest.set_timeout(10 * 1000 * 1000);
     std::vector<char> wbuf(4096, 0x33);
-    LOG_INFO("diag: B");
     EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
-    LOG_INFO("diag: C");
     std::vector<char> rbuf(4096);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
-    LOG_INFO("diag: D");
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
     LOG_INFO("diag: E");
     stalled.disconnect();
