@@ -1427,9 +1427,12 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
     LOG_INFO("diag: E");
-    stalled.force_close();
+    // The server already dropped this connection via stall_timeout.
+    // Just null out the pointer to prevent the destructor from touching it;
+    // the fd will be reclaimed when the process exits.
+    stalled.s = nullptr;
     LOG_INFO("diag: F");
-    honest.disconnect();
+    honest.force_close();
     LOG_INFO("diag: G");
     photon::thread_usleep(500 * 1000);
     LOG_INFO("diag: H");
