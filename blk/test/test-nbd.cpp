@@ -129,13 +129,12 @@ struct NbdTestClient {
         return d;
     }
 
-    // OPT_EXPORT_NAME's payload is the name and nothing else: no item count, and
-    // its answer is the export meta rather than an option reply.
+    // OPT_EXPORT_NAME's payload is the raw export name -- no uint32 length prefix,
+    // no item count. Its answer is the export meta rather than an option reply.
     static std::vector<char> name_payload(const char* export_name) {
         size_t n = strlen(export_name);
-        std::vector<char> d(4 + n);
-        be32wr(d.data(), (uint32_t)n);
-        memcpy(d.data() + 4, export_name, n);
+        std::vector<char> d(n);
+        memcpy(d.data(), export_name, n);
         return d;
     }
 
@@ -1281,20 +1280,21 @@ TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
         uint32_t opt;
         std::vector<char> payload;
         bool reply_comes;   // the protocol allows none for EXPORT_NAME
+        uint32_t expected_type;  // NBD_REP_ERR_INVALID or NBD_REP_ERR_UNKNOWN
         const char* why;
     };
     const Row rows[] = {
-        {NBD_OPT_GO, std::vector<char>(4, 0), true,
+        {NBD_OPT_GO, std::vector<char>(4, 0), true, NBD_REP_ERR_INVALID,
          "four bytes: a name length, and no room for the item count"},
-        {NBD_OPT_GO, NbdTestClient::go_payload("", 1), true,
+        {NBD_OPT_GO, NbdTestClient::go_payload("", 1), true, NBD_REP_ERR_INVALID,
          "one information item requested and no bytes behind the count"},
-        {NBD_OPT_GO, NbdTestClient::go_payload("some-other-export"), true,
+        {NBD_OPT_GO, NbdTestClient::go_payload("some-other-export"), true, NBD_REP_ERR_UNKNOWN,
          "an export this device does not serve"},
-        {NBD_OPT_INFO, NbdTestClient::go_payload("some-other-export"), true,
+        {NBD_OPT_INFO, NbdTestClient::go_payload("some-other-export"), true, NBD_REP_ERR_UNKNOWN,
          "the same refusal on OPT_INFO"},
-        {NBD_OPT_GO, NbdTestClient::go_payload_with_trailer(id.c_str(), 2), true,
+        {NBD_OPT_GO, NbdTestClient::go_payload_with_trailer(id.c_str(), 2), true, NBD_REP_ERR_INVALID,
          "the name matches and every read succeeds, but two bytes are left over"},
-        {NBD_OPT_EXPORT_NAME, NbdTestClient::name_payload("some-other-export"), false,
+        {NBD_OPT_EXPORT_NAME, NbdTestClient::name_payload("some-other-export"), false, 0,
          "EXPORT_NAME is answered with the export meta or with a close, never a reply"},
     };
     for (const auto& r : rows) {
@@ -1307,7 +1307,7 @@ TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
         int got = cli.read_opt_reply(&type, &data);
         if (r.reply_comes) {
             ASSERT_EQ(0, got) << r.why;
-            EXPECT_EQ(NBD_REP_ERR_INVALID, type) << r.why;
+            EXPECT_EQ(r.expected_type, type) << r.why;
         } else {
             EXPECT_EQ(-1, got) << r.why;
         }

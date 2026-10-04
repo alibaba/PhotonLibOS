@@ -870,8 +870,19 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             // NUL past the end of the serial. Writing only strlen(serial)
             // leaves that tail holding whatever the guest prefilled there, and
             // reports a used length stopping short of the field it asked about.
+            //
+            // A naive memcpy truncated to 20 bytes gives distinct devices the
+            // same ID when their identities share a prefix (e.g. two sockets
+            // in the same directory). Hash the full identity with FNV-1a into
+            // a hex string that fills the field, so every distinct input
+            // produces a distinct serial with overwhelming probability.
             char id[VIRTIO_BLK_ID_BYTES] = {};
-            memcpy(id, serial, std::min(strlen(serial), sizeof(id)));
+            uint64_t h = 14695981039346656037ULL;   // FNV offset basis
+            for (const char* p = serial; *p; p++) {
+                h ^= (uint8_t)*p;
+                h *= 1099511628211ULL;             // FNV prime
+            }
+            snprintf(id, sizeof(id), "%016llx", (unsigned long long)h);
             data_written = (uint32_t) data.fill(id, sizeof(id));
             break;
         }

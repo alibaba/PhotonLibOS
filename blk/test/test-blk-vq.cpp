@@ -669,6 +669,18 @@ TEST_F(ChainFixture, a_chain_too_short_to_hold_a_header_is_refused) {
 // used length covers it. Writing only strlen(serial) leaves the rest of the
 // guest's buffer holding whatever the guest prefilled there, and reports a used
 // length that does not reach the end of the field the guest asked about.
+// Compute the same FNV-1a hash that virtio_blk_serve_chain uses for GET_ID,
+// formatted as a 16-char hex string into a VIRTIO_BLK_ID_BYTES-wide buffer.
+static void fnv1a_serial(const char* input, char out[20]) {
+    uint64_t h = 14695981039346656037ULL;
+    for (const char* p = input; *p; p++) {
+        h ^= (uint8_t)*p;
+        h *= 1099511628211ULL;
+    }
+    memset(out, 0, 20);
+    snprintf(out, 20, "%016llx", (unsigned long long)h);
+}
+
 TEST_F(ChainFixture, get_id_fills_the_whole_fixed_width_field_with_nul_padding) {
     GuestChain c;
     put_header(c, VIRTIO_BLK_T_GET_ID);
@@ -684,10 +696,10 @@ TEST_F(ChainFixture, get_id_fills_the_whole_fixed_width_field_with_nul_padding) 
     // the whole field, plus the status byte the guest also gets back
     EXPECT_EQ((uint32_t) VIRTIO_BLK_ID_BYTES + 1, written);
 
-    const size_t slen = strlen(CHAIN_SERIAL);
-    ASSERT_LT(slen, (size_t) VIRTIO_BLK_ID_BYTES);
-    EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), slen));
-    for (size_t i = slen; i < (size_t) VIRTIO_BLK_ID_BYTES; i++)
+    char want[20];
+    fnv1a_serial(CHAIN_SERIAL, want);
+    EXPECT_EQ(0, memcmp(want, c.at(ioff), strlen(want)));
+    for (size_t i = strlen(want); i < (size_t) VIRTIO_BLK_ID_BYTES; i++)
         EXPECT_EQ(0, c.at(ioff)[i]);
 }
 
@@ -710,7 +722,9 @@ TEST_F(ChainFixture, get_id_into_a_shorter_buffer_writes_only_what_was_offered) 
     EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &written));
     EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
     EXPECT_EQ((uint32_t) offered + 1, written);
-    EXPECT_EQ(0, memcmp(CHAIN_SERIAL, c.at(ioff), offered));
+    char want[20];
+    fnv1a_serial(CHAIN_SERIAL, want);
+    EXPECT_EQ(0, memcmp(want, c.at(ioff), offered));
     for (size_t i = 0; i < offered; i++)
         EXPECT_EQ(SENTINEL, c.at(coff)[i]);
 }

@@ -473,6 +473,22 @@ struct VduseDeviceImpl : IBlkDevice {
                                                  // counters at the next refresh
                                                  // (vs adoption resume)
         std::atomic<bool> needs_refresh{false};  // DRIVER_OK seen; the loop resolves
+        // Set by ready_thunk when it returns true (the engine is about to read the
+        // avail ring), cleared by tick_thunk at the top of the next loop iteration.
+        // Between set and clear, no flush_stale may unmap this queue's ring mapping:
+        // redispatch_backlog passes hooks.ready and then reads avail->idx without
+        // re-checking readiness, and on a different vcpu a tick that sees zero
+        // in_flight could otherwise unmap the pages that reader is about to
+        // dereference. The flag is conservative -- it stays set for the whole
+        // dispatch, not just the single read -- but that costs nothing because a
+        // flush deferred by one tick lands on the next one.
+        std::atomic<bool> reading{false};
+        // True after the first successful vq_refresh publish. Distinguishes initial
+        // adoption (derive last_avail from used.idx, which equals avail.idx because
+        // start() refused non-quiescent rings) from a live refresh after
+        // UPDATE_IOTLB (preserve the existing last_avail, because used.idx counts
+        // completions and may lag behind dispatched-but-uncompleted requests).
+        bool refreshed_once = false;
 
         bool ready() const {
             return ready_gen.load(std::memory_order_relaxed) & 1u;
@@ -811,8 +827,21 @@ struct VduseDeviceImpl : IBlkDevice {
                     // in which a refresh publishes over the clear, and dispatch
                     // then runs on a ring the driver has torn down.
                     q->x.retire();
+                    // Bump the engine's generation so in-flight requests decline
+                    // to complete into the old used ring. retire() above invalidates
+                    // the transport's readiness token, but handle_req tests
+                    // srv.generation, which only changes on set_ring()/clear_ring().
+                    // Without this bump, a request that passed the generation check
+                    // before the reset could still publish its completion after the
+                    // driver has torn down the ring. The ring pointers stay valid --
+                    // only the generation moves -- so a request mid-execution can
+                    // still read them safely; it just won't complete.
+                    q->srv.generation.fetch_add(1, std::memory_order_release);
                     // the coming negotiation restarts the ring counters at 0
                     q->x.reset_pending.store(true, std::memory_order_relaxed);
+                    // next refresh is a fresh start, not a live one: derive
+                    // last_avail from used.idx rather than preserving the old one
+                    q->x.refreshed_once = false;
                 }
             } else if (dev_status & VIRTIO_CONFIG_S_FEATURES_OK) {
                 uint64_t f = 0;
@@ -1090,12 +1119,24 @@ struct VduseDeviceImpl : IBlkDevice {
                 // unconditional notification
                 q->srv.notify_valid.store(false, std::memory_order_relaxed);
             } else {
-                // Adoption of a live ring. The cursor was validated in start():
-                // either the ring is quiescent (avail idx == used idx) and both
-                // resume points are correct, or start() refused. There is no third
-                // outcome here -- a non-quiescent adopt never reaches this line.
-                q->srv.used_idx = vring_used_idx(q->srv.used);
-                q->srv.last_avail = q->srv.used_idx;
+                // Adoption of a live ring, or a live refresh after UPDATE_IOTLB.
+                // On adoption the cursor was validated in start(): either the ring
+                // is quiescent (avail idx == used idx) and both resume points are
+                // correct, or start() refused. There is no third outcome here --
+                // a non-quiescent adopt never reaches this line.
+                //
+                // On a live refresh the queue already has a valid last_avail from
+                // before the invalidation. Deriving it from used.idx would rewind
+                // the cursor: used.idx counts completions, not consumed avail
+                // entries, so if requests A and B were dispatched and only B
+                // completed, used.idx is 1 but last_avail is 2. Rewinding to 1
+                // replays B, and combined with the generation bump that retired
+                // the old ring, A's completion is dropped entirely.
+                if (!q->x.refreshed_once) {
+                    q->srv.used_idx = vring_used_idx(q->srv.used);
+                    q->srv.last_avail = q->srv.used_idx;
+                }
+                // else: preserve last_avail and used_idx from the previous ring
             }
         }
         // Establish avail_event == last_avail before the loop can sleep on the
@@ -1143,6 +1184,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // because the ring really was current at the moment it became ready. What
         // a publish can no longer do is survive one.
         if (q->x.publish_ready(gen_snapshot)) {
+            q->x.refreshed_once = true;
             LOG_INFO("vduse ` vq` ready: num ` desc ` avail ` used ` resume at `",
                      name, idx, q->srv.num, HEX(vi.desc_addr), HEX(vi.driver_addr),
                      HEX(vi.device_addr), q->srv.last_avail);
@@ -1199,7 +1241,12 @@ struct VduseDeviceImpl : IBlkDevice {
         // three readers of a ring pointer are covered by two different facts -- the
         // two that admit work into a ring consult readiness, and the third, a
         // completion already running, is counted in the in_flight this waits for.
-        if (!any_in_flight()) {
+        // The reading flag covers the window between hooks.ready passing and the
+        // avail ring read completing: a reader that passed ready but has not yet
+        // touched the ring is not counted in in_flight (it was decremented by the
+        // handle_req DEFER before redispatch_backlog ran), so without this check
+        // a flush on another vcpu could unmap the pages it is about to read.
+        if (!any_in_flight() && !any_reading()) {
             iotlb.flush_stale();
             return;
         }
@@ -1218,6 +1265,17 @@ struct VduseDeviceImpl : IBlkDevice {
     bool any_in_flight() {
         for (auto* o : vqs)
             if (o->srv.in_flight.load())
+                return true;
+        return false;
+    }
+
+    // True when any queue's engine is between passing hooks.ready and finishing
+    // its avail ring read. A flush that runs while this is true can unmap a ring
+    // that a reader on another vcpu is about to dereference through, so the flush
+    // must wait. See the `reading` flag's declaration for the full argument.
+    bool any_reading() {
+        for (auto* o : vqs)
+            if (o->x.reading.load(std::memory_order_relaxed))
                 return true;
         return false;
     }
@@ -1258,9 +1316,10 @@ struct VduseDeviceImpl : IBlkDevice {
         // exceeded, so a later tick tries again.
         uint64_t deadline = photon::now + VDUSE_QUIESCE_DRAIN_US;
         for (auto* o : vqs)
-            while (o->srv.in_flight.load() && photon::now < deadline)
+            while ((o->srv.in_flight.load() || o->x.reading.load(std::memory_order_relaxed)) &&
+                   photon::now < deadline)
                 photon::thread_usleep(1000);
-        bool drained = !any_in_flight();
+        bool drained = !any_in_flight() && !any_reading();
         if (drained)
             iotlb.flush_stale();
         // Every queue was retired, so every queue needs its ring re-resolved -- the
@@ -1284,10 +1343,17 @@ struct VduseDeviceImpl : IBlkDevice {
     }
     static bool ready_thunk(void* a) {
         auto* q = (Vq*)a;
-        return q->impl->vq_may_dispatch(q->qid);
+        bool r = q->impl->vq_may_dispatch(q->qid);
+        if (r)
+            q->x.reading.store(true, std::memory_order_relaxed);
+        return r;
     }
     static void tick_thunk(void* a) {
         auto* q = (Vq*)a;
+        // Clear BEFORE the tick body: the previous iteration's dispatch is done,
+        // and this tick may flush stale mappings. The flag must be clear so the
+        // flush sees no active reader on this queue.
+        q->x.reading.store(false, std::memory_order_relaxed);
         q->impl->vq_tick(q->qid);
     }
     static void* translate_thunk(void* a, uint64_t addr, size_t len, bool writable) {
@@ -1840,6 +1906,16 @@ struct VduseDeviceImpl : IBlkDevice {
         if (!bk)
             LOG_ERROR_RETURN(EINVAL, -1, "backend IFile is null");
 
+        // detach() retains backend and own_backend (the caller keeps the backend
+        // on a failed start, so rollback must not delete it), but a subsequent
+        // start() with a NEW backend would overwrite both without releasing the
+        // old ownership -- double-free at the next shutdown or destructor.
+        if (own_backend && backend) {
+            delete backend;
+            backend = nullptr;
+            own_backend = false;
+        }
+
         backend = bk;
         own_backend = ownership;
 
@@ -1875,6 +1951,11 @@ struct VduseDeviceImpl : IBlkDevice {
             }
         } else {
             LOG_INFO("vduse adopting the existing registration `", name);
+            // Set BEFORE the adoption checks below: they call iotlb.resolve()
+            // which needs dev_fd for VDUSE_IOTLB_GET_FD. Without this, resolve()
+            // fails with EBADF and the adoption loop treats every ring as "no
+            // consumer attached", bypassing the non-quiescent-ring rejection.
+            iotlb.dev_fd = dev_fd;
             // Capacity first: it is the cheaper question, and it is the one about
             // whether this registration is the device this config describes at all
             // rather than about how much of it we can serve. Both refuse the

@@ -1614,6 +1614,16 @@ struct VhostUserDeviceImpl : IBlkDevice {
         if (!bk)
             LOG_ERROR_RETURN(EINVAL, -1, "backend IFile is null");
 
+        // detach() retains backend and own_backend (the caller keeps the backend
+        // on a failed start, so rollback must not delete it), but a subsequent
+        // start() with a NEW backend would overwrite both without releasing the
+        // old ownership -- double-free at the next shutdown or destructor.
+        if (own_backend && backend) {
+            delete backend;
+            backend = nullptr;
+            own_backend = false;
+        }
+
         backend = bk;
         own_backend = ownership;
 
@@ -1651,6 +1661,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // close every queue's fds and reset it for a future session (srv holds
     // atomics, so no wholesale assignment)
     void vq_reset() {
+        // Clear the negotiated features: after reset/shutdown the engine returns
+        // to write-through policy, and without this a caller observing get_info()
+        // between sessions sees the previous frontend's negotiated word.
+        // SET_FEATURES re-populates it when the new frontend connects.
+        cfg.info.negotiated = 0;
         for (uint32_t i = 0; i < nqueues; i++) {
             auto* q = vqs[i];
             vq_stop(i);

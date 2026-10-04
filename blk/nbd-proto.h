@@ -49,7 +49,8 @@ static constexpr uint32_t NBD_OPT_GO          = 7;
 // option replies
 static constexpr uint32_t NBD_REP_ACK         = 1;
 static constexpr uint32_t NBD_REP_INFO        = 3;
-static constexpr uint32_t NBD_REP_ERR_INVALID = (1u << 31) | 3;
+static constexpr uint32_t NBD_REP_ERR_INVALID  = (1u << 31) | 3;
+static constexpr uint32_t NBD_REP_ERR_UNKNOWN  = (1u << 31) | 6;
 
 // info types
 static constexpr uint16_t NBD_INFO_EXPORT = 0;

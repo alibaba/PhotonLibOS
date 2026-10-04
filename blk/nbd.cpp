@@ -372,6 +372,18 @@ struct NbdDeviceImpl : NbdDevice {
         if (!bk)
             LOG_ERROR_RETURN(EINVAL, -1, "backend IFile is null");
 
+        // detach() retains backend and own_backend (the caller keeps the backend
+        // on a failed start, so detach-as-rollback must not delete it), but a
+        // subsequent start() with a NEW backend would overwrite both without
+        // releasing the old ownership -- double-free at the next shutdown or
+        // destructor. Release any previously owned backend before taking the
+        // new one; only reachable after detach(true) since started guards above.
+        if (own_backend && backend) {
+            delete backend;
+            backend = nullptr;
+            own_backend = false;
+        }
+
         backend = bk;
         own_backend = ownership;
         bool ok = false;
@@ -409,16 +421,46 @@ struct NbdDeviceImpl : NbdDevice {
         stall_us = (uint64_t)cfg.stall_timeout * 1000 * 1000;
 
         if (!cfg.unix_path.empty()) {
+            // Serialize the probe+bind sequence against concurrent starters.
+            // Between checking if the endpoint is replaceable and actually binding,
+            // another starter can race. Use a devlock in the socket's parent
+            // directory, derived from the socket's basename, to close that window.
+            // The lock is held across both the probe and the bind so no two
+            // starters can pass the probe simultaneously.
+            const char* upath = cfg.unix_path.c_str();
+            const char* base = strrchr(upath, '/');
+            base = base ? base + 1 : upath;
+            if (!*base)
+                LOG_ERROR_RETURN(EINVAL, -1, "nbd unix_path has no basename: ", upath);
+            char lock_dir[SCOPE_DIR_BUF];
+            if (base == upath) {
+                // no directory component -- use "." as the lock dir
+                snprintf(lock_dir, sizeof(lock_dir), ".");
+            } else {
+                size_t dlen = (size_t)(base - upath - 1);
+                if (dlen >= sizeof(lock_dir))
+                    LOG_ERROR_RETURN(ENAMETOOLONG, -1, "nbd unix_path directory too long for lock: ", upath);
+                memcpy(lock_dir, upath, dlen);
+                lock_dir[dlen] = '\0';
+            }
+            char lock_name[256];
+            if (snprintf(lock_name, sizeof(lock_name), "nbd-%s.lock", base) >= (int)sizeof(lock_name))
+                LOG_ERROR_RETURN(ENAMETOOLONG, -1, "nbd unix_path basename too long to lock: ", base);
+            int lock_fd = -1;
+            if (devlock_acquire(lock_dir, lock_name, &lock_fd) < 0)
+                LOG_ERRNO_RETURN(0, -1, "nbd cannot claim the unix socket ", upath);
+            DEFER(devlock_release(lock_fd));
+
             // blk.h start() contract: EBUSY when another live server holds the
             // endpoint. Unlinking a LIVE backend's socket would steal the path:
             // it keeps serving the orphaned inode while new clients come to us.
             // A verdict that cannot be reached is refused the same way, and so is
             // a node that is not a socket -- neither is evidence this path is ours.
-            int r = unix_endpoint_replaceable(cfg.unix_path.c_str());
+            int r = unix_endpoint_replaceable(upath);
             if (r < 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd reached no verdict on the unix socket ", cfg.unix_path);
+                LOG_ERRNO_RETURN(0, -1, "nbd reached no verdict on the unix socket ", upath);
             if (r == 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd refuses to take over the unix socket ", cfg.unix_path);
+                LOG_ERRNO_RETURN(0, -1, "nbd refuses to take over the unix socket ", upath);
             // No unlink of our own: bind() below goes through photon's socket
             // server with autoremove on, which clears an existing node itself and
             // only if it is a socket. So the removal inherits a type check this
@@ -426,8 +468,8 @@ struct NbdDeviceImpl : NbdDevice {
             // path survives to fail the bind instead of being deleted.
             uds_server = net::new_uds_server(true);
             if (start_server(uds_server, uds_accept_th, [&] {
-                    if (uds_server->bind(cfg.unix_path.c_str()) < 0)
-                        LOG_ERRNO_RETURN(0, -1, "failed to bind ", cfg.unix_path);
+                    if (uds_server->bind(upath) < 0)
+                        LOG_ERRNO_RETURN(0, -1, "failed to bind ", upath);
                     return 0;
                 }) < 0)
                 return -1;
@@ -903,7 +945,13 @@ struct NbdDeviceImpl : NbdDevice {
         default:
             err = NBD_ENOTSUP;
         }
-        send_reply(c, handle, err, (type == NBD_CMD_READ && err == NBD_SUCCESS) ? buf : nullptr, len);
+        // A client that stops reading holds depth and byte tokens via a blocked
+        // reply write. The stall_guard bounds that wait so the tokens are freed
+        // within stall_timeout rather than held indefinitely.
+        {
+            stall_guard stall(c->s, stall_us);
+            send_reply(c, handle, err, (type == NBD_CMD_READ && err == NBD_SUCCESS) ? buf : nullptr, len);
+        }
     }
 
     // backends whose fallocate lacks ZERO_RANGE support (e.g. tmpfs) still get
@@ -944,10 +992,17 @@ struct NbdDeviceImpl : NbdDevice {
     enum class Name { MATCH, MISMATCH, MALFORMED };
 
     // Parse the payload of NBD_OPT_EXPORT_NAME, NBD_OPT_INFO or NBD_OPT_GO,
-    // consuming exactly `length` bytes: a 32-bit export-name length, the name, and
-    // -- for INFO and GO only -- a 16-bit count of requested information items,
-    // each a 16-bit type, a 16-bit length and that many bytes. `length` is the
-    // option header's, already bounded by MAX_OPTION_LEN.
+    // consuming exactly `length` bytes from the stream.
+    //
+    // EXPORT_NAME (with_items=false): the payload IS the raw export name -- its
+    // length comes from the option header (`length`). There is no inner uint32
+    // name-length prefix. Read exactly `length` bytes and compare.
+    //
+    // INFO / GO (with_items=true): a uint32 name-length, the name, a uint16
+    // count of requested information items, then that many uint16 type codes.
+    // Each info item is just a type code with NO payload -- they are requests,
+    // not TLV records. This server always answers NBD_INFO_EXPORT alone; the
+    // requested items are parsed and dropped.
     //
     // A payload that does not parse is refused rather than skipped. Skipping is
     // what let a 4-byte OPT_GO through, although even an empty name with no items
@@ -958,15 +1013,40 @@ struct NbdDeviceImpl : NbdDevice {
     // whose length equals the identity's can match, and the identity IS this
     // export's name, so a client asking for a different export is refused rather
     // than served this one. An empty name asks for the default export and matches.
-    //
-    // The requested items are parsed and dropped. They are a request, not a
-    // requirement -- the server answers with the items it chooses, and this one
-    // always answers NBD_INFO_EXPORT alone. NBD_INFO_BLOCK_SIZE in particular
-    // cannot be honoured: the geometry is cfg.info's for the whole export, not
-    // something one connection can renegotiate.
     Name read_export_option(net::ISocketStream* s, uint32_t length, bool with_items) {
         const std::string& id = cfg.info.identity;
-        if (length < (with_items ? 6u : 4u))
+        if (!with_items) {
+            // EXPORT_NAME: the entire payload is the raw export name. No inner
+            // uint32 length prefix -- `length` from the option header IS the name.
+            if (length == 0)
+                return Name::MATCH;   // empty name = default export
+            if (length != (uint32_t)id.size()) {
+                // Cannot match, but must still consume the bytes
+                if (!s->skip_read(length))
+                    return Name::MALFORMED;
+                return Name::MISMATCH;
+            }
+            // Same length: read and compare
+            char chunk[256];
+            for (uint32_t off = 0; off < length; ) {
+                uint32_t k = length - off;
+                if (k > sizeof(chunk))
+                    k = (uint32_t)sizeof(chunk);
+                if (s->read(chunk, k) != (ssize_t)k)
+                    return Name::MALFORMED;
+                if (memcmp(chunk, id.data() + off, k) != 0) {
+                    // Mismatch found; drain the rest and report
+                    uint32_t remain = length - off - k;
+                    if (remain && !s->skip_read(remain))
+                        return Name::MALFORMED;
+                    return Name::MISMATCH;
+                }
+                off += k;
+            }
+            return Name::MATCH;
+        }
+        // INFO / GO: uint32 name_len + name + uint16 item_count + N x uint16 type
+        if (length < 6u)
             return Name::MALFORMED;
         uint32_t name_len;
         if (s->read(&name_len, sizeof(name_len)) != (ssize_t)sizeof(name_len))
@@ -990,22 +1070,18 @@ struct NbdDeviceImpl : NbdDevice {
             off += k;
         }
         used += name_len;
-        if (!with_items)
-            return used == length ? (match ? Name::MATCH : Name::MISMATCH) : Name::MALFORMED;
         uint16_t items;
         if (s->read(&items, sizeof(items)) != (ssize_t)sizeof(items))
             return Name::MALFORMED;
         items = __builtin_bswap16(items);
         used += sizeof(items);
+        // Each info item is a single uint16 type code with no payload
         for (uint16_t i = 0; i < items; i++) {
-            uint16_t hdr[2];   // the item's type, which nothing here acts on, then its length
-            if (length - used < sizeof(hdr) || s->read(hdr, sizeof(hdr)) != (ssize_t)sizeof(hdr))
+            uint16_t type_code;
+            if (length - used < sizeof(type_code) ||
+                s->read(&type_code, sizeof(type_code)) != (ssize_t)sizeof(type_code))
                 return Name::MALFORMED;
-            uint16_t ilen = __builtin_bswap16(hdr[1]);
-            used += sizeof(hdr);
-            if (ilen > length - used || !s->skip_read(ilen))
-                return Name::MALFORMED;
-            used += ilen;
+            used += sizeof(type_code);
         }
         // The walk has to land exactly on the option's own length. Anything else
         // means this side and the client disagree about the framing, and going on
@@ -1095,17 +1171,18 @@ struct NbdDeviceImpl : NbdDevice {
             case NBD_OPT_INFO:
             case NBD_OPT_GO: {
                 Name v = read_export_option(s, opt.length, true);
-                if (v != Name::MATCH) {
-                    if (v == Name::MALFORMED) {
-                        // a packed field cannot bind to the logger's reference
-                        uint32_t which = opt.opt;
-                        LOG_WARN("nbd option ` payload does not parse, closing", which);
-                    } else
-                        LOG_WARN("nbd client asked for an export this device does not serve, closing");
-                    // best-effort: an error reply ends the option phase, so this
-                    // connection closes whether the reply went out or not
+                if (v == Name::MALFORMED) {
+                    // a packed field cannot bind to the logger's reference
+                    uint32_t which = opt.opt;
+                    LOG_WARN("nbd option ` payload does not parse, closing", which);
                     send_opt_reply(s, opt.opt, NBD_REP_ERR_INVALID, nullptr, 0);
                     return -1;
+                }
+                if (v == Name::MISMATCH) {
+                    // Valid syntax but unknown export: tell the client and let it
+                    // try another. Do NOT close -- the option loop continues.
+                    send_opt_reply(s, opt.opt, NBD_REP_ERR_UNKNOWN, nullptr, 0);
+                    break;
                 }
                 NbdExportInfo info{NBD_INFO_EXPORT, {cfg.info.size, trans_flags}};
                 info.encode();

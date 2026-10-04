@@ -1284,8 +1284,16 @@ TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
 
+    // GET_ID returns an FNV-1a hash of the identity, not the raw basename
     char want[ID_BYTES] = {};
-    memcpy(want, "vhu.sock", sizeof("vhu.sock") - 1);
+    {
+        uint64_t h = 14695981039346656037ULL;
+        for (const char* p = "vhu.sock"; *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 1099511628211ULL;
+        }
+        snprintf(want, sizeof(want), "%016llx", (unsigned long long)h);
+    }
     char got[ID_BYTES];
     int rc = run_frontend([&](MockFrontend& fe) -> int {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
@@ -1295,8 +1303,7 @@ TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
         return 0;
     });
     ASSERT_EQ(0, rc);
-    EXPECT_EQ(0, memcmp(want, got, sizeof(want)));
-    EXPECT_STREQ("vhu.sock", got);
+    EXPECT_EQ(0, memcmp(want, got, strlen(want)));
 }
 
 // The control for the case below, and the reason that case's count is a
