@@ -3525,7 +3525,7 @@ TEST_F(VhostUserTest, avail_event_published) {
             << "bit 29 was not negotiated; this case would pass vacuously on the flags fallback";
 
         // one request through the normal path, so the backend has consumed one head
-        char buf[512];
+        char buf[512] = {};
         ASSERT_EQ(0, fe.write_dev(0, buf, sizeof(buf)));
 
         // avail_event must equal the index we are about to be given next, i.e. the
@@ -3567,7 +3567,7 @@ TEST_F(VhostUserTest, interrupt_suppressed_by_used_event) {
         ASSERT_TRUE(fe.features & F_RING_EVENT_IDX)
             << "bit 29 was not negotiated; this case would pass vacuously on the flags fallback";
 
-        char buf[512];
+        char buf[512] = {};
 
         // Request 1 goes through the normal path. Two things happen here that the
         // rest of the case depends on: the backend's first-decision unconditional
@@ -3672,7 +3672,7 @@ TEST_F(VhostUserTest, first_completion_always_notifies) {
         (void)fe.callfd_drain();                // clear the SET_VRING_CALL signal and
                                                 // anything the restart produced
 
-        char buf[512];
+        char buf[512] = {};
         uint16_t slot = 3;
         ASSERT_EQ(0, fe.submit(slot, T_OUT, 0, sizeof(buf), false));
         ASSERT_TRUE(fe.kick());   // unconditional: this case is about notify_valid,
@@ -3731,7 +3731,7 @@ TEST_F(VhostUserTest, event_idx_wrap) {
         ASSERT_TRUE(fe.restart_with_base(BASE));
         (void)fe.callfd_drain();
 
-        char buf[512];
+        char buf[512] = {};
         for (int i = 0; i < 4; i++) {
             // collect() keeps used_event at the consumed index, so §2.7.7.2 fires on
             // every one of these -- including across the turn
@@ -4097,7 +4097,7 @@ TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
         ASSERT_TRUE(fe.negotiate(false));
 
         // Drive five requests to completion so used_idx advances to 5.
-        char buf[512];
+        char buf[512] = {};
         for (int i = 0; i < 5; i++)
             ASSERT_EQ(0, fe.write_dev((uint64_t)i * 512, buf, sizeof(buf)));
 
