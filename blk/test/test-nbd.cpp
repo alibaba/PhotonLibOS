@@ -59,7 +59,10 @@ struct NbdTestClient {
 
     ~NbdTestClient() {
         if (s) {
-            disc();
+            // Don't send DISC in the destructor: the socket may be broken
+            // (server dropped the connection), and writing to it can deliver
+            // SIGPIPE on platforms without MSG_NOSIGNAL.
+            s->close();
             delete s;
         }
     }
