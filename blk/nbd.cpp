@@ -612,11 +612,13 @@ struct NbdDeviceImpl : NbdDevice {
 
     void serve_conn(Conn* c) {
         DEFER({
+            LOG_DEBUG("nbd: serve_conn DEFER entering, in_flight=`", c->in_flight.load(std::memory_order_relaxed));
             // no new dispatch past the loop below; wait for the in-flight
             // ones, so none of them writes to the closed stream (or touches
             // this Conn) afterwards
             while (c->in_flight.load(std::memory_order_relaxed))
                 photon::thread_usleep(1000);
+            LOG_DEBUG("nbd: serve_conn DEFER closing stream");
             c->s->close();
             {
                 SCOPED_LOCK(conns_lock);
@@ -624,7 +626,9 @@ struct NbdDeviceImpl : NbdDevice {
             }
             delete c->s;
             delete c;
+            LOG_DEBUG("nbd: serve_conn DEFER calling retire_self");
             retire_self();
+            LOG_DEBUG("nbd: serve_conn DEFER done");
         });
 
         if (c->negotiate && negotiate(c->s) < 0)
@@ -705,6 +709,7 @@ struct NbdDeviceImpl : NbdDevice {
                     // of step from here on whatever we replied.
                     stall_guard stall(c->s, stall_us);
                     if (c->s->read(buf, req.length) != (ssize_t)req.length) {
+                        LOG_WARN("nbd: stall-timeout read failed on connection, dropping");
                         free(buf);
                         bytes.signal(cost);
                         depth.signal(1);
@@ -747,9 +752,12 @@ struct NbdDeviceImpl : NbdDevice {
     };
 
     static void reap_worker(ReaperArg* arg) {
+        LOG_DEBUG("nbd: reaper entering, joining worker");
         photon::thread_join((photon::join_handle*)arg->worker);
+        LOG_DEBUG("nbd: reaper joined, decrementing live_workers");
         arg->dev->live_workers.fetch_sub(1, std::memory_order_relaxed);
         delete arg;
+        LOG_DEBUG("nbd: reaper done");
     }
 
     // Last act of a connection coroutine: leave the list cleanup_runtime joins, and
@@ -777,6 +785,7 @@ struct NbdDeviceImpl : NbdDevice {
     // cleanup_runtime waits on it only after joining everything it did take.
     void retire_self() {
         photon::thread* self = photon::CURRENT;
+        LOG_DEBUG("nbd: retire_self entering");
         bool ours;
         {
             SCOPED_LOCK(conns_lock);

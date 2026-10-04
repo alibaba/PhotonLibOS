@@ -1404,6 +1404,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     // the header of a 64 KiB write, and then nothing: the server has taken both gates
     // and is waiting for bytes that are not coming
     ASSERT_EQ(0, stalled.send_header_only(NBD_CMD_WRITE, 0, 65536));
+    LOG_INFO("stall test: stalled client sent partial write header");
 
     NbdTestClient honest;
     ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
@@ -1412,19 +1413,25 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     // this case instead of hanging the suite
     honest.set_timeout(10 * 1000 * 1000);
     std::vector<char> wbuf(4096, 0x33);
+    LOG_INFO("stall test: honest client about to write");
     EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    LOG_INFO("stall test: honest write done, about to read back");
     // the stalled connection is the one that went: the honest client still works
     std::vector<char> rbuf(4096);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    LOG_INFO("stall test: honest read done, checking data");
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
     // Close the stalled client explicitly so the server-side teardown finishes
     // before we inspect the connection list. Without this, the server's worker
     // for the stalled connection may still be draining in_flight or running its
     // reaper, and the count below races against that teardown.
+    LOG_INFO("stall test: disconnecting stalled client");
     stalled.disconnect();
     // Give the server time to finish tearing down the stalled connection.
     photon::thread_usleep(500 * 1000);
+    LOG_INFO("stall test: checking connection count");
     EXPECT_EQ(1u, dev->get_client_connections().size());
+    LOG_INFO("stall test: PASSED");
 }
 
 }  // namespace blk
