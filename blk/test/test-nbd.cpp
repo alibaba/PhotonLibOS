@@ -1438,11 +1438,6 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
 }  // namespace photon
 
 int main(int argc, char** arg) {
-    // Ignore SIGPIPE: NBD clients write to sockets the server may have already
-    // closed (stall timeout, error). On platforms without MSG_NOSIGNAL (macOS),
-    // this would otherwise kill the process. Photon's socket layer uses
-    // MSG_NOSIGNAL where available, but disc() in destructors bypasses it.
-    signal(SIGPIPE, SIG_IGN);
     // A consumer child is this binary re-executed with a sentinel in argv[1]:
     // dispatch it before photon::init() and before gtest sees that argument.
     int cons = photon::blk::test::consumer_child_main(argc, arg);
@@ -1452,6 +1447,10 @@ int main(int argc, char** arg) {
                      photon::blk::test::TEST_IO_ENGINE))
         return -1;
     DEFER(photon::fini());
+    // Ignore SIGPIPE after photon::init so it is not overridden by signalfd
+    // setup. NBD clients write DISC to sockets the server may have already
+    // closed; on platforms without MSG_NOSIGNAL this would deliver SIGPIPE.
+    signal(SIGPIPE, SIG_IGN);
     ::testing::InitGoogleTest(&argc, arg);
     return RUN_ALL_TESTS();
 }
