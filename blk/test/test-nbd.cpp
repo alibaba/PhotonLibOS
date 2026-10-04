@@ -1438,6 +1438,10 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     LOG_INFO("diag: H");
     EXPECT_EQ(0u, dev->get_client_connections().size());
     LOG_INFO("diag: I");
+    // Let any async serve_conn cleanup (reapers, DEFER drains) settle
+    // before the test scope ends and triggers shutdown.
+    photon::thread_usleep(100 * 1000);
+    LOG_INFO("diag: J");
 }
 
 }  // namespace blk
