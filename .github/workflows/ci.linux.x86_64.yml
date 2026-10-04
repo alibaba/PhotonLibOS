@@ -47,19 +47,19 @@ jobs:
       - name: Test epoll
         run: |
           nohup redis-server &
-          cd build && ctest -R test-blk-nbd --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test io_uring
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=io_uring
-          cd build && ctest -R test-blk-nbd --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
       - name: Test epoll_ng
         run: |
           nohup redis-server &
           export PHOTON_CI_EV_ENGINE=epoll_ng
-          cd build && ctest -R test-blk-nbd --timeout 3600 -V
+          cd build && ctest --timeout 3600 -V
           pkill redis-server
 
   fstack:

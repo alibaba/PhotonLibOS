@@ -350,12 +350,9 @@ struct NbdDeviceImpl : NbdDevice {
     const BlkDevInfo& get_info() const override { return cfg.info; }
 
     ~NbdDeviceImpl() {
-        LOG_INFO("diag: ~NbdDeviceImpl entered, started=`", started);
         if (started)
             shutdown();
-        LOG_INFO("diag: ~NbdDeviceImpl release_backend");
         release_backend();
-        LOG_INFO("diag: ~NbdDeviceImpl done");
     }
 
     // Delete a backend this object owns and forget it either way, so that neither
@@ -490,7 +487,6 @@ struct NbdDeviceImpl : NbdDevice {
             }
         }
         cleanup_runtime();
-        LOG_INFO("diag: detach() cleanup_runtime done");
         return 0;
     }
 
@@ -505,11 +501,8 @@ struct NbdDeviceImpl : NbdDevice {
     // detach() alone must NOT release: it is also the rollback path of a failed
     // start(), where the caller keeps the backend.
     int shutdown() override {
-        LOG_INFO("diag: shutdown() entered");
         int r = detach(true);
-        LOG_INFO("diag: shutdown() detach done, releasing backend");
         release_backend();
-        LOG_INFO("diag: shutdown() done");
         return r;
     }
 
