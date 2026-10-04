@@ -23,6 +23,8 @@ limitations under the License.
 #include <photon/photon.h>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
+
+#include <csignal>
 #include <photon/fs/localfs.h>
 #include <photon/net/socket.h>
 #include <photon/thread/stack-allocator.h>   // the default stack allocator, wrapped to count
@@ -59,10 +61,7 @@ struct NbdTestClient {
 
     ~NbdTestClient() {
         if (s) {
-            // Don't send DISC in the destructor: the socket may be broken
-            // (server dropped the connection), and writing to it can deliver
-            // SIGPIPE on platforms without MSG_NOSIGNAL.
-            s->close();
+            disc();
             delete s;
         }
     }
@@ -1397,9 +1396,7 @@ TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
 // of the byte budget for as long as it likes -- with queue_depth 1 that is every slot
 // there is, and the honest client behind it waits. cfg.timeout releases nothing here:
 // it is the kernel's request timeout for the loopback device.
-// DISABLED: crashes on CI during scope exit after all assertions pass;
-// root cause under investigation (#183/#230).
-TEST_F(NbdTest, DISABLED_a_stalled_write_payload_cannot_starve_another_client) {
+TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     NbdConfig cfg(make_info());
     cfg.loopback_device = false;
     cfg.enable_tcp = true;
@@ -1428,23 +1425,24 @@ TEST_F(NbdTest, DISABLED_a_stalled_write_payload_cannot_starve_another_client) {
     std::vector<char> rbuf(4096);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
-    // The server already dropped this connection via stall_timeout.
-    // Just null out the pointer to prevent the destructor from touching it;
-    // the fd will be reclaimed when the process exits.
-    stalled.s = nullptr;
+    // The server already dropped this connection via stall_timeout, so
+    // disc() will write to a closed socket. That is fine: SIGPIPE is
+    // ignored in main(), and write_exact returns -1 which disc() ignores.
+    stalled.disconnect();
     honest.force_close();
     photon::thread_usleep(500 * 1000);
     EXPECT_EQ(0u, dev->get_client_connections().size());
-    // Explicitly shut down before scope exit to isolate whether the crash
-    // is in shutdown itself or in something that runs after it.
-    dev->shutdown();
-    photon::thread_usleep(100 * 1000);
 }
 
 }  // namespace blk
 }  // namespace photon
 
 int main(int argc, char** arg) {
+    // Ignore SIGPIPE: NBD clients write to sockets the server may have already
+    // closed (stall timeout, error). On platforms without MSG_NOSIGNAL (macOS),
+    // this would otherwise kill the process. Photon's socket layer uses
+    // MSG_NOSIGNAL where available, but disc() in destructors bypasses it.
+    signal(SIGPIPE, SIG_IGN);
     // A consumer child is this binary re-executed with a sentinel in argv[1]:
     // dispatch it before photon::init() and before gtest sees that argument.
     int cons = photon::blk::test::consumer_child_main(argc, arg);
