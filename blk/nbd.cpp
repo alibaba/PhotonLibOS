@@ -1274,6 +1274,11 @@ struct NbdDeviceImpl : NbdDevice {
         // touch of anything here.
         while (live_workers.load(std::memory_order_relaxed))
             photon::thread_usleep(1000);
+        // live_workers reaching 0 means every reaper has decremented, but the
+        // reaper coroutines themselves may still be exiting on pool vcpus (photon
+        // freeing their stacks). Yield briefly so those vcpus can finish before
+        // we tear down device state they might still be touching indirectly.
+        photon::thread_usleep(1000);
         disconnect_loopback();
         if (uds_server) {
             delete uds_server;
