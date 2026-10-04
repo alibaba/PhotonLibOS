@@ -961,23 +961,34 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 while (down.load(std::memory_order_acquire))
                     photon::thread_usleep(200);
                 uint32_t g0 = gen.load(std::memory_order_acquire);
+                uint16_t p0 = port.load(std::memory_order_acquire);
                 int st = -1;
+                // which step produced st: connect/handshake/write/read all collapse
+                // to -1, and only the step says whether the server refused the
+                // connection or dropped it mid-request
+                const char* phase = "connect";
                 {
                     NbdTestClient cli;
-                    if (cli.connect_tcp("127.0.0.1", port.load(std::memory_order_acquire)) == 0 &&
-                        cli.handshake() == 0) {
-                        int w = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
-                        int r = w ? -1 : cli.xfer(NBD_CMD_READ, off, rbuf.data(), rbuf.size());
-                        st = w ? w : r;
-                        if (!st && memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
-                            bad++;   // corruption is never a restart-window artifact
-                            continue;
+                    if (cli.connect_tcp("127.0.0.1", p0) == 0) {
+                        phase = "handshake";
+                        if (cli.handshake() == 0) {
+                            phase = "write";
+                            st = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
+                            if (!st) {
+                                phase = "read";
+                                st = cli.xfer(NBD_CMD_READ, off, rbuf.data(), rbuf.size());
+                            }
+                            if (!st && memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
+                                bad++;   // corruption is never a restart-window artifact
+                                continue;
+                            }
                         }
                     }
                 }
                 if (st && gen.load(std::memory_order_acquire) == g0 &&
                     !down.load(std::memory_order_acquire)) {
-                    LOG_ERROR("client ` iter ` failed with ` outside the restart window", t, i, st);
+                    LOG_ERROR("client ` iter ` failed at ` with ` errno ` on port ` (current `) outside the restart window",
+                              t, i, phase, st, errno, p0, port.load(std::memory_order_acquire));
                     bad++;
                 }
                 if (!st)
@@ -1019,6 +1030,9 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
         }
         photon::thread_usleep(200);
     }
+    if (finished.load() < THREADS)
+        LOG_ERROR("giving up with ` of ` client threads finished, `; joining them now blocks this vcpu, which is where accept_loop lives",
+                  finished.load(), THREADS, VALUE(timeout_hit));
     for (auto& th : ths)
         th.join();
     EXPECT_FALSE(timeout_hit);
@@ -1349,11 +1363,15 @@ TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
 // throwaway coroutine that joins it, so the count comes back.
 TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
     StackCounter counter;
-    auto saved = photon::get_photon_thread_stack_allocator();
     ASSERT_EQ(0, photon::set_photon_thread_stack_allocator(counter));
-    // restored LAST: a stack has to be freed by the allocator that created it, and
-    // the DEFERs below destroy the device -- and with it its workers -- first
-    DEFER(photon::set_photon_thread_stack_allocator(saved));
+    // Restored LAST -- a stack has to be freed by the allocator that created it,
+    // and the DEFERs below destroy the device, and with it its workers, first.
+    // Restored to photon's DEFAULT, not to what get_photon_thread_stack_allocator()
+    // hands back: that facade is empty until something installs one, installing an
+    // empty one is rejected, and a rejected restore would leave `counter` -- a local
+    // of this frame -- as the process-wide allocator, so every coroutine stack
+    // allocated after this test returned would bump counters in dead stack.
+    DEFER(photon::set_photon_thread_stack_allocator());
 
     NbdConfig cfg(make_info());
     cfg.loopback_device = false;
