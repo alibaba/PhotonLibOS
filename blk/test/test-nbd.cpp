@@ -1404,28 +1404,29 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     // the header of a 64 KiB write, and then nothing: the server has taken both gates
     // and is waiting for bytes that are not coming
     ASSERT_EQ(0, stalled.send_header_only(NBD_CMD_WRITE, 0, 65536));
+    LOG_INFO("diag: A");
 
     NbdTestClient honest;
     ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
     ASSERT_EQ(0, honest.handshake());
-    // bounded well past stall_timeout, so a device that never releases the gate fails
-    // this case instead of hanging the suite
     honest.set_timeout(10 * 1000 * 1000);
     std::vector<char> wbuf(4096, 0x33);
+    LOG_INFO("diag: B");
     EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
-    // the stalled connection is the one that went: the honest client still works
+    LOG_INFO("diag: C");
     std::vector<char> rbuf(4096);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    LOG_INFO("diag: D");
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
-    // Close both clients explicitly so the server-side teardown finishes
-    // before we inspect the connection list or enter shutdown. Without this,
-    // a worker retiring concurrently with cleanup_runtime creates a reaper
-    // that races against the device's destruction.
+    LOG_INFO("diag: E");
     stalled.disconnect();
+    LOG_INFO("diag: F");
     honest.disconnect();
-    // Give the server time to finish tearing down both connections.
+    LOG_INFO("diag: G");
     photon::thread_usleep(500 * 1000);
+    LOG_INFO("diag: H");
     EXPECT_EQ(0u, dev->get_client_connections().size());
+    LOG_INFO("diag: I");
 }
 
 }  // namespace blk
