@@ -72,6 +72,17 @@ struct NbdTestClient {
         }
     }
 
+    // Close without sending DISC: for connections the server already dropped
+    // (e.g. stall-timeout), where writing to the socket may fault on some
+    // platforms or deliver SIGPIPE on others.
+    void force_close() {
+        if (s) {
+            s->close();
+            delete s;
+            s = nullptr;
+        }
+    }
+
     int connect_tcp(const char* ip, uint16_t port) {
         auto c = net::new_tcp_socket_client();
         if (!c)
@@ -1413,7 +1424,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
     LOG_INFO("diag: E");
-    stalled.disconnect();
+    stalled.force_close();
     LOG_INFO("diag: F");
     honest.disconnect();
     LOG_INFO("diag: G");
