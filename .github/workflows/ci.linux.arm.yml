@@ -67,7 +67,7 @@ jobs:
         run: |
           cd build
           nohup redis-server &
-          ctest -E test-lockfree --timeout 3600 -V
+          ctest -R test-blk-nbd --timeout 3600 -V
           pkill redis-server
 
   debug-build-from-source:

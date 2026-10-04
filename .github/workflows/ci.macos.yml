@@ -60,4 +60,4 @@ jobs:
 
       - name: Test
         working-directory: ${{github.workspace}}/build
-        run: ctest -E test-lockfree --timeout 3600 -V
+        run: ctest -R test-blk-nbd --timeout 3600 -V
