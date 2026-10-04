@@ -1396,19 +1396,13 @@ TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
 // of the byte budget for as long as it likes -- with queue_depth 1 that is every slot
 // there is, and the honest client behind it waits. cfg.timeout releases nothing here:
 // it is the kernel's request timeout for the loopback device.
-// macOS: photon's socket timeout relies on kqueue timers which have been
-// observed to not fire reliably under CI load, causing this test to hang.
-#ifdef __APPLE__
-TEST_F(NbdTest, DISABLED_a_stalled_write_payload_cannot_starve_another_client) {
-#else
 TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
-#endif
     NbdConfig cfg(make_info());
     cfg.loopback_device = false;
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
     cfg.queue_depth = 1;
-    cfg.stall_timeout = 2;
+    cfg.stall_timeout = 10;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -1425,7 +1419,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     NbdTestClient honest;
     ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
     ASSERT_EQ(0, honest.handshake());
-    honest.set_timeout(10 * 1000 * 1000);
+    honest.set_timeout(30 * 1000 * 1000);
     std::vector<char> wbuf(4096, 0x33);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
     std::vector<char> rbuf(4096);
