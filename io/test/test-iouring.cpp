@@ -631,7 +631,7 @@ TEST_F(event_engine, cascading_one_shot) {
 //
 // Gated on PHOTON_URING: iouring_uring_cmd is declared unconditionally in
 // iouring-wrapper.h but defined only when io/iouring-wrapper.cpp is compiled, so
-// this is the one test in the file that would not link without it.
+// these are the only tests in the file that would not link without it.
 #ifdef PHOTON_URING
 TEST(uring_cmd, cmd_len_bound) {
     ASSERT_EQ(0, photon::init(INIT_EVENT_IOURING, INIT_IO_NONE));
@@ -661,6 +661,106 @@ TEST(uring_cmd, cmd_len_bound) {
     errno = 0;
     EXPECT_EQ(-1, iouring_uring_cmd(fd, 0, cmd, 17, {}, nullptr));
     EXPECT_EQ(EINVAL, errno);
+}
+
+// Drives every iouring_* entry point that reaches a ring through get_ring, and
+// expects each to refuse. Nothing it passes is ever touched: get_ring identifies
+// the engine before any prep function runs, which is what lets one list cover all
+// of them with a dead fd and a path that does not exist -- each of which would also
+// fail on its own, differently, if it were ever reached.
+//
+// errno is the discriminator, and it has to be ENOSYS for the assertion to differ
+// from a refusal reached some other way. With the check taken out, the calls still
+// return -1 in places: iouring_register_files() answers EINVAL for fd < 0 and again
+// EINVAL when the kernel has no fixed-file table, and neither needs the ring, so it
+// reports a clean-looking failure through a pointer that was never an iouringEngine.
+// ENOSYS is what only get_ring's refusal produces.
+static void expect_entry_points_refuse(CascadingEventEngine* cee, const char* phase) {
+    int fd = -1;
+    char buf[16] = {};
+    iovec iov{buf, sizeof(buf)};
+    msghdr msg{};
+    sockaddr_storage addr{};
+    socklen_t addrlen = sizeof(addr);
+    uint8_t cmd[16] = {};
+
+    auto refused = [&](const char* name, int64_t ret) {
+        int err = errno;    // before EXPECT_EQ's own machinery can disturb it
+        EXPECT_EQ(-1, ret) << name << " must refuse, " << phase;
+        EXPECT_EQ(ENOSYS, err) << name << " must report ENOSYS, " << phase;
+    };
+
+    refused("iouring_splice",           iouring_splice(fd, 0, fd, 0, 0, 0, {}, cee));
+    refused("iouring_pread",            iouring_pread(fd, buf, sizeof(buf), 0, 0, {}, cee));
+    refused("iouring_pwrite",           iouring_pwrite(fd, buf, sizeof(buf), 0, 0, {}, cee));
+    refused("iouring_preadv",           iouring_preadv(fd, &iov, 1, 0, 0, {}, cee));
+    refused("iouring_pwritev",          iouring_pwritev(fd, &iov, 1, 0, 0, {}, cee));
+    refused("iouring_send",             iouring_send(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_send_zc",          iouring_send_zc(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_sendmsg",          iouring_sendmsg(fd, &msg, 0, {}, cee));
+    refused("iouring_sendmsg_zc",       iouring_sendmsg_zc(fd, &msg, 0, {}, cee));
+    refused("iouring_recv",             iouring_recv(fd, buf, sizeof(buf), 0, {}, cee));
+    refused("iouring_recvmsg",          iouring_recvmsg(fd, &msg, 0, {}, cee));
+    refused("iouring_connect",          iouring_connect(fd, (sockaddr*) &addr, addrlen, {}, cee));
+    refused("iouring_accept",           iouring_accept(fd, (sockaddr*) &addr, &addrlen, {}, cee));
+    refused("iouring_fsync",            iouring_fsync(fd, {}, cee));
+    refused("iouring_fdatasync",        iouring_fdatasync(fd, {}, cee));
+    refused("iouring_open",             iouring_open("/nonexistent", 0, 0, {}, cee));
+    refused("iouring_mkdir",            iouring_mkdir("/nonexistent", 0, {}, cee));
+    refused("iouring_close",            iouring_close(fd, {}, cee));
+    refused("iouring_uring_cmd",        iouring_uring_cmd(fd, 0, cmd, sizeof(cmd), {}, cee));
+    refused("iouring_register_files",   iouring_register_files(fd, cee));
+    refused("iouring_unregister_files", iouring_unregister_files(fd, cee));
+}
+
+// get_ring used to static_cast whatever engine it was handed to iouringEngine and
+// dereference the result. With a master engine that is not io_uring, that reads
+// another class's fields at this class's offsets, so every iouring_* entry point
+// faults instead of failing -- which is how CI's `Test epoll_ng` step lost this
+// whole binary to a SegFault.
+//
+// Pinning it needs a master engine that is definitely not io_uring, and asking
+// init() for one is not how to get one: ci-tools rewrites the event-engine bits of
+// every photon::init() from PHOTON_CI_EV_ENGINE (test/ci-tools.cpp), so a test that
+// inits with INIT_EVENT_EPOLL quietly runs on io_uring under the `Test io_uring`
+// step and never reaches the path it claims to. Two moves make this the same under
+// all four steps, with no skip gate needed: INIT_EVENT_NONE is the one request
+// ci-tools leaves alone (it rewrites only when the argument names an engine), and the
+// master engine is then installed past init(), where the override cannot follow.
+// That also covers all three of get_ring's rejections -- no engine at all, a
+// different master engine, and a cascading engine of the wrong kind.
+TEST(wrong_engine, entry_points_refuse) {
+    // Phase 1: no engine installed, i.e. the empty name. As unusable as the wrong
+    // one -- there is no ring either way -- and get_ring refuses it too.
+    ASSERT_EQ(0, photon::init(INIT_EVENT_NONE, INIT_IO_NONE));
+    DEFER(photon::fini());
+
+    auto installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    LOG_INFO("phase 1 master event engine: '`'", installed);
+    ASSERT_TRUE(installed.empty());
+    expect_entry_points_refuse(nullptr, "no master event engine installed");
+
+    // Phase 2: a real master engine of the wrong kind. This is the case CI hit.
+    ASSERT_EQ(0, photon::fd_events_init(photon::new_epoll_master_engine()));
+    installed = photon::get_vcpu()->master_event_engine->get_engine_name();
+    LOG_INFO("phase 2 master event engine: '`'", installed);
+    ASSERT_TRUE(installed == "epoll");
+    expect_entry_points_refuse(nullptr, "master event engine is epoll");
+
+    // Phase 3: get_ring's other arm -- a cascading engine passed explicitly, the way
+    // blk's ublk and the fuse iouring session loop pass theirs.
+    auto* cee = photon::new_epoll_cascading_engine();
+    ASSERT_NE(cee, nullptr);
+    DEFER(delete cee);
+    expect_entry_points_refuse(cee, "cascading engine is epoll");
+
+    // iouring_abandon is the 22nd: the one entry point whose contract demands a
+    // non-null cascading engine, so only this phase can exercise it. It returns
+    // void, leaving errno as the thing to assert on.
+    errno = 0;
+    iouring_abandon(cee);
+    int err = errno;
+    EXPECT_EQ(ENOSYS, err);
 }
 #endif
 

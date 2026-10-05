@@ -30,6 +30,14 @@ class CascadingEventEngine;
 
 static const uint64_t IouringFixedFileFlag = 1ULL<< 32;
 
+// Every entry point below that takes a `ce` needs an io_uring ring: the one `ce`
+// names, or else the current vcpu's master event engine. io_uring is that master
+// engine only if photon::init() was asked for INIT_EVENT_IOURING *and* got it --
+// init() walks a recommended order and keeps the first engine that initializes, so
+// the mask a caller passed does not say what is installed. Each one therefore
+// identifies its engine before using it, and answers -1 with errno ENOSYS when it is
+// not an io_uring one, instead of reading another engine's object as a ring.
+
 ssize_t iouring_splice(int fd_in, int64_t off_in, int fd_out, int64_t off_out,
                        unsigned int nbytes, uint64_t flags = 0, Timeout timeout = {}, CascadingEventEngine* ce = nullptr);
 
