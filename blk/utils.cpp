@@ -253,27 +253,6 @@ int unix_listener_live(const char* path) {
     return -1;
 }
 
-int unix_endpoint_replaceable(const char* path) {
-    struct stat st;
-    if (::stat(path, &st) != 0) {
-        if (errno == ENOENT)
-            return 1;   // nothing there, so nothing to preserve
-        return -1;      // cannot even stat it: no verdict, and no removal either
-    }
-    if (!S_ISSOCK(st.st_mode)) {
-        errno = EINVAL;
-        return 0;       // not a socket, so not a node this library ever made
-    }
-    int live = unix_listener_live(path);
-    if (live < 0)
-        return -1;
-    if (live > 0) {
-        errno = EBUSY;
-        return 0;
-    }
-    return 1;
-}
-
 int run_off_vcpu(TempDelegate<int> fn) {
     photon::semaphore sem(0);   // signal() is documented std::thread-safe
     int ret = -1, err = 0;

@@ -297,6 +297,11 @@ struct NbdDeviceImpl : NbdDevice {
                                            // its 8 MiB stack until somebody joins it
     bool own_backend = false;
     bool started = false;
+    // This device bound cfg.unix_path, so cleanup_runtime() removes the node. Not
+    // the same test as uds_server != nullptr: that is set before the bind, and a
+    // bind refused because the path was already there must not remove the node
+    // that refused it.
+    bool uds_bound = false;
     std::atomic<bool> stopping{false};
     // Connection coroutines that have not finished retiring. cleanup_runtime joins
     // the handles it took out of `workers` and then waits for this to reach zero,
@@ -421,69 +426,33 @@ struct NbdDeviceImpl : NbdDevice {
         stall_us = (uint64_t)cfg.stall_timeout * 1000 * 1000;
 
         if (!cfg.unix_path.empty()) {
-            // Serialize the probe+bind sequence against concurrent starters.
-            // Between checking if the endpoint is replaceable and actually binding,
-            // another starter can race. Use a devlock in the socket's parent
-            // directory, derived from the socket's basename, to close that window.
-            // The lock is held across both the probe and the bind so no two
-            // starters can pass the probe simultaneously.
+            // Nothing here removes anything. bind() is atomic and answers
+            // EADDRINUSE for a path that is already there, which is the whole of
+            // the exclusion this needs: no probe and no takeover, so no window in
+            // which a concurrent starter could read our bound-but-not-yet-listening
+            // node as an abandoned one and clear it. An occupied path is EEXIST,
+            // and it is the same answer whether a live server holds it, a crashed
+            // one left it behind, or what is there was never a socket -- this does
+            // not connect to find out, so it cannot say, and it does not remove
+            // what it cannot prove is dead.
             //
-            // The scope is DERIVED from the path rather than nominated, because
-            // NbdConfig has no scope directory and deliberately so -- blk.h gives
-            // the reason (an export leaves no persistent kernel-side state, so
-            // there is nothing for a scope to hold). What derivation costs is that
-            // a lock file appears in a directory the caller never nominated: next
-            // to the socket, or in the process's working directory for a path with
-            // no directory component. Two starters of the SAME path derive the same
-            // lock either way, which is all the exclusion above needs; a caller
-            // that wants the file somewhere of its own choosing has to put the
-            // socket there.
+            // The node this device binds is removed by cleanup_runtime(), which is
+            // the only unlink in this file: an owner removes its own, and nothing
+            // removes anybody else's. photon's autoremove is off, because it unlinks
+            // at bind time as well as in the server's destructor, and the bind-time
+            // half is exactly the removal this rules out.
             const char* upath = cfg.unix_path.c_str();
-            const char* base = strrchr(upath, '/');
-            base = base ? base + 1 : upath;
-            if (!*base)
-                LOG_ERROR_RETURN(EINVAL, -1, "nbd unix_path has no basename: ", upath);
-            char lock_dir[SCOPE_DIR_BUF];
-            if (base == upath) {
-                // no directory component -- use "." as the lock dir
-                snprintf(lock_dir, sizeof(lock_dir), ".");
-            } else {
-                size_t dlen = (size_t)(base - upath - 1);
-                if (dlen >= sizeof(lock_dir))
-                    LOG_ERROR_RETURN(ENAMETOOLONG, -1, "nbd unix_path directory too long for lock: ", upath);
-                memcpy(lock_dir, upath, dlen);
-                lock_dir[dlen] = '\0';
-            }
-            char lock_name[256];
-            if (snprintf(lock_name, sizeof(lock_name), "nbd-%s.lock", base) >= (int)sizeof(lock_name))
-                LOG_ERROR_RETURN(ENAMETOOLONG, -1, "nbd unix_path basename too long to lock: ", base);
-            int lock_fd = -1;
-            if (devlock_acquire(lock_dir, lock_name, &lock_fd) < 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd cannot claim the unix socket ", upath);
-            DEFER(devlock_release(lock_fd));
-
-            // blk.h start() contract: EBUSY when another live server holds the
-            // endpoint. Unlinking a LIVE backend's socket would steal the path:
-            // it keeps serving the orphaned inode while new clients come to us.
-            // A verdict that cannot be reached is refused the same way, and so is
-            // a node that is not a socket -- neither is evidence this path is ours.
-            int r = unix_endpoint_replaceable(upath);
-            if (r < 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd reached no verdict on the unix socket ", upath);
-            if (r == 0)
-                LOG_ERRNO_RETURN(0, -1, "nbd refuses to take over the unix socket ", upath);
-            // No unlink of our own: bind() below goes through photon's socket
-            // server with autoremove on, which clears an existing node itself and
-            // only if it is a socket. So the removal inherits a type check this
-            // function would otherwise have to repeat, and a regular file at the
-            // path survives to fail the bind instead of being deleted.
-            uds_server = net::new_uds_server(true);
+            uds_server = net::new_uds_server(false);
             if (start_server(uds_server, uds_accept_th, [&] {
-                    if (uds_server->bind(upath) < 0)
+                    if (uds_server->bind(upath) < 0) {
+                        if (errno == EADDRINUSE)
+                            LOG_ERROR_RETURN(EEXIST, -1, "nbd refuses to take over the unix socket ", upath);
                         LOG_ERRNO_RETURN(0, -1, "failed to bind ", upath);
+                    }
                     return 0;
                 }) < 0)
                 return -1;
+            uds_bound = true;
         }
         if (cfg.enable_tcp) {
             tcp_server = net::new_tcp_socket_server();
@@ -1289,6 +1258,17 @@ struct NbdDeviceImpl : NbdDevice {
         if (uds_server) {
             delete uds_server;
             uds_server = nullptr;
+        }
+        // Our own node, and the only unlink in this file. photon's server would have
+        // removed it in its destructor with autoremove on, but that flag also unlinks
+        // at bind time, which start() rules out -- so the removal lives here, after
+        // the listener is closed. It is not optional: start() refuses an occupied
+        // path, so a node left behind is a path this device can never bind again.
+        if (uds_bound) {
+            if (::unlink(cfg.unix_path.c_str()) != 0 && errno != ENOENT)
+                LOG_WARN("nbd could not remove its own unix socket `, so the next start() will refuse it: ",
+                         cfg.unix_path.c_str(), ERRNO());
+            uds_bound = false;
         }
         if (tcp_server) {
             delete tcp_server;

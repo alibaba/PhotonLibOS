@@ -188,20 +188,6 @@ int validate_scope_dir(const char* dir, const char* what);
 // Runs on the photon vcpu (nonblocking connect + fd wait).
 int unix_listener_live(const char* path);
 
-// May this process take `path` over for its own listener? 1 = yes: nothing is
-// there, or a socket node whose listener is confirmed gone. 0 = no, and errno
-// says which refusal it is: EBUSY when a live listener is behind it, EINVAL
-// when the node is not a socket and so is not one this library ever made. -1 =
-// no verdict, with the probe's errno.
-//
-// Removes nothing, on purpose. What replacing a node means differs by caller:
-// one binds by hand and has to unlink first, the other binds through photon's
-// socket server, which unlinks an existing node itself and only if it is a
-// socket. The decision is the shared part; the action belongs to whoever knows
-// how it binds. So -1 means "remove nothing", which is the one answer a caller
-// about to unlink needs and cannot get from the probe alone.
-int unix_endpoint_replaceable(const char* path);
-
 // ----------------------------------------------------------------------------
 // blocking syscalls this process's own coroutines must answer
 // ----------------------------------------------------------------------------

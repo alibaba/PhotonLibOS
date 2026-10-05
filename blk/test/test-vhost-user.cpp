@@ -1419,15 +1419,18 @@ TEST_F(VhostUserTest, config_validation) {
     EXPECT_EQ(-1, dev->start(file));
     EXPECT_EQ(EALREADY, errno);
 
-    // a second object must not steal a LIVE backend's socket path: the start
-    // probe finds the listener alive -> EBUSY, and the failed start's rollback
-    // must leave dev's socket file in place
+    // a second object must not steal a LIVE backend's socket path. It is refused with
+    // EEXIST and not EBUSY: do_listen() binds and reports what bind() said, and it no
+    // longer connects to the node to ask whether a live backend is behind it -- that
+    // answer never changed the refusal, and getting it cost a window in which the
+    // probe could be wrong. The failed start's rollback must leave dev's socket file
+    // in place, which is the half that was always the point.
     auto dev2 = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev2);
     DEFER(delete dev2);
     errno = 0;
     EXPECT_EQ(-1, dev2->start(file));
-    EXPECT_EQ(EBUSY, errno);
+    EXPECT_EQ(EEXIST, errno);
     EXPECT_EQ(0, ::access(SOCK_PATH, F_OK));
 
     EXPECT_EQ(0, dev->shutdown());
@@ -1932,8 +1935,13 @@ TEST_F(VhostUserTest, frontend_reconnect) {
     EXPECT_EQ(0, rc);
 }
 
-TEST_F(VhostUserTest, stale_socket_takeover) {
-    // a dead listener's socket file: SERVER start() must unlink + rebind
+// A dead listener's socket file. start() used to unlink it and rebind; it refuses
+// now, because the only way to tell "crashed" from "about to listen" is to connect,
+// and a node some other start has bound but not yet listened on answers exactly like
+// a crashed one. Recovery moves to destroy_orphan(), a call the caller makes on
+// purpose -- and the second half here is that it still recovers, so what changed is
+// who decides, not whether the path can be reused.
+TEST_F(VhostUserTest, a_stale_socket_is_refused_until_the_caller_destroys_it) {
     int lfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     ASSERT_GE(lfd, 0);
     sockaddr_un un;
@@ -1944,13 +1952,31 @@ TEST_F(VhostUserTest, stale_socket_takeover) {
     ASSERT_EQ(0, ::listen(lfd, 1));
     ::close(lfd);   // the "crashed" backend: the socket file survives
     ASSERT_EQ(0, ::access(SOCK_PATH, F_OK));
+    struct stat before;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &before));
 
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
-    ASSERT_EQ(0, dev->start(file));   // must replace the stale socket
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EEXIST, errno);
+    // A refusal is worth nothing if the removal already happened, so this is on the
+    // inode: the same node, and not one this start() bound.
+    struct stat after;
+    ASSERT_EQ(0, ::stat(SOCK_PATH, &after));
+    EXPECT_EQ(before.st_ino, after.st_ino) << "the stale node was replaced, not refused";
+
+    // The explicit path still clears it, and the very same start() then succeeds and
+    // serves -- which is the difference between refusing and being unusable.
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
+
+    ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
     int rc = run_frontend([&](MockFrontend& fe) -> int {
         if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
@@ -1963,20 +1989,22 @@ TEST_F(VhostUserTest, stale_socket_takeover) {
 }
 
 // ---------------------------------------------------------------------------
-// What start() may remove, and what it must leave alone
+// What start() leaves alone
 //
-// Taking over a path means unlinking whatever is there, so the question "is this
-// node a dead listener of our own?" has to be answered before the unlink and not
-// after it. The probe alone cannot answer it: a connect to a regular file gives
-// ECONNREFUSED, which is exactly what a dead listener gives, so "nobody answered"
-// is not the same fact as "this is a socket we may delete". These cases hold the
-// two apart, and each one asserts the node SURVIVED -- the refusal is worth
-// nothing if the removal already happened.
+// start() removes nothing, so each of these is a refusal plus the node surviving
+// it. They used to hold apart three answers from a probe -- a live listener, a
+// provably dead one, and no verdict -- and the probe is gone: bind() answers
+// EADDRINUSE for all three and start() reports EEXIST. What the cases still pin is
+// the half that was always the point, that nothing was deleted on the way to the
+// answer. destroy_orphan() below is the call that does probe, and does refuse a
+// live listener.
 // ---------------------------------------------------------------------------
 
-// The reviewer's first repro. A caller's ordinary file at the configured path
-// was deleted and a socket bound in its place, because a connect to a regular
-// file reads as "no listener".
+// The reviewer's first repro. A caller's ordinary file at the configured path was
+// deleted and a socket bound in its place, because a connect to a regular file reads
+// as "no listener". Nothing connects now, so the file is not preserved by a type
+// check that had to be gotten right -- there is no path through start() that removes
+// anything at all.
 TEST_F(VhostUserTest, a_regular_file_at_the_socket_path_is_refused_and_preserved) {
     static const char WANT[] = "not a socket, and not ours to remove";
     int fd = ::open(SOCK_PATH, O_CREAT | O_TRUNC | O_RDWR, 0644);
@@ -1991,7 +2019,7 @@ TEST_F(VhostUserTest, a_regular_file_at_the_socket_path_is_refused_and_preserved
     DEFER(delete dev);
     errno = 0;
     EXPECT_EQ(-1, dev->start(file));
-    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(EEXIST, errno);
 
     // survived, same type, same bytes -- not merely "a node is still there"
     struct stat st;
@@ -2006,9 +2034,10 @@ TEST_F(VhostUserTest, a_regular_file_at_the_socket_path_is_refused_and_preserved
     EXPECT_EQ(0, memcmp(WANT, back, sizeof(WANT)));
 }
 
-// Same shape, and a different errno before the type check existed: the unlink of
-// a directory fails EISDIR, so the old path reached bind() and reported its
-// EADDRINUSE rather than naming the real problem.
+// Same shape. The errno here has been through three answers: EADDRINUSE from a bind
+// reached after an unlink had failed EISDIR, then EINVAL from the type check added to
+// stop that unlink, now EEXIST from a bind preceded by nothing at all. What all three
+// share, and what this case was always about, is the second half: still a directory.
 TEST_F(VhostUserTest, a_directory_at_the_socket_path_is_refused_and_preserved) {
     ::rmdir(SOCK_PATH);
     ASSERT_EQ(0, ::mkdir(SOCK_PATH, 0755));
@@ -2021,25 +2050,23 @@ TEST_F(VhostUserTest, a_directory_at_the_socket_path_is_refused_and_preserved) {
     DEFER(delete dev);
     errno = 0;
     EXPECT_EQ(-1, dev->start(file));
-    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(EEXIST, errno);
 
     struct stat st;
     ASSERT_EQ(0, ::stat(SOCK_PATH, &st));
     EXPECT_TRUE(S_ISDIR(st.st_mode));
 }
 
-// The reviewer's second repro: a bound, listening socket whose mode denies the
-// connect. The probe is refused, and a refusal is not a verdict -- the old code
-// read it as "dead" and replaced a socket another process was serving.
+// The reviewer's second repro: a bound, listening socket whose mode bits deny a
+// connect. The old code probed it, got a denial, read that as "dead", and replaced a
+// socket another process was serving.
 //
-// Which refusal this witnesses depends on the uid, and the assertions are chosen
-// so that they do not: root is allowed through the mode bits, so under root the
-// probe reaches the listener and the answer is EBUSY, and this case then pins
-// the outcome rather than reproducing the failure. Under any other uid the
-// connect is denied, the answer is "no verdict", and the case is red against the
-// old code. What both have to agree on is that the node was not replaced, which
-// is what the inode identity states.
-TEST_F(VhostUserTest, a_listener_the_probe_cannot_reach_is_not_taken_over) {
+// The mode bits no longer matter, and that is the improvement: nothing connects, so
+// there is no probe to be denied and no answer that depends on which uid this suite
+// happens to run under. Root and an ordinary user now get the same EEXIST, where
+// before they got EBUSY and EACCES respectively and the case had to accept either.
+// What it still pins is the inode -- the node was not replaced.
+TEST_F(VhostUserTest, a_live_listener_is_refused_whatever_its_mode_bits) {
     int lfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     ASSERT_GE(lfd, 0);
     DEFER(::close(lfd));
@@ -2062,12 +2089,12 @@ TEST_F(VhostUserTest, a_listener_the_probe_cannot_reach_is_not_taken_over) {
     DEFER(delete dev);
     errno = 0;
     EXPECT_EQ(-1, dev->start(file));
-    EXPECT_TRUE(errno == EBUSY || errno == EACCES) << "errno=" << errno;
+    EXPECT_EQ(EEXIST, errno);
 
     struct stat after;
     ASSERT_EQ(0, ::stat(SOCK_PATH, &after));
     EXPECT_TRUE(S_ISSOCK(after.st_mode));
-    EXPECT_EQ(before.st_ino, after.st_ino);   // not replaced, whatever the refusal
+    EXPECT_EQ(before.st_ino, after.st_ino);   // not replaced
 }
 
 // The identity lock, witnessed without naming it: what a start leaves behind in

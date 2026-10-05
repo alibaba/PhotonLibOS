@@ -33,6 +33,7 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -434,8 +435,11 @@ TEST_F(NbdTest, config_validation) {
     EXPECT_EQ(EALREADY, errno);
     EXPECT_EQ(0, dev->shutdown());
 
-    // a second object must not steal the unix path of a LIVE server: EBUSY,
-    // and the socket file survives
+    // a second object must not steal the unix path of a LIVE server. It is refused
+    // with EEXIST rather than EBUSY: start() does not connect to the node, so it
+    // cannot say whether a live server holds it or a crashed one left it, and it
+    // reports the one thing it does know -- something is already there. The socket
+    // file survives either way.
     const char* path = "/tmp/photon-blk-nbd-test.sock";
     ::unlink(path);
     NbdConfig ucfg(make_info());
@@ -450,7 +454,7 @@ TEST_F(NbdTest, config_validation) {
     DEFER(delete dev2);
     errno = 0;
     EXPECT_EQ(-1, dev2->start(file));
-    EXPECT_EQ(EBUSY, errno);
+    EXPECT_EQ(EEXIST, errno);
     EXPECT_EQ(0, ::access(path, F_OK));
     EXPECT_EQ(0, udev->shutdown());
 
@@ -552,11 +556,11 @@ TEST_F(NbdTest, unix_path_mode) {
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
 }
 
-// The same refusal on the nbd side, where the removal used to be an explicit
-// unlink of our own rather than something bind() did. A caller's ordinary file
-// at unix_path was deleted and a socket bound in its place, and start() then
-// reported success -- so the assertion is not only that the file survived but
-// that the start was refused.
+// The same refusal on the nbd side. A caller's ordinary file at unix_path was once
+// deleted and a socket bound in its place, with start() reporting success -- so the
+// assertion is not only that the file survived but that the start was refused. The
+// errno is EEXIST rather than the EINVAL a type check gave: nothing stats the node
+// to classify it any more, because the classification never changed the answer.
 TEST_F(NbdTest, unix_path_holding_a_regular_file_is_refused_and_preserved) {
     static const char WANT[] = "not a socket, and not ours to remove";
     const char* path = "/tmp/photon-blk-nbd-regular-file";
@@ -575,7 +579,7 @@ TEST_F(NbdTest, unix_path_holding_a_regular_file_is_refused_and_preserved) {
     DEFER(delete dev);
     errno = 0;
     EXPECT_EQ(-1, dev->start(file));
-    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(EEXIST, errno);
 
     struct stat st;
     ASSERT_EQ(0, ::stat(path, &st));
@@ -587,6 +591,81 @@ TEST_F(NbdTest, unix_path_holding_a_regular_file_is_refused_and_preserved) {
     char back[sizeof(WANT)] = {};
     EXPECT_EQ((ssize_t) sizeof(WANT), ::read(fd, back, sizeof(back)));
     EXPECT_EQ(0, memcmp(WANT, back, sizeof(WANT)));
+}
+
+// A socket node with nobody behind it. This used to be taken over: start() probed
+// it, read "no listener", and photon's autoremove cleared it on the way to bind.
+// Nothing is removed now, so the answer is the same EEXIST a live listener gets --
+// start() does not connect, so it cannot tell the two apart, and it does not delete
+// what it cannot prove is dead. What makes this worth more than the live-listener
+// case is the second half: the node is still there, and it is still the same node.
+TEST_F(NbdTest, a_dead_socket_at_unix_path_is_refused_and_preserved) {
+    const char* path = "/tmp/photon-blk-nbd-dead.sock";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    // Bound and then closed without ever listening: the node survives with nobody
+    // behind it and a connect answers ECONNREFUSED. That is what a crashed daemon
+    // leaves, and it is also what a start() between its own bind and listen looks
+    // like from outside -- the two are not distinguishable, which is the reason
+    // nothing here probes.
+    int lfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_GE(lfd, 0);
+    sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", path);
+    ASSERT_EQ(0, ::bind(lfd, (sockaddr*)&un, sizeof(un)));
+    struct stat before;
+    ASSERT_EQ(0, ::stat(path, &before));
+    ::close(lfd);
+    ASSERT_EQ(0, ::access(path, F_OK));
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EEXIST, errno);
+
+    // A refusal is worth nothing if the removal already happened, so this is on the
+    // inode: same node, still a socket, and not one this start() bound.
+    struct stat after;
+    ASSERT_EQ(0, ::stat(path, &after));
+    EXPECT_TRUE(S_ISSOCK(after.st_mode));
+    EXPECT_EQ(before.st_ino, after.st_ino) << "the node was replaced rather than refused";
+}
+
+// shutdown() removes the node this device bound, which is the only unlink nbd does.
+// Not tidiness: start() refuses an occupied path and nothing else will clear it, so
+// a device that left its socket behind could never serve that path again. photon's
+// autoremove used to do this in the server's destructor -- but it also unlinks at
+// bind time, which is exactly the removal the case above rules out.
+TEST_F(NbdTest, shutdown_removes_its_own_node_so_the_path_can_be_bound_again) {
+    const char* path = "/tmp/photon-blk-nbd-restart.sock";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, ::access(path, F_OK));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(path, F_OK)) << "shutdown left its own socket behind";
+
+    // and the path is bindable again, which is the whole point of removing it
+    auto dev2 = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    ASSERT_EQ(0, dev2->start(file));
+    DEFER(dev2->shutdown());
+    EXPECT_EQ(0, ::access(path, F_OK));
 }
 
 TEST_F(NbdTest, both_endpoints) {

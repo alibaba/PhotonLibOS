@@ -18,9 +18,10 @@ limitations under the License.
 // vhost-user backend) to a FRONTEND -- normally QEMU's vhost-user-blk, or the
 // mock frontend in test-vhost-user.cpp. Unlike every other transport here
 // there is NO kernel registration: the unix socket path IS the identity.
-//   - SERVER role: we listen; a stale socket is unlinked and re-bound (the
-//     create/attach distinction collapses); a frontend reconnect re-negotiates
-//     from scratch.
+//   - SERVER role: we listen; an occupied path is REFUSED rather than cleared, so a
+//     socket a crash left behind has to go through destroy_orphan() first. The
+//     create/attach distinction collapses either way, and a frontend reconnect
+//     re-negotiates from scratch.
 //   - CLIENT role: the frontend holds the listener (the libvirt DAC /
 //     path-labeling use case); we connect and the negotiation is identical.
 // The frontend drives: it sends the VHOST_USER_* requests and we reply.
@@ -354,11 +355,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
     char lock_dir[SCOPE_DIR_BUF] = {};
     // What VIRTIO_BLK_T_GET_ID answers with. The socket's basename, so that two
     // devices served by one daemon do not report the same serial to their guests --
-    // a fixed per-transport string did. It is as unique as this controller's identity
-    // lock, and for the same reason: vhu_lock_name() derives that from the basename
-    // too, on the flat-one-level-of-sockets assumption the orphan scan already makes,
-    // so a basename collision inside one scope is refused by the lock before it can
-    // become two devices with one serial.
+    // a fixed per-transport string did. It is as unique as that basename is within
+    // this controller's scope, which is the flat-one-level-of-sockets assumption the
+    // orphan scan already makes. Two sockets sharing a basename in different
+    // subdirectories of one scope would report the same serial: the identity lock
+    // refuses them while their two starts overlap, and nothing refuses them after.
     char serial[SUN_PATH_MAX] = {};
 
     bool own_backend = false;
@@ -1476,16 +1477,22 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // ----- connection setup -----
 
     int do_listen() {
-        // The identity lock, taken by EVERY server start -- including the ones that
-        // go on to bind a path nothing held. A lock that only the takeover path
-        // took would not be held by the process that WON the path, so a loser would
-        // still be free to read that node as dead and remove it.
+        // The identity lock, taken by EVERY server start -- including the ones that go
+        // on to bind a path nothing held. bind() below already excludes a second
+        // starter of the same path, so what this adds is the BASENAME: the lock name
+        // is derived from it, and so is the serial this device answers
+        // VIRTIO_BLK_T_GET_ID with, so two sockets in one scope that would report the
+        // same serial to their guests refuse each other here instead.
         //
-        // Held until listen() has succeeded, not merely until bind() has: a socket
-        // that is bound but not yet listening answers the probe with ECONNREFUSED,
-        // which is indistinguishable from a listener that died. EBUSY here is the
-        // same refusal blk.h documents for a live identity -- another daemon is
-        // between claiming this name and listening on it.
+        // It is a concurrency guard and nothing wider. Released when do_listen
+        // returns, so two such sockets started one after the other both serve and both
+        // report the same serial; what it excludes is the case that actually happens,
+        // which is two daemons starting at once. EBUSY here is that refusal.
+        //
+        // It does NOT exclude destroy_orphan(), which takes no lock: that call probes
+        // the node itself and refuses a live listener, but a socket this start has
+        // bound and not yet listened on answers its probe as dead. Pre-existing and
+        // unchanged by the removal of the takeover path above.
         char lname[VHU_LOCK_BUF];
         if (vhu_lock_name(sock_path, lname, sizeof(lname)) < 0)
             return -1;   // vhu_lock_name logged it
@@ -1503,32 +1510,18 @@ struct VhostUserDeviceImpl : IBlkDevice {
         memset(&un, 0, sizeof(un));
         un.sun_family = AF_UNIX;
         memcpy(un.sun_path, sock_path, strlen(sock_path) + 1);   // start() bounded it
-        // Bind BEFORE asking whether the path is ours, because bind() is the one
-        // atomic step available here. When it succeeds nothing was probed and
-        // nothing was removed, which is the whole of the absent-path case and the
-        // common one. Only a path something else already holds answers EADDRINUSE,
-        // and only then does this have to decide whether that node may be taken
-        // over at all.
+        // Bind BEFORE anything else, because bind() is the one atomic step available
+        // here -- and it is the only step. Whatever is already at the path is refused,
+        // not probed and not removed, so EADDRINUSE covers a live backend, a node a
+        // crashed one left behind, and a path that was never a socket alike, and all
+        // three are reported as EEXIST. Nothing connects to tell them apart, because
+        // the answer would not change the refusal; recovery of a node this process did
+        // not bind is destroy_orphan()'s job, which does probe and does refuse a live
+        // listener.
         if (::bind(fd, (sockaddr*)&un, sizeof(un)) < 0) {
-            if (errno != EADDRINUSE)
-                LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed: ", sock_path);
-            // blk.h start() contract: EBUSY when another live process is serving
-            // this identity. Do NOT steal a live backend's socket path -- it keeps
-            // serving the orphaned inode while new frontends come to us. A verdict
-            // that cannot be reached is refused the same way, and so is a node that
-            // is not a socket: neither is evidence that this path is ours to take.
-            int r = unix_endpoint_replaceable(sock_path);
-            if (r < 0)
-                LOG_ERRNO_RETURN(0, -1, "vhost-user reached no verdict on the socket ", sock_path);
-            if (r == 0)
-                LOG_ERRNO_RETURN(0, -1, "vhost-user refuses to take over the socket ", sock_path);
-            // A socket node with no listener behind it. ENOENT here is a race --
-            // something else removed it since the verdict -- and is the state the
-            // bind below wants anyway.
-            if (::unlink(sock_path) != 0 && errno != ENOENT)
-                LOG_ERRNO_RETURN(0, -1, "failed to remove the stale vhost-user socket ", sock_path);
-            if (::bind(fd, (sockaddr*)&un, sizeof(un)) < 0)
-                LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed after clearing ", sock_path);
+            if (errno == EADDRINUSE)
+                LOG_ERROR_RETURN(EEXIST, -1, "vhost-user refuses to take over the socket ", sock_path);
+            LOG_ERRNO_RETURN(0, -1, "vhost-user bind failed: ", sock_path);
         }
         if (::listen(fd, 1) < 0)
             LOG_ERRNO_RETURN(0, -1, "vhost-user listen failed: ", sock_path);
@@ -1893,8 +1886,8 @@ struct VhostUserControllerImpl : VhostUserController {
     // Orphan scan: a vhost-user tombstone is a socket file in our directory whose
     // listener is gone -- the connect probe gets ECONNREFUSED. A successful connect
     // means a live backend (skip it). Descriptor fields are unspecified (zero):
-    // there is no registry to read them from; recovery is a blind re-listen via
-    // start().
+    // there is no registry to read them from, and recovery is destroy_orphan() on
+    // this path followed by start(), which reads nothing from the node but its name.
     std::vector<BlkDevInfo> list_orphans() override {
         std::vector<BlkDevInfo> ret;
         DIR* dd = ::opendir(sock_dir);
@@ -1916,7 +1909,8 @@ struct VhostUserControllerImpl : VhostUserController {
                 continue;   // not connectable as a unix socket anyway
             // 1 = a live backend (not an orphan), -1 = not a listener tombstone
             // (a socket race, a permission problem, ...): only a dead listener
-            // counts, and recovery is a blind re-listen anyway
+            // counts, and skipping an unprovable one costs nothing -- there is no
+            // registry behind it, so recovery would read nothing from it anyway
             if (unix_listener_live(path) != 0)
                 continue;
             BlkDevInfo bi;

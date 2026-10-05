@@ -163,8 +163,12 @@ struct BlkDevInfo {
 // backlog survived through the same dispatch path as fresh requests; otherwise
 // create the registration first. Returns 0 once serving. On failure returns -1
 // with errno set and rolls back kernel-side residue; the object returns to its
-// virgin state and start() may be retried on it. ENOENT/EEXIST races are retried
-// once internally; EBUSY means another live process is serving this identity.
+// virgin state and start() may be retried on it. ENOENT/EEXIST races on the
+// REGISTRATION are retried once internally, and EBUSY means another live process is
+// serving this identity. The two socket transports have no registration to race on:
+// they answer EEXIST for an occupied path and do not probe it, because the answer
+// would not change the refusal -- see NbdConfig::unix_path and
+// VhostUserController::SockRole.
 //
 // How much "reconciling" verifies is NOT common, and info().adoption is this
 // transport's answer. Full validates geometry and the registered feature set and
@@ -842,10 +846,11 @@ UblkController* new_ublk_controller(const char* lock_dir);
 
 // ---------------------------------------------------------------------------
 // One VhostUserController per SOCKET directory. vhost-user has no lock dir and no
-// ownership tombstone -- a dead socket file is an ops artifact, not a recovery key
-// (recovery is a blind re-listen via start()) -- so its scope means something
-// narrower than ublk's and vduse's: the directory we LISTEN in and the directory
-// we SCAN are the same one. new_device() therefore requires cfg.sock_path to sit
+// ownership tombstone -- a dead socket file is an ops artifact, not a recovery key,
+// and start() will not listen over one -- so its scope means something narrower than
+// ublk's and vduse's: the directory we LISTEN in and the directory we SCAN are the
+// same one. Clearing a path a crash left behind is destroy_orphan() and then
+// start(), in that order. new_device() therefore requires cfg.sock_path to sit
 // inside it, for BOTH roles: a CLIENT-role socket belongs to the initiator
 // (QEMU/libvirt), and the directory holding it is exactly the one worth scanning
 // for listeners that have gone away. The containment test is textual, so a
@@ -855,11 +860,14 @@ UblkController* new_ublk_controller(const char* lock_dir);
 class VhostUserController : public Object {
 public:
     enum class SockRole : uint8_t {
-        SERVER,     // this process listens on sock_path; a path held by a LIVE backend is
-                    // EBUSY, a socket whose listener is CONFIRMED gone is unlinked and
-                    // re-bound. A probe that was denied or that timed out is not
-                    // confirmation, and neither is a node that is not a socket (EINVAL) --
-                    // start() refuses both rather than remove what it cannot prove is dead.
+        SERVER,     // this process listens on sock_path. start() removes nothing: an
+                    // occupied path is EEXIST, whether a live backend holds it, a crashed
+                    // one left it behind, or what is there is not a socket at all. Nothing
+                    // connects to tell those apart, because the answer would not change the
+                    // refusal -- and a refusal that had already removed the node would be
+                    // worth nothing. shutdown() removes the node this device bound;
+                    // destroy_orphan() is the only call that removes one it did not bind,
+                    // and it probes first and refuses a live listener.
         CLIENT      // the initiator (e.g. QEMU with server=on) holds the listener; this process
                     // connects to it -- needed when the socket dir is owned/privileged (libvirt)
     };
@@ -1033,10 +1041,15 @@ struct NbdConfig : BlkConfig {
                                     // get_server_sockets() returns then carries it.
 
     std::string unix_path;          // the unix socket path to serve on; empty = no UDS.
-                                    // start() refuses the path rather than clear it when a
-                                    // live server holds it (EBUSY), when what is there is
-                                    // not a socket (EINVAL), or when probing it reached no
-                                    // verdict -- as for VhostUserController::SockRole.
+                                    // start() removes nothing: an occupied path is EEXIST,
+                                    // whether a live server holds it, a crashed one left it
+                                    // behind, or what is there was never a socket. Nothing
+                                    // connects to tell those apart, because the answer would
+                                    // not change the refusal -- and a refusal that had first
+                                    // removed the node would be worth nothing. shutdown()
+                                    // removes the node THIS device bound, so it can bind
+                                    // again; one left behind by a crash is the caller's to
+                                    // remove. Same rule as VhostUserController::SockRole.
 
     uint32_t stall_timeout = 30;    // seconds; how long an INCOMPLETE message may stall
                                     // before its connection is dropped. Two reads are
