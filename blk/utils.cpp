@@ -689,13 +689,146 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
         }
         const vring_desc* de = &desc[d];
         if (de->flags & VRING_DESC_F_INDIRECT) {
+            // §2.7.5.3.2: "The device MUST handle the case of zero or more normal
+            // chained descriptors followed by a single descriptor with
+            // flags&VIRTQ_DESC_F_INDIRECT." So this branch is reachable at any step,
+            // not only at head, and the descriptors already walked keep their bytes in
+            // the SAME two streams this table's entries go into.
             if (!allow_indirect) {
                 LOG_ERROR("virtio-blk `: indirect descriptor, unsupported", tag);
                 bad = true;
                 break;
             }
-            LOG_ERROR("virtio-blk `: negotiated indirect descriptor, table walk not implemented", tag);
-            bad = true;
+            // §2.7.5.3.1: "A driver MUST NOT set both VIRTQ_DESC_F_INDIRECT and
+            // VIRTQ_DESC_F_NEXT in flags." Refused rather than served with the NEXT
+            // ignored: ignoring it silently drops whatever the driver chained behind
+            // the table, and a chain whose tail is missing gets SERVED as a shorter
+            // request -- if the dropped tail was the status, wr.tail(1) below hands out
+            // the last DATA byte and the request completes one byte short of what the
+            // driver asked for.
+            if (de->flags & VRING_DESC_F_NEXT) {
+                LOG_ERROR("virtio-blk `: indirect descriptor at ` also carries NEXT", tag, d);
+                bad = true;
+                break;
+            }
+            // The table's length is a second peer-supplied integer, and the only one
+            // that names a whole array rather than one buffer. Both halves are needed:
+            // 0 entries is a request with no buffers, which has to be a refusal rather
+            // than an empty walk, and a partial trailing entry is not inside the buffer
+            // the driver declared -- on a transport whose regions are the whole guest
+            // RAM it is inside somebody else's request.
+            if (de->len == 0 || de->len % sizeof(vring_desc)) {
+                LOG_ERROR("virtio-blk `: indirect table length ` is not a whole number of `-byte entries",
+                          tag, de->len, sizeof(vring_desc));
+                bad = true;
+                break;
+            }
+            uint32_t n = (uint32_t)(de->len / sizeof(vring_desc));
+            // Checked BEFORE the translate: mapping a range only to refuse it is a
+            // wasted round trip on a transport whose translate is an ioctl.
+            if (n > MAX_INDIRECT_ENTRIES) {
+                LOG_ERROR("virtio-blk `: indirect table at ` declares ` entries, the limit is `",
+                          tag, d, n, MAX_INDIRECT_ENTRIES);
+                bad = true;
+                break;
+            }
+            // Read-only, through the same delegate every other buffer goes through. The
+            // table is guest memory this walk is about to READ, and the containment and
+            // permission checks that make a translate a translate live inside that
+            // delegate -- a private path for tables would bypass both. §2.7.5.3.2's "The
+            // device MUST ignore the write-only flag (flags&VIRTQ_DESC_F_WRITE) in the
+            // descriptor that refers to an indirect table" is why de->flags is not
+            // consulted here.
+            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, false);
+            if (!tbl) {
+                LOG_ERROR("virtio-blk `: unmappable indirect table address ` len `", tag, de->addr, de->len);
+                bad = true;
+                break;
+            }
+            // A SECOND index space. `t` is bounded by `n` -- a count our own arithmetic
+            // produced from de->len and then clamped -- and never by ring_num: a table
+            // entry's next has nothing to do with the ring, and testing it against
+            // ring_num passes for values that read past the table. Indexing desc[] with
+            // it instead of tbl[] is worse than a read past the end: it serves this
+            // request out of ring descriptors the driver never named for it, which is
+            // request A's data landing in request B's buffer with nothing in the status
+            // to show it.
+            //
+            // `j` is the step budget and `t >= n` is the index bound, and both are
+            // needed: a table whose entries point back at themselves satisfies the index
+            // bound forever.
+            bool tbl_end = false;
+            uint32_t t = 0;
+            for (uint32_t j = 0; j < n; j++) {
+                if (t >= n) {
+                    LOG_ERROR("virtio-blk `: indirect table entry ` outside its ` entries", tag, t, n);
+                    bad = true;
+                    break;
+                }
+                const vring_desc* te = &tbl[t];
+                if (te->flags & VRING_DESC_F_INDIRECT) {
+                    // §2.7.5.3.1: "The driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag
+                    // within an indirect descriptor (ie. only one table per descriptor)."
+                    // That is a DRIVER requirement -- §2.7.5.3.2 gives the device no
+                    // matching MUST -- so refusing here is our own strictness, and the
+                    // reason is the bound: nesting turns one step budget into a product
+                    // of budgets, with the depth the peer's.
+                    LOG_ERROR("virtio-blk `: nested indirect descriptor at table entry `", tag, t);
+                    bad = true;
+                    break;
+                }
+                // Same direction rule and same zero-length substitution as the ring walk
+                // above: a zero len asks for one byte, so a zero-length entry gets that
+                // answer instead of a vacuous success. Note the pair this forms with the
+                // entry-count bound -- it is BECAUSE a zero-length entry still reaches
+                // translate that a table of them is the carrier for that bound.
+                bool tw = te->flags & VRING_DESC_F_WRITE;
+                void* tva = translate(te->addr, te->len ? te->len : 1, tw);
+                if (!tva) {
+                    LOG_ERROR("virtio-blk `: unmappable indirect buffer address ` len ` writable ` at entry `",
+                              tag, te->addr, te->len, (int)tw, t);
+                    bad = true;
+                    break;
+                }
+                // The same two streams, so the same depth bound: push() reports full
+                // instead of storing past the end of a stack array. A mixed chain spends
+                // ONE budget, not two.
+                DescStream& ts = tw ? wr : rd;
+                if (!ts.push(tva, te->len)) {
+                    LOG_ERROR("virtio-blk `: indirect table overflows the `-element scatter list",
+                              tag, MAX_DESC_CHAIN);
+                    bad = true;
+                    break;
+                }
+                if (!(te->flags & VRING_DESC_F_NEXT)) {
+                    tbl_end = true;
+                    break;
+                }
+                t = te->next;
+            }
+            // tbl_end, NOT chain_end, and the distinction is deliberate: chain_end means
+            // "the ring walk reached a descriptor without NEXT", and the refusal below
+            // is about the table. Conflating them would let a circular table pass as a
+            // finished chain, or a finished chain be reported as a circular table.
+            if (!tbl_end && !bad) {
+                LOG_ERROR("virtio-blk `: indirect table at ` too long or circular", tag, d);
+                bad = true;
+            }
+            // The table descriptor itself carries NO data: its len bytes ARE the table,
+            // and pushing them would hand the descriptor array to pwritev as a WRITE's
+            // payload -- the bytes the guest sees would be our own view of its request.
+            // This is also why there is no push(de->addr, de->len) anywhere above.
+            //
+            // `tbl` is not re-validated after the walk, and the walk yields (translate
+            // takes a mutex and may ioctl on one transport). That is argued, not tested:
+            // the mappings a request holds are released only once no queue has anything
+            // in flight, and this request is counted in in_flight from before dispatch
+            // returned until handle_req's DEFER runs.
+            if (bad)
+                break;
+            // An indirect descriptor cannot carry NEXT (refused above), so there is
+            // nothing after it: the chain is complete.
+            chain_end = true;
             break;
         }
         // Read once, used twice: it tells translate which access to expect, and it

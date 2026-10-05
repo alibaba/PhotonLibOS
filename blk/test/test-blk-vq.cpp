@@ -1186,6 +1186,622 @@ TEST_F(ChainFixture, a_buffer_whose_mapping_forbids_the_access_is_refused_as_ioe
     EXPECT_EQ(1, g.asked_writable.back());
 }
 
+// ---------------------------------------------------------------------------
+// indirect tables
+//
+// GuestChain::mem IS the guest memory, so a table is just another placed range:
+// place() it, point one ring descriptor at it with VRING_DESC_F_INDIRECT, and the
+// entries inside it name the buffers. Two traps, each of which produces a case that
+// measures something other than what its name says:
+//
+//   add() cannot build the ring descriptor. It sets VRING_DESC_F_NEXT
+//   unconditionally and sets next = ndesc + 1, so a table descriptor built with it
+//   also carries NEXT -- the shape the engine refuses. Write desc[...] directly, the
+//   way DepthFixture::SetUp does.
+//
+//   A table of ZEROED entries is not a long table. flags == 0 means no NEXT, so the
+//   walk stops after one entry and the entry-count bound never fires. Exercising that
+//   bound needs entries that are explicitly chained: len 0, VRING_DESC_F_NEXT set,
+//   next = i + 1, and the last one clear.
+//
+// place() only EXPECT_LEs its bound, so a table that does not fit is REPORTED and then
+// built anyway -- which turns a case about the entry count into a case about translate
+// failing. begin() below asserts the fit.
+// ---------------------------------------------------------------------------
+
+// blk/utils.h's MAX_INDIRECT_ENTRIES, spelled out here for the reason DEEPEST_CHAIN
+// above is: this suite must not read the value it asserts against out of the code
+// under test, or a cap that moved would move the expectation with it and nothing
+// would go red.
+constexpr uint32_t TABLE_ENTRIES_MAX = 64;
+
+// One indirect table inside a GuestChain, plus the ring descriptor that names it.
+struct IndirectTable {
+    GuestChain* c = nullptr;
+    size_t off = 0;          // the table's guest address
+    uint32_t n = 0;          // entries the table DECLARES, i.e. de->len / 16
+    uint16_t ring_idx = 0;   // the ring descriptor holding the INDIRECT flag
+
+    // Lay `count` zeroed entries and return a pointer to them; the caller fills them.
+    // `declared` is what the ring descriptor's len will say, which need not equal
+    // `count` -- that disagreement is exactly what E1 and E3 test.
+    vring_desc* begin(uint32_t count, uint32_t declared) {
+        off = c->place(nullptr, (size_t) count * sizeof(vring_desc));
+        n = declared;
+        auto* t = (vring_desc*) c->at(off);
+        memset(t, 0, (size_t) count * sizeof(vring_desc));
+        EXPECT_LE((size_t) count * sizeof(vring_desc), c->mem.size() - off);
+        return t;
+    }
+    // Chain `count` entries into a zero-length list: every one asks for one byte of a
+    // mapping it never uses, which is what makes an over-cap table cost a translate per
+    // entry instead of terminating at the first. See the second trap above.
+    static void chain_zero_length(vring_desc* t, uint32_t count) {
+        for (uint32_t i = 0; i < count; i++) {
+            t[i].addr = 0;
+            t[i].len = 0;
+            t[i].flags = (i + 1 < count) ? VRING_DESC_F_NEXT : 0;
+            t[i].next = (uint16_t) (i + 1);
+        }
+    }
+    // The ring descriptor. Written directly, NOT through add(): see the traps above.
+    // `extra_flags` is how a case adds VRING_DESC_F_WRITE (E6) or VRING_DESC_F_NEXT
+    // (E7) to the INDIRECT flag; `declared_len` overrides n * 16 for E3 / E3b / E4.
+    void publish(uint16_t idx, uint16_t extra_flags = 0, uint32_t declared_len = 0) {
+        ring_idx = idx;
+        c->desc[idx].addr = off;
+        c->desc[idx].len = declared_len ? declared_len : n * (uint32_t) sizeof(vring_desc);
+        c->desc[idx].flags = (uint16_t) (VRING_DESC_F_INDIRECT | extra_flags);
+        c->desc[idx].next = 0;
+    }
+};
+
+// A virtio_blk_outhdr placed in guest memory, returned as its address. The fixture's
+// put_header() also adds a RING descriptor, which is the one thing an indirect case
+// must not do: the header belongs in the table.
+size_t put_table_header(GuestChain& c, uint32_t type, uint64_t sector = CHAIN_SECTOR) {
+    virtio_blk_outhdr hdr{};
+    hdr.type = type;
+    hdr.sector = sector;
+    return c.place(&hdr, sizeof(hdr));
+}
+
+// The four things a served request leaves behind, so that E8 can compare a direct
+// chain and an indirect table for one request as a single value. Comparing them one
+// at a time would let each be satisfied by a different bug: `written` alone hides a
+// wrong used length behind a right byte count, and the image alone hides a status
+// that was never written.
+struct ChainOutcome {
+    uint8_t st = 0;
+    uint32_t w = 0;
+    uint8_t status_byte = 0;
+    std::vector<uint8_t> image;
+};
+
+// The negotiation gate's SHAPE: a table offered to an engine told not to walk one is
+// refused, and refused the way every other mid-walk refusal in this file is -- no
+// status written, no bytes reported. What this case cannot see is whether a transport
+// derives allow_indirect from the NEGOTIATED features or from its own offer; that is
+// M2, which has a frontend able to decline one bit.
+TEST_F(ChainFixture, an_indirect_descriptor_is_refused_when_the_feature_was_not_negotiated) {
+    GuestChain c;
+    IndirectTable t;
+    t.c = &c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_IN);
+    size_t doff = c.place(nullptr, 512);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+    vring_desc* tbl = t.begin(3, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{doff, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 2};
+    tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR,
+              serve(c, false, &w, false, nullptr, RING_NUM, /*allow_indirect=*/false));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+}
+
+// A table entry's `next` indexes the TABLE, and the bound on it is the table's own
+// entry count. Taking the bound from the ring instead passes the ring's index check
+// for any value below ring_num -- the two counts are unrelated -- and then reads a
+// descriptor past the end of the table. What sits there in this fixture is a planted
+// descriptor naming a 513-byte buffer, so the wrong bound turns into a preadv into
+// memory the driver never named for this request.
+//
+// 513 and not 512: at 512 the writable stream's last byte is taken as the status,
+// leaving want = 511, and the whole-sector check refuses that before any byte is
+// written -- the decoy would stay untouched and the assertion would prove nothing.
+TEST_F(ChainFixture, an_out_of_range_table_next_is_refused_instead_of_read_past_the_table) {
+    GuestChain c;
+    // Seed the image where the read would come from, so "the decoy was read into" is
+    // distinguishable in bytes from "the decoy still holds its prefill".
+    std::vector<uint8_t> seed(512);
+    fill_pattern(seed.data(), seed.size(), 0x33);
+    ASSERT_EQ((ssize_t) 512, img.file->pwrite(seed.data(), seed.size(), (off_t) (CHAIN_SECTOR << 9)));
+
+    std::vector<uint8_t> decoy(513, SENTINEL);
+    size_t decoy_off = c.place(decoy.data(), decoy.size());
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_IN);
+    size_t doff = c.place(nullptr, 512);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    // Six entries laid out, THREE declared. Index 5 is outside the table the engine
+    // was told about and inside the range it would read if it bounded `next` by the
+    // ring (RING_NUM is 8), which is the whole of the discrimination.
+    vring_desc* tbl = t.begin(6, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 5};
+    tbl[1] = vring_desc{doff, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 2};
+    tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    tbl[5] = vring_desc{decoy_off, 513, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &w));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+    EXPECT_EQ(SENTINEL, *c.at(decoy_off))
+        << "a descriptor past the end of the table was read and served from";
+}
+
+// §2.7.5.3.2: "The device MUST handle the case of zero or more normal chained
+// descriptors followed by a single descriptor with flags&VIRTQ_DESC_F_INDIRECT." The
+// table is not the only thing in the chain, and the descriptors before it keep their
+// bytes in the same two streams its entries go into -- here the header is split with
+// its first half in the ring and its second half in the table.
+//
+// This is the case that catches an inner walk indexing desc[] instead of the
+// translated table: at t == 0 it re-reads the ring's own header half and at t == 1 it
+// reaches the ring descriptor carrying INDIRECT, which the nesting rule then refuses.
+// It fails on that collision, not on the header's contents being wrong.
+TEST_F(ChainFixture, normal_descriptors_before_a_trailing_indirect_table_are_all_served) {
+    GuestChain c;
+    // A FLUSH: it needs no data phase, so the whole request is the split header and
+    // the status, and every byte of the header has to come from somewhere.
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_FLUSH;
+    size_t hoff = c.place(&hdr, sizeof(hdr));
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(2, 2);
+    tbl[0] = vring_desc{hoff + 8, sizeof(virtio_blk_outhdr) - 8, VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(1);
+    // desc[0] carries the header's first half and chains to the table descriptor.
+    c.desc[0] = vring_desc{hoff, 8, VRING_DESC_F_NEXT, 1};
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &w));
+    EXPECT_EQ(1u, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+}
+
+// §2.7.5.3.1: "The driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag within an
+// indirect descriptor (ie. only one table per descriptor)." That is a DRIVER
+// requirement -- §2.7.5.3.2 gives the device no matching MUST -- so refusing is our
+// own strictness, and the reason is the bound: nesting turns one step budget into a
+// product of budgets, with the depth the peer's.
+//
+// All three assertions are needed. The status code alone would also pass an
+// implementation that walked one level of nesting and then failed for an unrelated
+// reason; `w == 0` and the untouched sentinel are what place the refusal DURING the
+// walk rather than after it.
+TEST_F(ChainFixture, a_nested_indirect_table_is_refused) {
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_IN);
+    size_t doff = c.place(nullptr, 512);
+    size_t inner = c.place(nullptr, 512);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    // The nested table, built as a real one so that an implementation which allowed
+    // the nesting would have something to walk and would go on to serve.
+    IndirectTable inner_t;
+    inner_t.c = &c;
+    vring_desc* it = inner_t.begin(2, 2);
+    it[0] = vring_desc{inner, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 1};
+    it[1] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(3, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{inner_t.off, 2 * (uint32_t) sizeof(vring_desc),
+                        (uint16_t) (VRING_DESC_F_INDIRECT | VRING_DESC_F_NEXT), 2};
+    tbl[2] = vring_desc{doff, 512, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &w));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+}
+
+// The table's length is a second peer-supplied integer and the only one that names a
+// whole array rather than one buffer, so it has to divide evenly. Flooring the
+// division and ignoring the tail would SERVE this request, and the tail it ignored is
+// not ours: on a transport whose regions are the whole of guest memory those eight
+// bytes belong to somebody else's request, and the containment predicate a translate
+// runs has nothing to say about a length we rounded down ourselves.
+TEST_F(ChainFixture, a_table_length_that_is_not_a_whole_number_of_entries_is_refused) {
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_FLUSH);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(3, 2);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    // Two entries and eight bytes: a floor would read it as two and serve.
+    t.publish(0, 0, 2 * (uint32_t) sizeof(vring_desc) + 8);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &w));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+}
+
+// A zero-length table is refused BEFORE the table is translated. The status code is
+// not the discriminator here -- with no length check the entry count is 0, the inner
+// walk takes no step, the table never reports an end, and the circular-table refusal
+// answers IOERR too. What differs is the translate count: an implementation that
+// substituted one byte for a zero length the way it does for an ordinary buffer would
+// pay a mapping for a table it was about to refuse, and on a transport whose translate
+// is an ioctl that is a syscall for nothing.
+TEST_F(ChainFixture, a_zero_length_table_is_refused_before_any_entry_is_translated) {
+    DirectedGuest g;
+    IndirectTable t;
+    t.c = &g.c;
+    // begin(1, 0) declares zero entries, and publish() with no declared_len uses
+    // n * 16, which is the zero length under test.
+    t.begin(1, 0);
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve_directed(g, &w));
+    EXPECT_EQ(0u, w);
+    ASSERT_EQ(0u, g.asked_addr.size()) << "a table refused on its length was mapped first";
+}
+
+// The entry-count bound, and the case the plan is most likely to get wrong if it is
+// built the obvious way. Two things have to hold for it to mean anything:
+//
+//   The entries must be CHAINED. A region of zeroes is not a long table -- flags == 0
+//   means no NEXT, the walk ends after one entry, and both a capped and an uncapped
+//   engine pay exactly one translate. chain_zero_length gives every entry a NEXT and
+//   the last one none, so an uncapped walk pays one translate per entry.
+//
+//   The status code is not the discriminator. Uncapped, 65 zero-length entries leave
+//   the readable stream empty, the header gather-copy fails, and the answer is IOERR
+//   anyway. What differs is the translate count: 0 against 66.
+TEST_F(ChainFixture, an_absurd_table_is_refused_before_it_is_walked) {
+    DirectedGuest g;
+    IndirectTable t;
+    t.c = &g.c;
+    const uint32_t ENTRIES = TABLE_ENTRIES_MAX + 1;
+    vring_desc* tbl = t.begin(ENTRIES, ENTRIES);
+    IndirectTable::chain_zero_length(tbl, ENTRIES);
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve_directed(g, &w));
+    EXPECT_EQ(0u, w);
+    ASSERT_EQ(0u, g.asked_addr.size())
+        << "an over-cap table was mapped and walked instead of refused on its count";
+}
+
+// The other end of the same bound, and the one that keeps the case above honest. A
+// table of exactly the cap is a legal request and must be served: with only the
+// refusal case, tightening the bound to 63 stays green while every maximum-size
+// request a real guest builds -- which is exactly 64 descriptors, its two framing
+// ones included -- is refused.
+TEST_F(ChainFixture, a_table_of_exactly_the_entry_cap_is_served) {
+    constexpr uint32_t DATA_DESCS = TABLE_ENTRIES_MAX - 2;   // a header and a status
+    constexpr size_t DATA_BYTES = (size_t) DATA_DESCS * 512;
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_IN);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    // Seed the image so "the scatter list was the destination" is witnessed in bytes.
+    std::vector<uint8_t> src(DATA_BYTES);
+    fill_pattern(src.data(), src.size(), 0x5a);
+    ASSERT_EQ((ssize_t) DATA_BYTES,
+              img.file->pwrite(src.data(), src.size(), (off_t) (CHAIN_SECTOR << 9)));
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(TABLE_ENTRIES_MAX, TABLE_ENTRIES_MAX);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    for (uint32_t i = 0; i < DATA_DESCS; i++) {
+        size_t off = c.place(nullptr, 512);
+        tbl[1 + i] = vring_desc{off, 512,
+                                (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT),
+                                (uint16_t) (i + 2)};
+    }
+    tbl[TABLE_ENTRIES_MAX - 1] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &w));
+    EXPECT_EQ((uint32_t) DATA_BYTES + 1, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    // One gather over the guest's own buffers, in table order.
+    size_t got = 0;
+    for (uint32_t i = 0; i < DATA_DESCS; i++) {
+        size_t off = (size_t) tbl[1 + i].addr;
+        EXPECT_EQ(0, memcmp(src.data() + got, c.at(off), 512)) << "payload " << i;
+        got += 512;
+    }
+}
+
+// The table is translated read-only, and first. Read-only because the walk is about
+// to READ it, and §2.7.5.3.2 requires the device to ignore the write-only flag in the
+// descriptor that names a table; first because every entry's address comes out of it,
+// so nothing else can be translated before it. Both halves are invisible without a
+// translate that records what it was asked for -- the same reason the existing
+// directed cases exist, and the same failure they were added for: a translate handed a
+// constant passes every other case in this suite.
+//
+// The request has to be PURELY indirect. In a mixed chain the first translate is for
+// the ring's own first descriptor and says nothing about the table.
+TEST_F(ChainFixture, the_table_is_translated_read_only_and_first) {
+    DirectedGuest g;
+    size_t hoff = put_table_header(g.c, VIRTIO_BLK_T_IN);
+    size_t doff = g.c.place(nullptr, 512);
+    size_t st = g.c.place(nullptr, 1);
+    *g.c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &g.c;
+    vring_desc* tbl = t.begin(3, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{doff, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 2};
+    tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    // Deliberately also WRITE, which §2.7.5.3.2 tells the device to ignore.
+    t.publish(0, VRING_DESC_F_WRITE);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_directed(g, &w));
+    ASSERT_EQ(4u, g.asked_addr.size());
+    EXPECT_EQ((uint64_t) t.off, g.asked_addr[0]);
+    EXPECT_EQ(0, g.asked_writable[0]) << "the table was mapped writable";
+    // ... and then each entry, in table order, with the direction its own flag gave.
+    EXPECT_EQ((uint64_t) hoff, g.asked_addr[1]);
+    EXPECT_EQ(0, g.asked_writable[1]);
+    EXPECT_EQ((uint64_t) doff, g.asked_addr[2]);
+    EXPECT_EQ(1, g.asked_writable[2]);
+    EXPECT_EQ((uint64_t) st, g.asked_addr[3]);
+    EXPECT_EQ(1, g.asked_writable[3]);
+}
+
+// The table descriptor carries NO data. Its len bytes ARE the table, so pushing them
+// into a stream would hand the descriptor array to pwritev as a WRITE's payload --
+// the bytes the guest read back would be our own view of its request. §2.7.5.3.2's
+// third MUST, that the device ignore the write-only flag in the descriptor naming a
+// table, is pinned by the same case: the flag is set here on purpose.
+//
+// The image is read back rather than inferred from the status, because the failure
+// being guarded against is bytes landing in the backend.
+TEST_F(ChainFixture, the_table_descriptor_itself_carries_no_data) {
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_OUT);
+    std::vector<uint8_t> data(512);
+    fill_pattern(data.data(), data.size(), 0x77);
+    size_t doff = c.place(data.data(), data.size());
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(3, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{doff, 512, VRING_DESC_F_NEXT, 2};
+    tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(0, VRING_DESC_F_WRITE);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &w));
+    EXPECT_EQ(1u, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    std::vector<uint8_t> back(512);
+    ASSERT_EQ((ssize_t) 512, img.file->pread(back.data(), back.size(), (off_t) (CHAIN_SECTOR << 9)));
+    EXPECT_EQ(0, memcmp(data.data(), back.data(), data.size()))
+        << "the backend holds something other than the payload the table named";
+}
+
+// §2.7.5.3.1: "A driver MUST NOT set both VIRTQ_DESC_F_INDIRECT and VIRTQ_DESC_F_NEXT
+// in flags." Refused rather than served with the NEXT ignored, and the reason is not
+// tidiness: ignoring it silently drops whatever the driver chained behind the table,
+// and a chain whose tail is missing is SERVED as a shorter request. If the dropped
+// tail was the status, the writable stream's last byte is a DATA byte and the request
+// completes one byte short of what was asked for.
+//
+// Honest note on the third assertion: the sentinel survives under both the correct
+// code (refused during the walk, so nothing is written) and the ignoring one (no
+// status descriptor is ever reached), so it does not discriminate here. The status
+// code does.
+TEST_F(ChainFixture, an_indirect_descriptor_chained_with_next_is_refused) {
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_OUT);
+    std::vector<uint8_t> data(512, 0);
+    size_t doff = c.place(data.data(), data.size());
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(2, 2);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{doff, 512, 0, 0};   // no status in the table
+    t.publish(0, VRING_DESC_F_NEXT);
+    c.desc[0].next = 1;
+    c.desc[1] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR, serve(c, false, &w));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+}
+
+// Indirect is a LAYOUT, not a semantics: the same request built both ways has to
+// leave the same four things behind. Compared as one value, because each of the four
+// on its own can be satisfied by a different bug -- `written` alone hides a wrong
+// used length behind a right byte count, and the image alone hides a status that was
+// never written.
+//
+// The two forms land at two different image offsets and place their own buffers, so
+// nothing is reused: a shared buffer would turn "the image matches" into an assertion
+// about the sharing.
+TEST_F(ChainFixture, an_indirect_read_and_write_report_the_same_result_as_the_direct_form) {
+    constexpr uint64_t SEC_DIRECT = CHAIN_SECTOR;
+    constexpr uint64_t SEC_TABLE = CHAIN_SECTOR + 8;
+    std::vector<uint8_t> data(512);
+    fill_pattern(data.data(), data.size(), 0x29);
+
+    // Seed both offsets so a READ has something to fetch and a WRITE has something to
+    // be distinguishable from.
+    for (uint64_t s : {SEC_DIRECT, SEC_TABLE})
+        ASSERT_EQ((ssize_t) 512, img.file->pwrite(data.data(), data.size(), (off_t) (s << 9)));
+
+    auto run = [&](uint32_t type, bool indirect, uint64_t sector) {
+        GuestChain c;
+        size_t hoff, doff, st;
+        // A READ's data buffer is device-writable, a WRITE's is not; both chain on to
+        // the status. Computed once because the braced init below would narrow it.
+        const uint16_t dflags = (uint16_t) ((type == VIRTIO_BLK_T_IN ? VRING_DESC_F_WRITE : 0) |
+                                            VRING_DESC_F_NEXT);
+        if (indirect) {
+            IndirectTable t;
+            t.c = &c;
+            hoff = put_table_header(c, type, sector);
+            doff = c.place(nullptr, 512);
+            if (type == VIRTIO_BLK_T_OUT)
+                memcpy(c.at(doff), data.data(), data.size());
+            st = c.place(nullptr, 1);
+            *c.at(st) = SENTINEL;
+            vring_desc* tbl = t.begin(3, 3);
+            tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+            tbl[1] = vring_desc{doff, 512, dflags, 2};
+            tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+            t.publish(0);
+        } else {
+            hoff = put_table_header(c, type, sector);
+            doff = c.place(nullptr, 512);
+            if (type == VIRTIO_BLK_T_OUT)
+                memcpy(c.at(doff), data.data(), data.size());
+            st = c.place(nullptr, 1);
+            *c.at(st) = SENTINEL;
+            c.desc[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+            c.desc[1] = vring_desc{doff, 512, dflags, 2};
+            c.desc[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+        }
+        ChainOutcome o;
+        o.st = serve(c, false, &o.w);
+        o.status_byte = *c.at(st);
+        o.image.resize(512);
+        EXPECT_EQ((ssize_t) 512,
+                  img.file->pread(o.image.data(), o.image.size(), (off_t) (sector << 9)));
+        return o;
+    };
+
+    for (uint32_t type : {VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT}) {
+        ChainOutcome direct = run(type, false, SEC_DIRECT);
+        ChainOutcome table = run(type, true, SEC_TABLE);
+        const char* which = (type == VIRTIO_BLK_T_IN) ? "READ" : "WRITE";
+        ASSERT_EQ(VIRTIO_BLK_S_OK, direct.st) << "the direct form broke, so this compares nothing";
+        EXPECT_EQ(direct.st, table.st) << which;
+        EXPECT_EQ(direct.w, table.w) << which;
+        EXPECT_EQ(direct.status_byte, table.status_byte) << which;
+        EXPECT_EQ(0, memcmp(direct.image.data(), table.image.data(), direct.image.size())) << which;
+        if (type == VIRTIO_BLK_T_OUT) {
+            EXPECT_EQ(0, memcmp(data.data(), table.image.data(), data.size())) << which;
+        }
+    }
+}
+
+// A header split across two TABLE entries. The direct-chain version of this shape is
+// already pinned, and the reason it matters is the same: a whole-descriptor parser
+// drops the second half and still answers OK. Split ring requires no read/write
+// ordering inside a table either, so nothing may assume one entry per role or that the
+// readable ones come first.
+TEST_F(ChainFixture, a_header_split_across_two_table_entries_is_still_served) {
+    GuestChain c;
+    size_t hoff = put_table_header(c, VIRTIO_BLK_T_OUT);
+    std::vector<uint8_t> data(512);
+    fill_pattern(data.data(), data.size(), 0x44);
+    size_t doff = c.place(data.data(), data.size());
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(4, 4);
+    tbl[0] = vring_desc{hoff, 8, VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{hoff + 8, sizeof(virtio_blk_outhdr) - 8, VRING_DESC_F_NEXT, 2};
+    tbl[2] = vring_desc{doff, 512, VRING_DESC_F_NEXT, 3};
+    tbl[3] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve(c, false, &w));
+    EXPECT_EQ(1u, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+    std::vector<uint8_t> back(512);
+    ASSERT_EQ((ssize_t) 512, img.file->pread(back.data(), back.size(), (off_t) (CHAIN_SECTOR << 9)));
+    EXPECT_EQ(0, memcmp(data.data(), back.data(), data.size()));
+}
+
+// A mixed chain spends ONE scatter-list budget, not two. The ring descriptors and the
+// table's entries push into the same two streams, so 32 of the first and 40 of the
+// second overflow a 64-deep array even though neither count is over it alone. That
+// this shape exists at all is a consequence of the layout §2.7.5.3.2 requires the
+// device to handle; under an exclusive reading of it there would be nothing to test.
+//
+// No mutant of its own: the direct-chain version of the same refusal is already
+// pinned one descriptor past the deepest, and what this adds is that the budget is
+// shared, which no single-line change can undo.
+TEST_F(ChainFixture, a_mixed_chain_that_overflows_the_shared_scatter_list_is_refused) {
+    constexpr uint32_t RING_DESCS = 32;
+    constexpr uint32_t TBL_DESCS = 40;
+    GuestChain c(RING_DESCS + 1);
+    // One buffer reused by every descriptor: this case is about the count, and a
+    // request that overflows is refused before any byte is gathered.
+    size_t shared = c.place(nullptr, 512);
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+    for (uint32_t i = 0; i < RING_DESCS; i++)
+        c.desc[i] = vring_desc{shared, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT),
+                               (uint16_t) (i + 1)};
+
+    IndirectTable t;
+    t.c = &c;
+    vring_desc* tbl = t.begin(TBL_DESCS, TBL_DESCS);
+    for (uint32_t i = 0; i < TBL_DESCS; i++)
+        tbl[i] = vring_desc{shared, 512,
+                            (uint16_t) (VRING_DESC_F_WRITE |
+                                        (i + 1 < TBL_DESCS ? VRING_DESC_F_NEXT : 0)),
+                            (uint16_t) (i + 1)};
+    c.desc[RING_DESCS] = vring_desc{t.off, TBL_DESCS * (uint32_t) sizeof(vring_desc),
+                                    VRING_DESC_F_INDIRECT, 0};
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR,
+              serve(c, false, &w, false, nullptr, RING_DESCS + 1));
+    EXPECT_EQ(0u, w);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+}
+
 // lay a FLUSH chain into `r`'s descriptor table: a readable header at `hoff`
 // and a writable status byte at `soff`, both offsets into whatever guest memory
 // the translate hook is bound to. A FLUSH needs no data buffer, so the whole
@@ -1386,6 +2002,10 @@ public:
     // queue, and the engine's answer to that is what the case measures.
     bool ready_state = true;
     static bool ready_thunk(void* a) { return ((DepthFixture*)a)->ready_state; }
+    // Off by default, so the seven cases that share this SetUp are untouched. E10
+    // turns it on through IndirectDepthFixture below, which builds the SAME request
+    // with its buffers named by a table instead of by three ring descriptors.
+    bool indirect = false;
 
     // Under the ring size, so no avail entry is overwritten by the publish loop,
     // and far enough under it that a cap reading `num` instead of `queue_depth`
@@ -1423,20 +2043,39 @@ public:
         hdr.sector = CHAIN_SECTOR;
         size_t hoff = guest.place(&hdr, sizeof(hdr));
         size_t doff = guest.place(nullptr, 512);
+        size_t toff = guest.place(nullptr, 3 * sizeof(vring_desc));
         soff = guest.place(nullptr, 1);
         *guest.at(soff) = SENTINEL;
-        ring.desc[0].addr = hoff;
-        ring.desc[0].len = sizeof(hdr);
-        ring.desc[0].flags = VRING_DESC_F_NEXT;
-        ring.desc[0].next = 1;
-        ring.desc[1].addr = doff;
-        ring.desc[1].len = 512;
-        ring.desc[1].flags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
-        ring.desc[1].next = 2;
-        ring.desc[2].addr = soff;
-        ring.desc[2].len = 1;
-        ring.desc[2].flags = VRING_DESC_F_WRITE;
-        ring.desc[2].next = 0;
+        if (!indirect) {
+            ring.desc[0].addr = hoff;
+            ring.desc[0].len = sizeof(hdr);
+            ring.desc[0].flags = VRING_DESC_F_NEXT;
+            ring.desc[0].next = 1;
+            ring.desc[1].addr = doff;
+            ring.desc[1].len = 512;
+            ring.desc[1].flags = VRING_DESC_F_WRITE | VRING_DESC_F_NEXT;
+            ring.desc[1].next = 2;
+            ring.desc[2].addr = soff;
+            ring.desc[2].len = 1;
+            ring.desc[2].flags = VRING_DESC_F_WRITE;
+            ring.desc[2].next = 0;
+        } else {
+            // The table lives in the same guest memory, so the translate hook is
+            // unchanged; what changes is that ONE ring descriptor names the three
+            // buffers. The feature has to be marked negotiated as well -- a chain
+            // carrying a table is a chain whose driver offered bit 28, and an engine
+            // that walked one without that would be the defect M2 exists to catch.
+            auto* tbl = (vring_desc*) guest.at(toff);
+            tbl[0] = vring_desc{hoff, sizeof(hdr), VRING_DESC_F_NEXT, 1};
+            tbl[1] = vring_desc{doff, 512,
+                                (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 2};
+            tbl[2] = vring_desc{soff, 1, VRING_DESC_F_WRITE, 0};
+            ring.desc[0].addr = toff;
+            ring.desc[0].len = 3 * (uint32_t) sizeof(vring_desc);
+            ring.desc[0].flags = VRING_DESC_F_INDIRECT;
+            ring.desc[0].next = 0;
+            srv.indirect_desc.store(true, std::memory_order_relaxed);
+        }
         for (int i = 0; i < PUBLISHED; i++)
             ring.avail->ring[i] = 0;
         __atomic_store_n(&ring.avail->idx, (uint16_t) PUBLISHED, __ATOMIC_RELEASE);
@@ -1474,6 +2113,17 @@ public:
     }
 };
 
+// DepthFixture with the request published as one indirect table instead of three ring
+// descriptors. Everything the derived case asserts is unchanged, which is the point:
+// the cap counts heads, and a table is still one head.
+class IndirectDepthFixture : public DepthFixture {
+public:
+    void SetUp() override {
+        indirect = true;
+        DepthFixture::SetUp();
+    }
+};
+
 // The shape measured in review: a device configured for a depth of 1 admitted four
 // blocked requests, all four into the backend at once, because the only bound the
 // engine had was `num` -- which for vhost-user is the frontend's SET_VRING_NUM and
@@ -1497,6 +2147,35 @@ TEST_F(DepthFixture, dispatch_stops_at_the_configured_depth_not_at_the_ring_size
     // And they are still served. A cap that stranded the overflow would be a worse
     // defect than no cap at all -- which is what dispatch_cap_recovery asserts from
     // the transport side at the ring-size cap.
+    rf->release_gate(1024);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+    EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) PUBLISHED, vring_used_idx(ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+}
+
+// D1, and the reason it costs no code: an indirect request is ONE head, so it is one
+// in_flight, and every number the case above reads is the number this one reads too.
+// The expectations are copied from it -- DEPTH, PUBLISHED and all four counts -- and
+// their being UNCHANGED is the discriminator. An engine that accounted per table entry
+// would reach the cap during the first dispatch, and last_avail would not read back as
+// DEPTH.
+//
+// No mutant, and that is honest bookkeeping rather than an omission: per-entry
+// accounting cannot be a one-line change, because the entry count is not known until
+// the request coroutine translates the table, and dispatch_avail is yield-free by
+// contract. Moving the translate into dispatch to learn the count would break the
+// single re-check loop() relies on.
+TEST_F(IndirectDepthFixture, an_indirect_request_counts_as_one_in_flight) {
+    srv.dispatch_avail();
+
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+    EXPECT_EQ(0, vring_used_idx(ring.used));
+    EXPECT_EQ(SENTINEL, *guest.at(soff));
+
     rf->release_gate(1024);
     ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
     EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
