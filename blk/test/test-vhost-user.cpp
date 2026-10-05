@@ -139,6 +139,12 @@ static constexpr uint64_t L_STATUS = L_DATA + SLOTS * DATA_SLOT;   // SLOTS * 64
 static constexpr uint64_t MEM_SIZE = L_STATUS + SLOTS * 64 + 0x10000;
 
 #define USED_F_NO_NOTIFY 1
+// The guest's counterpart to the device's bit above, and the only suppression
+// channel a session that did not negotiate VIRTIO_RING_F_EVENT_IDX has: §2.7.7.2
+// tells the device to ignore this bit once bit 29 IS negotiated, which is to say
+// the index replaces the bit rather than sitting beside it. Spelled out here rather
+// than taken from blk/utils.h -- the file's standing rule, see PEER_MAX_QUEUES below.
+#define AVAIL_F_NO_INTERRUPT 1
 // The two event-index slots are the uint16 right past each ring's `num`
 // entries -- <linux/virtio_ring.h>:193-194 spells them avail->ring[num] and
 // *(__virtio16 *)&used->ring[num]. The layout above already reserves room:
@@ -601,6 +607,36 @@ struct MockFrontend {
         return *(uint16_t*)(mem + AVAIL_EVENT_OFF);
     }
 
+    // ---- the regime selector, and the flags-mode half of the mock's side of the
+    // ---- ring: it owns avail->flags and reads used->flags, which is the mirror
+    // ---- image of owning used_event and reading avail_event above.
+
+    // Which regime this session settled on, read from `features` -- the word
+    // negotiate() settled and the mock's own record of it, never from anything the
+    // device published. That is the point: a backend that derived its per-queue
+    // state from the wrong word cannot make the mock agree with it, so the two
+    // disagreeing stays observable instead of becoming a shared mistake. A case
+    // that re-sends SET_FEATURES behind the mock's back leaves this stale, and
+    // stale is the safe direction -- it keeps the mock publishing used_event,
+    // which a flags-mode device ignores rather than acts on.
+    bool event_idx_negotiated() const { return (features & F_RING_EVENT_IDX) != 0; }
+
+    // Set or clear the driver's interrupt-suppression bit. §2.7.7.2's "the device
+    // MUST ignore the lower bit of flags" is conditional on bit 29 having been
+    // negotiated, so in a flags-mode session this is the only channel the guest has
+    // for telling the device not to interrupt, and blk/utils.cpp's vring_need_irq is
+    // the code that reads it.
+    void set_avail_no_interrupt(bool on) {
+        auto* avail = (vavail*)(mem + L_AVAIL);
+        avail->flags = on ? (uint16_t)(avail->flags | AVAIL_F_NO_INTERRUPT)
+                          : (uint16_t)(avail->flags & ~AVAIL_F_NO_INTERRUPT);
+        // After the store, not before: what has to be ordered is this flag against
+        // the avail->idx publish that follows in submit(), and a barrier ahead of
+        // the store would order nothing that matters. It pairs with the SEQ_CST
+        // fence should_notify() runs before reading the flag back.
+        __sync_synchronize();
+    }
+
     // §2.7.10.1: notify iff the index that determined where the descriptor
     // landed equals avail_event, and the used ring's flags low bit is clear.
     // `submit()` has already incremented avail_idx, so the index that picked the
@@ -615,6 +651,21 @@ struct MockFrontend {
         uint16_t flags = used->flags;
         uint16_t idx = (uint16_t)(avail_idx - 1);
         __sync_synchronize();
+        // Without bit 29 there is no avail_event to consult, and consulting it
+        // anyway is not merely redundant: publish_avail_event() writes that slot
+        // only when the engine is in EVENT_IDX mode, so a flags-mode device leaves
+        // it at its memset 0 and the equality below fires on the first kick alone.
+        // Every later request would then ride the device's 5 ms fallback re-scan --
+        // still served, so nothing would fail, which is precisely why the branch
+        // cannot be left to the conjunction above. §2.7.10.1 tells the driver to
+        // ignore the used ring's flags low bit only once bit 29 is negotiated, so
+        // without it that bit is the whole decision -- and it is provably clear,
+        // because nothing in blk/ ever writes used->flags while §2.7.10.1 has this
+        // side initialize it to 0. Tested rather than folded into a constant so a
+        // device that started setting it shows up here instead of as a hot-spinning
+        // kick loop.
+        if (!event_idx_negotiated())
+            return (flags & USED_F_NO_NOTIFY) ? true : kick();
         uint16_t ae = get_avail_event();
         if ((flags & USED_F_NO_NOTIFY) == 0 && (uint16_t)(idx - ae) < 1)
             return kick();
@@ -634,6 +685,24 @@ struct MockFrontend {
         return v;
     }
 
+    // Did the device serve `slot`, watched through the status byte submit() presets
+    // to 0xff. This and not collect(), for the reason interrupt_suppressed_by_used_event
+    // gives: collect() polls the used ring and drains the callfd, so a case whose
+    // subject IS the interrupt cannot use it without destroying its own oracle.
+    // The bound is generous and can be: the device writes the status byte inside
+    // serve_chain and then appends the used element and signals in complete_req,
+    // with no yield between the append and the signal -- so once the byte is
+    // visible the interrupt is a few non-yielding instructions away, and the
+    // callfd_readable() that follows this needs no slack of its own.
+    bool served_within(uint16_t slot, int ms = 2000) {
+        for (int i = 0; i < ms; i++) {
+            if (*(uint8_t*)(mem + status_off(slot)) != 0xff)
+                return true;
+            ::usleep(1000);
+        }
+        return false;
+    }
+
     // wait for the next used element (completions come back in ARBITRARY order).
     // Check the ring BEFORE polling: one eventfd read consumes the whole
     // accumulated counter, so a poll-first loop would burn a full timeout on
@@ -651,8 +720,21 @@ struct MockFrontend {
             // the device stops interrupting after the first completion, and this
             // loop still finds every result by polling the ring -- a silent
             // false green for the whole suite.
-            set_used_event(used_idx);
-            __sync_synchronize();
+            //
+            // Conditional on bit 29 because writing the slot in a flags-mode
+            // session supplies a side-channel no real flags-mode frontend writes.
+            // That is not a tidiness point: an unconditional write here is what
+            // let a backend deriving its per-queue event_idx from the OFFER rather
+            // than from the NEGOTIATED word go undetected, because the used_event
+            // it then read was the one this line had just put there. With the
+            // write gated, a flags-mode session leaves the slot at its memset 0
+            // and the device that reads it anyway suppresses every interrupt past
+            // the first -- which is what a_flags_mode_session_notifies_from_avail_flags_alone
+            // asserts on.
+            if (event_idx_negotiated()) {
+                set_used_event(used_idx);
+                __sync_synchronize();
+            }
             if (used->idx != used_idx) {
                 auto elem = used->ring[used_idx % VQ_NUM];
                 used_idx++;
@@ -671,7 +753,15 @@ struct MockFrontend {
         return fail("used ring");
     }
 
-    int do_request(uint32_t type, uint64_t sector, void* data, size_t len, bool data_write) {
+    // `used_len` is optional and defaults off, so the four wrappers below and
+    // every existing caller are untouched. Written as soon as a completion comes
+    // back and NOT only on the success path, because a FAILED completion's length
+    // is the one the length check below deliberately skips -- and it is the only
+    // thing that says how much of the guest's device-writable buffer the device
+    // claims to have filled. As with collect()'s own outputs, it is left alone
+    // when no completion arrived, so a caller initialises the local it passes in.
+    int do_request(uint32_t type, uint64_t sector, void* data, size_t len, bool data_write,
+                   uint32_t* used_len = nullptr) {
         if (len > DATA_SLOT) { errno = E2BIG; fail("len > DATA_SLOT"); return -1; }
         uint16_t slot = (uint16_t)(slot_seq++ % SLOTS);
         if (data && len && !data_write) memcpy(mem + data_off(slot), data, len);
@@ -682,6 +772,7 @@ struct MockFrontend {
 
         uint32_t head = 0, ulen = 0;
         if (!collect(&head, &ulen)) return -1;
+        if (used_len) *used_len = ulen;
         if (head >= VQ_NUM || slot_of_head[head] != (int16_t)slot) {
             errno = EPROTO;
             fail("used elem id");
@@ -705,8 +796,8 @@ struct MockFrontend {
         return *(uint8_t*)(mem + status_off(slot));
     }
 
-    int write_dev(uint64_t off, const void* buf, size_t len) {
-        return do_request(T_OUT, off >> 9, (void*)buf, len, false);
+    int write_dev(uint64_t off, const void* buf, size_t len, uint32_t* used_len = nullptr) {
+        return do_request(T_OUT, off >> 9, (void*)buf, len, false, used_len);
     }
     int read_dev(uint64_t off, void* buf, size_t len) {
         return do_request(T_IN, off >> 9, buf, len, true);
@@ -1382,6 +1473,116 @@ TEST_F(VhostUserTest, declining_flush_puts_the_device_in_write_through) {
     // the write itself
     EXPECT_EQ(1, probe.datasyncs.load());
     EXPECT_EQ(0, probe.syncs.load());
+}
+
+// A backend write that lands SHORT, seen from the guest's side of the socket.
+// test-blk-vq's a_write_that_landed_short_does_not_persist pins the engine's own
+// verdict by calling serve_chain directly; what only a transport-level case can see
+// is that the verdict survives the trip -- written into the guest's status byte and
+// published into the used ring, rather than dropped by one of handle_req's teardown
+// gates -- and that the used element's length is 1. The chain offers exactly one
+// device-writable buffer (submit() marks the data descriptor readable for a T_OUT),
+// so a length above 1 would be a claim about bytes written into a buffer this guest
+// never offered as writable.
+//
+// Declining F_BLK_FLUSH is what makes the durability half assertable instead of
+// trivially true: in write-back no write-time sync happens at all, so
+// `datasyncs == 0` would also pass for a device that persisted a write it was about
+// to report as failed -- the exact guard the engine case exists for. Write-through is
+// also the mode this transport derives from the negotiated word, so the decline does
+// double duty and the descriptor read below is the caller's view of the same fact.
+TEST_F(VhostUserTest, a_short_backend_write_reaches_the_guest_as_ioerr_unpersisted) {
+    test::BackendProbe probe(file);
+    probe.short_write_by = 1;   // 65535 of the 65536 bytes asked for
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x4c);
+    int st = -1;
+    uint32_t ulen = ~0u;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        fe.decline = F_BLK_FLUSH;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features & F_BLK_FLUSH) return EPROTO;   // the mask did not take, so
+                                                        // write_through was never derived
+        st = fe.write_dev(1 << 20, wbuf.data(), wbuf.size(), &ulen);
+        return st < 0 ? EIO : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(S_IOERR, st);
+    EXPECT_EQ(1u, ulen);
+    // The write REACHED pwritev, which is what separates a short count from an
+    // earlier refusal: the read-only, sector-granularity and capacity gates all
+    // answer S_IOERR with a used length of 1 as well, so without this the case would
+    // pass green against a request that never got near the backend.
+    EXPECT_EQ(1, probe.writes.load());
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+    EXPECT_EQ(0ull, dev->get_info().negotiated);
+    // The bytes DID land -- short_write_by fakes the COUNT only (harness.h says so),
+    // so a mismatch assertion here would be a claim about the probe rather than about
+    // the device. Recorded so that the two counts above are not misread as "the range
+    // is absent": the "not persisted" this case pins is the missing sync.
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
+}
+
+// The same write-through mode, with the persist ASKED FOR and FAILED. test-blk-vq's
+// a_write_whose_persist_fails_is_reported_as_failed pins the engine's verdict; the
+// transport's half is that deriving write_through from the NEGOTIATED word is what
+// puts the device in the mode where that verdict can arise at all, and that the
+// verdict then reaches the used ring. `datasyncs` is what separates the two halves,
+// and it is an equality rather than the `> 0` the distinction strictly needs:
+// fail_syncs still counts (harness.h), so 1 says "tried and failed" where 0 says
+// "never tried" -- and "never tried" is exactly what a device deriving write_through
+// from its own OFFER produces, because make_info() asks for FLUSH and the offer
+// therefore always carries it. Such a device answers S_OK for a write that never
+// reached stable storage, and every byte-count assertion in this suite stays green
+// under it: the bytes are in the page cache, so the read-back matches.
+TEST_F(VhostUserTest, a_failed_write_through_persist_reaches_the_guest_as_ioerr) {
+    test::BackendProbe probe(file);
+    probe.fail_syncs = true;
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+
+    auto wbuf = pattern(0x6d);
+    int st = -1;
+    uint32_t ulen = ~0u;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        fe.decline = F_BLK_FLUSH;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features & F_BLK_FLUSH) return EPROTO;   // as above: without the
+                                                        // decline there is no
+                                                        // write-through persist to fail
+        st = fe.write_dev(1 << 20, wbuf.data(), wbuf.size(), &ulen);
+        return st < 0 ? EIO : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(S_IOERR, st);
+    EXPECT_EQ(1u, ulen);
+    EXPECT_EQ(1, probe.writes.load());      // the write itself reached the backend
+    EXPECT_EQ(1, probe.datasyncs.load());   // and the persist was asked for, once --
+                                            // paired with `writes` so that neither can
+                                            // be satisfied by a device that synced once
+                                            // and then stopped (harness.h)
+    EXPECT_EQ(0, probe.syncs.load());       // fdatasync, not the heavier fsync
+    EXPECT_EQ(0ull, dev->get_info().negotiated);
+    // The bytes landed and only the persist failed, which is what makes reporting
+    // success actively wrong here rather than merely optimistic: the completion is the
+    // device's word that the data is where it promised, and in write-through that
+    // promise is stable storage.
+    EXPECT_EQ(0, verify_backend(1 << 20, wbuf));
 }
 
 TEST_F(VhostUserTest, client_role) {
@@ -3752,6 +3953,192 @@ TEST_F(VhostUserTest, event_idx_wrap) {
         // the turn itself: 65534 + 4 requests lands at 2, having passed through 0
         EXPECT_EQ(2u, (unsigned)fe.avail_idx);
         EXPECT_EQ(2u, (unsigned)((vused*)(fe.mem + L_USED))->idx);
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
+// The negotiation gate, from the side nothing else in this file looks at. Every
+// other case here settles VIRTIO_RING_F_EVENT_IDX: `decline` is written exactly
+// once in the whole file, to F_BLK_FLUSH, which is bit 9. So until this case the
+// transport's per-queue event_idx store -- the one in the SET_FEATURES handler --
+// had only ever been asked for the value it computes when bit 29 IS present, and
+// deriving it from offer_features instead of from the negotiated word, or storing
+// an unconditional true, was invisible to all of them: each kept reading a
+// used_event that collect() obligingly wrote, and avail->flags -- the only input a
+// flags-mode guest actually gives the device -- was never set to anything but its
+// memset 0, so vring_need_irq answered true every time and looked identical to the
+// EVENT_IDX arithmetic agreeing.
+//
+// What this adds over test-blk-vq's flags_mode_answers_from_the_driver_suppression_bit
+// is the plumbing, not the predicate. That case stores srv.event_idx by hand and
+// calls should_notify directly, so it cannot see which of the two words the
+// transport read; this one negotiates over a real socket and observes the callfd.
+//
+// THREE requests, and only the third has teeth. Under an unconditional store(true)
+// the device is in EVENT_IDX mode while the guest is in flags mode, so it reads
+// used_event -- which nothing on this side writes any more -- as 0: request 1 still
+// notifies (should_notify's first-decision rule, spent there), request 2 is
+// suppressed by need_event(0, 2, 1) = (1 < 1) and request 3 by need_event(0, 3, 2)
+// = (2 < 1). Requests 1 and 2 therefore read the SAME under both regimes and
+// neither can discriminate, however right their assertions look; request 3 is the
+// one that goes red, and it goes red on the notification rather than on "not
+// served" -- the kick half is the mock's own and is unaffected by what the device
+// believes, so the request is served either way and the failure is attributed.
+TEST_F(VhostUserTest, a_flags_mode_session_notifies_from_avail_flags_alone) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+
+        // A precondition, not a claim about the device, and read BEFORE the settled
+        // word is asserted on: declining a bit that was never offered changes
+        // nothing, and the case would then be exercising flags mode for a reason
+        // nobody negotiated while believing it had tested the gate. Same shape as
+        // the FLUSH precondition in accepting_flush_leaves_the_device_in_write_back.
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_FEATURES; m.size = 0;
+        ASSERT_TRUE(fe.transact(&m, &r));
+        // Copied out before the macro sees it: a scalar read in place is legal per
+        // the wire header's access rule, but `r` is a packed struct and nothing
+        // here gains from letting a gtest macro bind to one of its members.
+        const uint64_t offer = r.payload.u64;
+        ASSERT_TRUE(offer & F_RING_EVENT_IDX)
+            << "bit 29 was not offered, so declining it below is a no-op";
+
+        fe.decline = F_RING_EVENT_IDX;
+        ASSERT_TRUE(fe.negotiate(false));
+        ASSERT_FALSE(fe.features & F_RING_EVENT_IDX)
+            << "bit 29 survived the decline; this case would exercise EVENT_IDX and pass vacuously";
+
+        // SET_VRING_CALL signals once on install, so from here on a readable callfd
+        // means a completion notified and nothing else.
+        (void)fe.callfd_drain();
+        char buf[512] = {};
+
+        // ---- request 1: interrupts enabled, so the device's vring_need_irq
+        // ---- answers notify. §2.7.7.2 tells it to ignore this bit only once bit
+        // ---- 29 is negotiated, which this session did not.
+        fe.set_avail_no_interrupt(false);
+        const uint16_t s1 = 0;
+        ASSERT_EQ(0, fe.submit(s1, T_OUT, 0, sizeof(buf), false));
+        ASSERT_TRUE(fe.kick_if_needed());
+        ASSERT_TRUE(fe.served_within(s1)) << "request 1 was not served at all";
+        EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(s1)))
+            << "served, but with a nonzero virtio-blk status";
+        EXPECT_TRUE(fe.callfd_readable(1000))
+            << "flags mode with interrupts enabled did not notify";
+        (void)fe.callfd_drain();
+
+        // ---- request 2: the driver's suppression bit set, so it MUST NOT ----
+        fe.set_avail_no_interrupt(true);
+        const uint16_t s2 = 1;
+        ASSERT_EQ(0, fe.submit(s2, T_OUT, 0, sizeof(buf), false));
+        ASSERT_TRUE(fe.kick_if_needed());
+        ASSERT_TRUE(fe.served_within(s2)) << "request 2 was not served at all";
+        EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(s2)))
+            << "served, but with a nonzero virtio-blk status";
+        // Suppression is about the notification, not the work, and the two lines
+        // above are what keep this one honest: a request nobody served also raises
+        // no interrupt, so on its own this would pass against a dead queue. The
+        // bound is the 50 ms interrupt_suppressed_by_used_event uses, and here it is
+        // load-bearing in a second way: the flag for request 3 must not be cleared
+        // while this request's notify decision may still be pending, or a decision
+        // that read NO_INTERRUPT would land after the clear and be counted as
+        // request 3's. complete_req runs serve_chain's status-byte write and then
+        // the used append and should_notify with no yield between them, so a poll
+        // that blocked its full 50 ms and saw nothing is proof the decision was
+        // taken, and took it with the flag still set.
+        EXPECT_FALSE(fe.callfd_readable(50))
+            << "interrupted although avail->flags asked it not to (§2.7.7.2)";
+        (void)fe.callfd_drain();
+
+        // ---- request 3: the bit cleared again, so it MUST notify again ----
+        // The discriminating half; see the block comment for why 1 and 2 cannot be.
+        fe.set_avail_no_interrupt(false);
+        const uint16_t s3 = 2;
+        ASSERT_EQ(0, fe.submit(s3, T_OUT, 0, sizeof(buf), false));
+        ASSERT_TRUE(fe.kick_if_needed());
+        ASSERT_TRUE(fe.served_within(s3)) << "request 3 was not served at all";
+        EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(s3)))
+            << "served, but with a nonzero virtio-blk status";
+        EXPECT_TRUE(fe.callfd_readable(1000))
+            << "flags mode stopped consulting avail->flags after the first request";
+        EXPECT_EQ(1u, fe.callfd_drain()) << "expected exactly one notification";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
+// The same gate, the other direction: a poisoned side-channel. A flags-mode
+// frontend does not publish used_event at all -- that slot is part of the
+// EVENT_IDX layout -- and §2.7.7.2's "the device MUST ignore the lower bit of
+// flags" is conditional on bit 29 having been negotiated, which is to say the
+// flags bit REPLACES the index rather than sitting beside it. This case writes the
+// slot anyway, with the value that would suppress under EVENT_IDX, and asserts the
+// interrupt still arrives: a device that goes on reading used_event after its peer
+// declined bit 29 is a device taking input from a channel that peer never wrote,
+// and the value it finds there is whatever the previous session or the memset left.
+//
+// Request 1 cannot discriminate, for the reason the case above gives: should_notify's
+// first-decision rule notifies unconditionally whichever regime the device thinks it
+// is in. The assertion with teeth is request 2's, where the mutated device computes
+// need_event(100, 2, 1) = (uint16)(2 - 100 - 1) = 65437 < 1, i.e. false, and stays
+// silent while the correct one answers from avail->flags and notifies.
+TEST_F(VhostUserTest, a_flags_mode_session_ignores_a_planted_used_event) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        fe.decline = F_RING_EVENT_IDX;
+        ASSERT_TRUE(fe.negotiate(false));
+        ASSERT_FALSE(fe.features & F_RING_EVENT_IDX)
+            << "bit 29 survived the decline; this case would exercise EVENT_IDX and pass vacuously";
+
+        // Planted AFTER negotiate(), which memsets the whole guest region, and left
+        // alone from here on: nothing in this case calls collect(), so the only
+        // writer of the slot is this line. 100 is interrupt_suppressed_by_used_event's
+        // value and suppresses for the same arithmetic reason.
+        fe.set_used_event(100);
+        (void)fe.callfd_drain();   // SET_VRING_CALL's one-shot install signal
+        char buf[512] = {};
+
+        for (int i = 0; i < 2; i++) {
+            const uint16_t slot = (uint16_t)i;
+            ASSERT_EQ(0, fe.submit(slot, T_OUT, 0, sizeof(buf), false));
+            ASSERT_TRUE(fe.kick_if_needed());
+            ASSERT_TRUE(fe.served_within(slot)) << "request " << i << " was not served at all";
+            EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(slot)))
+                << "request " << i << " served, but with a nonzero virtio-blk status";
+            EXPECT_TRUE(fe.callfd_readable(1000))
+                << "request " << i << " was not notified: a flags-mode device took its "
+                   "decision from the planted used_event instead of from avail->flags";
+            EXPECT_EQ(1u, fe.callfd_drain()) << "expected exactly one notification";
+        }
+        // avail->flags was never touched, so it is still the memset 0 that asks for
+        // interrupts. Asserted rather than assumed: the case's whole claim is that
+        // this bit and not the index is what the device consulted, and a region
+        // whose flags had been set elsewhere would make both notifications
+        // unexpected rather than expected.
+        EXPECT_EQ(0, (int)((vavail*)(fe.mem + L_AVAIL))->flags);
+        EXPECT_EQ(100u, fe.get_used_event())
+            << "something else wrote the slot; the case's premise is that this plant is "
+               "the only used_event the device can find there";
     });
     if (!fe.err.empty())
         LOG_ERROR("mock frontend: `", fe.err);
