@@ -936,6 +936,16 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     std::atomic<int> finished{0};
 
     constexpr int THREADS = 8, ITERS = 20;
+    // Every client operation is bounded, and the polling loop's deadline below has
+    // to exceed whatever a thread can still need. The loop's exit is followed by
+    // join(), which blocks THIS OS thread -- and this thread's vcpu is where
+    // accept_loop lives, so any client still waiting can never be served and the
+    // join never returns. Bounding the clients is what makes the join terminate.
+    constexpr uint64_t CLIENT_TIMEOUT_US = 5ull * 1000 * 1000;
+    constexpr uint64_t DEADLINE_US = 300ull * 1000 * 1000;
+    static_assert(DEADLINE_US > (uint64_t) ITERS * CLIENT_TIMEOUT_US,
+                  "a thread could still be working when the polling loop gives up, "
+                  "and the join that follows would then deadlock this vcpu");
     std::vector<std::thread> ths;
     for (int t = 0; t < THREADS; t++)
         ths.emplace_back([&, t] {
@@ -967,28 +977,41 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
                 // to -1, and only the step says whether the server refused the
                 // connection or dropped it mid-request
                 const char* phase = "connect";
+                int err = 0;
                 {
                     NbdTestClient cli;
-                    if (cli.connect_tcp("127.0.0.1", p0) == 0) {
+                    if (cli.connect_tcp("127.0.0.1", p0) != 0) {
+                        err = errno;
+                    } else {
+                        // after the connect: set_timeout() forwards to the stream,
+                        // which only exists once connect_tcp has stored it
+                        cli.set_timeout(CLIENT_TIMEOUT_US);
                         phase = "handshake";
-                        if (cli.handshake() == 0) {
+                        if (cli.handshake() != 0) {
+                            err = errno;
+                        } else {
                             phase = "write";
                             st = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
-                            if (!st) {
+                            if (st) {
+                                err = errno;
+                            } else {
                                 phase = "read";
                                 st = cli.xfer(NBD_CMD_READ, off, rbuf.data(), rbuf.size());
-                            }
-                            if (!st && memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
-                                bad++;   // corruption is never a restart-window artifact
-                                continue;
+                                if (st) {
+                                    err = errno;
+                                } else if (memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
+                                    bad++;   // corruption is never a restart-window artifact
+                                    continue;
+                                }
                             }
                         }
                     }
-                }
+                }   // errno must be captured above: this destructor sends DISC and
+                    // closes the socket, which overwrites whatever the failure set
                 if (st && gen.load(std::memory_order_acquire) == g0 &&
                     !down.load(std::memory_order_acquire)) {
                     LOG_ERROR("client ` iter ` failed at ` with ` errno ` on port ` (current `) outside the restart window",
-                              t, i, phase, st, errno, p0, port.load(std::memory_order_acquire));
+                              t, i, phase, st, err, p0, port.load(std::memory_order_acquire));
                     bad++;
                 }
                 if (!st)
@@ -1002,7 +1025,7 @@ TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
     // drops every connection; start() rebinds and publishes the new port.
     // No semaphore here: blocking would stop the yields accept_loop needs.
     bool restarted = false;
-    uint64_t deadline = photon::now + 300ull * 1000 * 1000;
+    uint64_t deadline = photon::now + DEADLINE_US;
     bool timeout_hit = false;
     while (finished.load() < THREADS) {
         auto conns = dev->get_client_connections();
@@ -1420,7 +1443,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     cfg.enable_tcp = true;
     cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
     cfg.queue_depth = 1;
-    cfg.stall_timeout = 10;
+    cfg.stall_timeout = 2;
     auto dev = new_nbd_device(cfg);
     ASSERT_NE(nullptr, dev);
     DEFER(delete dev);
@@ -1437,7 +1460,7 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     NbdTestClient honest;
     ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
     ASSERT_EQ(0, honest.handshake());
-    honest.set_timeout(30 * 1000 * 1000);
+    honest.set_timeout(10 * 1000 * 1000);
     std::vector<char> wbuf(4096, 0x33);
     EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
     std::vector<char> rbuf(4096);
