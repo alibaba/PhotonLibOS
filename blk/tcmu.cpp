@@ -538,20 +538,23 @@ struct TcmuServer {
     // the null runs in place on the pump's own vcpu, which is what that branch is
     // for. With pool == nullptr it is simply the caller's own vcpu.
     //
-    // Control-plane field: written by serve_start and read by run_serve_stop. That
-    // both are on the vcpu that started the device is a contract with the caller, not
-    // a property of this code -- `home` is a plain pointer, while every TcmuLink field
-    // that both the HBA's listener vcpu and this device's caller write is atomic,
-    // because this device is driven from whatever vcpu its caller runs on; TcmuLink
-    // below has two plain fields, and those are set once in TcmuDeviceImpl's
+    // Control-plane field: written by serve_start and read by run_serve_stop, both on
+    // the control vcpu blk.h's IBlkDevice names -- and `home` is a plain pointer, so a
+    // detach() or a shutdown() issued from another vcpu leaves it read and written
+    // from two OS threads: serve_start writes it on the vcpu that started the device,
+    // while run_serve_stop reads and clears it on its caller's. The pump's own vcpu
+    // never touches it. That is why the clear lives in run_serve_stop's DEFER instead
+    // of at the end of serve_stop -- under the hop, serve_stop runs on the serving
+    // vcpu, and writing `home` from there would be the cross-vcpu write this field
+    // exists to avoid.
+    //
+    // What the HBA shares with this device is a separate axis, guarded for that and
+    // not by the contract above: every TcmuLink field both the HBA's listener vcpu and
+    // this device's caller write is atomic, because the listener is a vcpu of its own
+    // and answers kernel events without asking which vcpu the device's owner is on.
+    // TcmuLink below has two plain fields, and those are set once in TcmuDeviceImpl's
     // constructor -- before it publishes the link to the HBA's registry -- and are
-    // never reassigned. So a detach() or a shutdown() from another vcpu leaves `home`
-    // read and written from two OS threads: serve_start writes it on the vcpu that
-    // started the device, while run_serve_stop reads and clears it on its caller's.
-    // The pump's own vcpu never touches it. That is why the clear lives in
-    // run_serve_stop's DEFER instead of at the end of serve_stop -- under the hop,
-    // serve_stop runs on the serving vcpu, and writing `home` from there would be the
-    // cross-vcpu write this field exists to avoid.
+    // never reassigned.
     //
     // Work stealing is what would break it: photon writes the field again only in its
     // two stealing scans, and those need a per-thread create flag and a per-vcpu init
@@ -2216,14 +2219,16 @@ struct TcmuHBAImpl : TcmuHBA {
                 // release never unlinks), so -1 does not mean "not ours" -- only
                 // that this caller could not use the file, and devlock_free
                 // never inspects errno: a 0600 tombstone is unreadable by a
-                // caller that is neither its owner nor root. The consequence is
-                // bounded -- THIS scan cannot report the device. Recovery is not
-                // lost with it: initial_scan gates on enable, and the dev_config
-                // it also reads gates on whether the read succeeds, not on what
-                // it says. initial_scan treats -1 at its probe as not held, so an
-                // unusable tombstone does not by itself drop the entry; adoption
-                // opens the file to write, and devlock_acquire logs that open's
-                // failure. Neither other probe in this file says a word about -1.
+                // caller that is neither its owner nor root (nor equivalent
+                // capability). The consequence is bounded -- THIS scan cannot
+                // report the device. Recovery is not lost by it: initial_scan
+                // gates on enable, and the dev_config it also reads gates on
+                // whether the read succeeds, not on what it says. initial_scan
+                // treats -1 at its probe as not held, so an unusable tombstone
+                // does not by itself drop the entry; adoption opens the file to
+                // write, and devlock_acquire logs that open's failure. No other
+                // devlock_free call in this file warns about -1; each turns it
+                // into an answer of its own.
                 LOG_WARN("tcmu backstore ` is ours but its tombstone is missing or unopenable, so it cannot be reported as an orphan",
                          identity);
                 continue;
@@ -2303,8 +2308,10 @@ struct TcmuHBAImpl : TcmuHBA {
         if (!path_exists(bs_path)) {
             // No registration, so there is no orphan to recover. lf still tells the
             // two remaining cases apart: a tombstone outliving its registration is
-            // our own litter and goes with it, while nothing at all means the
-            // identity names no backstore this HBA ever had.
+            // our own litter and goes with it, while one this call cannot use --
+            // absent, or there and not openable by this caller, which devlock_free
+            // does not tell apart -- is reported as no such backstore, and nothing
+            // is removed.
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no tcmu backstore ` under this HBA, and no tombstone for it that this call could use", bs_name);
             if (devlock_unlink(lock_dir, lock) < 0)

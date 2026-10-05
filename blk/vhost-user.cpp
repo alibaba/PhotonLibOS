@@ -294,20 +294,18 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // those.
         //
         // Control-plane field: written by vq_start and read by the teardown callers,
-        // every one of which runs on the vcpu that called start() -- the message loop
-        // too, which start() creates there and which is deliberately never migrated.
-        // That is a contract with the caller, not a property of this code: `home` is a
-        // plain pointer, and nothing here would notice a detach() or a shutdown()
-        // issued from another vcpu -- `home` would then be written by vq_start on the
-        // vcpu that called start() and read and cleared by the detaching caller on
-        // the other one: two OS threads, one plain field, nothing ordering them. The
-        // loop's own vcpu never touches it. vq_stop clears it once the loop is joined,
-        // so a drain that follows a stop runs in place -- which it may, because
-        // drain() polls nothing but the atomic in_flight and therefore has no vcpu it
-        // must be on. The drains that precede a stop still hop. Clearing it is also
-        // what makes a restart inside one session safe: the next vq_start records the
-        // landing vcpu of the loop it just created instead of leaving the previous
-        // loop's here.
+        // every one of which runs on the control vcpu blk.h's IBlkDevice names -- the
+        // message loop too, which start() creates there and which is deliberately
+        // never migrated. `home` is a plain pointer and nothing here would notice a
+        // breach: vq_start would write it on the vcpu that called start() while the
+        // detaching caller read and cleared it on the other one -- two OS threads, one
+        // plain field, nothing ordering them. The loop's own vcpu never touches it.
+        // vq_stop clears it once the loop is joined, so a drain that follows a stop
+        // runs in place -- which it may, because drain() polls nothing but the
+        // atomic in_flight and therefore has no vcpu it must be on.
+        // The drains that precede a stop still hop. Clearing it is also what makes a
+        // restart inside one session safe: the next vq_start records the landing vcpu
+        // of the loop it just created instead of leaving the previous loop's here.
         //
         // Work stealing is what would break it: photon writes the field again only in
         // its two stealing scans, and those need a per-thread create flag and a

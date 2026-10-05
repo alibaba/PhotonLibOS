@@ -93,8 +93,18 @@ int devlock_acquire(const char* dir, const char* name, int* fd_out);
 void devlock_release(int fd);
 
 // Non-creating probe for the orphan scans: 1 = free (no live server holds it),
-// 0 = held, -1 = missing or unopenable (an inconsistent state -- the caller
-// skips the device). Read-only and no O_CREAT: a query must not create files.
+// 0 = the flock attempt failed, -1 = missing or unopenable (the caller skips the
+// device). Read the last two as what they are -- this caller could not use the
+// file -- and not as a verdict on the registration, because the probe inspects no
+// errno. 0 is normally a live server's hold, but it also carries ENOLCK, EBADF,
+// EINVAL and EINTR. -1 also carries a tombstone that is there and healthy but not
+// openable by this caller: devlock_acquire makes them 0600 inside a 0755 directory,
+// so one that is neither the owner nor root gets -1 for it. And an exhausted fd
+// table (EMFILE, ENFILE) gives -1 for every probe in the scan at once. What either
+// answer bounds is therefore this caller and not the device: the same scan run by a
+// uid that can open the file, or with descriptors to spare, lists what this one
+// skipped.
+// Read-only and no O_CREAT: a query must not create files.
 // Note that a DIRECTORY in place of the file reads as 1: open(O_RDONLY) and
 // flock both succeed on a directory fd. It is devlock_acquire that refuses one,
 // because O_CREAT|O_RDWR on a directory is EISDIR.

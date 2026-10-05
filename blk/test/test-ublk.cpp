@@ -291,12 +291,15 @@ public:
     }
 
     // remove leftovers from crashed runs. Two forms: QUIESCED orphans
-    // (list_orphans), and DEAD residues (crashed mid-create between
-    // ADD_DEV and the lock) which the orphan list deliberately excludes.
-    // For every /dev/ublkcN whose flock exists and is free, start() with a
-    // dummy backend (a DEAD residue is DEL'd and recreated, a QUIESCED one
-    // recovered), then shutdown(). A missing lock file means a foreign
-    // device (never ours); a held lock means a live server.
+    // (list_orphans), and DEAD residues (crashed mid-create) which the
+    // orphan list deliberately excludes. For every /dev/ublkcN whose flock
+    // exists and is free, start() with a dummy backend (a DEAD residue is
+    // DEL'd and recreated, a QUIESCED one recovered), then shutdown(). A
+    // missing lock file usually means a device that is not ours -- this
+    // walks a kernel-enumerated namespace -- but it is not proof of that:
+    // our own residue from the auto-assigned-id create has no lock file
+    // between ADD_DEV and the claim, and neither loop here reaches it. A
+    // held lock means a live server.
     //
     // Owns its controller rather than using ctl: a skipped SetUp returns
     // before ctl exists, and TearDown still runs.

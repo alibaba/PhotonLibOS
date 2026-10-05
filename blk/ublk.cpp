@@ -1328,9 +1328,13 @@ struct UblkControllerImpl : UblkController {
             uint32_t id = (uint32_t)atoi(e->d_name + 5);
             // probe the flock first (cheap): free => no live server. Read-only
             // open, no O_CREAT: a query must not create files. This walks a
-            // kernel-enumerated namespace, so a device with no tombstone of
-            // ours is the norm rather than an inconsistency -- it is somebody
-            // else's ublk device, and "not ours to list" is the whole answer.
+            // kernel-enumerated namespace, so no tombstone of ours is the norm
+            // rather than an inconsistency, and usually means somebody else's
+            // ublk device. Not a proof of it: our own residue from the
+            // auto-assigned-id create has no tombstone between ADD_DEV and the
+            // claim, and neither does one whose tombstone something removed
+            // behind our back. Skipping is still the whole answer here, since
+            // this scan cannot tell the cases apart and does not try.
             char name[32];
             snprintf(name, sizeof(name), "ublk-%u.lock", id);
             if (devlock_free(lock_dir, name) != 1)
@@ -1410,8 +1414,10 @@ struct UblkControllerImpl : UblkController {
             // No registration, so there is no orphan to recover. devlock_free()'s
             // three answers still have to be told apart, and only one of them is
             // litter this call may take away:
-            //   -1  nothing there at all -- the dev_id names no device this host
-            //       ever had, so there is nothing to remove and nothing to report.
+            //   -1  no tombstone this call could use -- absent, or there and not
+            //       openable by this caller, which devlock_free does not tell apart.
+            //       Either way this reports the dev_id as naming no device, and
+            //       removes nothing.
             //    0  a LIVE SERVER holds the tombstone, which with no registration
             //       means it is between claiming the name and ADD_DEV. Unlinking it
             //       would leave the device that server then creates with no

@@ -68,24 +68,29 @@ enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOr
 // How much of an existing registration start() validates before adopting it, graded by what
 // the transport can ASK the registration: Full checks geometry and the registered feature set,
 // IdentityAndSize checks only those two, QueueCountOnly checks the queue count and asks
-// nothing else of it. A transport may also keep a record of its own and check against it,
-// and that does not raise the grade, because its own record can be missing where the
-// registration's answer cannot. vduse is the case in point: its uapi can write the device
-// config but has no readback of it, so QueueCountOnly is the ceiling on what it can ask, and
-// its identity is the name the registration is opened by rather than a field that could
-// differ from the config. It does record the capacity in its own tombstone and refuses an
-// adoption that disagrees with it -- but a tombstone carrying no record, which is what a
-// start() that failed after claiming the name leaves behind, has nothing to compare, and then
-// a new daemon adopts with different geometry while the consumer keeps the old one.
+// nothing else of the registration's CONFIGURATION. A ring's cursors are not configuration
+// and do not count toward the grade -- see below. A transport may also keep a record of
+// its own and check against it, and that does not raise the grade, because its own record
+// can be missing where the registration's answer cannot. vduse is the case in point: its uapi
+// can write the device config but has no readback of it, so QueueCountOnly is the ceiling on
+// what it can ask, and its identity is the name the registration is opened by rather than a
+// field that could differ from the config. It does record the capacity in its own tombstone
+// and refuses an adoption that disagrees with it -- but a tombstone carrying no record, which
+// is what a start() that failed after claiming the name leaves behind, has nothing to compare,
+// and then a new daemon adopts with different geometry while the consumer keeps the old one.
 // Validating the RING is a separate question and does not enter the grade either,
 // because the grade is about configuration drift -- whether the registration still
 // describes the device this config says it is -- while a ring's cursors are volatile
-// handover state. vduse reads them before adopting, and refuses when the previous
-// daemon left entries it dispatched but never completed, whose identities a split ring
-// cannot give back; un-fetched backlog past that cursor is adopted and served as fresh
-// work, which is the KernelSide promise above. Such a refusal leaves the registration
-// standing with any consumer still attached to it, and that combination is the hazard
-// detach() describes.
+// handover state. vduse reads them before adopting, and refuses the adoption with EINVAL
+// when the previous daemon left entries it dispatched but never completed, whose
+// identities a split ring cannot give back. It also refuses where it cannot read a cursor
+// at all, rather than adopt on a guess: with no EVENT_IDX negotiated nothing ever
+// maintained the slot, and only a ring whose two indices already agree is let through,
+// while a cursor lying outside the window its own invariants allow has no sound reading
+// whatever the indices say. Un-fetched backlog past the cursor is adopted and served as
+// fresh work, which is the KernelSide promise above. Such a refusal leaves the
+// registration standing with any consumer still attached to it, and that combination is
+// the hazard detach() describes.
 // NoRegistration means the transport keeps no kernel-side registration that could drift, so
 // there is nothing to validate and adoption cannot happen.
 enum class BlkAdoption : uint8_t { NoRegistration, QueueCountOnly, IdentityAndSize, Full };
@@ -164,16 +169,37 @@ struct BlkDevInfo {
 // How much "reconciling" verifies is NOT common, and info().adoption is this
 // transport's answer. Full validates geometry and the registered feature set and
 // rejects a mismatch with EINVAL. IdentityAndSize validates only those two.
-// QueueCountOnly validates the queue count and asks the registration nothing else,
-// so an adoption can succeed with different geometry while the consumer keeps the
-// config it already has; a transport that also checks a record of its own against
-// the config says so where it documents that record, and keeps this grade anyway,
-// because a record can be missing where the registration's answer cannot.
+// QueueCountOnly validates the queue count and asks the registration nothing else
+// about its CONFIGURATION, so an adoption can succeed with different geometry while
+// the consumer keeps the config it already has; a transport that also checks a
+// record of its own against the config says so where it documents that record, and
+// keeps this grade anyway, because a record can be missing where the registration's
+// answer cannot.
 // NoRegistration means the transport keeps no registration that could
 // drift, so there is nothing to validate and every start() begins its own
 // session. Whether a backlog exists to harvest at all is info().backlog, on the
 // same principle: a transport that keeps no queue across detach() has nothing to
 // harvest, and saying so is what stops a caller from relying on one.
+//
+// WHICH VCPU CALLS is common too, and it is the caller's half of the bargain: one
+// device's lifecycle calls -- start(), and the detach(), shutdown() and resize()
+// that follow it -- must all be issued from one and the same photon vcpu, this
+// device's control vcpu, which is normally the caller's own. Nothing in a device
+// detects a breach, and the failure is not a clean one: every transport keeps part
+// of its control plane in fields that are plain precisely because only that one
+// vcpu writes them. Where a transport pins the vcpu its serving coroutines run on,
+// so that teardown can hop onto it, the pin is such a field and start() wrote it --
+// so a teardown issued elsewhere reads and clears it from a second OS thread with
+// nothing ordering the two. resize() belongs to the set for the same reason:
+// vhost-user's writes the config bytes its own message loop answers a GET_CONFIG
+// from, and ublk's submits on an io_uring whose submission side is not thread-safe.
+//
+// What this binds is where those calls are ISSUED, not where the work RUNS.
+// BlkConfig::pool moves the serving coroutines onto other vcpus, and teardown hops
+// onto the serving vcpu to stop them there -- that is the point of a pool. Nor does
+// it mean a device has only one vcpu in its life: tcmu's HBA answers kernel events
+// on a listener vcpu of its own, and whatever that costs is paid inside tcmu rather
+// than by this contract.
 //
 // Identity and geometry are FIXED AT CONSTRUCTION: every new_xxx_device() takes
 // its transport's config and validates it, so a constructed object is always
@@ -314,10 +340,22 @@ struct BlkConfig {
 
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
                                   // Honored by ublk, vhost-user and vduse, all clamping it
-                                  // to their maximum. tcmu and nbd ignore it by nature:
-                                  // tcmu's kernel gives one command ring per device, and
-                                  // nbd's parallelism is its client connection count --
-                                  // neither has a queue count to declare
+                                  // to their maximum -- by a start() that CREATES the
+                                  // registration. One that ADOPTS serves the count the
+                                  // registration already has, and this value does not
+                                  // decide it, 0 included: ublk takes the registered count
+                                  // outright, up or down, and vduse treats this one as a
+                                  // LOWER BOUND -- raising its own to the registered count,
+                                  // refusing the adoption with EINVAL when that count is
+                                  // above its maximum (no slots to serve more with, and
+                                  // serving fewer than the registration declares loses
+                                  // requests), and failing start() at a later step when the
+                                  // registration is narrower. vhost-user keeps no
+                                  // registration, so for it this value is always exact.
+                                  // tcmu and nbd ignore it by nature: tcmu's kernel gives
+                                  // one command ring per device, and nbd's parallelism is
+                                  // its client connection count -- neither has a queue
+                                  // count to declare
 
     uint32_t queue_depth = 0;     // per-queue in-flight limit; 0 = auto, clamped by kernel limits.
                                   // tcmu: SCSI command dispatch depth (coroutine pool capacity,
@@ -523,11 +561,16 @@ public:
     virtual int wait_for_event(Event* out, Timeout tmo = {}) = 0;
 
     // Backstores this HBA created -- ones whose dev_config is its own
-    // "<dev_config_prefix><identity>" -- that no live server holds the flock for:
-    // crash recovery, with the identity as the recovery key. The startup scan
-    // additionally SYNTHESIZES ADDED events for every unserved backstore under the
-    // HBA, external ones included, so a single event loop covers both the backlog
-    // and whatever arrives later.
+    // "<dev_config_prefix><identity>" -- whose tombstone this call finds free:
+    // crash recovery, with the identity as the recovery key. Two reasons keep a
+    // backstore of this HBA out of the result, and they are not alike. A live
+    // server holds the flock: routine, and skipped silently. Or the tombstone is
+    // missing or unopenable by this caller, which devlock_free()'s contract
+    // describes: skipped with a warning, and that backstore then stays unreported
+    // by every scan this uid runs, while one run by a uid that can open the file
+    // does list it. The startup scan additionally SYNTHESIZES ADDED events for
+    // every unserved backstore under the HBA, external ones included, so a single
+    // event loop covers both the backlog and whatever arrives later.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
 
     // Remove one orphan -- the configfs backstore registration, and the tombstone

@@ -595,13 +595,12 @@ struct VduseDeviceImpl : IBlkDevice {
         // dereferences `avail`, which flush_stale on this same vcpu is what munmaps.
         //
         // Control-plane field: written by vq_start, read by the three teardown
-        // callers and by msg_loop's answer to the kernel's vq state read. That all
-        // of those readers run on the vcpu that called start() is a contract with
-        // the caller, not a property of this code: `home` is a plain pointer, and
-        // nothing here would notice a detach() or a shutdown() issued from another
-        // vcpu. `home` is then what two OS threads would share: vq_start writes it on
-        // the vcpu that called start(), while a caller on the other one both reads it
-        // and nulls it. msg_loop honours it because start() creates it there and
+        // callers and by msg_loop's answer to the kernel's vq state read. All of
+        // those readers run on the control vcpu blk.h's IBlkDevice names, and `home`
+        // is a plain pointer nothing here would notice a breach of: vq_start writes
+        // it on the vcpu that called start(), while a caller on another one both
+        // reads it and nulls it -- two OS threads, one field, nothing ordering them.
+        // msg_loop honours the contract because start() creates it there and
         // deliberately never migrates it. The loop's own vcpu never touches it.
         // vq_stop clears it once the loop is joined, so the drain that follows
         // runs in place -- which it may, because drain() polls nothing but the
@@ -678,6 +677,11 @@ struct VduseDeviceImpl : IBlkDevice {
         // slots and sets the bit itself.
         nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
 
+        // ACCESS_PLATFORM is not a compatibility bit this transport may drop or make
+        // conditional: CREATE_DEV refuses a device that does not offer it, measured on
+        // 7.0.0-31-generic with the rest of the payload held constant. The refusal does
+        // not point here -- its message names the create, not the features -- so the
+        // bit stays unconditional and this note is what keeps it that way.
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
                          (1ULL << VIRTIO_RING_F_EVENT_IDX) |
                          (1ULL << VIRTIO_BLK_F_BLK_SIZE);
@@ -2511,12 +2515,14 @@ struct VduseControllerImpl : VduseController {
 
         if (::access(path, F_OK) != 0) {
             // No registration, and devlock_free()'s three answers still have to be
-            // told apart. Nothing at all means this name was never a device of ours.
-            // A tombstone nobody holds is our own litter and goes with the device it
-            // outlived. One a LIVE SERVER holds is not ours to take: that server is
-            // between claiming the name and CREATE_DEV, and removing the file would
-            // leave the device it then creates with no tombstone, which
-            // list_orphans() skips -- unrecoverable by every later scan.
+            // told apart. One this call cannot use -- absent, or there and not
+            // openable by this caller, which devlock_free does not tell apart -- is
+            // reported as no such device, and nothing is removed. A tombstone nobody
+            // holds is our own litter and goes with the device it outlived. One a
+            // LIVE SERVER holds is not ours to take: that server is between claiming
+            // the name and CREATE_DEV, and removing the file would leave the device
+            // it then creates with no tombstone, which list_orphans() skips --
+            // unrecoverable by every later scan.
             int lf = devlock_free(lock_dir, ln);
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no vduse device ` and no tombstone for it that this call could use", name);

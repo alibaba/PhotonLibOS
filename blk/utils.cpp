@@ -1250,18 +1250,9 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     // num bounds serve_chain's descriptor index and divides in vring_used_append.
     // Both current direct writers do -- a ring resize quiesces in its own handler,
     // and a session reset's callers quiesce every queue before they call it.)
-    // Leaving a request uncompleted is the documented handover: the next daemon
-    // does not recover it from the ring. A split ring is a circular buffer of
-    // width num, so entry i and entry i+num share a slot and the outstanding set
-    // can span more indices than the buffer holds -- which means no window over
-    // the ring identifies exactly the entries that were dispatched but never
-    // completed. vhost-user resumes from the frontend's SET_VRING_BASE (the
-    // previous backend's own last_avail for a clean handover) and accepts that
-    // loss; vduse refuses to adopt a ring whose trusted cursor shows entries in
-    // that state, while still adopting one whose gap is un-fetched backlog -- the
-    // cursor tells the two apart, and only the first is a loss. Either way,
-    // re-serving an uncompleted entry would publish a second used element for a
-    // head the driver has already reclaimed, which is worse than losing it.
+    // Leaving a request uncompleted is the documented handover; `stopping`'s
+    // declaration in utils.h carries why the next daemon cannot recover it from
+    // the ring, and what the two virtio transports each do about that.
     if (stopping.load(std::memory_order_relaxed) ||
         gen != generation.load(std::memory_order_acquire))
         return;
