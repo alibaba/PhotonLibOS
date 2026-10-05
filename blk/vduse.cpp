@@ -484,10 +484,13 @@ struct VduseDeviceImpl : IBlkDevice {
         // flush deferred by one tick lands on the next one.
         std::atomic<bool> reading{false};
         // True after the first successful vq_refresh publish. Distinguishes initial
-        // adoption (derive last_avail from used.idx, which equals avail.idx because
-        // start() refused non-quiescent rings) from a live refresh after
-        // UPDATE_IOTLB (preserve the existing last_avail, because used.idx counts
-        // completions and may lag behind dispatched-but-uncompleted requests).
+        // adoption (derive last_avail from used.idx, which start() proved equal to the
+        // previous daemon's consume cursor -- it refuses an adoption whose dispatched
+        // entries were not all completed, so nothing is in flight to lose, and any
+        // avail entries past that cursor are un-fetched backlog this daemon serves as
+        // fresh work) from a live refresh after UPDATE_IOTLB (preserve the existing
+        // last_avail, because used.idx counts completions and may lag behind
+        // dispatched-but-uncompleted requests).
         bool refreshed_once = false;
 
         bool ready() const {
@@ -1120,10 +1123,15 @@ struct VduseDeviceImpl : IBlkDevice {
                 q->srv.notify_valid.store(false, std::memory_order_relaxed);
             } else {
                 // Adoption of a live ring, or a live refresh after UPDATE_IOTLB.
-                // On adoption the cursor was validated in start(): either the ring
-                // is quiescent (avail idx == used idx) and both resume points are
-                // correct, or start() refused. There is no third outcome here --
-                // a non-quiescent adopt never reaches this line.
+                // On adoption the cursor was validated in start(), and there are
+                // three outcomes rather than two: the ring is fully quiescent (avail
+                // idx == used idx == the previous daemon's cursor), or it carries
+                // un-fetched backlog (used idx == cursor < avail idx, which is what
+                // detach(false) leaves and what a kernel-side backlog exists for) --
+                // and in both, used.idx IS the cursor, so the derivation below is
+                // correct and the backlog is served as fresh work -- or start()
+                // refused, because dispatched-but-uncompleted entries have no
+                // recoverable identities. A refused adopt never reaches this line.
                 //
                 // On a live refresh the queue already has a valid last_avail from
                 // before the invalidation. Deriving it from used.idx would rewind
@@ -1967,26 +1975,57 @@ struct VduseDeviceImpl : IBlkDevice {
             // assuming cfg.queues describes it.
             if (adopt_queue_count() < 0)
                 return -1;
-            // The cursor half of what an adopt validates, and why it can only be a
-            // refusal rather than a reconstruction. A split ring is a circular
-            // buffer of width num: entry i and entry i+num share a slot, so
-            // publishing the newer destroys the older one's head. The outstanding
-            // set has at most num members but can span num+1 indices, which means
-            // every width-num window misses at least one member -- and the one it
-            // misses is exactly the one whose slot was overwritten, so its head
-            // exists nowhere in shared memory. This is not a property of any one
-            // assumption about used_event or the driver; it is a property of the
-            // ring itself, and no ioctl gives back what the ring lost. The kernel's
-            // own reported avail_index was measured on 2026-10-03 to be 0 after a
-            // daemon that had consumed one entry died, while used_idx was 1 and the
-            // driver had published 2 -- resuming from it would have re-served
-            // everything and published duplicate completions for heads the driver
-            // had already reclaimed. So there is no cursor to resume from when the
-            // previous daemon left work outstanding, and the only sound answer is
-            // to refuse and let the operator decide. When the ring IS quiescent --
-            // the driver has published nothing the previous daemon did not consume
-            // -- both counters agree and resuming from either is correct.
-            uint16_t aidx = 0, uidx = 0;
+            // The cursor half of what an adopt validates. Two questions get conflated
+            // if this is read carelessly, and conflating them is what made this check
+            // refuse adoptions it should have taken.
+            //
+            // (1) Can the IDENTITIES of dispatched-but-uncompleted entries be
+            // recovered? No, and that is a property of the ring rather than of any
+            // assumption about the driver. A split ring is a circular buffer of width
+            // num: entry i and entry i+num share a slot, so publishing the newer
+            // destroys the older one's head. The outstanding set has at most num
+            // members but can span num+1 indices, so every width-num window misses at
+            // least one -- and the one it misses is exactly the one whose slot was
+            // overwritten, so its head exists nowhere in shared memory. Nor does an
+            // ioctl give it back: the kernel's own reported avail_index was measured on
+            // 2026-10-03 to be 0 after a daemon that had consumed one entry died, while
+            // used_idx was 1 and the driver had published 2. Resuming from THAT would
+            // re-serve everything and publish duplicate completions for heads the driver
+            // had already reclaimed.
+            //
+            // (2) Can their EXISTENCE be detected? Yes, from one trusted cursor. The
+            // engine publishes avail_event == last_avail per consumed head, into the
+            // slot past the used ring, so that slot is the previous daemon's consume
+            // cursor left behind in shared memory -- the only copy that outlives the
+            // process. cursor - used_idx is then exactly the count of entries it took
+            // and did not finish: sound because used->idx advances once per completed
+            // entry and only dispatched entries are ever completed, so used_idx <= cursor
+            // always, and a completion is written before the release store that publishes
+            // it.
+            //
+            // Only (1) forces a refusal, and only when (2)'s count is non-zero. When the
+            // count IS zero, every dispatched entry completed, so resuming from used->idx
+            // neither loses nor duplicates -- and whatever sits past the cursor is backlog
+            // the driver published and nobody fetched, which is exactly what detach(false)
+            // leaves behind and what BlkBacklog::KernelSide promises a successor will pick
+            // up. Refusing that state made adoption impossible against any consumer still
+            // submitting: draining completes what was dispatched, but the driver publishes
+            // again at once, so the two indices are not equal for long enough to adopt.
+            // Measured 2026-10-05 on a registration the rescue tool then recovered cold:
+            // cursor 75, used idx 75, avail idx 76 -- one un-fetched entry, served in a
+            // single pass.
+            //
+            // The feature word is read here, separately from the resync below that reads
+            // it for its own purpose: avail_event is maintained only under EVENT_IDX, so
+            // without that bit the slot holds whatever preceded it and cannot be trusted,
+            // and the fallback is the strict equality test. Two reads of one read-only
+            // ioctl rather than one shared variable, because a failed read means two
+            // different things -- here it narrows the check, there it leaves the engine
+            // at its defaults -- and sharing it would make each site reason about the
+            // other's ordering.
+            uint64_t feat = 0;
+            const bool trust_cursor = ::ioctl(dev_fd, VDUSE_DEV_GET_FEATURES, &feat) == 0 &&
+                                      (feat & (1ULL << VIRTIO_RING_F_EVENT_IDX));
             for (uint32_t i = 0; i < nqueues; i++) {
                 vduse_vq_info vi;
                 memset(&vi, 0, sizeof(vi));
@@ -2007,14 +2046,35 @@ struct VduseDeviceImpl : IBlkDevice {
                 // connects, vq_refresh will re-resolve the ring from scratch.
                 if (!a || !u)
                     continue;
-                aidx = __atomic_load_n(&a->idx, __ATOMIC_ACQUIRE);
-                uidx = __atomic_load_n(&u->idx, __ATOMIC_ACQUIRE);
-                if (aidx != uidx)
+                uint16_t aidx = __atomic_load_n(&a->idx, __ATOMIC_ACQUIRE);
+                uint16_t uidx = __atomic_load_n(&u->idx, __ATOMIC_ACQUIRE);
+                if (!trust_cursor) {
+                    // No cursor to consult, so the only state this can vouch for is
+                    // one where the two indices agree on their own.
+                    if (aidx != uidx)
+                        LOG_ERROR_RETURN(EINVAL, -1,
+                                         "vduse ` vq` is not quiescent on adopt (avail idx `, used idx `) and EVENT_IDX is not in the device's feature word, so there is no cursor to tell un-fetched backlog from dispatched-but-uncompleted entries; refusing to adopt it",
+                                         name, i, aidx, uidx);
+                    continue;
+                }
+                uint16_t cursor = vring_avail_event(u, vi.num);
+                // Both are uint16 modular differences, so each is a count only while the
+                // cursor sits inside the window [used idx, avail idx]. Outside it the
+                // slot was not maintained -- a predecessor that ran without EVENT_IDX, or
+                // a ring this engine never served -- and there is no sound reading of it.
+                uint16_t dispatched = (uint16_t)(cursor - uidx);
+                uint16_t backlog = (uint16_t)(aidx - cursor);
+                if (dispatched >= 0x8000 || backlog >= 0x8000)
                     LOG_ERROR_RETURN(EINVAL, -1,
-                                     "vduse ` vq` is not quiescent on adopt (avail idx `, used idx `): "
-                                     "the previous daemon left dispatched-but-uncompleted entries that cannot be "
-                                     "recovered from a split ring; refusing to adopt it",
-                                     name, i, aidx, uidx);
+                                     "vduse ` vq` has an untrustworthy avail_event cursor on adopt (cursor `, used idx `, avail idx `): it lies outside the window the engine's invariants allow, so nothing here can say what the previous daemon left outstanding; refusing to adopt it",
+                                     name, i, cursor, uidx, aidx);
+                if (dispatched)
+                    LOG_ERROR_RETURN(EINVAL, -1,
+                                     "vduse ` vq` has ` dispatched-but-uncompleted entries on adopt (cursor `, used idx `, avail idx `): their identities cannot be recovered from a split ring, so resuming would both lose and duplicate them; refusing to adopt it",
+                                     name, i, dispatched, cursor, uidx, aidx);
+                if (backlog)
+                    LOG_INFO("vduse adopting ` vq` with ` un-fetched avail entries (cursor `, used idx `, avail idx `); they are served as fresh work",
+                             name, i, backlog, cursor, uidx, aidx);
             }
         }
         iotlb.dev_fd = dev_fd;

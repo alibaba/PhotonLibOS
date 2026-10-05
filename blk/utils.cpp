@@ -934,6 +934,10 @@ void vring_set_avail_event(vring_used* used, uint32_t num, uint16_t v) {
     __atomic_store_n((uint16_t*)&used->ring[num], v, __ATOMIC_RELEASE);
 }
 
+uint16_t vring_avail_event(const vring_used* used, uint32_t num) {
+    return __atomic_load_n((const uint16_t*)&used->ring[num], __ATOMIC_ACQUIRE);
+}
+
 bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old) {
     return (uint16_t)(new_idx - event_idx - 1) < (uint16_t)(new_idx - old);
 }
@@ -1253,7 +1257,9 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     // the ring identifies exactly the entries that were dispatched but never
     // completed. vhost-user resumes from the frontend's SET_VRING_BASE (the
     // previous backend's own last_avail for a clean handover) and accepts that
-    // loss; vduse refuses to adopt a non-quiescent ring outright. Either way,
+    // loss; vduse refuses to adopt a ring whose trusted cursor shows entries in
+    // that state, while still adopting one whose gap is un-fetched backlog -- the
+    // cursor tells the two apart, and only the first is a loss. Either way,
     // re-serving an uncompleted entry would publish a second used element for a
     // head the driver has already reclaimed, which is worse than losing it.
     if (stopping.load(std::memory_order_relaxed) ||

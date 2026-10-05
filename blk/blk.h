@@ -42,10 +42,12 @@ static constexpr uint64_t FEATURE_WRITE_ZEROES  = 1ull << 2;
 
 // Where a request backlog survives detach() -- that is, what a later start(),
 // possibly in another process, has to harvest. KernelSide: our own registration
-// retains it and start() picks it up. PeerSide: the frontend retains it, so only a
-// reconnecting peer can bring it back and there is nothing for us to harvest. None:
-// the transport keeps no queue across a detach(), so "left pending for the next
-// start()" describes nothing.
+// retains it and start() picks it up. What it retains is the backlog nobody fetched
+// yet; entries a daemon already dispatched are not recoverable from a split ring, so
+// a start() that finds any outstanding refuses the adoption rather than guess (see
+// BlkAdoption). PeerSide: the frontend retains it, so only a reconnecting peer can
+// bring it back and there is nothing for us to harvest. None: the transport keeps no
+// queue across a detach(), so "left pending for the next start()" describes nothing.
 enum class BlkBacklog : uint8_t { None, KernelSide, PeerSide };
 
 // What shutdown() does while a consumer is still attached. RefusesWhenAttached
@@ -75,6 +77,15 @@ enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOr
 // adoption that disagrees with it -- but a tombstone carrying no record, which is what a
 // start() that failed after claiming the name leaves behind, has nothing to compare, and then
 // a new daemon adopts with different geometry while the consumer keeps the old one.
+// Validating the RING is a separate question and does not enter the grade either,
+// because the grade is about configuration drift -- whether the registration still
+// describes the device this config says it is -- while a ring's cursors are volatile
+// handover state. vduse reads them before adopting, and refuses when the previous
+// daemon left entries it dispatched but never completed, whose identities a split ring
+// cannot give back; un-fetched backlog past that cursor is adopted and served as fresh
+// work, which is the KernelSide promise above. Such a refusal leaves the registration
+// standing with any consumer still attached to it, and that combination is the hazard
+// detach() describes.
 // NoRegistration means the transport keeps no kernel-side registration that could drift, so
 // there is nothing to validate and adoption cannot happen.
 enum class BlkAdoption : uint8_t { NoRegistration, QueueCountOnly, IdentityAndSize, Full };
@@ -219,6 +230,20 @@ public:
     //   info().detach_no_wait: it is true only where false really does skip the I/O
     //   wait, and what is left to wait on there is bounded, because it is a wait on
     //   the kernel rather than on a backend.
+    //
+    // Where the consumer is external and outlives serving -- vduse is the measured
+    // case, its /dev/vdX belonging to whoever ran `vdpa dev add` -- detach() leaves
+    // that consumer attached to a registration nothing is serving. Its next I/O then
+    // blocks uninterruptibly until some daemon adopts, and so does REMOVING it: the
+    // kernel freezes the request queue on the way down and waits for in-flight to
+    // reach zero, which nothing will now bring about. A task in that state ignores
+    // SIGKILL, and because the removal waits while holding the generic-netlink lock,
+    // every other netlink user on the machine stalls with it -- measured at 30 minutes
+    // across three tasks, and cleared only by serving the registration again. So on
+    // such a transport the consumer must be detached BEFORE serving stops, or
+    // something must remain able to serve it, which is what start() on an orphan does
+    // and what a recovery loop is for. This is the kernel's teardown path rather than
+    // a photon defect, and no return value reports it: detach() itself succeeds.
     virtual int detach(bool wait_pending) = 0;
 
     // detach() + destroy the kernel-side registration. What happens while a

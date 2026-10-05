@@ -693,6 +693,16 @@ uint16_t vring_used_event(const vring_avail* avail, uint32_t num);   // acquire 
 // the release store lives inside it and no caller can forget it.
 void vring_set_avail_event(vring_used* used, uint32_t num, uint16_t v);   // release store
 
+// Reading that same slot back. The device only ever WRITES it, so within one daemon's
+// life there is nothing to read -- the value it published is the `last_avail` it
+// already has. The reader exists for the one case where the two differ: an adopter
+// whose predecessor is gone. Because publish_avail_event() keeps the slot equal to
+// last_avail at all times, and does so per consumed head rather than per batch, the
+// slot is the previous daemon's consume cursor left behind in shared memory -- the
+// only copy of it that survives the process. Only meaningful when EVENT_IDX was
+// negotiated; without that bit nothing ever wrote the slot.
+uint16_t vring_avail_event(const vring_used* used, uint32_t num);   // acquire load
+
 // The suppression predicate. uint16 modular subtraction makes it wrap-safe,
 // which is the entire reason it is written in this shape. With new == old + 1 it
 // reduces to old == event_idx, i.e. exactly the equality rule of §2.7.7.2 /
@@ -888,8 +898,12 @@ public:
                                          // from the frontend's SET_VRING_BASE (the
                                          // previous backend's own last_avail for a
                                          // clean handover) and accepts that loss;
-                                         // vduse refuses to adopt a non-quiescent
-                                         // ring outright. Either way, re-serving an
+                                         // vduse refuses to adopt a ring whose
+                                         // trusted cursor shows entries in that
+                                         // state, and adopts one whose gap is
+                                         // un-fetched backlog instead: the cursor
+                                         // tells the two apart, and only the first
+                                         // is a loss. Either way, re-serving an
                                          // uncompleted entry would publish a second
                                          // used element for a head the driver has
                                          // already reclaimed, which is worse than

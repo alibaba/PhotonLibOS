@@ -80,6 +80,13 @@ static constexpr uint64_t IMG_SIZE = 64ull << 20;
 static const char TEST_NAME[]      = "photon-vduse-test";   // the vduse device name
 static const char NAME_PREFIX[]    = "photon-vduse";        // sweep filter
 
+// The lock directory every controller in this suite is built on. Stated here rather
+// than left to a library default, because there is no default: a directory two
+// applications share lets each one's orphan scan adopt the other's devices. Every
+// tombstone path this file checks is built from it, so the suite cannot drift onto
+// one directory for its controllers and probe another.
+static const char SUITE_LOCKS[] = "/run/photon-blk";
+
 static constexpr uint64_t IO_OFF = 1ull << 20;   // 1 MiB
 static constexpr size_t   IO_LEN = 256ull << 10; // 256 KiB
 
@@ -109,13 +116,6 @@ static std::string vdpa_attach(const char* name) {
     return "/dev/" + out;
 }
 
-static void vdpa_detach(const char* name) {
-    std::string cmd = "vdpa dev del ";
-    cmd += name;
-    cmd += " 2>/dev/null; true";
-    test::sh_off_vcpu(cmd);
-}
-
 // Whether one of this suite's flock tombstones is CLAIMED right now: "HELD",
 // "not-held", or "missing". Only a lock still held is residue -- the FILE surviving
 // is the convention, since devlock_release() unlocks and closes and never unlinks --
@@ -134,6 +134,95 @@ static const char* lock_state(const std::string& path) {
         return "HELD";
     ::flock(fd, LOCK_UN);
     return "not-held";
+}
+
+// The bare removal. Every caller in this file goes through vdpa_detach() below, which
+// is the only place allowed to issue it.
+static void vdpa_del(const char* name) {
+    std::string cmd = "vdpa dev del ";
+    cmd += name;
+    cmd += " 2>/dev/null; true";
+    test::sh_off_vcpu(cmd);
+}
+
+// Is a vdpa consumer attached to this registration? The bus directory is the kernel's
+// own record, and asking it is a stat -- no genl command is sent, which is the point,
+// since a genl command against an unserved registration is what wedges.
+static bool vdpa_attached(const char* name) {
+    std::string p = std::string("/sys/bus/vdpa/devices/") + name;
+    return ::access(p.c_str(), F_OK) == 0;
+}
+
+// Serve an orphaned registration through the product path, remove its consumer while
+// it is served, then let go. start() on an orphan IS the productized rescue, so this
+// needs no raw uapi. list_orphans() both finds the registration and proves nothing else
+// is serving it: a tombstone is claimed before the char dev is opened and released by
+// detach(), so an orphan that scan lists is unserved by construction -- and a scan
+// cannot see one whose tombstone is missing at all, devlock_free() answering -1 for it.
+// The recorded capacity is what stops the adopt being refused for config drift.
+// Returns false if the registration could not be served, leaving it as it was found.
+static bool rescue_serve(const char* name) {
+    auto c = new_vduse_controller(SUITE_LOCKS);
+    if (!c)
+        return false;
+    DEFER(delete c);
+    for (auto& rec : c->list_orphans()) {
+        if (rec.identity != name)
+            continue;
+        BlkConfig cfg;
+        cfg.info.identity = rec.identity;
+        cfg.info.size = rec.size ? rec.size : (4 << 20);
+        auto d = c->new_device(cfg);
+        if (!d)
+            return false;
+        DEFER(delete d);
+        auto l = fs::new_localfs_adaptor();
+        if (!l)
+            return false;
+        DEFER(delete l);
+        auto f = l->open(IMG_PATH, O_RDWR | O_CREAT, 0644);
+        if (!f)
+            return false;
+        if (d->start(f, /*ownership=*/true) < 0) {
+            delete f;   // a refused start leaves the backend the caller's to delete
+            return false;
+        }
+        vdpa_del(name);
+        d->shutdown();
+        return true;
+    }
+    return false;
+}
+
+// Remove this registration's vdpa consumer -- and never let that removal run against a
+// registration nothing serves.
+//
+// The precondition belongs here rather than in each caller because the callers that
+// matter are the ones running after an assertion failed. Removing a consumer of an
+// UNSERVED vduse registration blocks forever in the kernel's queue freeze
+// (blk_mq_freeze_queue_wait, under del_gendisk via virtblk_remove) waiting on a request
+// only a daemon can answer, and it holds the machine-wide genl_lock while blocked, so
+// nbd and tcmu stall with it; a task in D state ignores SIGKILL, and recovery is either
+// a reboot or vduse-cli.cc's rescue drill. Measured, not theorised: on 2026-10-05
+// orphan_recovery's adopt was refused, its DEFER issued a bare `vdpa dev del`, and
+// three tasks -- that vdpa, a udev-worker closing the node, and a read-only
+// `vdpa dev show` -- sat in D state for 30 minutes.
+//
+// Declining rather than removing is the fallback and not a fix: a stranded registration
+// only wedges the NEXT command sent to it, whereas the removal wedges now. It is loud
+// because the residue needs the drill above.
+static void vdpa_detach(const char* name) {
+    if (!vdpa_attached(name))
+        return;   // nothing to remove; the bare command would have been a silent no-op
+    // A held tombstone means a live daemon is in there serving it, so the removal can
+    // drain. That is the normal case: every DEFER here orders the consumer off BEFORE
+    // the daemon stops, precisely so that this holds.
+    std::string ln = std::string(SUITE_LOCKS) + "/vduse-" + name + ".lock";
+    if (!strcmp(lock_state(ln), "HELD"))
+        return vdpa_del(name);
+    if (rescue_serve(name))
+        return;
+    LOG_ERROR("vduse `: a consumer is attached to a registration nothing serves, and adopting it was refused, so `vdpa dev del` is being withheld -- it would block in the kernel's queue freeze holding the machine-wide genl_lock. Recover the registration with blk/test/vduse-cli.cc's rescue drill", name);
 }
 
 // How many descriptors this process holds. What it is for: a claim or a control
@@ -217,12 +306,18 @@ static int raw_vduse_destroy(const char* name) {
     return 0;
 }
 
-// The lock directory every controller in this suite is built on. Stated here rather
-// than left to a library default, because there is no default: a directory two
-// applications share lets each one's orphan scan adopt the other's devices. Every
-// tombstone path this file checks is built from it, so the suite cannot drift onto
-// one directory for its controllers and probe another.
-static const char SUITE_LOCKS[] = "/run/photon-blk";
+// The geometry every config in this file starts from. At file scope rather than a
+// fixture member because two fixtures need it: the gated one, and the ungated one
+// covering what a constructed device already knows before anything reaches the
+// kernel. One definition, so the two cannot drift onto different geometries.
+static BlkDevInfo make_info() {
+    BlkDevInfo i;
+    i.identity = TEST_NAME;
+    i.size = IMG_SIZE;
+    i.sector_size_shift = 9;
+    i.features = FEATURE_FLUSH;   // DISCARD/WRITE_ZEROES not offered in P1
+    return i;
+}
 
 // The kernel-side state a start() refused part-way through could leave behind,
 // as one sortable listing: the vduse registrations, and each of this suite's
@@ -339,6 +434,35 @@ static uint64_t msg_timeout_us(const char* name) {
 static constexpr uint32_t FEAT_BIT_BLK_MQ = 12;
 static constexpr uint32_t PEER_MAX_QUEUES = 64;
 
+// The construction-time half of this suite: what a caller can learn from a config
+// and from a device that has been built but not started.
+//
+// Ungated, and that is the whole point of splitting it out. new_device() runs
+// validate() -- pure by its own contract, no I/O and no kernel access -- and a
+// constructor that only derives fields from the config, and start() rejects a null
+// backend before it opens the control device. So none of this needs root, the vduse
+// module or the vdpa tool. Behind VduseTest's gate CI executed none of it: the
+// runners there are unprivileged containers on a 5.10 node kernel, which predates
+// vduse entirely, so the gate could never open no matter how the suite was written.
+//
+// The controller still gets SUITE_LOCKS rather than a writable stand-in. Nothing
+// here opens it, and if a case ever starts to, a non-root run fails loudly instead
+// of passing against a directory only some machines happen to permit.
+class VduseConfigTest : public ::testing::Test {
+public:
+    VduseController* ctl = nullptr;
+
+    void SetUp() override {
+        ctl = new_vduse_controller(SUITE_LOCKS);
+        ASSERT_NE(nullptr, ctl);
+    }
+
+    void TearDown() override {
+        delete ctl;
+        ctl = nullptr;
+    }
+};
+
 class VduseTest : public test::SkippableTest {
 public:
     test::TestImage img;
@@ -377,16 +501,16 @@ public:
     // registration. Owns its controller rather than using ctl: a skipped SetUp
     // returns before ctl exists, and TearDown still runs.
     //
-    // THE ORDER BELOW IS WRONG AND IS KNOWN TO BE. Detaching our vdpa devs before
-    // anything serves them is precisely the ordering that wedges a task in D state --
-    // see destroy_orphan_refuses_an_attached_consumer, which measures it. It is not a
-    // theoretical exposure: a run killed between attaching a consumer and serving it
-    // leaves one behind, and the next run's sweep opens by detaching it with no daemon
-    // up. The safe order is adopt, serve, THEN detach. Detaching per device from
-    // inside the loop below loses no coverage, because a consumer can only exist for a
-    // registration that loop already visits -- the tombstone is planted before
-    // CREATE_DEV, and the only thing that unlinks it is destroy_orphan(), which
-    // unlinks the registration with it.
+    // Consumers are removed per registration, from inside the loop below and through
+    // vdpa_detach() -- never by a blanket `vdpa dev del` ahead of the loop, which is
+    // what this function used to open with. That ordering was wrong and its own header
+    // said so: detaching a consumer before anything serves its registration blocks the
+    // removal in the kernel's queue freeze while holding the machine-wide genl_lock.
+    // Per registration loses no coverage, because a consumer can only exist for a
+    // registration this loop visits -- the tombstone is planted before CREATE_DEV, and
+    // the only thing that unlinks it is destroy_orphan(), which unlinks the registration
+    // with it. And vdpa_detach() carries the precondition itself, so the hazardous case
+    // is SERVED before it is removed rather than merely routed around here.
     //
     // Recovery from a wedge is to serve the registration again, not to kill anything:
     // a task in D state ignores SIGKILL, and serving it is what lets the removal
@@ -401,10 +525,6 @@ public:
     // the same way. destroy_orphan() below is the second way, and the one that
     // works on exactly the orphans the adopt cannot take.
     void sweep() {
-        test::sh_off_vcpu(
-            "ls /sys/bus/vdpa/devices/ 2>/dev/null | grep '^"
-            + std::string(NAME_PREFIX) +
-            "' | while read n; do vdpa dev del \"$n\" 2>/dev/null; done; true");
         auto c = new_vduse_controller(SUITE_LOCKS);   // the same scope as ctl
         if (!c)
             return;
@@ -412,6 +532,7 @@ public:
         for (auto& rec : c->list_orphans()) {
             if (rec.identity.rfind(NAME_PREFIX, 0) != 0)
                 continue;   // never touch devices we did not create
+            vdpa_detach(rec.identity.c_str());
             BlkConfig cfg;
             cfg.info.identity = rec.identity;
             // The recorded capacity when the tombstone carries one: start() refuses
@@ -457,15 +578,6 @@ public:
         return f;
     }
 
-    BlkDevInfo make_info() {
-        BlkDevInfo i;
-        i.identity = TEST_NAME;
-        i.size = IMG_SIZE;
-        i.sector_size_shift = 9;
-        i.features = FEATURE_FLUSH;   // DISCARD/WRITE_ZEROES not offered in P1
-        return i;
-    }
-
     // run blocking device IO off the photon vcpu, in a spawned consumer child;
     // harness.h's device_io is the authoritative statement of what it returns
     int device_io(const std::string& node, const std::vector<char>& wbuf,
@@ -479,8 +591,7 @@ public:
     std::vector<char> pattern(uint8_t seed, size_t n = IO_LEN) { return test::pattern(seed, n); }
 };
 
-TEST_F(VduseTest, config_validation) {
-    if (skip_reason) return;
+TEST_F(VduseConfigTest, config_validation) {
     // the pure config checks are construction-time now: no object at all
     BlkConfig bad(make_info());
     bad.info.identity = "";
@@ -506,7 +617,10 @@ TEST_F(VduseTest, config_validation) {
     EXPECT_EQ(nullptr, ctl->new_device(bad));
     EXPECT_EQ(EINVAL, errno);
 
-    // a null backend is start()'s to reject: it is not part of the config
+    // A null backend is start()'s to reject: it is not part of the config. The
+    // rejection is the second statement of start(), ahead of the control device
+    // being opened, so it needs no kernel -- and it leaves nothing behind, since
+    // `backend` is only assigned once the argument is known good.
     BlkConfig good(make_info());
     auto dev = ctl->new_device(good);
     ASSERT_NE(nullptr, dev);
@@ -514,6 +628,16 @@ TEST_F(VduseTest, config_validation) {
     errno = 0;
     EXPECT_EQ(-1, dev->start(nullptr));
     EXPECT_EQ(EINVAL, errno);
+}
+
+// The two refusals that do need a registration to refuse against, which is why they
+// stayed behind the gate when the construction-time half above moved out.
+TEST_F(VduseTest, start_refusals_ealready_and_ebusy) {
+    if (skip_reason) return;
+    BlkConfig good(make_info());
+    auto dev = ctl->new_device(good);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
 
     // a second start on the same object must be EALREADY
     ASSERT_EQ(0, dev->start(file));
@@ -539,8 +663,7 @@ TEST_F(VduseTest, config_validation) {
 // inferring it from which factory built the object. Every axis pinned here is a property
 // of the transport, so all of them are already correct on a constructed device, before
 // anything touches the kernel.
-TEST_F(VduseTest, capabilities_descriptor) {
-    if (skip_reason) return;
+TEST_F(VduseConfigTest, capabilities_descriptor) {
     BlkConfig cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -551,10 +674,12 @@ TEST_F(VduseTest, capabilities_descriptor) {
     // start() has something to harvest. DESTROY_DEV answers EBUSY on a bound device
     // rather than tearing it down. INJECT_CONFIG_IRQ failing only logs, so a successful
     // resize() does not mean the guest was told. Adoption asks the registration for its
-    // queue count and nothing else -- the uapi has no config readback -- and the grade
-    // stays at that even though start() also refuses a capacity its own tombstone record
-    // disagrees with, because a record can be missing and then the geometry goes
-    // unverified. The registered feature set is never checked.
+    // queue count and nothing else about its CONFIG -- the uapi has no config readback --
+    // and the grade stays at that even though start() also refuses a capacity its own
+    // tombstone record disagrees with, because a record can be missing and then the
+    // geometry goes unverified. The registered feature set is never checked. start() does
+    // read the ring's cursors before adopting, but those are handover state rather than
+    // configuration, so they do not raise the grade either.
     EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
     EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
     EXPECT_EQ(BlkResizeEffect::BestEffortNotify, i.resize_effect);
@@ -566,13 +691,21 @@ TEST_F(VduseTest, capabilities_descriptor) {
     // adoption resync reads is only negotiated once FEATURES_OK is set, and no ioctl
     // says whether it is, so the descriptor stays at "not witnessed" rather than guess.
     EXPECT_EQ(0ull, i.negotiated);
+}
 
-    // The second half of that claim, and the half that makes the publish mapping
-    // testable: start() with no guest attached still reports 0. It cannot be witnessed
-    // the other way round, because a real guest ALWAYS negotiates FLUSH here -- it is
-    // the only feature this transport offers -- so a writer that published FLUSH
-    // unconditionally would be indistinguishable after an attach. The reset is the one
-    // moment where the correct value and a stuck-on value differ.
+// The second half of that claim, and the half that makes the publish mapping
+// testable: start() with no guest attached still reports 0. It cannot be witnessed
+// the other way round, because a real guest ALWAYS negotiates FLUSH here -- it is
+// the only feature this transport offers -- so a writer that published FLUSH
+// unconditionally would be indistinguishable after an attach. The reset is the one
+// moment where the correct value and a stuck-on value differ.
+TEST_F(VduseTest, negotiated_stays_unwitnessed_until_a_guest_negotiates) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
     EXPECT_EQ(0ull, dev->get_info().negotiated);
@@ -580,9 +713,9 @@ TEST_F(VduseTest, capabilities_descriptor) {
 
 // The requested/offered split. This transport accepts DISCARD and WRITE_ZEROES in a
 // config and serves neither; before the split a caller could only learn that by reading
-// the constructor, and now it is arithmetic on the descriptor.
-TEST_F(VduseTest, offered_exposes_requests_the_transport_cannot_honour) {
-    if (skip_reason) return;
+// the constructor, and now it is arithmetic on the descriptor. All of it is arithmetic
+// on a constructed device, so it belongs to the ungated fixture.
+TEST_F(VduseConfigTest, offered_exposes_requests_the_transport_cannot_honour) {
     BlkConfig cfg(make_info());
     cfg.info.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
     auto dev = ctl->new_device(cfg);
@@ -648,11 +781,16 @@ TEST_F(VduseTest, basic_io) {
 // #208: what the guest reads back as this disk's serial has to identify THIS
 // registration. A fixed per-transport string made every device one daemon served
 // report the same serial to its guest, and that serial is what a guest uses to tell
-// two disks apart. The expected value is spelled out rather than read out of
-// make_info().identity, so this cannot agree with the transport by repeating its
-// rule. What the fixed-width fill itself does -- all 20 bytes written, NUL past the
-// end of the serial -- is witnessed against the shared engine in test-blk-vq.cpp, so
-// this case is about the value the transport hands it.
+// two disks apart. The identity is spelled out rather than read from
+// make_info().identity, and the hash is recomputed here from the two published
+// constants rather than called out of the engine -- the shape the vhost-user suite's
+// case of the same name uses -- so a change to the engine's rule shows up here as a
+// mismatch instead of being mirrored. The digest this produced was corroborated
+// against a real guest readback of /sys/block/vdX/serial (72c5b4683ab92eae), so the
+// rule is not resting only on this file's copy of it. What the fixed-width fill itself
+// does -- all 20 bytes written, NUL past the end of the serial -- is witnessed against
+// the shared engine in test-blk-vq.cpp, so this case is about the value the transport
+// hands it.
 TEST_F(VduseTest, get_id_reports_this_device_not_the_transport) {
     if (skip_reason) return;
     BlkConfig cfg(make_info());
@@ -666,9 +804,22 @@ TEST_F(VduseTest, get_id_reports_this_device_not_the_transport) {
     std::string node = vdpa_attach(TEST_NAME);
     ASSERT_FALSE(node.empty());
     std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+
+    // GET_ID answers with an FNV-1a hash of the identity, not the identity: a copy
+    // truncated to the field's 20 bytes would give two devices whose identities share
+    // a prefix the same serial, which is the collision the hash exists to prevent.
+    char want[20] = {};
+    {
+        uint64_t h = 14695981039346656037ULL;   // FNV offset basis
+        for (const char* p = "photon-vduse-test"; *p; p++) {
+            h ^= (uint8_t)*p;
+            h *= 1099511628211ULL;              // FNV prime
+        }
+        snprintf(want, sizeof(want), "%016llx", (unsigned long long)h);
+    }
     std::string serial;
     ASSERT_TRUE(sysfs_serial(kname, &serial)) << "no serial attribute under " << kname;
-    EXPECT_EQ("photon-vduse-test", serial);
+    EXPECT_EQ(std::string(want), serial);
 }
 
 // The engine suite pins what write_through does and the vhost-user suite pins where
@@ -899,8 +1050,15 @@ TEST_F(VduseTest, orphan_recovery) {
             found = true;
     ASSERT_TRUE(found);
 
-    // a fresh object adopts it by name and resumes from used->idx; the
-    // consumer never noticed (its backlog gets served)
+    // A fresh object adopts it by name and resumes from used->idx; the consumer never
+    // noticed, and its backlog gets served. The combination this pins is the one
+    // detach(false) actually produces: the previous daemon's cursor equals used->idx --
+    // it completed everything it dispatched -- while avail->idx has moved past it,
+    // because the attached consumer kept submitting into a ring nobody was reading.
+    // Measured 2026-10-05 as cursor 75, used idx 75, avail idx 76: one un-fetched entry,
+    // which is fresh work for the adopter rather than lost work. Requiring the two
+    // indices to be equal here would make adoption impossible against any consumer still
+    // submitting, which is the only kind that needs recovering.
     BlkConfig cfg2(make_info());
     auto dev2 = ctl->new_device(cfg2);
     ASSERT_NE(nullptr, dev2);
