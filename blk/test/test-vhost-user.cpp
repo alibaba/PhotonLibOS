@@ -138,6 +138,31 @@ static constexpr uint64_t L_DATA  = 0x20000;                 // SLOTS * DATA_SLO
 static constexpr uint64_t L_STATUS = L_DATA + SLOTS * DATA_SLOT;   // SLOTS * 64
 static constexpr uint64_t MEM_SIZE = L_STATUS + SLOTS * 64 + 0x10000;
 
+// Rings for every queue past the first. They go in the 0x10000 of slack MEM_SIZE
+// already reserves past the status slots, so the region is exactly as large as it
+// was and nothing else that reads MEM_SIZE moves -- the tail address in
+// vring_addr_that_does_not_fit, the fit static_asserts in oob_descriptor_index and
+// wrapping_buffer_address. Queue 0 keeps L_DESC/L_AVAIL/L_USED where they are,
+// which is what leaves every existing call site reading the same three constants.
+static constexpr uint32_t MQ_QUEUES = 4;   // qids 1..MQ_QUEUES, so five in all
+static constexpr uint64_t L_MQ = L_STATUS + SLOTS * 64;
+// One block per queue with each of the three rings on its own 4 KiB boundary. The
+// device sizes them in vq_retranslate (blk/vhost-user.cpp) as num*16, 2*(3+num) and
+// 6+8*num, so the block has to hold all three; putting them on separate boundaries
+// turns "does it fit" into the three asserts below instead of a sum to recheck by
+// hand every time VQ_NUM moves.
+static constexpr uint64_t MQ_STRIDE = 0x3000;
+static constexpr uint64_t MQ_DESC  = 0x0000;
+static constexpr uint64_t MQ_AVAIL = 0x1000;
+static constexpr uint64_t MQ_USED  = 0x2000;
+static_assert(MQ_DESC + VQ_NUM * sizeof(vdesc) <= MQ_AVAIL,
+              "mq descriptor array must fit its block");
+// The 6 in each of these is the ring's own 4 bytes of flags+idx plus the 2-byte
+// event-index slot that follows its `num` entries, so both slots are inside the fit.
+static_assert(MQ_AVAIL + 2 * VQ_NUM + 6 <= MQ_USED, "mq avail ring must fit its block");
+static_assert(MQ_USED + 8 * VQ_NUM + 6 <= MQ_STRIDE, "mq used ring must fit its block");
+static_assert(L_MQ + MQ_QUEUES * MQ_STRIDE <= MEM_SIZE, "mq rings must fit the declared region");
+
 #define USED_F_NO_NOTIFY 1
 // The guest's counterpart to the device's bit above, and the only suppression
 // channel a session that did not negotiate VIRTIO_RING_F_EVENT_IDX has: §2.7.7.2
@@ -162,9 +187,33 @@ struct MockFrontend {
     int listen_fd = -1;          // CLIENT-role tests: we hold the listener
     int memfd = -1;
     char* mem = nullptr;         // our mapping of the guest memory
-    int kickfd = -1, callfd = -1;
+    int kickfd = -1, callfd = -1;   // queue 0's; the per-queue twins are in mq[]
     int backend_fd = -1;         // our end of the SET_BACKEND_REQ_FD pair
+    // Queue 0's cursors, likewise. Everything the ring protocol keeps per queue --
+    // the two cursors, the descriptor allocator and the pair of eventfds -- exists
+    // once more here for qids 1..MQ_QUEUES, rather than in one array indexed by qid,
+    // because cases read and WRITE the qid-0 names directly (fe.avail_idx,
+    // fe.used_idx, fe.callfd, fe.kickfd) and folding them in would churn tests that
+    // have nothing to do with multiqueue. The *_of(qid) accessors are the only place
+    // that has to know which half a queue index lands in, so the split cannot drift.
     uint16_t avail_idx = 0, used_idx = 0, desc_head = 0;
+    struct VqState {
+        uint16_t avail_idx = 0, used_idx = 0, desc_head = 0;
+        int kickfd = -1, callfd = -1;
+    };
+    VqState mq[MQ_QUEUES];
+
+    // Bounded once, at the five places a case can hand the mock a queue index of its
+    // own -- setup_queue, submit, collect, kick and do_request -- so the accessors
+    // index without re-checking. A qid past MQ_QUEUES has no ring in the guest
+    // mapping either, so the alternative to rejecting it there is a write into the
+    // padding past the last block.
+    static bool qid_valid(uint32_t qid) { return qid <= MQ_QUEUES; }
+    uint16_t& avail_idx_of(uint32_t qid) { return qid ? mq[qid - 1].avail_idx : avail_idx; }
+    uint16_t& used_idx_of(uint32_t qid)  { return qid ? mq[qid - 1].used_idx  : used_idx; }
+    uint16_t& desc_head_of(uint32_t qid) { return qid ? mq[qid - 1].desc_head : desc_head; }
+    int& kickfd_of(uint32_t qid)         { return qid ? mq[qid - 1].kickfd : kickfd; }
+    int& callfd_of(uint32_t qid)         { return qid ? mq[qid - 1].callfd : callfd; }
     uint64_t features = 0;
     // Bits this frontend declines, masked off the offered word as soon as it
     // arrives -- so `features` always means "the word this frontend settled on",
@@ -524,6 +573,75 @@ struct MockFrontend {
         return true;
     }
 
+    // Bring up ONE more virtqueue, qid 1..MQ_QUEUES, with its own ring in the guest
+    // mapping and its own pair of eventfds. The message sequence is negotiate()'s own
+    // for qid 0 verbatim -- NUM, BASE, ADDR, KICK, CALL, ENABLE -- because that order
+    // is what a primary sends and what the backend's handlers are written against:
+    // SET_VRING_NUM's "does the ring fit" check is gated on an already-translated
+    // vring, and the comment there records QEMU sending NUM before ADDR. Same
+    // check_ack on NUM and ADDR, for the same reason negotiate() gives: both are
+    // protocol-legal here, so an error ack is the backend refusing a queue it should
+    // be serving, and swallowing it would leave the case to die later on a timeout
+    // instead of on the message that was actually rejected.
+    //
+    // Not folded into negotiate(): almost every case in this file wants exactly one
+    // queue, and building rings nobody drives would only add teardown to walk.
+    bool setup_queue(uint32_t qid) {
+        if (qid == 0 || !qid_valid(qid)) {
+            errno = EINVAL;
+            return fail("setup_queue takes qid 1..MQ_QUEUES; negotiate() already set up 0");
+        }
+        if (kickfd_of(qid) >= 0) {
+            errno = EALREADY;
+            return fail("queue already set up");
+        }
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_SET_VRING_NUM; m.size = sizeof(vhost_vring_state);
+        m.payload.state = {qid, VQ_NUM};
+        if (!settle(&m, nullptr, 0, /*check_ack=*/true)) return false;
+
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_SET_VRING_BASE; m.size = sizeof(vhost_vring_state);
+        m.payload.state = {qid, 0};
+        if (!settle(&m)) return false;
+
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_SET_VRING_ADDR; m.size = sizeof(vhost_vring_addr);
+        m.payload.addr = vhost_vring_addr{qid, 0, (uint64_t)(mem + ring_desc_off(qid)),
+                                          (uint64_t)(mem + ring_used_off(qid)),
+                                          (uint64_t)(mem + ring_avail_off(qid)), 0};
+        if (!settle(&m, nullptr, 0, /*check_ack=*/true)) return false;
+
+        // Created before the two messages that hand them over: SCM_RIGHTS gives the
+        // backend its own descriptor for the same open file description, so ours
+        // stays usable as the kick source and the interrupt sink.
+        int& kf = kickfd_of(qid);
+        int& cf = callfd_of(qid);
+        kf = ::eventfd(0, EFD_NONBLOCK);
+        cf = ::eventfd(0, EFD_NONBLOCK);
+        if (kf < 0 || cf < 0) return fail("eventfd");
+        memset(&m, 0, sizeof(m));
+        // The index rides in the low 8 bits of the u64 payload, not in a
+        // vhost_vring_state: vhost-user-wire.h's VHOST_USER_VRING_IDX_MASK, with
+        // VHOST_USER_VRING_NOFD_MASK above it, are the two halves of that u64. This
+        // sends an fd, so the NOFD bit stays clear.
+        m.request = VHOST_USER_SET_VRING_KICK; m.size = 8; m.payload.u64 = qid;
+        if (!settle(&m, &kf, 1)) return false;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_SET_VRING_CALL; m.size = 8; m.payload.u64 = qid;
+        if (!settle(&m, &cf, 1)) return false;
+
+        // ENABLE last, and through transact() rather than settle(), exactly as
+        // negotiate() does for qid 0: the request is only sent once bit 30 is
+        // settled, and NEED_REPLY is answered whether or not REPLY_ACK is.
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_SET_VRING_ENABLE; m.size = sizeof(vhost_vring_state);
+        m.payload.state = {qid, 1};
+        if (!transact(&m, &r)) return false;
+        return true;
+    }
+
     uint64_t config_capacity() {
         vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
@@ -541,11 +659,48 @@ struct MockFrontend {
     // The used ring reports a request by its descriptor HEAD, so the mock keeps
     // the head -> slot mapping to find the buffers a completion belongs to.
     int16_t slot_of_head[VQ_NUM] = {};
+    // One map PER RING, because a head is an index into a descriptor array and every
+    // queue has its own: head 0 exists on all of them. A single shared map would let
+    // a completion the backend appended to the wrong used ring read back as the slot
+    // this side meant, which is the exact defect the map exists to catch. The slots
+    // themselves stay in one pool -- hdr/data/status are just guest buffers, and two
+    // queues sharing a slot would be a real driver bug, not a backend one, so keeping
+    // them distinct is the caller's job.
+    int16_t mq_slot_of_head[MQ_QUEUES][VQ_NUM] = {};
+    int16_t* slot_of_head_of(uint32_t qid) {
+        return qid ? mq_slot_of_head[qid - 1] : slot_of_head;
+    }
     uint16_t slot_seq = 0;
 
     static uint64_t hdr_off(uint16_t slot)    { return L_HDR    + (uint64_t)slot * 64; }
     static uint64_t data_off(uint16_t slot)   { return L_DATA   + (uint64_t)slot * DATA_SLOT; }
     static uint64_t status_off(uint16_t slot) { return L_STATUS + (uint64_t)slot * 64; }
+
+    // Where `qid`'s three rings live. qid 0 is the legacy triple the whole file
+    // already reads, at the addresses it has always had; qid >= 1 gets the block
+    // L_MQ reserves for it. The two event-index slots hang off these the same way
+    // USED_EVENT_OFF and AVAIL_EVENT_OFF hang off L_AVAIL and L_USED. constexpr so
+    // the two asserts that follow this struct can hold the generalisation to
+    // account: moving queue 0 by accident would not break the multiqueue cases, it
+    // would silently break every EVENT_IDX case in the file, and those all still
+    // pass. They follow the struct rather than sitting here because a constexpr
+    // member function is not usable in a constant expression until its enclosing
+    // class is complete.
+    static constexpr uint64_t ring_desc_off(uint32_t qid) {
+        return qid ? L_MQ + (qid - 1) * MQ_STRIDE + MQ_DESC : L_DESC;
+    }
+    static constexpr uint64_t ring_avail_off(uint32_t qid) {
+        return qid ? L_MQ + (qid - 1) * MQ_STRIDE + MQ_AVAIL : L_AVAIL;
+    }
+    static constexpr uint64_t ring_used_off(uint32_t qid) {
+        return qid ? L_MQ + (qid - 1) * MQ_STRIDE + MQ_USED : L_USED;
+    }
+    static constexpr uint64_t used_event_off(uint32_t qid) {
+        return ring_avail_off(qid) + 4 + 2 * VQ_NUM;
+    }
+    static constexpr uint64_t avail_event_off(uint32_t qid) {
+        return ring_used_off(qid) + 4 + 8 * VQ_NUM;
+    }
 
     // a chain never straddles the end of the descriptor array (a real driver
     // allocates from a free list and would refuse to split one). The bound has
@@ -556,17 +711,21 @@ struct MockFrontend {
     // used to agree on that (the device indexed the descriptor array without a
     // bound, and the shared mapping made the over-read succeed), so it stayed
     // invisible until the device started checking.
-    uint16_t alloc_head() {
-        uint16_t head = desc_head;
-        desc_head = (uint16_t)(head + 6 > VQ_NUM ? 0 : head + 3);
+    // Per queue: each ring has its own free list, so each has its own cursor.
+    uint16_t alloc_head(uint32_t qid = 0) {
+        uint16_t& cursor = desc_head_of(qid);
+        uint16_t head = cursor;
+        cursor = (uint16_t)(head + 6 > VQ_NUM ? 0 : head + 3);
         return head;
     }
 
-    // build one request into `slot` and publish it to the avail ring; no kick
-    int submit(uint16_t slot, uint32_t type, uint64_t sector, uint32_t len, bool data_write) {
-        uint16_t head = alloc_head();
-        auto* desc = (vdesc*)(mem + L_DESC);
-        auto* avail = (vavail*)(mem + L_AVAIL);
+    // build one request into `slot` and publish it to `qid`'s avail ring; no kick
+    int submit(uint16_t slot, uint32_t type, uint64_t sector, uint32_t len, bool data_write,
+               uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; fail("queue index"); return -1; }
+        uint16_t head = alloc_head(qid);
+        auto* desc = (vdesc*)(mem + ring_desc_off(qid));
+        auto* avail = (vavail*)(mem + ring_avail_off(qid));
         auto* hdr = (blk_outhdr*)(mem + hdr_off(slot));
         hdr->type = type;
         hdr->ioprio = 0;
@@ -579,32 +738,36 @@ struct MockFrontend {
                                (uint16_t)(head + 2)};
         desc[head + 2] = vdesc{status_off(slot), 1, DESC_F_WRITE, 0};
 
-        avail->ring[avail_idx % VQ_NUM] = head;
+        uint16_t& ai = avail_idx_of(qid);
+        avail->ring[ai % VQ_NUM] = head;
         __sync_synchronize();
-        avail->idx = ++avail_idx;
+        avail->idx = ++ai;
         __sync_synchronize();
-        slot_of_head[head] = (int16_t)slot;
+        slot_of_head_of(qid)[head] = (int16_t)slot;
         return 0;
     }
 
-    bool kick() {
+    bool kick(uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; return fail("queue index"); }
         uint64_t one = 1;
-        if (::write(kickfd, &one, 8) != 8) { errno = EIO; return fail("kick"); }
+        if (::write(kickfd_of(qid), &one, 8) != 8) { errno = EIO; return fail("kick"); }
         return true;
     }
 
     // ---- event index: the mock is the driver, so it owns used_event and reads
     // ---- avail_event. Both predicates are rewritten here rather than shared
     // ---- with blk/utils.h -- see the file's standing rule.
+    // ---- Both slots are per ring (§2.7.7.2 and §2.7.10.1 are stated per
+    // ---- virtqueue), so every accessor here takes the queue index.
 
-    void set_used_event(uint16_t v) {
+    void set_used_event(uint16_t v, uint32_t qid = 0) {
         __sync_synchronize();
-        *(uint16_t*)(mem + USED_EVENT_OFF) = v;
+        *(uint16_t*)(mem + used_event_off(qid)) = v;
     }
-    uint16_t get_used_event() { return *(uint16_t*)(mem + USED_EVENT_OFF); }
-    uint16_t get_avail_event() {
+    uint16_t get_used_event(uint32_t qid = 0) { return *(uint16_t*)(mem + used_event_off(qid)); }
+    uint16_t get_avail_event(uint32_t qid = 0) {
         __sync_synchronize();
-        return *(uint16_t*)(mem + AVAIL_EVENT_OFF);
+        return *(uint16_t*)(mem + avail_event_off(qid));
     }
 
     // ---- the regime selector, and the flags-mode half of the mock's side of the
@@ -626,8 +789,8 @@ struct MockFrontend {
     // negotiated, so in a flags-mode session this is the only channel the guest has
     // for telling the device not to interrupt, and blk/utils.cpp's vring_need_irq is
     // the code that reads it.
-    void set_avail_no_interrupt(bool on) {
-        auto* avail = (vavail*)(mem + L_AVAIL);
+    void set_avail_no_interrupt(bool on, uint32_t qid = 0) {
+        auto* avail = (vavail*)(mem + ring_avail_off(qid));
         avail->flags = on ? (uint16_t)(avail->flags | AVAIL_F_NO_INTERRUPT)
                           : (uint16_t)(avail->flags & ~AVAIL_F_NO_INTERRUPT);
         // After the store, not before: what has to be ordered is this flag against
@@ -641,15 +804,17 @@ struct MockFrontend {
     // landed equals avail_event, and the used ring's flags low bit is clear.
     // `submit()` has already incremented avail_idx, so the index that picked the
     // slot is avail_idx - 1; the uint16 form below is that equality written to
-    // survive wraparound.
-    bool kick_if_needed() {
-        if (kickfd < 0)
+    // survive wraparound. Both the flags it reads and the avail_event it consults
+    // belong to `qid`'s own ring.
+    bool kick_if_needed(uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; return fail("queue index"); }
+        if (kickfd_of(qid) < 0)
             return true;   // no kick fd (revoked by a NOFD SET_VRING_KICK): there
                            // is nothing to notify with, so the device can only
                            // find the work by its own fallback re-scan
-        auto* used = (vused*)(mem + L_USED);
+        auto* used = (vused*)(mem + ring_used_off(qid));
         uint16_t flags = used->flags;
-        uint16_t idx = (uint16_t)(avail_idx - 1);
+        uint16_t idx = (uint16_t)(avail_idx_of(qid) - 1);
         __sync_synchronize();
         // Without bit 29 there is no avail_event to consult, and consulting it
         // anyway is not merely redundant: publish_avail_event() writes that slot
@@ -665,23 +830,23 @@ struct MockFrontend {
         // device that started setting it shows up here instead of as a hot-spinning
         // kick loop.
         if (!event_idx_negotiated())
-            return (flags & USED_F_NO_NOTIFY) ? true : kick();
-        uint16_t ae = get_avail_event();
+            return (flags & USED_F_NO_NOTIFY) ? true : kick(qid);
+        uint16_t ae = get_avail_event(qid);
         if ((flags & USED_F_NO_NOTIFY) == 0 && (uint16_t)(idx - ae) < 1)
-            return kick();
+            return kick(qid);
         return true;
     }
 
     // strict poll: does NOT consume. collect() drains, so it cannot be used to
     // assert that a notification did or did not happen.
-    bool callfd_readable(int ms) {
-        pollfd pfd{callfd, POLLIN, 0};
+    bool callfd_readable(int ms, uint32_t qid = 0) {
+        pollfd pfd{callfd_of(qid), POLLIN, 0};
         return ::poll(&pfd, 1, ms) > 0;
     }
     // eventfd accumulates, so one read returns the total since the last read
-    uint64_t callfd_drain() {
+    uint64_t callfd_drain(uint32_t qid = 0) {
         uint64_t v = 0;
-        while (::read(callfd, &v, 8) == 8) {}
+        while (::read(callfd_of(qid), &v, 8) == 8) {}
         return v;
     }
 
@@ -709,8 +874,10 @@ struct MockFrontend {
     // every completion after the first.
     // Both outputs are written only on the success path, which gcc cannot see
     // across the call, so every caller initialises the locals it passes in.
-    bool collect(uint32_t* head_out, uint32_t* len_out, int ms = 20000) {
-        auto* used = (vused*)(mem + L_USED);
+    bool collect(uint32_t* head_out, uint32_t* len_out, int ms = 20000, uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; return fail("queue index"); }
+        auto* used = (vused*)(mem + ring_used_off(qid));
+        uint16_t& ui = used_idx_of(qid);
         for (int i = 0; i <= ms / 10; i++) {
             // A conformant driver keeps used_event at the index it has consumed
             // to, so §2.7.7.2's equality fires on the next element the device
@@ -732,21 +899,21 @@ struct MockFrontend {
             // the first -- which is what a_flags_mode_session_notifies_from_avail_flags_alone
             // asserts on.
             if (event_idx_negotiated()) {
-                set_used_event(used_idx);
+                set_used_event(ui, qid);
                 __sync_synchronize();
             }
-            if (used->idx != used_idx) {
-                auto elem = used->ring[used_idx % VQ_NUM];
-                used_idx++;
+            if (used->idx != ui) {
+                auto elem = used->ring[ui % VQ_NUM];
+                ui++;
                 *head_out = elem.id;
                 *len_out = elem.len;
                 return true;
             }
-            pollfd pfd{callfd, POLLIN, 0};
+            pollfd pfd{callfd_of(qid), POLLIN, 0};
             int pr = ::poll(&pfd, 1, 10);
             if (pr > 0) {
                 uint64_t v;
-                while (::read(callfd, &v, 8) == 8) {}
+                while (::read(callfd_of(qid), &v, 8) == 8) {}
             }
         }
         errno = ETIMEDOUT;
@@ -760,20 +927,22 @@ struct MockFrontend {
     // thing that says how much of the guest's device-writable buffer the device
     // claims to have filled. As with collect()'s own outputs, it is left alone
     // when no completion arrived, so a caller initialises the local it passes in.
+    // `qid` defaults to 0 for the same reason and in the same shape.
     int do_request(uint32_t type, uint64_t sector, void* data, size_t len, bool data_write,
-                   uint32_t* used_len = nullptr) {
+                   uint32_t* used_len = nullptr, uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; fail("queue index"); return -1; }
         if (len > DATA_SLOT) { errno = E2BIG; fail("len > DATA_SLOT"); return -1; }
         uint16_t slot = (uint16_t)(slot_seq++ % SLOTS);
         if (data && len && !data_write) memcpy(mem + data_off(slot), data, len);
-        submit(slot, type, sector, (uint32_t)len, data_write);
+        submit(slot, type, sector, (uint32_t)len, data_write, qid);
         // a conformant driver: kick only when §2.7.10.1 says to. The
         // unconditional kick() stays for cases that are not about notification.
-        if (!kick_if_needed()) return -1;
+        if (!kick_if_needed(qid)) return -1;
 
         uint32_t head = 0, ulen = 0;
-        if (!collect(&head, &ulen)) return -1;
+        if (!collect(&head, &ulen, 20000, qid)) return -1;
         if (used_len) *used_len = ulen;
-        if (head >= VQ_NUM || slot_of_head[head] != (int16_t)slot) {
+        if (head >= VQ_NUM || slot_of_head_of(qid)[head] != (int16_t)slot) {
             errno = EPROTO;
             fail("used elem id");
             return -1;
@@ -796,11 +965,12 @@ struct MockFrontend {
         return *(uint8_t*)(mem + status_off(slot));
     }
 
-    int write_dev(uint64_t off, const void* buf, size_t len, uint32_t* used_len = nullptr) {
-        return do_request(T_OUT, off >> 9, (void*)buf, len, false, used_len);
+    int write_dev(uint64_t off, const void* buf, size_t len, uint32_t* used_len = nullptr,
+                  uint32_t qid = 0) {
+        return do_request(T_OUT, off >> 9, (void*)buf, len, false, used_len, qid);
     }
-    int read_dev(uint64_t off, void* buf, size_t len) {
-        return do_request(T_IN, off >> 9, buf, len, true);
+    int read_dev(uint64_t off, void* buf, size_t len, uint32_t qid = 0) {
+        return do_request(T_IN, off >> 9, buf, len, true, nullptr, qid);
     }
     int flush_dev() {
         return do_request(T_FLUSH, 0, nullptr, 0, false);
@@ -816,6 +986,10 @@ struct MockFrontend {
     // negotiate() and submit() only build valid sequences, which is precisely why
     // the device's rejection paths had never executed: a guard that never runs is
     // indistinguishable from a guard that is not there.
+    // These all address vring index 0 and stay that way: each one is about a single
+    // malformed message, and the index bound has its own case
+    // (vring_index_out_of_range_is_rejected). setup_queue() above is the only thing
+    // here that builds a per-queue sequence.
 
     // transact() checks that a REPLY_ACK arrived, and with check_ack also that
     // the ack payload is 0 (accepted). Left at its default it does not look at
@@ -988,25 +1162,26 @@ struct MockFrontend {
         return *(uint8_t*)(mem + status_off(slot));
     }
 
-    // append `head` to the avail ring without building a chain
-    void publish(uint16_t head) {
-        auto* avail = (vavail*)(mem + L_AVAIL);
-        avail->ring[avail_idx % VQ_NUM] = head;
+    // append `head` to `qid`'s avail ring without building a chain
+    void publish(uint16_t head, uint32_t qid = 0) {
+        auto* avail = (vavail*)(mem + ring_avail_off(qid));
+        uint16_t& ai = avail_idx_of(qid);
+        avail->ring[ai % VQ_NUM] = head;
         __sync_synchronize();
-        avail->idx = ++avail_idx;
+        avail->idx = ++ai;
         __sync_synchronize();
     }
 
-    uint16_t used_idx_now() {
+    uint16_t used_idx_now(uint32_t qid = 0) {
         __sync_synchronize();
-        return ((vused*)(mem + L_USED))->idx;
+        return ((vused*)(mem + ring_used_off(qid)))->idx;
     }
     // Wait for the used ring to advance by `n`. Measured on the free-running
     // 16-bit index, NOT by counting elements: the device may legitimately lap
     // the 256-entry ring when more than VQ_NUM completions are outstanding.
-    bool wait_used_advance(uint16_t from, uint16_t n, int ms) {
+    bool wait_used_advance(uint16_t from, uint16_t n, int ms, uint32_t qid = 0) {
         for (int i = 0; i <= ms / 10; i++) {
-            if ((uint16_t)(used_idx_now() - from) >= n)
+            if ((uint16_t)(used_idx_now(qid) - from) >= n)
                 return true;
             ::usleep(10 * 1000);
         }
@@ -1089,11 +1264,27 @@ struct MockFrontend {
         if (listen_fd >= 0) ::close(listen_fd);
         if (kickfd >= 0) ::close(kickfd);
         if (callfd >= 0) ::close(callfd);
+        for (auto& q : mq) {
+            if (q.kickfd >= 0) ::close(q.kickfd);
+            if (q.callfd >= 0) ::close(q.callfd);
+        }
         if (backend_fd >= 0) ::close(backend_fd);
         if (mem) ::munmap(mem, MEM_SIZE);
         if (memfd >= 0) ::close(memfd);
     }
 };
+
+// The generalisation's two invariants, stated where MockFrontend is complete so the
+// constexpr accessors above are usable in a constant expression. Both are about
+// qid 0: the per-queue rings were added beside it, not underneath it, and every
+// pre-existing case in this file still addresses the legacy triple by name.
+static_assert(MockFrontend::ring_desc_off(0) == L_DESC &&
+              MockFrontend::ring_avail_off(0) == L_AVAIL &&
+              MockFrontend::ring_used_off(0) == L_USED,
+              "qid 0 must keep the legacy ring addresses");
+static_assert(MockFrontend::used_event_off(0) == USED_EVENT_OFF &&
+              MockFrontend::avail_event_off(0) == AVAIL_EVENT_OFF,
+              "and its two event-index slots");
 
 // ---------------------------------------------------------------------------
 
@@ -2616,6 +2807,302 @@ TEST_F(VhostUserTest, protocol_mq_is_what_lets_a_frontend_learn_the_queue_count)
     EXPECT_EQ(1u, capped);
     EXPECT_EQ((uint64_t)QUEUES, served_again);
     EXPECT_EQ(served, served_again);
+}
+
+// The two cases above pin the multiqueue CONTROL plane. Nothing in this file had ever
+// driven a request on a queue above zero: every submit(), collect() and do_request()
+// here targeted the rings at L_DESC/L_AVAIL/L_USED, which negotiate() hands to index
+// 0. So a backend that configured queues 1..N correctly and then served them all from
+// queue 0's ring, that bound every queue's hooks to vqs[0], or that signalled a
+// completion on a constant index's callfd, passed the whole suite green.
+//
+// This is one non-zero queue's DATA path end to end: its own avail ring is consumed,
+// its own descriptors are walked into its own guest buffers, its completion lands in
+// its own used ring, and its own callfd is what fires. Queue 1 is driven in the same
+// session so that "queue 3 works" cannot be satisfied by a backend that merely aliases
+// whatever index it is handed to the one queue it really serves.
+//
+// The discriminating assertion is the callfd triple, and specifically the zero on
+// queue 0 -- NOT the used ring. collect() polls the ring and uses the eventfd only as
+// a wait hint, so a completion that landed in the right ring behind a notification
+// that went to the wrong fd is invisible to every other assertion in this case. Queue
+// 0 is given no work at all here, so any count on its fd is a notify bound to a
+// constant index: notify_thunk passing something other than q->qid, or the
+// SET_VRING_CALL handler storing every queue's fd in one slot.
+TEST_F(VhostUserTest, a_queue_above_zero_serves_io_end_to_end) {
+    constexpr uint32_t QUEUES = 4;
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = QUEUES;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t OFF1 = 12 << 20, OFF3 = 13 << 20;
+    constexpr size_t LEN = 4096;
+    // Hand-driven requests take slots from the top, clear of the ones do_request's
+    // slot_seq hands out from the bottom in the same session.
+    constexpr uint16_t SLOT3 = SLOTS - 1;
+    auto w1 = pattern(0x1e, LEN), w3 = pattern(0xa7, LEN);
+    std::vector<char> r1(LEN), r3(LEN), x1(LEN), x3(LEN);
+    uint64_t sig0 = 0, sig1 = 0, sig3 = 0;
+
+    // The raw off-vcpu helper rather than run_frontend(), for the reason
+    // avail_event_published gives: the assertions below are gtest macros and need a
+    // void context, not an errno. `fe` therefore outlives the body, so a fatal ASSERT
+    // that returns early still leaves here what it wrote before it did.
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        // Preconditions, and what stops this case passing vacuously. negotiate() asks
+        // GET_QUEUE_NUM only once PROTOCOL_F_MQ is settled and leaves queue_num at 1
+        // otherwise, so against a device serving one queue these two fire and
+        // setup_queue(3) is never reached. Without them the same device would fail
+        // later as an error ack on vring index 3, which reads as a data-path failure
+        // and is not one.
+        ASSERT_NE(0u, fe.proto_features & (1ULL << VHOST_USER_PROTOCOL_F_MQ))
+            << "protocol MQ was not settled, so this frontend has one queue";
+        ASSERT_EQ(QUEUES, fe.queue_num)
+            << "the peer learned a count that cannot address queue 3";
+
+        ASSERT_TRUE(fe.setup_queue(1));
+        ASSERT_TRUE(fe.setup_queue(3));
+        // SET_VRING_CALL signals the fd it installs exactly once -- the behaviour
+        // vring_call_signals_once pins -- and it is sent for every queue set up here.
+        // Clear all three so the counts below can only have come from a completion.
+        (void)fe.callfd_drain(0);
+        (void)fe.callfd_drain(1);
+        (void)fe.callfd_drain(3);
+
+        // Queue 3 driven by hand rather than through write_dev(): do_request's
+        // collect() drains the callfd it polls, which would eat the very signal this
+        // half of the case is about.
+        memcpy(fe.mem + MockFrontend::data_off(SLOT3), w3.data(), w3.size());
+        ASSERT_EQ(0, fe.submit(SLOT3, T_OUT, OFF3 >> 9, (uint32_t)LEN, false, 3));
+        ASSERT_TRUE(fe.kick(3));
+        ASSERT_TRUE(fe.served_within(SLOT3))
+            << "queue 3's avail ring was never consumed";
+        EXPECT_TRUE(fe.callfd_readable(1000, 3))
+            << "queue 3's own callfd was never signalled";
+        // Drained in this order, and the 1 s wait above is what makes the two zeros
+        // below mean something: a notify delivered to the wrong fd arrives instead of
+        // this one, not as well as it, so if it went to queue 0 or queue 1 the wait
+        // has already expired in full by the time that counter is read.
+        sig3 = fe.callfd_drain(3);
+        sig0 = fe.callfd_drain(0);
+        sig1 = fe.callfd_drain(1);
+
+        uint32_t head = VQ_NUM, ulen = 0;
+        ASSERT_TRUE(fe.collect(&head, &ulen, 5000, 3));
+        ASSERT_LT(head, VQ_NUM);
+        EXPECT_EQ((int)SLOT3, (int)fe.slot_of_head_of(3)[head])
+            << "queue 3's used element names a head that ring never published";
+        EXPECT_EQ(1u, ulen) << "a successful T_OUT writes only the status byte";
+        EXPECT_EQ(S_OK, (int)*(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT3)));
+
+        // Read back through the same queue. This is the half that proves queue 3's
+        // DESCRIPTORS were walked and not merely its avail ring drained: the payload
+        // has to land in the guest buffer the chain this side built named.
+        ASSERT_EQ(0, fe.read_dev(OFF3, r3.data(), r3.size(), 3));
+
+        // A second queue in the same session, through the ordinary wrappers.
+        ASSERT_EQ(0, fe.write_dev(OFF1, w1.data(), w1.size(), nullptr, 1));
+        ASSERT_EQ(0, fe.read_dev(OFF1, r1.data(), r1.size(), 1));
+
+        // Each queue reads what the OTHER wrote. One backing file, so this is not a
+        // data-isolation claim; it is that both queues are still coherently bookkept
+        // after the hand-driven sequence above, whose submit/collect pair moved queue
+        // 3's two cursors behind do_request's back.
+        ASSERT_EQ(0, fe.read_dev(OFF3, x1.data(), x1.size(), 1));
+        ASSERT_EQ(0, fe.read_dev(OFF1, x3.data(), x3.size(), 3));
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+
+    EXPECT_EQ(1u, sig3) << "queue 3's first completion must interrupt it exactly once";
+    EXPECT_EQ(0u, sig0) << "queue 0 had no work, so its callfd cannot have been signalled";
+    EXPECT_EQ(0u, sig1) << "queue 1 had no work yet when this was read";
+    EXPECT_EQ(0, memcmp(r3.data(), w3.data(), LEN)) << "queue 3 did not read back its own write";
+    EXPECT_EQ(0, memcmp(r1.data(), w1.data(), LEN)) << "queue 1 did not read back its own write";
+    EXPECT_EQ(0, memcmp(x1.data(), w3.data(), LEN)) << "queue 1 could not see queue 3's write";
+    EXPECT_EQ(0, memcmp(x3.data(), w1.data(), LEN)) << "queue 3 could not see queue 1's write";
+    // And through to the backing file, not just back out of the ring: a queue that
+    // completed a write it never issued would satisfy every assertion above.
+    EXPECT_EQ(0, verify_backend(OFF1, w1));
+    EXPECT_EQ(0, verify_backend(OFF3, w3));
+}
+
+// Independence, not just presence. The case above shows a non-zero queue works; it
+// cannot separate a backend that serves queue N from queue N's own ring from one that
+// serves it somewhere shared and happens to report back correctly. So: one request in
+// flight on queue 1 and another on queue 2 at the same time, held there by the backend
+// gate, and then ONE token released so that exactly one of the two retires. The other
+// must still be untouched -- used ring unmoved, callfd silent -- which is the
+// observation a crossed wire cannot survive, and the one thing about multiqueue that
+// a sequence of single-queue requests can never show.
+//
+// Which of the two retires first is the gate semaphore's choice, so every assertion
+// below is written against `first` and `other` rather than against a queue number.
+//
+// The discriminating assertions are the ones on `other`, and which of them has teeth
+// depends on the mutation. sig_other (with the callfd_readable that precedes it) is
+// the ONLY thing in the case that goes red on a notify bound to a constant index:
+// the used rings, the collects, the lengths and the statuses all still come out right
+// when the interrupt is merely delivered to the wrong eventfd. used_other is the
+// first thing that goes red on a completion appended to the wrong used ring -- one of
+// the two collects at the end would time out on that too, but only after the gate has
+// opened and both rings hold an element, which says "something did not complete"
+// rather than "a queue was credited with somebody else's completion". used_q0/sig_q0
+// are the same two assertions aimed at the ring every other case in this file drives,
+// so a backend that funnels other queues' completions to index 0 is caught as well.
+TEST_F(VhostUserTest, two_queues_complete_independently) {
+    constexpr uint32_t QUEUES = 3;
+    constexpr uint64_t OFF1 = 20 << 20, OFF2 = 21 << 20;
+    constexpr size_t LEN = 4096;
+    constexpr uint16_t SLOT1 = SLOTS - 1, SLOT2 = SLOTS - 2;
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = QUEUES;
+    // Declared before `dev` and before `fe`: RecordingFile does not own the backend,
+    // so its destruction has to come after the device's shutdown DEFER and its delete.
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto w1 = pattern(0x4b, LEN);
+    auto w2 = pattern(0xd2, LEN);
+    // Queue 2's request is a READ, so it needs content to come back with. Filled
+    // through the fixture's own handle and not through the mock: the gate is already
+    // shut, and every IO the DEVICE issues would park in it.
+    {
+        iovec iov{w2.data(), w2.size()};
+        ASSERT_EQ((ssize_t)LEN, file->pwritev(&iov, 1, (off_t)OFF2));
+    }
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    // Runs BEFORE the shutdown above, and it is the backstop for an early ASSERT:
+    // a request left parked here would make an orderly teardown wait out a timeout.
+    DEFER(rf.release_gate(1024));
+
+    uint32_t first = 0, other = 0;
+    uint16_t used_other = 0, used_q0 = 0;
+    uint64_t sig_first = 0, sig_other = 0, sig_q0 = 0;
+    uint32_t h1 = VQ_NUM, l1 = 0, h2 = VQ_NUM, l2 = 0;
+    int st1 = -1, st2 = -1, data2 = -1;
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        // The same precondition as the case above, for the same reason.
+        ASSERT_NE(0u, fe.proto_features & (1ULL << VHOST_USER_PROTOCOL_F_MQ))
+            << "protocol MQ was not settled, so this frontend has one queue";
+        ASSERT_EQ(QUEUES, fe.queue_num)
+            << "the peer learned a count that cannot address queue 2";
+        ASSERT_TRUE(fe.setup_queue(1));
+        ASSERT_TRUE(fe.setup_queue(2));
+        (void)fe.callfd_drain(0);
+        (void)fe.callfd_drain(1);
+        (void)fe.callfd_drain(2);
+
+        memcpy(fe.mem + MockFrontend::data_off(SLOT1), w1.data(), w1.size());
+        // A sentinel under the read buffer, so that "the device filled this" and "it
+        // already held what we expect" cannot be the same observation.
+        memset(fe.mem + MockFrontend::data_off(SLOT2), 0xcc, LEN);
+
+        // A write on queue 1 and a read on queue 2. Different types on purpose: a
+        // successful T_OUT's used length is 1 and a T_IN's is LEN+1, so the element
+        // found in each ring says which request it belongs to.
+        ASSERT_EQ(0, fe.submit(SLOT1, T_OUT, OFF1 >> 9, (uint32_t)LEN, false, 1));
+        ASSERT_TRUE(fe.kick(1));
+        ASSERT_EQ(0, fe.submit(SLOT2, T_IN, OFF2 >> 9, (uint32_t)LEN, true, 2));
+        ASSERT_TRUE(fe.kick(2));
+
+        // Both parked, which is what makes them concurrent rather than merely
+        // consecutive. Bounded, and the bound is a precondition rather than a hope:
+        // with `gated` set, `arrivals` counts what ENTERED the backend, so 2 is the
+        // evidence that both were dispatched before either could complete. FLUSH is
+        // negotiated on this connection, so a write is one recorded IO and not two --
+        // which is what makes 2 the expected count rather than a lower bound.
+        for (int i = 0; i < 5000 && rf.arrivals.load() < 2u; i++)
+            ::usleep(1000);
+        ASSERT_EQ(2u, (uint32_t)rf.arrivals.load())
+            << "both requests have to be in flight before either is released";
+
+        // One token, so exactly one of the two retires.
+        rf.poke_gate(1);
+        uint16_t u0 = 0;
+        for (int i = 0; i < 500 && !first; i++) {
+            u0 = fe.used_idx_now(0);
+            uint16_t u1 = fe.used_idx_now(1), u2 = fe.used_idx_now(2);
+            if (u1 || u2) first = u1 ? 1u : 2u;
+            else ::usleep(10 * 1000);
+        }
+        ASSERT_TRUE(first == 1u || first == 2u)
+            << "releasing one gated IO advanced no queue's used ring; queue 0's is " << u0;
+        other = 3 - first;
+
+        // Wait for the retirement to be fully REPORTED before reading anything else.
+        // complete_req appends the used element and then writes the callfd with no
+        // yield between, but this thread does neither, so the ring can be seen
+        // advanced a few instructions before the eventfd is. Bounding the wait on the
+        // positive is also what gives the negative that follows its force: without it
+        // a silent callfd on `other` could mean "not yet" instead of "not yours".
+        // EXPECT rather than ASSERT so that both counters below are still read and
+        // reported when this one fails -- which is exactly the case where the split
+        // between them is the interesting part.
+        EXPECT_TRUE(fe.callfd_readable(1000, first))
+            << "queue " << first << " retired without interrupting its own callfd";
+        // The other queue has a request in flight and no token, so nothing that
+        // belongs to it may have moved.
+        EXPECT_FALSE(fe.callfd_readable(200, other))
+            << "queue " << other << " was interrupted for a completion that is not its own";
+        used_other = fe.used_idx_now(other);
+        used_q0 = fe.used_idx_now(0);
+        sig_first = fe.callfd_drain(first);
+        sig_other = fe.callfd_drain(other);
+        sig_q0 = fe.callfd_drain(0);
+
+        rf.release_gate(1024);
+        ASSERT_TRUE(fe.collect(&h1, &l1, 5000, 1));
+        ASSERT_TRUE(fe.collect(&h2, &l2, 5000, 2));
+        st1 = *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT1));
+        st2 = *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT2));
+        data2 = memcmp(w2.data(), fe.mem + MockFrontend::data_off(SLOT2), LEN);
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+
+    ASSERT_TRUE(first == 1u || first == 2u);
+    EXPECT_EQ(0, (int)used_q0) << "queue 0 was given no work in this case";
+    EXPECT_EQ(0, (int)used_other)
+        << "queue " << other << " completed a request that is still parked in the gate";
+    EXPECT_EQ(1u, sig_first) << "the queue that retired was not interrupted exactly once";
+    EXPECT_EQ(0u, sig_other)
+        << "queue " << other << " was interrupted for a completion that is not its own";
+    EXPECT_EQ(0u, sig_q0) << "queue 0 was interrupted for work it never had";
+
+    ASSERT_LT(h1, VQ_NUM);
+    ASSERT_LT(h2, VQ_NUM);
+    EXPECT_EQ((int)SLOT1, (int)fe.slot_of_head_of(1)[h1]);
+    EXPECT_EQ((int)SLOT2, (int)fe.slot_of_head_of(2)[h2]);
+    // The two lengths differ, so each ring's element is identified as its own
+    // request's. These are what go red on a dispatch that took one queue's head and
+    // walked another's descriptor array: nothing is ever submitted on queue 0 here, so
+    // its array is still the memset zeros the mock mapped, the walk ends at its first
+    // descriptor and completes 0 bytes with the 0xff sentinel untouched -- and the
+    // status pair below then says which of the two queues it happened to.
+    EXPECT_EQ(1u, l1) << "queue 1's element does not describe the T_OUT it was given";
+    EXPECT_EQ((uint32_t)LEN + 1, l2) << "queue 2's element does not describe the T_IN it was given";
+    EXPECT_EQ(S_OK, st1);
+    EXPECT_EQ(S_OK, st2);
+    EXPECT_EQ(0, data2) << "queue 2's read did not fill the guest buffer its own chain named";
+    EXPECT_EQ(0, verify_backend(OFF1, w1));
 }
 
 // `gpa + len - 1 < base + size` wraps: addr = 2^64 - 101 with len = 200 sums to
