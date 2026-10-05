@@ -580,6 +580,22 @@ TEST_F(TcmuTest, shutdown_releases_a_backend_it_owns) {
     EXPECT_EQ(2, destroyed.load());
     delete mine;
     EXPECT_EQ(3, destroyed.load());
+
+    // detach() is the other way back into start(), and it is the leg that still
+    // leaked after shutdown()->start() was fixed. detach keeps the configfs
+    // registration on purpose, and it cannot release the backend either: it doubles
+    // as the rollback path of a failed start, where the caller owns it. So start() is
+    // the only place that can release what an earlier session owned -- and both
+    // halves below are load-bearing, because releasing in detach() instead would
+    // pass the second and break the first.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(3, destroyed.load());
+    ASSERT_EQ(0, dev->detach(false));
+    EXPECT_EQ(3, destroyed.load()) << "detach released a backend it is meant to keep";
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(4, destroyed.load()) << "start() overwrote the owned backend detach had kept";
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ(5, destroyed.load());
 }
 
 TEST_F(TcmuTest, loopback_io) {

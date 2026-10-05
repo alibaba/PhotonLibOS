@@ -1047,6 +1047,13 @@ struct UblkDeviceImpl : IBlkDevice {
         if (!bk)
             LOG_ERROR_RETURN(EINVAL, -1, "backend IFile is null");
 
+        // A backend a previous session owned and detach() kept. detach() cannot
+        // release it itself: it is also the rollback path of a failed start, where
+        // the caller keeps the backend, and shutdown() is the one that releases. So
+        // this is the only place that can, and without it the two assignments below
+        // drop the sole reference to a file this object promised to delete.
+        release_backend();
+
         backend = bk;
         own_backend = ownership;
 
