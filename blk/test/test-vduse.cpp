@@ -90,6 +90,19 @@ static const char SUITE_LOCKS[] = "/run/photon-blk";
 static constexpr uint64_t IO_OFF = 1ull << 20;   // 1 MiB
 static constexpr size_t   IO_LEN = 256ull << 10; // 256 KiB
 
+// blk/vduse.cpp's observation seam over its iotlb cache, declared here because that
+// is the only place it is declared: the cache's type is local to vduse.cpp and
+// appears in no header, so without these nothing outside that translation unit could
+// read how much mapping it holds. The signatures have to match vduse.cpp exactly --
+// a mismatch is a link error rather than a silent one, which is the point of keeping
+// them to three scalars. UINT64_MAX is the answer for a handle that is not a vduse
+// device, so a wrong-typed argument cannot read as "nothing retained". The two byte
+// counters take the cache's photon::mutex, so they are called on the vcpu, as every
+// case here is.
+uint64_t vduse_iotlb_live_bytes(IBlkDevice* dev);
+uint64_t vduse_iotlb_stale_bytes(IBlkDevice* dev);
+uint64_t vduse_iotlb_flush_budget();
+
 // attach a vduse registration to the vdpa bus; returns the new /dev/vdX ("" on
 // failure). Identifies OUR device by diffing /sys/block -- never by guessing a
 // vd letter (the VM's own disks are virtio-blk too).
@@ -776,6 +789,95 @@ TEST_F(VduseTest, basic_io) {
     ASSERT_FALSE(node.empty());
     EXPECT_EQ(0, device_io(node, pattern(0x5a), true));
     EXPECT_EQ(0, device_io(node, pattern(0xa5), true, IMG_SIZE - IO_OFF - IO_LEN));
+}
+
+// The retained-mapping budget's observable half.
+//
+// vduse resolves guest addresses lazily and, when an invalidation retires a mapping,
+// keeps it on a `stale` list rather than munmapping it under a request that may still
+// hold its VA; vq_tick releases that list once no queue has anything in flight, and
+// past VDUSE_STALE_FLUSH_BYTES it stops dispatch device-wide to force the moment
+// sooner. What this case witnesses is the accounting the budget is read off, and the
+// release that keeps the accounting from being a leak:
+//
+//   live   0 -> nonzero while the device serves -> 0 once it stops
+//   stale  0 throughout
+//
+// Load-following, and the shape is the point rather than a stylistic choice. A single
+// static number cannot separate a cache that released everything from one that had
+// not yet accumulated anything -- which is exactly how a retained-mapping leak passes
+// a suite that samples once. A rise and a return to the same baseline can, and the
+// return is the assertion a missing release fails: dropping the flush from
+// Iotlb::clear() leaves `stale` holding every mapping the device resolved, and
+// dropping the invalidate from it leaves them in the lookup, so each of the two final
+// zeros has a mutation of its own.
+//
+// What it does NOT witness, and why, is the budget's own threshold. The only writer
+// that leaves anything ON `stale` is invalidate_locked() as the VDUSE_UPDATE_IOTLB
+// handler calls it -- Iotlb::clear() invalidates and flushes inside one critical
+// section, and invalidate() has no caller at all -- and the kernel sends that message
+// from exactly one place: vduse_dev_update_iotlb(), called only by
+// vduse_vdpa_set_map(), whose .set_map op only vhost-vdpa invokes (linux-7.2.3
+// drivers/vdpa/vdpa_user/vduse_dev.c:340 and :885, and the three ops->set_map sites
+// in drivers/vhost/vdpa.c; virtio_vdpa.c has none). This suite's consumer is
+// `vdpa dev add mgmtdev vduse`, i.e. the virtio_vdpa bus driver -- so no invalidation
+// arrives, `stale` stays empty, and neither the comparison against the budget nor the
+// quiesce it triggers is reachable from here. The two `stale` assertions below are
+// therefore a baseline and not a bound: they cannot go red on a mutation of that
+// comparison, only on one that retains a mapping past teardown.
+TEST_F(VduseTest, teardown_releases_every_mapping_the_cache_retained) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    // The baseline the return below is measured against, read where it is true
+    // whatever start() goes on to do: a constructed device has never been asked for
+    // an address. Read AFTER start() instead and it would also be asserting something
+    // about sweep() -- a start() that adopts a leftover registration rather than
+    // creating one resolves the vring during the adopt, so the cache is not empty
+    // there, and the sweep's own notes record an adoption it could not complete.
+    EXPECT_EQ((uint64_t) 0, vduse_iotlb_live_bytes(dev));
+    EXPECT_EQ((uint64_t) 0, vduse_iotlb_stale_bytes(dev));
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());          // fires LAST (declared first)
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    // One write and its read-back, which is what makes the device resolve a data
+    // buffer and not only its vring.
+    ASSERT_EQ(0, device_io(node, pattern(0x5a), true));
+
+    // The rise, and the non-vacuity control for everything below it: a device that
+    // never resolved an address returns to zero by holding nothing, and only this
+    // says it held something first.
+    uint64_t live = vduse_iotlb_live_bytes(dev);
+    EXPECT_GT(live, (uint64_t) 0);
+    EXPECT_EQ((uint64_t) 0, vduse_iotlb_stale_bytes(dev));
+    // The budget's calibration, measured instead of asserted in prose. One mapping of
+    // the kernel's bounce region is 64 MiB by default -- VDUSE_BOUNCE_SIZE at
+    // vduse_dev.c:47, undivided because nas is 1 for the api version 0 this transport
+    // sets (:2214, :2237), registered as ONE iotlb entry covering [0, bounce_size-1]
+    // at iova_domain.c:400 -- and any request carrying data resolves through it. So a
+    // device that has served one such request already holds at least the flush budget
+    // LIVE, which is what makes the first invalidation of that region meet
+    // `stale_bytes() >= VDUSE_STALE_FLUSH_BYTES` outright rather than creep towards
+    // it. One-sided, and stated as such: a budget raised past what one device holds
+    // goes red here, while one lowered -- which would quiesce the device on every
+    // tick -- does not, because this bounds the budget from above only.
+    EXPECT_LE(vduse_iotlb_flush_budget(), live)
+        << "the budget is wider than one serving device holds live";
+
+    // The return to baseline. Detached and shut down explicitly rather than left to
+    // the two DEFERs above, because the assertions that follow need both to have run;
+    // each DEFER is idempotent, so the teardown still happens if an assertion fails
+    // first, and the order inside it is unchanged -- consumer off, then daemon.
+    vdpa_detach(TEST_NAME);
+    ASSERT_EQ(0, dev->shutdown());
+    EXPECT_EQ((uint64_t) 0, vduse_iotlb_live_bytes(dev));
+    EXPECT_EQ((uint64_t) 0, vduse_iotlb_stale_bytes(dev));
 }
 
 // #208: what the guest reads back as this disk's serial has to identify THIS

@@ -339,6 +339,19 @@ struct Iotlb {
             n += (size_t)(m.last - m.start + 1);
         return n;
     }
+    // The pair of the counter above: bytes of mapping still IN the lookup, i.e.
+    // mmapped and reachable by a resolve() hit. The two together are the whole
+    // footprint this cache holds in our address space, and the split is what says
+    // which half of it is still answering requests and which is only waiting to be
+    // released. Same expression as stale_bytes, so the note there about a wrapping
+    // range covers this one too.
+    size_t live_bytes() {
+        SCOPED_LOCK(lock);
+        size_t n = 0;
+        for (auto& m : maps)
+            n += (size_t)(m.last - m.start + 1);
+        return n;
+    }
     // Unlocked halves for clear(): photon::mutex is not recursive, so clear()
     // cannot call the lock-taking members above it. `lock` is already held.
     void invalidate_locked(uint64_t start, uint64_t last,
@@ -2604,6 +2617,37 @@ VduseController* new_vduse_controller(const char* lock_dir) {
     if (validate_scope_dir(lock_dir, "lock") < 0)
         return nullptr;   // already logged
     return new VduseControllerImpl(lock_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Observation seam over the iotlb cache's mapping accounting.
+//
+// Iotlb is declared in this file and appears in no header, so no other translation
+// unit could read how much mapping the cache holds -- which is why the retained
+// mapping budget vq_tick enforces (VDUSE_STALE_FLUSH_BYTES) had nothing a test
+// could observe it with. These three close that without moving the type: they are
+// read-only, they are declared nowhere but in the suite that calls them, and no
+// header gains a declaration, a type or a field.
+//
+// UINT64_MAX, and not 0, for a handle that is not a vduse device: 0 is the answer
+// that reads as "nothing retained", so a wrong-typed handle has to contradict the
+// assertion it was passed to rather than agree with it.
+//
+// The two byte counters take the cache's photon::mutex, so they are for a caller on
+// the vcpu -- which is where the cache's own readers are.
+// ---------------------------------------------------------------------------
+uint64_t vduse_iotlb_live_bytes(IBlkDevice* dev) {
+    auto* impl = dynamic_cast<VduseDeviceImpl*>(dev);
+    return impl ? impl->iotlb.live_bytes() : UINT64_MAX;
+}
+
+uint64_t vduse_iotlb_stale_bytes(IBlkDevice* dev) {
+    auto* impl = dynamic_cast<VduseDeviceImpl*>(dev);
+    return impl ? impl->iotlb.stale_bytes() : UINT64_MAX;
+}
+
+uint64_t vduse_iotlb_flush_budget() {
+    return VDUSE_STALE_FLUSH_BYTES;
 }
 
 }  // namespace blk

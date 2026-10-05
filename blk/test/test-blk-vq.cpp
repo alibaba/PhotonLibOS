@@ -297,6 +297,12 @@ struct GuestChain {
     size_t bump = 0;
 
     GuestChain() : mem(64 * 1024, 0), desc(RING_NUM) {}
+    // A table deeper than the ring, for the cases that walk a chain up to the
+    // engine's own depth bound: `ring_num` is the extent the walk checks every
+    // guest-written index against, so a chain of N descriptors needs a table of at
+    // least N. 64 KiB of guest memory is unchanged and still enough -- the deepest
+    // chain built here is 64 * 512 bytes of payload plus a header and a status.
+    explicit GuestChain(uint32_t table_size) : mem(64 * 1024, 0), desc(table_size) {}
 
     // reserve `len` bytes of guest memory, optionally filled; returns the
     // address a descriptor would carry
@@ -468,12 +474,17 @@ public:
     // test::BackendProbe so the sync becomes observable. `write_through` defaults
     // to false because every case that predates the caching policy asserts on the
     // bytes and none on persistence -- the ones that do pass it by name.
+    // `ring_num` defaults to RING_NUM, which is what GuestChain's default constructor
+    // sizes its table to, so every existing case passes the same value it always did;
+    // the deep-chain cases pass their own table's extent, because that is the bound
+    // the walk checks each guest-written descriptor index against.
     uint8_t serve(GuestChain& c, bool read_only, uint32_t* written,
-                  bool write_through = false, fs::IFile* backend = nullptr) {
+                  bool write_through = false, fs::IFile* backend = nullptr,
+                  uint32_t ring_num = RING_NUM) {
         VirtioBlkTranslate tr;
         tr.bind(&c, &chain_translate);
         return virtio_blk_serve_chain(backend ? backend : img.file, read_only, write_through,
-                                      CHAIN_SERIAL, "vq", c.desc.data(), 0, RING_NUM,
+                                      CHAIN_SERIAL, "vq", c.desc.data(), 0, ring_num,
                                       CHAIN_CAPACITY, tr, written);
     }
     ssize_t read_back(void* dst, size_t n) {
@@ -727,6 +738,191 @@ TEST_F(ChainFixture, get_id_into_a_shorter_buffer_writes_only_what_was_offered) 
     EXPECT_EQ(0, memcmp(want, c.at(ioff), offered));
     for (size_t i = 0; i < offered; i++)
         EXPECT_EQ(SENTINEL, c.at(coff)[i]);
+}
+
+// ---------------------------------------------------------------------------
+// The request path's working storage
+//
+// What the engine claims about serving a request is that it allocates nothing for
+// it: the chain is walked into a DescStream that lives in serve_chain's own frame,
+// whose iovec array is a fixed C array one element deep per descriptor the walk
+// will take, and the scatter list the backend is handed is that array pointing at
+// the guest's own buffers. Two consequences of that are observable from here and a
+// third is not; the two cases below pin the first two, and (3) says what the third
+// would need:
+//
+//   1. the depth is a COMPILE-TIME bound and the engine refuses past it rather than
+//      growing: a chain of exactly DEEPEST_CHAIN is served and one descriptor deeper
+//      is refused. That bound IS the array's depth -- DescStream's iov[] carries one
+//      element per descriptor the walk will take -- so it is also what sets
+//      serve_chain's stack footprint, and raising it to serve deeper chains is the
+//      change that would first need the storage moved off the stack.
+//   2. the payload reaches the backend as ONE gather over the guest's buffers. A
+//      per-request bounce buffer, the one-line way to break the claim, is invisible
+//      in the bytes that land and in every count test::BackendProbe already keeps;
+//      the iovec bases and lengths are what betray it, so this records them.
+//   3. that the array is an array rather than something with a heap behind it is NOT
+//      observable from here: a std::vector<iovec> of the same depth produces the same
+//      bases, the same lengths and the same single call, so both cases below stay
+//      green over it. Witnessing that directly needs an allocator instrument, and one
+//      perturbs the path it is measuring -- which is why (1) is pinned instead: it is
+//      the part of the claim a reason to heap-allocate would have to break first.
+// ---------------------------------------------------------------------------
+
+// blk/utils.cpp's MAX_DESC_CHAIN, spelled out here on purpose. It is file-local to
+// the implementation and this suite family's standing rule is that it must not read
+// the values it asserts against out of the code under test (see PEER_MAX_QUEUES in
+// test-vduse.cpp): the constant is what bounds both the walk's step count and the
+// iovec array's depth, so if it ever moves these two cases go red, which is the
+// point.
+constexpr int DEEPEST_CHAIN = 64;
+constexpr int SCATTER_MAX_IOV = DEEPEST_CHAIN;
+
+// The scatter list exactly as the backend received it. Derived from BackendProbe in
+// this file rather than added to harness.h: that header is compiled into five
+// binaries and its classes are the ones whose layout the project has already
+// measured and pinned, so an observation only this suite needs stays here.
+class ScatterProbe : public test::BackendProbe {
+public:
+    // does NOT own f, exactly as BackendProbe does not
+    explicit ScatterProbe(fs::IFile* f) : test::BackendProbe(f) {}
+
+    struct Call {
+        int iovcnt = 0;
+        void* base[SCATTER_MAX_IOV] = {};
+        size_t len[SCATTER_MAX_IOV] = {};
+    };
+    // One entry per call, in order. A vector because the number of calls is the
+    // thing being asserted -- a fixed array would have to guess it.
+    std::vector<Call> calls;
+
+    // preadv only, because both cases below build READ chains: that is the arm whose
+    // destination has to be the guest's own memory for the bytes to land anywhere the
+    // guest can see. pwritev is left to BackendProbe, whose short-count knob these
+    // cases do not use.
+    ssize_t preadv(const struct iovec* iov, int iovcnt, off_t offset) override {
+        Call c;
+        c.iovcnt = iovcnt;
+        for (int i = 0; i < iovcnt && i < SCATTER_MAX_IOV; i++) {
+            c.base[i] = iov[i].iov_base;
+            c.len[i] = iov[i].iov_len;
+        }
+        calls.push_back(c);
+        return test::BackendProbe::preadv(iov, iovcnt, offset);
+    }
+};
+
+// Lay out a READ chain `ndesc` descriptors deep: a readable header, ndesc - 2
+// writable payload descriptors of one sector each, and the writable status byte.
+// Returns the payload offsets in guest memory, in chain order -- which is what the
+// scatter list is compared against.
+static std::vector<size_t> put_read_chain(GuestChain& c, int ndesc) {
+    virtio_blk_outhdr hdr{};
+    hdr.type = VIRTIO_BLK_T_IN;
+    hdr.sector = CHAIN_SECTOR;
+    c.add(c.place(&hdr, sizeof(hdr)), sizeof(hdr), 0);
+    std::vector<size_t> offs;
+    for (int i = 0; i < ndesc - 2; i++) {
+        size_t o = c.place(nullptr, 512);
+        memset(c.at(o), SENTINEL, 512);
+        c.add(o, 512, VRING_DESC_F_WRITE);
+        offs.push_back(o);
+    }
+    size_t st = c.place(nullptr, 1);
+    *c.at(st) = SENTINEL;
+    c.add(st, 1, VRING_DESC_F_WRITE);
+    c.finish();
+    return offs;
+}
+
+// The deepest chain the walk will take, served. Which assertion carries what:
+//   serve() == S_OK, written == payload + 1   a chain this deep is servable at all,
+//                                             so the counts below are not the
+//                                             silence of a refusal
+//   calls.size() == 1                         gathered, not looped over per element
+//   iovcnt == PAYLOAD_DESCS, and every base   THE discriminator for the no-copy
+//   equal to the guest buffer it describes    claim: a per-request bounce buffer
+//                                             answers the first two and puts heap
+//                                             addresses here instead
+//   the payload memcmp                        the control on the bases: it says the
+//                                             addresses recorded really were where
+//                                             the bytes went, which a bounce buffer
+//                                             also satisfies -- so it corroborates
+//                                             the probe and discriminates nothing
+//                                             on its own
+TEST_F(ChainFixture, the_deepest_chain_reaches_the_backend_as_one_gather_over_the_guest_buffers) {
+    constexpr int PAYLOAD_DESCS = DEEPEST_CHAIN - 2;   // a header and a status take the other two
+    constexpr size_t PAYLOAD_BYTES = (size_t) PAYLOAD_DESCS * 512;
+    GuestChain c(DEEPEST_CHAIN);
+    ScatterProbe backend(img.file);
+
+    // A pattern where the read will fetch from, so "the scatter list was the
+    // destination" is witnessed by bytes and not only by addresses.
+    std::vector<uint8_t> src(PAYLOAD_BYTES);
+    fill_pattern(src.data(), src.size(), 0x33);
+    ASSERT_EQ((ssize_t) PAYLOAD_BYTES,
+              img.file->pwrite(src.data(), src.size(), (off_t) (CHAIN_SECTOR << 9)));
+
+    std::vector<size_t> offs = put_read_chain(c, DEEPEST_CHAIN);
+    ASSERT_EQ((uint16_t) DEEPEST_CHAIN, c.ndesc);
+    size_t st = (size_t) c.desc[DEEPEST_CHAIN - 1].addr;   // the status descriptor's guest offset
+    ASSERT_EQ(SENTINEL, *c.at(st));
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK,
+              serve(c, false, &written, false, &backend, (uint32_t) c.desc.size()));
+    EXPECT_EQ((uint32_t) PAYLOAD_BYTES + 1, written);
+
+    // ONE call, not one per descriptor: the chain was gathered, not looped over.
+    ASSERT_EQ(1u, backend.calls.size());
+    // ... and gathered over the GUEST's buffers, in chain order, each element the
+    // length its descriptor carried. This is the assertion the no-copy half of the
+    // budget rests on: a bounce buffer satisfies every count above and puts heap
+    // addresses here instead.
+    ASSERT_EQ(PAYLOAD_DESCS, backend.calls[0].iovcnt);
+    for (int i = 0; i < PAYLOAD_DESCS; i++) {
+        EXPECT_EQ((void*) (c.mem.data() + offs[i]), backend.calls[0].base[i]) << "iovec " << i;
+        EXPECT_EQ(512u, backend.calls[0].len[i]) << "iovec " << i;
+        EXPECT_EQ(0, memcmp(src.data() + (size_t) i * 512, c.at(offs[i]), 512)) << "payload " << i;
+    }
+    // The status is the writable stream's last byte, which at this depth is the
+    // chain's own last descriptor. Written, so the walk reached the end of a
+    // 64-descriptor chain and located it there rather than refusing.
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *c.at(st));
+}
+
+// One descriptor past the deepest, refused. This is the other side of the depth
+// bound: the constant cannot be raised to serve a deeper chain without reddening
+// it, and raising it is the change that would have to move the working storage off
+// the stack, because DescStream's array is one element deep per descriptor the walk
+// takes.
+//
+// The refusal is detected MID-WALK -- the loop ran out of steps before it reached a
+// descriptor without VRING_DESC_F_NEXT -- so the writable stream's last byte is
+// somewhere in the middle of the chain and no status is written at all. That is the
+// documented behaviour of a mid-walk refusal, and
+// a_buffer_whose_mapping_forbids_the_access_is_refused_as_ioerr below pins the same
+// half from the other direction; what is added here is that the backend is left
+// untouched, i.e. nothing was gathered into a partial request either.
+TEST_F(ChainFixture, a_chain_one_past_the_deepest_is_refused_without_touching_the_backend) {
+    constexpr int TOO_DEEP = DEEPEST_CHAIN + 1;
+    GuestChain c(TOO_DEEP);
+    ScatterProbe backend(img.file);
+    std::vector<size_t> offs = put_read_chain(c, TOO_DEEP);
+    ASSERT_EQ((uint16_t) TOO_DEEP, c.ndesc);
+    size_t st = (size_t) c.desc[TOO_DEEP - 1].addr;   // the status descriptor's guest offset
+    ASSERT_EQ(SENTINEL, *c.at(st));
+
+    uint32_t written = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_IOERR,
+              serve(c, false, &written, false, &backend, (uint32_t) c.desc.size()));
+    // nothing reached the backend, and no status was written over a data byte
+    EXPECT_EQ(0u, backend.calls.size());
+    EXPECT_EQ(0u, written);
+    EXPECT_EQ(SENTINEL, *c.at(st));
+    // nor into the guest's payload: every buffer still holds the prefill
+    for (size_t o : offs)
+        EXPECT_EQ(SENTINEL, *c.at(o));
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,6 +1457,17 @@ public:
             photon::thread_usleep(1000);
         return cond();
     }
+
+    // Offer `n` chains and let the engine take what its cap allows. SetUp already
+    // laid every avail entry out as head 0, so all this moves is the index -- with a
+    // release store, because dispatch_avail reads it through vring_avail_idx's acquire
+    // load. Writing a SMALLER index than SetUp's is legal here and only here: the
+    // cases that use this have dispatched nothing yet, so last_avail is still 0 and
+    // the engine sees the index only ever move forward.
+    void publish(uint32_t n) {
+        __atomic_store_n(&ring.avail->idx, (uint16_t) n, __ATOMIC_RELEASE);
+        srv.dispatch_avail();
+    }
 };
 
 // The shape measured in review: a device configured for a depth of 1 admitted four
@@ -1290,6 +1497,78 @@ TEST_F(DepthFixture, dispatch_stops_at_the_configured_depth_not_at_the_ring_size
     ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
     EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
     EXPECT_EQ((uint16_t) PUBLISHED, vring_used_idx(ring.used));
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
+}
+
+// The cap under a load that MOVES. The case above samples in_flight once, at the
+// cap, and one number cannot tell three devices apart: one that admits exactly the
+// configured depth, one that admitted more earlier and has since drained, and one
+// whose count never returns to zero because a slot leaked. Following the offered
+// load up, holding it there, then taking it away separates all three -- the count
+// has to TRACK what is offered while the gate holds every request, and return to its
+// baseline once the gate lets them finish.
+//
+// The two halves discriminate different mutations, and neither covers the other:
+//   the "past the cap" block   an engine that ADMITS too much. `>` in place of
+//                              dispatch_avail's `>=`, or a cap reading `num` instead
+//                              of the lesser of `num` and `queue_depth`, both put
+//                              in_flight and last_avail above DEPTH here.
+//   the final block            an engine that PROGRESSES too little. Deleting
+//                              handle_req's DEFER(in_flight--) leaves the count at
+//                              the cap forever, so the redispatch a completion
+//                              triggers keeps finding the cap binding and the four
+//                              held-back chains are never admitted; deleting
+//                              DEFER(redispatch_backlog()) drains to zero instead
+//                              and still leaves them unserved. Both fail the return
+//                              to baseline, the first by never reaching it.
+// What does NOT discriminate, and why it is here anyway: `arrivals` inside the "past
+// the cap" block. dispatch_avail only queues a coroutine -- it never runs one, since
+// neither it nor publish() yields -- so an over-admitting cap has not reached the
+// backend yet at the point that count is read, and it reads DEPTH either way. The
+// two counts beside it are read at the same instant and do move. arrivals is kept
+// because it is the same fact one step later, and a case that asserted the internal
+// counters only would not say anything about IO.
+TEST_F(DepthFixture, in_flight_follows_the_offered_load_and_returns_to_its_baseline) {
+    EXPECT_EQ(0u, srv.in_flight.load());
+
+    // One chain offered, one admitted. Below the cap, so the cap is not what holds
+    // this one back and the count has to move with the load rather than sit at it.
+    publish(1);
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= 1; }));
+    EXPECT_EQ(1u, srv.in_flight.load());
+    EXPECT_EQ((uint16_t) 1, srv.last_avail);
+
+    // Up to the cap. Both requests are parked in the gate, so this is a state and
+    // not a race: nothing can free a slot until the gate opens below.
+    publish(DEPTH);
+    ASSERT_TRUE(settle_until([&] { return rf->arrivals.load() >= DEPTH; }));
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+
+    // Past it. Everything here is synchronous: publish() and the extra dispatch both
+    // run to completion without yielding (thread_create only queues), so the counts
+    // are read at a point no coroutine can have moved them from.
+    publish(PUBLISHED);
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+    EXPECT_EQ((uint16_t) DEPTH, srv.last_avail);
+    // A second kick against a cap that is still binding is refused the same way,
+    // which is what makes the cap a bound rather than a one-pass decision.
+    srv.dispatch_avail();
+    EXPECT_EQ((uint64_t) DEPTH, rf->arrivals.load());
+    EXPECT_EQ((uint64_t) DEPTH, srv.in_flight.load());
+
+    // The load goes away and the gate opens: every offered chain is served and the
+    // count returns to where it started. in_flight can only reach 0 once the backlog
+    // is exhausted -- handle_req's decrement and the redispatch that fills the freed
+    // slot are in one DEFER chain with no yield between them -- so the counts below
+    // are read at a settled point.
+    rf->release_gate(1024);
+    ASSERT_TRUE(settle_until([&] { return srv.in_flight.load() == 0; }));
+    EXPECT_EQ(0u, srv.in_flight.load());
+    EXPECT_EQ((uint64_t) PUBLISHED, rf->arrivals.load());
+    EXPECT_EQ((uint16_t) PUBLISHED, vring_used_idx(ring.used));
+    EXPECT_EQ((uint16_t) PUBLISHED, srv.last_avail);
     EXPECT_EQ(VIRTIO_BLK_S_OK, *guest.at(soff));
 }
 
