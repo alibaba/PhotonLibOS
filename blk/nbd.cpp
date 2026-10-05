@@ -427,6 +427,17 @@ struct NbdDeviceImpl : NbdDevice {
             // directory, derived from the socket's basename, to close that window.
             // The lock is held across both the probe and the bind so no two
             // starters can pass the probe simultaneously.
+            //
+            // The scope is DERIVED from the path rather than nominated, because
+            // NbdConfig has no scope directory and deliberately so -- blk.h gives
+            // the reason (an export leaves no persistent kernel-side state, so
+            // there is nothing for a scope to hold). What derivation costs is that
+            // a lock file appears in a directory the caller never nominated: next
+            // to the socket, or in the process's working directory for a path with
+            // no directory component. Two starters of the SAME path derive the same
+            // lock either way, which is all the exclusion above needs; a caller
+            // that wants the file somewhere of its own choosing has to put the
+            // socket there.
             const char* upath = cfg.unix_path.c_str();
             const char* base = strrchr(upath, '/');
             base = base ? base + 1 : upath;
