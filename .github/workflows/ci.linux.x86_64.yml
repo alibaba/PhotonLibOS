@@ -62,55 +62,6 @@ jobs:
           cd build && ctest --timeout 3600 -V
           pkill redis-server
 
-  # PROBE, not a test -- remove once it has answered.
-  #
-  # Question: can a privileged container on a GitHub-hosted runner reach the three
-  # kernel transports whose suites the gcc-test job above skips entirely? It cannot
-  # today, for two independent reasons. The arc-acs-runner-set pods are unprivileged
-  # (values.yaml's pod spec sets no securityContext, and the job log shows the
-  # Docker-default 63 MB /dev/shm), and their node kernel is 5.10.134-*.lifsea8,
-  # which predates ublk (mainline 6.0) and vduse (5.15) outright -- so no uid can
-  # load a module the kernel does not have. That is why 104 of the blk cases print
-  # "requires root" and verify nothing.
-  #
-  # This job is the cheapest way to find out whether a different runner can: same
-  # image the arc runners are built from, but on a GitHub-hosted VM with
-  # --privileged, which is what the fstack and RocksDB jobs below already use.
-  # Every command is `|| true` and the step always exits 0, so a missing module
-  # cannot turn CI red -- the answer is in the log, not in the conclusion.
-  blk-kernel-probe:
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
-    steps:
-      - name: Probe
-        run: |
-          # GitHub runs this with `bash -e`; the whole point is that nothing here
-          # may fail the job, so the answer has to be read rather than inferred
-          # from a red X.
-          set +e
-          echo "== who am i =="
-          id
-          uname -r
-          echo "== module tree visible? =="
-          ls -d /lib/modules/* 2>&1
-          command -v modprobe >/dev/null || dnf install -y kmod
-          echo "== can each transport be loaded, and does its node appear? =="
-          for m in ublk_drv vduse target_core_user tcm_loop; do
-            out=$(modprobe "$m" 2>&1); rc=$?
-            echo "  modprobe $m: rc=$rc loaded=$(lsmod | grep -c "^$m ") ${out:+-- $out}"
-          done
-          ls -l /dev/ublk-control /dev/vduse/control /dev/uio0 2>&1
-          echo "== tcmu's configfs =="
-          ls -d /sys/kernel/config/target 2>&1
-          echo "== vduse's consumer tool (the suite skips without it) =="
-          command -v vdpa 2>&1
-          echo "== /dev/shm, which other suites already skip on =="
-          df -h /dev/shm 2>&1
-          exit 0
-
   fstack:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-26.04
