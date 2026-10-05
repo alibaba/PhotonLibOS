@@ -88,6 +88,14 @@ namespace blk {
 #define F_BLK_MQ        (1ULL << 12)
 // virtio 1.2 §2.7.7.2 / §2.7.10.1: negotiate this and both sides stop looking
 // at the flags low bit and suppress by index instead
+// virtio 1.2 §5.2.3: seg_max is the DATA-segment count, and a driver frames those
+// with a header and a status descriptor before it counts what it publishes. Read back
+// through GET_CONFIG by config_seg_max() below.
+#define F_BLK_SEG_MAX     (1ULL << 2)
+// virtio 1.2 §2.7.5.3: one ring descriptor names an array of descriptors elsewhere in
+// guest memory. Spelled as a mask here, unlike DESC_F_INDIRECT below which is the
+// flags-field value -- the same split this file already makes between F_* and DESC_F_*.
+#define F_RING_INDIRECT_DESC (1ULL << 28)
 #define F_RING_EVENT_IDX  (1ULL << 29)
 // vhost-user protocol feature constants are in vhost-user-wire.h
 struct blk_outhdr { uint32_t type, ioprio; uint64_t sector; };
@@ -108,6 +116,9 @@ static_assert(offsetof(blk_config, capacity) == 0 && offsetof(blk_config, blk_si
 struct vdesc { uint64_t addr; uint32_t len; uint16_t flags, next; };
 #define DESC_F_NEXT 1
 #define DESC_F_WRITE 2
+// Rewritten here rather than included from blk/utils.h -- the file's standing rule,
+// see the blk_config note above.
+#define DESC_F_INDIRECT 4
 struct vavail { uint16_t flags, idx, ring[]; };
 struct vused_elem { uint32_t id, len; };
 struct vused { uint16_t flags, idx; vused_elem ring[]; };
@@ -162,6 +173,34 @@ static_assert(MQ_DESC + VQ_NUM * sizeof(vdesc) <= MQ_AVAIL,
 static_assert(MQ_AVAIL + 2 * VQ_NUM + 6 <= MQ_USED, "mq avail ring must fit its block");
 static_assert(MQ_USED + 8 * VQ_NUM + 6 <= MQ_STRIDE, "mq used ring must fit its block");
 static_assert(L_MQ + MQ_QUEUES * MQ_STRIDE <= MEM_SIZE, "mq rings must fit the declared region");
+
+// Indirect tables. They go in what is left of the 0x10000 slack MEM_SIZE already
+// reserves past the status slots, AFTER the mq ring blocks -- so MEM_SIZE does not
+// move. That is deliberate and worth more than it looks: the comment above the mq
+// blocks records that they were put in this same slack for the same reason, because
+// three things read MEM_SIZE and each would need re-checking if it moved -- the tail
+// address in vring_addr_that_does_not_fit, the fit static_asserts in
+// oob_descriptor_index, and wrapping_buffer_address's proof that its address plus its
+// length overflows. All three compare in the direction growing would preserve, so
+// growing MEM_SIZE is not WRONG -- it is just a blast radius this feature does not
+// need to take.
+//
+// The design rule the L_AVAIL/L_USED comment states applies to this region unchanged:
+// they sit past the whole descriptor array so a chain can never write into them
+// however the heads are allocated, and a table is exactly such a region -- the device
+// READS it, and nothing the device writes may land in it.
+static constexpr uint64_t L_TBL = L_MQ + MQ_QUEUES * MQ_STRIDE;
+// Per-slot tables, so concurrent indirect requests do not share one. 8 entries is
+// header + data + status with room to split the header or hang a few extras.
+static constexpr uint32_t TBL_PER_SLOT = 8;
+static constexpr uint64_t TBL_SLOT_BYTES = TBL_PER_SLOT * sizeof(vdesc);
+static constexpr uint64_t L_TBL_BIG = L_TBL + SLOTS * TBL_SLOT_BYTES;
+// One shared over-cap table, for the single case that needs more entries than a slot
+// holds: MAX_INDIRECT_ENTRIES + 1, spelled out rather than read out of the code under
+// test (this suite family's standing rule).
+static constexpr uint32_t TBL_BIG_ENTRIES = 65;
+static_assert(L_TBL_BIG + TBL_BIG_ENTRIES * sizeof(vdesc) <= MEM_SIZE,
+              "indirect tables must fit the declared region");
 
 #define USED_F_NO_NOTIFY 1
 // The guest's counterpart to the device's bit above, and the only suppression
@@ -655,6 +694,22 @@ struct MockFrontend {
         return bc.capacity;
     }
 
+    // seg_max as the wire reports it, so the value AND the offset it sits at are both
+    // read from outside this process's idea of the struct. UINT32_MAX on a failed
+    // transact, which no legal config can produce.
+    uint32_t config_seg_max() {
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_CONFIG;
+        m.size = offsetof(vhost_user_config, region) + sizeof(blk_config);
+        m.payload.config.offset = 0;
+        m.payload.config.size = sizeof(blk_config);
+        if (!transact(&m, &r)) return UINT32_MAX;
+        blk_config bc;
+        memcpy(&bc, r.payload.config.region, sizeof(bc));
+        return bc.seg_max;
+    }
+
     // ---- request slots (batch submission) ----
     // The used ring reports a request by its descriptor HEAD, so the mock keeps
     // the head -> slot mapping to find the buffers a completion belongs to.
@@ -675,6 +730,13 @@ struct MockFrontend {
     static uint64_t hdr_off(uint16_t slot)    { return L_HDR    + (uint64_t)slot * 64; }
     static uint64_t data_off(uint16_t slot)   { return L_DATA   + (uint64_t)slot * DATA_SLOT; }
     static uint64_t status_off(uint16_t slot) { return L_STATUS + (uint64_t)slot * 64; }
+    // A slot's indirect table. GPA, not QVA: connect_to() gives the region a GPA base
+    // of 0, so a guest offset IS its GPA -- the same identity hdr_off, data_off and
+    // status_off already rely on, and the opposite space from what SET_VRING_ADDR
+    // carries.
+    static constexpr uint64_t tbl_off(uint16_t slot) {
+        return L_TBL + (uint64_t) slot * TBL_SLOT_BYTES;
+    }
 
     // Where `qid`'s three rings live. qid 0 is the legacy triple the whole file
     // already reads, at the addresses it has always had; qid >= 1 gets the block
@@ -719,6 +781,19 @@ struct MockFrontend {
         return head;
     }
 
+    // An indirect request takes ONE ring slot, which is the whole point of the feature:
+    // the same ring depth carries more requests, and a request can carry more buffers
+    // than the ring is deep. A separate allocator rather than a parameter on
+    // alloc_head(), because the two steps differ -- three there, one here -- and
+    // folding them would put the three back into the indirect path by accident, which
+    // is the shape of the defect the comment above alloc_head() records.
+    uint16_t alloc_head_indirect(uint32_t qid = 0) {
+        uint16_t& cursor = desc_head_of(qid);
+        uint16_t head = cursor;
+        cursor = (uint16_t)(head + 1 >= VQ_NUM ? 0 : head + 1);
+        return head;
+    }
+
     // build one request into `slot` and publish it to `qid`'s avail ring; no kick
     int submit(uint16_t slot, uint32_t type, uint64_t sector, uint32_t len, bool data_write,
                uint32_t qid = 0) {
@@ -737,6 +812,60 @@ struct MockFrontend {
                                (uint16_t)(DESC_F_NEXT | (data_write ? DESC_F_WRITE : 0)),
                                (uint16_t)(head + 2)};
         desc[head + 2] = vdesc{status_off(slot), 1, DESC_F_WRITE, 0};
+
+        uint16_t& ai = avail_idx_of(qid);
+        avail->ring[ai % VQ_NUM] = head;
+        __sync_synchronize();
+        avail->idx = ++ai;
+        __sync_synchronize();
+        slot_of_head_of(qid)[head] = (int16_t)slot;
+        return 0;
+    }
+
+    // Build one request as a single INDIRECT ring descriptor plus a table holding
+    // header / data / status, and publish it to `qid`'s avail ring; no kick. The
+    // completion path is NOT touched and must not be: slot_of_head, collect(), and
+    // do_request's head check and used-len check all work off the RING head, which is
+    // what the used element's id reports for an indirect request too. That those four
+    // need no change is the observable half of "the used id and the used len are
+    // unchanged by layout".
+    //
+    // `n_extra` hangs that many zero-length entries behind the status, chained, for the
+    // over-cap case. They go AFTER the status rather than before it, so a table walked
+    // correctly still ends at the status.
+    int submit_indirect(uint16_t slot, uint32_t type, uint64_t sector, uint32_t len,
+                        bool data_write, uint32_t n_extra = 0, uint32_t qid = 0) {
+        if (!qid_valid(qid)) { errno = EINVAL; fail("queue index"); return -1; }
+        // A table is built in the slot's own region, so it has to fit there; the one
+        // case that needs more entries than a slot holds builds in L_TBL_BIG instead.
+        if (3 + n_extra > TBL_PER_SLOT) {
+            errno = E2BIG;
+            fail("table does not fit its slot");
+            return -1;
+        }
+        uint16_t head = alloc_head_indirect(qid);
+        auto* desc = (vdesc*)(mem + ring_desc_off(qid));
+        auto* avail = (vavail*)(mem + ring_avail_off(qid));
+        auto* hdr = (blk_outhdr*)(mem + hdr_off(slot));
+        hdr->type = type;
+        hdr->ioprio = 0;
+        hdr->sector = sector;
+        *(uint8_t*)(mem + status_off(slot)) = 0xff;
+
+        auto* t = (vdesc*)(mem + tbl_off(slot));
+        const uint32_t n = 3 + n_extra;
+        t[0] = vdesc{hdr_off(slot), sizeof(blk_outhdr), DESC_F_NEXT, 1};
+        t[1] = vdesc{data_off(slot), len,
+                     (uint16_t)(DESC_F_NEXT | (data_write ? DESC_F_WRITE : 0)), 2};
+        t[2] = vdesc{status_off(slot), 1,
+                     (uint16_t)(DESC_F_WRITE | (n_extra ? DESC_F_NEXT : 0)),
+                     (uint16_t)(n_extra ? 3 : 0)};
+        for (uint32_t i = 0; i < n_extra; i++)
+            t[3 + i] = vdesc{data_off(slot), 0,
+                             (uint16_t)(i + 1 < n_extra ? DESC_F_NEXT : 0),
+                             (uint16_t)(i + 4)};
+        // ONE ring descriptor, carrying the flag and no NEXT.
+        desc[head] = vdesc{tbl_off(slot), n * (uint32_t)sizeof(vdesc), DESC_F_INDIRECT, 0};
 
         uint16_t& ai = avail_idx_of(qid);
         avail->ring[ai % VQ_NUM] = head;
