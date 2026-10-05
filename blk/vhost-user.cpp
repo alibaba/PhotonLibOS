@@ -54,8 +54,10 @@ limitations under the License.
 // in BOTH words: VIRTIO_BLK_F_MQ in the device features and
 // VHOST_USER_PROTOCOL_F_MQ in the protocol features. Neither alone is enough -- the
 // device bit is what tells the guest driver to use the queues, the protocol bit is
-// what lets the primary find out how many there are. Split ring, no
-// indirect descriptors offered (F_RING_INDIRECT_DESC not in our feature set),
+// what lets the primary find out how many there are. Split ring, indirect
+// descriptors offered (VIRTIO_RING_F_INDIRECT_DESC) and walked once negotiated --
+// one table per descriptor, MAX_INDIRECT_ENTRIES deep, no nesting -- alongside
+// VIRTIO_BLK_F_SEG_MAX so the driver can learn the segment bound;
 // IN/OUT/FLUSH/GET_ID served; FEATURE_DISCARD/WRITE_ZEROES accepted in cfg
 // but not offered. Each queue serves on one vcpu -- the caller's, or a pool
 // vcpu when BlkConfig::pool is set -- while the control plane (the accept and
@@ -394,7 +396,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         nqueues = cfg.queues ? std::min<uint32_t>(cfg.queues, MAX_QUEUES) : 1;
 
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_BLK_F_BLK_SIZE) |
-                         (1ULL << VIRTIO_RING_F_EVENT_IDX) |
+                         (1ULL << VIRTIO_BLK_F_SEG_MAX) |
+                         (1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
                          (1ULL << VHOST_USER_F_PROTOCOL_FEATURES);   // we always answer
                                                                      // GET_PROTOCOL_FEATURES
         if (cfg.info.features & FEATURE_FLUSH)
@@ -409,6 +412,17 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // the device is multiqueue.
         if (nqueues >= 2)
             offer_features |= (1ULL << VIRTIO_BLK_F_MQ);
+        // Offering bit 28 commits us to walking a table: a second peer-supplied length
+        // per request, bounded by MAX_INDIRECT_ENTRIES and by the scatter list's own
+        // depth, translated read-only through the same delegate every buffer goes
+        // through, and never itself treated as data. Offering SEG_MAX commits us to a
+        // truthful seg_max, and the two are coupled by arithmetic rather than by code:
+        // a driver frames its data segments with a header and a status descriptor, so
+        // what it publishes is seg_max + 2 long. VIRTIO_BLK_SEG_MAX_ADVERTISED is that
+        // subtraction; advertising MAX_INDIRECT_ENTRIES itself would have our own cap
+        // refuse the largest request we just told the driver it could build. The two
+        // offers are otherwise independent -- in particular neither is gated on
+        // nqueues, so do not fold them into the F_MQ condition above.
         vqs.reserve(nqueues);
         for (uint32_t i = 0; i < nqueues; i++) {
             auto* q = new Vq;
@@ -1089,6 +1103,14 @@ struct VhostUserDeviceImpl : IBlkDevice {
             for (uint32_t i = 0; i < nqueues; i++) {
                 vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                             std::memory_order_relaxed);
+                // Same rule as event_idx beside it, and the same reason with one extra
+                // edge: a frontend that masked bit 28 off and still sent a table is
+                // claiming a layout we never agreed to bound, so deriving this from our
+                // own offer would have us walk it. A store, not an assign: handle_req
+                // reads it from the serving side, this handler writes it from the
+                // control plane.
+                vqs[i]->srv.indirect_desc.store(!!(negotiated & (1ULL << VIRTIO_RING_F_INDIRECT_DESC)),
+                                                std::memory_order_relaxed);
                 // FLUSH absent from the negotiated word leaves the frontend with
                 // no command that asks for persistence, so a write cannot be
                 // completed on the strength of a FLUSH that may never come.
@@ -1607,6 +1629,9 @@ struct VhostUserDeviceImpl : IBlkDevice {
         auto* bc = (virtio_blk_config*)dev_config;
         bc->capacity = capacity_sectors;
         bc->blk_size = 1u << sector_shift;
+        // §5.2.3, and only meaningful because F_SEG_MAX is offered. See
+        // VIRTIO_BLK_SEG_MAX_ADVERTISED for why this is the entry cap minus two.
+        bc->seg_max = VIRTIO_BLK_SEG_MAX_ADVERTISED;
         bc->num_queues = (uint16_t)nqueues;
     }
 
@@ -1684,6 +1709,10 @@ struct VhostUserDeviceImpl : IBlkDevice {
             // unconditional notification.
             q->srv.event_idx.store(false, std::memory_order_relaxed);
             q->srv.notify_valid.store(false, std::memory_order_relaxed);
+            // Same hazard, and a more concrete one: a true value left here means a NEW
+            // session that never negotiated bit 28 still walks tables, i.e. the
+            // offer-instead-of-negotiated mistake comes back on the reset path.
+            q->srv.indirect_desc.store(false, std::memory_order_relaxed);
             // write_through goes the other way, back to the engine's default: with
             // no negotiated word in hand, the safe assumption is that no FLUSH will
             // arrive. Being wrong here costs a sync per write until SET_FEATURES

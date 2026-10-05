@@ -710,6 +710,22 @@ struct MockFrontend {
         return bc.seg_max;
     }
 
+    // size_max sits next to seg_max in the same struct, and this reads it for the same
+    // reason: VIRTIO_BLK_F_SIZE_MAX (bit 1) is not offered, so the field has to stay 0
+    // and a seg_max written one field early shows up here rather than nowhere.
+    uint32_t config_size_max() {
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_CONFIG;
+        m.size = offsetof(vhost_user_config, region) + sizeof(blk_config);
+        m.payload.config.offset = 0;
+        m.payload.config.size = sizeof(blk_config);
+        if (!transact(&m, &r)) return UINT32_MAX;
+        blk_config bc;
+        memcpy(&bc, r.payload.config.region, sizeof(bc));
+        return bc.size_max;
+    }
+
     // ---- request slots (batch submission) ----
     // The used ring reports a request by its descriptor HEAD, so the mock keeps
     // the head -> slot mapping to find the buffers a completion belongs to.
@@ -1058,12 +1074,19 @@ struct MockFrontend {
     // when no completion arrived, so a caller initialises the local it passes in.
     // `qid` defaults to 0 for the same reason and in the same shape.
     int do_request(uint32_t type, uint64_t sector, void* data, size_t len, bool data_write,
-                   uint32_t* used_len = nullptr, uint32_t qid = 0) {
+                   uint32_t* used_len = nullptr, uint32_t qid = 0, bool indirect = false) {
         if (!qid_valid(qid)) { errno = EINVAL; fail("queue index"); return -1; }
         if (len > DATA_SLOT) { errno = E2BIG; fail("len > DATA_SLOT"); return -1; }
         uint16_t slot = (uint16_t)(slot_seq++ % SLOTS);
         if (data && len && !data_write) memcpy(mem + data_off(slot), data, len);
-        submit(slot, type, sector, (uint32_t)len, data_write, qid);
+        // Only the SUBMIT half differs. Everything below -- the head check, the used-len
+        // check, the status read -- is shared, which is the observable half of "the used
+        // id and the used len are unchanged by layout": a second completion path here
+        // would be a place for a layout change to hide.
+        if (indirect)
+            submit_indirect(slot, type, sector, (uint32_t)len, data_write, 0, qid);
+        else
+            submit(slot, type, sector, (uint32_t)len, data_write, qid);
         // a conformant driver: kick only when §2.7.10.1 says to. The
         // unconditional kick() stays for cases that are not about notification.
         if (!kick_if_needed(qid)) return -1;
@@ -5309,6 +5332,422 @@ TEST_F(VhostUserTest, adopt_keeps_a_full_ring_cursor_and_snaps_one_entry_past_it
             << "a cursor " << VQ_NUM + 1 << " entries past used_idx was adopted on a "
             << VQ_NUM << "-entry ring; one more outstanding than the ring can hold is"
                " not a state this queue was ever in";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
+// ---------------------------------------------------------------------------
+// Indirect descriptors over the wire
+//
+// The engine half of this is pinned in test-blk-vq.cpp against a fixture whose guest
+// memory the case itself owns. What this file adds is the transport: that the bit is
+// offered, that the device walks a table only once the NEGOTIATED word carries it,
+// that a reconnect which declines the bit stops walking them, and that seg_max is
+// published where the wire says it is.
+//
+// One trap the cases below are written around. Offering bit 28 makes every existing
+// case in this file negotiate it, and not one of them sends a table -- they all build
+// three-descriptor direct chains. So the 68 that predate this block are the regression
+// guard for "offered the bit, driver still sends direct chains", which is a combination
+// a real frontend produces, and nothing in them exercises the walk by accident. Every
+// case below builds its indirect request explicitly.
+// ---------------------------------------------------------------------------
+
+TEST_F(VhostUserTest, indirect_desc_is_offered_and_negotiated) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        // The offer is a PRECONDITION and is read before the negotiated word is
+        // asserted on: a bit that was never offered cannot survive negotiation either,
+        // and the second assertion below would then pass for a reason nobody intended.
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_FEATURES; m.size = 0;
+        ASSERT_TRUE(fe.transact(&m, &r));
+        // Copied out before a macro sees it: `r` is a packed struct.
+        const uint64_t offer = r.payload.u64;
+        ASSERT_TRUE(offer & F_RING_INDIRECT_DESC) << "bit 28 is not in GET_FEATURES";
+
+        ASSERT_TRUE(fe.negotiate(false));
+        ASSERT_TRUE(fe.features & F_RING_INDIRECT_DESC)
+            << "bit 28 was offered but did not survive negotiation, so every case below"
+               " that builds a table is exercising a refusal";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
+// The gate itself, and the in-repo discriminator for deriving it from the offer
+// instead of from the negotiated word: this mock can DECLINE one bit, so "we offered
+// it" and "the peer accepted it" are two different sessions here. The request sent is
+// a legal one -- byte for byte the request M3 serves -- so what differs is only the
+// feature word.
+//
+// The write/read pair afterwards is not padding. A refusal that tore the session down
+// would satisfy every assertion above it and still be a defect.
+TEST_F(VhostUserTest, an_indirect_request_is_refused_when_the_feature_was_declined) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t OFF = 4ull << 20;
+    auto good = pattern(0x11, 4096);
+    std::vector<char> buf(4096, 0);
+    int st = -1;
+    uint32_t ulen = 0;
+    const char* why = nullptr;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_FEATURES; m.size = 0;
+        if (!fe.transact(&m, &r)) return EPROTO;
+        const uint64_t offer = r.payload.u64;
+        if (!(offer & F_RING_INDIRECT_DESC)) { why = "bit 28 was never offered"; return EPROTO; }
+        fe.decline = F_RING_INDIRECT_DESC;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features & F_RING_INDIRECT_DESC) { why = "bit 28 survived the decline"; return EPROTO; }
+
+        if (fe.write_dev(OFF, good.data(), good.size()) != S_OK) return EIO;
+        st = fe.do_request(T_IN, OFF >> 9, buf.data(), buf.size(), true, &ulen, 0,
+                           /*indirect=*/true);
+        // And the session is still usable, which is the half a bare refusal shape
+        // cannot show.
+        if (fe.write_dev(OFF, good.data(), good.size()) != S_OK) return EIO;
+        std::vector<char> back(good.size(), 0);
+        if (fe.read_dev(OFF, back.data(), back.size()) != S_OK) return EIO;
+        return memcmp(good.data(), back.data(), good.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(nullptr, why) << why;
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0xff, st) << "a declined feature still walked the table";
+    EXPECT_EQ(0u, ulen);
+    EXPECT_EQ(0, verify_backend(OFF, good));
+}
+
+// A READ published as a table reports data plus status in the used element's length,
+// exactly as the direct form does. The 4097 is written out rather than left to
+// do_request's own expectation: it derives the same number from the request type, and
+// a case that leaned on that would stop being a check on the wire the moment somebody
+// "simplified" the helper.
+TEST_F(VhostUserTest, an_indirect_read_reports_data_plus_status) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t OFF = 4ull << 20;
+    auto w = pattern(0x33, 4096);
+    std::vector<char> buf(4096, 0);
+    int st = -1;
+    uint32_t ulen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+        // Seeded through the direct path, so what the indirect read brings back is
+        // compared against bytes that got there a different way.
+        if (fe.write_dev(OFF, w.data(), w.size()) != S_OK) return EIO;
+        st = fe.do_request(T_IN, OFF >> 9, buf.data(), buf.size(), true, &ulen, 0, true);
+        return st < 0 ? EIO : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(S_OK, st);
+    EXPECT_EQ(4097u, ulen);
+    EXPECT_EQ(0, memcmp(w.data(), buf.data(), w.size()));
+}
+
+// The WRITE half. Its evidence that no table byte reached the backend is read from the
+// image itself rather than from the used length: verify_backend bypasses the frontend
+// entirely, which is the transport-side counterpart of the engine case that asserts
+// the table descriptor carries no data.
+TEST_F(VhostUserTest, an_indirect_write_reports_only_the_status_byte) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t OFF = 4ull << 20;
+    auto w = pattern(0x44, 4096);
+    int st = -1;
+    uint32_t ulen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+        st = fe.do_request(T_OUT, OFF >> 9, w.data(), w.size(), false, &ulen, 0, true);
+        return st < 0 ? EIO : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(S_OK, st);
+    EXPECT_EQ(1u, ulen);
+    EXPECT_EQ(0, verify_backend(OFF, w));
+}
+
+// D1 from the transport side, and the same argument as the engine case: an indirect
+// request is one head, so it is one in_flight, so a configured queue_depth caps it the
+// same way. Every expectation is copied from configured_queue_depth_caps_in_flight and
+// only the request's LAYOUT differs -- which is the discriminator, since per-entry
+// accounting would hit the cap during the first dispatch and `seen` would not read 2.
+TEST_F(VhostUserTest, configured_queue_depth_caps_indirect_requests_the_same_way) {
+    constexpr uint64_t DEPTH = 2;
+    constexpr int N = 8;   // far under VQ_NUM, so only the depth can hold this at 2
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queue_depth = (uint32_t) DEPTH;
+    test::RecordingFile rf(file);
+    rf.gated = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    DEFER(rf.release_gate(1024));
+
+    uint64_t seen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+        constexpr uint16_t SLOT = SLOTS - 1;
+        // ONE ring descriptor naming a three-entry table, in place of the three ring
+        // descriptors the direct-chain case writes. Everything after this is verbatim.
+        auto* desc = (vdesc*)(fe.mem + L_DESC);
+        auto* t = (vdesc*)(fe.mem + MockFrontend::tbl_off(SLOT));
+        t[0] = vdesc{MockFrontend::hdr_off(SLOT), sizeof(blk_outhdr), DESC_F_NEXT, 1};
+        t[1] = vdesc{MockFrontend::data_off(SLOT), 512,
+                     (uint16_t)(DESC_F_WRITE | DESC_F_NEXT), 2};
+        t[2] = vdesc{MockFrontend::status_off(SLOT), 1, DESC_F_WRITE, 0};
+        desc[0] = vdesc{MockFrontend::tbl_off(SLOT), 3 * (uint32_t)sizeof(vdesc),
+                        DESC_F_INDIRECT, 0};
+        *(blk_outhdr*)(fe.mem + MockFrontend::hdr_off(SLOT)) = blk_outhdr{T_IN, 0, 0};
+        *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) = 0xff;
+
+        uint16_t u0 = fe.used_idx_now();
+        for (int i = 0; i < N; i++)
+            fe.publish(0);
+        if (!fe.kick()) return EIO;   // ONE kick for all N
+
+        for (int i = 0; i < 2000 && rf.arrivals.load() < DEPTH; i++)
+            ::usleep(1000);
+        // The gate is shut, so nothing completes and nothing frees a slot: the count
+        // can only rise here, and waiting can never turn a device that over-admitted
+        // into one that looks like it did not.
+        ::usleep(50 * 1000);
+        seen = rf.arrivals.load();
+        rf.release_gate(1024);
+        if (!fe.wait_used_advance(u0, (uint16_t) N, 20000)) return ETIMEDOUT;
+        return *(uint8_t*)(fe.mem + MockFrontend::status_off(SLOT)) == S_OK ? 0 : EIO;
+    });
+    EXPECT_EQ(0, rc);
+    EXPECT_EQ(DEPTH, seen);
+    EXPECT_EQ((uint64_t) N, rf.arrivals.load());
+}
+
+// vq_reset() clearing indirect_desc is what this pins, and it is the only thing that
+// does: without the clear, a session that never negotiated bit 28 inherits the
+// previous session's true and walks tables anyway -- the offer-instead-of-negotiated
+// mistake, arriving through the reset path.
+//
+// Session 1 has to SUCCEED. A case whose first half also failed would be comparing two
+// refusals and would pass with the clear deleted.
+TEST_F(VhostUserTest, a_reconnect_that_declines_the_feature_stops_walking_tables) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t OFF = 4ull << 20;
+    auto w = pattern(0x55, 4096);
+    int st1 = -1, st2 = -1;
+    uint32_t ulen2 = 0;
+
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+        st1 = fe.do_request(T_OUT, OFF >> 9, w.data(), w.size(), false, nullptr, 0, true);
+        return st1 == S_OK ? 0 : EIO;
+    });
+    ASSERT_EQ(0, rc) << "session 1 did not serve the table, so session 2 proves nothing";
+    EXPECT_EQ(S_OK, st1);
+
+    rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        fe.decline = F_RING_INDIRECT_DESC;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.features & F_RING_INDIRECT_DESC) return EPROTO;
+        st2 = fe.do_request(T_OUT, OFF >> 9, w.data(), w.size(), false, &ulen2, 0, true);
+        return 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0xff, st2) << "a session that declined bit 28 inherited the previous one's";
+    EXPECT_EQ(0u, ulen2);
+}
+
+// The table's address goes through the same containment predicate every other buffer
+// does, and an address whose length wraps past the top of the space is refused by it.
+// No mutant of its own, and that is honest bookkeeping: the predicate is pre-existing
+// and already pinned. What this adds is the CALL SITE, and a predicate's coverage is
+// counted per call site rather than per line of code -- a table translated through a
+// private path would pass every existing case.
+TEST_F(VhostUserTest, a_wrapping_table_address_is_refused) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint64_t WRAP_ADDR = 0xFFFFFFFFFFFFFF9BULL;   // 2^64 - 101
+    constexpr uint32_t WRAP_LEN = 200;   // -101 + 200 = 0x62, well under MEM_SIZE
+    static_assert(WRAP_ADDR + WRAP_LEN - 1 < MEM_SIZE, "the predicate this test pins must wrap");
+
+    constexpr uint16_t SLOT = 3;
+    int st = -1;
+    uint32_t ulen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+
+        uint16_t head = fe.alloc_head_indirect();
+        blk_outhdr hdr{T_IN, 0, 0};
+        vdesc chain[1] = {{WRAP_ADDR, WRAP_LEN, DESC_F_INDIRECT, 0}};
+        st = fe.do_raw(head, SLOT, hdr, chain, 1, &ulen);
+        // The session survives its own refusal, which is the half the shape above
+        // cannot show on its own.
+        auto w = pattern(0x66, 512);
+        if (fe.write_dev(1 << 20, w.data(), w.size()) != S_OK) return EIO;
+        std::vector<char> back(w.size(), 0);
+        if (fe.read_dev(1 << 20, back.data(), back.size()) != S_OK) return EIO;
+        return memcmp(w.data(), back.data(), w.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0xff, st);
+    EXPECT_EQ(0u, ulen);
+}
+
+// An over-cap table is refused and the session goes on serving. The entries are
+// CHAINED, not zeroed: flags == 0 means no NEXT, so a region of zeroes is a one-entry
+// table and both a capped and an uncapped engine pay exactly one translate for it.
+//
+// The kick is unconditional because do_raw's is, and that is the right choice here
+// rather than an oversight: this case sends a deliberately malformed table, so the
+// backend is busy refusing it, and a conditional kick would make the verdict depend on
+// an avail_event published by a device in exactly that window. §2.7.10.2 lets a device
+// tolerate a spurious notification, which is what this relies on.
+//
+// The entry-count half of the DoS argument is NOT observable here and this case does
+// not claim it: one translate on this transport is at most a handful of integer
+// comparisons against the mapped regions, so even a quarter of a million of them costs
+// milliseconds and collect()'s budget never expires. The count is pinned by the engine
+// case that asserts zero translates for an over-cap table. What is left here is the
+// refusal shape and the session surviving it.
+TEST_F(VhostUserTest, an_absurd_table_is_refused_and_the_session_survives) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    constexpr uint16_t SLOT = 4;
+    int st = -1;
+    uint32_t ulen = 0;
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+
+        auto* t = (vdesc*)(fe.mem + L_TBL_BIG);
+        for (uint32_t i = 0; i < TBL_BIG_ENTRIES; i++) {
+            t[i].addr = 0;
+            t[i].len = 0;
+            t[i].flags = (i + 1 < TBL_BIG_ENTRIES) ? DESC_F_NEXT : 0;
+            t[i].next = (uint16_t)(i + 1);
+        }
+        uint16_t head = fe.alloc_head_indirect();
+        blk_outhdr hdr{T_IN, 0, 0};
+        vdesc chain[1] = {{L_TBL_BIG, TBL_BIG_ENTRIES * (uint32_t)sizeof(vdesc),
+                           DESC_F_INDIRECT, 0}};
+        st = fe.do_raw(head, SLOT, hdr, chain, 1, &ulen);
+        auto w = pattern(0x77, 512);
+        if (fe.write_dev(1 << 20, w.data(), w.size()) != S_OK) return EIO;
+        std::vector<char> back(w.size(), 0);
+        if (fe.read_dev(1 << 20, back.data(), back.size()) != S_OK) return EIO;
+        return memcmp(w.data(), back.data(), w.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0xff, st);
+    EXPECT_EQ(0u, ulen);
+}
+
+// seg_max over the wire, which pins the value AND the offset it sits at: both are read
+// out of a GET_CONFIG reply rather than out of this process's idea of the struct, so a
+// 62 written one field early reads back as 0 here and as 62 in the size_max assertion
+// below, and the pair goes red together.
+//
+// That matters because the seven static_asserts over the config struct pin capacity,
+// blk_size and num_queues by offset and are required to stay exactly as they are, so
+// seg_max's offset is otherwise only implied by packed-ness and its neighbours. This is
+// the one way to pin it without touching that copy.
+//
+// What it cannot prove, stated plainly: that 62 is the RIGHT number. This asserts we
+// published the cap minus the two framing descriptors. That the driver reads the field
+// the same way is argued from the spec and from a kernel source read recorded in the
+// design document, not from anything in this repository.
+TEST_F(VhostUserTest, seg_max_is_published_as_the_cap_minus_the_two_framing_descriptors) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        vhost_user_msg m, r;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_FEATURES; m.size = 0;
+        ASSERT_TRUE(fe.transact(&m, &r));
+        const uint64_t offer = r.payload.u64;
+        ASSERT_TRUE(offer & F_BLK_SEG_MAX)
+            << "bit 2 is not offered, so a seg_max in the config space means nothing";
+        ASSERT_TRUE(fe.negotiate(false));
+        // 64 entries minus the header and status descriptors a driver frames its data
+        // segments with. Spelled out, not read out of the code under test.
+        EXPECT_EQ(62u, fe.config_seg_max());
+        // VIRTIO_BLK_F_SIZE_MAX (bit 1) is not offered, so its field stays zero -- and
+        // a seg_max written one field early would show up here instead of nowhere.
+        EXPECT_FALSE(offer & (1ULL << 1)) << "bit 1 is offered but nothing fills size_max";
+        EXPECT_EQ(0u, fe.config_size_max());
     });
     if (!fe.err.empty())
         LOG_ERROR("mock frontend: `", fe.err);

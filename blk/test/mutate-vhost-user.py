@@ -152,7 +152,11 @@ blk/utils.cpp -- VIRTIO_RING_F_EVENT_IDX, one annotation per mutant below:
                     # not catch it either: idx issues three requests against a
                     # 128-entry ring and so never reaches the in-flight cap.
 
-Run on the VM against ~/PhotonLibOS (a copy, not the repository).
+Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence is
+`backup`, then one mutation at a time with a build and a run between it and the next
+`backup`, then `restore`; `restore` and every mutation refuse to run without the
+stamp `backup` leaves, because `restore` copies .orig over the source and an .orig of
+unknown age reverts the tree silently.
 """
 import pathlib
 import sys
@@ -166,6 +170,22 @@ SRCS = {
     "utils": (pathlib.Path.home() / "PhotonLibOS/blk/utils.cpp",
               pathlib.Path.home() / "utils.cpp.orig"),
 }
+
+# `restore` overwrites BOTH sources from their .orig files, so a .orig left behind by
+# an earlier experiment reverts the tree to that experiment's shape -- silently, and
+# across every file this script knows about rather than just the one mutated. A stale
+# pair once turned the sources back three weeks; the build then failed and the previous
+# binary still printed PASSED, so the damage read as a green run. The stamp makes the
+# sequence self-checking: only `backup` may create it, a mutation and a `restore` both
+# require it, and `restore` consumes it, so a `.orig` of unknown age can never be
+# applied to a tree that is not mid-experiment.
+STAMP = pathlib.Path.home() / "mutate-vhost-user.inflight"
+
+
+def require_stamp(what):
+    if not STAMP.exists():
+        die("%s needs a backup taken in this experiment; run `backup` first "
+            "(a .orig of unknown age would revert the tree silently)" % what)
 
 MUTANTS = {
     "overread": "vhost-user",
@@ -236,13 +256,15 @@ BOUND_BLOCK = """        if (m->size > sizeof(m->payload)) {
 
 
 OFFER_FEATURES = """        offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_BLK_F_BLK_SIZE) |
-                         (1ULL << VIRTIO_RING_F_EVENT_IDX) |
+                         (1ULL << VIRTIO_BLK_F_SEG_MAX) |
+                         (1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
                          (1ULL << VHOST_USER_F_PROTOCOL_FEATURES);   // we always answer
                                                                      // GET_PROTOCOL_FEATURES
 """
 
 OFFER_FEATURES_NO_BIT30 = """        offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_BLK_F_BLK_SIZE) |
-                         (1ULL << VIRTIO_RING_F_EVENT_IDX);
+                         (1ULL << VIRTIO_BLK_F_SEG_MAX) |
+                         (1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_RING_F_INDIRECT_DESC);
 """
 
 # deleting just the call leaves an empty else-if body, which still compiles
@@ -386,17 +408,21 @@ def main():
         for src, bak in SRCS.values():
             bak.write_bytes(src.read_bytes())
             print("BACKUP_OK", bak)
+        STAMP.write_text("")
         return
     if mode == "restore":
+        require_stamp("restore")
         for src, bak in SRCS.values():
             if not bak.exists():
                 die("no backup at %s" % bak)
             src.write_bytes(bak.read_bytes())
             print("RESTORE_OK", src)
+        STAMP.unlink()
         return
 
     if mode not in MUTANTS:
         die("unknown mutation %r" % mode)
+    require_stamp(mode)
     src = SRCS[MUTANTS[mode]][0]
     text = src.read_text()
     if mode == "overread":
