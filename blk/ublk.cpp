@@ -450,11 +450,17 @@ struct UblkDeviceImpl : IBlkDevice {
         // transport whose detach(false) really does skip the I/O wait: stop_serving
         // drains in_flight only when asked to flush, and queue teardown abandons rather
         // than waits, so what is left is the QUIESCED poll -- a bounded wait on the
-        // kernel. Its own destroy path has no liveness check to consult (DEL_DEV is
-        // unconditional), which is the absence of a refusal rather than a force option.
+        // kernel. shutdown() REFUSES rather than forcing: it gates on TRY_STOP_DEV,
+        // which answers EBUSY for as long as an initiator holds the node, and after
+        // stop_timeout_ms of that it returns EBUSY with nothing torn down and the node
+        // still there. Measured on 7.0.0-34-generic -- 201 EBUSY answers over 2.19 s at
+        // the default 2000 ms, on a LIVE and on a QUIESCED device alike. The path with no
+        // liveness check to consult is destroy_orphan(), whose DEL_DEV is a different
+        // operation carrying a different contract; it used to be cited here, which put
+        // the descriptor one level below the axis blk.h asks about.
         cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
         cfg.info.backlog = BlkBacklog::KernelSide;
-        cfg.info.shutdown_refusal = BlkShutdownRefusal::Unconditional;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::RefusesWhenAttached;
         cfg.info.resize_effect = BlkResizeEffect::NotifiedOrFailed;
         cfg.info.adoption = BlkAdoption::Full;
         cfg.info.detach_no_wait = true;
@@ -1176,8 +1182,9 @@ struct UblkDeviceImpl : IBlkDevice {
             // re-serve before tearing down (tcmu's settled shutdown-after-
             // detach design): the quiesce REISSUEs in-flight IO and traps
             // whoever had it outstanding -- a udev probe caught mid-read
-            // sits in D state holding the disk open, so disk_openers() never
-            // drops and TRY_STOP spins EBUSY forever; only a live daemon
+            // sits in D state holding the disk open, so the kernel's count of
+            // the node's openers never drops and TRY_STOP keeps answering
+            // EBUSY until the retry budget below runs out; only a live daemon
             // completes that IO. A genuine holder (mounted fs) survives the
             // re-serve and still gets the contractual EBUSY below. If the
             // re-attach fails, fall through and stop the quiesced device
@@ -1196,9 +1203,12 @@ struct UblkDeviceImpl : IBlkDevice {
                 if (ctrl.try_stop_dev((uint32_t)dev_id) == 0)
                     break;
                 if (errno == EOPNOTSUPP) {   // no SAFE_STOP_DEV: plain stop
-                    // Do not swallow this: a device that failed to stop is still
-                    // live, so DEL_DEV below would fail with EBUSY and hand the
-                    // caller an error that points at the wrong step.
+                    // Do not swallow this: a device that failed to stop is still live,
+                    // and DEL_DEV below does not refuse a live one -- measured, it
+                    // blocks until the last opener closes and then returns success.
+                    // Swallowing the stop failure would therefore hand the caller a 0
+                    // for a teardown that stopped nothing, after a wait whose length
+                    // nothing here bounds.
                     if (ctrl.stop_dev((uint32_t)dev_id) < 0 && errno != ENODEV)
                         LOG_ERRNO_RETURN(0, -1, "ublk STOP_DEV failed, dev `", dev_id);
                     break;
@@ -1461,11 +1471,13 @@ struct UblkControllerImpl : UblkController {
         // UNBOUNDED, and that is the kernel's doing rather than a missing knob: with
         // an initiator still holding /dev/ublkbN, DEL_DEV takes the node away and then
         // waits for the last opener to close before returning success. Measured on a
-        // quiesced orphan whose holder issued nothing to it: 227s, then 0 -- and at
-        // once, when that holder was killed. It blocks this coroutine, not the vcpu;
-        // the wait is a kernel wait on an io_uring worker while the vcpu stays in its
-        // event loop. blk.h tells the caller, who is the one that has to decide
-        // whether it can afford to wait.
+        // quiesced orphan whose holder issued nothing to it: the node already gone at
+        // 234s with the command still outstanding, and the 0 arriving about 1ms after
+        // that holder was killed at 300s. It blocks this coroutine, not the vcpu -- the
+        // io_uring worker is what parks in the kernel's delete path while the vcpu stays
+        // in its event loop. blk.h carries the measurements and the blast radius, and
+        // tells the caller, who is the one that has to decide whether it can afford to
+        // wait.
         if (ctrl.del_dev(want) < 0 && errno != ENODEV)
             // ENODEV means the registration is already gone, which is the goal.
             // Anything else means it SURVIVES, so this did not do what it claims.

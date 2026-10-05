@@ -394,9 +394,12 @@ TEST_F(UblkConfigTest, capabilities_descriptor) {
     // with EINVAL, which is what makes adoption Full rather than partial.
     EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
     EXPECT_EQ(BlkAdoption::Full, i.adoption);
-    // DEL_DEV has no liveness check to consult: an initiator holding /dev/ublkbN is not
-    // a refusal, so this is the absence of one rather than a force option.
-    EXPECT_EQ(BlkShutdownRefusal::Unconditional, i.shutdown_refusal);
+    // shutdown() gates on TRY_STOP_DEV, which answers EBUSY for as long as an initiator
+    // holds the node and then gives up with EBUSY after stop_timeout_ms, leaving the
+    // device alone -- shutdown_busy is the case that pins it. That DEL_DEV itself has no
+    // liveness check is destroy_orphan()'s contract, a different operation, and citing
+    // it here is what had this axis answering one level below the question blk.h asks.
+    EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
     // UPDATE_SIZE goes through the control channel and a refusal there fails resize()
     EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
     // The one transport where detach(false) really does skip the I/O wait: stop_serving

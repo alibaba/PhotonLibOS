@@ -792,19 +792,35 @@ public:
     //
     // An INITIATOR holding /dev/ublkbN is not a refusal and does not produce EBUSY.
     // DEL_DEV removes the node and then WAITS for the last opener to close before it
-    // returns, and returns success: measured on a quiesced orphan with a process
-    // holding the node open and issuing nothing to it, the call took 227s and came
-    // back 0, and came back at once when that holder was killed. So this call is
-    // UNBOUNDED -- it blocks the calling coroutine for as long as anything holds the
-    // node. It does not block the vcpu: the wait is a kernel wait on an io_uring
-    // worker while the caller's vcpu stays in its event loop, so other coroutines
-    // there keep running. A caller that cannot afford to wait has to establish that
-    // the node is unheld before calling: nothing in this signature bounds it, and a
-    // timeout knob would not either, because there is nothing to retry -- the call is
-    // already inside the kernel rather than waiting to be issued. The bounded loop
-    // shutdown() drives with stop_timeout_ms sits around TRY_STOP_DEV, which is the
-    // step that answers EBUSY, and this call has no reason to stop a device it is
-    // about to delete.
+    // returns, and returns success. Measured on a quiesced orphan whose holder opened
+    // the node and issued nothing to it: the node was already gone at 234s with the
+    // command still outstanding, and the command returned 0 about 1ms after that
+    // holder's process group was killed at 300s. An earlier run on an older kernel
+    // recorded 227s and a clean 0. The two agree on the mechanism, and the second
+    // says the duration was never the kernel's -- it was the holder's. So this call is
+    // UNBOUNDED: it blocks the calling coroutine for as long as anything holds the
+    // node, and the number a past measurement produced is not a bound a caller may
+    // plan around.
+    //
+    // It does not block the vcpu, and that is now measured rather than reasoned: for
+    // the length of such a wait the caller's vcpu thread sits in ep_poll, the io_uring
+    // worker is what parks in the kernel's delete path, and a 10ms ticker coroutine on
+    // the same vcpu went on logging deltas of 10.0-13.7ms. Nor does it wedge the
+    // control plane -- the question worth asking of any wait this long, because a
+    // command that blocks while holding something every other device needs is a
+    // different failure from one slow caller, and only measurement tells the two
+    // apart: with one DEL_DEV outstanding, a second process answered
+    // GET_DEV_INFO on the same dev_id in 0.11ms and on a different one in 0.09ms,
+    // ADD_DEV for a fresh device in 0.37ms, and a second photon process ran
+    // list_orphans() in 0.11ms -- reporting nothing, because the blocked caller holds
+    // the tombstone. The blast radius here is one caller and one tombstone.
+    //
+    // A caller that cannot afford to wait has to establish that the node is unheld
+    // before calling: nothing in this signature bounds it, and a timeout knob would
+    // not either, because there is nothing to retry -- the call is already inside the
+    // kernel rather than waiting to be issued. The bounded loop shutdown() drives with
+    // stop_timeout_ms sits around TRY_STOP_DEV, which is the step that answers EBUSY,
+    // and this call has no reason to stop a device it is about to delete.
     //
     // No such device and no tombstone either is ENOENT. A tombstone with no
     // registration is our own litter and is removed, returning 0 -- unless a live
