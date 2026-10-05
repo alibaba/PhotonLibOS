@@ -301,12 +301,21 @@ struct NbdTestClient {
     }
 
 private:
-    int read_exact(void* buf, size_t n) {
-        return s->read(buf, n) == (ssize_t)n ? 0 : -1;
+    // photon's read/write return a short count at EOF and -1 with errno set on
+    // error. Collapsing both into -1 without touching errno leaves the caller
+    // reporting whatever the last fd wait happened to leave there, and that is
+    // photon's EOK sentinel -- ENXIO (io/fd-events.h) -- so a peer that closed
+    // mid-handshake reads out as "no such device". Naming the close is what lets
+    // the errno a case reports about a failed exchange mean the failure.
+    static int exact(ssize_t r, size_t n) {
+        if (r == (ssize_t)n)
+            return 0;
+        if (r >= 0)
+            errno = ECONNRESET;
+        return -1;
     }
-    int write_exact(const void* buf, size_t n) {
-        return s->write(buf, n) == (ssize_t)n ? 0 : -1;
-    }
+    int read_exact(void* buf, size_t n) { return exact(s->read(buf, n), n); }
+    int write_exact(const void* buf, size_t n) { return exact(s->write(buf, n), n); }
     int send_option(uint32_t opt, const void* data, uint32_t len) {
         char h[16];
         be64wr(h, NBD_OPTS_MAGIC);
@@ -1375,6 +1384,47 @@ TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
         std::vector<char> rbuf(4096);
         EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
     }
+}
+
+// A server that closes mid-handshake has to read out as a CLOSE. photon's read()
+// answers a short count at EOF and -1 with errno set on error, and read_exact()
+// collapses the two into -1 -- so until it named the EOF case, errno held whatever the
+// last fd wait left behind, which is photon's EOK sentinel ENXIO (io/fd-events.h:33).
+// A client failure then reported "no such device" for a socket the peer had simply
+// closed, and that reading sent two separate investigations after a phantom device
+// error: this one, and an Oct-3 log whose leftover happened to be ENOSYS instead.
+TEST_F(NbdTest, a_server_close_mid_handshake_reports_the_close_not_a_leftover_errno) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+    ASSERT_NE(0, ep.port);
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake_front());
+    // OPT_EXPORT_NAME for an export this device does not serve. The protocol allows no
+    // reply to that option at all, and nbd.cpp's answer to a name mismatch is to close,
+    // so what comes back is a short count at EOF rather than an error.
+    std::vector<char> name = NbdTestClient::name_payload("not-photon-nbd-test");
+    ASSERT_EQ(0, cli.send_raw_option(NBD_OPT_EXPORT_NAME, name.data(), (uint32_t)name.size()));
+    char meta[10];
+    EXPECT_EQ(-1, cli.read_raw(meta, sizeof(meta)));
+    // Captured here rather than asserted in place, because the destructor sends DISC and
+    // closes the socket, overwriting whatever the failure set. force_close() instead of
+    // letting it: this is precisely the "server already dropped it" case that exists for.
+    int e = errno;
+    cli.force_close();
+    EXPECT_EQ(ECONNRESET, e) << "a peer that closed mid-handshake reported errno " << e;
 }
 
 // Every connection coroutine is joinable, because cleanup_runtime has to be able to
