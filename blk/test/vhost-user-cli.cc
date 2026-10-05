@@ -44,6 +44,13 @@ limitations under the License.
 // or statically, adding whatever that build enabled:
 //   g++ -O2 -Wall -I include -o vhost-user-cli blk/test/vhost-user-cli.cc build/output/libphoton.a -lpthread -ldl -laio -luring
 //
+// ENVIRONMENT. PHOTON_VHU_QUEUES sets how many virtqueues to serve; unset, empty or 0
+// means one, which is what every caller got before it existed. The peer script reads
+// PHOTON_VHU_BACKEND for this program's path and is the intended setter of both -- see
+// qemu-vhost-user-peer.py, and note that QEMU's multiqueue case compares the
+// num_queues it reads back from config space against the count it asked for, so a peer
+// that cannot be told the count makes that case fail for a reason of its own.
+//
 // EXIT STATUS IS PART OF THE CONTRACT. QEMU's quit_storage_daemon() SIGTERMs the
 // peer and asserts it exited 0, so teardown here is orderly and main returns 0
 // once serving has started: shutdown() unlinks the socket, then the device, the
@@ -155,6 +162,23 @@ int main(int argc, char** argv) {
     blk::VhostUserController::Config cfg(info);
     cfg.sock_path = argv[1];
     cfg.sock_role = blk::VhostUserController::SockRole::SERVER;
+    // The queue count comes from the environment rather than a positional argument:
+    // argv[3] is already the image size, and the peer script that drives this binary
+    // already hands over PHOTON_VHU_BACKEND the same way. Unset, empty or 0 leaves
+    // cfg.queues at 0, which the transport reads as "you choose" and answers with one
+    // queue -- so an unchanged invocation is unchanged behaviour.
+    //
+    // Without this the peer cannot be told how many queues to serve, and that is not a
+    // cosmetic gap: QEMU's own multiqueue qtest reads num_queues back out of config
+    // space and compares it with the 8 it asked for, so against a one-queue peer that
+    // case fails for a reason that has nothing to do with the backend under test. A
+    // control experiment on a false premise is worse than none, because it reads like a
+    // verdict. Logged rather than left implicit for the same reason the peer's output
+    // goes to a file: when the two sides disagree, this log is the only evidence.
+    if (const char* q = getenv("PHOTON_VHU_QUEUES"))
+        cfg.queues = (uint32_t)strtoul(q, nullptr, 0);
+    LOG_INFO("vhost-user peer serving ` with ` queue(s)", argv[1],
+             cfg.queues ? cfg.queues : 1);
 
     auto* ctl = blk::new_vhost_user_controller(dir);
     if (!ctl)
