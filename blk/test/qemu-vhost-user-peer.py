@@ -22,6 +22,11 @@ patched test selects the peer by environment, so the QSD path still works:
     PHOTON_VHU_BACKEND=/path/to/vhost-user-cli   # photon backend
     QTEST_QEMU_STORAGE_DAEMON_BINARY=...         # required either way: the test
                                                  # registers nothing without it
+
+Do NOT also set PHOTON_VHU_QUEUES: the patched test derives it from each case's
+own num_queues and overwrites whatever is in the environment, so a value you
+export proves nothing about that forwarding -- and hiding a regression in it is
+exactly how this script once shipped a peer that always served one queue.
 """
 
 import sys
@@ -49,15 +54,42 @@ FUNC = r'''/*
  *
  * The peer's output goes to a file rather than /dev/null: when a vhost-user
  * backend and QEMU disagree about the protocol, that log is the only evidence.
+ *
+ * num_queues reaches the peer as PHOTON_VHU_QUEUES rather than as an argument,
+ * because the peer's argv slots are already the socket, the image and the image
+ * size -- see blk/test/vhost-user-cli.cc, which documents the variable. It does
+ * have to reach it: vhost_user_backend_init() asks a backend how many queues it
+ * serves with GET_QUEUE_NUM and rejects any device asking for more, so a peer
+ * left at its one-queue default makes device_add num-queues=8 fail with "The
+ * maximum number of queues supported by the backend is 1", and libqtest asserts
+ * on any QMP error -- a red that reads as a defect in the backend under test.
+ *
+ * Giving every instance the same count is what the QSD branch below does too,
+ * and it is safe: hw/block/vhost-user-blk.c advertises VIRTIO_BLK_F_MQ only
+ * when the DEVICE's num-queues exceeds 1, and starts only that many vrings, so
+ * queues a device never asked for go unused. multiqueue depends on exactly that
+ * -- one setup call covers both its devices, yet it asserts the primary does
+ * NOT offer VIRTIO_BLK_F_MQ while the one it hotplugs with num-queues=8 does,
+ * and reads 8 back out of config space.
  */
-static void start_photon_vhost_user_blk(GString *cmd_line, int vus_instances)
+static void start_photon_vhost_user_blk(GString *cmd_line, int vus_instances,
+                                        int num_queues)
 {
     const char *bin = getenv("PHOTON_VHU_BACKEND");
+    char *queues = g_strdup_printf("%d", num_queues);
     int i;
 
     g_string_append_printf(cmd_line,
             " -object memory-backend-shm,id=mem,size=256M "
             " -M memory-backend=mem -m 256M ");
+
+    /* in the parent rather than in the child below, for the reason the strings
+     * there are built here: g_setenv allocates, and the child inherits it */
+    if (!g_setenv("PHOTON_VHU_QUEUES", queues, true)) {
+        fprintf(stderr, "cannot set PHOTON_VHU_QUEUES=%s\n", queues);
+        abort();
+    }
+    g_free(queues);
 
     for (i = 0; i < vus_instances; i++) {
         char *sock_path = g_strdup_printf("%s/photon-vhu-%d-%d.sock",
@@ -139,7 +171,8 @@ DISPATCH = ('    QemuStorageDaemonState *qsd;\n'
             '\n'
             '    if (getenv("PHOTON_VHU_BACKEND")) {\n'
             '        g_string_free(storage_daemon_command, true);\n'
-            '        start_photon_vhost_user_blk(cmd_line, vus_instances);\n'
+            '        start_photon_vhost_user_blk(cmd_line, vus_instances, '
+            'num_queues);\n'
             '        return;\n'
             '    }\n'
             '\n'
