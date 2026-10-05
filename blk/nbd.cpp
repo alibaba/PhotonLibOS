@@ -82,6 +82,12 @@ static constexpr uint32_t NBD_REP_ERR_UNSUP = (1u << 31) | 1;
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
 static constexpr uint32_t MAX_BLOCK_SIZE      = 32u << 20;
+// The preferred block size advertised in NBD_INFO_BLOCK_SIZE. The spec requires a
+// power of two at least max(minimum, 512), and the minimum advertised is
+// 1 << sector_size_shift with that shift capped at 12 by validate_info, so 4096 is
+// at least every minimum this export can declare -- and it is the protocol's own
+// default and the page size the backend's preadv/pwritev land on.
+static constexpr uint32_t PREFERRED_BLOCK_SIZE = 4096;
 // Simultaneous client connections. queue_depth bounds in-flight REQUESTS, not
 // connections: a client that connects and sends nothing costs nothing against
 // it, so a TCP-facing export would otherwise be exhaustible by connect count
@@ -172,6 +178,22 @@ struct NbdExportInfo {        // NBD_REP_INFO payload of type NBD_INFO_EXPORT, 1
     }
 }__attribute__((packed));
 static_assert(sizeof(NbdExportInfo) == 12, "NBD export info is 12 bytes on the wire");
+
+// NBD_REP_INFO payload of type NBD_INFO_BLOCK_SIZE, 14 bytes. The three sizes
+// are the spec's "size constraints": the smallest length and alignment the
+// export is addressable in, the length at which an aligned request is efficient,
+// and the longest payload the server will take in one request.
+struct NbdBlockSizeInfo {
+    uint16_t type;
+    uint32_t minimum, preferred, maximum;
+    void encode() {
+        type = __builtin_bswap16(type);
+        minimum = __builtin_bswap32(minimum);
+        preferred = __builtin_bswap32(preferred);
+        maximum = __builtin_bswap32(maximum);
+    }
+}__attribute__((packed));
+static_assert(sizeof(NbdBlockSizeInfo) == 14, "NBD block size info is 14 bytes on the wire");
 
 struct NbdRequest {           // client -> server request header, 28 bytes
     uint32_t magic;
@@ -981,8 +1003,10 @@ struct NbdDeviceImpl : NbdDevice {
     // INFO / GO (with_items=true): a uint32 name-length, the name, a uint16
     // count of requested information items, then that many uint16 type codes.
     // Each info item is just a type code with NO payload -- they are requests,
-    // not TLV records. This server always answers NBD_INFO_EXPORT alone; the
-    // requested items are parsed and dropped.
+    // not TLV records. One of them is honoured: a request for NBD_INFO_BLOCK_SIZE
+    // is reported back through wants_block_size, because asking for that item in
+    // an OPT_GO is also the client's promise to obey the size constraints it is
+    // about to be told. The rest are parsed and dropped.
     //
     // A payload that does not parse is refused rather than skipped. Skipping is
     // what let a 4-byte OPT_GO through, although even an empty name with no items
@@ -993,7 +1017,8 @@ struct NbdDeviceImpl : NbdDevice {
     // whose length equals the identity's can match, and the identity IS this
     // export's name, so a client asking for a different export is refused rather
     // than served this one. An empty name asks for the default export and matches.
-    Name read_export_option(net::ISocketStream* s, uint32_t length, bool with_items) {
+    Name read_export_option(net::ISocketStream* s, uint32_t length, bool with_items,
+                            bool* wants_block_size) {
         const std::string& id = cfg.info.identity;
         if (!with_items) {
             // EXPORT_NAME: the entire payload is the raw export name. No inner
@@ -1061,6 +1086,8 @@ struct NbdDeviceImpl : NbdDevice {
             if (length - used < sizeof(type_code) ||
                 s->read(&type_code, sizeof(type_code)) != (ssize_t)sizeof(type_code))
                 return Name::MALFORMED;
+            if (wants_block_size && __builtin_bswap16(type_code) == NBD_INFO_BLOCK_SIZE)
+                *wants_block_size = true;
             used += sizeof(type_code);
         }
         // The walk has to land exactly on the option's own length. Anything else
@@ -1111,7 +1138,7 @@ struct NbdDeviceImpl : NbdDevice {
             case NBD_OPT_EXPORT_NAME: {
                 // The protocol allows no reply to EXPORT_NAME -- the server either
                 // sends the export meta or closes -- so a refusal here is a close.
-                Name v = read_export_option(s, opt.length, false);
+                Name v = read_export_option(s, opt.length, false, nullptr);
                 if (v != Name::MATCH) {
                     if (v == Name::MALFORMED)
                         LOG_WARN("nbd OPT_EXPORT_NAME payload does not parse, closing");
@@ -1150,7 +1177,8 @@ struct NbdDeviceImpl : NbdDevice {
             }
             case NBD_OPT_INFO:
             case NBD_OPT_GO: {
-                Name v = read_export_option(s, opt.length, true);
+                bool wants_block_size = false;
+                Name v = read_export_option(s, opt.length, true, &wants_block_size);
                 if (v == Name::MALFORMED) {
                     // a packed field cannot bind to the logger's reference
                     uint32_t which = opt.opt;
@@ -1164,9 +1192,42 @@ struct NbdDeviceImpl : NbdDevice {
                     send_opt_reply(s, opt.opt, NBD_REP_ERR_UNKNOWN, nullptr, 0);
                     break;
                 }
+                // Sent on every INFO and GO, asked for or not -- the spec requires it
+                // of a server whose size constraints are not the defaults, and a
+                // minimum of 512 or more is never the default minimum of 1 -- and
+                // ahead of NBD_INFO_EXPORT. That order is a free choice, since a client
+                // must not rely on one, but it is qemu-nbd's, and BLOCK_SIZE first is
+                // what lets QEMU's client check that the export size is a multiple of
+                // the advertised minimum at all: that check sits in its EXPORT branch
+                // and reads min_block, so with EXPORT first it still sees 0 and skips.
+                //
+                // Which minimum goes out is the spec's own distinction, not a guess. A
+                // client that asks for BLOCK_SIZE in an OPT_GO MUST abide by what it
+                // receives, and one that sends OPT_INFO is only learning, so both are
+                // told the export's real granularity: 1 << sector_size_shift, the same
+                // number the loopback half hands the kernel as NBD_ATTR_BLOCK_SIZE_BYTES
+                // or NBD_SET_BLKSIZE. That was the value's only path until now, so a
+                // 4096-shift export served over TCP or a unix socket looked like a
+                // 512-byte one to a remote client. An OPT_GO that did not ask promised
+                // nothing and is told 1, because this server does not reject an unaligned
+                // request -- execute() hands byte offsets straight to the backend, which
+                // answers EINVAL itself if it cannot serve them -- so a minimum quoted to
+                // a client that never agreed to one would claim an enforcement that is
+                // not there.
+                //
+                // maximum is the MAX_BLOCK_SIZE serve_conn enforces on a READ or WRITE
+                // payload, so a client that obeys it never reaches that EINVAL. TRIM and
+                // WRITE_ZEROES carry no payload and get no bound beyond the export size,
+                // which is what the spec asks of them.
+                uint32_t minimum = (opt.opt == NBD_OPT_INFO || wants_block_size)
+                                       ? (1u << cfg.info.sector_size_shift) : 1u;
+                NbdBlockSizeInfo bs{NBD_INFO_BLOCK_SIZE, minimum,
+                                    PREFERRED_BLOCK_SIZE, MAX_BLOCK_SIZE};
+                bs.encode();
                 NbdExportInfo info{NBD_INFO_EXPORT, {cfg.info.size, trans_flags}};
                 info.encode();
-                if (send_opt_reply(s, opt.opt, NBD_REP_INFO, &info, sizeof(info)) < 0 ||
+                if (send_opt_reply(s, opt.opt, NBD_REP_INFO, &bs, sizeof(bs)) < 0 ||
+                    send_opt_reply(s, opt.opt, NBD_REP_INFO, &info, sizeof(info)) < 0 ||
                     send_opt_reply(s, opt.opt, NBD_REP_ACK, nullptr, 0) < 0)
                     return -1;
                 if (opt.opt == NBD_OPT_GO)

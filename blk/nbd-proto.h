@@ -53,7 +53,8 @@ static constexpr uint32_t NBD_REP_ERR_INVALID  = (1u << 31) | 3;
 static constexpr uint32_t NBD_REP_ERR_UNKNOWN  = (1u << 31) | 6;
 
 // info types
-static constexpr uint16_t NBD_INFO_EXPORT = 0;
+static constexpr uint16_t NBD_INFO_EXPORT     = 0;
+static constexpr uint16_t NBD_INFO_BLOCK_SIZE = 3;
 
 // transmission flags; renamed NBD_TRANS_* to avoid <linux/nbd.h> macros of the
 // same NBD_FLAG_* names

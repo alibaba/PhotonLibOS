@@ -59,6 +59,11 @@ struct NbdTestClient {
     uint16_t trans_flags = 0;
     uint64_t export_size = 0;
     uint64_t next_handle = 1;
+    // The NBD_INFO_BLOCK_SIZE triple, all three still 0 if the server sent no such
+    // item, and the type of the first NBD_REP_INFO it did send -- 0xffff is not an
+    // info type, so that one also distinguishes "no info reply at all".
+    uint32_t min_block = 0, pref_block = 0, max_block = 0;
+    uint16_t first_info_type = 0xffff;
 
     ~NbdTestClient() {
         if (s) {
@@ -130,6 +135,17 @@ struct NbdTestClient {
         return d;
     }
 
+    // go_payload()'s `items` is only the count, so a case that wants the server to
+    // actually see a request needs a type code behind it. One is enough: the answer
+    // does not depend on where in the list the code sits.
+    static std::vector<char> go_payload_requesting(const char* export_name, uint16_t item) {
+        std::vector<char> d = go_payload(export_name, 1);
+        char c[2];
+        be16wr(c, item);
+        d.insert(d.end(), c, c + 2);
+        return d;
+    }
+
     // OPT_EXPORT_NAME's payload is the raw export name -- no uint32 length prefix,
     // no item count. Its answer is the export meta rather than an option reply.
     static std::vector<char> name_payload(const char* export_name) {
@@ -188,15 +204,21 @@ struct NbdTestClient {
     // answers fails the case instead of hanging it
     void set_timeout(uint64_t us) { s->timeout(us); }
 
-    int handshake(const char* export_name = "") {
+    // Drives OPT_GO by default. Passing NBD_OPT_INFO instead leaves the connection
+    // in the option phase after the ACK, so a caller that asks for it must not go on
+    // to xfer() -- it reads the same replies and reports the same members.
+    int handshake(const char* export_name = "", bool request_sizes = false,
+                  uint32_t opt = NBD_OPT_GO) {
         if (handshake_front() < 0)
             return -1;
 
         // the name length is 32 bits on the wire. Encoding it as 16 was the same
         // wrong assumption the server made when it skipped the payload instead of
         // parsing it, so a 4-byte OPT_GO looked well formed to both sides.
-        std::vector<char> data = go_payload(export_name);
-        if (send_option(NBD_OPT_GO, data.data(), (uint32_t)data.size()) < 0)
+        std::vector<char> data = request_sizes
+                                     ? go_payload_requesting(export_name, NBD_INFO_BLOCK_SIZE)
+                                     : go_payload(export_name);
+        if (send_option(opt, data.data(), (uint32_t)data.size()) < 0)
             return -1;
 
         while (true) {
@@ -212,9 +234,20 @@ struct NbdTestClient {
                 return -1;
             if (type & (1u << 31))
                 return -1;
-            if (type == NBD_REP_INFO && len >= 12 && be16rd(d.data()) == NBD_INFO_EXPORT) {
-                export_size = be64rd(d.data() + 2);
-                trans_flags = be16rd(d.data() + 10);
+            if (type == NBD_REP_INFO && len >= 2) {
+                uint16_t info = be16rd(d.data());
+                if (first_info_type == 0xffff)
+                    first_info_type = info;
+                // NBD_INFO_BLOCK_SIZE's length is exactly 14: 2 for the type and 4
+                // each for the three sizes. QEMU's client refuses anything else.
+                if (info == NBD_INFO_BLOCK_SIZE && len == 14) {
+                    min_block = be32rd(d.data() + 2);
+                    pref_block = be32rd(d.data() + 6);
+                    max_block = be32rd(d.data() + 10);
+                } else if (info == NBD_INFO_EXPORT && len >= 12) {
+                    export_size = be64rd(d.data() + 2);
+                    trans_flags = be16rd(d.data() + 10);
+                }
             }
             if (type == NBD_REP_ACK)
                 return 0;
@@ -530,6 +563,99 @@ TEST_F(NbdTest, tcp_roundtrip) {
 #endif
 
     EXPECT_EQ(1u, dev->get_client_connections().size());
+}
+
+// sector_size_shift reaches the kernel over the loopback path only, as
+// NBD_ATTR_BLOCK_SIZE_BYTES or NBD_SET_BLKSIZE. A socket client has one source for
+// it and that source is NBD_INFO_BLOCK_SIZE, so without that item an export
+// configured 4096 was served over TCP looking like a 512-byte one. The three shapes
+// below are the spec's own: a client that asks in an OPT_GO MUST then abide by what
+// it receives, one that sends OPT_INFO is only probing, and an OPT_GO that did not
+// ask promised nothing -- and this server does not reject an unaligned request, so
+// quoting such a client a real minimum would claim an enforcement that is not there.
+// Each shape is a separate operand of that decision, so dropping either half of it
+// changes one of the three.
+TEST_F(NbdTest, block_size_info_carries_the_configured_sector_size_to_a_socket_client) {
+    BlkDevInfo i = make_info();
+    i.sector_size_shift = 12;
+    NbdConfig cfg(i);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+
+    {   // (1) an OPT_GO that asks is told the real granularity
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/true));
+        EXPECT_EQ(4096u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+        // A minimum that does not divide the export would leave the last bytes
+        // unreachable, which is why validate_info rejects such a config outright.
+        EXPECT_EQ(0u, cli.export_size % cli.min_block);
+        // The order is the server's to pick -- a client must not rely on one -- but
+        // this is the pick QEMU's client needs: it runs that divisibility check in
+        // its EXPORT branch, reading a min_block that is still 0 if EXPORT came
+        // first, so the check only happens when BLOCK_SIZE arrives ahead of it.
+        EXPECT_EQ(NBD_INFO_BLOCK_SIZE, cli.first_info_type);
+    }
+    {   // (2) an OPT_GO that does not ask still gets the item, with a permissive
+        // minimum: preferred and maximum are true whatever the minimum is
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        EXPECT_EQ(1u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+    }
+    {   // (3) an OPT_INFO that does not ask is a probe and is told the truth
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/false, NBD_OPT_INFO));
+        EXPECT_EQ(4096u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+        cli.force_close();   // still in the option phase, so no DISC
+    }
+}
+
+// The other end of the same decision, and the one that keeps (1) honest: a 512-shift
+// export has to report 512, not the 4096 that (1) sees. Without this the minimum
+// could be a constant and every assertion above would still hold. It also shows the
+// two sizes differing -- the spec requires preferred to be at least max(minimum,
+// 512), and here it is strictly larger.
+TEST_F(NbdTest, block_size_info_of_a_512_shift_export_keeps_the_preferred_size_at_4096) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/true));
+    EXPECT_EQ(512u, cli.min_block);
+    EXPECT_EQ(4096u, cli.pref_block);
+    EXPECT_EQ(32u << 20, cli.max_block);
 }
 
 TEST_F(NbdTest, unix_path_mode) {
