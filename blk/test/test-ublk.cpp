@@ -92,6 +92,19 @@ static std::string node_of(IBlkDevice* d) {
 // one directory for its controllers and probe another.
 static const char SUITE_LOCKS[] = "/run/photon-blk";
 
+// The geometry every config in this file starts from. At file scope rather than a
+// fixture member because two fixtures need it: the gated one, and the ungated one
+// covering what a constructed device already knows before anything reaches the
+// kernel. One definition, so the two cannot drift onto different geometries.
+static BlkDevInfo make_info() {
+    BlkDevInfo i;
+    i.identity = TEST_IDENTITY;
+    i.size = IMG_SIZE;
+    i.sector_size_shift = 9;
+    i.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    return i;
+}
+
 // Everything a start() that was refused after it had already talked to the
 // kernel could leave behind, as one sortable listing: the ublk nodes under /dev,
 // and each of this suite's flock files marked HELD or FREE. The lock FILE is
@@ -215,6 +228,35 @@ public:
     }
 };
 
+// The construction-time half of this suite: what a caller can learn from a config
+// and from a device that has been built but not started.
+//
+// Ungated, and that is the whole point of splitting it out. new_device() runs
+// validate() -- pure by its own contract, no I/O and no kernel access -- and a
+// constructor that only derives fields from the config, and start() rejects a null
+// backend before it opens the control device. So none of this needs root or
+// ublk_drv. Behind UblkTest's gate CI executed none of it: the runners there are
+// unprivileged containers on a 5.10 node kernel, which predates ublk entirely, so
+// the gate could never open no matter how the suite was written.
+//
+// The controller still gets SUITE_LOCKS rather than a writable stand-in. Nothing
+// here opens it, and if a case ever starts to, a non-root run fails loudly instead
+// of passing against a directory only some machines happen to permit.
+class UblkConfigTest : public ::testing::Test {
+public:
+    UblkController* ctl = nullptr;
+
+    void SetUp() override {
+        ctl = new_ublk_controller(SUITE_LOCKS);
+        ASSERT_NE(nullptr, ctl);
+    }
+
+    void TearDown() override {
+        delete ctl;
+        ctl = nullptr;
+    }
+};
+
 class UblkTest : public test::SkippableTest {
 public:
     test::TestImage img;
@@ -321,15 +363,6 @@ public:
         return f;
     }
 
-    BlkDevInfo make_info() {
-        BlkDevInfo i;
-        i.identity = TEST_IDENTITY;
-        i.size = IMG_SIZE;
-        i.sector_size_shift = 9;
-        i.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
-        return i;
-    }
-
     // run blocking device IO off the photon vcpu, in a spawned consumer child;
     // harness.h's device_io is the authoritative statement of what it returns
     int device_io(const std::string& node, const std::vector<char>& wbuf,
@@ -344,10 +377,8 @@ public:
 
 // The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
 // inferring it from which factory built the object. The axes are properties of the
-// transport, so they are already correct on a constructed device; `negotiated` is the
-// one member start() has to fill in.
-TEST_F(UblkTest, capabilities_descriptor) {
-    if (skip_reason) return;
+// transport, so they are already correct on a constructed device.
+TEST_F(UblkConfigTest, capabilities_descriptor) {
     UblkController::Config cfg(make_info());
     auto dev = ctl->new_device(cfg);
     ASSERT_NE(nullptr, dev);
@@ -372,6 +403,17 @@ TEST_F(UblkTest, capabilities_descriptor) {
     EXPECT_EQ(true, i.detach_no_wait);
     EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
     EXPECT_EQ(0ull, i.negotiated);   // no registration yet
+}
+
+// `negotiated` is the one descriptor member start() has to fill in, so it is the half
+// of the descriptor that does need the kernel -- and the half the ungated case above
+// can only pin at its initial value.
+TEST_F(UblkTest, capabilities_negotiated_is_filled_by_start) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
 
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
@@ -381,8 +423,7 @@ TEST_F(UblkTest, capabilities_descriptor) {
               dev->get_info().negotiated);
 }
 
-TEST_F(UblkTest, config_validation) {
-    if (skip_reason) return;
+TEST_F(UblkConfigTest, config_validation) {
     // the pure geometry checks are construction-time now: no object at all
     UblkController::Config bad(make_info());
     bad.info.size = 0;
@@ -402,7 +443,10 @@ TEST_F(UblkTest, config_validation) {
     EXPECT_EQ(nullptr, ctl->new_device(bad));
     EXPECT_EQ(EINVAL, errno);
 
-    // a null backend is start()'s to reject: it is not part of the config
+    // A null backend is start()'s to reject: it is not part of the config. The
+    // rejection is the second statement of start(), ahead of the control device
+    // being opened, so it needs no kernel -- and it leaves nothing behind, since
+    // `backend` is only assigned once the argument is known good.
     UblkController::Config good(make_info());
     auto dev = ctl->new_device(good);
     ASSERT_NE(nullptr, dev);
@@ -410,8 +454,15 @@ TEST_F(UblkTest, config_validation) {
     errno = 0;
     EXPECT_EQ(-1, dev->start(nullptr));
     EXPECT_EQ(EINVAL, errno);
+}
 
-    // a second start on the same object must be EALREADY
+TEST_F(UblkTest, a_second_start_on_the_same_object_is_ealready) {
+    if (skip_reason) return;
+    UblkController::Config good(make_info());
+    auto dev = ctl->new_device(good);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
     ASSERT_EQ(0, dev->start(file));
     errno = 0;
     EXPECT_EQ(-1, dev->start(file));
