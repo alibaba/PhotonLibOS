@@ -436,8 +436,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // caller's vcpu) writes these and this queue's loop reads them on `home`,
         // which BlkConfig::pool can make another OS thread. vq_refresh is the
         // exception -- it runs on the loop's side, where it reads the generation,
-        // consumes reset_pending and re-arms needs_refresh. Relaxed only: nothing
-        // else is published through them.
+        // consumes reset_pending, re-arms needs_refresh and both reads and sets
+        // refreshed_once. Relaxed only: nothing else is published through them.
         //
         // Readiness and its generation are ONE word because they are two halves of
         // one state transition, and two objects cannot be written as one. The
@@ -504,7 +504,16 @@ struct VduseDeviceImpl : IBlkDevice {
         // fresh work) from a live refresh after UPDATE_IOTLB (preserve the existing
         // last_avail, because used.idx counts completions and may lag behind
         // dispatched-but-uncompleted requests).
-        bool refreshed_once = false;
+        //
+        // Atomic for the same reason as every neighbour above: a status-0 reset clears
+        // it from the msg loop's vcpu while vq_refresh reads and sets it on `home`,
+        // which BlkConfig::pool can make another OS thread. Relaxed, likewise -- it
+        // selects a mode and publishes no other data, and the case that needs an
+        // ordering is already covered by something stronger: a refresh in flight when
+        // the reset lands fails its publish against the generation it snapshotted, so
+        // it never reaches the store below and the re-armed refresh is the one that
+        // reads the cleared flag.
+        std::atomic<bool> refreshed_once{false};
 
         bool ready() const {
             return ready_gen.load(std::memory_order_relaxed) & 1u;
@@ -861,7 +870,7 @@ struct VduseDeviceImpl : IBlkDevice {
                     q->x.reset_pending.store(true, std::memory_order_relaxed);
                     // next refresh is a fresh start, not a live one: derive
                     // last_avail from used.idx rather than preserving the old one
-                    q->x.refreshed_once = false;
+                    q->x.refreshed_once.store(false, std::memory_order_relaxed);
                 }
             } else if (dev_status & VIRTIO_CONFIG_S_FEATURES_OK) {
                 uint64_t f = 0;
@@ -1157,7 +1166,7 @@ struct VduseDeviceImpl : IBlkDevice {
                 // completed, used.idx is 1 but last_avail is 2. Rewinding to 1
                 // replays B, and combined with the generation bump that retired
                 // the old ring, A's completion is dropped entirely.
-                if (!q->x.refreshed_once) {
+                if (!q->x.refreshed_once.load(std::memory_order_relaxed)) {
                     q->srv.used_idx = vring_used_idx(q->srv.used);
                     q->srv.last_avail = q->srv.used_idx;
                 }
@@ -1209,7 +1218,7 @@ struct VduseDeviceImpl : IBlkDevice {
         // because the ring really was current at the moment it became ready. What
         // a publish can no longer do is survive one.
         if (q->x.publish_ready(gen_snapshot)) {
-            q->x.refreshed_once = true;
+            q->x.refreshed_once.store(true, std::memory_order_relaxed);
             LOG_INFO("vduse ` vq` ready: num ` desc ` avail ` used ` resume at `",
                      name, idx, q->srv.num, HEX(vi.desc_addr), HEX(vi.driver_addr),
                      HEX(vi.device_addr), q->srv.last_avail);
