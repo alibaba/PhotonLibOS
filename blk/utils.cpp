@@ -661,7 +661,7 @@ struct DescStream {
 };
 
 uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_through,
-                               const char* serial, const char* tag,
+                               bool allow_indirect, const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,
                                uint32_t ring_num, uint64_t capacity,
                                VirtioBlkTranslate translate, uint32_t* written) {
@@ -688,8 +688,13 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             break;
         }
         const vring_desc* de = &desc[d];
-        if (de->flags & VRING_DESC_F_INDIRECT) {   // not offered; defensive
-            LOG_ERROR("virtio-blk `: indirect descriptor, unsupported", tag);
+        if (de->flags & VRING_DESC_F_INDIRECT) {
+            if (!allow_indirect) {
+                LOG_ERROR("virtio-blk `: indirect descriptor, unsupported", tag);
+                bad = true;
+                break;
+            }
+            LOG_ERROR("virtio-blk `: negotiated indirect descriptor, table walk not implemented", tag);
             bad = true;
             break;
         }
@@ -1107,7 +1112,8 @@ void VirtQueueServer::dispatch_avail() {
         // avail->idx is a guest-written free-running counter, so this loop needs
         // a bound of its own: without one a single kick spawns up to 65535
         // coroutines. `num` is the outer bound -- every chain consumes at least
-        // one descriptor, so a correct driver can never exceed it -- and
+        // one descriptor, so a correct driver can never exceed it (an indirect
+        // chain consumes exactly one: its table is not in the ring) -- and
         // queue_depth is the caller's, when the caller set one. Taking the lesser
         // is what makes BlkConfig::queue_depth mean here what it already means in
         // tcmu and nbd; without it the two virtio transports bound concurrency by
@@ -1242,6 +1248,7 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     uint32_t written = 0;
     virtio_blk_serve_chain(backend, read_only,
                            write_through.load(std::memory_order_relaxed),
+                           indirect_desc.load(std::memory_order_relaxed),
                            serial, tag, desc, head,
                            num, capacity.load(std::memory_order_relaxed),
                            hooks.translate, &written);

@@ -478,14 +478,18 @@ public:
     // sizes its table to, so every existing case passes the same value it always did;
     // the deep-chain cases pass their own table's extent, because that is the bound
     // the walk checks each guest-written descriptor index against.
+    // `allow_indirect` defaults to true, which means every pre-existing case now runs
+    // in a world where tables are permitted -- and none of their chains carries
+    // VRING_DESC_F_INDIRECT, so nothing about them changes. Pinning the negotiation
+    // gate (B4) therefore needs an EXPLICIT false; the default cannot do it.
     uint8_t serve(GuestChain& c, bool read_only, uint32_t* written,
                   bool write_through = false, fs::IFile* backend = nullptr,
-                  uint32_t ring_num = RING_NUM) {
+                  uint32_t ring_num = RING_NUM, bool allow_indirect = true) {
         VirtioBlkTranslate tr;
         tr.bind(&c, &chain_translate);
         return virtio_blk_serve_chain(backend ? backend : img.file, read_only, write_through,
-                                      CHAIN_SERIAL, "vq", c.desc.data(), 0, ring_num,
-                                      CHAIN_CAPACITY, tr, written);
+                                      allow_indirect, CHAIN_SERIAL, "vq", c.desc.data(), 0,
+                                      ring_num, CHAIN_CAPACITY, tr, written);
     }
     ssize_t read_back(void* dst, size_t n) {
         return img.file->pread(dst, n, (off_t) (CHAIN_SECTOR << 9));
@@ -514,10 +518,10 @@ public:
     }
     // The same walk through a translate that models a permission-carrying mapping:
     // it refuses a write into [0, ro_end) and records the direction of every call.
-    uint8_t serve_directed(DirectedGuest& g, uint32_t* written) {
+    uint8_t serve_directed(DirectedGuest& g, uint32_t* written, bool allow_indirect = true) {
         VirtioBlkTranslate tr;
         tr.bind(&g, &directed_translate);
-        return virtio_blk_serve_chain(img.file, false, false, CHAIN_SERIAL, "vq",
+        return virtio_blk_serve_chain(img.file, false, false, allow_indirect, CHAIN_SERIAL, "vq",
                                       g.c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
                                       tr, written);
     }

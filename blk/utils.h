@@ -416,8 +416,21 @@ struct GenlSock {
 //   want & 511      a READ's or WRITE's payload must be a whole number of
 //                   sectors -- the LBA and the backend offset both are.
 //   VRING_DESC_F_INDIRECT
-//                   refused outright: an indirect table carries a second
-//                   peer-supplied length, and this core does not walk it.
+//                   walked only once the transport negotiated bit 28, and then inside
+//                   three bounds of ours. The second peer-supplied length this
+//                   descriptor carries is checked for a whole, nonzero entry count and
+//                   against MAX_INDIRECT_ENTRIES BEFORE the table is translated;
+//                   nesting is refused (one table per descriptor); and the table
+//                   descriptor itself is never pushed into a stream, so its len bytes
+//                   cannot reach pwritev as a payload.
+//   tbl[t], te->next
+//                   a table entry's index lives in a SECOND index space: it is bounded
+//                   by that table's own entry count, never by ring_num, and the array
+//                   indexed is the translated table, never desc[]. Taking either the
+//                   bound or the array from the ring passes the ring's own index check
+//                   -- the two counts are unrelated -- and then serves this request out
+//                   of descriptors the driver never named for it, which is silent
+//                   cross-request corruption rather than a refusal.
 //   hdr.sector,     the sector bound is compared in SECTORS, because sector
 //   want            is a full 64 bits and (sector << 9) can wrap back into
 //                   the range it was just tested against; only once that
@@ -460,6 +473,11 @@ struct GenlSock {
 
 #define VIRTIO_ID_BLOCK 0x02
 
+// virtio 1.2 §5.2.3: "VIRTIO_BLK_F_SEG_MAX (2) Maximum number of segments in a
+// request is in seg_max." seg_max counts DATA segments; see
+// VIRTIO_BLK_SEG_MAX_ADVERTISED in the split vring section for the two framing
+// descriptors a driver adds around them before it counts what it will publish.
+#define VIRTIO_BLK_F_SEG_MAX  2
 #define VIRTIO_BLK_F_RO       5
 #define VIRTIO_BLK_F_BLK_SIZE 6
 #define VIRTIO_BLK_F_FLUSH    9
@@ -521,6 +539,39 @@ struct vring_used {
 // the driver publishes used_event at the END of the avail ring, we publish
 // avail_event at the END of the used ring (<linux/virtio_ring.h>:82-85, :193-194).
 #define VIRTIO_RING_F_EVENT_IDX 29
+
+// virtio 1.2 §2.7.5.3: one descriptor in the ring names an array of descriptors
+// elsewhere in guest memory, so a request takes one ring slot but carries many
+// buffers (<linux/virtio_ring.h>:78; the flag it sets on that descriptor is
+// VRING_DESC_F_INDIRECT, :42). Cited by line rather than included: that header's
+// inline vring_init() assigns void* to typed pointers, which C++ rejects, and that
+// is why this file copies the structs above verbatim instead.
+#define VIRTIO_RING_F_INDIRECT_DESC 28
+
+// How many entries one indirect table may carry. OURS, not the peer's and not the
+// spec's: split ring puts no normative limit on a table's length (§2.7.5.3's
+// `struct virtq_desc desc[len / 16]` is descriptive), so without this the entry
+// count is bounded only by de->len, which is bounded only by the mapping the table
+// has to fit in. A zero-length entry takes no iovec slot (DescStream::push returns
+// early on len == 0), so the scatter list's own depth never fires on a table of
+// them and every one still costs a translate.
+//
+// Equal to blk/utils.cpp's MAX_DESC_CHAIN on purpose, and the two are NOT one
+// constant: MAX_DESC_CHAIN is a memory-safety bound (the depth of a stack array),
+// this is a denial-of-service bound. The two streams are shared by the descriptors
+// walked in the ring and the entries walked in a table, so a larger table buys
+// nothing -- the extra entries are refused by push -- and a smaller one would be a
+// self-imposed functional limit.
+static constexpr uint32_t MAX_INDIRECT_ENTRIES = 64;
+
+// seg_max as §5.2.3 defines it: the number of DATA segments in one request. A
+// driver frames those with one header and one status descriptor before it counts
+// what it will publish, so the descriptor count -- and the indirect table's length
+// -- is seg_max + 2. Advertising MAX_INDIRECT_ENTRIES itself would let a guest build
+// a 66-entry table that our own cap then refuses: the bound that exists to protect
+// the walk would be the thing breaking large IO. The subtraction mirrors the
+// driver's own reading of the field, so it is not a fudge factor we invented.
+static constexpr uint32_t VIRTIO_BLK_SEG_MAX_ADVERTISED = MAX_INDIRECT_ENTRIES - 2;
 
 // ----------------------------------------------------------------------------
 // virtio-blk wire structs (verbatim from <linux/virtio_blk.h>)
@@ -634,16 +685,27 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t, bool>;
 // refused: a short read is harmless, but a write past EOF on a regular-file
 // backend EXTENDS it, so an unbounded guest could grow the image at will.
 //
-// `read_only` and `write_through` are the device's caching and access policy,
-// both derived by the caller from the NEGOTIATED features. read_only turns every
-// WRITE into VIRTIO_BLK_S_IOERR. write_through makes a WRITE that reached the
-// backend durable before this returns, so the caller may publish its completion
-// without the driver ever sending a FLUSH -- which is what a driver that declined
-// VIRTIO_BLK_F_FLUSH is entitled to, having no command to ask with. A failed
-// persist is reported as VIRTIO_BLK_S_IOERR: a completion says the data is where
-// the driver was promised, and in this mode that promise includes stable storage.
+// `read_only`, `write_through` and `allow_indirect` are the device's caching, access
+// and layout policy, all three derived by the caller from the NEGOTIATED features.
+// allow_indirect says a table MAY be walked, never that one MUST be: the engine
+// decides per descriptor from its flags, so a peer that negotiated bit 28 and still
+// sends direct chains is served, and one that sends both shapes in one session is too.
+// read_only turns every WRITE into VIRTIO_BLK_S_IOERR. write_through makes a WRITE
+// that reached the backend durable before this returns, so the caller may publish
+// its completion without the driver ever sending a FLUSH -- which is what a driver
+// that declined VIRTIO_BLK_F_FLUSH is entitled to, having no command to ask with. A
+// failed persist is reported as VIRTIO_BLK_S_IOERR: a completion says the data is
+// where the driver was promised, and in this mode that promise includes stable
+// storage.
 //
-// Chain layout (no indirect -- callers should not offer VRING_F_INDIRECT_DESC).
+// Chain layout. Two shapes, and §2.7.5.3.2 requires the device to handle both: a
+// chain of ordinary descriptors, and zero or more ordinary descriptors followed by
+// ONE descriptor carrying VRING_DESC_F_INDIRECT, whose addr/len name an array of
+// vring_desc elsewhere in guest memory. That array has its own index space -- an
+// entry's `next` indexes the table, never the ring -- and its own bound,
+// MAX_INDIRECT_ENTRIES. `allow_indirect` is the third policy input (see above); when
+// it is false a descriptor carrying the flag is refused, and the refusal is a
+// MID-WALK one, so no status is written and the used element's len is 0.
 // A chain is two byte streams, not one role per descriptor: the device-readable
 // stream is the virtio_blk_outhdr followed by a WRITE's payload, and the
 // device-writable stream is a READ's or GET_ID's destination followed by the
@@ -656,7 +718,7 @@ using VirtioBlkTranslate = TempDelegate<void*, uint64_t, size_t, bool>;
 // A refusal is written into the status byte whenever the chain was walked to its
 // end, so the driver is told instead of being left with whatever it put there.
 uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_through,
-                               const char* serial, const char* tag,
+                               bool allow_indirect, const char* serial, const char* tag,
                                const vring_desc* desc, uint16_t head,
                                uint32_t ring_num, uint64_t capacity,
                                VirtioBlkTranslate translate, uint32_t* written);
@@ -749,8 +811,12 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // Bound: dispatch_avail() stops at min(num, queue_depth) outstanding chains.
 // avail->idx is a guest-written free-running counter, so without a cap a single
 // kick could fan out 65535 coroutines; `num` is the outer limit because every
-// chain consumes at least one descriptor, so a correct driver never reaches it,
-// and queue_depth is the caller's own when the caller set one -- without it the
+// chain consumes at least one descriptor, so a correct driver never reaches it --
+// and an INDIRECT_DESC chain consumes EXACTLY one, its table living outside the
+// ring's three regions, so that bound only gets stronger there. The accounting unit
+// is the head, not the descriptor: one indirect request is one in_flight, which is
+// what keeps queue_depth meaning the same thing under both layouts. queue_depth is
+// the caller's own when the caller set one -- without it the
 // two virtio transports would bound concurrency by whatever ring the peer chose.
 // What the cap leaves pending, redispatch_backlog takes as soon as a request
 // completes; loop()'s next KICK_FALLBACK_US re-read is the backstop behind that,
@@ -876,6 +942,15 @@ public:
     // serving side. It does not make that pair a well-defined handover -- only
     // the individual accesses.
     std::atomic<bool> notify_valid{false};
+    // VIRTIO_RING_F_INDIRECT_DESC state, per queue. Set by the transport from the
+    // NEGOTIATED features, never from what we offered, for the reason event_idx above
+    // gives and with one extra edge: a peer that masked bit 28 off but sent a table
+    // anyway is claiming a layout we never agreed to bound, and deriving this from our
+    // own offer would have us walk it. Atomic for the same reason: the transport
+    // re-derives it from the control plane while handle_req reads it from the serving
+    // side, and those are not necessarily one vcpu. Relaxed is enough -- it publishes
+    // nothing else.
+    std::atomic<bool> indirect_desc{false};
 
     // Both written by teardown and read by loop()/handle_req, which the split
     // described above can put on different vcpus. Atomic only against tearing:
