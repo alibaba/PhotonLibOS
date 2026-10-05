@@ -390,6 +390,13 @@ constexpr uint32_t CONSUMER_MAGIC = 0x434f4e53u;   // "CONS"
 // the number also travels in argv, so the child does not have to.
 constexpr int CONS_CHANNEL_FD = 3;
 
+// The body a suite installed for CONS_MODE_SUITE, or null. One slot and not a table:
+// a suite binary is one suite, and a second body would be a second mode tag whose only
+// difference is which of them the argv names. Read in the child (which installed it in
+// its own main(), before consumer_child_main() ran) and in the parent, which refuses to
+// spawn without one -- so a null here is never a silent "nothing to do".
+ConsumerSuiteBody g_suite_body = nullptr;
+
 // The exit code a spawn leaves behind when the exec itself failed: the child
 // never became our program, so it never mapped the channel and there is no
 // report to read. 127 cannot be confused with a verdict, because a verdict
@@ -446,6 +453,11 @@ size_t channel_io_bytes(int mode, size_t len) {
     case CONS_MODE_WRITER:   // posix_memaligns the block it hammers, same reason
         return 0;
     default:
+        // CONS_MODE_SUITE lands here and gets the report page alone, because its
+        // `len` is 0 on both sides by construction: decode_child_argv() fills in no
+        // field past the channel fd for a suite tag, and consumer_spawn_suite() asks
+        // for the layout with a length of 0. A suite body that needed a payload would
+        // have to be a built-in mode, which is the point of leaving it at 0.
         return page_align(len);
     }
 }
@@ -773,12 +785,24 @@ bool decode_writer_argv(int argc, char** argv, ConsumerArgs* a) {
 }
 
 bool decode_child_argv(int argc, char** argv, ConsumerArgs* a) {
-    // The mode tag selects the rest of the table, so it is read ahead of the
-    // halves it chooses between -- and an unknown tag is a mis-decode like any
-    // other, not a default.
-    if (argc < 4 ||
-        !parse_int(argv[2], &a->mode, CONS_MODE_IO, CONS_MODE_WRITER) ||
+    if (argc < 4)
+        return false;
+    // The tag is read ahead of the halves it chooses between, and a suite's own tag is
+    // dispatched here rather than folded into the four's range: what that range bounds
+    // is the per-mode argc gates below, and a suite argv has no gate on this side to
+    // pass. Leaving `len` at the 0 the memset gave it is load-bearing, not an omission:
+    // channel_io_bytes() has no case for a suite tag, so it sizes this child's payload
+    // as page_align(0) -- nothing -- and the parent derives the same layout from the
+    // same (tag, 0), which is why the two sides agree on the report page and nothing
+    // else.
+    int tag = -1;
+    if (!parse_int(argv[2], &tag, 0, INT_MAX) ||
         !parse_int(argv[3], &a->channel_fd, 3, 65535))
+        return false;
+    a->mode = tag;
+    if (tag == CONS_MODE_SUITE)
+        return true;
+    if (tag > CONS_MODE_WRITER)   // CONS_MODE_IO is 0, which parse_int's own floor is
         return false;
     if (a->mode == CONS_MODE_IO)
         return decode_io_argv(argc, argv, a);
@@ -1071,6 +1095,7 @@ ConsumerStage exit_code_stage(int code) {
     case CONS_EXIT_FDLEAK:   return CONS_FDLEAK;
     case CONS_EXIT_ARGV:     return CONS_ARGV;
     case CONS_EXIT_CHANNEL:  return CONS_CHANNEL;
+    case CONS_EXIT_NO_BODY:  return CONS_NO_BODY;
     default:                 return CONS_EXIT;
     }
 }
@@ -1454,6 +1479,7 @@ const char* consumer_stage_name(ConsumerStage s) {
     case CONS_SPAWN:    return "posix_spawn";
     case CONS_MAPPING:  return "creating the result channel";
     case CONS_TIMEOUT:  return "the caller's deadline";
+    case CONS_NO_BODY:  return "looking for a suite child body that was never installed";
     }
     return "?";
 }
@@ -1502,6 +1528,34 @@ int consumer_child_main(int argc, char** argv) {
     // (d) the body, and (e) the exit -- dispatched on the same tag
     // decode_child_argv just dispatched on, because a mode routed to the wrong body
     // would run its IO against fields decoded out of another mode's slots.
+    if (a.mode == CONS_MODE_SUITE) {
+        // A tag with no body is a structural failure of the isolation rather than a
+        // verdict, so it gets a structural exit code and cannot fall through to one of
+        // the four below: every one of those reads fields no decoder filled in.
+        if (!g_suite_body) {
+            rep->stage = CONS_NO_BODY;
+            rep->status = EIO;
+            rep->magic = CONSUMER_MAGIC;
+            _exit(CONS_EXIT_NO_BODY);
+        }
+        ConsumerSuiteChild sc;
+        sc.argc = argc;
+        sc.argv = argv;
+        sc.rep = rep;
+        sc.shm = base;
+        sc.shm_size = l.total;
+        // The body fills in its own `stage` and `child_errno` and returns the status;
+        // publishing is the harness's, so the one ordering rule of the channel (magic
+        // last, because it says the rest is final) has one writer rather than one per
+        // suite. The clamp is the built-in bodies' own: a verdict must not be able to
+        // read as a structural exit code.
+        int st = g_suite_body(sc);
+        if (st >= CONS_EXIT_DROP_FDS)
+            st = EIO;
+        rep->status = st;
+        rep->magic = CONSUMER_MAGIC;
+        _exit(st);
+    }
     if (a.mode == CONS_MODE_STRESS)
         _exit(consumer_stress_body(&a));
     if (a.mode == CONS_MODE_RO_WRITE)
@@ -1560,6 +1614,42 @@ ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv, uint6
     s.timeout_us = timeout_us;
     for (const auto& a : argv)
         s.argv.push_back(a.c_str());
+    return consumer_spawn(s);
+}
+
+void consumer_set_suite_body(ConsumerSuiteBody body) {
+    g_suite_body = body;
+}
+
+ConsumerIoResult consumer_spawn_suite(const std::vector<std::string>& args,
+                                      const std::string& node, uint64_t timeout_us) {
+    ConsumerIoResult refused;
+    refused.node = node;
+    // Refused in the parent rather than sent: a child that finds no body exits with a
+    // structural code the caller would then have to tell apart from a verdict, and the
+    // parent is the side that knows whether it installed one.
+    if (!g_suite_body) {
+        refused.status = EINVAL;
+        refused.stage = CONS_NO_BODY;
+        LOG_ERROR_RETURN(EINVAL, refused, "no suite child body is installed, so no ` child can be spawned", node.c_str());
+    }
+    char a_mode[8], a_fd[12];
+    snprintf(a_mode, sizeof(a_mode), "%d", (int)CONS_MODE_SUITE);
+    snprintf(a_fd, sizeof(a_fd), "%d", CONS_CHANNEL_FD);
+
+    ConsumerSpawn s;
+    s.node = node;
+    s.argv = {CONS_CHILD_ARG, a_mode, a_fd};
+    for (const auto& x : args)
+        s.argv.push_back(x.c_str());
+    // LAST, as every consumer argv puts its node: elements pass through verbatim, so a
+    // path needs no quoting and a suite decoder can count on the position.
+    s.argv.push_back(node.c_str());
+    // The report page alone. A suite tag carries no length, so channel_io_bytes() sizes
+    // no payload for it -- and the child derives the same layout from the same (tag, 0),
+    // which is what keeps the two sides reading one another's page at one offset.
+    s.layout = channel_layout(CONS_MODE_SUITE, 0);
+    s.timeout_us = timeout_us;
     return consumer_spawn(s);
 }
 

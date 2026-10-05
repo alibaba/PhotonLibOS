@@ -579,6 +579,11 @@ static_assert(atomic_always_lock_free<decltype(ConsumerWriterReport::stop_flag)>
 //                               its upper bound is the child's, and is the same
 //                               2^40 as `len` above for the same reason -- it is a
 //                               size this side has to allocate.
+//   CONS_MODE_SUITE         -   a suite's own fields, which no table here can list:
+//                               the harness decodes the tag and the channel fd and
+//                               hands the rest over UNPARSED, so the argc and the
+//                               ranges are the suite builder's and its decoder's to
+//                               agree on (see consumer_spawn_suite).
 enum ConsumerMode : int32_t {
     CONS_MODE_IO       = 0,   // one write+fsync+read-back: consumer_io()
     CONS_MODE_STRESS   = 1,   // a whole stress phase: stress_run()
@@ -589,6 +594,15 @@ enum ConsumerMode : int32_t {
     // stop() of its own.
     CONS_MODE_WRITER   = 3,
 };
+
+// The mode tag a suite's own child body carries -- NOT the next value of the enum
+// above, and the distance is deliberate. decode_child_argv() dispatches this tag
+// before any of the four argc gates, so a suite mode is a separate branch and not a
+// widening of the range those gates bound; and test-harness.cpp's argv table pins
+// "the mode tag is one over its range" at 4, so a suite tag of 4 would turn that row
+// into a decoded argv in every binary that installs a body. A tag nothing else can
+// reach keeps the row pinning what it was written to pin.
+constexpr int32_t CONS_MODE_SUITE = 100;
 
 // Where a consumer IO ended. Also how the caller's own failure to even start
 // one is reported, so that a single `stage` names the culprit in every case.
@@ -613,6 +627,11 @@ enum ConsumerStage : int32_t {
     CONS_SPAWN,      // the caller's posix_spawn()
     CONS_MAPPING,    // the caller's result channel
     CONS_TIMEOUT,    // the deadline passed with the child still running
+    // CONS_MODE_SUITE alone: a suite tag reached a binary that installed no body, so
+    // there was nothing to run. Its own value rather than CONS_ARGV, which says the
+    // argv did not decode -- and this argv did, which is why the child got as far as
+    // looking for a body to hand it to.
+    CONS_NO_BODY,
 };
 const char* consumer_stage_name(ConsumerStage s);
 
@@ -624,6 +643,7 @@ enum ConsumerExit : int32_t {
     CONS_EXIT_FDLEAK   = 201,
     CONS_EXIT_ARGV     = 202,
     CONS_EXIT_CHANNEL  = 203,
+    CONS_EXIT_NO_BODY  = 204,
 };
 
 // Returned by consumer_child_main() when argv is not the sentinel, i.e. when this
@@ -754,6 +774,72 @@ void consumer_release(ConsumerIoResult& r);
 // about the path the suites actually take.
 ConsumerIoResult consumer_spawn_argv(const std::vector<std::string>& argv,
                                      uint64_t timeout_us = 0);
+
+// ---------------------------------------------------------------------------
+// a suite's own child mode
+//
+// The four modes above are the harness's and every one of them is a CONSUMER: it
+// does IO against a node this process exports. A suite can also need a child that is
+// not a consumer at all, while needing everything the isolation buys -- an address
+// space holding none of this process's descriptors or device mappings, a bounded wait
+// that abandons rather than kills, and a verdict that outlives the child. That is what
+// this mode is: the harness keeps the structural half, which is the half whose
+// correctness was measured (see the long comment above ConsumerReport), and the suite
+// supplies the body. A suite that spawned its own child would have to re-derive the
+// fd drop, the census, the channel and the wait, and would get the fork/exec question
+// wrong in the direction that is not recoverable.
+// ---------------------------------------------------------------------------
+
+// What consumer_child_main() hands the body. The structural half has already run by
+// then -- the channel is mapped, the inherited fd table is dropped, and the census
+// found nothing left -- so the body is a program with no descriptor of this process's
+// and one page to report through. `argc`/`argv` are the child's own: argv[0] this
+// binary, argv[1] CONS_CHILD_ARG, argv[2] the tag, argv[3] the channel fd, and
+// argv[4..] the suite's fields with its node LAST. The suite parses them because only
+// it knows what they are, so the ranges and the argc are its contract to enforce.
+struct ConsumerSuiteChild {
+    int argc = 0;
+    char** argv = nullptr;
+    // Offset 0 of the channel. The body writes `stage` and `child_errno` into it and
+    // returns its status; the harness writes `status` and then `magic`, because
+    // "magic last" is the channel's one ordering rule and a rule only one side has to
+    // know is a rule that will be got wrong. So a suite body must NOT write `magic`
+    // itself -- the four built-in bodies do, and this one must not.
+    ConsumerReport* rep = nullptr;
+    void* shm = nullptr;        // the whole mapping, which is the report page alone
+    size_t shm_size = 0;
+};
+
+// The body. Returns the child's status: 0, or an errno, which the harness clamps
+// below CONS_EXIT_DROP_FDS so that a verdict can never read as a structural exit code
+// (the four built-in bodies each do that clamping themselves). stdout and stderr are
+// /dev/null in here -- consumer_spawn redirects them so that an abandoned child cannot
+// hold a capture pipe open -- so a log line the body writes is a line nobody reads, and
+// anything worth keeping has to be a field of the report.
+typedef int (*ConsumerSuiteBody)(const ConsumerSuiteChild&);
+
+// Install the body. It has to have run before the first CONS_MODE_SUITE spawn in the
+// parent AND before the child's dispatch, and one call site does both: every suite's
+// main(), ahead of consumer_child_main(), because the child is this same binary
+// re-executed and so runs the same main(). A namespace-scope initializer would also run
+// in both, but its order against main() is exactly what [basic.start.dynamic] leaves
+// implementation-defined for a variable nothing odr-uses. A spawn with no body
+// installed is refused in the parent rather than sent to a child that cannot run it.
+void consumer_set_suite_body(ConsumerSuiteBody body);
+
+// Spawn a suite-mode child and wait for it with a deadline. `args` are the suite's own
+// argv fields, appended after the tag and the channel fd; `node` goes LAST, as it does
+// in every consumer argv, and doubles as the name this child is logged under. The
+// channel is the report page alone: a suite tag carries no `len`, so channel_io_bytes()
+// sizes no payload for it, and a body that needs one has to be a built-in mode instead.
+//
+// The body must end on its own, because this waits. On expiry the child is ABANDONED
+// and never killed -- an uninterruptible sleeper ignores signals -- and the result comes
+// back with `hung` set and the channel still mapped, which is the caller's to release or
+// to hand to consumer_reap(): consumer_io()'s contract, unchanged.
+ConsumerIoResult consumer_spawn_suite(const std::vector<std::string>& args,
+                                      const std::string& node,
+                                      uint64_t timeout_us = 0);
 
 // ---------------------------------------------------------------------------
 // single-shot device IO (the suites' workhorse) and a deterministic pattern
