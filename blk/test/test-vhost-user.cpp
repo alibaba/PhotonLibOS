@@ -5053,6 +5053,138 @@ TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
         LOG_ERROR("mock frontend: `", fe.err);
 }
 
+// The other half of the same resume: what happens when BASE is not a cursor this
+// ring could have produced. SET_VRING_BASE lets the frontend put last_avail
+// anywhere, and vq_start's only defence is to snap an impossible one back to the
+// used_idx it just read from the live ring. For that defence to be sound the bound
+// has to be the ring's own width: a split ring of num entries holds at most num
+// outstanding, so last_avail - used_idx is a count and cannot exceed num. Half the
+// 16-bit counter space reads like the same test and is not -- it agrees with the
+// invariant for every num up to 16384 and is wrong at MAX_VRING_NUM, where a
+// legitimately saturated 32768-entry ring sits exactly 0x8000 past used_idx and a
+// correct cursor would be discarded.
+//
+// Asserted on avail_event rather than on served I/O because the engine publishes
+// avail_event == last_avail as an invariant, so what the driver can read back out
+// of the used ring IS the cursor vq_start settled on. A BASE 1000 past used_idx on
+// a 256-entry ring is adopted by the half-space bound and snapped by the ring's
+// own, and the two readings differ by exactly that.
+TEST_F(VhostUserTest, adopt_snaps_a_base_the_ring_cannot_vouch_for) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        ASSERT_TRUE(fe.features & F_RING_EVENT_IDX)
+            << "bit 29 was not negotiated, so avail_event is never published and "
+               "this case would read back a stale zero and pass for the wrong reason";
+
+        // Five requests to completion, so used idx == avail idx == 5 and the ring is
+        // coherent with nothing outstanding. The cursor under test is then the only
+        // incoherent thing in the picture.
+        char buf[512] = {};
+        for (int i = 0; i < 5; i++)
+            ASSERT_EQ(0, fe.write_dev((uint64_t)i * 512, buf, sizeof(buf)));
+        ASSERT_EQ(5, fe.avail_idx);
+        ASSERT_TRUE(fe.set_vring_enable(false));   // vq_stop() JOINS the loop
+
+        // Far enough past the ring to be unambiguous, well inside half the counter
+        // space so the bound under test is the only thing that can catch it.
+        const uint16_t BASE = 5 + 1000;
+        fe.set_used_event(5);
+        ASSERT_TRUE(fe.restart_with_base(BASE));
+        (void)fe.callfd_drain();
+
+        EXPECT_EQ(5, fe.get_avail_event())
+            << "a BASE 1000 entries past used_idx was adopted on a " << VQ_NUM
+            << "-entry ring; that many entries cannot be outstanding at once, so the"
+               " cursor describes a state this queue was never in";
+
+        // And the snap is more than a tidier number: resuming at used_idx is what
+        // makes the next entry the driver publishes the one that gets served.
+        ASSERT_EQ(0, fe.submit(5, T_OUT, 0, sizeof(buf), false));
+        ASSERT_TRUE(fe.kick());
+        bool served = false;
+        for (int i = 0; i < 2000 && !served; i++) {
+            served = (*(uint8_t*)(fe.mem + fe.status_off(5)) != 0xff);
+            if (!served) ::usleep(1000);
+        }
+        EXPECT_TRUE(served) << "the request published at the snapped cursor was not served";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
+// The boundary of that bound, from both sides. A ring of num entries can hold
+// exactly num outstanding: the driver's free count starts at num and dispatch_avail's
+// own cap is `in_flight >= num`, so a predecessor that consumed every entry and
+// completed none leaves last_avail precisely num past used_idx. That is a full ring,
+// not a stale record, and snapping it loses the whole ring -- the same loss the case
+// above exists to prevent, reached by an off-by-one in the other direction. One entry
+// past it is impossible and has to snap, or the bound is not the ring's width but
+// something looser that only happens to agree with it here.
+TEST_F(VhostUserTest, adopt_keeps_a_full_ring_cursor_and_snaps_one_entry_past_it) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        ASSERT_TRUE(fe.features & F_RING_EVENT_IDX)
+            << "bit 29 was not negotiated, so avail_event is never published and "
+               "this case would read back a stale zero and pass for the wrong reason";
+
+        char buf[512] = {};
+        for (int i = 0; i < 5; i++)
+            ASSERT_EQ(0, fe.write_dev((uint64_t)i * 512, buf, sizeof(buf)));
+        ASSERT_TRUE(fe.set_vring_enable(false));   // vq_stop() JOINS the loop
+        fe.set_used_event(5);
+
+        // used idx 5, avail idx 5 + VQ_NUM: every slot the driver owns is consumed
+        // and none of them completed, which is the fullest a ring this wide can be.
+        const uint16_t FULL = 5 + VQ_NUM;
+        ((vused*)(fe.mem + L_USED))->idx = 5;
+        ((vavail*)(fe.mem + L_AVAIL))->idx = FULL;
+        fe.used_idx = 5;
+        fe.avail_idx = FULL;
+        ASSERT_TRUE(fe.restart_with_base(FULL));
+        (void)fe.callfd_drain();
+        EXPECT_EQ(FULL, fe.get_avail_event())
+            << "a cursor exactly " << VQ_NUM << " entries past used_idx -- a full "
+            << VQ_NUM << "-entry ring, not an impossible one -- was snapped back";
+
+        // One entry past the width. avail idx goes back to 5 so that the snap this
+        // expects leaves last_avail equal to it and nothing is dispatched: the
+        // assertion is on the cursor, and a ring full of unconsumed garbage would
+        // only add noise to it.
+        ASSERT_TRUE(fe.set_vring_enable(false));
+        const uint16_t PAST = FULL + 1;
+        ((vavail*)(fe.mem + L_AVAIL))->idx = 5;
+        fe.avail_idx = 5;
+        ASSERT_TRUE(fe.restart_with_base(PAST));
+        (void)fe.callfd_drain();
+        EXPECT_EQ(5, fe.get_avail_event())
+            << "a cursor " << VQ_NUM + 1 << " entries past used_idx was adopted on a "
+            << VQ_NUM << "-entry ring; one more outstanding than the ring can hold is"
+               " not a state this queue was ever in";
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+}
+
 }  // namespace blk
 }  // namespace photon
 

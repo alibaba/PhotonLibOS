@@ -872,16 +872,27 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // is not a contiguous prefix of the avail ring. Resuming from it both loses
         // uncompleted entries below it and re-serves completed ones above it,
         // producing duplicate used elements for heads the driver no longer owns.
-        // The wrap-safe comparison here defends only against a stale BASE that
-        // wrapped past used_idx by more than half the counter space -- an artefact
-        // of a very old frontend record combined with a 16-bit turn -- and even
-        // then it raises to used_idx rather than adopting a cursor known to be
-        // wrong. A sane frontend never supplies one.
-        if ((uint16_t)(q->srv.last_avail - q->srv.used_idx) >= 0x8000)
+        // The bound on that cursor is the ring's own, not a slice of the counter
+        // space. A split ring of width num holds at most num outstanding entries, so
+        // last_avail - used_idx counts what this queue consumed and has not completed
+        // and cannot exceed num -- the same invariant vduse's adoption check rests on.
+        // Past it, BASE is a record the ring cannot vouch for: a very old one, or one
+        // that turned the 16-bit counter. Snapping to used_idx is the recovery, and it
+        // is neither a raise nor a lower in general -- which it is depends on which
+        // side of used_idx the bogus cursor landed. A sane frontend never supplies one.
+        //
+        // Half the counter space, which is what this tested, looks like the same idea
+        // and is not: it agrees with the invariant for every num up to 16384 and is
+        // wrong at MAX_VRING_NUM, where a legitimately saturated 32768-entry ring sits
+        // exactly 0x8000 past used_idx and the test would discard a cursor that is
+        // merely full -- re-serving every one of those entries and publishing
+        // duplicate completions for heads the driver had already reclaimed.
+        uint32_t in_flight = (uint16_t)(q->srv.last_avail - q->srv.used_idx);
+        if (in_flight > q->srv.num)
             q->srv.last_avail = q->srv.used_idx;
         // Establish avail_event == last_avail before the loop can sleep on the
         // kickfd. SET_VRING_BASE lets the frontend put last_avail anywhere
-        // (handle_msg's SET_VRING_BASE branch), and the two lines above can raise
+        // (handle_msg's SET_VRING_BASE branch), and the two lines above can snap
         // it to used_idx, while avail_event still holds whatever the peer's setup
         // left there -- zero for a fresh ring. Without this publish the invariant
         // does not hold until the first head is consumed, and a driver that kicks
