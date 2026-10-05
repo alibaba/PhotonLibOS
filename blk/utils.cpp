@@ -1131,6 +1131,10 @@ void VirtQueueServer::dispatch_avail() {
         // reached num nothing would ever dispatch again. Returning without
         // advancing leaves the chain available for the next pass -- the same
         // recovery the cap above relies on.
+        // The engine's one allocation on a request's behalf, and dispatch's rather
+        // than serving's: test-blk-vq.cpp's "serving allocates nothing" budget is
+        // about the chain walk into serve_chain's own DescStream, not this. Freed by
+        // req_trampoline, or below if the create fails.
         auto* arg = new ReqArg{this, head, generation.load(std::memory_order_acquire)};
         if (!photon::thread_create(&VirtQueueServer::req_trampoline, arg, stack_size)) {
             delete arg;

@@ -212,8 +212,10 @@ struct BlkDevInfo {
 // different identity means constructing a different device.
 class IBlkDevice : public Object {
 public:
-    // Serve `backend`. ownership = this object deletes it (on shutdown and in
-    // the destructor); a FAILED start() hands it back to the caller either way.
+    // Serve `backend`. ownership = this object deletes it, and the caller never has
+    // to: at shutdown(), or -- when a shutdown() fails and what failed can still be
+    // served through that backend -- at destruction instead. A FAILED start() hands
+    // it back to the caller either way.
     // What start() rejects is only what needs the backend or the kernel: a null
     // backend (EINVAL), a second concurrent start (EALREADY), config drift to the
     // extent info().adoption detects it, a foreign live daemon, a missing kernel
