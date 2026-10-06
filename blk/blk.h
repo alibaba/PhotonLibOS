@@ -789,7 +789,8 @@ public:
     // rejected too: it is Config::dev_id's "let the kernel choose" sentinel, not a
     // device. Both are EINVAL, with nothing deleted.
     //
-    // EBUSY here means exactly one thing: another LIVE SERVER holds the tombstone.
+    // EBUSY here means exactly one gate: the tombstone lock is not free, which
+    // another LIVE SERVER holding it explains in the routine case.
     // The flock is CLAIMED and held across the DEL_DEV rather than merely probed,
     // because DEL_DEV is unconditional -- no EBUSY, no state check -- so a
     // probe-then-destroy pair leaves a window in which another daemon adopts the
@@ -992,9 +993,10 @@ public:
     // name.
     //
     // EBUSY is the live refusal and it has three sources, checked in this order:
-    // a live server holds the tombstone; a FOREIGN daemon is connected to the
-    // single-opener char device, which the tombstone cannot tell us about; or a vdpa
-    // consumer is still attached, which is what /sys/bus/vdpa/devices/<name> is for.
+    // the tombstone lock is not free, normally a live server's hold; a FOREIGN
+    // daemon is connected to the single-opener char device, which the tombstone
+    // cannot tell us about; or a vdpa consumer is still attached, which is what
+    // /sys/bus/vdpa/devices/<name> is for.
     // That entry does not bracket the kernel-side vdev exactly -- see the next
     // paragraph. The claim is taken and held across the DESTROY_DEV rather than
     // merely probed, so that no other server of this implementation adopts the

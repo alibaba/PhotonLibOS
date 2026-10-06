@@ -1074,8 +1074,12 @@ struct VduseDeviceImpl : IBlkDevice {
             LOG_ERRNO_RETURN(0, -1, "vduse VQ_GET_INFO failed, dev `", name);
         // all five of these arrive cleared together after a device reset, and num
         // is not validated on the way in -- so num belongs in this guard as much
-        // as the addresses do. It is a modulo divisor in dispatch_avail and in
-        // vring_used_append; a 0 here with ready set divides by zero.
+        // as the addresses do. dispatch_avail derives its in-flight cap from num
+        // and returns before reading the ring whenever in_flight is already at
+        // that cap, so a published 0 caps the queue at nothing: no chain is
+        // dispatched, none completes, and the queue stalls silently while still
+        // marked ready. This guard makes it not-ready instead, and that is the
+        // whole of what it buys -- the stall is not a fault anyone would see.
         if (!vi.ready || !vi.num || !vi.desc_addr || !vi.driver_addr || !vi.device_addr) {
             // No ring is published, so no range is advertised either: retiring a
             // queue for an update that cannot touch a ring it is serving would
@@ -2528,7 +2532,8 @@ struct VduseControllerImpl : VduseController {
             char ln[VDUSE_LOCK_BUF];
             vduse_lock_name(e->d_name, ln, sizeof(ln));
             if (devlock_free(lock_dir, ln) != 1)
-                continue;   // held, or no tombstone here: not ours to list
+                continue;   // locked, or no tombstone this call could use: either
+                            // way it is not ours to list
             char path[VDUSE_NAME_MAX + 16];
             snprintf(path, sizeof(path), "/dev/vduse/%s", e->d_name);
             int fd = ::open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -2587,16 +2592,17 @@ struct VduseControllerImpl : VduseController {
             // told apart. One this call cannot use -- absent, or there and not
             // openable by this caller, which devlock_free does not tell apart -- is
             // reported as no such device, and nothing is removed. A tombstone nobody
-            // holds is our own litter and goes with the device it outlived. One a
-            // LIVE SERVER holds is not ours to take: that server is between claiming
-            // the name and CREATE_DEV, and removing the file would leave the device
-            // it then creates with no tombstone, which list_orphans() skips --
-            // unrecoverable by every later scan.
+            // holds is our own litter and goes with the device it outlived. One whose
+            // flock attempt failed -- normally a LIVE SERVER's hold -- is not ours to
+            // take: that server is between claiming the name and CREATE_DEV, and
+            // removing the file would leave the device it then creates with no
+            // tombstone, which list_orphans() skips -- unrecoverable by every later
+            // scan.
             int lf = devlock_free(lock_dir, ln);
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no vduse device ` and no tombstone for it that this call could use", name);
             if (lf == 0)
-                LOG_ERROR_RETURN(EBUSY, -1, "no vduse device ` yet, but a live server holds its tombstone", name);
+                LOG_ERROR_RETURN(EBUSY, -1, "no vduse device ` yet, but its tombstone is locked, normally by a live server", name);
             if (devlock_unlink(lock_dir, ln) < 0)
                 return -1;   // devlock_unlink logged it
             return 0;

@@ -1435,19 +1435,20 @@ struct UblkControllerImpl : UblkController {
             //       openable by this caller, which devlock_free does not tell apart.
             //       Either way this reports the dev_id as naming no device, and
             //       removes nothing.
-            //    0  a LIVE SERVER holds the tombstone, which with no registration
-            //       means it is between claiming the name and ADD_DEV. Unlinking it
-            //       would leave the device that server then creates with no
-            //       tombstone, and list_orphans() skips a registration whose
-            //       tombstone is missing -- so it would become unrecoverable by
-            //       every later scan. Same hazard the ordering above avoids.
+            //    0  the flock attempt failed, normally because a LIVE SERVER holds
+            //       the tombstone -- which with no registration means it is between
+            //       claiming the name and ADD_DEV. Unlinking it would leave the
+            //       device that server then creates with no tombstone, and
+            //       list_orphans() skips a registration whose tombstone is missing,
+            //       so it would become unrecoverable by every later scan. Same
+            //       hazard the ordering above avoids.
             //    1  free: a tombstone outliving its device is our own litter, and it
             //       goes with it.
             int lf = devlock_free(lock_dir, name);
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no ublk device ` and no tombstone for it that this call could use", want);
             if (lf == 0)
-                LOG_ERROR_RETURN(EBUSY, -1, "no ublk device ` yet, but a live server holds its tombstone", want);
+                LOG_ERROR_RETURN(EBUSY, -1, "no ublk device ` yet, but its tombstone is locked, normally by a live server", want);
             if (devlock_unlink(lock_dir, name) < 0)
                 return -1;   // devlock_unlink logged it
             return 0;

@@ -2217,7 +2217,8 @@ struct TcmuHBAImpl : TcmuHBA {
             TcmuDeviceImpl::lock_file_name(identity, name, sizeof(name));
             int lf = devlock_free(lock_dir, name);
             if (lf == 0)
-                continue;   // a live server holds it: routine, and deliberately silent
+                continue;   // the flock attempt failed -- normally a live server's
+                            // hold, so skipping is routine and deliberately silent
             if (lf < 0) {
                 // Ours: what reaches here passed the dev_config filter above,
                 // and the filter is that guarantee, not the directory, which
@@ -2311,7 +2312,7 @@ struct TcmuHBAImpl : TcmuHBA {
         TcmuDeviceImpl::lock_file_name(bs_name, lock, sizeof(lock));
         int lf = devlock_free(lock_dir, lock);
         if (lf == 0)
-            LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` has a live server holding its tombstone; leaving it alone", bs_name);
+            LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore `: tombstone locked, normally by a live server; leaving it alone", bs_name);
         if (!path_exists(bs_path)) {
             // No registration, so there is no orphan to recover. lf still tells the
             // two remaining cases apart: a tombstone outliving its registration is
@@ -2638,11 +2639,11 @@ struct TcmuHBAImpl : TcmuHBA {
         char lock[80];
         TcmuDeviceImpl::lock_file_name(bs, lock, sizeof(lock));
         if (devlock_free(lock_dir, lock) == 0) {
-            // another PROCESS serves it: our own start() is covered by the
-            // starting flag above, which it raises before taking this lock. That
-            // server serves the ring itself, and the kernel only needs an answer
-            // to unblock the operator
-            LOG_INFO("tcmu device ` is served by a live server; staying out", bs);
+            // the flock attempt failed, so read it as another PROCESS serving the
+            // device: our own start() is covered by the starting flag above, which
+            // it raises before taking this lock. Such a server serves the ring
+            // itself, and the kernel only needs an answer to unblock the operator
+            LOG_INFO("tcmu device `: tombstone locked, normally by a live server; staying out", bs);
             reply_done(rsk, fam, TCMU_CMD_ADDED_DEVICE_DONE, dev_id, 0);
             return;
         }
@@ -2751,7 +2752,7 @@ struct TcmuHBAImpl : TcmuHBA {
     // arrives later. No DONE is owed -- that configure completed already, or
     // hung in a way nobody can answer, because the dev_id only ever existed in
     // the missed event (see blk.h on reset_netlink) -- hence dev_id stays 0 and
-    // the event is marked synthesized. Backstores a live server holds are
+    // the event is marked synthesized. Backstores whose tombstone is locked are
     // skipped: there is nothing to hand over.
     void initial_scan() {
         char hba_dir[128];   // TARGET_ROOT/core/<subtype>
@@ -2776,7 +2777,7 @@ struct TcmuHBAImpl : TcmuHBA {
             char lock[80];
             TcmuDeviceImpl::lock_file_name(e->d_name, lock, sizeof(lock));
             if (devlock_free(lock_dir, lock) == 0)
-                continue;   // a live server holds it
+                continue;   // tombstone locked: nothing to hand over
             char dc[256], node[64];
             snprintf(p, sizeof(p), "%s/attrib/dev_config", bs_path);
             if (cfg_read(p, dc, sizeof(dc)) < 0)
