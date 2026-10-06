@@ -63,8 +63,9 @@ limitations under the License.
 // P1 scope: BlkConfig::queues virtqueues -- 0 means one, over MAX_QUEUES means
 // clamped to it, and an ADOPTED registration keeps the count it was created with
 // instead -- and VIRTIO_BLK_F_MQ offered exactly when that count is more
-// than one, split ring only (no RING_PACKED / INDIRECT -- not offered, so the
-// driver must not use them), IN/OUT/FLUSH/GET_ID requests, FEATURE_FLUSH +
+// than one, split ring only (no RING_PACKED -- not offered, so the driver must not
+// use it), indirect descriptors implemented in the shared engine but NOT offered
+// here, with the three reasons at offer_features, IN/OUT/FLUSH/GET_ID requests, FEATURE_FLUSH +
 // read_only + logical block size; FEATURE_DISCARD/WRITE_ZEROES are accepted in
 // cfg.info.features but not offered yet. Serving runs on the caller's vcpu
 // unless BlkConfig::pool names one, in which case each queue's loop coroutine
@@ -704,8 +705,26 @@ struct VduseDeviceImpl : IBlkDevice {
         // 7.0.0-31-generic with the rest of the payload held constant. The refusal does
         // not point here -- its message names the create, not the features -- so the
         // bit stays unconditional and this note is what keeps it that way.
+        // VIRTIO_RING_F_INDIRECT_DESC (bit 28) is NOT offered here, though the engine
+        // this transport shares with vhost-user walks tables. Three reasons, none of
+        // them "the driver would build a table we cannot serve" -- that risk was
+        // measured away: a driver not offered SEG_MAX limits itself to one data segment,
+        // so it never builds a long chain either way.
+        //   1. the iotlb's invalidation generation is DEVICE-wide, so one unrelated unmap
+        //      fails every in-flight slow path, and a table adds one resolve per request
+        //      to the count that exposure multiplies.
+        //   2. retained mappings are released only once nothing is in flight, and past
+        //      their budget the device stops dispatch on EVERY queue to force that
+        //      moment -- a per-request table mapping feeds that budget.
+        //   3. the rescue tool drains a backlog by walking chains, and it does not walk
+        //      tables. Daemon death with an indirect backlog published is exactly the
+        //      scenario this transport advertises, so that one is a capability loss
+        //      rather than a slowdown.
+        // Turning it on is therefore a one-line change here plus a re-run of this suite,
+        // not a feature: the three wiring points are already in place.
         offer_features = (1ULL << VIRTIO_F_VERSION_1) | (1ULL << VIRTIO_F_ACCESS_PLATFORM) |
                          (1ULL << VIRTIO_RING_F_EVENT_IDX) |
+                         (1ULL << VIRTIO_BLK_F_SEG_MAX) |
                          (1ULL << VIRTIO_BLK_F_BLK_SIZE);
         if (cfg.info.features & FEATURE_FLUSH)
             offer_features |= (1ULL << VIRTIO_BLK_F_FLUSH);
@@ -886,6 +905,14 @@ struct VduseDeviceImpl : IBlkDevice {
                     for (uint32_t i = 0; i < nqueues; i++) {
                         vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                                     std::memory_order_relaxed);
+                        // Derived from the negotiated word, never from offer_features,
+                        // for the reason event_idx beside it gives. On THIS transport the
+                        // value is always false today, because bit 28 is not offered --
+                        // and it is wired anyway, so that turning the offer on is one
+                        // line rather than a hunt for the three places this had to be
+                        // written. See the offer_features comment for why it is off.
+                        vqs[i]->srv.indirect_desc.store(!!(negotiated & (1ULL << VIRTIO_RING_F_INDIRECT_DESC)),
+                                                        std::memory_order_relaxed);
                         // FLUSH absent from the negotiated word leaves the driver
                         // with no command that asks for persistence, so we cannot
                         // lean on one arriving later: a write has to be durable
@@ -1147,6 +1174,11 @@ struct VduseDeviceImpl : IBlkDevice {
                 // would cost the first completion after this reset its
                 // unconditional notification
                 q->srv.notify_valid.store(false, std::memory_order_relaxed);
+                // and indirect_desc goes false for the same reason: a true value left
+                // here means a NEW negotiation that never carried bit 28 still walks
+                // tables, i.e. the offer-instead-of-negotiated mistake returns on the
+                // reset path.
+                q->srv.indirect_desc.store(false, std::memory_order_relaxed);
             } else {
                 // Adoption of a live ring, or a live refresh after UPDATE_IOTLB.
                 // On adoption the cursor was validated in start(), and there are
@@ -1601,6 +1633,13 @@ struct VduseDeviceImpl : IBlkDevice {
         auto* bc = (virtio_blk_config*)buf;
         bc->capacity = capacity_sectors;
         bc->blk_size = 1u << sector_shift;
+        // §5.2.3, and only meaningful because F_SEG_MAX is offered; see
+        // VIRTIO_BLK_SEG_MAX_ADVERTISED for why the value is the entry cap minus two.
+        // On this transport bit 28 is NOT offered, so a driver takes this as a DIRECT
+        // chain bound: it may now publish that many data descriptors plus the two
+        // framing ones, which lands exactly on the engine's MAX_DESC_CHAIN. That is
+        // deliberate, and it is what this suite's full regression checks.
+        bc->seg_max = VIRTIO_BLK_SEG_MAX_ADVERTISED;
         bc->num_queues = (uint16_t)nqueues;
     }
 
@@ -2174,6 +2213,14 @@ struct VduseDeviceImpl : IBlkDevice {
             for (uint32_t i = 0; i < nqueues; i++) {
                 vqs[i]->srv.event_idx.store(!!(negotiated & (1ULL << VIRTIO_RING_F_EVENT_IDX)),
                                             std::memory_order_relaxed);
+                // Derived from the negotiated word, never from offer_features,
+                // for the reason event_idx beside it gives. On THIS transport the
+                // value is always false today, because bit 28 is not offered --
+                // and it is wired anyway, so that turning the offer on is one
+                // line rather than a hunt for the three places this had to be
+                // written. See the offer_features comment for why it is off.
+                vqs[i]->srv.indirect_desc.store(!!(negotiated & (1ULL << VIRTIO_RING_F_INDIRECT_DESC)),
+                                                std::memory_order_relaxed);
                 vqs[i]->srv.write_through.store(!(negotiated & (1ULL << VIRTIO_BLK_F_FLUSH)),
                                                 std::memory_order_relaxed);
             }

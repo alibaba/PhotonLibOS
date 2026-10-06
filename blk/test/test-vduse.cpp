@@ -1028,6 +1028,8 @@ static uint64_t msg_timeout_us(const char* name) {
 // suite becomes self-consistently wrong. If the two ever disagree these tests
 // go red, which is the point.
 static constexpr uint32_t FEAT_BIT_BLK_MQ = 12;
+static constexpr uint32_t FEAT_BIT_BLK_SEG_MAX = 2;
+static constexpr uint32_t FEAT_BIT_RING_INDIRECT_DESC = 28;
 static constexpr uint32_t PEER_MAX_QUEUES = 64;
 
 // The construction-time half of this suite: what a caller can learn from a config
@@ -2899,6 +2901,44 @@ TEST_F(VduseTest, a_refused_start_leaves_no_registration_and_no_claim) {
     EXPECT_NE(0, ::access(reg.c_str(), F_OK));
     EXPECT_STREQ("not-held", lock_state(lp));
     EXPECT_EQ(before, residue());
+}
+
+// The asymmetry D3 chose, pinned rather than commented. blk/vduse.cpp deliberately
+// does NOT offer VIRTIO_RING_F_INDIRECT_DESC while blk/vhost-user.cpp does, for three
+// reasons that live in that file's offer_features comment. Without this case the
+// decision is one line of comment: adding the bit there would leave every other case
+// green, because nothing else in this suite reads the feature word.
+//
+// The oracle is the kernel's record of what arrived over the wire
+// (/sys/block/<node>/device/features), not a readback of our own config image -- the
+// same independence queue_count_follows_config's F_MQ assertion relies on. Note this
+// read issues no device I/O, unlike the serial attribute this suite also reads, so it
+// needs no sh_off_vcpu.
+//
+// SEG_MAX IS offered here, and that is the half of this case with real consequences:
+// it is what raises a Linux driver from one data segment per request to as many as the
+// advertised count, and on this transport those segments stay in the RING (no bit 28),
+// so it is also what first makes a real driver build chains as long as the engine's own
+// MAX_DESC_CHAIN. Asserted here so that bound cannot be reached by accident.
+TEST_F(VduseTest, indirect_desc_is_not_offered_on_this_transport) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());          // fires LAST (declared first)
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    // virtio_feature_bit takes the bare kernel name; the node we got back is a /dev path
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    EXPECT_EQ(0, virtio_feature_bit(kname, FEAT_BIT_RING_INDIRECT_DESC))
+        << "bit 28 must not be offered on vduse; see the offer_features comment";
+    EXPECT_EQ(1, virtio_feature_bit(kname, FEAT_BIT_BLK_SEG_MAX))
+        << "SEG_MAX is offered on both transports";
+    // and the device still serves: refusing to offer bit 28 is not refusing to work
+    EXPECT_EQ(0, device_io(node, pattern(0x5a), true));
 }
 
 }  // namespace blk
