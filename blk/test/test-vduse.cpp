@@ -2693,6 +2693,192 @@ TEST_F(VduseTest, multiqueue_without_a_pool) {
     EXPECT_TRUE(rec.ran_on(caller));
 }
 
+// n > m. multiqueue_io_spreads_over_the_pool is the n == m case -- four queues over four
+// pool vcpus -- so its cursor never wraps: four draws over four vcpus visit each one
+// exactly once, and a cursor that stopped advancing once it had been through them all
+// would visit each one exactly once too. Here the same four draws have to come back as two
+// vcpus twice over. WorkPool answers the out-of-range index migrate_to_pool always passes
+// with `vcpu_index++ % size`, and on this transport vq_start is that helper's only caller
+// -- start() runs it once per queue, so the number of draws is the queue count and nothing
+// else in a device's life moves the cursor. That those draws are ahead of any consumer is
+// a property of THIS case and not of start(): the device is created fresh here and its
+// consumer attaches only after start() returns, while start()'s adoption path exists
+// precisely for a device whose consumer is already attached when it runs.
+//
+// EXPECT_EQ, not the EXPECT_GE multiqueue_io_spreads_over_the_pool settles for, and the
+// reach it adds is on the UPPER side: a queue whose migration was REFUSED keeps running on
+// this vcpu, so the count reads 3 -- two pool vcpus plus one that never left. ran_on() reads
+// the same fact directly rather than leaving it to be inferred, because a count of 2 is
+// otherwise equally consistent with a pool half used and this vcpu making up the other half.
+//
+// What this cannot see, stated rather than left to be found: RecordingFile records the
+// SET of vcpus that reached the backend, with nothing attributing an entry to a queue,
+// so it cannot say how many queues landed on each. A cursor that saturates once it has
+// been through the pool draws the two vcpus and then the second one twice more, and
+// reads 2 here exactly as round-robin does. Telling those apart needs each draw observed
+// on its own -- the probe reset between draws, and a neighbours-differ assertion over the
+// results -- which this shape does not offer: all four draws land in one deduped set with
+// nothing attributed to any of them. The saturating mutant is killed elsewhere in the tree
+// rather than here, by the nbd sibling more_connections_than_pool_vcpus_use_every_vcpu,
+// which resets its probe per connection and asserts that consecutive connections differ.
+// two_devices_share_one_pool below pins the cursor's SCOPE instead, which is the half of
+// the property that IS observable from here.
+//
+// Every queue has to carry IO and not merely be enabled, because vcpu_count() counts
+// what reached the backend: a queue that was migrated and never driven contributes
+// nothing to the set, so a case that drove queue 0 alone would read 1 against a cursor
+// working perfectly. The stress driver is the spread this file already trusts --
+// adoption_resyncs_every_queue rests on the same one, and there an IO that reached a
+// queue nobody served would simply never complete. ASSERT on the mq directory count
+// rather than EXPECT, because it is the premise of the sentence above and not a co-equal
+// claim: on a host whose driver built fewer hardware queues than we serve (it caps them
+// at a CPU count), the placement below would be decided by which queues the block layer
+// could reach, and going red should say that instead of reading as a placement bug.
+TEST_F(VduseTest, four_queues_over_a_two_vcpu_pool_use_both_vcpus) {
+    if (skip_reason) return;
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());   // m, the denominator of the wrap
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    BlkConfig cfg(make_info());
+    cfg.queues = 4;   // n > m: the cursor has to wrap twice
+    cfg.pool = pool;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    DEFER(vdpa_detach(TEST_NAME));   // consumer off BEFORE the daemon: an
+                                     // unserved device wedges its users in D state
+    std::string node = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node.empty());
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    ASSERT_EQ(4, test::count_mq_dirs(kname))
+        << "fewer hardware queues than served queues: which queues carry IO would then "
+           "be the block layer's reach, not the cursor's doing";
+    EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "vduse 4 queues / 2 pool vcpus", 8));
+
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// Two devices on ONE pool, one queue each. The cursor is WorkPool's own `vcpu_index`, a
+// member of the pool's impl and shared by every caller, so device B's draw continues
+// where device A's left off instead of restarting at the first vcpu -- which is the whole
+// reason migrate_to_pool hands thread_migrate an out-of-range index rather than 0.
+// Nothing else in this file can see that: no other case here asserts PLACEMENT across two
+// starts -- multiqueue_shutdown_hands_over_inflight_io_promptly runs two starts against one
+// pool, but hands its second device the raw backend file rather than a recording probe, so
+// where that second draw landed goes unobserved -- and one device draws consecutive values
+// whichever way the cursor is scoped, so a per-device cursor and a pool-wide one are the
+// same observation until a second device draws.
+//
+// SEQUENTIAL, and that is a safety decision rather than an accident of the shape. Two
+// consumers attached to two registrations at once is twice the surface this file's header
+// warns about, and it would buy nothing here: on this transport the draw happens in
+// vq_start, which only start() calls, so each device has already drawn before its own
+// consumer exists. Phase A therefore ends with an explicit detach + shutdown -- the pair
+// shutdown_busy ends with -- and a shutdown that returns 0 has issued DESTROY_DEV, so at
+// every instant below there is at most one consumer and at most one registration: exactly
+// the peak state of every single-device case in this file. The DEFERs stay as the backstop
+// for an ASSERT firing before that explicit pair runs, both halves are idempotent, and
+// vdpa_detach answers NoConsumer from a stat -- no genl command -- for a consumer already
+// gone. A DEFER declared below a phase-A ASSERT is never constructed, so none of B's can
+// fire against a dev_b that was never built.
+//
+// One queue per device is what makes the assertion exact rather than likely. Each queue is
+// drawn for exactly once, by the vq_start that creates its loop coroutine. start()'s own
+// engine probe draws nothing, because check_pool_engines migrates by IN-range index, which
+// is the branch that skips the cursor; teardown draws nothing either, because run_on_home
+// migrates to the recorded `home` vcpu directly rather than through the pool. Two devices
+// are therefore two CONSECUTIVE draws, and `% 2` maps consecutive draws to different vcpus
+// wherever the counter happened to stand -- so nothing here depends on a fresh pool
+// starting at zero, only on nobody else drawing between the two starts.
+//
+// Disjointness is the strongest claim that follows from that, and it is deliberately not
+// the stronger-looking "A on the pool's first vcpu, B on its second": WorkPool fills its
+// vcpus vector from add_vcpu, i.e. in worker-thread startup order, so an absolute index
+// would pin that order as if it were a contract. Consecutiveness is all disjointness needs,
+// and one queue per device is what buys it. Nor is it weaker than it looks: a cursor scoped
+// to the device restarts at the first vcpu for B and lands it where A already is, and a
+// migrate_to_pool that passed an in-range index draws the first vcpu for both -- a constant
+// 0 and the queue index are the same thing when each device has one queue. Either way the
+// EXPECT_NE reads two equal pointers. A cursor that saturates after one cycle is NOT caught
+// here: two draws never reach a third.
+//
+// One RecordingFile per device so each placement stays attributable; a single probe behind
+// both backends would report a union, and a union of two is evidence of a split only once
+// each device is known to have contributed exactly one vcpu -- the pair of counts below,
+// which holds because a device's per-request coroutines are created on its loop's own vcpu
+// and never migrated. Both probes wrap the fixture's image, which is safe because A's IO is
+// complete and verified before B is built, and neither start() is given ownership of it.
+TEST_F(VduseTest, two_devices_share_one_pool) {
+    if (skip_reason) return;
+    // A second name INSIDE NAME_PREFIX, so that a residue of this case is still something
+    // the fixture's sweep() will adopt and clear rather than leave standing for the next
+    // run's start() to die on. Distinct from TEST_NAME because the registration, its
+    // tombstone and its vdpa bus device are all keyed by name.
+    static const char NAME_B[] = "photon-vduse-test-b";
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());   // `% 2` is what makes consecutive draws differ
+    test::RecordingFile rec_a(file);
+    test::RecordingFile rec_b(file);
+    auto* caller = photon::get_vcpu();
+
+    // ---- device A: drawn for, driven, and gone again before B is built ----
+    BlkConfig cfg_a(make_info());
+    cfg_a.queues = 1;   // one queue = one draw, which is what makes the pair consecutive
+    cfg_a.pool = pool;
+    auto dev_a = ctl->new_device(cfg_a);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    ASSERT_EQ(0, dev_a->start(&rec_a));
+    DEFER(dev_a->shutdown());          // backstop, idempotent; fires LAST of A's three
+    DEFER(vdpa_detach(TEST_NAME));     // backstop; fires BEFORE the shutdown above
+    std::string node_a = vdpa_attach(TEST_NAME);
+    ASSERT_FALSE(node_a.empty());
+    EXPECT_EQ(0, device_io(node_a, pattern(0x11), true));
+    // A's placement, read BEFORE its teardown: the claim is where the serving coroutine
+    // ran, and whatever a shutdown goes on to do through the backend is not that.
+    ASSERT_EQ(1u, rec_a.vcpu_count());
+    EXPECT_FALSE(rec_a.ran_on(caller));
+    // Consumer off while A still serves, then A's registration destroyed -- asserted
+    // rather than merely done. ServedByUs is the branch that means the removal drained
+    // against a live daemon. Of the other four, AdoptedHere and RescuedBySentinel mean one
+    // of the two rescues ran here, against a device this case is itself serving;
+    // NoConsumer means the consumer attached above has vanished on its own; Withheld means
+    // both rescues ran and failed, so the removal was declined outright. Any of them is a
+    // fact to stop on. The access() after it is the independent witness that B is about to
+    // be the ONLY registration alive, which is the premise the sequential safety argument
+    // rests on.
+    EXPECT_TRUE(DetachOutcome::ServedByUs == vdpa_detach(TEST_NAME));
+    ASSERT_EQ(0, dev_a->shutdown());
+    EXPECT_NE(0, ::access((std::string("/dev/vduse/") + TEST_NAME).c_str(), F_OK));
+
+    // ---- device B: the second draw on the same cursor ----
+    BlkConfig cfg_b(make_info());
+    cfg_b.info.identity = NAME_B;
+    cfg_b.queues = 1;
+    cfg_b.pool = pool;
+    auto dev_b = ctl->new_device(cfg_b);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    ASSERT_EQ(0, dev_b->start(&rec_b));
+    DEFER(dev_b->shutdown());          // backstop, idempotent
+    DEFER(vdpa_detach(NAME_B));        // backstop; fires BEFORE the shutdown above
+    std::string node_b = vdpa_attach(NAME_B);
+    ASSERT_FALSE(node_b.empty());
+    // A range of its own, so a read-back cannot be satisfied by the bytes A left behind
+    EXPECT_EQ(0, device_io(node_b, pattern(0x22), true, IO_OFF + IO_LEN));
+
+    ASSERT_EQ(1u, rec_b.vcpu_count());
+    EXPECT_FALSE(rec_b.ran_on(caller));
+    EXPECT_NE(rec_a.vcpus().front(), rec_b.vcpus().front())
+        << "both devices' serving coroutines landed on one pool vcpu, so the cursor is "
+           "not shared across devices";
+}
+
 // The handover this suite already trusts for ONE queue (daemon_restart_io), on four
 // queues over a pool: a consumer attached, a writer with completed iterations behind
 // it, then detach(false) and a second daemon adopting and serving again. What it adds
