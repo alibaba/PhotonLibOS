@@ -268,14 +268,17 @@ static unsigned msgs, driver_ok_seen;  // device-wide, not per-queue
 static int kickfds[MAX_VQS];
 static unsigned nkickfds;
 
-// seconds since the first call: the probe's own deadline base (alog timestamps
-// the trace, so this is only for the loop's budget)
+// Seconds since the first call: the probe's own deadline base (alog timestamps the
+// trace, so this is only for the loop's budget). The unit is load-bearing -- /1e6
+// here returns milliseconds, which made the 25 s deadline and the 18 s wrap-up read
+// as 25 ms and 18 ms, so probe stopped serving 0.2 s in, while `vdpa dev add` was
+// still in flight, and left cleanup() to delete a device nobody was serving.
 static double now() {
     static long long t0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     long long t = ts.tv_sec * 1000000000LL + ts.tv_nsec;
     if (!t0) t0 = t;
-    return (t - t0) / 1e6;
+    return (t - t0) / 1e9;
 }
 
 // system() is warn_unused_result; the probe's shell steps are best-effort and
@@ -583,10 +586,12 @@ static void cleanup() {
     sigaddset(&block, SIGTERM);
     sigaddset(&block, SIGINT);
     sigprocmask(SIG_BLOCK, &block, nullptr);
-    // Bounded: on a wedged device `vdpa dev del` can itself block. If it times
-    // out, DESTROY_DEV below still succeeds and takes the half-attached vdpa
-    // device with it; if even that returns EBUSY, serve the backlog with
-    // `vduse-cli rescue` first, then retry.
+    // NOT bounded, whatever `timeout 10` reads like -- this is the first trap above:
+    // timeout signals a D-state child, cannot reap it, and waits. Every run that
+    // reached here blocked until the harness's own timeout fired, and DESTROY_DEV
+    // below answered EBUSY rather than taking the half-attached device with it.
+    // Reaching here at all means the background shell's del -- the one that runs
+    // while the loop still serves, which is what makes it rc=0 -- never got there.
     sh("timeout 10 vdpa dev del " PROBE_NAME " 2>/dev/null; true");
     // Every queue's eventfd, not just the first: a probe that declared N queues
     // registered N of them, and a slot holding -1 is one eventfd() refused.
