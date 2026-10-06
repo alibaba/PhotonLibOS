@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """Mutation harness for blk/vhost-user.cpp and blk/utils.cpp.
 
+Three groups, each with a different relationship to the real frontend, so do not read
+a detection claimed here as a QEMU detection unless it says so.
+
 The four protocol mutants guard transport-level behaviours. Do not book this group
 as "found by QEMU": that is substantiated for nocallsignal only -- it is a defect
 the real frontend catches at its qvirtio_wait_queue_isr and a polling mock
 structurally cannot. overread and nobound go the other way, and have long been
-caught in-repo by pipelined_messages and oversized_payload. The eight EVENT_IDX
-mutants are a different case, and each is annotated where it is listed below:
-several of them have no real-frontend detection at all, so do not read this file
-as claiming one. What every mutant here does
+caught in-repo by pipelined_messages and oversized_payload.
+
+The eight EVENT_IDX mutants are a different case, and each is annotated where it is
+listed below: several of them have no real-frontend detection at all, so do not read
+this file as claiming one.
+
+The fifteen INDIRECT_DESC mutants split across both files -- eleven on the table walk
+in the shared engine, four on the one transport that offers the bit. nooffer is the
+only mutant here with a real-frontend detection that is certain rather than argued,
+because QEMU's indirect case asserts bit 28 before it sets features. Several of the
+others have teeth at the engine layer only and say so where they are listed.
+
+What every mutant here does
 establish is narrower and still worth having -- that the new mock-side assertion
 actually fires, rather than passing for a reason
 that has nothing to do with the guard it is supposed to cover. Every mutation is
@@ -16,9 +28,10 @@ an anchored replacement that fails loudly if the anchor is not found exactly onc
 so a mutation can never silently degrade into a no-op and report a false "the test
 still passes".
 
-Two source files, because the guards live at two levels: the protocol guards are
-in the transport (blk/vhost-user.cpp) and the VIRTIO_RING_F_EVENT_IDX guards are
-in the shared virtqueue engine (blk/utils.cpp), which both transports sit on.
+Two source files, because the guards live at two levels: the protocol guards and the
+INDIRECT_DESC offer are in the transport (blk/vhost-user.cpp), and the
+VIRTIO_RING_F_EVENT_IDX and table-walk guards are in the shared virtqueue engine
+(blk/utils.cpp), which both transports sit on.
 `backup` and `restore` cover both; each mutant declares which file it acts on.
 `backup` before the first mutant and `restore` after every single one -- a
 mutant left in place silently poisons every later run.
@@ -29,7 +42,19 @@ mutant left in place silently poisons every later run.
 
 blk/vhost-user.cpp -- protocol layer:
 
-    overread        # revert recv_msg to one recvmsg of sizeof(vhost_user_msg)
+    overread        # revert recv_msg to one recvmsg of sizeof(vhost_user_msg).
+                    # CURRENTLY VOID, and not because of a stale anchor: the anchor
+                    # matches exactly once and the mutation applies, but the result
+                    # does not compile. recv_msg gained a SECOND bound after this
+                    # replacement text was written -- `payload_min(req)` -- and the
+                    # pre-fix body carries only the older sizeof bound, so applying
+                    # it deletes payload_min's only caller and
+                    # -Werror=unused-function fails the build. Repairing it is a
+                    # design choice rather than a resync, because a faithful pre-fix
+                    # body also drops the DEFER that closes half-received fds and
+                    # that second bound, so it would conflate three mutants into one
+                    # run. Left broken and loud rather than quietly narrowed to
+                    # something that compiles and proves less than its name claims.
     nobound         # drop the oversized-payload check
     noprotofeature  # stop offering device feature bit 30, the gate on protocol
                     # negotiation
@@ -152,6 +177,129 @@ blk/utils.cpp -- VIRTIO_RING_F_EVENT_IDX, one annotation per mutant below:
                     # not catch it either: idx issues three requests against a
                     # 128-entry ring and so never reaches the in-flight cap.
 
+blk/utils.cpp -- VIRTIO_RING_F_INDIRECT_DESC, the table walk:
+
+    nogate          # drop the refusal when the transport did not negotiate bit 28,
+                    # leaving the walk itself in place. Caught by
+                    # an_indirect_descriptor_is_refused_when_the_feature_was_not_negotiated.
+                    # Deleting the block rather than emptying its body is deliberate:
+                    # `if (x) ;` trips -Wempty-body under -Werror, the build fails, and a
+                    # mutant that does not compile is void -- while a run that is red
+                    # because of a compile error looks exactly like a real detection.
+    noxtnext        # drop the refusal of a descriptor carrying INDIRECT and NEXT
+                    # together, so whatever the driver chained behind the table is
+                    # silently discarded. Caught by
+                    # an_indirect_descriptor_chained_with_next_is_refused, on its status
+                    # assertion: the wrong shape returns S_OK. That case's sentinel
+                    # assertion does NOT discriminate between the two shapes, so it is
+                    # not the detection and is not booked as one.
+    partialent      # keep only the zero-length half of the table length check, so a
+                    # length that is not a whole number of entries gets walked. Caught by
+                    # a_table_length_that_is_not_a_whole_number_of_entries_is_refused.
+                    # Split from zerolen because the two halves guard different things:
+                    # this one reads outside the buffer the driver declared, that one
+                    # treats an empty table as a legitimate chain.
+    zerolen         # keep only the divisibility half, so a zero-length table gets
+                    # walked. Caught by
+                    # a_zero_length_table_is_refused_before_any_entry_is_translated, on
+                    # its ASSERT_EQ(0u, g.asked_addr.size()) -- not on the status, which
+                    # is IOERR under both shapes.
+    nocab           # drop the MAX_INDIRECT_ENTRIES cap on a table's entry count. Caught
+                    # by an_absurd_table_is_refused_before_it_is_walked, on its
+                    # ASSERT_EQ(0u, g.asked_addr.size()): 0 against 66. The status is the
+                    # SAME under both shapes, so an IOERR assertion here is not a
+                    # detection. Nor does the vhost-user case that refuses an absurd
+                    # table count as a second one: on that transport a translate is a
+                    # handful of integer comparisons, so even a quarter of a million of
+                    # them finishes in milliseconds and the mock's collection budget
+                    # never expires. One detection, not two.
+    capoffbyone     # >= instead of > on that cap, refusing a table of exactly
+                    # MAX_INDIRECT_ENTRIES. Caught by
+                    # a_table_of_exactly_the_entry_cap_is_served. This is the half of the
+                    # cap arithmetic the published seg_max does not cover: 62 and 64 are
+                    # the two ends of one equation and this moves one end. The real
+                    # frontend cannot catch it -- QEMU's indirect case builds a table of
+                    # exactly two entries.
+    tblwrite        # translate the table itself as writable instead of read-only. Caught
+                    # by the_table_is_translated_read_only_and_first, on its
+                    # EXPECT_EQ(0, g.asked_writable[0]). Teeth at the engine layer only:
+                    # vhost-user's translate does not consult the writable argument, so
+                    # no transport-level case can see it, and on vduse the walk is
+                    # unreachable because that transport does not offer the bit.
+    tblasdata       # push the table descriptor's own bytes into a data stream as well as
+                    # walking it. Caught by
+                    # the_table_descriptor_itself_carries_no_data, on its S_OK assertion:
+                    # the stray table bytes make the role split reject the request. The
+                    # indirect write case goes red too but by a different mechanism -- it
+                    # reads the table's first entry as a request header -- so only the one
+                    # case is booked.
+    tblbound        # bound a table entry's index by ring_num instead of by the table's
+                    # own entry count, conflating two index spaces. Caught by
+                    # an_out_of_range_table_next_is_refused_instead_of_read_past_the_table,
+                    # on its sentinel assertion -- not on the status, which is IOERR
+                    # either way because the wrong bound still lands somewhere invalid.
+                    # That is what the 513-byte decoy in that case is for.
+    tblarray        # read table entries out of the main ring's descriptor array instead
+                    # of out of the table. Caught by
+                    # normal_descriptors_before_a_trailing_indirect_table_are_all_served,
+                    # and the attribution matters: it goes red because at entry 1 it
+                    # re-reads the ring descriptor carrying INDIRECT and trips the
+                    # nested-table refusal, not because a header comparison fails.
+    nestok          # drop the refusal of a nested indirect descriptor, so one table
+                    # entry may name another table. Caught by
+                    # a_nested_indirect_table_is_refused, and by nothing else. The real
+                    # frontend cannot catch it: QEMU's indirect helper hard-codes a table
+                    # of two entries and never builds a nested one.
+
+blk/vhost-user.cpp -- the INDIRECT_DESC offer and the seg_max it publishes:
+
+    nooffer         # stop offering device feature bit 28. Caught by
+                    # indirect_desc_is_offered_and_negotiated on its offer precondition.
+                    # This is the only mutant in the file whose real-frontend detection
+                    # is certain rather than argued: QEMU's indirect case asserts bit 28
+                    # is present before it calls qvirtio_set_features, so that case stays
+                    # not ok.
+    gateonoffer     # gate the table walk on what we offered instead of on what the peer
+                    # negotiated. Caught by
+                    # an_indirect_request_is_refused_when_the_feature_was_declined, which
+                    # exists precisely because this mock CAN decline a bit. The sibling
+                    # event-idx guard has no equivalent mutant, and that is a gap in this
+                    # file's coverage rather than a judgement that the guard is unneeded:
+                    # that mock cannot express a decline, so there is nothing to mutate
+                    # against.
+    noreset         # drop the indirect_desc clear in vq_reset. EXPECTED NOT TO BE
+                    # DETECTED, and that is a correction to the design document, which
+                    # books this mutant against
+                    # a_reconnect_that_declines_the_feature_stops_walking_tables.
+                    # Measured instead: both suites stay green under it, 52/52 and
+                    # 77/77. The reason is structural rather than a weak test. vq_reset
+                    # runs only on the two terminal paths -- stop_session and the
+                    # destructor -- and a frontend RECONNECT tears down with vq_stop,
+                    # not vq_reset (the SET_VRING_NUM comment says so explicitly), so
+                    # the reconnect case never reaches the line this deletes. And in
+                    # any session that can serve at all, SET_FEATURES stores the flag
+                    # from the negotiated word before a ring goes live, overwriting
+                    # whatever a reset left behind.
+                    # What the clear still defends is a frontend that sets up its rings
+                    # and kicks without ever sending SET_FEATURES: nothing in the
+                    # protocol forces that message, and on a second session the flag
+                    # would otherwise hold the first session's true. A discriminating
+                    # test needs exactly that mock path, and negotiate() does not have
+                    # it. Kept rather than deleted because the flag gates a
+                    # peer-supplied length, and because the clears beside it are not all
+                    # alike: event_idx is redundant the same way and its own comment
+                    # admits it, while notify_valid is NOT re-derived by SET_FEATURES
+                    # and so genuinely depends on this path.
+    segmaxfull      # publish MAX_INDIRECT_ENTRIES as seg_max instead of that count minus
+                    # the two framing descriptors. Caught by
+                    # seg_max_is_published_as_the_cap_minus_the_two_framing_descriptors,
+                    # which reads 64 where it expects 62. State the strength of that tooth
+                    # plainly: it is literal against literal, so it kills any other
+                    # number, but nothing in this repository can prove 62 is the RIGHT
+                    # number. Deleting the assignment outright has the same effect as not
+                    # offering SEG_MAX and goes red on the same assertion reading 0, so no
+                    # second mutant is needed.
+
 Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence is
 `backup`, then one mutation at a time with a build and a run between it and the next
 `backup`, then `restore`; `restore` and every mutation refuse to run without the
@@ -200,6 +348,23 @@ MUTANTS = {
     "wrongevent": "utils",
     "nofence": "utils",
     "noprogress": "utils",
+    # VIRTIO_RING_F_INDIRECT_DESC: eleven in the shared engine, four in the one
+    # transport that offers the bit.
+    "nogate": "utils",
+    "noxtnext": "utils",
+    "partialent": "utils",
+    "zerolen": "utils",
+    "nocab": "utils",
+    "capoffbyone": "utils",
+    "tblwrite": "utils",
+    "tblasdata": "utils",
+    "tblbound": "utils",
+    "tblarray": "utils",
+    "nestok": "utils",
+    "nooffer": "vhost-user",
+    "gateonoffer": "vhost-user",
+    "noreset": "vhost-user",
+    "segmaxfull": "vhost-user",
 }
 
 RECV_MSG_MARK = "    int recv_msg(int fd, vhost_user_msg* m, int* fds, int* nfds) {\n"
@@ -243,15 +408,12 @@ OLD_RECV_MSG = """    int recv_msg(int fd, vhost_user_msg* m, int* fds, int* nfd
     }
 """
 
-BOUND_BLOCK = """        if (m->size > sizeof(m->payload)) {
-            // copied out first: m is not const here, and alog's forwarding
-            // reference cannot bind a packed field (see the access rule above)
-            int32_t req = m->request;
-            uint32_t sz = m->size;
-            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, "
-                             "the largest this protocol has is `",
-                             req, sz, (uint32_t)sizeof(m->payload));
-        }
+# The check alone, not the two locals declared above it: `req` and `sz` are read
+# again by the payload_min bound a few lines further down, so deleting them along
+# with the check would fail the build -- and a mutant that does not compile is
+# void, not a detection.
+BOUND_BLOCK = """        if (sz > sizeof(m->payload))
+            LOG_ERROR_RETURN(EPROTO, -1, "vhost-user request ` declares a ` byte payload, the largest this protocol has is `", req, sz, (uint32_t)sizeof(m->payload));
 """
 
 
@@ -267,14 +429,16 @@ OFFER_FEATURES_NO_BIT30 = """        offer_features = (1ULL << VIRTIO_F_VERSION_
                          (1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_RING_F_INDIRECT_DESC);
 """
 
-# deleting just the call leaves an empty else-if body, which still compiles
-CALL_SIGNAL = """                vq_notify();
+# deleting just the call leaves an empty else-if body, which still compiles.
+# vq_start now sits between that body and the break, and it is kept in the anchor
+# so the match cannot drift onto some other closing brace.
+CALL_SIGNAL = """                vq_notify(idx);
             }
-            break;
+            vq_start(idx);
 """
 
 CALL_SIGNAL_MUTATED = """            }
-            break;
+            vq_start(idx);
 """
 
 # ---- blk/utils.cpp: the shared virtqueue engine, VIRTIO_RING_F_EVENT_IDX ----
@@ -291,8 +455,8 @@ SHOULD_NOTIFY_NEVER = """bool VirtQueueServer::should_notify(uint16_t old_used_i
 }
 """
 
-NOTIFY_VALID_BLOCK = """    if (!notify_valid) {
-        notify_valid = true;
+NOTIFY_VALID_BLOCK = """    if (!notify_valid.load(std::memory_order_relaxed)) {
+        notify_valid.store(true, std::memory_order_relaxed);
         return true;
     }
 """
@@ -336,6 +500,99 @@ DRAIN_PROGRESS = """                uint16_t before = last_avail;
 
 DRAIN_PROGRESS_MUTATED = """                dispatch_avail();
 """
+
+# ---- blk/utils.cpp: the shared virtqueue engine, VIRTIO_RING_F_INDIRECT_DESC ----
+# Every anchor below is a slice of virtio_blk_serve_chain's indirect branch. The
+# deletion anchors carry their own LOG_ERROR text, because the branch is full of
+# `bad = true; break;` and a bare one would match several times.
+
+INDIRECT_GATE = """            if (!allow_indirect) {
+                LOG_ERROR("virtio-blk `: indirect descriptor, unsupported", tag);
+                bad = true;
+                break;
+            }
+"""
+
+INDIRECT_WITH_NEXT = """            if (de->flags & VRING_DESC_F_NEXT) {
+                LOG_ERROR("virtio-blk `: indirect descriptor at ` also carries NEXT", tag, d);
+                bad = true;
+                break;
+            }
+"""
+
+TBL_LEN_CHECK = "            if (de->len == 0 || de->len % sizeof(vring_desc)) {\n"
+
+TBL_LEN_ONLY_ZERO = "            if (de->len == 0) {\n"
+
+TBL_LEN_ONLY_PARTIAL = "            if (de->len % sizeof(vring_desc)) {\n"
+
+TBL_CAP_BLOCK = """            if (n > MAX_INDIRECT_ENTRIES) {
+                LOG_ERROR("virtio-blk `: indirect table at ` declares ` entries, the limit is `",
+                          tag, d, n, MAX_INDIRECT_ENTRIES);
+                bad = true;
+                break;
+            }
+"""
+
+# nocab deletes the block above; capoffbyone changes only the comparison, so its
+# anchor is the single line. Both start with `if (n >`, which is why the block
+# anchor has to carry the log text to stay unique.
+TBL_CAP_TEST = "            if (n > MAX_INDIRECT_ENTRIES) {\n"
+
+TBL_CAP_TEST_OFFBYONE = "            if (n >= MAX_INDIRECT_ENTRIES) {\n"
+
+TBL_TRANSLATE = "            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, false);\n"
+
+TBL_TRANSLATE_WRITABLE = "            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, true);\n"
+
+# tblwrite only; the cast is needed because push() takes void* and tbl is const.
+# Inserted BEFORE the `if (!tbl)` refusal, hence the guard.
+TBL_AS_DATA = (TBL_TRANSLATE +
+               "            if (tbl) ((de->flags & VRING_DESC_F_WRITE) ? wr : rd).push((void*)tbl, de->len);\n")
+
+TBL_INDEX_BOUND = "                if (t >= n) {\n"
+
+TBL_INDEX_BOUND_RING = "                if (t >= ring_num) {\n"
+
+TBL_ARRAY = "                const vring_desc* te = &tbl[t];\n"
+
+TBL_ARRAY_RING = "                const vring_desc* te = &desc[t];\n"
+
+TBL_NESTED = """                if (te->flags & VRING_DESC_F_INDIRECT) {
+                    // \u00a72.7.5.3.1: "The driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag
+                    // within an indirect descriptor (ie. only one table per descriptor)."
+                    // That is a DRIVER requirement -- \u00a72.7.5.3.2 gives the device no
+                    // matching MUST -- so refusing here is our own strictness, and the
+                    // reason is the bound: nesting turns one step budget into a product
+                    // of budgets, with the depth the peer's.
+                    LOG_ERROR("virtio-blk `: nested indirect descriptor at table entry `", tag, t);
+                    bad = true;
+                    break;
+                }
+"""
+
+# ---- blk/vhost-user.cpp: the INDIRECT_DESC offer and the seg_max it publishes ----
+
+OFFER_INDIRECT = ("                         (1ULL << VIRTIO_RING_F_EVENT_IDX) | "
+                  "(1ULL << VIRTIO_RING_F_INDIRECT_DESC) |\n")
+
+OFFER_NO_INDIRECT = "                         (1ULL << VIRTIO_RING_F_EVENT_IDX) |\n"
+
+GATE_ON_NEGOTIATED = ("                vqs[i]->srv.indirect_desc.store(!!(negotiated & "
+                      "(1ULL << VIRTIO_RING_F_INDIRECT_DESC)),\n")
+
+GATE_ON_OFFER = ("                vqs[i]->srv.indirect_desc.store(!!(offer_features & "
+                 "(1ULL << VIRTIO_RING_F_INDIRECT_DESC)),\n")
+
+RESET_INDIRECT = """            // Same hazard, and a more concrete one: a true value left here means a NEW
+            // session that never negotiated bit 28 still walks tables, i.e. the
+            // offer-instead-of-negotiated mistake comes back on the reset path.
+            q->srv.indirect_desc.store(false, std::memory_order_relaxed);
+"""
+
+SEG_MAX_ADVERTISED = "        bc->seg_max = VIRTIO_BLK_SEG_MAX_ADVERTISED;\n"
+
+SEG_MAX_FULL = "        bc->seg_max = MAX_INDIRECT_ENTRIES;\n"
 
 
 def die(msg):
@@ -460,6 +717,51 @@ def main():
     elif mode == "noprogress":
         text = sub_once(text, DRAIN_PROGRESS, DRAIN_PROGRESS_MUTATED,
                         "the drain loop's no-progress break")
+    elif mode == "nogate":
+        text = sub_once(text, INDIRECT_GATE, "",
+                        "the allow_indirect refusal on an indirect descriptor")
+    elif mode == "noxtnext":
+        text = sub_once(text, INDIRECT_WITH_NEXT, "",
+                        "the refusal of an indirect descriptor that also carries NEXT")
+    elif mode == "partialent":
+        text = sub_once(text, TBL_LEN_CHECK, TBL_LEN_ONLY_ZERO,
+                        "the whole-number-of-entries half of the table length check")
+    elif mode == "zerolen":
+        text = sub_once(text, TBL_LEN_CHECK, TBL_LEN_ONLY_PARTIAL,
+                        "the non-zero half of the table length check")
+    elif mode == "nocab":
+        text = sub_once(text, TBL_CAP_BLOCK, "",
+                        "the MAX_INDIRECT_ENTRIES cap on a table's entry count")
+    elif mode == "capoffbyone":
+        text = sub_once(text, TBL_CAP_TEST, TBL_CAP_TEST_OFFBYONE,
+                        "the comparison operator on the table entry cap")
+    elif mode == "tblwrite":
+        text = sub_once(text, TBL_TRANSLATE, TBL_TRANSLATE_WRITABLE,
+                        "the read-only translate of the table itself")
+    elif mode == "tblasdata":
+        text = sub_once(text, TBL_TRANSLATE, TBL_AS_DATA,
+                        "the table descriptor, which carries no data")
+    elif mode == "tblbound":
+        text = sub_once(text, TBL_INDEX_BOUND, TBL_INDEX_BOUND_RING,
+                        "the table entry index bound, which is n and not ring_num")
+    elif mode == "tblarray":
+        text = sub_once(text, TBL_ARRAY, TBL_ARRAY_RING,
+                        "the array a table entry is read out of")
+    elif mode == "nestok":
+        text = sub_once(text, TBL_NESTED, "",
+                        "the refusal of a nested indirect descriptor")
+    elif mode == "nooffer":
+        text = sub_once(text, OFFER_INDIRECT, OFFER_NO_INDIRECT,
+                        "device feature bit 28 in offer_features")
+    elif mode == "gateonoffer":
+        text = sub_once(text, GATE_ON_NEGOTIATED, GATE_ON_OFFER,
+                        "the negotiated word the table walk is gated on")
+    elif mode == "noreset":
+        text = sub_once(text, RESET_INDIRECT, "",
+                        "the indirect_desc clear in vq_reset")
+    elif mode == "segmaxfull":
+        text = sub_once(text, SEG_MAX_ADVERTISED, SEG_MAX_FULL,
+                        "the two framing descriptors subtracted from seg_max")
     src.write_text(text)
     print("MUTATED", mode, src)
 
