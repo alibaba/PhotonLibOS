@@ -23,7 +23,8 @@ limitations under the License.
 //                                     it, and dump the whole kernel<->daemon
 //                                     interaction
 //   vduse-cli rescue <name> [secs]    adopt an EXISTING registration nobody serves
-//                                     and drain its backlog (default 60s)
+//                                     and drain the backlog of EVERY queue it has
+//                                     (default 60s)
 //   vduse-cli destroy <name>          VDUSE_DESTROY_DEV, without serving it
 //   vduse-cli vqprobe <n> <setup> <i>...   create a registration declaring <n>
 //                                     virtqueues and ask VDUSE_VQ_GET_INFO about
@@ -42,17 +43,47 @@ limitations under the License.
 // blk/vduse.cpp's own recovery path (start() on an orphan) is the productized
 // rescue.
 //
-// MEASURED RECOVERY ORDER for a wedged device:
-//   1. vduse-cli rescue <name> &   adopt and serve the backlog; the D-state
-//                                  consumers (vdpa dev add, udev-worker) clear
-//   2. vdpa dev del <name>         detach the consumer -- on a half-attached device
-//                                  this can TIME OUT (rc=124), which is fine
-//   3. kill the rescue daemon (DESTROY_DEV is EBUSY while a daemon is still
-//      connected), then `vduse-cli destroy <name>`: destroying the registration
-//      also takes the half-attached vdpa device with it, so this is the step that
-//      actually clears the residue
+// MEASURED RECOVERY ORDER for a wedged device. Verified end to end on a 4-queue
+// wedge; the drill recorded before that run is the one that failed, and how it
+// failed is why this tool holds per-queue state now.
+//   1. Serve EVERY queue of the registration. `vduse-cli rescue <name>` does that
+//      only as of this change. Before it, rescue kept ONE set of file-scope ring
+//      state and hardcoded vi.index = 0, so it mapped and served queue 0 and no
+//      other -- and one instance per queue is not available either, because the
+//      char device admits a single opener (a second open answers EBUSY, measured).
+//      On that 4-queue wedge it adopted, mapped one vring, logged 5 lines in
+//      total, and served nothing across a 1800 s continuous run plus 240 s of
+//      polling, while two processes stayed in uninterruptible D state holding the
+//      machine-wide genl_lock. The four rescues recorded as successful before
+//      that all happened to have their pending work reachable from queue 0.
+//      The fallback that did work, in 6 s, was adopting through blk/vduse.cpp's
+//      start(), whose resync covers every queue. It is usable on a wedged box for
+//      a reason worth remembering: vduse.cpp includes no netlink header, so its
+//      control plane issues no genl command and cannot block on the genl_lock a
+//      wedged `vdpa dev add` is holding.
+//   2. `vdpa dev show` answering rc=0 instantly is the criterion that genl_lock is
+//      free, i.e. that the machine has stopped being machine-wide wedged. Test it
+//      before any other step that speaks netlink.
+//   3. `vdpa dev del <name>`: rc=0 when something is serving the device, 124 only
+//      when it is half-attached. Never WAIT on it -- first trap below.
+//   4. SIGTERM the daemon, never -9: DESTROY_DEV is EBUSY while a daemon is still
+//      connected, and SIGKILL leaves the registration UNSERVED, which re-wedges
+//      its consumers.
+//   5. `vduse-cli destroy <name>`: destroying the registration also takes a
+//      half-attached vdpa device with it, so this is the step that clears the
+//      residue.
 // Clean state afterwards: `ls /dev/vduse` shows only `control` and `vdpa dev show`
-// is empty. SIGKILL is not recoverable without the rescue subcommand.
+// is empty. SIGKILL is not recoverable without this tool or the product adopter.
+//
+// TWO TRAPS THAT COST TIME ON THAT RUN, both general:
+//   - A recovery script must never WAIT on `vdpa dev del`. `timeout N vdpa dev del`
+//     does not bound it: when the child goes to D state, timeout signals it,
+//     cannot reap it, and blocks -- so the script hangs before reaching its own
+//     destroy step, and the hung timeout leaves a SECOND unkillable D process
+//     behind. Run it detached and poll instead.
+//   - `pkill -f "<pattern>"` self-matches: the invoking shell's own command line
+//     contains the pattern, so pkill kills the session that ran it. Kill by pid,
+//     taken from `pgrep -x <exact name>`.
 //
 // WHY vqprobe EXISTS, separately from probe. A daemon that ADOPTS a registration
 // somebody else created never ran CREATE_DEV, so the queue count the kernel holds
@@ -64,7 +95,12 @@ limitations under the License.
 // count, or answer any index? vqprobe measures it, on a registration of its own
 // with a count of its own choosing, so the answer does not depend on anybody's
 // device being in anybody's state. Unlike probe it never attaches a consumer, so
-// there is no /dev/vdX to wedge and no IOTLB stall to wait out.
+// there is no /dev/vdX to wedge and no IOTLB stall to wait out. rescue leans on
+// that answer: discover_vqs() counts the indices VDUSE_VQ_GET_INFO replies to and
+// stops at the first one it refuses, so the refusal -- not any field of a reply
+// -- is the queue count. Which errno the refusal carries is not predictable from
+// the header either: out of range was measured as EINVAL, and the same probe on
+// an unbound orphan (a registration no consumer has ever attached to) as EPERM.
 //
 // HAZARD (probe): it can block for MINUTES inside VDUSE_IOTLB_GET_FD for a
 // request's DATA buffer while `vdpa dev add` sits in D state waiting for that very
@@ -171,14 +207,30 @@ static Mode mode = PROBE;
 
 static int ctrl = -1, dev_fd = -1, kickfd = -1;
 
-// ---- vring state (a single vq) ----
-static unsigned vq_num;
-static struct vring_desc *desc;
-static struct vring_avail *avail;
-static struct vring_used *used;
-static unsigned last_avail, used_idx;
-static int vq_live;
-static unsigned msgs, driver_ok_seen;
+// The cap blk/utils.h's MAX_QUEUES puts on one device's queue count, repeated
+// here because this assistant program includes no blk header. It has to be that
+// cap rather than a number of our own: a rescue that can hold fewer queues than
+// the registration has serves fewer than the registration has, which is exactly
+// the defect the per-queue state below exists to remove.
+static constexpr unsigned MAX_VQS = 64;
+
+// ---- vring state, one set per virtqueue ----
+// A registration this tool adopts was declared by somebody else, so its queue
+// count is not one this tool chose and the uapi has no readback for it (see
+// discover_vqs). A single set of globals would serve index 0 alone and leave
+// every other queue's backlog unserved -- the wedge rescue exists to clear.
+struct Vq {
+    unsigned index;       // what VDUSE_VQ_GET_INFO and VDUSE_VQ_INJECT_IRQ take
+    unsigned vq_num;      // ring size, as the kernel reports it
+    struct vring_desc *desc;
+    struct vring_avail *avail;
+    struct vring_used *used;
+    unsigned last_avail, used_idx;
+    int live;             // rings mapped and safe to serve
+};
+static struct Vq vqs[MAX_VQS];
+static unsigned nvqs;                  // indices the discovery probe answered for
+static unsigned msgs, driver_ok_seen;  // device-wide, not per-queue
 
 // seconds since the first call: the probe's own deadline base (alog timestamps
 // the trace, so this is only for the loop's budget)
@@ -201,7 +253,7 @@ static void sh(const char *cmd) {
 static void usage() {
     fprintf(stderr,
         "usage: vduse-cli probe                  create, serve and dump its own \"" PROBE_NAME "\" device\n"
-        "       vduse-cli rescue <name> [secs]   adopt a wedged registration and drain it (default 60)\n"
+        "       vduse-cli rescue <name> [secs]   adopt a wedged registration and drain all its queues (default 60)\n"
         "       vduse-cli destroy <name>         VDUSE_DESTROY_DEV without serving\n"
         "       vduse-cli vqprobe <vq_num> <setup:0|1> <index>...\n"
         "                                        create a registration of <vq_num> virtqueues and ask\n"
@@ -243,59 +295,85 @@ static void *map_iova(unsigned long long iova, size_t need, bool quiet) {
     return (char *)base + (iova - e.start);
 }
 
-// Re-read the vq and map its three rings. resume_from_used picks the recovery
+// How many virtqueues the registration has, measured rather than declared: the
+// count belongs to whoever ran VDUSE_CREATE_DEV and nothing in the uapi hands it
+// back, so it is the number of indices VDUSE_VQ_GET_INFO replies to. The walk
+// stops at the first index the ioctl refuses, whatever errno it refuses with --
+// out of range answers EINVAL and an unbound orphan answers EPERM, and calling
+// either one "out of range" would be a guess, so only the refusal itself counts.
+static unsigned discover_vqs() {
+    unsigned n;
+    for (n = 0; n < MAX_VQS; n++) {
+        struct vduse_vq_info vi;
+        memset(&vi, 0, sizeof(vi));
+        vi.index = n;
+        if (ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) < 0)
+            break;
+        vqs[n].index = n;
+    }
+    if (n == MAX_VQS)
+        LOG_WARN("` indices answered VDUSE_VQ_GET_INFO, which is the cap this tool holds: queues beyond it are NOT served", MAX_VQS);
+    else
+        LOG_INFO("` virtqueue(s) discovered by probing VDUSE_VQ_GET_INFO", n);
+    return n;
+}
+
+// Re-read one vq and map its three rings. resume_from_used picks the recovery
 // point: a rescue adopts a ring whose daemon is gone, and the kernel's
 // avail_index is only what that daemon last reported, so resume from used->idx --
 // re-serving a completed request is safe (virtio-blk ops are idempotent), missing
 // one is not. The probe measures the kernel's own value instead.
-static bool vq_refresh(bool resume_from_used) {
+static bool vq_refresh(struct Vq &vq, bool resume_from_used) {
     struct vduse_vq_info vi;
     memset(&vi, 0, sizeof(vi));
-    vi.index = 0;
+    vi.index = vq.index;
     if (ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) < 0)
-        LOG_ERRNO_RETURN(0, false, "VDUSE_VQ_GET_INFO failed");
+        LOG_ERRNO_RETURN(0, false, "VDUSE_VQ_GET_INFO of vq ` failed", vq.index);
     if (mode == PROBE)
         LOG_INFO("VQ_GET_INFO: num `, ready `, desc 0x`, driver 0x`, device 0x`, avail_index ",
                  vi.num, vi.ready, HEX(vi.desc_addr), HEX(vi.driver_addr),
                  HEX(vi.device_addr), vi.split.avail_index);
-    vq_live = 0;
+    vq.live = 0;
     if (!vi.ready || !vi.desc_addr || !vi.driver_addr || !vi.device_addr)
         return false;
-    vq_num = vi.num;
-    desc  = (struct vring_desc*)map_iova(vi.desc_addr, vi.num * sizeof(struct vring_desc), false);
-    avail = (struct vring_avail*)map_iova(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num), false);
-    used  = (struct vring_used*)map_iova(vi.device_addr, sizeof(uint16_t) * 3 +
-                                         sizeof(struct vring_used_elem) * vi.num, false);
-    if (!desc || !avail || !used)
+    vq.vq_num = vi.num;
+    vq.desc  = (struct vring_desc*)map_iova(vi.desc_addr, vi.num * sizeof(struct vring_desc), false);
+    vq.avail = (struct vring_avail*)map_iova(vi.driver_addr, sizeof(uint16_t) * (3 + vi.num), false);
+    vq.used  = (struct vring_used*)map_iova(vi.device_addr, sizeof(uint16_t) * 3 +
+                                           sizeof(struct vring_used_elem) * vi.num, false);
+    if (!vq.desc || !vq.avail || !vq.used)
         return false;   // map_iova already said why
-    used_idx = used->idx;      // live ring: resume where the device left off
-    last_avail = resume_from_used ? used_idx : vi.split.avail_index;
-    vq_live = 1;
+    vq.used_idx = vq.used->idx;      // live ring: resume where the device left off
+    vq.last_avail = resume_from_used ? vq.used_idx : vi.split.avail_index;
+    vq.live = 1;
+    // named locals so this row prints the three names it always has -- it is the
+    // probe's dump as much as the rescue's, and the caller is what names the queue
+    unsigned vq_num = vq.vq_num, last_avail = vq.last_avail, used_idx = vq.used_idx;
     LOG_INFO("vring mapped, ", VALUE(vq_num), VALUE(last_avail), VALUE(used_idx));
     return true;
 }
 
-// Walk every available chain, answer it as a null virtio-blk device (reads
-// return zeros, so a wedged partition scan sees invalid partitions and gives up
-// cleanly) and publish the used ring. Returns the number served.
-static int serve_vq() {
-    if (!vq_live)
+// Walk every available chain of ONE queue, answer it as a null virtio-blk device
+// (reads return zeros, so a wedged partition scan sees invalid partitions and
+// gives up cleanly) and publish that queue's used ring. Returns the number served.
+static int serve_vq(struct Vq &vq) {
+    if (!vq.live)
         return 0;
     __sync_synchronize();
-    unsigned aidx = avail->idx;
+    unsigned aidx = vq.avail->idx;
     int served = 0;
-    while (last_avail != aidx) {
-        unsigned head = avail->ring[last_avail % vq_num];
+    while (vq.last_avail != aidx) {
+        unsigned head = vq.avail->ring[vq.last_avail % vq.vq_num];
         struct virtio_blk_outhdr *hdr = nullptr;
         void *data = nullptr; unsigned dlen = 0;
         unsigned char *status = nullptr;
         unsigned d = head;
         for (int k = 0; k < 32; k++) {   // chain walk; no indirect descriptors
-            struct vring_desc *de = &desc[d];
+            struct vring_desc *de = &vq.desc[d];
             void *va = map_iova(de->addr, de->len ? de->len : 1, true);
             if (!va) {
-                LOG_ERROR("unmappable descriptor: chain head `, desc `, iova 0x`, len ",
-                          head, d, HEX(de->addr), de->len);
+                LOG_ERROR("vq ` unmappable descriptor: chain head `, desc `, iova 0x`, len ",
+                          vq.index, head, d, HEX(de->addr), de->len);
                 return served;
             }
             if (!(de->flags & VRING_DESC_F_WRITE)) {
@@ -319,22 +397,29 @@ static int serve_vq() {
         }
         // OUT (writes) and FLUSH need no action here
         if (status) *status = VIRTIO_BLK_S_OK;
-        used->ring[used_idx % vq_num].id = head;
-        used->ring[used_idx % vq_num].len = (status ? 1 : 0) + ((is_read && data) ? dlen : 0);
-        used_idx++;
-        last_avail++;
+        vq.used->ring[vq.used_idx % vq.vq_num].id = head;
+        vq.used->ring[vq.used_idx % vq.vq_num].len = (status ? 1 : 0) + ((is_read && data) ? dlen : 0);
+        vq.used_idx++;
+        vq.last_avail++;
         served++;
         if (mode == PROBE)
             LOG_INFO("served head `, type `, sector `, dlen ", head, type, sector, dlen);
     }
     if (served) {
         __sync_synchronize();
-        used->idx = used_idx;
+        vq.used->idx = vq.used_idx;
         __sync_synchronize();
-        unsigned idx = 0;
-        if (ioctl(dev_fd, VDUSE_VQ_INJECT_IRQ, &idx) < 0)
-            LOG_ERROR("VDUSE_VQ_INJECT_IRQ failed, ", ERRNO());
-        LOG_INFO("served ` request(s), used->idx ", served, used_idx);
+        // The interrupt names the queue it belongs to. A zero here would tell the
+        // consumer of queue 0 about completions some OTHER queue published, so the
+        // queue that was actually served leaves its waiter blocked on a folio only
+        // this tool can complete -- the wedge rescue exists to clear, reproduced
+        // by one constant.
+        if (ioctl(dev_fd, VDUSE_VQ_INJECT_IRQ, &vq.index) < 0)
+            LOG_ERROR("VDUSE_VQ_INJECT_IRQ of vq ` failed, ", vq.index, ERRNO());
+        if (mode == PROBE)   // the probe's dump keeps the row it has always printed
+            LOG_INFO("served ` request(s), used->idx ", served, vq.used_idx);
+        else                 // a multiqueue rescue has to say which queue it served
+            LOG_INFO("vq ` served ` request(s), used->idx ", vq.index, served, vq.used_idx);
     }
     return served;
 }
@@ -376,12 +461,22 @@ static bool handle_one_msg() {
                     ioctl(dev_fd, VDUSE_DEV_GET_FEATURES, &f);
                     LOG_INFO("negotiated features 0x`", HEX(f));
                 }
-                vq_refresh(mode == RESCUE);
+                // A rescue can be started before any consumer has attached, and on
+                // an unbound orphan this same probe was measured answering EPERM --
+                // a refusal whose meaning for an IN-RANGE index is not measured. So
+                // a count of zero taken that early means "not knowable yet" as much
+                // as "no queues", and DRIVER_OK is the first moment the
+                // registration is bound: ask again before refreshing.
+                if (!nvqs)
+                    nvqs = discover_vqs();
+                for (unsigned i = 0; i < nvqs; i++)
+                    vq_refresh(vqs[i], mode == RESCUE);
             }
         }
         if (req.s.status == 0) {
             LOG_INFO("device reset");
-            vq_live = 0;
+            for (unsigned i = 0; i < nvqs; i++)
+                vqs[i].live = 0;
             driver_ok_seen = 0;
         }
         reply(req.request_id, VDUSE_REQ_RESULT_OK, 0, 0);
@@ -392,13 +487,22 @@ static bool handle_one_msg() {
         if (mode == PROBE && msgs <= 4)   // dump the first few mappings in full
             map_iova(req.iova.start, req.iova.last - req.iova.start + 1, false);
         if (req.iova.start == 0 && req.iova.last == 0)
-            vq_live = 0;   // unmap-all: the vring is gone
+            for (unsigned i = 0; i < nvqs; i++)
+                vqs[i].live = 0;   // unmap-all: every vring is gone
         reply(req.request_id, VDUSE_REQ_RESULT_OK, 0, 0);
         break;
-    case VDUSE_GET_VQ_STATE:
-        LOG_INFO("MSG #` GET_VQ_STATE vq ` -> avail ", msgs, req.vq_state.index, last_avail);
-        reply(req.request_id, VDUSE_REQ_RESULT_OK, req.vq_state.index, last_avail);
+    case VDUSE_GET_VQ_STATE: {
+        unsigned i = req.vq_state.index;
+        // The kernel asks about ONE queue by index. Answering with a different
+        // queue's cursor hands the driver a resume point into a ring it is not
+        // about to serve -- the same mistake as serving the wrong queue.
+        if (i >= nvqs)
+            LOG_ERROR("MSG #` GET_VQ_STATE for index ` of ` discovered queues", msgs, i, nvqs);
+        unsigned la = i < nvqs ? vqs[i].last_avail : 0;
+        LOG_INFO("MSG #` GET_VQ_STATE vq ` -> avail ", msgs, i, la);
+        reply(req.request_id, VDUSE_REQ_RESULT_OK, i, la);
         break;
+    }
     default:
         LOG_INFO("MSG #` type ` -> OK", msgs, req.type);
         reply(req.request_id, VDUSE_REQ_RESULT_OK, 0, 0);
@@ -500,6 +604,10 @@ static int cmd_probe() {
     vqc.index = 0; vqc.max_size = 128;
     if (ioctl(dev_fd, VDUSE_VQ_SETUP, &vqc) < 0)
         LOG_ERROR("VDUSE_VQ_SETUP failed, ", ERRNO());
+    // One queue, index 0: CREATE_DEV above declared vq_num 1, so there is nothing
+    // for discover_vqs to find out and every row this probe prints names index 0.
+    nvqs = 1;
+    vqs[0].index = 0;
 
     kickfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     struct vduse_vq_eventfd ev;
@@ -532,17 +640,20 @@ static int cmd_probe() {
         if (pfd[1].revents & POLLIN) {
             uint64_t v;
             while (read(kickfd, &v, 8) == 8) kicks += v;
-            serve_vq();
+            for (unsigned i = 0; i < nvqs; i++)
+                serve_vq(vqs[i]);
         }
         if (pfd[0].revents & POLLIN)
             while (handle_one_msg()) ;
         // also poll-serve: kicks can be missed if the eventfd raced the setup,
         // and on this kernel the kickfd was observed never to fire at all
-        if (vq_live && kicks == 0 && driver_ok_seen) serve_vq();
+        if (kicks == 0 && driver_ok_seen)
+            for (unsigned i = 0; i < nvqs; i++)
+                serve_vq(vqs[i]);   // serve_vq skips a queue that is not live
         if (driver_ok_seen && now() > 18.0) break;   // IO done, wrap up
     }
 
-    LOG_INFO("summary, ", VALUE(msgs), VALUE(kicks), "served_to=", used_idx);
+    LOG_INFO("summary, ", VALUE(msgs), VALUE(kicks), "served_to=", vqs[0].used_idx);
     LOG_INFO("---- the background log ----");
     sh("cat /tmp/vdprobe.bg.log");
     cleanup();   // also runs on SIGTERM/SIGINT; idempotent
@@ -550,7 +661,8 @@ static int cmd_probe() {
 }
 
 // ---------------------------------------------------------------------------
-// rescue: adopt somebody else's wedged registration and drain the backlog
+// rescue: adopt somebody else's wedged registration and drain the backlog of
+// every queue it has
 // ---------------------------------------------------------------------------
 
 static int cmd_rescue(int argc, char **argv) {
@@ -566,19 +678,32 @@ static int cmd_rescue(int argc, char **argv) {
         LOG_ERRNO_RETURN(0, 1, "open ` failed", path);
     LOG_INFO("adopting ` for ` s; SIGTERM stops it and the registration is NOT destroyed",
              argv[0], secs);
-    if (!vq_refresh(true))
-        LOG_INFO("vq not live yet; messages only");
+    // Every queue, not index 0 alone: the count belongs to whoever created the
+    // registration, and a backlog left on a queue this tool never serves keeps
+    // that queue's consumer in D state (see MEASURED RECOVERY ORDER above).
+    nvqs = discover_vqs();
+    for (unsigned i = 0; i < nvqs; i++) {
+        if (!vq_refresh(vqs[i], true)) {
+            LOG_INFO("vq ` is not live yet; messages only", i);
+            continue;
+        }
+        LOG_INFO("vq ` adopted, resuming from used: last_avail `, used_idx `",
+                 i, vqs[i].last_avail, vqs[i].used_idx);
+    }
+    if (!nvqs)
+        LOG_INFO("no virtqueue answered VDUSE_VQ_GET_INFO; messages only");
 
     time_t t0 = time(nullptr);
     while (time(nullptr) - t0 < secs) {
-        serve_vq();
+        for (unsigned i = 0; i < nvqs; i++)
+            serve_vq(vqs[i]);
         struct pollfd pfd = { dev_fd, POLLIN, 0 };
         int n = poll(&pfd, 1, 100);
         if (n <= 0) continue;
         while (handle_one_msg()) ;
     }
     close(dev_fd);
-    LOG_INFO("rescue done");
+    LOG_INFO("rescue done, ` queue(s) served", nvqs);
     return 0;
 }
 
