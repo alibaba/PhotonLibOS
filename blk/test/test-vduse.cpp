@@ -251,37 +251,44 @@ static bool rescue_serve(const char* name) {
 //     refused by: list_orphans() skips a registration whose tombstone is missing
 //     (vduse.cpp:2474, devlock_free() answering -1), and start() refuses an adoption
 //     whose recorded capacity its config disagrees with (vduse.cpp:1911-1926).
-//   - It serves virtqueue INDEX 0 ONLY, because the recipe does: vq_refresh() there
-//     hard-codes vi.index = 0 (vduse-cli.cc:242-246), and the queue count a registration
-//     was created with has no readback at all -- vduse-cli.cc:57-67 is why `vqprobe`
-//     exists to measure whether VDUSE_VQ_GET_INFO even bounds its index. So a
+//   - It serves virtqueue INDEX 0 ONLY, and that is THIS sentinel's limit, not the
+//     recipe's: vduse-cli.cc's vq_refresh() sets vi.index = vq.index, and cmd_rescue()
+//     loops over every queue discover_vqs() found. What is still true is that a
+//     registration's queue count has no readback ioctl -- the `WHY vqprobe EXISTS`
+//     block is why `vqprobe` exists to measure whether VDUSE_VQ_GET_INFO even bounds
+//     its index, and discover_vqs() turns that refusal into the count rescue serves
+//     by. So a
 //     MULTIQUEUE registration whose backlog sits on another queue is NOT covered: the
 //     removal blocks, the sentinel keeps serving it, and the parent's deadline abandons
 //     the sentinel rather than let it go. That is the safe outcome, and it is not a
 //     rescue.
 //   - It answers a request as a NULL device: reads come back zeroed and every status
-//     byte is VIRTIO_BLK_S_OK (vduse-cli.cc:301-311), which is what lets a wedged
-//     partition scan see invalid partitions and give up cleanly (:268-270). It is a
+//     byte is VIRTIO_BLK_S_OK (vduse-cli.cc's serve_vq()), which is what lets a wedged
+//     partition scan see invalid partitions and give up cleanly (serve_vq()'s own
+//     header comment). It is a
 //     drain, not a backend, so it must never be pointed at a device whose data anybody
 //     still wants.
-//   - It never destroys the registration (:157-158, :570). The registration is not
-//     ours to destroy, and DESTROY_DEV answers EBUSY while a daemon is connected anyway
-//     (:593) -- so what the sentinel leaves behind is a served-then-released
-//     registration with no consumer, which sweep()'s adopt can take.
+//   - It never destroys the registration (Mode::RESCUE in vduse-cli.cc, and the
+//     close(dev_fd) that ends cmd_rescue()). The registration is not ours to destroy,
+//     and DESTROY_DEV answers EBUSY while a daemon is connected anyway
+//     (cmd_destroy()'s EBUSY branch) -- so what the sentinel leaves behind is a
+//     served-then-released registration with no consumer, which sweep()'s adopt can take.
 //   - Its descriptor walk is the recipe's deliberately lax one: capped at 32 steps but
-//     never bounded against the ring size (:88-95). The peer here is the local kernel's
-//     virtio_vdpa driver and the operator is root, so a malformed ring means the
-//     diagnosis was needed in the first place. Do not copy it into the library.
+//     never bounded against the ring size (vduse-cli.cc's "As a root-only diagnostic"
+//     header paragraph). The peer here is the local kernel's virtio_vdpa driver and the
+//     operator is root, so a malformed ring means the diagnosis was needed in the first
+//     place. Do not copy it into the library.
 // ---------------------------------------------------------------------------
 
 // The split vring, copied verbatim from <linux/virtio_ring.h> exactly as
-// vduse-cli.cc:126-150 and blk/utils.h:505-529 both copy it: that header's inline
-// vring_init() assigns void* to typed pointers, which C++ rejects. NOT taken from
-// blk/utils.h, whose copies these are identical to -- the standing rule stated at
-// raw_vduse_create below is that this file does not reach into blk/'s internals, and
-// the sentinel is a diagnostic peer of the kernel's driver rather than a user of the
-// engine. VRING_DESC_F_INDIRECT is the one macro not carried over: the walk below does
-// not test it, and neither does the recipe's (:283, "no indirect descriptors").
+// vduse-cli.cc's `split vring` block and blk/utils.h's own copy both exist because
+// that header's inline vring_init() assigns void* to typed pointers, which C++ rejects.
+// NOT taken from blk/utils.h, whose copies these are identical to -- the standing rule
+// stated at raw_vduse_create below is that this file does not reach into blk/'s
+// internals, and the sentinel is a diagnostic peer of the kernel's driver rather than a
+// user of the engine. VRING_DESC_F_INDIRECT is the one macro not carried over: the walk
+// below does not test it, and neither does the recipe's (serve_vq()'s "no indirect
+// descriptors" note on its chain walk).
 struct vring_desc {
     uint64_t addr;    // guest/IOVA address -- resolved through VDUSE_IOTLB_GET_FD
     uint32_t len;
@@ -335,10 +342,12 @@ static const char* sentinel_step_name(int32_t s) {
     return "?";
 }
 
-// `timeout`'s bound on the removal the sentinel launches. The recipe bounds the same
-// command at 10 (vduse-cli.cc:426); this is wider because a removal that is BEING
-// SERVED can legitimately take longer than one that is not, and killing it early is
-// what leaves a half-attached device behind (:50-53).
+// `timeout`'s bound on the removal the sentinel launches. The recipe writes 10 for the
+// same command (vduse-cli.cc's cleanup()) but the comment there says the 10 bounds
+// nothing: `timeout` signals a D-state child, cannot reap it, and waits -- the first of
+// its TWO TRAPS. This is wider in any case, because a removal that is BEING SERVED can
+// legitimately take longer than one that is not, and killing it early is what leaves a
+// half-attached device behind (the MEASURED RECOVERY ORDER block's steps 3 and 5).
 static constexpr uint32_t SENT_DEL_TIMEOUT_SECS = 30;
 // The parent's deadline for the sentinel, and it has to sit ABOVE the removal's own
 // bound: a deadline that expired while the sentinel was still working abandons the only
@@ -387,13 +396,13 @@ public:
         rep->child_errno = e;
     }
 
-    // vduse-cli.cc:210-234. The mapping is leaked on purpose, for the reason given there
-    // (:206-209): a request's buffer can arrive while a consumer is blocked waiting for
-    // it, so there is no safe moment to unmap -- and this process is one _exit() away
-    // from handing all of them back at once. No logging on the two failure paths, unlike
-    // the recipe's: this child's stdout and stderr are /dev/null (consumer_spawn
-    // redirects them so an abandoned child cannot hold a capture pipe open), so the
-    // failures travel in the report instead.
+    // vduse-cli.cc's map_iova(). The mapping is leaked on purpose, for the reason that
+    // function's own header comment gives: a request's buffer can arrive while a
+    // consumer is blocked waiting for it, so there is no safe moment to unmap -- and
+    // this process is one _exit() away from handing all of them back at once. No logging
+    // on the two failure paths, unlike the recipe's: this child's stdout and stderr are
+    // /dev/null (consumer_spawn redirects them so an abandoned child cannot hold a
+    // capture pipe open), so the failures travel in the report instead.
     void* map_iova(uint64_t iova, size_t need) {
         vduse_iotlb_entry e;
         memset(&e, 0, sizeof(e));
@@ -411,8 +420,10 @@ public:
         return (char*)base + (iova - e.start);
     }
 
-    // vduse-cli.cc:241-266 with `resume_from_used` always set, this being the RESCUE
-    // side of that parameter's two uses. One addition, and it is not the recipe's:
+    // vduse-cli.cc's vq_refresh() with `resume_from_used` always set, this being the
+    // RESCUE side of that parameter's two uses. The recipe's copy now takes a per-queue
+    // struct instead of file-scope state; this one does not. One addition, and it is not
+    // the recipe's:
     // vi.num is required to be nonzero, because serve_vq() below takes two remainders
     // by it and a ready-but-countless queue would be a SIGFPE rather than a refusal.
     bool vq_refresh() {
@@ -435,14 +446,17 @@ public:
         // Resume from used->idx and NOT from the kernel's avail_index, which is the whole
         // of `resume_from_used`: the kernel's value is only what the daemon that is now
         // GONE last reported, re-serving a completed request is safe because virtio-blk
-        // ops are idempotent, and missing one is not (:236-240).
+        // ops are idempotent, and missing one is not (vq_refresh()'s header comment).
         last_avail = used_idx;
         vq_live = true;
         return true;
     }
 
-    // vduse-cli.cc:271-330 with the PROBE-only branches dropped -- the signature fill at
-    // :306-308 and the three logs, none of which a RESCUE run reaches. Walks every
+    // vduse-cli.cc's serve_vq() with the PROBE-only branches dropped -- the signature
+    // fill and the PROBE-gated logs, which a RESCUE run does not reach. The recipe's copy
+    // has since gone per-queue: it takes a struct Vq, names the queue it completed in
+    // INJECT_IRQ, and logs a per-queue row whenever it serves more than one. This one
+    // keeps a single set of file-scope state, so it is queue 0's shape. Walks every
     // available chain, answers it as a null virtio-blk device and publishes the used ring.
     int serve_vq() {
         if (!vq_live)
@@ -462,7 +476,7 @@ public:
                 void* va = map_iova(de->addr, de->len ? de->len : 1);
                 if (!va)
                     // Left un-answered and `last_avail` unmoved, exactly as the recipe
-                    // leaves it (:285-290): the next pass retries the same chain, which
+                    // leaves it (serve_vq()): the next pass retries the same chain, which
                     // is the only thing that can make progress out of a mapping the
                     // kernel would not hand over the first time.
                     return served;
@@ -482,7 +496,7 @@ public:
             bool is_read = hdr && hdr->type == VIRTIO_BLK_T_IN;
             if (is_read && data)
                 memset(data, 0, dlen);   // a read returns zeros; see WHAT IT COVERS
-            // OUT (writes) and FLUSH need no action here (:310)
+            // OUT (writes) and FLUSH need no action here, as in serve_vq()
             if (status)
                 *status = VIRTIO_BLK_S_OK;
             used->ring[used_idx % vq_num].id = head;
@@ -496,16 +510,19 @@ public:
             used->idx = used_idx;
             __sync_synchronize();
             uint32_t idx = 0;
-            // Tolerated on failure as the recipe tolerates it (:325-326): the used ring
+            // Tolerated on failure as the recipe tolerates it (serve_vq()): the used ring
             // is already published, so the driver's own next kick finds the completions
-            // and there is nothing better to do from here.
+            // and there is nothing better to do from here. The recipe passes &vq.index
+            // rather than a zero, and warns that a zero would tell queue 0's consumer
+            // about completions some OTHER queue published; a zero is right HERE only
+            // because this sentinel serves queue 0 and no other.
             if (::ioctl(dev_fd, VDUSE_VQ_INJECT_IRQ, &idx) < 0) { }
         }
         return served;
     }
 
-    // vduse-cli.cc:332-343. `reserved` MUST be zero -- the kernel checks it (:334, and
-    // vduse-uapi.h's own note on the field).
+    // vduse-cli.cc's reply(). `reserved` MUST be zero -- the kernel checks it, as that
+    // function's own comment and vduse-uapi.h's note on the field both say.
     int reply(uint32_t rid, uint32_t result, uint32_t vqidx, uint16_t avail_index) {
         vduse_dev_response resp;
         memset(&resp, 0, sizeof(resp));
@@ -518,22 +535,29 @@ public:
         return 0;
     }
 
-    // vduse-cli.cc:347-397, RESCUE side only. `more` is the recipe's return value
-    // inverted: true while another message may be waiting, false when the drain ends.
-    // The status it returns is the reply's, which the recipe logs and drops.
+    // vduse-cli.cc's handle_one_msg(), RESCUE side only. `more` is the recipe's return
+    // value inverted: true while another message may be waiting, false when the drain
+    // ends. The status it returns is the reply's, which the recipe logs and drops.
+    // The recipe's copy has since gone multiqueue and this one has not, in two places
+    // that matter: it re-runs discover_vqs() at DRIVER_OK when it has no queues yet and
+    // then refreshes every queue, and its VDUSE_GET_VQ_STATE bounds the index and
+    // answers with THAT queue's cursor, calling a wrong-queue cursor "the same mistake
+    // as serving the wrong queue". This copy answers any index with its one queue-0
+    // cursor, which is correct only because it serves queue 0 alone.
     int handle_one_msg(bool* more) {
         *more = false;
         vduse_dev_request req;
         ssize_t r = ::read(dev_fd, &req, sizeof(req));
         if (r != (ssize_t)sizeof(req))
-            // EAGAIN ends the drain, as it does in the recipe (:349-354), and is not an
+            // EAGAIN ends the drain, as it does in handle_one_msg(), and is not an
             // error; a real read error is.
             return (r < 0 && errno != EAGAIN) ? (errno ? errno : EIO) : 0;
         *more = true;
         switch (req.type) {
         case VDUSE_SET_STATUS:
             // Re-adopt on EVERY DRIVER_OK, not only the first handshake: that is the
-            // difference the recipe calls out between its two modes (:359-370), and it is
+            // difference the recipe calls out between its two modes (handle_one_msg()'s
+            // DRIVER_OK block), and it is
             // what lets a rescue survive the consumer reset+reinit a removal performs.
             if (req.s.status & VIRTIO_CONFIG_S_DRIVER_OK)
                 vq_refresh();
@@ -555,13 +579,16 @@ public:
     // The removal, LAUNCHED rather than run -- and this is the one step with no
     // single line in the recipe, because the recipe's two halves are in two processes.
     // Its measured order is `rescue &` and then `vdpa dev del` from the operator's
-    // shell (:45-53): the removal blocks in the kernel's queue freeze until a daemon
-    // answers the requests it is waiting on, and this child IS that daemon, so running
+    // shell -- steps 1 and 3 of the MEASURED RECOVERY ORDER block: the removal blocks
+    // in the kernel's queue freeze until a daemon answers the requests it is waiting
+    // on, and this child IS that daemon, so running
     // it synchronously here would be waiting on itself. The recipe's own serving
     // process splits the same way when it needs a bus command, putting the whole thing
-    // in a background subshell so its loop keeps running (:504-513). posix_spawnp keeps
+    // in a background subshell so its loop keeps running (cmd_probe()'s background
+    // shell). posix_spawnp keeps
     // the pid, which a subshell would not, and the pid is what the loop below polls.
-    // `timeout` is cleanup()'s own bound on the command (:426).
+    // `timeout` is what cleanup() writes for the command, though the comment there says
+    // it bounds nothing.
     //
     // No file actions and no attributes: this child's 0,1,2 are already /dev/null, which
     // is where the removal's output belongs, and it has no signal mask worth passing on.
@@ -592,24 +619,24 @@ public:
         const char* name = argv[4];
         char path[VDUSE_NAME_MAX + 16];
         snprintf(path, sizeof(path), "/dev/vduse/%s", name);
-        // vduse-cli.cc:554, plus O_CLOEXEC -- the one flag this adds, and launch_del() is
-        // why: a `timeout`/`vdpa` that inherited the char device would keep the
-        // registration held after this child exits, and DESTROY_DEV answers EBUSY while
-        // anything is connected (:593). The recipe needs no such flag because it never
-        // spawns. The IOTLB descriptors map_iova() takes are closed inside it and no
-        // spawn overlaps one: vq_refresh()'s three all complete before launch_del() runs,
-        // and the serve loop below spawns nothing.
+        // vduse-cli.cc's cmd_rescue() open, plus O_CLOEXEC -- the one flag this adds, and
+        // launch_del() is why: a `timeout`/`vdpa` that inherited the char device would
+        // keep the registration held after this child exits, and DESTROY_DEV answers
+        // EBUSY while anything is connected (cmd_destroy()'s EBUSY branch). The recipe
+        // needs no such flag because it never spawns. The IOTLB descriptors map_iova()
+        // takes are closed inside it and no spawn overlaps one: vq_refresh()'s three all
+        // complete before launch_del() runs, and the serve loop below spawns nothing.
         // EBUSY here means a live daemon already serves it, so there is nothing to
-        // rescue (:552-553).
+        // rescue (cmd_rescue()'s "the char device admits a single opener" comment).
         dev_fd = ::open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
         if (dev_fd < 0) {
             int e = errno ? errno : EIO;
             note(SENT_OPEN, e);
             return e;
         }
-        DEFER(::close(dev_fd));   // :570, and the reason the registration is unheld again
+        DEFER(::close(dev_fd));   // as cmd_rescue() does: this unholds the registration
         // A failure here is FATAL, and that is not the recipe's behaviour: cmd_rescue
-        // logs "vq not live yet; messages only" and serves messages anyway (:559-560).
+        // logs "vq N is not live yet; messages only" per queue and serves messages anyway.
         // With no ring resolved there is no backlog this child can drain, so the removal
         // it is about to launch would block in the freeze with nothing to answer it --
         // and vdpa_detach()'s whole rule is that no removal runs against a registration
@@ -625,9 +652,10 @@ public:
             note(SENT_DEL, e);
             return e;
         }
-        // The recipe's serve loop (:562-569) with its wall-clock bound replaced by the
-        // removal's lifetime. `secs` there bounded a daemon an operator starts and stops
-        // (:557); here what decides when serving may stop is the removal in flight, and
+        // The recipe's serve loop in cmd_rescue() -- now a loop over every discovered
+        // queue rather than one -- with its wall-clock bound replaced by the removal's
+        // lifetime. `secs` there bounded a daemon an operator starts and stops; here
+        // what decides when serving may stop is the removal in flight, and
         // stopping before it is the one outcome that must not happen -- a child that let
         // go of the char device while a `vdpa dev del` is blocked in the freeze has
         // produced exactly the state this guard exists to prevent. So the loop has NO
@@ -659,9 +687,10 @@ public:
                 break;   // ECHILD: collected behind our back, so there is no status
         }
         // The removal's own verdict, and it is a report rather than a decision: the drill
-        // records rc=124 -- `timeout` having killed it -- as an acceptable outcome on a
-        // half-attached device (:48-50), so only the kernel's bus directory says whether
-        // the consumer actually went, and the parent is the side that can read it.
+        // ties rc=124 -- `timeout` having killed it -- to a HALF-ATTACHED device and says
+        // rc=0 is what a served removal returns (MEASURED RECOVERY ORDER step 3), so the
+        // rc alone does not settle it. Only the kernel's bus directory says whether the
+        // consumer actually went, and the parent is the side that can read it.
         if (!have_status) {
             note(SENT_DEL_RC, ECHILD);
             return EIO;
@@ -2113,11 +2142,11 @@ TEST_F(VduseTest, detach_rescues_an_orphan_the_product_path_cannot_see) {
     const std::string reg = std::string("/dev/vduse/") + TEST_NAME;
     const std::string lp = std::string(SUITE_LOCKS) + "/vduse-" + TEST_NAME + ".lock";
     const std::string sp = std::string("/sys/bus/vdpa/devices/") + TEST_NAME;
-    // Declared FIRST, so it fires LAST. DESTROY_DEV is step 3 of vduse-cli.cc's
-    // recovery drill and not step 1: against a consumer still attached it is the very
-    // call that blocks in the kernel's queue freeze holding the machine-wide genl_lock.
-    // So this destroys only once the consumer is confirmed gone, and otherwise leaves
-    // the registration exactly as it was found -- stranded, which wedges the NEXT
+    // Declared FIRST, so it fires LAST. DESTROY_DEV is the fifth and last step of
+    // vduse-cli.cc's recovery drill, not the first: against a consumer still attached it
+    // is the very call that blocks in the kernel's queue freeze holding the machine-wide
+    // genl_lock. So this destroys only once the consumer is confirmed gone, and otherwise
+    // leaves the registration exactly as it was found -- stranded, which wedges the NEXT
     // command sent to it rather than this one -- and says so.
     DEFER({
         if (::access(sp.c_str(), F_OK) == 0) {
@@ -2145,7 +2174,7 @@ TEST_F(VduseTest, detach_rescues_an_orphan_the_product_path_cannot_see) {
     EXPECT_TRUE(DetachOutcome::RescuedBySentinel == vdpa_detach(TEST_NAME));
     EXPECT_NE(0, ::access(sp.c_str(), F_OK)) << "the consumer is gone";
     // The sentinel closes its fd and never issues DESTROY_DEV, so the registration
-    // outlives the rescue -- the drill's step 3, left to the DEFER above.
+    // outlives the rescue -- the drill's step 5, left to the DEFER above.
     EXPECT_EQ(0, ::access(reg.c_str(), F_OK)) << "the sentinel does not destroy what it rescued";
 }
 
