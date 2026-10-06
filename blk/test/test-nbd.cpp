@@ -364,6 +364,7 @@ private:
 };
 
 static const char IMG_PATH[] = "/tmp/photon-blk-nbd-test.img";
+static const char IMG2_PATH[] = "/tmp/photon-blk-nbd-test2.img";
 static constexpr uint64_t IMG_SIZE = 4u << 20;
 
 class NbdTest : public test::SkippableTest {
@@ -1108,6 +1109,176 @@ TEST_F(NbdTest, connections_spread_over_the_pool) {
     // this vcpu through `rec` and record the caller as a false placement.
     EXPECT_EQ(2u, rec.vcpu_count());
     EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// More connections than pool vcpus, which is nbd's version of "more queues than
+// vcpus": the connection is the unit spawn_serve_conn migrates, so it is the unit
+// that draws WorkPool's cursor. The two-client case above never draws past that
+// cursor's first cycle, and within it a cursor that saturates at the last index it
+// drew is indistinguishable from one that wraps -- both hand out vcpus[0] and
+// vcpus[1] once and both read 2. Four connections push the cursor past the pool
+// size, and attributing each one to its own vcpu is what tells the two apart:
+// wrapping alternates, saturating lands the last three together, and a cursor that
+// stopped advancing altogether lands all four together.
+//
+// Sequential, and the attribution is why: record() dedups into a member vector that
+// nothing drops until reset(), so a closed connection's placement survives the
+// disconnect and the reset between connections sees one connection's IO only --
+// overlapping connections would each find the other's entries already there.
+// Sequential is also what makes the ORDER assertable: with two clients in flight the
+// order of their two draws belongs to the scheduler. One connection whose reply has
+// arrived has certainly been migrated: spawn_serve_conn creates serve_conn, registers
+// it and migrates it without yielding -- thread_enable_join sets a flag and
+// conns_lock is a photon::spinlock, whose lock spins rather than yielding -- so
+// serve_conn cannot have run, and cannot have touched the backend, before the draw
+// that placed it.
+TEST_F(NbdTest, more_connections_than_pool_vcpus_use_every_vcpu) {
+    constexpr int CONNS = 4;      // twice the pool, so the cursor has to wrap
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    std::vector<photon::vcpu_base*> per_conn;
+    for (int c = 0; c < CONNS; c++) {
+        rec.reset();
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        uint64_t base = 4096u + (uint64_t)c * 65536;   // this connection's own region
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size()));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, base, rbuf.data(), rbuf.size()));
+        EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+        // One connection is one serve_conn plus the execute coroutines it creates
+        // WITHOUT migrating them, so its whole backend IO shares one vcpu -- and a
+        // pool one: accept_th stays on this vcpu and touches no backend, so the
+        // caller appearing here would mean this connection never moved.
+        ASSERT_EQ(1u, rec.vcpu_count());
+        EXPECT_FALSE(rec.ran_on(caller));
+        per_conn.push_back(rec.vcpus().front());
+    }
+
+    // Both pool vcpus got traffic at all: a cursor pinned to one index from the start
+    // reads 1 here. This does NOT prove the wrap -- saturating after the first cycle
+    // also reads 2 -- which is what the neighbour assert below is for.
+    std::vector<photon::vcpu_base*> distinct;
+    for (auto* v : per_conn) {
+        bool seen = false;
+        for (auto* u : distinct)
+            if (u == v)
+                seen = true;
+        if (!seen)
+            distinct.push_back(v);
+    }
+    EXPECT_EQ(2u, distinct.size());
+    // Neighbours differ, and this is the wrap itself: one draw per connection over
+    // two vcpus has to alternate. It is also the assertion the two-client case
+    // cannot make -- a cursor that saturates after its first cycle satisfies that
+    // case's count of 2 and fails here on the third connection.
+    for (int c = 1; c < CONNS; c++)
+        EXPECT_NE(per_conn[c - 1], per_conn[c]);
+}
+
+// Two devices on ONE pool. WorkPool's cursor belongs to the pool, not to the caller,
+// and migrate_to_pool passes an out-of-range index on purpose so that cursor is what
+// picks the vcpu -- so device B's first connection continues where device A's left
+// off instead of restarting at vcpus[0]. The NE below is the strongest form the
+// property has, and it says nothing without the three asserts around it: the two
+// counts of 1 mean each device contributes exactly one serving coroutine, and the two
+// ran_on(caller) exclusions mean neither vcpu they name is this one. Together those
+// make "the union covers both pool vcpus" and "the two vcpus differ" the same
+// statement.
+// Nothing stronger is assertable, because WHICH of the two a device gets is not
+// decidable -- WorkPool's impl fills its vcpus vector from add_vcpu(), i.e. in
+// worker-thread startup order, and asserting an absolute index would pin that order
+// as if it were a contract.
+//
+// The order of the two DRAWS is decidable, and that is what makes the NE a guarantee
+// rather than a coin flip: A is driven to a completed reply before B exists, and
+// B's own start() draws nothing, because check_pool_engines migrates its probes by
+// in-range index precisely so that every vcpu is checked exactly once. So the two
+// draws are consecutive, and consecutive values of `vcpu_index++ % 2` differ
+// wherever the cursor happened to start -- which is why nothing here depends on it
+// starting at zero.
+TEST_F(NbdTest, two_devices_share_one_pool) {
+    // B needs its own backend and its own probe: one shared RecordingFile would
+    // merge the two devices' placements into a single set and leave the comparison
+    // below nothing to compare. img2 is declared first so that reverse destruction
+    // drops rec_b, then rec_a, then the image's file handle.
+    test::TestImage img2;
+    ASSERT_EQ(0, img2.create(IMG2_PATH, IMG_SIZE));
+    test::RecordingFile rec_a(file);
+    test::RecordingFile rec_b(img2.file);
+    auto* caller = photon::get_vcpu();
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+
+    auto dev_a = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    ASSERT_EQ(0, dev_a->start(&rec_a));
+    DEFER(dev_a->shutdown());
+    net::EndPoint ep_a;
+    ASSERT_EQ(0, dev_a->get_server_sockets().tcp->getsockname(ep_a));
+
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    NbdTestClient cli_a;
+    ASSERT_EQ(0, cli_a.connect_tcp("127.0.0.1", ep_a.port));
+    ASSERT_EQ(0, cli_a.handshake());
+    EXPECT_EQ(0, cli_a.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli_a.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    // the same config again: port 0 makes the kernel hand B a listener of its own,
+    // and the identity is only the export name, which each listener answers for
+    // itself
+    auto dev_b = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    ASSERT_EQ(0, dev_b->start(&rec_b));
+    DEFER(dev_b->shutdown());
+    net::EndPoint ep_b;
+    ASSERT_EQ(0, dev_b->get_server_sockets().tcp->getsockname(ep_b));
+    ASSERT_NE(ep_a.port, ep_b.port);
+
+    NbdTestClient cli_b;
+    ASSERT_EQ(0, cli_b.connect_tcp("127.0.0.1", ep_b.port));
+    ASSERT_EQ(0, cli_b.handshake());
+    EXPECT_EQ(0, cli_b.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli_b.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    ASSERT_EQ(1u, rec_a.vcpu_count());
+    ASSERT_EQ(1u, rec_b.vcpu_count());
+    EXPECT_FALSE(rec_a.ran_on(caller));
+    EXPECT_FALSE(rec_b.ran_on(caller));
+    EXPECT_NE(rec_a.vcpus().front(), rec_b.vcpus().front())
+        << "both devices' connections landed on one pool vcpu";
 }
 
 // Eight OS threads churn connections while the caller's vcpu traverses the

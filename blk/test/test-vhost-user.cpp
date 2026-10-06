@@ -4887,6 +4887,236 @@ TEST_F(VhostUserTest, pool_placement) {
     EXPECT_FALSE(rec.ran_on(caller));
 }
 
+// n > m. The case above draws the cursor exactly once -- one queue, one vq_start,
+// one migrate_to_pool -- so what it observes is a landing and not a wrap. Four
+// queues over two vcpus is the wrap: WorkPool answers the out-of-range index
+// migrate_to_pool always passes with `vcpu_index++ % size`, so four consecutive
+// draws come back as two vcpus twice over. What the count at the end witnesses is
+// narrower than that, and has to be stated narrowly: RecordingFile keeps a SET of
+// vcpus with no queue attributed to any of them, so "two queues each" is a property
+// of the code this case cannot observe, and a cursor that saturated after its first
+// cycle would read 2 as well. What the count does exclude is the mutant this case
+// exists for -- a migrate_to_pool that passed a constant IN-range index instead of
+// the out-of-range one parks all four on that index's vcpu and this reads 1.
+//
+// Every queue has to carry IO and not merely be enabled, because vcpu_count() counts
+// what reached the backend: a queue that was migrated and never driven contributes
+// nothing to the set, so a case that drove queue 0 alone would read 1 against a
+// cursor working perfectly. Sequential IO is nonetheless a complete observation --
+// placement is decided once, at the SET_VRING_ENABLE that starts each queue, and the
+// per-request coroutines dispatch_avail creates are created on that queue's own vcpu
+// and never migrated, so nothing can move after the four enables. Concurrency would
+// add no coverage here, only a race to lose.
+TEST_F(VhostUserTest, four_queues_over_a_two_vcpu_pool_use_both_vcpus) {
+    constexpr uint32_t QUEUES = 4;
+    constexpr size_t LEN = 4096;
+    test::TestPool pool(2);
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = QUEUES;
+    cfg.pool = pool;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    // A distinct seed and a distinct offset per queue, so a read-back cannot be
+    // satisfied by another queue's data and a write served into the wrong range
+    // still fails its own comparison. 0xcc under the read buffers for the reason
+    // two_queues_complete_independently gives: "the device filled this" and "it
+    // already held what we expected" must not be the same observation.
+    std::vector<char> w[QUEUES], r[QUEUES];
+    for (uint32_t q = 0; q < QUEUES; q++) {
+        w[q] = pattern((uint8_t)(0x11 * (q + 1)), LEN);
+        r[q].resize(LEN, (char)0xcc);
+    }
+
+    // The raw off-vcpu helper rather than run_frontend(), for the reason
+    // a_queue_above_zero_serves_io_end_to_end gives: the preconditions below are
+    // gtest macros and need a void context, and `fe` has to outlive the block so a
+    // fatal ASSERT that returns early still leaves here what it wrote before it did.
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        // Preconditions, and what stops this case passing vacuously. negotiate() asks
+        // GET_QUEUE_NUM only once PROTOCOL_F_MQ is settled and leaves queue_num at 1
+        // otherwise, so against a device serving fewer queues these two fire and the
+        // setup_queue loop is never reached. Without them the same device would fail
+        // below as an error ack on a vring index it does not have, which reads as a
+        // data-path failure and is not one.
+        ASSERT_NE(0u, fe.proto_features & (1ULL << VHOST_USER_PROTOCOL_F_MQ))
+            << "protocol MQ was not settled, so this frontend has one queue";
+        ASSERT_EQ(QUEUES, fe.queue_num)
+            << "the peer learned a count that cannot address queue " << QUEUES - 1;
+        for (uint32_t q = 1; q < QUEUES; q++)
+            ASSERT_TRUE(fe.setup_queue(q)) << "queue " << q;
+
+        for (uint32_t q = 0; q < QUEUES; q++) {
+            uint64_t off = (uint64_t)(q + 1) << 20;
+            ASSERT_EQ(S_OK, fe.write_dev(off, w[q].data(), LEN, nullptr, q))
+                << "write on queue " << q;
+            ASSERT_EQ(S_OK, fe.read_dev(off, r[q].data(), LEN, q))
+                << "read on queue " << q;
+        }
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+
+    for (uint32_t q = 0; q < QUEUES; q++) {
+        EXPECT_EQ(0, memcmp(w[q].data(), r[q].data(), LEN))
+            << "queue " << q << " did not read back its own write";
+        // through `file`, not `rec`, for the reason pool_placement gives: this read
+        // runs on the caller's vcpu, so routing it via the probe would record that
+        // vcpu as one of the device's own placements
+        EXPECT_EQ(0, verify_backend((uint64_t)(q + 1) << 20, w[q]));
+    }
+
+    // Both halves, and neither alone is the claim. The count says the four queues
+    // covered two vcpus; the ran_on says neither of the two was this one, which is
+    // what turns "two" into "the whole pool" -- a queue whose migration was refused
+    // stays here and would make the count 3, and a count of 2 built from this vcpu
+    // plus one pool vcpu is a pool half used.
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// Two devices on ONE pool, one queue each. The cursor is WorkPool's own
+// `vcpu_index`, a member of the pool and shared by every caller, so the second
+// device continues where the first left off instead of starting over at vcpus[0] --
+// which is the entire reason migrate_to_pool hands thread_migrate an out-of-range
+// index rather than 0. Nothing else in this file can see that: every other case here
+// binds SOCK_PATH, and bind() hands a path to one device at a time, so none of them
+// has two serving -- and one device draws consecutive values whichever way the cursor
+// is scoped, so a per-device cursor and a pool-wide one are the same observation until
+// a second device draws.
+//
+// One queue per device is what makes the assertion below exact rather than likely.
+// Each queue is drawn for exactly once, at the SET_VRING_ENABLE that starts it: the
+// SET_VRING_NUM, _ADDR, _KICK and _CALL handlers a negotiate() sends ahead of the
+// enable call vq_start too, but its readiness gate wants `enabled`, and in a session
+// that settled bit 30 only the enable sets it; a queue whose loop already exists then
+// short-circuits ahead of the create, so the enable's call is the only one that
+// reaches migrate_to_pool. That scope is a premise and not a given -- a session that
+// DECLINED bit 30 gets every queue enabled by its own SET_FEATURES instead, sends no
+// enable at all, and so draws three times per queue, at _ADDR/_KICK/_CALL -- which is
+// why both frontends below assert the bit settled before either drives anything.
+// start()'s own engine probe draws nothing either: check_pool_engines migrates with an
+// IN-range index, which is the branch that skips the cursor. Two devices are therefore
+// two CONSECUTIVE draws, and `% 2` maps consecutive draws to different vcpus whatever
+// the counter held before them.
+//
+// Disjointness is the strongest claim that follows from that. It is deliberately not
+// the stronger-looking "A on the pool's first vcpu, B on its second": that pins where
+// the counter stood when A drew, an absolute this transport has no say in, and a pool
+// its caller had already drawn from would land A elsewhere while behaving correctly.
+// Consecutiveness is all the premise disjointness needs, and one queue per device is
+// what buys it. Nor is the assertion weaker than it looks: a migrate_to_pool that
+// passed an in-range index draws vcpus[0] for both devices -- a constant 0 and the
+// queue index are the same thing when each device has one queue, and 0 is in range --
+// and a cursor scoped to the device instead of the pool restarts at 0 for the second
+// one. Either way the EXPECT_NE at the end reads two equal pointers.
+//
+// One RecordingFile per device so each placement stays attributable. A single probe
+// behind both backends would report a union, and a union of two is evidence of a
+// split only once each device is known to have contributed exactly one vcpu -- the
+// pair of counts below, which holds because a device's per-request coroutines run on
+// its loop's vcpu and are never migrated.
+TEST_F(VhostUserTest, two_devices_share_one_pool) {
+    // A second path INSIDE SOCK_DIR, which is what new_device() requires of a
+    // sock_path, and so a second basename as well: do_listen() binds the path and
+    // answers EEXIST for one already bound, and the serial a device reports to
+    // VIRTIO_BLK_T_GET_ID is that basename, so two sockets in one scope sharing it
+    // would tell their guests they are the same device. shutdown() removes the node
+    // its own device bound; SetUp's sweep of the directory is the backstop for a case
+    // that never got that far.
+    const std::string sock_b = std::string(SOCK_DIR) + "/vhu2.sock";
+    // The pool first: BlkConfig's lifetime contract wants every device using it shut
+    // down before it goes, and declaration order is what buys that here.
+    test::TestPool pool(2);
+    // Both probes before both devices, and neither owning `file`: each has to outlive
+    // the shutdown DEFER that issues its own device's last backend IO.
+    test::RecordingFile rec_a(file);
+    test::RecordingFile rec_b(file);
+    auto* caller = photon::get_vcpu();
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.queues = 1;   // exactly one queue: exactly one draw, which is what the
+                      // disjointness below is argued from
+    cfg.pool = pool;
+    auto dev_a = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    ASSERT_EQ(0, dev_a->start(&rec_a));
+    DEFER(dev_a->shutdown());
+
+    auto cfg_b = cfg;
+    cfg_b.sock_path = sock_b;
+    auto dev_b = ctl->new_device(cfg_b);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    ASSERT_EQ(0, dev_b->start(&rec_b));
+    DEFER(dev_b->shutdown());
+
+    // Disjoint ranges of one image. The property is placement, and a second
+    // TestImage would add a second file without adding an observation -- while a
+    // shared range would make the two read-backs unable to tell the devices apart.
+    constexpr uint64_t OFF_A = 8 << 20, OFF_B = 9 << 20;
+    constexpr size_t LEN = 4096;
+    auto wa = pattern(0x6c, LEN), wb = pattern(0xb1, LEN);
+    std::vector<char> ra(LEN, (char)0xcc), rb(LEN, (char)0xcc);
+
+    // Sequential, and it can be: the draws happen at each session's enable, so the
+    // second device's landing is already decided by the time the first frontend
+    // disconnects. Running the two frontends at once would interleave two draws that
+    // are consecutive either way.
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        // The regime the one-draw-per-queue argument is scoped to: with bit 30
+        // declined the draws move to _ADDR/_KICK/_CALL and the two sessions stop
+        // being two consecutive draws, so the EXPECT_NE below would be arguing
+        // from a premise this lambda no longer holds.
+        if (!(fe.features & (1ULL << VHOST_USER_F_PROTOCOL_FEATURES)))
+            return EPROTONOSUPPORT;
+        if (fe.write_dev(OFF_A, wa.data(), LEN) != S_OK) return EIO;
+        if (fe.read_dev(OFF_A, ra.data(), LEN) != S_OK) return EIO;
+        return memcmp(wa.data(), ra.data(), LEN) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(sock_b.c_str())) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & (1ULL << VHOST_USER_F_PROTOCOL_FEATURES)))
+            return EPROTONOSUPPORT;   // as above: this session has to draw once too
+        if (fe.write_dev(OFF_B, wb.data(), LEN) != S_OK) return EIO;
+        if (fe.read_dev(OFF_B, rb.data(), LEN) != S_OK) return EIO;
+        return memcmp(wb.data(), rb.data(), LEN) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    // through `file`, not either probe: these reads run on the caller's vcpu
+    EXPECT_EQ(0, verify_backend(OFF_A, wa));
+    EXPECT_EQ(0, verify_backend(OFF_B, wb));
+
+    ASSERT_EQ(1u, rec_a.vcpu_count()) << "one queue serves one device from one vcpu";
+    ASSERT_EQ(1u, rec_b.vcpu_count()) << "one queue serves one device from one vcpu";
+    auto* vcpu_a = rec_a.vcpus()[0];
+    auto* vcpu_b = rec_b.vcpus()[0];
+    // Kept apart from the EXPECT_NE below because a migration that failed outright
+    // fails that one too, and for a reason which is not the cursor: the two vcpus
+    // would be equal because both are this one. These two say the split is a split OF
+    // THE POOL, which is what makes the inequality about the cursor.
+    EXPECT_FALSE(rec_a.ran_on(caller));
+    EXPECT_FALSE(rec_b.ran_on(caller));
+    EXPECT_NE(vcpu_a, vcpu_b)
+        << "both devices' serving coroutines landed on the same pool vcpu";
+}
+
 // No pool at all. Identical IO, and the one loop coroutine must be on this vcpu --
 // the placement every other case in this file runs with.
 TEST_F(VhostUserTest, pool_null_serves_on_the_caller_vcpu) {
