@@ -1075,8 +1075,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // all five of these arrive cleared together after a device reset, and num
         // is not validated on the way in -- so num belongs in this guard as much
         // as the addresses do. dispatch_avail derives its in-flight cap from num
-        // and returns before reading the ring whenever in_flight is already at
-        // that cap, so a published 0 caps the queue at nothing: no chain is
+        // and returns before indexing a ring entry whenever in_flight is already
+        // at that cap, so a published 0 caps the queue at nothing: no chain is
         // dispatched, none completes, and the queue stalls silently while still
         // marked ready. This guard makes it not-ready instead, and that is the
         // whole of what it buys -- the stall is not a fault anyone would see.

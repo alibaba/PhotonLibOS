@@ -569,9 +569,10 @@ public:
     // Backstores this HBA created -- ones whose dev_config is its own
     // "<dev_config_prefix><identity>" -- whose tombstone this call finds free:
     // crash recovery, with the identity as the recovery key. Two reasons keep a
-    // backstore of this HBA out of the result, and they are not alike. A live
-    // server holds the flock: routine, and skipped silently. Or the tombstone is
-    // missing or unopenable by this caller, which devlock_free()'s contract
+    // backstore of this HBA out of the result, and they are not alike. The flock
+    // attempt fails, which a live server's hold explains in the routine case:
+    // skipped silently, because it is routine. Or the tombstone is missing or
+    // unopenable by this caller, which devlock_free()'s contract
     // describes: skipped with a warning, and that backstore then stays unreported
     // by every scan this uid runs, while one run by a uid that can open the file
     // does list it. The startup scan additionally SYNTHESIZES ADDED events for
@@ -789,8 +790,7 @@ public:
     // rejected too: it is Config::dev_id's "let the kernel choose" sentinel, not a
     // device. Both are EINVAL, with nothing deleted.
     //
-    // EBUSY here means exactly one gate: the tombstone lock is not free, which
-    // another LIVE SERVER holding it explains in the routine case.
+    // EBUSY here means exactly one thing: another LIVE SERVER holds the tombstone.
     // The flock is CLAIMED and held across the DEL_DEV rather than merely probed,
     // because DEL_DEV is unconditional -- no EBUSY, no state check -- so a
     // probe-then-destroy pair leaves a window in which another daemon adopts the
@@ -830,9 +830,10 @@ public:
     // and this call has no reason to stop a device it is about to delete.
     //
     // No such device and no tombstone either is ENOENT. A tombstone with no
-    // registration is our own litter and is removed, returning 0 -- unless a live
-    // server holds it, which means it is between claiming the dev_id and ADD_DEV, and
-    // that is EBUSY: removing the file would leave the device it then creates with no
+    // registration is our own litter and is removed, returning 0 -- unless the flock
+    // attempt on it fails, which a live server's hold explains in the routine case
+    // and which then means it is between claiming the dev_id and ADD_DEV. That is
+    // EBUSY: removing the file would leave the device it then creates with no
     // tombstone, and list_orphans() skips an entry whose tombstone is missing, so it
     // would stop being reported by every later scan while still being in the kernel.
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
@@ -993,10 +994,9 @@ public:
     // name.
     //
     // EBUSY is the live refusal and it has three sources, checked in this order:
-    // the tombstone lock is not free, normally a live server's hold; a FOREIGN
-    // daemon is connected to the single-opener char device, which the tombstone
-    // cannot tell us about; or a vdpa consumer is still attached, which is what
-    // /sys/bus/vdpa/devices/<name> is for.
+    // a live server holds the tombstone; a FOREIGN daemon is connected to the
+    // single-opener char device, which the tombstone cannot tell us about; or a vdpa
+    // consumer is still attached, which is what /sys/bus/vdpa/devices/<name> is for.
     // That entry does not bracket the kernel-side vdev exactly -- see the next
     // paragraph. The claim is taken and held across the DESTROY_DEV rather than
     // merely probed, so that no other server of this implementation adopts the
@@ -1014,9 +1014,10 @@ public:
     // of vduse's.
     //
     // No such device and no tombstone either is ENOENT. A tombstone with no
-    // registration is our own litter and is removed, returning 0 -- unless a live
-    // server holds it, which means it is between claiming the name and CREATE_DEV,
-    // and that is EBUSY.
+    // registration is our own litter and is removed, returning 0 -- unless the flock
+    // attempt on it fails, which a live server's hold explains in the routine case
+    // and which then means it is between claiming the name and CREATE_DEV. That is
+    // EBUSY.
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 

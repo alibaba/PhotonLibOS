@@ -2639,10 +2639,11 @@ struct TcmuHBAImpl : TcmuHBA {
         char lock[80];
         TcmuDeviceImpl::lock_file_name(bs, lock, sizeof(lock));
         if (devlock_free(lock_dir, lock) == 0) {
-            // the flock attempt failed, so read it as another PROCESS serving the
-            // device: our own start() is covered by the starting flag above, which
-            // it raises before taking this lock. Such a server serves the ring
-            // itself, and the kernel only needs an answer to unblock the operator
+            // the flock attempt failed. Read it as another PROCESS serving the
+            // device, which a live server's hold explains in the routine case: our
+            // own start() is covered by the starting flag above, which it raises
+            // before taking this lock. Such a server serves the ring itself, and
+            // the kernel only needs an answer to unblock the operator
             LOG_INFO("tcmu device `: tombstone locked, normally by a live server; staying out", bs);
             reply_done(rsk, fam, TCMU_CMD_ADDED_DEVICE_DONE, dev_id, 0);
             return;
