@@ -94,6 +94,16 @@ limitations under the License.
 // so a malformed ring means the diagnosis was needed in the first place. Do not
 // copy this walk into the library.
 //
+// serve_vq() also does not walk indirect descriptor tables, and the shared engine now
+// does. That gap is deliberate and it is bounded by the transports rather than by this
+// file: the only transport that offers VIRTIO_RING_F_INDIRECT_DESC is vhost-user, whose
+// rings live in the frontend's memory and are not what this tool rescues, while vduse
+// does not offer it -- so a backlog published with tables cannot reach here today. If
+// vduse ever offers the bit, this walk starts skipping requests silently: it treats a
+// descriptor carrying VRING_DESC_F_INDIRECT as an ordinary buffer, so the header it
+// finds is table bytes, the type it reads is garbage, and the request it "serves" is
+// one the driver never made. Fixing that is its own change, not a comment.
+//
 // C++, unlike the three .c files it replaces. <linux/virtio_ring.h> cannot be
 // included from C++ (its inline vring_init() assigns void* to typed pointers), so
 // the split-ring structs are copied verbatim below, exactly as blk/utils.h does;
