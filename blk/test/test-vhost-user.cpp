@@ -281,6 +281,29 @@ struct MockFrontend {
     // negotiate() masks the bit off the feature word itself when this is set, so the
     // two halves of the mock cannot disagree.
     bool no_protocol_features = false;
+    // Models a frontend that never sends SET_FEATURES at all. No conformant peer does
+    // this -- that message is how a backend learns anything about the session -- but
+    // nothing in the protocol compels it, and the device has no gate that refuses to
+    // serve without it: SET_VRING_ENABLE brings a ring up on its own, so a peer that
+    // sends the ring messages and then kicks is served. That is the peer a reset path
+    // has to be defended against, because whatever a per-queue feature flag holds when
+    // it arrives is what that session runs with.
+    //
+    // `features` reads 0 from the point negotiate() omits the message, and has to: it is
+    // documented as the word this frontend settled on, and no word was settled. Leaving
+    // the offer standing would put the mock in EVENT_IDX mode against a device that is in
+    // flags mode, and the two would then disagree about which suppression channel is
+    // live -- the disagreement event_idx_negotiated() exists to keep observable.
+    //
+    // Mutually exclusive with no_protocol_features, and negotiate() refuses the pair
+    // rather than modelling it: together they send neither SET_FEATURES nor
+    // SET_VRING_ENABLE, and the device's "enable all rings immediately" fallback lives
+    // INSIDE its SET_FEATURES handler. That is a limit on this MOCK, not on the device --
+    // the device runs its ENABLE arm whether or not it owes a reply, so a peer willing to
+    // send one silently could still bring a ring up -- but every ENABLE helper here goes
+    // through transact(), which cannot complete without REPLY_ACK. So negotiate() would
+    // bring no ring up, and a case would die on an I/O timeout instead of on an assertion.
+    bool skip_set_features = false;
     std::string err;
 
     bool fail(const char* what) {
@@ -455,6 +478,13 @@ struct MockFrontend {
 
     // ---- negotiation (the QEMU sequence) ----
     bool negotiate(bool with_backend_channel) {
+        // Refused before a message goes out, so a case that asked for the combination
+        // hears about it here instead of timing out on I/O later. See the knob.
+        if (skip_set_features && no_protocol_features) {
+            errno = EINVAL;
+            return fail("skip_set_features and no_protocol_features together leave "
+                        "negotiate() no way to enable a ring");
+        }
         vhost_user_msg m, r;
         int fds[8], nfds;
         memset(&m, 0, sizeof(m));
@@ -509,11 +539,23 @@ struct MockFrontend {
         m.request = VHOST_USER_SET_OWNER; m.size = 0;
         if (!settle(&m)) return false;
 
-        memset(&m, 0, sizeof(m));
-        m.request = VHOST_USER_SET_FEATURES; m.size = 8;
-        m.payload.u64 = features;   // the word this frontend settled on above,
-                                    // which is the offer minus whatever it declined
-        if (!settle(&m)) return false;
+        if (skip_set_features) {
+            // ONE message omitted and nothing else moved. That is a judgement rather
+            // than a spec quotation -- no conformant frontend omits SET_FEATURES, so
+            // nothing says what such a one does next -- and what it buys is a peer the
+            // backend can still serve: the protocol exchange above is what settles
+            // REPLY_ACK for settle(), and SET_VRING_ENABLE below is the only message
+            // left that can bring a ring up, the device's own enable-all fallback
+            // living inside the SET_FEATURES handler this frontend never triggers.
+            // No word was settled, so `features` reads as none from here on.
+            features = 0;
+        } else {
+            memset(&m, 0, sizeof(m));
+            m.request = VHOST_USER_SET_FEATURES; m.size = 8;
+            m.payload.u64 = features;   // the word this frontend settled on above,
+                                        // which is the offer minus whatever it declined
+            if (!settle(&m)) return false;
+        }
 
         // Asked ONLY once protocol MQ is settled, which is what a primary does:
         // without the bit the backend's maximum queue count is taken to be 1 and
@@ -5563,10 +5605,12 @@ TEST_F(VhostUserTest, configured_queue_depth_caps_indirect_requests_the_same_way
     EXPECT_EQ((uint64_t) N, rf.arrivals.load());
 }
 
-// vq_reset() clearing indirect_desc is what this pins, and it is the only thing that
-// does: without the clear, a session that never negotiated bit 28 inherits the
-// previous session's true and walks tables anyway -- the offer-instead-of-negotiated
-// mistake, arriving through the reset path.
+// A session that declines bit 28 does not inherit the previous one's, and the reason is
+// SET_FEATURES: it re-derives the flag from the word it carries. A frontend RECONNECT
+// never reaches vq_reset(), because msg_loop tears a disconnected session down with
+// vq_stop and leaves the per-queue state standing for the next frontend. The reset path
+// is what the case below pins: its second session sends no SET_FEATURES at all, so it
+// has nothing to re-derive the flag from.
 //
 // Session 1 has to SUCCEED. A case whose first half also failed would be comparing two
 // refusals and would pass with the clear deleted.
@@ -5605,6 +5649,101 @@ TEST_F(VhostUserTest, a_reconnect_that_declines_the_feature_stops_walking_tables
     ASSERT_EQ(0, rc);
     EXPECT_EQ(0xff, st2) << "a session that declined bit 28 inherited the previous one's";
     EXPECT_EQ(0u, ulen2);
+}
+
+// The reset path the case above cannot OBSERVE, and the only case here that can tell
+// whether vq_reset()'s clear of indirect_desc ran. Plenty of cases EXECUTE that clear --
+// every shutdown() reaches it through detach() -- but they all send SET_FEATURES in their
+// next session, which overwrites whatever it left behind, so none of them can see it.
+// Per-queue state crosses a detach()/start() boundary because the Vq objects do -- built
+// in the constructor, freed only in the destructor, and that is deliberate: a device has
+// to stay able to start again and those are the slots it starts from. detach() is blk.h's
+// stop-serving-and-start-again call and keeps them too; what it does empty, through
+// stop_session()'s vq_reset(), is the slots' ring and negotiated state -- num, the three
+// ring addresses, both cursors, both eventfds, and every feature-derived flag.
+// SET_FEATURES is the only message that puts bit 28 back, so a session that never sends
+// one runs on whatever the reset left behind: nothing, in a device that clears, and the
+// previous session's true in one that does not -- the offer-instead-of-negotiated
+// mistake, arriving through the reset path.
+//
+// Nothing else on the way to a dispatch asks whether SET_FEATURES arrived: the ring goes
+// live on SET_VRING_ENABLE alone, so such a session is served rather than refused, and
+// that is what makes an inherited flag reachable at all.
+//
+// Session 1 has to SUCCEED, for the reason the case above gives, and its proof is read
+// out of the image rather than out of the frontend: those bytes got there through the
+// TABLE's data descriptor.
+TEST_F(VhostUserTest, a_session_that_never_sends_set_features_does_not_inherit_the_last_one_s_indirect_desc) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+
+    constexpr uint64_t OFF  = 4ull << 20;
+    constexpr uint64_t OFF2 = 5ull << 20;
+    auto w = pattern(0x66, 4096);
+    auto w2 = pattern(0x77, 4096);
+    std::vector<char> buf(4096, 0);
+    int st1 = -1, st2 = -1;
+    uint32_t ulen2 = 0;
+
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (!(fe.features & F_RING_INDIRECT_DESC)) return EPROTO;
+        // No used_len out-param on this one: do_request already refuses a successful
+        // write whose used length is not the single status byte, so rc == 0 IS that
+        // check, and an EXPECT_EQ on the value here could only ever read back what the
+        // call it follows requires.
+        st1 = fe.do_request(T_OUT, OFF >> 9, w.data(), w.size(), false, nullptr, 0,
+                            /*indirect=*/true);
+        return st1 == S_OK ? 0 : EIO;
+    });
+    ASSERT_EQ(0, rc) << "session 1 did not walk the table, so session 2 proves nothing";
+    EXPECT_EQ(S_OK, st1);
+    EXPECT_EQ(0, verify_backend(OFF, w));
+
+    // detach() is what runs stop_session() and so vq_reset(). It also leaves the socket
+    // node behind, which shutdown() does not, and bind() refuses whatever already sits at
+    // the path -- a dead listener included -- so the node has to go before the next
+    // start(). destroy_orphan() removes a dead one and refuses a live one, so its
+    // returning 0 is also the witness that the detach really stopped serving.
+    ASSERT_EQ(0, dev->detach(true));
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(SOCK_PATH)) return ECONNREFUSED;
+        fe.skip_set_features = true;
+        if (!fe.negotiate(false)) return EPROTO;
+        // A precondition on the mock, in the shape the declined case above uses: this
+        // session settled no feature word at all, so nothing below can be read as an
+        // agreement to walk a table. The ring is up all the same, so an inherited flag
+        // would be reachable rather than merely present.
+        if (fe.features != 0) return EPROTO;
+        st2 = fe.do_request(T_IN, OFF >> 9, buf.data(), buf.size(), true, &ulen2, 0,
+                            /*indirect=*/true);
+        // And the session is still usable, which is the half a bare refusal shape cannot
+        // show.
+        if (fe.write_dev(OFF2, w2.data(), w2.size()) != S_OK) return EIO;
+        std::vector<char> back(w2.size(), 0);
+        if (fe.read_dev(OFF2, back.data(), back.size()) != S_OK) return EIO;
+        return memcmp(w2.data(), back.data(), w2.size()) ? EILSEQ : 0;
+    });
+    ASSERT_EQ(0, rc);
+    EXPECT_EQ(0xff, st2) << "a session that never sent SET_FEATURES inherited the last one's bit 28";
+    EXPECT_EQ(0u, ulen2);
+    // The refusal reaches the data path too, and this reads it out of the buffer rather
+    // than out of the status byte: a device that walked the table would have filled this
+    // from the image, with the pattern session 1 put there through a table of its own.
+    const std::vector<char> zeroes(buf.size(), 0);
+    EXPECT_EQ(0, memcmp(zeroes.data(), buf.data(), buf.size()))
+        << "the refused read still filled the buffer it was offered";
 }
 
 // The table's address goes through the same containment predicate every other buffer

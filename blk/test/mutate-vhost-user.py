@@ -267,29 +267,50 @@ blk/vhost-user.cpp -- the INDIRECT_DESC offer and the seg_max it publishes:
                     # file's coverage rather than a judgement that the guard is unneeded:
                     # that mock cannot express a decline, so there is nothing to mutate
                     # against.
-    noreset         # drop the indirect_desc clear in vq_reset. EXPECTED NOT TO BE
-                    # DETECTED, and that is a correction to the design document, which
-                    # books this mutant against
-                    # a_reconnect_that_declines_the_feature_stops_walking_tables.
-                    # Measured instead: both suites stay green under it, 52/52 and
-                    # 77/77. The reason is structural rather than a weak test. vq_reset
-                    # runs only on the two terminal paths -- stop_session and the
-                    # destructor -- and a frontend RECONNECT tears down with vq_stop,
-                    # not vq_reset (the SET_VRING_NUM comment says so explicitly), so
-                    # the reconnect case never reaches the line this deletes. And in
-                    # any session that can serve at all, SET_FEATURES stores the flag
-                    # from the negotiated word before a ring goes live, overwriting
-                    # whatever a reset left behind.
-                    # What the clear still defends is a frontend that sets up its rings
-                    # and kicks without ever sending SET_FEATURES: nothing in the
-                    # protocol forces that message, and on a second session the flag
-                    # would otherwise hold the first session's true. A discriminating
-                    # test needs exactly that mock path, and negotiate() does not have
-                    # it. Kept rather than deleted because the flag gates a
-                    # peer-supplied length, and because the clears beside it are not all
-                    # alike: event_idx is redundant the same way and its own comment
-                    # admits it, while notify_valid is NOT re-derived by SET_FEATURES
-                    # and so genuinely depends on this path.
+    noreset         # drop the indirect_desc clear in vq_reset. DETECTED, by
+                    # a_session_that_never_sends_set_features_does_not_inherit_the_last_one_s_indirect_desc.
+                    # Measured: 78 tests run, 77 pass, that one fails on three
+                    # assertions at once -- the status byte reads 0 where the sentinel
+                    # 0xff was expected, the used length reads 4097 where 0 was
+                    # expected, and the offered read buffer comes back filled instead
+                    # of all-zero. Restoring the line returns the suite to 78/78.
+                    #
+                    # This entry previously read EXPECTED NOT TO BE DETECTED. That was
+                    # right about the case it named and wrong to leave there. The
+                    # structural half of the old argument still holds, and one detail of
+                    # it was wrong: vq_reset runs only from stop_session and rollback
+                    # -- NOT from the destructor, which reaches it through shutdown()
+                    # then detach() -- and a frontend RECONNECT tears down with vq_stop,
+                    # not vq_reset, so
+                    # a_reconnect_that_declines_the_feature_stops_walking_tables never
+                    # reaches the deleted line. That case's guarantee comes from
+                    # SET_FEATURES re-deriving the flag, not from this clear.
+                    # What was actually missing was the mock path the old entry named,
+                    # and negotiate() now has one: skip_set_features omits that single
+                    # message and leaves the rest of the sequence intact, so a session
+                    # can bring a ring up on SET_VRING_ENABLE alone and be served with no
+                    # feature word ever settled.
+                    #
+                    # Why that is a real defect and not a curiosity: per-queue state
+                    # crosses a detach()/start() boundary because the Vq objects do --
+                    # built in the constructor, freed only in the destructor, so that a
+                    # device stays able to start again -- and nothing on the way to a
+                    # dispatch asks whether SET_FEATURES ever arrived.
+                    #
+                    # Only test-blk-vhost-user was run under this mutant, and that is the
+                    # only suite that can see it: test-blk-vq links vhost-user.cpp through
+                    # libphoton like every suite here does, but it drives the shared engine
+                    # directly and never constructs a VhostUserController, so it cannot
+                    # reach this line either way. The 52/52 the earlier version of this
+                    # entry recorded alongside the 77/77 was a green that proved nothing.
+                    #
+                    # The clears beside it are not all alike, which is worth keeping in
+                    # view now that this one has a witness: event_idx is redundant in the
+                    # same way -- SET_FEATURES re-derives it every session, and its own
+                    # comment says so -- while notify_valid is NOT re-derived by
+                    # SET_FEATURES and therefore depends on this path with nothing behind
+                    # it. The flag this mutant restores gates a peer-supplied length, so
+                    # the clear is not decorative even now that a test covers it.
     segmaxfull      # publish MAX_INDIRECT_ENTRIES as seg_max instead of that count minus
                     # the two framing descriptors. Caught by
                     # seg_max_is_published_as_the_cap_minus_the_two_framing_descriptors,
