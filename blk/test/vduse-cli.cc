@@ -18,10 +18,10 @@ limitations under the License.
 // one program, sharing the ABI plumbing (the lazy IOTLB, the vring refresh, the
 // virtio-blk descriptor walk, the kernel message replies).
 //
-//   vduse-cli probe                   create a virtio-blk VDUSE device of its own
-//                                     ("vdprobe"), attach it to the vdpa bus, serve
-//                                     it, and dump the whole kernel<->daemon
-//                                     interaction
+//   vduse-cli probe [vq_num]          create a virtio-blk VDUSE device of its own
+//                                     ("vdprobe") of <vq_num> virtqueues (default 1),
+//                                     attach it to the vdpa bus, serve it, and dump
+//                                     the whole kernel<->daemon interaction
 //   vduse-cli rescue <name> [secs]    adopt an EXISTING registration nobody serves
 //                                     and drain the backlog of EVERY queue it has
 //                                     (default 60s)
@@ -42,6 +42,31 @@ limitations under the License.
 // the drill for that, for the case where no daemon can start at all --
 // blk/vduse.cpp's own recovery path (start() on an orphan) is the productized
 // rescue.
+//
+// WHY probe TAKES A QUEUE COUNT. It is the ABI oracle the paragraph above points
+// at, and until this change it was single-queue BY CONSTRUCTION: CREATE_DEV
+// declared vq_num 1, VDUSE_VQ_SETUP ran for index 0 alone, one eventfd was
+// registered as that index's kickfd, and the poll set held exactly two fds. So it
+// could never dump the per-queue surface -- VDUSE_VQ_GET_INFO, VDUSE_VQ_SETUP and
+// VDUSE_VQ_SETUP_KICKFD per index, VDUSE_VQ_INJECT_IRQ naming the queue it
+// completes, and adoption resync across every queue -- which is exactly the
+// surface blk/vduse.cpp's multiqueue support added and exactly the surface a
+// 4-queue wedge showed rescue had been missing. `probe N` declares N virtqueues
+// and sets every one of them up, and it serves the queue whose kickfd fired rather
+// than every queue on every kick: WHICH queue a consumer kicks is a fact this dump
+// exists to record, and serving them all would erase it.
+// HONEST LIMIT, TWO PARTS. First, the N > 1 path has NOT been run against a
+// device: running probe attaches a real consumer (`vdpa dev add` plus a background
+// `dd`), and the HAZARD note below says it can then block for minutes in
+// VDUSE_IOTLB_GET_FD and must never be SIGKILLed -- so N > 1 is compile-verified
+// only and the extra rows it prints are unmeasured. Second, N > 1 exercises that
+// per-queue CONTROL surface and not a multiqueue data path, because probe does not
+// offer VIRTIO_BLK_F_MQ (see the comment at cc->features): without it the
+// consumer's virtio_blk driver derives one virtqueue and drives index 0 alone, so
+// queues 1..N-1 are set up, answered by VDUSE_VQ_GET_INFO as not ready, and never
+// kicked. Offering the bit would change the features row recorded at N = 1.
+// At N = 1, the default, nothing changed: every existing invocation and every
+// recorded ABI fact still matches.
 //
 // MEASURED RECOVERY ORDER for a wedged device. Verified end to end on a 4-queue
 // wedge; the drill recorded before that run is the one that failed, and how it
@@ -205,13 +230,15 @@ enum Mode {
 };
 static Mode mode = PROBE;
 
-static int ctrl = -1, dev_fd = -1, kickfd = -1;
+static int ctrl = -1, dev_fd = -1;
 
 // The cap blk/utils.h's MAX_QUEUES puts on one device's queue count, repeated
 // here because this assistant program includes no blk header. It has to be that
 // cap rather than a number of our own: a rescue that can hold fewer queues than
 // the registration has serves fewer than the registration has, which is exactly
-// the defect the per-queue state below exists to remove.
+// the defect the per-queue state below exists to remove. It also bounds probe's
+// vq_num argument -- a registration declaring more queues than this tool can
+// serve is one this tool must refuse to create, not quietly truncate.
 static constexpr unsigned MAX_VQS = 64;
 
 // ---- vring state, one set per virtqueue ----
@@ -229,8 +256,17 @@ struct Vq {
     int live;             // rings mapped and safe to serve
 };
 static struct Vq vqs[MAX_VQS];
-static unsigned nvqs;                  // indices the discovery probe answered for
+static unsigned nvqs;                  // queues to serve: discovered (rescue) or declared (probe)
 static unsigned msgs, driver_ok_seen;  // device-wide, not per-queue
+
+// ---- probe's kickfds, one eventfd per queue index ----
+// The kernel signals a kick on the eventfd registered for THAT index, so the poll
+// slot that wakes up is what identifies the queue -- one shared eventfd would
+// collapse that back to "some queue was kicked". cleanup() closes them, hence
+// file scope; nkickfds counts the slots filled so far, so a signal arriving
+// mid-loop closes exactly the fds that exist and never a zero-initialized slot.
+static int kickfds[MAX_VQS];
+static unsigned nkickfds;
 
 // seconds since the first call: the probe's own deadline base (alog timestamps
 // the trace, so this is only for the loop's budget)
@@ -252,7 +288,7 @@ static void sh(const char *cmd) {
 // the one thing that is not a log: the help text, unadorned on stderr
 static void usage() {
     fprintf(stderr,
-        "usage: vduse-cli probe                  create, serve and dump its own \"" PROBE_NAME "\" device\n"
+        "usage: vduse-cli probe [vq_num]         create, serve and dump its own \"" PROBE_NAME "\" device (default 1)\n"
         "       vduse-cli rescue <name> [secs]   adopt a wedged registration and drain all its queues (default 60)\n"
         "       vduse-cli destroy <name>         VDUSE_DESTROY_DEV without serving\n"
         "       vduse-cli vqprobe <vq_num> <setup:0|1> <index>...\n"
@@ -402,8 +438,14 @@ static int serve_vq(struct Vq &vq) {
         vq.used_idx++;
         vq.last_avail++;
         served++;
-        if (mode == PROBE)
-            LOG_INFO("served head `, type `, sector `, dlen ", head, type, sector, dlen);
+        if (mode == PROBE) {
+            // a multiqueue dump has to say whose request it was; the single-queue
+            // probe keeps the row it has always printed
+            if (nvqs > 1)
+                LOG_INFO("vq ` served head `, type `, sector `, dlen ", vq.index, head, type, sector, dlen);
+            else
+                LOG_INFO("served head `, type `, sector `, dlen ", head, type, sector, dlen);
+        }
     }
     if (served) {
         __sync_synchronize();
@@ -416,9 +458,9 @@ static int serve_vq(struct Vq &vq) {
         // by one constant.
         if (ioctl(dev_fd, VDUSE_VQ_INJECT_IRQ, &vq.index) < 0)
             LOG_ERROR("VDUSE_VQ_INJECT_IRQ of vq ` failed, ", vq.index, ERRNO());
-        if (mode == PROBE)   // the probe's dump keeps the row it has always printed
+        if (mode == PROBE && nvqs == 1)   // the probe's dump keeps the row it has always printed
             LOG_INFO("served ` request(s), used->idx ", served, vq.used_idx);
-        else                 // a multiqueue rescue has to say which queue it served
+        else   // multiqueue, in either mode, has to say which queue it served
             LOG_INFO("vq ` served ` request(s), used->idx ", vq.index, served, vq.used_idx);
     }
     return served;
@@ -469,8 +511,15 @@ static bool handle_one_msg() {
                 // registration is bound: ask again before refreshing.
                 if (!nvqs)
                     nvqs = discover_vqs();
-                for (unsigned i = 0; i < nvqs; i++)
+                for (unsigned i = 0; i < nvqs; i++) {
+                    // A multiqueue dump has to say whose rows follow: VQ_GET_INFO,
+                    // the IOTLB mappings and `vring mapped` are printed by code
+                    // shared with rescue that names no queue, and adding an index
+                    // there would rewrite rows a rescue run has already recorded.
+                    if (mode == PROBE && nvqs > 1)
+                        LOG_INFO("---- vq ` ----", i);
                     vq_refresh(vqs[i], mode == RESCUE);
+                }
             }
         }
         if (req.s.status == 0) {
@@ -518,8 +567,9 @@ static bool handle_one_msg() {
 // MINUTES inside VDUSE_IOTLB_GET_FD (see HAZARD above), so an external timeout's
 // SIGTERM arrives while it is blocked. Dying without this leaves the registration
 // UNSERVED, and anything touching its /dev/vdX then wedges in unkillable D state.
-// Order matters: consumer off first, then close the char dev (DESTROY_DEV is
-// EBUSY while a daemon is still connected), then destroy.
+// Order matters: consumer off first, then our own fds -- every queue's eventfd and
+// the char dev (DESTROY_DEV is EBUSY while a daemon is still connected) -- then
+// destroy.
 static void cleanup() {
     static int done = 0;
     if (done) return;
@@ -538,6 +588,10 @@ static void cleanup() {
     // device with it; if even that returns EBUSY, serve the backlog with
     // `vduse-cli rescue` first, then retry.
     sh("timeout 10 vdpa dev del " PROBE_NAME " 2>/dev/null; true");
+    // Every queue's eventfd, not just the first: a probe that declared N queues
+    // registered N of them, and a slot holding -1 is one eventfd() refused.
+    for (unsigned i = 0; i < nkickfds; i++)
+        if (kickfds[i] >= 0) { close(kickfds[i]); kickfds[i] = -1; }
     if (dev_fd >= 0) { close(dev_fd); dev_fd = -1; }
     if (ctrl < 0) return;
     if (ioctl(ctrl, VDUSE_DESTROY_DEV, PROBE_NAME) < 0)
@@ -554,8 +608,20 @@ static void on_term(int sig) {
     _exit(128 + sig);
 }
 
-static int cmd_probe() {
+// argv: [vq_num]
+static int cmd_probe(int argc, char **argv) {
     mode = PROBE;
+    // Refused rather than clamped: a registration created with fewer queues than
+    // the operator asked for would dump a narrower ABI surface than the one asked
+    // about and say so nowhere. Parsed before anything is opened, so a bad
+    // argument leaves no registration behind.
+    unsigned vq_num = 1;
+    if (argc > 0) {
+        int n = atoi(argv[0]);
+        if (n < 1 || n > (int)MAX_VQS)
+            LOG_ERROR_RETURN(EINVAL, 2, "vq_num must be between 1 and `, got `", MAX_VQS, n);
+        vq_num = (unsigned)n;
+    }
     now();   // start the deadline clock before anything can block
     ctrl = open("/dev/vduse/control", O_RDWR | O_CLOEXEC);
     if (ctrl < 0)
@@ -576,7 +642,13 @@ static int cmd_probe() {
     cc->device_id = VIRTIO_ID_BLOCK;
     cc->features = (1ULL << VIRTIO_F_ACCESS_PLATFORM) | (1ULL << VIRTIO_F_VERSION_1) |
                    (1ULL << VIRTIO_BLK_F_FLUSH) | (1ULL << VIRTIO_BLK_F_BLK_SIZE);
-    cc->vq_num = 1;
+    // VIRTIO_BLK_F_MQ is deliberately NOT offered, so the consumer's virtio_blk
+    // driver derives one virtqueue from config space and drives index 0 alone
+    // whatever vq_num declares. What N > 1 therefore measures is the per-queue
+    // CONTROL surface -- VQ_SETUP, VQ_SETUP_KICKFD and VQ_GET_INFO for every
+    // index -- and not a multiqueue data path. Offering the bit to get one would
+    // change the features row this probe has always printed.
+    cc->vq_num = vq_num;
     cc->vq_align = sysconf(_SC_PAGESIZE);
     cc->config_size = sizeof(struct virtio_blk_config);
     auto bc = (struct virtio_blk_config*)cc->config;
@@ -599,22 +671,43 @@ static int cmd_probe() {
     LOG_INFO("second open returned ` [expect EBUSY: the char dev IS the lock], ", fd2, ERRNO());
     if (fd2 >= 0) close(fd2);
 
-    struct vduse_vq_config vqc;
-    memset(&vqc, 0, sizeof(vqc));
-    vqc.index = 0; vqc.max_size = 128;
-    if (ioctl(dev_fd, VDUSE_VQ_SETUP, &vqc) < 0)
-        LOG_ERROR("VDUSE_VQ_SETUP failed, ", ERRNO());
-    // One queue, index 0: CREATE_DEV above declared vq_num 1, so there is nothing
-    // for discover_vqs to find out and every row this probe prints names index 0.
-    nvqs = 1;
-    vqs[0].index = 0;
+    // Every index, not 0 alone: CREATE_DEV above declared vq_num of them, and a
+    // queue the kernel was never given a max_size for is one it will not make ready.
+    for (unsigned i = 0; i < vq_num; i++) {
+        struct vduse_vq_config vqc;
+        memset(&vqc, 0, sizeof(vqc));
+        vqc.index = i; vqc.max_size = 128;
+        if (ioctl(dev_fd, VDUSE_VQ_SETUP, &vqc) < 0) {
+            if (vq_num > 1)   // the single-queue row keeps the wording it has always had
+                LOG_ERROR("VDUSE_VQ_SETUP of vq ` failed, ", i, ERRNO());
+            else
+                LOG_ERROR("VDUSE_VQ_SETUP failed, ", ERRNO());
+        }
+    }
+    // This run declared the count itself at CREATE_DEV, so unlike a rescue there is
+    // nothing for discover_vqs to measure: the indices are 0..vq_num-1 by
+    // construction. Set before the loop below, which polls and serves by index.
+    nvqs = vq_num;
+    for (unsigned i = 0; i < nvqs; i++)
+        vqs[i].index = i;
 
-    kickfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    struct vduse_vq_eventfd ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.index = 0; ev.fd = kickfd;
-    if (ioctl(dev_fd, VDUSE_VQ_SETUP_KICKFD, &ev) < 0)
-        LOG_ERROR("VDUSE_VQ_SETUP_KICKFD failed, ", ERRNO());
+    // One eventfd per index. The kernel signals a kick on the eventfd registered
+    // for the queue that was kicked, so this is what makes "which queue" knowable
+    // at all. nkickfds is advanced only AFTER its slot is filled, so a SIGTERM
+    // landing mid-loop makes cleanup() close exactly the fds that exist.
+    for (unsigned i = 0; i < nvqs; i++) {
+        kickfds[i] = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        nkickfds = i + 1;
+        struct vduse_vq_eventfd ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.index = i; ev.fd = kickfds[i];
+        if (ioctl(dev_fd, VDUSE_VQ_SETUP_KICKFD, &ev) < 0) {
+            if (nvqs > 1)   // the single-queue row keeps the wording it has always had
+                LOG_ERROR("VDUSE_VQ_SETUP_KICKFD of vq ` failed, ", i, ERRNO());
+            else
+                LOG_ERROR("VDUSE_VQ_SETUP_KICKFD failed, ", ERRNO());
+        }
+    }
 
     // background: attach to the vdpa bus, find OUR new block dev, do IO
     sh("ls /sys/block | sort > /tmp/vdprobe.before");
@@ -633,27 +726,50 @@ static int cmd_probe() {
     // main loop: answer kernel messages + serve the vring on kicks
     double deadline = now() + 25.0;
     int kicks = 0;
+    uint64_t qkicks[MAX_VQS] = {};   // per queue: the total cannot say which one was kicked
     while (now() < deadline) {
-        struct pollfd pfd[2] = { {dev_fd, POLLIN, 0}, {kickfd, POLLIN, 0} };
-        int n = poll(pfd, 2, 200);
+        // Slot 0 is the char dev and slot 1+i is queue i's kickfd, so the slot that
+        // wakes up IS the queue index -- the arithmetic the serving loop below runs
+        // on. The bound is the same MAX_VQS that sizes vqs[] and kickfds[], so this
+        // file has one queue cap rather than two; 65 pollfds are still cheap enough
+        // to re-arm on the stack five times a second, which is what this loop does.
+        struct pollfd pfd[1 + MAX_VQS] = { {dev_fd, POLLIN, 0} };
+        for (unsigned i = 0; i < nvqs; i++) {
+            pfd[1 + i].fd = kickfds[i];
+            pfd[1 + i].events = POLLIN;
+            pfd[1 + i].revents = 0;
+        }
+        int n = poll(pfd, 1 + nvqs, 200);
         if (n < 0) { if (errno == EINTR) continue; break; }
-        if (pfd[1].revents & POLLIN) {
+        for (unsigned i = 0; i < nvqs; i++) {
+            if (!(pfd[1 + i].revents & POLLIN)) continue;
             uint64_t v;
-            while (read(kickfd, &v, 8) == 8) kicks += v;
-            for (unsigned i = 0; i < nvqs; i++)
-                serve_vq(vqs[i]);
+            while (read(kickfds[i], &v, 8) == 8) { kicks += v; qkicks[i] += v; }
+            if (nvqs > 1)   // the single-queue dump has always been silent about kicks
+                LOG_INFO("kickfd of vq ` fired", i);
+            // ONLY the queue that was kicked. Serving all of them here would look
+            // the same in the used rings and would erase the fact this dump exists
+            // to record, namely which queue the consumer kicked.
+            serve_vq(vqs[i]);
         }
         if (pfd[0].revents & POLLIN)
             while (handle_one_msg()) ;
-        // also poll-serve: kicks can be missed if the eventfd raced the setup,
-        // and on this kernel the kickfd was observed never to fire at all
-        if (kicks == 0 && driver_ok_seen)
+        // also poll-serve: a kick can be missed if the eventfd raced the setup, and
+        // on this kernel the kickfd was observed never to fire at all. Per queue
+        // rather than device-wide, because a consumer that kicks queue 0 only still
+        // leaves queues 1..N-1 with a backlog nobody drains -- and at N = 1 the
+        // queue's own total and the device-wide one are the same number.
+        if (driver_ok_seen)
             for (unsigned i = 0; i < nvqs; i++)
-                serve_vq(vqs[i]);   // serve_vq skips a queue that is not live
+                if (!qkicks[i])
+                    serve_vq(vqs[i]);   // serve_vq skips a queue that is not live
         if (driver_ok_seen && now() > 18.0) break;   // IO done, wrap up
     }
 
     LOG_INFO("summary, ", VALUE(msgs), VALUE(kicks), "served_to=", vqs[0].used_idx);
+    if (nvqs > 1)   // the row above names queue 0's cursor and the device-wide total
+        for (unsigned i = 0; i < nvqs; i++)
+            LOG_INFO("vq ` kicks ` served_to=", i, qkicks[i], vqs[i].used_idx);
     LOG_INFO("---- the background log ----");
     sh("cat /tmp/vdprobe.bg.log");
     cleanup();   // also runs on SIGTERM/SIGINT; idempotent
@@ -841,7 +957,7 @@ static int cmd_vqprobe(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 2; }
-    if (!strcmp(argv[1], "probe")) return cmd_probe();
+    if (!strcmp(argv[1], "probe")) return cmd_probe(argc - 2, argv + 2);
     if (!strcmp(argv[1], "rescue")) return cmd_rescue(argc - 2, argv + 2);
     if (!strcmp(argv[1], "destroy")) return cmd_destroy(argc - 2, argv + 2);
     if (!strcmp(argv[1], "vqprobe")) return cmd_vqprobe(argc - 2, argv + 2);
