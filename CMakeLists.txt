@@ -372,6 +372,29 @@ if (WIN32 AND PHOTON_BUILD_DEPENDENCIES)
     target_compile_definitions(photon_obj PRIVATE CURL_STATICLIB)
 endif ()
 
+# Operator-facing tools, built beside the blk transports they drive instead of
+# under PHOTON_BUILD_TESTING because they are useful in production, not only in
+# tests: vduse-cli diagnoses and unwedges a live vduse device, and vhost-user-cli
+# serves an image so an independent frontend can be pointed at blk/vhost-user.cpp.
+# Static, so either binary can be copied onto a wedged machine with no
+# libphoton.so and no rpath to satisfy. Not registered with CTest -- both need
+# arguments, vduse-cli needs root, and neither is a test. LINUX mirrors
+# blk_vhost_user's own ENABLE, whose symbols vhost-user-cli links against.
+#
+# Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
+# ".cc is for assistant programs not included in normal compilation". Here the
+# extension is doing work rather than marking neglect: it keeps them out of any
+# `blk/*.cpp` source glob, as net/http/huffman/gen_tree.cc stays out of
+# net/http/huffman/*.cpp. blk lists its sources file by file today because each
+# transport is gated separately, so this is insurance rather than a live need.
+if (LINUX)
+    add_executable(vduse-cli blk/vduse-cli.cc)
+    target_link_libraries(vduse-cli PRIVATE photon_static)
+
+    add_executable(vhost-user-cli blk/vhost-user-cli.cc)
+    target_link_libraries(vhost-user-cli PRIVATE photon_static)
+endif ()
+
 # Build examples and test cases
 if (PHOTON_BUILD_TESTING)
     include(photon-test-helpers)

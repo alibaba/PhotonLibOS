@@ -220,7 +220,7 @@ static bool rescue_serve(const char* name) {
 // ---------------------------------------------------------------------------
 // the rescue sentinel
 //
-// blk/test/vduse-cli.cc's `rescue` subcommand, ported into a spawned child of this
+// blk/vduse-cli.cc's `rescue` subcommand, ported into a spawned child of this
 // suite so that vdpa_detach() below can clean instead of decline. The recipe it ports
 // is the one that has been run by hand to recover a wedged machine, so every step
 // cites the line it came from; the places that are NOT the recipe are each marked at
@@ -817,7 +817,7 @@ static DetachOutcome vdpa_detach(const char* name) {
         return DetachOutcome::AdoptedHere;
     if (sentinel_rescue(name))
         return DetachOutcome::RescuedBySentinel;
-    LOG_ERROR("vduse `: a consumer is attached to a registration nothing serves, and neither adopting it here nor the rescue sentinel could serve it, so `vdpa dev del` is being withheld -- it would block in the kernel's queue freeze holding the machine-wide genl_lock. Recover the registration with blk/test/vduse-cli.cc's rescue drill", name);
+    LOG_ERROR("vduse `: a consumer is attached to a registration nothing serves, and neither adopting it here nor the rescue sentinel could serve it, so `vdpa dev del` is being withheld -- it would block in the kernel's queue freeze holding the machine-wide genl_lock. Recover the registration with blk/vduse-cli.cc's rescue drill", name);
     return DetachOutcome::Withheld;
 }
 
@@ -2121,7 +2121,7 @@ TEST_F(VduseTest, detach_rescues_an_orphan_the_product_path_cannot_see) {
     // command sent to it rather than this one -- and says so.
     DEFER({
         if (::access(sp.c_str(), F_OK) == 0) {
-            LOG_ERROR("vduse `: leaving a stranded registration with its consumer still attached, because DESTROY_DEV against it is what wedges; recover it with blk/test/vduse-cli.cc's rescue drill", TEST_NAME);
+            LOG_ERROR("vduse `: leaving a stranded registration with its consumer still attached, because DESTROY_DEV against it is what wedges; recover it with blk/vduse-cli.cc's rescue drill", TEST_NAME);
         } else if (::access(reg.c_str(), F_OK) == 0) {
             EXPECT_EQ(0, raw_vduse_destroy(TEST_NAME));
         }

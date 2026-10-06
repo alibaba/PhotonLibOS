@@ -57,7 +57,7 @@ FUNC = r'''/*
  *
  * num_queues reaches the peer as PHOTON_VHU_QUEUES rather than as an argument,
  * because the peer's argv slots are already the socket, the image and the image
- * size -- see blk/test/vhost-user-cli.cc, which documents the variable. It does
+ * size -- see blk/vhost-user-cli.cc, which documents the variable. It does
  * have to reach it: vhost_user_backend_init() asks a backend how many queues it
  * serves with GET_QUEUE_NUM and rejects any device asking for more, so a peer
  * left at its one-queue default makes device_add num-queues=8 fail with "The

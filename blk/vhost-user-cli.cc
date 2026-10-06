@@ -38,11 +38,11 @@ limitations under the License.
 // running both gives an A/B baseline: same frontend, same libqos driver, same six
 // cases.
 //
-// BUILD (from the repo root, against any photon build dir; Linux only, since
-// blk/vhost-user.cpp itself is Linux-gated). Against the shared library:
-//   g++ -O2 -Wall -I include -o vhost-user-cli blk/test/vhost-user-cli.cc -L build/output -lphoton -Wl,-rpath,$PWD/build/output
-// or statically, adding whatever that build enabled:
-//   g++ -O2 -Wall -I include -o vhost-user-cli blk/test/vhost-user-cli.cc build/output/libphoton.a -lpthread -ldl -laio -luring
+// BUILD: the `vhost-user-cli` target of the top-level CMakeLists, Linux only -- the
+// same gate blk/vhost-user.cpp sits behind, whose symbols this links against:
+//   cmake --build <build-dir> --target vhost-user-cli
+// Linked against photon_static, so the binary needs neither a libphoton.so on the
+// target host nor an rpath pointing back at the build tree.
 //
 // ENVIRONMENT. PHOTON_VHU_QUEUES sets how many virtqueues to serve; unset, empty or 0
 // means one, which is what every caller got before it existed. The peer script reads
@@ -57,10 +57,13 @@ limitations under the License.
 // controller, the image and photon are released by DEFER in reverse order.
 // Setup failures return non-zero, which the harness reads as a hard error.
 //
-// Assistant program, deliberately NOT a build target -- hence the .cc extension
-// AGENTS.md reserves for programs outside normal compilation (see vduse-cli.cc).
+// The .cc extension survived the move into the build, so this file is an exception
+// to AGENTS.md's ".cc is for assistant programs not included in normal compilation".
+// It is kept because the extension keeps the file out of any `blk/*.cpp` source glob;
+// the target declaration in the top-level CMakeLists records the same thing, and
+// vduse-cli.cc is the other half of the pair.
 
-#include "../blk.h"
+#include "blk.h"
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>

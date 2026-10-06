@@ -55,18 +55,21 @@ limitations under the License.
 // and sets every one of them up, and it serves the queue whose kickfd fired rather
 // than every queue on every kick: WHICH queue a consumer kicks is a fact this dump
 // exists to record, and serving them all would erase it.
-// HONEST LIMIT, TWO PARTS. First, the N > 1 path has NOT been run against a
-// device: running probe attaches a real consumer (`vdpa dev add` plus a background
-// `dd`), and the HAZARD note below says it can then block for minutes in
-// VDUSE_IOTLB_GET_FD and must never be SIGKILLed -- so N > 1 is compile-verified
-// only and the extra rows it prints are unmeasured. Second, N > 1 exercises that
-// per-queue CONTROL surface and not a multiqueue data path, because probe does not
-// offer VIRTIO_BLK_F_MQ (see the comment at cc->features): without it the
-// consumer's virtio_blk driver derives one virtqueue and drives index 0 alone, so
-// queues 1..N-1 are set up, answered by VDUSE_VQ_GET_INFO as not ready, and never
-// kicked. Offering the bit would change the features row recorded at N = 1.
-// At N = 1, the default, nothing changed: every existing invocation and every
-// recorded ABI fact still matches.
+// HONEST LIMIT. N > 1 exercises that per-queue CONTROL surface and not a multiqueue
+// data path, because probe does not offer VIRTIO_BLK_F_MQ (see the comment at
+// cc->features): without it the consumer's virtio_blk driver derives one virtqueue
+// and drives index 0 alone, so queues 1..N-1 are set up, answered by
+// VDUSE_VQ_GET_INFO as not ready, and never kicked. Offering the bit would change
+// the features row recorded at N = 1.
+// N = 2 HAS been run against a device, so its extra rows are measured rather than
+// compile-verified: vq 0 answers num 128 ready 1 with its three ring addresses, and
+// vq 1 answers num 0 ready 0 with all three zero -- the oracle speaking for an index
+// nobody ever bound, which is the very fact rescue's discover_vqs() leans on -- plus
+// a kicks/served_to row of its own per queue.
+// At N = 1, the default, the invocation is unchanged and every recorded ABI fact
+// still matches. The run does not look the same, though: since the clock-unit fix it
+// serves its whole window, so the background shell completes and teardown destroys
+// the device instead of leaving a registration that needs the rescue drill.
 //
 // MEASURED RECOVERY ORDER for a wedged device. Verified end to end on a 4-queue
 // wedge; the drill recorded before that run is the one that failed, and how it
@@ -135,16 +138,22 @@ limitations under the License.
 // SIGINT are caught and tear the device down, but SIGKILL leaves the registration
 // UNSERVED and the VM wedged. Give it a generous timeout and never -9 it.
 //
-// Assistant program, deliberately NOT a build target: built by hand, from the repo
-// root, against a photon build (only alog is used, and alog needs no
+// Built as the `vduse-cli` target by the top-level CMakeLists, on Linux only:
+//     cmake --build <build-dir> --target vduse-cli
+// Linked against photon_static, and the static link is the point rather than a
+// preference: the rescue use is copying this binary onto a machine whose device is
+// already wedged, where a libphoton.so to find and an rpath to get right are two
+// more things that can fail. Only alog is used from photon, and alog needs no
 // photon::init() -- it stamps its own lines from photon's clock and writes to
-// stdout):
-//     g++ -O2 -Wall -I include -o vduse-cli blk/test/vduse-cli.cc build/output/libphoton.a -lpthread -ldl
-// Any build dir's libphoton.a works; linking the shared libphoton.so instead needs
-// -L that dir plus an rpath. Run as root, with both modules loaded as SEPARATE
-// commands (`modprobe a b` passes b as a PARAMETER of a) and the iproute2 vdpa
-// tool present:
+// stdout. Run as root, with both modules loaded as SEPARATE commands (`modprobe a b`
+// passes b as a PARAMETER of a) and the iproute2 vdpa tool present:
 //     modprobe vduse; modprobe virtio_vdpa
+//
+// The .cc extension survived the move into the build, so this file is an exception
+// to AGENTS.md's ".cc is for assistant programs not included in normal compilation".
+// It is kept because the extension keeps the file out of any `blk/*.cpp` source
+// glob; the target declaration in the top-level CMakeLists records the same thing,
+// which is where a reader of the build will look for it.
 //
 // As a root-only diagnostic, serve_vq() below is DELIBERATELY laxer than
 // blk/utils.cpp's virtio_blk_serve_chain: it caps the descriptor walk at 32 steps

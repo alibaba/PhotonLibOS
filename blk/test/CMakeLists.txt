@@ -34,19 +34,7 @@ if (LINUX)
     endif ()
 endif ()
 
-# The two .cc files here are deliberately NOT build targets -- that extension is
-# what AGENTS.md reserves for assistant programs outside normal compilation, and
-# each is built by hand with the g++ line in its own header comment.
-#
-# vduse-cli.cc diagnoses and unwedges vduse devices, and is only runnable as root
-# with the vduse module loaded. It links a photon build for alog (the LOG_*
-# macros) but cannot include <linux/virtio_ring.h> -- that header's inline
-# vring_init() assigns void* to typed pointers, which C++ rejects -- so it copies
-# the split-ring structs the way blk/utils.h does.
-#
-# vhost-user-cli.cc serves one image over a vhost-user socket so that an
-# INDEPENDENT frontend can be pointed at blk/vhost-user.cpp: QEMU's own
-# tests/qtest/vhost-user-blk-test.c, whose peer is normally qemu-storage-daemon.
-# test-vhost-user.cpp's mock frontend shares this repo's assumptions about the
-# wire format, so it cannot catch a format both sides got wrong the same way;
-# QEMU's frontend can.
+# The two CLI tools this directory's scripts drive -- vduse-cli and vhost-user-cli
+# -- are NOT here and NOT tests: they live in blk/ and the top-level CMakeLists
+# builds them as operator tools. qemu-vhost-user-peer.py stays here because it is a
+# test driver, and takes the built binary's path in PHOTON_VHU_BACKEND.
