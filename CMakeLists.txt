@@ -378,15 +378,26 @@ endif ()
 # serves an image so an independent frontend can be pointed at blk/vhost-user.cpp.
 # Static, so either binary can be copied onto a wedged machine with no
 # libphoton.so and no rpath to satisfy. Not registered with CTest -- both need
-# arguments, vduse-cli needs root, and neither is a test. LINUX mirrors
-# blk_vhost_user's own ENABLE, whose symbols vhost-user-cli links against.
+# arguments, vduse-cli needs root, and neither is a test. One LINUX gate covers both,
+# for two separate reasons: vhost-user-cli links blk_vhost_user's symbols and that
+# module's own ENABLE is LINUX, while vduse-cli links nothing from blk/vduse.cpp but
+# includes <linux/virtio_blk.h> and <linux/virtio_config.h>, so it does not compile
+# off Linux either.
 #
 # Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
 # ".cc is for assistant programs not included in normal compilation". Here the
 # extension is doing work rather than marking neglect: it keeps them out of any
-# `blk/*.cpp` source glob, as net/http/huffman/gen_tree.cc stays out of
-# net/http/huffman/*.cpp. blk lists its sources file by file today because each
-# transport is gated separately, so this is insurance rather than a live need.
+# `blk/*.cpp` source glob, as net/http/huffman/gen_tree.cc stays out of the real
+# net/http/huffman/*.cpp glob in photon_module(http). blk has no such glob today --
+# every photon_module(blk*) names its single file -- so here the extension is
+# insurance against one being added rather than a live need.
+#
+# Placement is load-bearing. CMAKE_RUNTIME_OUTPUT_DIRECTORY is captured at
+# add_executable time, and the PHOTON_BUILD_TESTING block below repoints it at
+# examples-output before pointing it back at output. Declaring these two above that
+# block is what lands both binaries in <build-dir>/output/ beside every other
+# executable; declaring them between those two set() calls would put them in
+# examples-output instead, and nothing in the build would say so.
 if (LINUX)
     add_executable(vduse-cli blk/vduse-cli.cc)
     target_link_libraries(vduse-cli PRIVATE photon_static)

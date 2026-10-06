@@ -268,11 +268,12 @@ static bool rescue_serve(const char* name) {
 //     header comment). It is a
 //     drain, not a backend, so it must never be pointed at a device whose data anybody
 //     still wants.
-//   - It never destroys the registration (Mode::RESCUE in vduse-cli.cc, and the
-//     close(dev_fd) that ends cmd_rescue()). The registration is not ours to destroy,
-//     and DESTROY_DEV answers EBUSY while a daemon is connected anyway
-//     (cmd_destroy()'s EBUSY branch) -- so what the sentinel leaves behind is a
-//     served-then-released registration with no consumer, which sweep()'s adopt can take.
+//   - It never destroys the registration (vduse-cli.cc's cmd_rescue(): it sets
+//     RESCUE mode and releases with close(dev_fd), issuing no DESTROY_DEV). The
+//     registration is not ours to destroy, and DESTROY_DEV answers EBUSY while a
+//     daemon is connected anyway (cmd_destroy()'s EBUSY branch) -- so what the
+//     sentinel leaves behind is a served-then-released registration with no
+//     consumer, which sweep()'s adopt can take.
 //   - Its descriptor walk is the recipe's deliberately lax one: capped at 32 steps but
 //     never bounded against the ring size (vduse-cli.cc's "As a root-only diagnostic"
 //     header paragraph). The peer here is the local kernel's virtio_vdpa driver and the
@@ -452,12 +453,13 @@ public:
         return true;
     }
 
-    // vduse-cli.cc's serve_vq() with the PROBE-only branches dropped -- the signature
-    // fill and the PROBE-gated logs, which a RESCUE run does not reach. The recipe's copy
-    // has since gone per-queue: it takes a struct Vq, names the queue it completed in
-    // INJECT_IRQ, and logs a per-queue row whenever it serves more than one. This one
-    // keeps a single set of file-scope state, so it is queue 0's shape. Walks every
-    // available chain, answers it as a null virtio-blk device and publishes the used ring.
+    // vduse-cli.cc's serve_vq() with its logs and its PROBE-only signature fill
+    // dropped -- this sentinel drains silently. The recipe's copy has since gone
+    // per-queue: it takes a struct Vq, names the queue it completed in INJECT_IRQ,
+    // and logs a per-queue served row in every shape but a single-queue PROBE, which
+    // keeps the row probe has always printed. This one keeps a single set of
+    // file-scope state, so it is queue 0's shape. Walks every available chain,
+    // answers it as a null virtio-blk device and publishes the used ring.
     int serve_vq() {
         if (!vq_live)
             return 0;

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// vduse-cli: the vduse diagnostic and recovery assistant -- four subcommands in
+// vduse-cli: the vduse diagnostic and recovery tool -- four subcommands in
 // one program, sharing the ABI plumbing (the lazy IOTLB, the vring refresh, the
 // virtio-blk descriptor walk, the kernel message replies).
 //
@@ -66,10 +66,16 @@ limitations under the License.
 // vq 1 answers num 0 ready 0 with all three zero -- the oracle speaking for an index
 // nobody ever bound, which is the very fact rescue's discover_vqs() leans on -- plus
 // a kicks/served_to row of its own per queue.
-// At N = 1, the default, the invocation is unchanged and every recorded ABI fact
-// still matches. The run does not look the same, though: since the clock-unit fix it
-// serves its whole window, so the background shell completes and teardown destroys
-// the device instead of leaving a registration that needs the rescue drill.
+// At N = 1, the default, the invocation is unchanged and so are the ABI VALUES it
+// records -- the same features row, the same VDUSE_VQ_SETUP and VDUSE_VQ_GET_INFO for
+// index 0 alone. The LOG is not, and diffing a current one against a run recorded
+// before the clock-unit and dd-read fixes will mislead. A ms-for-s clock bug cut that
+// older run's serving loop to its first 200 ms poll, while `vdpa dev add` was still in
+// flight -- the background log was still empty when teardown cat'ed it -- so the
+// device never attached and the VQ_GET_INFO and served rows were never emitted at
+// all. They are now, the served row reports sector 1024 rather than 0, and
+// READ_RC/SIGNATURE are new. Teardown also completes instead of leaving a
+// registration that needs the rescue drill. Read the growth as those fixes.
 //
 // MEASURED RECOVERY ORDER for a wedged device. Verified end to end on a 4-queue
 // wedge; the drill recorded before that run is the one that failed, and how it
@@ -257,13 +263,14 @@ static Mode mode = PROBE;
 
 static int ctrl = -1, dev_fd = -1;
 
-// The cap blk/utils.h's MAX_QUEUES puts on one device's queue count, repeated
-// here because this assistant program includes no blk header. It has to be that
-// cap rather than a number of our own: a rescue that can hold fewer queues than
-// the registration has serves fewer than the registration has, which is exactly
-// the defect the per-queue state below exists to remove. It also bounds probe's
-// vq_num argument -- a registration declaring more queues than this tool can
-// serve is one this tool must refuse to create, not quietly truncate.
+// The cap blk/utils.h's MAX_QUEUES puts on one device's queue count, copied rather
+// than included: the only blk header this tool takes is vduse-uapi.h, for the uapi,
+// and utils.h would drag in the serving engine this tool deliberately does not use.
+// It has to be that cap rather than a number of our own: a rescue that can hold
+// fewer queues than the registration has serves fewer than the registration has,
+// which is exactly the defect the per-queue state below exists to remove. It also
+// bounds probe's vq_num argument -- a registration declaring more queues than this
+// tool can serve is one this tool must refuse to create, not quietly truncate.
 static constexpr unsigned MAX_VQS = 64;
 
 // ---- vring state, one set per virtqueue ----
@@ -749,19 +756,24 @@ static int cmd_probe(int argc, char **argv) {
        "sleep 0.5; if [ -n \"$new\" ] && [ -b /dev/$new ]; then "
        "echo '--- dd write:'; timeout 5 dd if=/dev/zero of=/dev/$new bs=4k count=4 conv=fsync 2>&1 | tail -1; "
        // The read takes a range nothing else has touched -- skip=128 lands it at
-       // sector 1024, clear of the write above (sectors 0-31) and of the partition
-       // scan (0, 3832-4088) -- rather than a cache flag. Cached, it witnesses
-       // nothing: before this it ran in 0.0003 s at 16 MB/s and read back zeros the
-       // write had just left in the page cache. `iflag=direct` is no answer either,
-       // being unportable -- on uutils coreutils dd 0.8.0 it fails with "IO error:
-       // Invalid input" even against /etc/hostname and the host's own root disk. An
-       // untouched range needs no flag, there being nothing cached to hit, and it is
-       // what makes the check conclusive: probe's own served-request log must then
-       // show a read at sector 1024, which sectors 0-31 could never prove because
-       // `vdpa dev add` had already served reads there. The stale file goes first so
-       // a failed read cannot pass on the previous run's bytes, and READ_RC and
-       // SIGNATURE are the two rows that can go red -- an od dump alone cannot tell
-       // a pass from a silent failure.
+       // sector 1024, clear of the write above (sectors 0-31, being 4 blocks of 4096
+       // over a 512-byte sector) and clear of the partition scan -- rather than a
+       // cache flag. The scan's range is MEASURED, not derivable: one serving log put
+       // it at sector 0 and at 3832-4088, on a device whose bc->capacity of 4096
+       // makes 4095 the last sector. Neither number follows from any constant in this
+       // file, so re-measure rather than recompute them.
+       // Cached, the read witnesses nothing: before this it ran in 0.0003 s at 16 MB/s
+       // and read back zeros the write had just left in the page cache. `iflag=direct`
+       // is no answer either, being unportable -- on uutils coreutils dd 0.8.0 it
+       // fails with "IO error: Invalid input" even against /etc/hostname and the
+       // host's own root disk. An untouched range needs no flag, there being nothing
+       // cached to hit, and it is what makes the check conclusive: probe's own
+       // served-request log must then show a read at sector 1024. Nothing in sectors
+       // 0-31 could show that -- the write left all 32 of them in the page cache, and
+       // sector 0 was the scan's before the write ran. The stale file goes first so a
+       // failed read cannot pass on the previous run's bytes, and READ_RC and
+       // SIGNATURE are the two rows that can go red -- an od dump alone cannot tell a
+       // pass from a silent failure.
        "echo '--- dd read:'; rm -f /tmp/vdprobe.read; "
        "timeout 5 dd if=/dev/$new of=/tmp/vdprobe.read bs=4k count=4 skip=128 2>&1; "
        "echo READ_RC=$?; "

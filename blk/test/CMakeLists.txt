@@ -34,7 +34,9 @@ if (LINUX)
     endif ()
 endif ()
 
-# The two CLI tools this directory's scripts drive -- vduse-cli and vhost-user-cli
-# -- are NOT here and NOT tests: they live in blk/ and the top-level CMakeLists
-# builds them as operator tools. qemu-vhost-user-peer.py stays here because it is a
-# test driver, and takes the built binary's path in PHOTON_VHU_BACKEND.
+# The two CLI tools -- vduse-cli and vhost-user-cli -- are NOT here and NOT tests:
+# they live in blk/ and the top-level CMakeLists builds them as operator tools. Only
+# vhost-user-cli is driven from this directory, by qemu-vhost-user-peer.py, which
+# stays here because it is a test driver and takes the binary's path in
+# PHOTON_VHU_BACKEND. Nothing here execs vduse-cli: test-vduse.cpp ports its rescue
+# recipe in-tree rather than spawning it.
