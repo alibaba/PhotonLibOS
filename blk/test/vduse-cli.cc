@@ -723,7 +723,26 @@ static int cmd_probe(int argc, char **argv) {
        "[ -n \"$new\" ] && break; sleep 0.2; done; echo NEWDEV=$new; "
        "sleep 0.5; if [ -n \"$new\" ] && [ -b /dev/$new ]; then "
        "echo '--- dd write:'; timeout 5 dd if=/dev/zero of=/dev/$new bs=4k count=4 conv=fsync 2>&1 | tail -1; "
-       "echo '--- dd read:'; timeout 5 dd if=/dev/$new of=/tmp/vdprobe.read bs=4k count=4 2>&1 | tail -1; "
+       // The read takes a range nothing else has touched -- skip=128 lands it at
+       // sector 1024, clear of the write above (sectors 0-31) and of the partition
+       // scan (0, 3832-4088) -- rather than a cache flag. Cached, it witnesses
+       // nothing: before this it ran in 0.0003 s at 16 MB/s and read back zeros the
+       // write had just left in the page cache. `iflag=direct` is no answer either,
+       // being unportable -- on uutils coreutils dd 0.8.0 it fails with "IO error:
+       // Invalid input" even against /etc/hostname and the host's own root disk. An
+       // untouched range needs no flag, there being nothing cached to hit, and it is
+       // what makes the check conclusive: probe's own served-request log must then
+       // show a read at sector 1024, which sectors 0-31 could never prove because
+       // `vdpa dev add` had already served reads there. The stale file goes first so
+       // a failed read cannot pass on the previous run's bytes, and READ_RC and
+       // SIGNATURE are the two rows that can go red -- an od dump alone cannot tell
+       // a pass from a silent failure.
+       "echo '--- dd read:'; rm -f /tmp/vdprobe.read; "
+       "timeout 5 dd if=/dev/$new of=/tmp/vdprobe.read bs=4k count=4 skip=128 2>&1; "
+       "echo READ_RC=$?; "
+       "sig=$(head -c 8 /tmp/vdprobe.read 2>/dev/null); "
+       "if [ \"$sig\" = 'VDPROBE!' ]; then echo SIGNATURE=match; "
+       "else echo SIGNATURE=MISMATCH; fi; "
        "head -c 8 /tmp/vdprobe.read | od -c | head -1; fi; "
        "echo '--- cleanup: vdpa dev del'; vdpa dev del " PROBE_NAME "; echo DEL_RC=$?) "
        "> /tmp/vdprobe.bg.log 2>&1 &");
