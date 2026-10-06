@@ -176,8 +176,16 @@ limitations under the License.
 //
 // C++, unlike the three .c files it replaces. <linux/virtio_ring.h> cannot be
 // included from C++ (its inline vring_init() assigns void* to typed pointers), so
-// the split-ring structs are copied verbatim below, exactly as blk/utils.h does;
-// <linux/vduse.h>, <linux/virtio_blk.h> and <linux/virtio_config.h> are C++-safe.
+// the split-ring structs are copied verbatim below, exactly as blk/utils.h does.
+// <linux/virtio_blk.h> and <linux/virtio_config.h> are old and C++-safe.
+//
+// The VDUSE uapi comes from blk/vduse-uapi.h, the copy vduse.cpp and test-vduse.cpp
+// share -- NOT from <linux/vduse.h>, which is what this file included back when
+// nothing compiled it. That header arrived in the kernel later than many build hosts'
+// header packages, so a translation unit including it does not compile there at all,
+// and now that this is a build target those hosts include CI's own images. Do not
+// "simplify" it back. vduse-uapi.h supplies every VDUSE_* symbol and vduse_* struct
+// used here and defines no vring struct, so the copies below cannot collide.
 // No `#define _GNU_SOURCE`: g++ already defines it on the command line.
 
 #include <photon/common/alog.h>
@@ -195,9 +203,17 @@ limitations under the License.
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <linux/vduse.h>
 #include <linux/virtio_blk.h>
 #include <linux/virtio_config.h>
+
+#include "vduse-uapi.h"
+
+// vduse-uapi.h declares its copies inside photon::blk, because the two translation
+// units that already share it -- blk/vduse.cpp and blk/test/test-vduse.cpp -- both
+// live in that namespace. This program does not: it is a standalone tool, not part
+// of the library, so it reaches in wholesale rather than qualifying every use of
+// every struct and message type. vhost-user-cli.cc does the same with photon.
+using namespace photon::blk;
 
 // ---------------------------------------------------------------------------
 // split vring (verbatim from <linux/virtio_ring.h>, which C++ cannot include)
