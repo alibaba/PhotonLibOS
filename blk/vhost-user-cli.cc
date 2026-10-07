@@ -38,11 +38,14 @@ limitations under the License.
 // running both gives an A/B baseline: same frontend, same libqos driver, same six
 // cases.
 //
-// BUILD: the `vhost-user-cli` target of the top-level CMakeLists, Linux only -- the
-// same gate blk/vhost-user.cpp sits behind, whose symbols this links against:
+// BUILD: the `vhost-user-cli` target of the top-level CMakeLists, gated on
+// blk_vhost_user's enable state (PHOTON_MODULE_blk_vhost_user_ENABLED) -- literally
+// the same gate blk/vhost-user.cpp sits behind, whose symbols this links against:
 //   cmake --build <build-dir> --target vhost-user-cli
-// Linked against photon_static, so the binary needs neither a libphoton.so on the
-// target host nor an rpath pointing back at the build tree.
+// The binary lands at <build-dir>/output/vhost-user-cli, and that is the path to hand
+// PHOTON_VHU_BACKEND when driving qemu-vhost-user-peer.py. Linked against
+// photon_static, so the binary needs neither a libphoton.so on the target host nor an
+// rpath pointing back at the build tree.
 //
 // ENVIRONMENT. PHOTON_VHU_QUEUES sets how many virtqueues to serve; unset, empty or 0
 // means one, which is what every caller got before it existed. The peer script reads

@@ -144,7 +144,13 @@ limitations under the License.
 // SIGINT are caught and tear the device down, but SIGKILL leaves the registration
 // UNSERVED and the VM wedged. Give it a generous timeout and never -9 it.
 //
-// Built as the `vduse-cli` target by the top-level CMakeLists, on Linux only:
+// Built as the `vduse-cli` target by the top-level CMakeLists, gated on blk_vduse's
+// enable state (PHOTON_MODULE_blk_vduse_ENABLED) so that this tool is built exactly
+// when the transport it diagnoses is. That gate is BORROWED, not derived from this
+// file's own needs: it draws no symbol from blk/vduse.cpp -- only alog, see below --
+// and it needs Linux for its own <linux/virtio_blk.h> and <linux/virtio_config.h>.
+// Both conditions are LINUX today, so the coupling costs nothing now, and it is what
+// keeps the tool from outliving the transport.
 //     cmake --build <build-dir> --target vduse-cli
 // Linked against photon_static, and the static link is the point rather than a
 // preference: the rescue use is copying this binary onto a machine whose device is
