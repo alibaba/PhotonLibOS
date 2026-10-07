@@ -36,7 +36,11 @@ endif ()
 
 # The two CLI tools -- vduse-cli and vhost-user-cli -- are NOT here and NOT tests:
 # they live in blk/ and the top-level CMakeLists builds them as operator tools. Only
-# vhost-user-cli is driven from this directory, by qemu-vhost-user-peer.py, which
-# stays here because it is a test driver and takes the binary's path in
-# PHOTON_VHU_BACKEND. Nothing here execs vduse-cli: test-vduse.cpp ports its rescue
-# recipe in-tree rather than spawning it.
+# vhost-user-cli is driven from this directory, by the two qemu-vhost-user-*.py
+# scripts, which stay here because they are manual drivers rather than CTest cases:
+# the peer one patches QEMU's own vhost-user-blk test to accept our backend and takes
+# its path in PHOTON_VHU_BACKEND, and the qtest one runs the six cases and reports
+# what each actually proved. Neither is registered with add_test -- both need a
+# hand-built QEMU tree that CI does not have, and the qtest driver exits non-zero on
+# a missing prerequisite instead of skipping quietly. Nothing here execs vduse-cli:
+# test-vduse.cpp ports its rescue recipe in-tree rather than spawning it.
