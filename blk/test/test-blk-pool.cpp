@@ -97,10 +97,30 @@ TEST(blk_pool, null_pool_leaves_coroutine_on_caller_vcpu) {
     EXPECT_EQ(self, *v.begin());
 }
 
+// A null thread is refused by migrate_to_pool rather than passed down, and the
+// refusal is not redundant with photon's own null check: WorkPool::thread_migrate
+// resolves the index BEFORE it calls photon::thread_migrate, and it resolves the
+// out-of-range index migrate_to_pool always passes with `vcpu_index++ % size`. A null
+// call that got that far would therefore be rejected only after consuming a slot of
+// the pool-wide round-robin cursor, shifting every placement that follows it --
+// including another device's. Over a 2-vcpu pool that shift is visible as a lost
+// alternation: one cursor step per landing alternates, two steps land back where they
+// started, which is what the last EXPECT_NE reads. Both landings are first shown to be
+// pool vcpus rather than the caller's, so a pair that differs cannot be one that
+// differs because a migration silently failed and left a coroutine at home.
 TEST(blk_pool, null_thread_is_not_an_error) {
+    auto self = photon::get_vcpu();
     migrate_to_pool(nullptr, nullptr);
     photon::WorkPool pool(2, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
+    ASSERT_EQ(2, pool.get_vcpu_num());
+    auto a = land(1, &pool);
     migrate_to_pool(&pool, nullptr);   // must not crash, must not migrate anything
+    auto b = land(1, &pool);
+    ASSERT_EQ(1UL, a.size());
+    ASSERT_EQ(1UL, b.size());
+    EXPECT_NE(self, *a.begin());
+    EXPECT_NE(self, *b.begin());
+    EXPECT_NE(*a.begin(), *b.begin());
 }
 
 // The guard this exists for: WorkPool::get_vcpu_in_pool does `vcpu_index++ % size`

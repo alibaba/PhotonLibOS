@@ -269,9 +269,12 @@ int run_off_vcpu(TempDelegate<int> fn) {
 
 void migrate_to_pool(photon::WorkPool* pool, photon::thread* th) {
     if (!pool || !th || pool->get_vcpu_num() == 0)
-        return;   // the empty-pool test is load-bearing, not tidiness: WorkPool
-                  // resolves an out-of-range index with `vcpu_index++ % size`,
-                  // and size == 0 there is a SIGFPE
+        return;   // neither non-pool test is tidiness, because WorkPool::thread_migrate
+                  // resolves the index BEFORE it calls photon::thread_migrate, and it
+                  // resolves the out-of-range index passed below with
+                  // `vcpu_index++ % size`. So size == 0 there is a SIGFPE, and a null th
+                  // that got that far would be rejected only after consuming a slot of
+                  // the pool-wide cursor, shifting every placement that follows it.
     if (pool->thread_migrate(th, -1ULL) < 0)
         LOG_WARN("failed to migrate a serving coroutine into the work pool, ", ERRNO());
 }
