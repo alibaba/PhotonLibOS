@@ -378,11 +378,21 @@ endif ()
 # serves an image so an independent frontend can be pointed at blk/vhost-user.cpp.
 # Static, so either binary can be copied onto a wedged machine with no
 # libphoton.so and no rpath to satisfy. Not registered with CTest -- both need
-# arguments, vduse-cli needs root, and neither is a test. One LINUX gate covers both,
-# for two separate reasons: vhost-user-cli links blk_vhost_user's symbols and that
-# module's own ENABLE is LINUX, while vduse-cli links nothing from blk/vduse.cpp but
-# includes <linux/virtio_blk.h> and <linux/virtio_config.h>, so it does not compile
-# off Linux either.
+# arguments, vduse-cli needs root, and neither is a test.
+#
+# Each tool is gated on ITS OWN TRANSPORT's enable state, not on a condition
+# restated here: if photon's build carries the transport, it carries the tool that
+# drives it, and if that transport's gate ever narrows or widens the tool follows
+# without this block being edited. PHOTON_MODULE_<name>_ENABLED is the property
+# photon_module() records and the same one photon_module_targets() and
+# photon_module_link_into() gate on, so "this transport is in the build" has one
+# meaning rather than two that can drift. Both transports' ENABLE is LINUX today,
+# so the effective condition is unchanged -- but the reason each tool needs Linux
+# is not the transport's reason. vhost-user-cli draws blk_vhost_user's symbols
+# (new_vhost_user_controller, VhostUserController::Config); vduse-cli draws no
+# symbol from blk/vduse.cpp and needs it for <linux/virtio_blk.h> and
+# <linux/virtio_config.h>. Restating LINUX here would have been a third
+# independent gate for two tools that each have their own.
 #
 # Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
 # ".cc is for assistant programs not included in normal compilation". Here the
@@ -398,10 +408,14 @@ endif ()
 # block is what lands both binaries in <build-dir>/output/ beside every other
 # executable; declaring them between those two set() calls would put them in
 # examples-output instead, and nothing in the build would say so.
-if (LINUX)
+get_property(_blk_vduse_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vduse_ENABLED)
+if (_blk_vduse_enabled)
     add_executable(vduse-cli blk/vduse-cli.cc)
     target_link_libraries(vduse-cli PRIVATE photon_static)
+endif ()
 
+get_property(_blk_vhost_user_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vhost_user_ENABLED)
+if (_blk_vhost_user_enabled)
     add_executable(vhost-user-cli blk/vhost-user-cli.cc)
     target_link_libraries(vhost-user-cli PRIVATE photon_static)
 endif ()
