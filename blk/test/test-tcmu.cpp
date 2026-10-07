@@ -870,9 +870,9 @@ TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
     if (skip_reason) return;
     // Planted with NO HBA listening, for the reason the directory-tombstone case
     // below states in full: an `enable` makes the kernel multicast an ADDED, and
-    // the listener's on_added() PROBES the tombstone it is told about
-    // (tcmu.cpp:2633), holding LOCK_EX while it does (utils.cpp:148). A probe
-    // from this vcpu that overlaps it reads "a live server holds it", so
+    // the listener's on_added() PROBES the tombstone it is told about -- tcmu.cpp
+    // calls devlock_free there, holding LOCK_EX while it does (utils.cpp:148). A
+    // probe from this vcpu that overlaps it reads "a live server holds it", so
     // list_orphans() drops that entry -- which cost this case one of its two
     // records -- and destroy_orphan() answers EBUSY. new_tcmu_hba() returns only
     // once the one probe the listener still owes an already-enabled backstore
@@ -1128,7 +1128,7 @@ TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
     // Enabled with NO HBA listening; the HBA comes up only afterwards. `echo 1 >
     // enable` makes the kernel multicast an ADDED, and the listener that receives
     // it PROBES the tombstone of the backstore it is told about before queueing
-    // the event (on_added's devlock_free, tcmu.cpp:2633) -- and a probe holds
+    // the event (tcmu.cpp's on_added calls devlock_free) -- and a probe holds
     // LOCK_EX for as long as it runs (utils.cpp:148). A probe of the same path
     // from this vcpu that overlaps it reads "a live server holds it", which is
     // the flake this case had in both of its shapes: list_orphans() skips a held
@@ -1138,8 +1138,8 @@ TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
     //
     // Bringing the HBA up after the enable removes the race rather than narrowing
     // it. The only probe the listener then owes this backstore is initial_scan's,
-    // and vcpu_main() publishes after initial_scan() returns (tcmu.cpp:2468),
-    // which is what start() waits for (tcmu.cpp:2412) -- so new_tcmu_hba() cannot
+    // and vcpu_main() calls publish(1) as soon as initial_scan() returns, which
+    // signals the started_sem start() waits on -- so new_tcmu_hba() cannot
     // return before that probe is over. The one event the backstore can still
     // raise is the REMOVED from destroy_orphan()'s own enable=0, and on_removed()
     // never touches the flock.
@@ -1389,9 +1389,10 @@ TEST_F(TcmuTest, pool_placement_pump_off_the_caller_vcpu) {
     if (skip_reason) return;
     // TestPool is built with the same request mask this suite's main() inited
     // the caller's vcpu with, which is what makes check_pool_engines pass: it
-    // derives its requirement from the caller's own vcpu, and photon has no query
-    // for the engine a vcpu actually installed, so the match has to be arranged
-    // by construction rather than read back and copied. See TEST_EVENT_ENGINE.
+    // derives its requirement from the caller's own vcpu and then reads back
+    // each pool vcpu's engine name to compare against it, so the match it
+    // verifies still has to be arranged by construction -- nothing answers with
+    // the mask a vcpu was inited with. See TEST_EVENT_ENGINE.
     test::TestPool pool(2);
     // Declared before cfg/dev so it outlives the device (BlkConfig CONTRACT 1)
     test::RecordingFile rec(file);

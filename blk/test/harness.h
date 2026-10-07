@@ -311,11 +311,13 @@ private:
 };
 
 // The engine masks every blk suite passes to photon::init(), and the ones TestPool
-// builds its pool with. One pair used on both sides is what makes a pool
-// "matching": photon has no query for the engine a vcpu actually installed --
-// init() walks a recommended order and keeps the first that works -- so the match
-// has to be arranged by construction instead of read back and copied. Spelling an
-// engine at the call sites instead would encode today's recommended_order (epoll
+// builds its pool with. One pair used on both sides is what makes a pool "matching",
+// and it has to be arranged by construction rather than read back. photon does let a
+// vcpu name the master event engine it installed -- MasterEventEngine::get_engine_name,
+// which is exactly what check_pool_engines() compares, on both sides -- but nothing
+// answers with the MASK init() was given, and init() walks a recommended order and
+// keeps the first that works, so a name cannot be turned back into a request. Spelling
+// an engine at the call sites instead would encode today's recommended_order (epoll
 // ahead of iouring) as if it were a contract, and would be wrong on macOS, where
 // the caller's engine is kqueue or select.
 constexpr int TEST_EVENT_ENGINE = (int)INIT_EVENT_DEFAULT;

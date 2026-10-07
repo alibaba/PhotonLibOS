@@ -61,10 +61,12 @@ CONTROL_CASE = "basic"
 # Rendered substrings of blk/vhost-user.cpp's own log lines, verified against the
 # source rather than recalled: `negotiated features` is the SET_FEATURES handler's
 # LOG_INFO; `serving: num` is the LOG_INFO inside vq_start(), printed once per ring
-# that actually goes live; `mem table:` is the SET_MEM_TABLE handler's. Note that
-# vq_start is a FUNCTION name and appears in no log line -- counting "vq_start"
-# would read zero forever and look like a backend that never starts anything. Cited
-# by handler and function rather than by line number, because line numbers in this
+# that actually goes live; `mem table:` is the SET_MEM_TABLE handler's. photon's alog
+# prefixes every non-AUDIT line with `<file>:<line>|<func>:` -- common/alog.h feeds the
+# Prologue __func__ and common/alog.cpp prints it -- so the enclosing function's own
+# name is a usable anchor too (`vq_start:` really does appear in the line above). These
+# match message text instead, because that is the part saying what happened. Cited by
+# handler and function rather than by line number, because line numbers in this
 # repository have rotted twice in a single day.
 PATTERNS = {
     "negotiated": "negotiated features",

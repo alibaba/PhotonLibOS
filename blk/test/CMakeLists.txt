@@ -36,11 +36,18 @@ endif ()
 
 # The two CLI tools -- vduse-cli and vhost-user-cli -- are NOT here and NOT tests:
 # they live in blk/ and the top-level CMakeLists builds them as operator tools. Only
-# vhost-user-cli is driven from this directory, by the two qemu-vhost-user-*.py
-# scripts, which stay here because they are manual drivers rather than CTest cases:
-# the peer one patches QEMU's own vhost-user-blk test to accept our backend and takes
-# its path in PHOTON_VHU_BACKEND, and the qtest one runs the six cases and reports
-# what each actually proved. Neither is registered with add_test -- both need a
-# hand-built QEMU tree that CI does not have, and the qtest driver exits non-zero on
-# a missing prerequisite instead of skipping quietly. Nothing here execs vduse-cli:
-# test-vduse.cpp ports its rescue recipe in-tree rather than spawning it.
+# vhost-user-cli is driven from this directory.
+#
+# Four Python scripts live here, and none is registered with add_test: they are manual
+# instruments that exit non-zero on a missing prerequisite instead of skipping quietly.
+# The two qemu-vhost-user-*.py are drivers, and both need a hand-built QEMU tree that CI
+# does not have -- the peer one patches QEMU's own vhost-user-blk test to accept our
+# backend and takes its path in PHOTON_VHU_BACKEND, and the qtest one runs the six cases
+# and reports what each actually proved. The two mutate-*.py are mutation harnesses
+# forming ONE ledger of seventeen mutants: mutate-vhost-user.py owns the protocol and
+# EVENT_IDX guards in blk/vhost-user.cpp (test-vhost-user.cpp cites its `noprogress`
+# record by name), and mutate-blk.py carries the eight multiqueue mutants targeting
+# utils.cpp, ublk.cpp, tcmu.cpp or nbd.cpp while refusing the other nine BY NAME rather
+# than dropping them silently. This note is the only pointer to mutate-blk.py from any
+# tracked file. Nothing here execs vduse-cli: test-vduse.cpp ports its rescue recipe
+# in-tree rather than spawning it.

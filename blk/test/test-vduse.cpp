@@ -249,25 +249,23 @@ static bool rescue_serve(const char* name) {
 //   - It adopts by opening /dev/vduse/<name> itself, so it needs no tombstone and no
 //     capacity record. Those two are exactly what rescue_serve()'s product path is
 //     refused by: list_orphans() skips a registration whose tombstone is missing
-//     (vduse.cpp:2474, devlock_free() answering -1), and start() refuses an adoption
-//     whose recorded capacity its config disagrees with (vduse.cpp:1911-1926).
+//     (its devlock_free() != 1 continue), and start() refuses an adoption whose
+//     recorded capacity its config disagrees with (validate_adopted_capacity()).
 //   - It serves virtqueue INDEX 0 ONLY, and that is THIS sentinel's limit, not the
 //     recipe's: vduse-cli.cc's vq_refresh() sets vi.index = vq.index, and cmd_rescue()
 //     loops over every queue discover_vqs() found. What is still true is that a
-//     registration's queue count has no readback ioctl -- the `WHY vqprobe EXISTS`
-//     block is why `vqprobe` exists to measure whether VDUSE_VQ_GET_INFO even bounds
-//     its index, and discover_vqs() turns that refusal into the count rescue serves
-//     by. So a
-//     MULTIQUEUE registration whose backlog sits on another queue is NOT covered: the
-//     removal blocks, the sentinel keeps serving it, and the parent's deadline abandons
-//     the sentinel rather than let it go. That is the safe outcome, and it is not a
-//     rescue.
+//     registration's queue count has no readback ioctl: `vqprobe` exists to measure
+//     whether VDUSE_VQ_GET_INFO even bounds its index (its `WHY vqprobe EXISTS`
+//     block), and discover_vqs() turns that refusal into the count rescue serves by.
+//     This sentinel does neither, so a MULTIQUEUE registration whose backlog sits on
+//     another queue is NOT covered: the removal blocks, the sentinel keeps serving
+//     it, and the parent's deadline abandons the sentinel rather than let it go.
+//     That is the safe outcome, and it is not a rescue.
 //   - It answers a request as a NULL device: reads come back zeroed and every status
 //     byte is VIRTIO_BLK_S_OK (vduse-cli.cc's serve_vq()), which is what lets a wedged
 //     partition scan see invalid partitions and give up cleanly (serve_vq()'s own
-//     header comment). It is a
-//     drain, not a backend, so it must never be pointed at a device whose data anybody
-//     still wants.
+//     header comment). It is a drain, not a backend, so it must never be pointed at
+//     a device whose data anybody still wants.
 //   - It never destroys the registration (vduse-cli.cc's cmd_rescue(): it sets
 //     RESCUE mode and releases with close(dev_fd), issuing no DESTROY_DEV). The
 //     registration is not ours to destroy, and DESTROY_DEV answers EBUSY while a
@@ -735,11 +733,11 @@ static void install_vduse_sentinel() {
 // wedges now.
 static bool sentinel_rescue(const char* name) {
     // The identity reaches a path and a `vdpa` argv, so it gets the two checks
-    // destroy_orphan() puts on one (vduse.cpp:2514-2521): a '/' would name something
-    // that is not /dev/vduse/<name>, and "." or ".." resolve to /dev/vduse and /dev,
-    // which both exist. No caller here can produce either -- the names come from
-    // list_orphans() or from TEST_NAME -- but this is the only thing between a future
-    // caller and a sentinel pointed at /dev.
+    // destroy_orphan() puts on one (its EINVAL refusals of a '/' and of "."/".."):
+    // a '/' would name something that is not /dev/vduse/<name>, and "." or ".."
+    // resolve to /dev/vduse and /dev, which both exist. No caller here can produce
+    // either -- the names come from list_orphans() or from TEST_NAME -- but this is
+    // the only thing between a future caller and a sentinel pointed at /dev.
     if (!name || !name[0] || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, ".."))
         LOG_ERROR_RETURN(EINVAL, false, "vduse `: refusing to rescue an identity that is not a device name", name ? name : "(null)");
     test::ConsumerIoResult r;
