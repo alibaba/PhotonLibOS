@@ -72,15 +72,13 @@ jobs:
   debug-build-from-source:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: arc-runner-set-arm
-    container:
-      image: almalinux:8
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: |
-          dnf install -y 'dnf-command(config-manager)'
-          dnf config-manager --set-enabled powertools
-          dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
+          sudo dnf install -y 'dnf-command(config-manager)'
+          sudo dnf config-manager --set-enabled powertools
+          sudo dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
           source /opt/rh/gcc-toolset-9/enable
           cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
                          -D PHOTON_BUILD_DEPENDENCIES=ON  \
