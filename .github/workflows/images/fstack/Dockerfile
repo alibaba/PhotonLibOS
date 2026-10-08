@@ -1,7 +1,7 @@
 FROM debian:11
 
 # Bullseye security packages have moved out of the active Debian mirror.
-RUN sed -i 's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+RUN sed -i 's|http://deb.debian.org/debian-security|http://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
     rm -rf /var/lib/apt/lists/* && \
     apt update -y && \
     apt install -y build-essential git curl cmake libssl-dev libcurl4-openssl-dev libaio-dev zlib1g-dev libgtest-dev libgmock-dev libgflags-dev libfuse-dev libgsasl7-dev && \
