@@ -64,9 +64,7 @@ jobs:
 
   fstack:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: arc-acs-runner-set
-    container:
-      image: ghcr.io/alibaba/photon-ut-fstack:latest
+    runs-on: photon-arc-runner-fstack
     steps:
       - uses: actions/checkout@v4
       - name: Build
