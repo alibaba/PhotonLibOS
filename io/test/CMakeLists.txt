@@ -14,9 +14,8 @@ if (LINUX)
     photon_add_test(test-iouring test-iouring.cpp)
     photon_add_test(test-iouring-uaf test-iouring-uaf.cpp)
     if (PHOTON_ENABLE_URING)
-        photon_add_test(test-iouring-completion test-iouring-completion.cpp
-            LIBS ${URING_LIBRARIES}
-            INCLUDES ${URING_INCLUDE_DIRS})
+        target_link_libraries(test-iouring PRIVATE Photon::uring)
+        target_compile_definitions(test-iouring PRIVATE PHOTON_URING=on)
     endif ()
 endif ()
 

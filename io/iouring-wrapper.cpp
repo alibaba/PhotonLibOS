@@ -40,6 +40,7 @@ limitations under the License.
     ((type*)((char*)static_cast<const decltype(((type*)0)->member)*>(ptr) - offsetof(type,member)))
 
 namespace photon {
+namespace {
 
 constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>> evmap;
 
@@ -654,6 +655,9 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
+} // namespace
+
+#ifndef PHOTON_IOURING_TEST_ENGINE_ONLY
 inline iouringEngine* get_ring(CascadingEventEngine* cee) {
     return cee ? static_cast<iouringEngine*>(cee) :
                  static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
@@ -772,6 +776,6 @@ void* new_iouring_event_engine(iouring_args args) {
     CascadingEventEngine* c = uring;
     return c;
 }
-
+#endif
 
 }
