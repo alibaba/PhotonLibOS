@@ -13,6 +13,11 @@ if (LINUX)
     photon_add_test(test-syncio test-syncio.cpp)
     photon_add_test(test-iouring test-iouring.cpp)
     photon_add_test(test-iouring-uaf test-iouring-uaf.cpp)
+    if (PHOTON_ENABLE_URING)
+        photon_add_test(test-iouring-completion test-iouring-completion.cpp
+            LIBS ${URING_LIBRARIES}
+            INCLUDES ${URING_INCLUDE_DIRS})
+    endif ()
 endif ()
 
 if (PHOTON_ENABLE_SPDK)
