@@ -7,15 +7,11 @@ on:
 
 jobs:
   clean-auto-pr:
-    if: ${{ github.event.pull_request.merged }} &&
-        ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id }} &&
-<<<<<<< HEAD
-        ${{ github.event.pull_request.head.ref == 'auto-pr-*' }}
-    runs-on: ubuntu-latest
-=======
-        ${{ startsWith(github.event.pull_request.head.ref, 'auto-pr-') || startsWith(github.event.pull_request.head.ref, 'backport-pr-') }}
+    if: >-
+        ${{ github.event.pull_request.merged &&
+            github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id &&
+            (startsWith(github.event.pull_request.head.ref, 'auto-pr-') || startsWith(github.event.pull_request.head.ref, 'backport-pr-')) }}
     runs-on: arc-acs-runner-set
->>>>>>> fc88a8d (ci: migrate remaining Linux and AutoPR jobs to ARC (#1674))
     steps:
         - uses: actions/checkout@v4
           with:
@@ -23,10 +19,12 @@ jobs:
             token: ${{ secrets.AUTOPR_SECRET }}
 
         - name: set git config
+          env:
+            PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           run: |
             git config --global user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
             git config --global user.name "${GITHUB_ACTOR}"
             git config --global advice.mergeConflict false
             git config --global --add safe.directory "${{ github.workspace }}"
             git config -l
-            git push -d origin ${{ github.event.pull_request.head.ref }}
+            git push -d origin "$PR_BRANCH"
