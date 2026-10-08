@@ -64,10 +64,9 @@ jobs:
 
   fstack:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04
+    runs-on: arc-acs-runner-set
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
-      options: --cpus 4 --privileged
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -79,10 +78,9 @@ jobs:
 
   RocksDB:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04
+    runs-on: arc-acs-runner-set
     container:
       image: almalinux:8
-      options: --cpus 4 --privileged
     steps:
       - uses: actions/checkout@v4
       - name: Build
