@@ -9,8 +9,13 @@ jobs:
   clean-auto-pr:
     if: ${{ github.event.pull_request.merged }} &&
         ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id }} &&
+<<<<<<< HEAD
         ${{ github.event.pull_request.head.ref == 'auto-pr-*' }}
     runs-on: ubuntu-latest
+=======
+        ${{ startsWith(github.event.pull_request.head.ref, 'auto-pr-') || startsWith(github.event.pull_request.head.ref, 'backport-pr-') }}
+    runs-on: arc-acs-runner-set
+>>>>>>> fc88a8d (ci: migrate remaining Linux and AutoPR jobs to ARC (#1674))
     steps:
         - uses: actions/checkout@v4
           with:

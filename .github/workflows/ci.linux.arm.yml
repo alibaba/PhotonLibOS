@@ -71,7 +71,7 @@ jobs:
 
   debug-build-from-source:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-26.04-arm
+    runs-on: arc-runner-set-arm
     container:
       image: almalinux:8
     steps:
