@@ -12,7 +12,10 @@ RUN test "${TARGETARCH}" = "amd64"
 ENV RUNNER_MANUALLY_TRAP_SIG=1
 ENV ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
 
-RUN apt-get update && \
+# Bullseye security packages have moved out of the active Debian mirror.
+RUN sed -i 's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' /etc/apt/sources.list && \
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl sudo && \
     rm -rf /var/lib/apt/lists/*
 
