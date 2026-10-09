@@ -18,7 +18,6 @@ limitations under the License.
 
 #include <atomic>
 #include <sched.h>
-#include <pthread.h>
 #include <unordered_map>
 #include <photon/photon.h>
 #include <photon/common/alog.h>
@@ -35,7 +34,6 @@ struct VCPULocalBase::Slot : intrusive_list_node<Slot> {
     void* ptr = nullptr;            // the T; read lock-free by the owning vCPU
     bool ready = false;             // ptr fully built; only touched on owning vCPU
     std::atomic<bool> disowned{false}; // ~VCPULocal gave up; owning vCPU reaps
-    uint64_t epoch = 0;             // fork generation this T belongs to
     vcpu_base* vcpu = nullptr;      // the owning vCPU
     VCPULocalBase* key = nullptr;   // the instance (map key); never deref if disowned
     Table* table = nullptr;         // the owning vCPU's table
@@ -71,18 +69,6 @@ struct VCPULocalBase::Table {
     void at_fini();
 };
 
-// A fork bumps the epoch: every slot built before it is stale in the child, so
-// get() rebuilds and ~VCPULocal forgets rather than destroys (the child must not
-// touch resources -- fds, threads -- that belong to the parent).
-static std::atomic<uint64_t> g_fork_epoch{1};
-
-// atfork must lock every per-instance reference list, and the calling thread's
-// table: either lock can otherwise be inherited while held by a vanished thread.
-// The intrusive registry needs no allocation and is itself held across fork.
-static photon::spinlock g_instances_lock;
-static VCPULocalBase* g_instances = nullptr;
-static bool g_atfork_registered = false;
-
 VCPULocalBase::Table& VCPULocalBase::current_table() {
     static thread_local Table t;
     return t;
@@ -91,37 +77,6 @@ VCPULocalBase::Table& VCPULocalBase::current_table() {
 VCPULocalBase::VCPULocalBase(void (*destroyer)(void*, void*),
                            std::shared_ptr<void> destroyerState)
     : m_destroyer(destroyer), m_destroyer_state(std::move(destroyerState)) {
-    SCOPED_LOCK(g_instances_lock);
-    if (!g_atfork_registered) {
-        auto ret = pthread_atfork(&VCPULocalBase::atfork_prepare,
-                                  &VCPULocalBase::atfork_parent,
-                                  &VCPULocalBase::atfork_child);
-        if (ret == 0)
-            g_atfork_registered = true;
-        else
-            LOG_ERROR("pthread_atfork failed, ", VALUE(ret));
-    }
-    m_registry_next = g_instances;
-    g_instances = this;
-}
-
-void VCPULocalBase::atfork_prepare() {
-    g_instances_lock.lock();
-    for (auto p = g_instances; p; p = p->m_registry_next)
-        p->m_lock.lock();
-    current_table().lock.lock();
-}
-
-void VCPULocalBase::atfork_parent() {
-    current_table().lock.unlock();
-    for (auto p = g_instances; p; p = p->m_registry_next)
-        p->m_lock.unlock();
-    g_instances_lock.unlock();
-}
-
-void VCPULocalBase::atfork_child() {
-    g_fork_epoch.fetch_add(1, std::memory_order_relaxed);
-    atfork_parent();
 }
 
 bool VCPULocalBase::remove_ref(Slot* s) {
@@ -135,13 +90,11 @@ bool VCPULocalBase::remove_ref(Slot* s) {
 
 void* VCPULocalBase::get_or_create() {
     auto& t = current_table();
-    uint64_t epoch = g_fork_epoch.load(std::memory_order_relaxed);
 
     auto it = t.map.find(this);
     if (it != t.map.end()) {
         Slot* s = it->second;
-        if (s->epoch == epoch &&
-            !s->disowned.load(std::memory_order_acquire)) {
+        if (!s->disowned.load(std::memory_order_acquire)) {
             if (s->ready) return s->ptr;   // steady state: lock-free
             // a sibling coroutine on this vCPU is building it (or a build failed
             // and left it empty); wait on just this slot, then take/retry it
@@ -150,30 +103,19 @@ void* VCPULocalBase::get_or_create() {
             return s->ptr;
         }
         t.map.erase(it);
-        if (s->epoch == epoch) {
-            // The previous VCPULocal at this address was destroyed outside a
-            // photon context. Reap its disowned slot before this address is used
-            // as a key again; this runs on the slot's owning vCPU.
-            {
-                SCOPED_LOCK(t.lock);
-                if (t.contains_locked(s)) t.live.erase(s);
-            }
-            if (s->vcpu == photon::get_vcpu()) {
-                s->destroy(s->ptr, s->destroyer_state.get());
-                delete s;
-            }
-            // Otherwise its original vCPU has already gone away. Leak the old
-            // value rather than destroy a vCPU-bound object in the new runtime.
-        } else {
-            // A pre-fork slot surviving into the child: forget it (its T belongs
-            // to the parent), then build a fresh one on this vCPU.
-            {
-                SCOPED_LOCK(t.lock);
-                if (t.contains_locked(s)) t.live.erase(s);
-            }
-            { SCOPED_LOCK(m_lock); remove_ref(s); }
-            // s and its T are leaked on purpose
+        // The previous VCPULocal at this address was destroyed outside a
+        // photon context. Reap its disowned slot before this address is used
+        // as a key again; this runs on the slot's owning vCPU.
+        {
+            SCOPED_LOCK(t.lock);
+            if (t.contains_locked(s)) t.live.erase(s);
         }
+        if (s->vcpu == photon::get_vcpu()) {
+            s->destroy(s->ptr, s->destroyer_state.get());
+            delete s;
+        }
+        // Otherwise its original vCPU has already gone away. Leak the old
+        // value rather than destroy a vCPU-bound object in the new runtime.
     }
 
     // Publish an empty slot before building, so a sibling that arrives during
@@ -181,7 +123,6 @@ void* VCPULocalBase::get_or_create() {
     // T. None of the steps below yields, so no sibling runs until create_value.
     Slot* s = new Slot;
     s->vcpu = photon::get_vcpu();
-    s->epoch = epoch;
     s->key = this;
     s->table = &t;
     s->destroy = m_destroyer;
@@ -194,7 +135,7 @@ void* VCPULocalBase::get_or_create() {
     }
     {
         SCOPED_LOCK(m_lock);
-        m_refs.push_back({s, &t, s->vcpu, epoch});
+        m_refs.push_back({s, &t, s->vcpu});
     }
     SCOPED_LOCK(s->ctor_mtx);
     s->ptr = create_value();
@@ -207,7 +148,7 @@ void* VCPULocalBase::peek_current() {
     auto it = t.map.find(this);
     if (it == t.map.end()) return nullptr;
     Slot* s = it->second;
-    if (s->epoch == g_fork_epoch.load(std::memory_order_relaxed) && s->ready &&
+    if (s->ready &&
         !s->disowned.load(std::memory_order_acquire))
         return s->ptr;
     return nullptr;
@@ -272,15 +213,6 @@ void VCPULocalBase::drain() {
             ref = m_refs.back();
             s = ref.slot;
 
-            if (ref.epoch != g_fork_epoch.load(std::memory_order_relaxed)) {
-                // A pre-fork slot: its vCPU is gone in this child and its T belongs
-                // to the parent. Detach it from this dead instance; the inherited
-                // table's fini hook discards the slot without touching its T.
-                s->disowned.store(true, std::memory_order_release);
-                remove_ref(s);
-                continue;
-            }
-
             SCOPED_LOCK(ref.table->lock);
             if (ref.table->contains_locked(s)) {
                 if (!photon::CURRENT) {
@@ -317,18 +249,10 @@ VCPULocalBase::~VCPULocalBase() {
     // the derived VCPULocal<T> must have drained already: destroy_value is gone
     // by now, and any surviving slot would dangle back to this instance
     assert(m_drained && m_refs.empty());
-    SCOPED_LOCK(g_instances_lock);
-    for (VCPULocalBase** p = &g_instances; *p; p = &(*p)->m_registry_next) {
-        if (*p != this) continue;
-        *p = m_registry_next;
-        return;
-    }
-    assert(false);
 }
 
 void VCPULocalBase::Table::at_fini() {
     // reap every T this vCPU still owns, here, where they belong
-    auto epoch = g_fork_epoch.load(std::memory_order_relaxed);
     for (;;) {
         lock.lock();
         Slot* s = live.pop_front();
@@ -340,20 +264,6 @@ void VCPULocalBase::Table::at_fini() {
             // than finishing the list pass and then only waiting on the pin.
             if (!busy) break;
             photon::thread_usleep(1000);
-            continue;
-        }
-        if (s->epoch != epoch) {
-            // The child inherited this slot from the parent. Its value belongs
-            // to the parent; discard only the child process's copy of the slot.
-            // A live instance still needs its inherited back-reference removed,
-            // while a disowned slot's key may already be dangling.
-            if (!s->disowned.load(std::memory_order_acquire)) {
-                SCOPED_LOCK(s->key->m_lock);
-                s->key->remove_ref(s);
-            }
-            // Deleter captures may own parent-only resources too. Abandon
-            // that state together with the inherited value in the child.
-            if (!s->destroyer_state) delete s;
             continue;
         }
         if (!s->disowned.load(std::memory_order_acquire)) {
@@ -368,7 +278,6 @@ void VCPULocalBase::Table::at_fini() {
     }
     // The list is empty and every claimed handoff has landed (or returned its
     // slot for reclamation above), so no helper can access this table afterward.
-    // Old-epoch map keys may name destroyed instances; do not inspect them.
     map.clear();
     hook = false;   // photon::fini() clears the hook vector; re-arm on next init
 }

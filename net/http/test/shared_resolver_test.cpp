@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <memory>
 #include <thread>
@@ -68,86 +65,7 @@ public:
     }
 };
 
-void check_fork(bool redial) {
-    ResolverState state;
-    TestSharedResolver shared(&state);
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-    DEFER(if (photon::CURRENT) photon::fini());
-    auto inherited = std::unique_ptr<SharedResolver::Ref>(
-        new SharedResolver::Ref(shared.borrow()));
-    auto parent = inherited->operator->();
-    auto pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        alarm(15);
-        inherited.reset(); // releasing a parent lease must not touch its state
-        bool ok = state.destroyed.load() == 0;
-        if (redial) {
-            {
-                auto child = shared.borrow();
-                ok = child.operator->() != parent && state.created.load() == 2 && ok;
-            }
-            ok = photon::fini() == 0 && state.destroyed.load() == 1 && ok;
-        } else {
-            ok = photon::fini() == 0 && state.destroyed.load() == 0 && ok;
-        }
-        _exit(ok && state.wrong_vcpu.load() == 0 ? 0 : 1);
-    }
-
-    int status = 0;
-    ASSERT_EQ(pid, waitpid(pid, &status, 0));
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(0, WEXITSTATUS(status));
-    EXPECT_EQ(1, state.created.load());
-    EXPECT_EQ(0, state.destroyed.load());
-    {
-        auto again = shared.borrow();
-        EXPECT_EQ(parent, again.operator->());
-    }
-    inherited.reset();
-    EXPECT_EQ(0, photon::fini());
-    EXPECT_EQ(1, state.destroyed.load());
-    EXPECT_EQ(0, state.wrong_vcpu.load());
-}
-
 } // namespace
-
-TEST(shared_resolver, child_rebuilds_and_releases_inherited_lease) {
-    check_fork(true);
-}
-
-TEST(shared_resolver, child_fini_without_redial_abandons_parent) {
-    check_fork(false);
-}
-
-TEST(shared_resolver, default_resolver_child_fini_with_and_without_redial) {
-    SharedResolver shared;
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
-    {
-        auto parent = shared.borrow();
-        ASSERT_FALSE(parent->resolve("localhost").undefined());
-    }
-    for (bool redial : {false, true}) {
-        auto pid = fork();
-        ASSERT_GE(pid, 0);
-        if (pid == 0) {
-            alarm(15);
-            bool ok = true;
-            if (redial) {
-                auto child = shared.borrow();
-                ok = !child->resolve("localhost").undefined();
-            }
-            _exit(photon::fini() == 0 && ok ? 0 : 1);
-        }
-        int status = 0;
-        ASSERT_EQ(pid, waitpid(pid, &status, 0));
-        ASSERT_TRUE(WIFEXITED(status));
-        EXPECT_EQ(0, WEXITSTATUS(status));
-        auto parent = shared.borrow();
-        EXPECT_FALSE(parent->resolve("localhost").undefined());
-    }
-}
 
 TEST(shared_resolver, shutdown_waits_for_only_its_generation_past_three_seconds) {
     ResolverState state;

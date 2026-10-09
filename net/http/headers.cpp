@@ -99,10 +99,10 @@ int HeadersBase::insert(std::string_view key, std::string_view value, int allow_
 
 std::string_view HeadersBase::serialized() const {
     if (empty()) return {};
-    size_t bytes = 0;
-    for (auto entry = kv_begin(); entry != kv_end(); ++entry)
-        bytes = std::max(bytes, size_t(entry->second.offset()) + entry->second.size() + 2);
-    return {m_buf, bytes};
+    auto last = std::max_element(kv_begin(), kv_end(), [](const KV& a, const KV& b) {
+        return a.second.offset() < b.second.offset();
+    });
+    return {m_buf, size_t(last->second.offset()) + last->second.size() + 2};
 }
 
 int HeadersBase::merge_duplicates(const HeadersBase& source) {
@@ -157,8 +157,8 @@ int HeadersBase::erase(std::string_view key) {
         --m_kv_size;
         for (auto item = kv_begin(); item != kv_end(); ++item) {
             if (item->first.offset() >= last) {
-                item->first += -(int)bytes;
-                item->second += -(int)bytes;
+                item->first.offset() -= bytes;
+                item->second.offset() -= bytes;
             }
         }
         m_buf_size -= bytes;

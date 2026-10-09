@@ -54,11 +54,7 @@ namespace photon {
 // Constraints:
 //   * get() must not race ~VCPULocal on the same instance -- destroying a thing
 //     while another vCPU still uses it is a use-after-free regardless of us.
-//   * A T built before fork() is abandoned in the child (never used, never
-//     destroyed): its resources belong to the parent. The child lazily builds
-//     fresh Ts on demand. Photon still does not support fork() with multiple
-//     vCPUs; this only prevents inherited VCPULocal state from deadlocking or
-//     being reused before the child exec()s.
+//   * Reusing inherited instances after fork() is not supported.
 class VCPULocalBase {
 public:
     VCPULocalBase(const VCPULocalBase&) = delete;
@@ -85,24 +81,20 @@ private:
     struct DestroyCtx;
     // A back-reference kept per instance so ~VCPULocal can reach a slot's owning
     // vCPU and take its table lock without first dereferencing the slot (which a
-    // shutting-down vCPU may already be freeing) -- table/vcpu/epoch are fixed at
+    // shutting-down vCPU may already be freeing) -- table/vcpu are fixed at
     // creation, so the copy stays valid until we win the race for the slot.
-    struct SlotRef { Slot* slot; Table* table; vcpu_base* vcpu; uint64_t epoch; };
+    struct SlotRef { Slot* slot; Table* table; vcpu_base* vcpu; };
 
     void (*m_destroyer)(void*, void*); // stamped onto each slot
     std::shared_ptr<void> m_destroyer_state;
     photon::spinlock m_lock;        // guards m_refs; taken cross-vCPU at teardown
     std::vector<SlotRef> m_refs;    // one entry per vCPU that built a T for us
     bool m_drained = false;
-    VCPULocalBase* m_registry_next = nullptr;
 
     bool remove_ref(Slot* s);              // caller holds m_lock
     static Table& current_table();         // the current vCPU's slot table
     static void* destroy_entry(void* ctx); // thread entry, runs on the owning vCPU
     static void destroy_slot(Slot* s, vcpu_base* v);   // erase + destroy, on owning vCPU
-    static void atfork_prepare();
-    static void atfork_parent();
-    static void atfork_child();
 };
 
 template<typename T>

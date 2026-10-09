@@ -37,7 +37,7 @@ namespace http {
 // The complete connection intent for one HTTP request. The resolver lease is
 // optional: an empty one selects the process-wide default resolver. Its owning
 // vCPU's fini waits for in-flight dials using that resolver to release it. After
-// fork, the child lazily creates a fresh default resolver.
+// fork, reusing inherited dialers or resolvers is not supported.
 struct DialTarget {
     std::string_view host;
     uint16_t port = 0;

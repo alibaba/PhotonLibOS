@@ -141,8 +141,7 @@ int Message::send_header(net::ISocketStream* stream) {
     if (headers.space_remain() < 2)
         LOG_ERROR_RETURN(ENOBUFS, -1, "no buffer");
 
-    auto tail = m_buf + m_buf_size + headers.size();
-    memcpy(tail, "\r\n", 2);
+    memcpy(m_buf + m_buf_size + headers.size(), "\r\n", 2);
     std::string_view sv = {m_buf, size_t(m_buf_size) + headers.size() + 2};
 
     ssize_t ret = m_stream->write(sv.data(), sv.size());
@@ -324,6 +323,12 @@ inline bool use_absolute_uri(const URL& u, bool enable_proxy) {
     return enable_proxy && !u.secure();
 }
 
+inline size_t request_line_size(Verb verb, const URL& url, bool enable_proxy) {
+    auto target_size = verb == Verb::CONNECT ? authority_size(url) :
+        (use_absolute_uri(url, enable_proxy) ? full_url_size(url) : url.target().size());
+    return verbstr[verb].size() + target_size + sizeof(" HTTP/1.1\r\n");
+}
+
 void Request::make_request_line(Verb v, const URL& u, bool enable_proxy) {
     m_secure = u.secure();
     m_port = u.port();
@@ -365,11 +370,7 @@ Request::Request(void* buf, uint16_t buf_capacity, Verb v,
 
 int Request::reset(Verb v, std::string_view url, bool enable_proxy) {
     URL u(url);
-    auto target_size = v == Verb::CONNECT ? authority_size(u) :
-        (use_absolute_uri(u, enable_proxy) ? full_url_size(u) : u.target().size());
-    auto request_line_size = verbstr[v].size() + 1 + target_size +
-                             sizeof(" HTTP/1.1\r\n") - 1;
-    if (request_line_size > m_buf_capacity)
+    if (request_line_size(v, u, enable_proxy) > m_buf_capacity)
         LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
 
     LOG_DEBUG("request reset ", VALUE(u.host()), VALUE(enable_proxy));
@@ -395,10 +396,7 @@ int Request::redirect(Verb v, estring_view location, bool enable_proxy) {
         location = full_location;
     }
     StoredURL u(location);
-    auto target_size = v == Verb::CONNECT ? authority_size(u) :
-        (use_absolute_uri(u, enable_proxy) ? full_url_size(u) : u.target().size());
-    auto new_request_line_size = verbstr[v].size() + sizeof(" HTTP/1.1\r\n") +
-        target_size;
+    auto new_request_line_size = request_line_size(v, u, enable_proxy);
     if (new_request_line_size > m_buf_capacity)
         LOG_ERROR_RETURN(ENOBUFS, -1, "out of buffer");
 

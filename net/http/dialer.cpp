@@ -18,7 +18,6 @@ limitations under the License.
 #include "message.h"
 
 #include <memory>
-#include <pthread.h>
 #include <string>
 #include <utility>
 
@@ -36,9 +35,6 @@ limitations under the License.
 namespace photon {
 namespace net {
 
-// Internal hook implemented alongside DefaultResolver in net/utils.cpp.
-void abandon_default_resolver_after_fork(Resolver* resolver);
-
 namespace http {
 
 static const uint64_t kDNSCacheLife = 3600ULL * 1000 * 1000;
@@ -47,67 +43,32 @@ static constexpr uint16_t kTunnelReqSize = 8 * 1024 - 1;
 
 namespace {
 
-class SharedResolver;
-static photon::spinlock g_resolvers_lock;
-static SharedResolver* g_resolvers = nullptr;
-static bool g_resolvers_atfork_registered = false;
-
 class SharedResolver {
 public:
     struct Gen {
         Resolver* resolver;
         uint32_t users = 0;
-        uint64_t epoch = 0;
-        vcpu_base* owner = nullptr;
-        Gen* next = nullptr;
     };
 
-    SharedResolver()
-        : SharedResolver({nullptr, &make_default_resolver},
-                         {nullptr, &abandon_default_resolver}) {}
+    SharedResolver() : SharedResolver({nullptr, &make_default_resolver}) {}
 
-    explicit SharedResolver(Delegate<Resolver*> factory,
-                            Delegate<void, Resolver*> abandon = {})
-        : m_factory(factory), m_abandon(abandon) {
-        SCOPED_LOCK(g_resolvers_lock);
-        if (!g_resolvers_atfork_registered) {
-            auto ret = pthread_atfork(&atfork_prepare, &atfork_parent,
-                                      &atfork_child);
-            if (ret == 0)
-                g_resolvers_atfork_registered = true;
-            else
-                LOG_ERROR("resolver pthread_atfork failed, ", VALUE(ret));
-        }
-        m_next = g_resolvers;
-        g_resolvers = this;
-    }
-
-    ~SharedResolver() {
-        SCOPED_LOCK(g_resolvers_lock);
-        for (auto p = &g_resolvers; *p; p = &(*p)->m_next) {
-            if (*p != this) continue;
-            *p = m_next;
-            break;
-        }
-    }
+    explicit SharedResolver(Delegate<Resolver*> factory) : m_factory(factory) {}
 
     class Ref {
     public:
         Ref(SharedResolver* owner, Gen* gen, Resolver* resolver)
-            : m_owner(owner), m_gen(gen), m_resolver(resolver),
-              m_epoch(gen->epoch) {}
+            : m_owner(owner), m_gen(gen), m_resolver(resolver) {}
         explicit Ref(std::shared_ptr<Resolver> resolver)
             : m_owner(nullptr), m_gen(nullptr), m_resolver(resolver.get()),
               m_owned(std::move(resolver)) {}
         Ref(Ref&& rhs)
             : m_owner(rhs.m_owner), m_gen(rhs.m_gen),
-              m_resolver(rhs.m_resolver), m_owned(std::move(rhs.m_owned)),
-              m_epoch(rhs.m_epoch) {
+              m_resolver(rhs.m_resolver), m_owned(std::move(rhs.m_owned)) {
             rhs.m_resolver = nullptr;
         }
         Ref(const Ref&) = delete;
         ~Ref() {
-            if (m_owner && m_resolver) m_owner->put(m_gen, m_epoch);
+            if (m_owner && m_resolver) m_owner->put(m_gen);
         }
         Resolver* operator->() const { return m_resolver; }
 
@@ -116,7 +77,6 @@ public:
         Gen* m_gen;
         Resolver* m_resolver;
         std::shared_ptr<Resolver> m_owned;
-        uint64_t m_epoch = 0;
     };
 
     Ref borrow() {
@@ -134,9 +94,7 @@ public:
             if (m_current) {
                 redundant = resolver;
             } else {
-                m_current = new Gen{resolver, 0, m_epoch, photon::get_vcpu(),
-                                    m_generations};
-                m_generations = m_current;
+                m_current = new Gen{resolver, 0};
                 m_vcpu = photon::get_vcpu();
                 if (!m_hook) {
                     m_hook = true;
@@ -167,77 +125,29 @@ public:
             uint32_t users;
             {
                 SCOPED_LOCK(m_lock);
-                if (gen->epoch != m_epoch) return; // inherited drain after fork
                 users = gen->users;
             }
             if (users == 0) break;
             photon::thread_usleep(1000);
         }
         delete gen->resolver;
-        {
-            SCOPED_LOCK(m_lock);
-            for (auto p = &m_generations; *p; p = &(*p)->next) {
-                if (*p != gen) continue;
-                *p = gen->next;
-                break;
-            }
-        }
         delete gen;
     }
 
 public:
     photon::spinlock m_lock;
     Gen* m_current = nullptr;
-    Gen* m_generations = nullptr; // includes unpublished generations draining
     vcpu_base* m_vcpu = nullptr;
     bool m_hook = false;
-    uint64_t m_epoch = 1;
     Delegate<Resolver*> m_factory;
-    Delegate<void, Resolver*> m_abandon;
-    SharedResolver* m_next = nullptr;
 
-    void put(Gen* gen, uint64_t epoch) {
+    void put(Gen* gen) {
         SCOPED_LOCK(m_lock);
-        // A Ref inherited across fork must not touch its parent generation.
-        if (epoch != m_epoch) return;
         --gen->users;
     }
 
     static Resolver* make_default_resolver(void*) {
         return new_default_resolver(kDNSCacheLife);
-    }
-
-    static void abandon_default_resolver(void*, Resolver* resolver) {
-        abandon_default_resolver_after_fork(resolver);
-    }
-
-    static void atfork_prepare() {
-        g_resolvers_lock.lock();
-        for (auto p = g_resolvers; p; p = p->m_next) p->m_lock.lock();
-    }
-
-    static void atfork_parent() {
-        for (auto p = g_resolvers; p; p = p->m_next) p->m_lock.unlock();
-        g_resolvers_lock.unlock();
-    }
-
-    static void atfork_child() {
-        for (auto p = g_resolvers; p; p = p->m_next) {
-            ++p->m_epoch;
-            if (p->m_abandon && photon::CURRENT) {
-                for (auto gen = p->m_generations; gen; gen = gen->next) {
-                    if (gen->owner == photon::get_vcpu())
-                        p->m_abandon(gen->resolver);
-                }
-            }
-            // Abandon parent caches and leases without invoking destructors;
-            // inherited workers on this vCPU have been stopped above.
-            p->m_current = nullptr;
-            p->m_generations = nullptr;
-            p->m_vcpu = nullptr;
-            p->m_hook = false;
-        }
-        atfork_parent();
     }
 };
 
@@ -493,6 +403,25 @@ public:
     std::shared_ptr<PoolDialerState> m_state;
 };
 
+// Each field is self-delimiting, including strings containing NUL or '/'.
+class RouteKey : public estring {
+public:
+    template<typename... Fields>
+    RouteKey& appends(const Fields&... fields) {
+        estring::appends(encode(fields)...);
+        return *this;
+    }
+
+private:
+    static CatList<uint64_t, std::string_view> encode(uint32_t value) {
+        return {value, "/"};
+    }
+    static CatList<uint64_t, std::string_view, std::string_view>
+    encode(std::string_view value) {
+        return {uint64_t(value.size()), ":", value};
+    }
+};
+
 class PoolDialer : public IDialer {
 public:
     PoolDialer(IDialer* underlay, bool ownership, uint64_t expiration)
@@ -520,30 +449,28 @@ public:
 public:
     std::shared_ptr<PoolDialerState> m_state;
 
-    static std::string make_key(const DialTarget& target) {
-        estring key;
-        key.appends(uint32_t(2), "/"); // key format version
+    static RouteKey make_key(const DialTarget& target) {
+        RouteKey key;
+        key.appends(uint32_t(2)); // key format version
         if (!target.uds_path.empty()) {
-            key.appends(uint32_t(1), "/", estring::length_prefixed(target.uds_path),
-                        uint32_t(target.secure), "/",
-                        estring::length_prefixed(target.host), uint32_t(target.port), "/");
+            key.appends(uint32_t(1), target.uds_path, uint32_t(target.secure),
+                        target.host, uint32_t(target.port));
         } else if (target.need_tunnel()) {
-            key.appends(uint32_t(4), "/", uint32_t(target.proxy_secure), "/",
-                        estring::length_prefixed(target.proxy_host), uint32_t(target.proxy_port), "/",
-                        estring::length_prefixed(target.host), uint32_t(target.port), "/",
-                        estring::length_prefixed(target.proxy_auth),
-                        estring::length_prefixed(target.proxy_pool_key));
+            key.appends(uint32_t(4), uint32_t(target.proxy_secure),
+                        target.proxy_host, uint32_t(target.proxy_port),
+                        target.host, uint32_t(target.port),
+                        target.proxy_auth, target.proxy_pool_key);
         } else if (target.via_proxy()) {
-            key.appends(uint32_t(3), "/", uint32_t(target.proxy_secure), "/",
-                        estring::length_prefixed(target.proxy_host), uint32_t(target.proxy_port), "/",
-                        estring::length_prefixed(target.proxy_auth),
-                        estring::length_prefixed(target.proxy_pool_key));
+            key.appends(uint32_t(3), uint32_t(target.proxy_secure),
+                        target.proxy_host, uint32_t(target.proxy_port),
+                        target.proxy_auth, target.proxy_pool_key);
         } else {
-            key.appends(uint32_t(2), "/", uint32_t(target.secure), "/",
-                        estring::length_prefixed(target.host), uint32_t(target.port), "/");
+            key.appends(uint32_t(2), uint32_t(target.secure),
+                        target.host, uint32_t(target.port));
         }
         return key;
     }
+
 };
 
 class VCPULocalDialer : public IDialer {

@@ -71,15 +71,6 @@ namespace photon
                 _wait_ready.wait_no_lock();
             return 0;
         }
-        // Stop an inherited worker in the fork child without joining or running
-        // its callback. Call only on its owning vCPU; the inherited Timer and
-        // callback state must then be abandoned, never used or destroyed.
-        void abandon_after_fork()
-        {
-            if (!_th) return;
-            _repeating = false;
-            if (_waiting) thread_interrupt(_th, ECANCELED);
-        }
         ~Timer()
         {
             if (!_th) return;

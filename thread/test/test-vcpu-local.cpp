@@ -14,9 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <memory>
 #include <new>
@@ -264,88 +261,6 @@ TEST(vcpu_local, custom_deleter_on_owner_and_not_for_failed_factory) {
         pool.call([&] { ASSERT_NE(nullptr, local.get()); });
     }
     EXPECT_EQ(1, calls);
-    EXPECT_EQ(1, g_dtor.load());
-}
-
-TEST(vcpu_local, rebuild_after_fork) {
-    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
-    DEFER(photon::fini());
-    reset();
-    VCPULocal<Value> local;
-    auto parent_value = local.get();
-    ASSERT_NE(nullptr, parent_value);
-
-    auto pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        auto child_value = local.get();
-        bool ok = child_value && child_value != parent_value &&
-                  g_ctor.load() == 2 && g_dtor.load() == 0;
-        _exit(ok ? 0 : 1);
-    }
-
-    int status = 0;
-    ASSERT_EQ(pid, waitpid(pid, &status, 0));
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(0, WEXITSTATUS(status));
-    EXPECT_EQ(parent_value, local.get());
-    EXPECT_EQ(1, g_ctor.load());
-}
-
-TEST(vcpu_local, inherited_custom_deleter_state_is_abandoned_in_child) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
-    reset();
-    int captureDestroyed = 0;
-    auto state = std::shared_ptr<int>(new int(42), [&](int* p) {
-        ++captureDestroyed;
-        delete p;
-    });
-    struct Local final : VCPULocal<Value> { using VCPULocal<Value>::VCPULocal; };
-    auto local = new Local({}, [state](Value* value) { delete value; });
-    state.reset();
-    ASSERT_NE(nullptr, local->get());
-    auto pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        delete local;
-        bool ok = g_dtor.load() == 0 && captureDestroyed == 0;
-        ok = photon::fini() == 0 && g_dtor.load() == 0 &&
-             captureDestroyed == 0 && ok;
-        _exit(ok ? 0 : 1);
-    }
-    int status = 0;
-    ASSERT_EQ(pid, waitpid(pid, &status, 0));
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(0, WEXITSTATUS(status));
-    delete local;
-    EXPECT_EQ(1, g_dtor.load());
-    EXPECT_EQ(1, captureDestroyed);
-}
-
-TEST(vcpu_local, destroy_then_fini_after_fork_without_get) {
-    photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
-    DEFER(photon::fini());
-    reset();
-    struct Local final : VCPULocal<Value> {};
-    auto local = new Local;
-    ASSERT_NE(nullptr, local->get());
-
-    auto pid = fork();
-    ASSERT_GE(pid, 0);
-    if (pid == 0) {
-        delete local;
-        bool ok = g_dtor.load() == 0;
-        ok = photon::fini() == 0 && g_dtor.load() == 0 && ok;
-        _exit(ok ? 0 : 1);
-    }
-
-    int status = 0;
-    ASSERT_EQ(pid, waitpid(pid, &status, 0));
-    ASSERT_TRUE(WIFEXITED(status));
-    EXPECT_EQ(0, WEXITSTATUS(status));
-    EXPECT_EQ(0, g_dtor.load());
-    delete local;
     EXPECT_EQ(1, g_dtor.load());
 }
 
