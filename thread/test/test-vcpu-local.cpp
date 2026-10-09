@@ -23,6 +23,7 @@ limitations under the License.
 #include <photon/common/alog.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 #include <photon/thread/workerpool.h>
 #include <photon/thread/vcpu-local.h>
 
@@ -204,6 +205,83 @@ TEST(vcpu_local, address_reuse_after_disown) {
     EXPECT_EQ(1, g_dtor.load());
     second->~Local();
     EXPECT_EQ(2, g_dtor.load());
+}
+
+TEST(vcpu_local, address_reuse_serializes_yielding_reclamation) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    reset();
+    photon::semaphore reaping(0), release(0), sibling_started(0);
+    struct Local final : VCPULocal<Value> { using VCPULocal<Value>::VCPULocal; };
+    alignas(Local) unsigned char storage[sizeof(Local)];
+    auto first = new (storage) Local({}, [&](Value* value) {
+        reaping.signal(1);
+        EXPECT_EQ(0, release.wait(1, 5ULL * 1000 * 1000));
+        delete value;
+    });
+    ASSERT_NE(nullptr, first->get());
+    std::thread destroyer([&] { first->~Local(); });
+    destroyer.join();
+    auto second = new (storage) Local;
+    Value *a = nullptr, *b = nullptr;
+    auto get_a = thread_enable_join(thread_create11([&] { a = second->get(); }));
+    EXPECT_EQ(0, reaping.wait(1, 5ULL * 1000 * 1000));
+    auto get_b = thread_enable_join(thread_create11([&] {
+        sibling_started.signal(1);
+        b = second->get();
+    }));
+    EXPECT_EQ(0, sibling_started.wait(1, 5ULL * 1000 * 1000));
+    // The old deleter is still blocked. No sibling may construct the new value.
+    EXPECT_EQ(1, g_ctor.load());
+    EXPECT_EQ(nullptr, second->get_if());
+    release.signal(1);
+    thread_join(get_a);
+    thread_join(get_b);
+    EXPECT_NE(nullptr, a);
+    EXPECT_EQ(a, b);
+    EXPECT_EQ(a, second->get_if());
+    EXPECT_EQ(2, g_ctor.load());
+    second->~Local();
+    EXPECT_EQ(2, g_dtor.load());
+}
+
+static void check_interrupted_destroy_wait(int error) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    reset();
+    WorkPool pool(1, photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE, -1);
+    photon::semaphore destroying(0), release(0);
+    struct Local final : VCPULocal<Value> { using VCPULocal<Value>::VCPULocal; };
+    auto local = new Local({}, [&](Value* value) {
+        EXPECT_EQ(value->built_on, photon::get_vcpu());
+        destroying.signal(1);
+        EXPECT_EQ(0, release.wait(1, 5ULL * 1000 * 1000));
+        delete value;
+    });
+    pool.call([&] { EXPECT_NE(nullptr, local->get()); });
+    bool returned = false;
+    auto destroyer = thread_create11([&] {
+        delete local;
+        returned = true;
+    });
+    auto joined = thread_enable_join(destroyer);
+    EXPECT_EQ(0, destroying.wait(1, 5ULL * 1000 * 1000));
+    thread_interrupt(destroyer, error);
+    thread_yield();
+    EXPECT_FALSE(returned); // helper still owns the deleter's stack context
+    EXPECT_EQ(0, g_dtor.load());
+    release.signal(1);
+    thread_join(joined);
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(1, g_dtor.load());
+}
+
+TEST(vcpu_local, destroy_wait_ignores_timeout_interrupt) {
+    check_interrupted_destroy_wait(ETIMEDOUT);
+}
+
+TEST(vcpu_local, destroy_wait_ignores_shutdown_interrupt) {
+    check_interrupted_destroy_wait(ESHUTDOWN);
 }
 
 TEST(vcpu_local, custom_deleter_survives_native_instance_destruction) {

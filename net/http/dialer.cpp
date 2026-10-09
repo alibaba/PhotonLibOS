@@ -459,6 +459,15 @@ public:
 public:
     std::shared_ptr<PoolDialerState> m_state;
 
+    static std::string_view effective_proxy_auth(const DialTarget& target) {
+        if (target.proxy_headers) {
+            auto authorization = target.proxy_headers->find("Proxy-Authorization");
+            if (authorization != target.proxy_headers->end())
+                return authorization.second();
+        }
+        return target.proxy_auth;
+    }
+
     static RouteKey make_key(const DialTarget& target) {
         RouteKey key;
         key.appends(uint32_t(2)); // key format version
@@ -469,11 +478,11 @@ public:
             key.appends(uint32_t(4), uint32_t(target.proxy_secure),
                         target.proxy_host, uint32_t(target.proxy_port),
                         target.host, uint32_t(target.port),
-                        target.proxy_auth, target.proxy_pool_key);
+                        effective_proxy_auth(target), target.proxy_pool_key);
         } else if (target.via_proxy()) {
             key.appends(uint32_t(3), uint32_t(target.proxy_secure),
                         target.proxy_host, uint32_t(target.proxy_port),
-                        target.proxy_auth, target.proxy_pool_key);
+                        effective_proxy_auth(target), target.proxy_pool_key);
         } else {
             key.appends(uint32_t(2), uint32_t(target.secure),
                         target.host, uint32_t(target.port));

@@ -57,6 +57,10 @@ struct DialTarget {
 
 struct ProxyAuth {
     CommonHeaders<4 * 1024 - 1> headers;
+    // Effective Proxy-Authorization is included automatically in the route
+    // identity, including a present empty override. Encode any additional
+    // application-specific identity/route headers here; per-request noise
+    // such as trace IDs need not prevent reuse of an authenticated tunnel.
     estring pool_key;
 };
 

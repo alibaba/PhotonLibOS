@@ -90,6 +90,7 @@ bool VCPULocalBase::remove_ref(Slot* s) {
 
 void* VCPULocalBase::get_or_create() {
     auto& t = current_table();
+    Slot* retired = nullptr;
 
     auto it = t.map.find(this);
     if (it != t.map.end()) {
@@ -103,17 +104,14 @@ void* VCPULocalBase::get_or_create() {
             return s->ptr;
         }
         t.map.erase(it);
-        // The previous VCPULocal at this address was destroyed outside a
-        // photon context. Reap its disowned slot before this address is used
-        // as a key again; this runs on the slot's owning vCPU.
+        // Detach the previous instance's disowned slot. Its destroyer may
+        // yield, so defer reclamation until the replacement is published and
+        // its construction mutex is held.
         {
             SCOPED_LOCK(t.lock);
             if (t.contains_locked(s)) t.live.erase(s);
         }
-        if (s->vcpu == photon::get_vcpu()) {
-            s->destroy(s->ptr, s->destroyer_state.get());
-            delete s;
-        }
+        if (s->vcpu == photon::get_vcpu()) retired = s;
         // Otherwise its original vCPU has already gone away. Leak the old
         // value rather than destroy a vCPU-bound object in the new runtime.
     }
@@ -138,6 +136,10 @@ void* VCPULocalBase::get_or_create() {
         m_refs.push_back({s, &t, s->vcpu});
     }
     SCOPED_LOCK(s->ctor_mtx);
+    if (retired) {
+        retired->destroy(retired->ptr, retired->destroyer_state.get());
+        delete retired;
+    }
     s->ptr = create_value();
     s->ready = (s->ptr != nullptr);
     return s->ptr;
@@ -161,6 +163,12 @@ void* VCPULocalBase::peek_current() {
 struct VCPULocalBase::DestroyCtx {
     Slot* s;
     photon::semaphore done{0};
+    void wait() {
+        // Even an infinite semaphore wait returns on ETIMEDOUT/ESHUTDOWN
+        // interrupts. The helper must finish before this stack context and
+        // the owner's handoff pin can be released.
+        while (done.wait(1) < 0) {}
+    }
 };
 void* VCPULocalBase::destroy_entry(void* arg) {
     auto c = (DestroyCtx*)arg;
@@ -196,12 +204,12 @@ void VCPULocalBase::destroy_slot(Slot* s, vcpu_base* v) {
         // Failed migration leaves the helper runnable here. Let it finish
         // without touching the owner's map/value before releasing its context.
         ctx.s = nullptr;
-        ctx.done.wait(1);
+        ctx.wait();
         defer_cleanup();
         LOG_WARN("failed to migrate the vCPU-local destroy helper, deferring cleanup");
         return;
     }
-    ctx.done.wait(1);
+    ctx.wait();
 }
 
 void VCPULocalBase::drain() {

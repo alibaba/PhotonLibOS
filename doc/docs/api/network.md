@@ -284,6 +284,12 @@ configuration remains available for later calls, retries and redirects. A body w
 still receives `&op.req` and sees the final outgoing headers and body framing during
 its callback; the caller configuration is restored when body transmission finishes.
 
+Authenticator-provided `Proxy-Authorization` overrides the fallback credentials,
+including when the field is explicitly empty. Connection pool route keys include
+this effective authorization automatically. `ProxyAuth::pool_key` must distinguish
+any additional application-specific identity or route headers used to establish a
+tunnel; per-request trace headers need not prevent tunnel reuse.
+
 When space permits, the outgoing message and then the response reuse the unused
 region of the configured request buffer. Tight buffers and cookie composition use
 a separate outgoing buffer without changing the caller's header storage.

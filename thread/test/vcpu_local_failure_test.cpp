@@ -18,16 +18,22 @@ limitations under the License.
 #include <thread>
 #include <photon/photon.h>
 #include <photon/thread/vcpu-local.h>
+#include <photon/thread/thread11.h>
 #include "../../test/gtest.h"
 
 namespace {
 
 struct FailureGate {
     photon::semaphore owner_ready{0}, start_fini{0}, fini_waiting{0};
+    photon::semaphore helper_started{0}, helper_release{0};
     std::atomic<int> helper_calls{0}, destroyed{0}, wrong_owner{0};
     bool race_fini = false;
     bool fail_migration = false;
     int migration_calls = 0;
+    bool gate_helper = false;
+    photon::thread_entry helper_entry = nullptr;
+    void* helper_arg = nullptr;
+    int helper_completed = 0;
 };
 
 FailureGate* gate = nullptr;
@@ -51,6 +57,18 @@ static thread* fail_destroy_helper(thread_entry entry, void* arg) {
         // The slot is already claimed and pins its owning vCPU. Let that
         // vCPU's fini hook reach the empty-list handoff wait before failing.
         EXPECT_EQ(0, gate->fini_waiting.wait(1, 5ULL * 1000 * 1000));
+    }
+    if (gate->gate_helper) {
+        gate->helper_entry = entry;
+        gate->helper_arg = arg;
+        return photon::thread_create([](void* arg) -> void* {
+            auto state = (FailureGate*)arg;
+            state->helper_started.signal(1);
+            EXPECT_EQ(0, state->helper_release.wait(1, 5ULL * 1000 * 1000));
+            auto result = state->helper_entry(state->helper_arg);
+            ++state->helper_completed;
+            return result;
+        }, gate);
     }
     if (gate->fail_migration) return photon::thread_create(entry, arg);
     errno = ENOMEM;
@@ -125,6 +143,53 @@ TEST(vcpu_local_failure, migration_failure_before_fini) {
 
 TEST(vcpu_local_failure, migration_failure_after_fini_waits_for_handoff) {
     check_helper_failure(true, true);
+}
+
+static void check_interrupted_cancel_wait(int error) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    FailureGate state;
+    state.fail_migration = state.gate_helper = true;
+    gate = &state;
+    struct Local final : photon::VCPULocal<Value> {};
+    auto local = new Local;
+    std::thread owner([&] {
+        EXPECT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
+        EXPECT_NE(nullptr, local->get());
+        state.owner_ready.signal(1);
+        EXPECT_EQ(0, state.start_fini.wait(1, 5ULL * 1000 * 1000));
+        EXPECT_EQ(0, photon::fini());
+    });
+    EXPECT_EQ(0, state.owner_ready.wait(1, 5ULL * 1000 * 1000));
+    bool returned = false;
+    auto destroyer = photon::thread_create11([&] {
+        delete local;
+        returned = true;
+    });
+    auto joined = photon::thread_enable_join(destroyer);
+    EXPECT_EQ(0, state.helper_started.wait(1, 5ULL * 1000 * 1000));
+    photon::thread_interrupt(destroyer, error);
+    photon::thread_yield();
+    EXPECT_FALSE(returned);
+    EXPECT_EQ(0, state.helper_completed);
+    state.helper_release.signal(1);
+    photon::thread_join(joined);
+    EXPECT_TRUE(returned);
+    EXPECT_EQ(1, state.helper_completed);
+    EXPECT_EQ(0, state.destroyed.load());
+    state.start_fini.signal(1);
+    owner.join();
+    EXPECT_EQ(1, state.destroyed.load());
+    EXPECT_EQ(0, state.wrong_owner.load());
+    gate = nullptr;
+}
+
+TEST(vcpu_local_failure, cancelled_helper_wait_ignores_timeout_interrupt) {
+    check_interrupted_cancel_wait(ETIMEDOUT);
+}
+
+TEST(vcpu_local_failure, cancelled_helper_wait_ignores_shutdown_interrupt) {
+    check_interrupted_cancel_wait(ESHUTDOWN);
 }
 
 int main(int argc, char** argv) {

@@ -423,6 +423,53 @@ TEST(dialer, pool_reuses_only_identical_routes) {
     EXPECT_EQ(1, destroyed);
 }
 
+TEST(dialer, tunnel_pool_keys_effective_authorization) {
+    StreamDialer transport;
+    transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    std::unique_ptr<IDialer> pool(new_pool_dialer(
+        new_connect_tunnel_dialer(&transport), true));
+    CommonHeaders<512> headers;
+    DialTarget target;
+    target.host = "origin.example";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.example";
+    target.proxy_port = 8080;
+    target.proxy_auth = "Basic fallback";
+    target.proxy_headers = &headers;
+
+    auto use = [&](const char* authorization) {
+        headers.reset();
+        ASSERT_EQ(0, headers.insert("pRoXy-AuThOrIzAtIoN", authorization));
+        std::unique_ptr<ISocketStream> stream(pool->dial(target));
+        ASSERT_NE(nullptr, stream);
+    };
+    use("Basic Alice");
+    EXPECT_EQ(1, transport.calls);
+    EXPECT_NE(std::string::npos, transport.last->output().find("Basic Alice\r\n"));
+    use("Basic Alice");
+    EXPECT_EQ(1, transport.calls);
+    // A shadowed fallback is not the authenticated tunnel identity.
+    target.proxy_auth = "Basic changed fallback";
+    use("Basic Alice");
+    EXPECT_EQ(1, transport.calls);
+    use("Basic Bob");
+    EXPECT_EQ(2, transport.calls);
+    EXPECT_NE(std::string::npos, transport.last->output().find("Basic Bob\r\n"));
+    use("Basic Bob");
+    EXPECT_EQ(2, transport.calls);
+    use(""); // a present empty field still overrides the fallback
+    EXPECT_EQ(3, transport.calls);
+    EXPECT_EQ(std::string::npos, transport.last->output().find("Basic changed fallback"));
+    use("");
+    EXPECT_EQ(3, transport.calls);
+    headers.reset();
+    std::unique_ptr<ISocketStream> fallback(pool->dial(target));
+    ASSERT_NE(nullptr, fallback);
+    EXPECT_EQ(4, transport.calls);
+    EXPECT_NE(std::string::npos, transport.last->output().find("Basic changed fallback\r\n"));
+}
+
 TEST(dialer, pool_rejects_oversized_route_keys_before_connect) {
     auto underlay = new StreamDialer;
     std::unique_ptr<IDialer> pool(new_pool_dialer(underlay, true));
