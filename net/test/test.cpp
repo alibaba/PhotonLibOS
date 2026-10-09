@@ -16,6 +16,8 @@ limitations under the License.
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <memory>
 #include <photon/common/alog.h>
 #include <photon/common/utility.h>
 #include <photon/io/fd-events.h>
@@ -38,6 +40,38 @@ limitations under the License.
 
 using namespace photon;
 using namespace net;
+
+TEST(Socket, accepts_exact_sized_uds_path_storage) {
+    auto pageSize = sysconf(_SC_PAGESIZE);
+    ASSERT_GT(pageSize, 0);
+    auto mapping = mmap(nullptr, 2 * pageSize, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_NE(MAP_FAILED, mapping);
+    DEFER(munmap(mapping, 2 * pageSize));
+    auto pageEnd = static_cast<char*>(mapping) + pageSize;
+    ASSERT_EQ(0, mprotect(pageEnd, pageSize, PROT_NONE));
+
+    for (bool abstract : {false, true}) {
+#ifndef __linux__
+        if (abstract) continue;
+#endif
+        auto name = std::string("photon-uds-guard-") + std::to_string(getpid());
+        auto path = abstract ? std::string(1, '\0') + name + '\0' + "embedded" :
+                               std::string("/tmp/") + name + ".sock";
+        if (!abstract) unlink(path.c_str());
+        DEFER(if (!abstract) unlink(path.c_str()));
+        auto storage = pageEnd - path.size();
+        memcpy(storage, path.data(), path.size());
+        std::unique_ptr<ISocketServer> server(new_uds_server());
+        ASSERT_NE(nullptr, server);
+        ASSERT_EQ(0, server->bind(path.c_str(), path.size()));
+        ASSERT_EQ(0, server->listen());
+        std::unique_ptr<ISocketClient> client(new_uds_client());
+        ASSERT_NE(nullptr, client);
+        std::unique_ptr<ISocketStream> stream(client->connect(storage, path.size()));
+        ASSERT_NE(nullptr, stream);
+    }
+}
 
 char uds_path[] = "/tmp/udstest.sock";
 
