@@ -269,7 +269,7 @@ int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count) {
         LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname is too long (`>`)", count, LEN);
 
     memset(&name, 0, sizeof(name));
-    memcpy(name.sun_path, path, count + 1);
+    memcpy(name.sun_path, path, count);
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     name.sun_len = 0;
 #endif
