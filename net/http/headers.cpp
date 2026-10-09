@@ -136,37 +136,6 @@ int HeadersBase::merge_duplicates(const HeadersBase& source) {
     return 0;
 }
 
-int HeadersBase::erase(std::string_view key) {
-    int erased = 0;
-    while (true) {
-        auto it = find(key);
-        if (it == end()) return erased;
-        auto index = it.i;
-        auto removed = kv(index);
-        auto first = removed.first.offset();
-        auto last = removed.second.offset() + removed.second.size() + 2;
-        auto bytes = last - first;
-
-        memmove(m_buf + first, m_buf + last, m_buf_size - last);
-        // The index ends at a fixed buffer address. Removing an entry moves
-        // kv_begin() right by one: shift its prefix right, leaving its suffix
-        // in place. Assignment preserves KV's std::pair semantics in C++14.
-        auto begin = kv_begin();
-        if (index != 0)
-            std::copy_backward(begin, begin + index, begin + index + 1);
-        --m_kv_size;
-        for (auto item = kv_begin(); item != kv_end(); ++item) {
-            if (item->first.offset() >= last) {
-                item->first.offset() -= bytes;
-                item->second.offset() -= bytes;
-            }
-        }
-        m_buf_size -= bytes;
-        m_last_kv = m_kv_size;
-        ++erased;
-    }
-}
-
 bool HeadersBase::value_append(std::string_view value) {
     if (m_last_kv >= m_kv_size) return false;
     auto append_size =  value.size();

@@ -66,8 +66,16 @@ struct OwnedResolverSlot {
         // If fini wins ownership of this slot, keep its vCPU alive until every
         // client/request lease is gone. No new lease can be issued after the
         // aliasing shared_ptr's control block reaches zero.
-        while (!state->released.load(std::memory_order_acquire))
+        auto started = photon::now;
+        Timeout report(5'000'000);
+        while (!state->released.load(std::memory_order_acquire)) {
+            if (report.expired()) {
+                LOG_WARN("waiting ` us for owned resolver ` leases; release or replace the client resolver before owner fini",
+                         photon::now - started, state->resolver);
+                report = 5'000'000;
+            }
             photon::thread_usleep(1000);
+        }
         if (state->adopted) delete state->resolver;
     }
 };
@@ -319,17 +327,8 @@ public:
             t.proxy_headers = &pa.headers;
             t.proxy_pool_key = pa.pool_key;
         }
-        auto dialer = acquire_dialer();
-        if (!m_dialer) t.resolver = atomic_load_resolver(&m_resolver);
-        auto s = dialer->dial(t, tmo.timeout());
-        if (!s) {
-            if (errno == ECONNREFUSED || errno == ENOENT) {
-                LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused")
-            }
-            LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
-        }
-
-        SocketStream_ptr sock(s);
+        // Declared before outgoing: its borrowed body wrapper must die first.
+        SocketStream_ptr sock;
         // a forwarded request is the one the proxy reads, so it carries the proxy's
         // headers; for a tunneled one they went into the CONNECT instead
         const HeadersBase* proxy_headers = nullptr;
@@ -348,24 +347,38 @@ public:
         // unknown amount of header data. The original free region remains the
         // response buffer after sending, preserving the existing reuse path.
         auto space = req.get_remain_space();
-        size_t required = req.m_buf_size + req.headers.size() + req.headers.kv_size() +
+        size_t required = size_t(req.m_buf_size) + req.headers.size() + req.headers.kv_size() +
             m_common_headers.size() + m_common_headers.kv_size() + m_user_agent.size() +
             sizeof(USERAGENT) + 128;
         if (proxy_headers) required += proxy_headers->size() + proxy_headers->kv_size();
         std::unique_ptr<char, decltype(&free)> ownedBuffer(nullptr, &free);
         char* buffer = space.first;
-        auto capacity = space.second;
+        size_t capacity = space.second;
         if (capacity < required || m_cookie_jar) {
-            capacity = req.m_buf_capacity;
+            // The estimate includes fields that precedence may discard. Clamp
+            // it before conversion; actual bounded inserts decide whether it fits.
+            // A custom cookie jar has no sizing API and must be invoked only once.
+            capacity = m_cookie_jar ? UINT16_MAX :
+                std::min(size_t(UINT16_MAX), std::max(required, size_t(req.m_buf_capacity)));
             ownedBuffer.reset((char*)malloc(capacity));
             if (!ownedBuffer)
                 LOG_ERROR_RETURN(ENOMEM, ROUNDTRIP_FAILED, "failed to allocate outgoing request buffer");
             buffer = ownedBuffer.get();
         }
-        Request outgoing(buffer, capacity);
+        Request outgoing(buffer, uint16_t(capacity));
         if (outgoing.copy_request_line(req) < 0 ||
             compose_request_headers(outgoing, req, proxy_headers) < 0)
             return ROUNDTRIP_FAILED;
+        if (outgoing.headers.space_remain() < 2)
+            LOG_ERROR_RETURN(ENOBUFS, ROUNDTRIP_FAILED, "no room for request header terminator");
+        auto dialer = acquire_dialer();
+        if (!m_dialer) t.resolver = atomic_load_resolver(&m_resolver);
+        sock.reset(dialer->dial(t, tmo.timeout()));
+        if (!sock) {
+            if (errno == ECONNREFUSED || errno == ENOENT)
+                LOG_ERROR_RETURN(0, ROUNDTRIP_FAST_RETRY, "connection refused");
+            LOG_ERROR_RETURN(0, ROUNDTRIP_NEED_RETRY, "connection failed");
+        }
         LOG_DEBUG("Sending request ` `", req.verb(), req.target());
         if (outgoing.send_header(sock.get()) < 0) {
             sock->close();
@@ -492,6 +505,7 @@ public:
             if (followed > op->follow || retry > op->retry)
                 LOG_ERRNO_RETURN(0, -1,  "connection failed");
         }
+        if (ret == ROUNDTRIP_FAILED) return -1;
         if (ret != ROUNDTRIP_SUCCESS) LOG_ERROR_RETURN(0, -1,"too many retry, roundtrip failed");
         return 0;
     }

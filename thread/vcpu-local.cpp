@@ -165,9 +165,11 @@ struct VCPULocalBase::DestroyCtx {
 void* VCPULocalBase::destroy_entry(void* arg) {
     auto c = (DestroyCtx*)arg;
     auto s = c->s;
-    s->table->map.erase(s->key);   // on the owning vCPU: structural change is safe
-    s->destroy(s->ptr, s->destroyer_state.get());
-    delete s;
+    if (s) {
+        s->table->map.erase(s->key); // structural changes stay on the owning vCPU
+        s->destroy(s->ptr, s->destroyer_state.get());
+        delete s;
+    }
     c->done.signal(1);
     return nullptr;
 }
@@ -178,21 +180,27 @@ void VCPULocalBase::destroy_slot(Slot* s, vcpu_base* v) {
         delete s;
         return;
     }
+    auto defer_cleanup = [s] {
+        s->disowned.store(true, std::memory_order_release);
+        SCOPED_LOCK(s->table->lock);
+        s->table->live.push_back(s);
+    };
     DestroyCtx ctx{s};
     auto th = photon::thread_create(&destroy_entry, &ctx);
     if (!th) {
-        // There is no helper that could signal ctx.done. Return ownership to the
-        // vCPU's live list, so its fini hook or address-reuse path can reap it.
-        s->disowned.store(true, std::memory_order_release);
-        {
-            SCOPED_LOCK(s->table->lock);
-            s->table->live.push_back(s);
-        }
+        defer_cleanup();
         LOG_ERROR("failed to create the vCPU-local destroy helper, deferring cleanup");
         return;
     }
-    if (photon::thread_migrate(th, v) < 0)
-        LOG_WARN("failed to migrate to the value's vCPU, destroying locally");
+    if (photon::thread_migrate(th, v) < 0) {
+        // Failed migration leaves the helper runnable here. Let it finish
+        // without touching the owner's map/value before releasing its context.
+        ctx.s = nullptr;
+        ctx.done.wait(1);
+        defer_cleanup();
+        LOG_WARN("failed to migrate the vCPU-local destroy helper, deferring cleanup");
+        return;
+    }
     ctx.done.wait(1);
 }
 

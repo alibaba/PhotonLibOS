@@ -296,6 +296,37 @@ TEST(dialer, tunnel_validates_response_status_line) {
     EXPECT_EQ(ECONNREFUSED, errno);
 }
 
+TEST(dialer, tunnel_distinguishes_eof_from_receive_errors) {
+    struct ReceiveFailure : TrackedStream {
+        int error;
+        ReceiveFailure(int* destroyed, int error) : TrackedStream(destroyed), error(error) {}
+        ssize_t recv(void*, size_t, int = 0) override {
+            errno = error ? error : EAGAIN; // EOF deliberately leaves stale errno
+            return error ? -1 : 0;
+        }
+    };
+    struct Transport : IDialer {
+        int error = 0, destroyed = 0;
+        ISocketStream* dial(const DialTarget&, uint64_t) override {
+            return new ReceiveFailure(&destroyed, error);
+        }
+    };
+    for (int error : {0, ETIMEDOUT, ECONNRESET}) {
+        Transport transport;
+        transport.error = error;
+        std::unique_ptr<IDialer> tunnel(new_connect_tunnel_dialer(&transport));
+        DialTarget target;
+        target.host = "origin.example";
+        target.port = 443;
+        target.secure = true;
+        target.proxy_host = "proxy.example";
+        target.proxy_port = 8080;
+        EXPECT_EQ(nullptr, tunnel->dial(target));
+        EXPECT_EQ(error ? error : ECONNRESET, errno);
+        EXPECT_EQ(1, transport.destroyed);
+    }
+}
+
 TEST(dialer, tunnel_preserves_duplicate_proxy_header_order) {
     StreamDialer transport;
     transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -429,7 +460,7 @@ TEST(dialer, pool_rejects_oversized_route_keys_before_connect) {
     target.proxy_auth = oversized;
     reject(target);
     oversized.back() = 'y';
-    reject(target); // different credentials must never find a truncated key
+    reject(target); // a different oversized credential is also rejected before lookup
     target.proxy_auth = {};
     target.proxy_pool_key = oversized;
     reject(target);

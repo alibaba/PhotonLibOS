@@ -654,8 +654,10 @@ TEST(http_client, unix_socket) {
     ASSERT_EQ(200, op2.resp.status_code());
 }
 
-#ifdef __linux__
 TEST(http_client, abstract_unix_socket_path_length) {
+#ifndef __linux__
+    GTEST_SKIP() << "Abstract Unix-domain sockets are Linux-specific";
+#else
     static const char uds_path[] = "\0photon-http-client-abstract";
 
     auto http_server = new_http_server();
@@ -675,8 +677,8 @@ TEST(http_client, abstract_unix_socket_path_length) {
         client, Verb::GET, "http://localhost/simple-api");
     ASSERT_EQ(0, op.call(std::string_view(uds_path, sizeof(uds_path) - 1)));
     ASSERT_EQ(200, op.resp.status_code());
-}
 #endif
+}
 
 int ua_check_handler(void*, Request &req, Response &resp, std::string_view) {
     auto ua = req.headers["User-Agent"];
@@ -1484,6 +1486,61 @@ TEST(http_client, per_hop_headers_preserve_configuration_and_body_callback) {
     }
 }
 
+TEST(http_client, outgoing_buffer_grows_for_common_headers_and_cookies) {
+    struct CookieJar : ICookieJar {
+        int calls = 0;
+        std::string value = std::string(4096, 'c');
+        int set_cookies_to_headers(Request* request) override {
+            ++calls;
+            return request->headers.insert("Cookie", value);
+        }
+        int get_cookies_from_headers(std::string_view, Message*) override { return 0; }
+    };
+    for (bool useCookies : {false, true}) {
+        HeaderCaptureDialer dialer;
+        CookieJar jar;
+        std::unique_ptr<Client> client(new_http_client(useCookies ? &jar : nullptr));
+        client->set_dialer(&dialer);
+        std::string value(4096, 'h');
+        ASSERT_EQ(0, client->common_headers()->insert("X-Common", value));
+        Client::OperationOnStack<512> op(client.get(), Verb::GET, "http://origin.example/");
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        auto configured = std::string(op.req.headers.serialized());
+        ASSERT_EQ(0, op.call());
+        EXPECT_EQ(1, dialer.calls);
+        EXPECT_NE(std::string::npos, dialer.last->output().find("X-Common: " + value));
+        if (useCookies) {
+            EXPECT_EQ(1, jar.calls);
+            EXPECT_NE(std::string::npos, dialer.last->output().find("Cookie: " + jar.value));
+        }
+        EXPECT_EQ(configured, op.req.headers.serialized());
+    }
+}
+
+TEST(http_client, outgoing_buffer_limit_applies_to_composed_headers) {
+    for (bool duplicate : {false, true}) {
+        HeaderCaptureDialer dialer;
+        std::unique_ptr<Client> client(new_http_client());
+        client->set_dialer(&dialer);
+        std::string value(40000, 'h');
+        ASSERT_EQ(0, client->common_headers()->insert(duplicate ? "X-Large" : "X-Other", value));
+        Client::OperationOnStack<> op(client.get(), Verb::GET, "http://origin.example/");
+        ASSERT_EQ(0, op.req.headers.insert("X-Large", value));
+        ASSERT_EQ(0, op.req.headers.content_length(0));
+        auto configured = std::string(op.req.headers.serialized());
+        errno = 0;
+        if (duplicate) {
+            ASSERT_EQ(0, op.call()); // estimate exceeds UINT16_MAX, actual message fits
+            EXPECT_EQ(1, dialer.calls);
+        } else {
+            EXPECT_EQ(-1, op.call());
+            EXPECT_EQ(ENOBUFS, errno);
+            EXPECT_EQ(0, dialer.calls);
+        }
+        EXPECT_EQ(configured, op.req.headers.serialized());
+    }
+}
+
 TEST(http_client, per_hop_headers_are_rebuilt_on_retry_and_redirect) {
     for (bool redirect : {false, true}) {
         HeaderCaptureDialer dialer;
@@ -1626,6 +1683,7 @@ TEST(http_client, per_hop_headers_validate_merged_body_framing) {
     errno = 0;
     EXPECT_NE(0, op.call());
     EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0, dialer.calls);
     EXPECT_EQ(configured, op.req.headers.serialized());
 }
 
@@ -1948,37 +2006,65 @@ TEST(http_client, owned_resolver_owner_fini_waits_for_last_lease) {
 }
 
 TEST(http_client, cross_vcpu_client_destruction) {
-    auto tcpserver = new_tcp_socket_server();
-    tcpserver->bind_v4localhost();
-    tcpserver->listen();
-    DEFER(delete tcpserver);
-    auto server = new_http_server();
-    DEFER(delete server);
+    std::unique_ptr<ISocketServer> tcpserver(new_tcp_socket_server());
+    ASSERT_EQ(0, tcpserver->bind_v4localhost());
+    ASSERT_EQ(0, tcpserver->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
     server->add_handler(new SimpleHandler, true, "/simple");
     tcpserver->set_handler(server->get_connection_handler());
-    tcpserver->start_loop();
-    auto target = to_url(tcpserver, "/simple");
+    ASSERT_EQ(0, tcpserver->start_loop());
+    auto target = to_url(tcpserver.get(), "/simple");
 
-    auto client = new_http_client();
-    photon::semaphore req_done(0), quit(0);
+    std::atomic<int> retired{0}, wrongOwner{0};
+    struct TrackedDialer : IDialer {
+        std::atomic<int>* retired;
+        std::atomic<int>* wrongOwner;
+        photon::vcpu_base* owner = photon::get_vcpu();
+        std::unique_ptr<IDialer> inner{new_http_dialer()};
+        TrackedDialer(std::atomic<int>* retired, std::atomic<int>* wrongOwner)
+            : retired(retired), wrongOwner(wrongOwner) {}
+        ~TrackedDialer() override {
+            if (owner != photon::get_vcpu()) ++*wrongOwner;
+            inner.reset();
+            ++*retired;
+        }
+        ISocketStream* dial(const DialTarget& target, uint64_t timeout) override {
+            return inner->dial(target, timeout);
+        }
+    };
+    auto makeDialer = [&]() -> IDialer* { return new TrackedDialer(&retired, &wrongOwner); };
+    std::unique_ptr<ClientImpl> client(static_cast<ClientImpl*>(new_http_client()));
+    client->m_builtin_dialer.reset(new_vcpu_local_dialer(makeDialer));
+    client->timeout(5'000'000);
+    photon::semaphore req_done(0), quit(0), done(0);
     std::thread th([&] {
-        photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE);
+        DEFER(done.signal(1));
+        ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
         DEFER(photon::fini());
-        simple_get(client, target);   // creates a dialer on this worker vCPU
+        simple_get(client.get(), target);
         std::unique_ptr<ISocketStream> native(client->native_connect(
-            "127.0.0.1", tcpserver->getsockname().port));
+            "127.0.0.1", tcpserver->getsockname().port, false, 5'000'000));
         EXPECT_NE(nullptr, native);
         req_done.signal(1);
-        quit.wait(1);                 // keep the vCPU alive during deletion
+        EXPECT_EQ(0, quit.wait(1, 10'000'000));
         if (native) {
-            EXPECT_EQ(0, native->close());
+            native->timeout(5'000'000);
+            const char request[] = "GET /simple HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            EXPECT_EQ(ssize_t(sizeof(request) - 1), native->write(request, sizeof(request) - 1));
+            char buffer[8192];
+            struct TestResponse : Response { using Response::receive_header; };
+            TestResponse response;
+            response.reset(buffer, sizeof(buffer), false, native.get(), false, Verb::GET);
+            response.reset_status(HEADER_SENT);
+            EXPECT_EQ(0, response.receive_header(5'000'000));
+            EXPECT_EQ(200, response.status_code());
         }
     });
-    req_done.wait(1);
-    // Retire the worker's dialer while its checked-out stream is still alive.
-    delete client;
-    quit.signal(1);
-    th.join();
+    DEFER(quit.signal(1); EXPECT_EQ(0, done.wait(1, 10'000'000)); th.join());
+    ASSERT_EQ(0, req_done.wait(1, 10'000'000));
+    client.reset(); // native remains checked out on its owner until quit
+    EXPECT_EQ(1, retired.load());
+    EXPECT_EQ(0, wrongOwner.load());
 }
 
 TEST(http_client, response_and_native_stream_outlive_client) {

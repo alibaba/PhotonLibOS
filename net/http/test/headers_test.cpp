@@ -87,7 +87,6 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     EXPECT_EQ(ENOBUFS, errno);
     EXPECT_EQ(before, tight.serialized());
     EXPECT_EQ("retained", tight["Keep"]);
-    EXPECT_EQ(0, tight.erase("missing"));
     CommonHeaders<16> empty;
     EXPECT_EQ(0, tight.merge(empty, 1));
 
@@ -165,13 +164,6 @@ TEST(headers, req_header) {
     LOG_DEBUG(req.headers["Content-Length"]);
     EXPECT_EQ(req.headers["Host"], "HostName");
     EXPECT_EQ(req.headers.find("noexist"), req.headers.end());
-    ASSERT_EQ(0, req.headers.insert("Proxy-Authorization", "secret"));
-    ASSERT_EQ(0, req.headers.insert("X-After", "retained"));
-    ASSERT_EQ(1, req.headers.erase("Proxy-Authorization"));
-    EXPECT_TRUE(req.headers["Proxy-Authorization"].empty());
-    EXPECT_EQ(req.headers["Host"], "HostName");
-    EXPECT_EQ(req.headers["Content-Length"], "0");
-    EXPECT_EQ(req.headers["X-After"], "retained");
     LOG_DEBUG(req.headers["Host"]);
     string capacity_overflow;
     capacity_overflow.resize(100000);
@@ -180,40 +172,6 @@ TEST(headers, req_header) {
     RequestHeadersStored<> req_proxy(Verb::GET, "http://HostName:80/targetName", true);
     LOG_DEBUG(VALUE(req_proxy.target()));
     EXPECT_EQ(req_proxy.target(), "http://HostName/targetName");
-}
-
-TEST(headers, erase_preserves_index_offsets_and_serialization) {
-    // Insertion order deliberately differs from the sorted index order.
-    for (auto victim : {"A", "M", "Z"}) {
-        CommonHeaders<256> headers;
-        ASSERT_EQ(0, headers.insert("M", "middle"));
-        ASSERT_EQ(0, headers.insert("Z", "last"));
-        ASSERT_EQ(0, headers.insert("A", "first"));
-        ASSERT_EQ(1, headers.erase(victim));
-        std::string expected;
-        for (auto item : {std::make_pair("M", "middle"),
-                          std::make_pair("Z", "last"),
-                          std::make_pair("A", "first")}) {
-            if (std::string_view(item.first) == victim) continue;
-            EXPECT_EQ(item.second, headers[item.first]);
-            expected += std::string(item.first) + ": " + item.second + "\r\n";
-        }
-        EXPECT_EQ(expected, headers.serialized());
-        ASSERT_EQ(0, headers.insert("B", "new"));
-        EXPECT_EQ("new", headers["B"]);
-        EXPECT_EQ(0, headers.erase("missing"));
-    }
-    CommonHeaders<256> headers;
-    ASSERT_EQ(0, headers.insert("X-Dup", "one", 1));
-    ASSERT_EQ(0, headers.insert("Keep", "value"));
-    ASSERT_EQ(0, headers.insert("x-dup", "two", 1));
-    ASSERT_EQ(2, headers.erase("X-DUP"));
-    EXPECT_EQ("Keep: value\r\n", headers.serialized());
-    ASSERT_EQ(1, headers.erase("Keep"));
-    EXPECT_TRUE(headers.empty());
-    EXPECT_TRUE(headers.serialized().empty());
-    ASSERT_EQ(0, headers.insert("Again", "works"));
-    EXPECT_EQ("Again: works\r\n", headers.serialized());
 }
 
 class test_stream : public net::SocketStreamBase {

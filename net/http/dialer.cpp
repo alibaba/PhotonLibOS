@@ -121,6 +121,8 @@ public:
         // Keep the owning vCPU alive until this generation's final lease is
         // returned. New borrowers use a new generation and cannot extend this
         // drain. A finite timeout would permanently leak a cache and its timer.
+        auto started = photon::now;
+        Timeout report(5'000'000);
         while (true) {
             uint32_t users;
             {
@@ -128,6 +130,11 @@ public:
                 users = gen->users;
             }
             if (users == 0) break;
+            if (report.expired()) {
+                LOG_WARN("waiting ` us for shared resolver ` generation: ` outstanding leases",
+                         photon::now - started, gen->resolver, users);
+                report = 5'000'000;
+            }
             photon::thread_usleep(1000);
         }
         delete gen->resolver;
@@ -323,9 +330,12 @@ public:
         size_t end;
         while (true) {
             auto ret = stream->recv(response + size, sizeof(response) - size);
-            if (ret <= 0)
-                LOG_ERRNO_RETURN(0, -1,
-                                 "proxy closed before answering CONNECT, `:`",
+            if (ret == 0)
+                LOG_ERROR_RETURN(ECONNRESET, -1,
+                                 "proxy closed before completing CONNECT, `:`",
+                                 target.proxy_host, target.proxy_port);
+            if (ret < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to receive CONNECT response, `:`",
                                  target.proxy_host, target.proxy_port);
             size += ret;
             end = estring_view(response, size).find("\r\n\r\n");
@@ -431,8 +441,8 @@ public:
 
     ISocketStream* dial(const DialTarget& target, uint64_t timeout) override {
         auto key = make_key(target);
-        // The socket pool stores key lengths in uint16_t and reserves the
-        // maximum value. Reject before either lookup or connection creation.
+        // The socket pool asserts key.size() < UINT16_MAX. Enforce that
+        // bound in release builds too, before _key_len could truncate.
         if (key.size() >= UINT16_MAX)
             LOG_ERROR_RETURN(ENAMETOOLONG, nullptr,
                              "HTTP route key is too long: ` bytes", key.size());
