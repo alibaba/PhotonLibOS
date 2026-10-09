@@ -15,11 +15,7 @@ on:
 jobs:
   arm-linux-build-and-test:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04-arm
-
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4
+    runs-on: arc-runner-set-arm
 
     steps:
       - uses: szenius/set-timezone@v2.0
