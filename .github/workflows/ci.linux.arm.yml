@@ -45,9 +45,6 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Set up project liburing
-        run: bash .github/scripts/setup-liburing.sh
-
       - name: Build
         run: |
           if [ "${{ matrix.gcc }}" != "8" ]; then

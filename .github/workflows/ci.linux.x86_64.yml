@@ -28,8 +28,6 @@ jobs:
           timezoneMacos: "Asia/Shanghai"
           timezoneWindows: "China Standard Time"
       - uses: actions/checkout@v4
-      - name: Set up project liburing
-        run: bash .github/scripts/setup-liburing.sh
       - name: Build
         run: |
           uname -a
