@@ -64,7 +64,7 @@ TEST(Socket, accepts_exact_sized_uds_path_storage) {
         memcpy(storage, path.data(), path.size());
         std::unique_ptr<ISocketServer> server(new_uds_server());
         ASSERT_NE(nullptr, server);
-        ASSERT_EQ(0, server->bind(path.c_str(), path.size()));
+        ASSERT_EQ(0, server->bind(storage, path.size()));
         ASSERT_EQ(0, server->listen());
         std::unique_ptr<ISocketClient> client(new_uds_client());
         ASSERT_NE(nullptr, client);
