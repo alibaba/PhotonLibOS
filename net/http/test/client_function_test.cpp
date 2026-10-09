@@ -26,7 +26,32 @@ limitations under the License.
 
 #include <photon/net/socket.h>
 #include <photon/common/alog.h>
+// Preinclude implementation dependencies so fault injection affects only its
+// explicit allocation, not inline allocation helpers in their headers.
+#include "../client.h"
+#include <bitset>
+#include <algorithm>
+#include <random>
+#include <photon/common/alog-stdstring.h>
+#include <photon/common/iovector.h>
+#include <photon/common/string_view.h>
+#include <photon/net/security-context/tls-stream.h>
+#include <photon/net/utils.h>
+#include <photon/photon.h>
+
+static bool fail_response_allocation = false;
+static int response_allocation_failures = 0;
+static void* client_test_malloc(size_t size) {
+    if (fail_response_allocation) {
+        ++response_allocation_failures;
+        errno = ENOMEM;
+        return nullptr;
+    }
+    return ::malloc(size);
+}
+#define malloc client_test_malloc
 #include "../client.cpp"
+#undef malloc
 #include "../server.h"
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
@@ -70,6 +95,40 @@ public:
         return 0;
     }
 };
+
+TEST(http_client, response_allocation_failure_closes_connection) {
+    std::unique_ptr<ISocketServer> tcp(new_tcp_socket_server());
+    ASSERT_EQ(0, tcp->bind_v4localhost());
+    ASSERT_EQ(0, tcp->listen());
+    std::unique_ptr<HTTPServer> server(new_http_server());
+    server->add_handler(new SimpleHandler, true, "/simple");
+    auto handler = server->get_connection_handler();
+    int connections = 0;
+    auto counted = [&](ISocketStream* stream) {
+        ++connections;
+        return handler(stream);
+    };
+    tcp->set_handler(counted);
+    ASSERT_EQ(0, tcp->start_loop());
+    std::unique_ptr<Client> client(new_http_client());
+    client->timeout(5'000'000);
+    auto target = std::string("http://127.0.0.1:") +
+        std::to_string(tcp->getsockname().port) + "/simple";
+    Client::OperationOnStack<1024> op(client.get(), Verb::GET, target);
+    ASSERT_EQ(0, op.req.headers.content_length(0));
+    op.retry = 0;
+    response_allocation_failures = 0;
+    fail_response_allocation = true;
+    DEFER(fail_response_allocation = false);
+    errno = 0;
+    EXPECT_EQ(-1, op.call());
+    EXPECT_EQ(ENOMEM, errno);
+    EXPECT_EQ(1, response_allocation_failures);
+    fail_response_allocation = false;
+    ASSERT_EQ(0, op.call());
+    EXPECT_EQ(200, op.resp.status_code());
+    EXPECT_EQ(2, connections); // the abandoned response cannot poison pool reuse
+}
 
 TEST(http_client, get) {
     system("mkdir -p /tmp/ease_ut/http_test/");
