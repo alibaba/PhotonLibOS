@@ -294,6 +294,13 @@ public:
             resp.reset(space.first, space.second, false, sock.release(), true, req.verb());
         } else {
             auto buf = malloc(kMinimalHeadersSize);
+            if (!buf) {
+                sock->close(); // unread response bytes must not return to the pool
+                req.m_body_stream.reset();
+                req.m_stream = nullptr;
+                req.reset_status();
+                LOG_ERROR_RETURN(ENOMEM, ROUNDTRIP_FAILED, "failed to allocate response header buffer");
+            }
             resp.reset((char *)buf, kMinimalHeadersSize, true, sock.release(), true, req.verb());
         }
         resp.reset_status(HEADER_SENT);
