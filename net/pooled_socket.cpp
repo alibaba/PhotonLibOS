@@ -114,7 +114,7 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
 
 struct StreamListHead : public StreamListNode {
     StreamListHead* _key_next = this;
-    // total # of sockets, including those in use, not including the head
+    // References from idle/checked-out streams, connectors and collector pins.
     uint32_t _refcnt = 0;
     uint16_t _key_len;
     char _key[0];
@@ -290,7 +290,16 @@ public:
             head->_refcnt++;
             stream = connector();
             if (!stream) {
-                head->_refcnt--;
+                if (--head->_refcnt == 0) {
+                    // Connectors may yield and other calls can prepend keys or
+                    // pin this head. Unlink only after its final reference drops.
+                    ERRNO err;
+                    auto link = &_key_head;
+                    while (*link != head) link = &(*link)->_key_next;
+                    *link = head->_key_next;
+                    sockmap.erase(head->key());
+                    errno = err.no;
+                }
                 return nullptr;
             }
             if (args.enable_tcp_keepalive)
@@ -351,40 +360,49 @@ public:
     Timeout check_expire_heartbeat() {
         Timeout near_expire(args.expiration);
         for (auto h = _key_head; h; h = h->_key_next) {
-            // Expire timed-out nodes
-            auto ptr = h->next();
-            while (ptr != h) {
+            // Stream destructors and heartbeats can yield or reenter connect().
+            // Pin the head and always restart expiration from its first node,
+            // so a destructor may remove another node without invalidating a
+            // retained traversal pointer.
+            ++h->_refcnt;
+            while (!h->single()) {
+                auto ptr = h->next();
                 if (now < ptr->timeout.expiration()) {
                     near_expire = std::min(near_expire, ptr->timeout);
                     break;
                 }
-                auto next = ptr->remove_from_list();
+                ptr->remove_from_list();
                 rm_watch(ptr);
                 assert(h->_refcnt > 0);
                 h->_refcnt--;
                 delete ptr;
-                ptr = next;
             }
-            // Heartbeat remaining nodes
             if (args.heartbeater) {
-                while (ptr != h) {
-                    // Take node out of the list so connect() cannot grab it
-                    // while the heartbeater yields (I/O).
-                    auto next = ptr->remove_from_list();
+                // Detach the whole heartbeat batch. A callback can then
+                // reenter connect(), but it cannot remove any node retained
+                // by this traversal.
+                StreamListNode pending(nullptr, h, 0);
+                while (!h->single()) {
+                    auto ptr = h->next();
+                    ptr->remove_from_list();
                     rm_watch(ptr);
-                    int ret = args.heartbeater(ptr->stream.get());
-                    if (ret == 0) {
+                    pending.insert_before(ptr);
+                }
+                while (!pending.single()) {
+                    auto ptr = pending.next();
+                    ptr->remove_from_list();
+                    near_expire = std::min(near_expire, ptr->timeout);
+                    if (args.heartbeater(ptr->stream.get()) == 0) {
                         h->insert_before(ptr);
                         add_watch(ptr->stream->get_underlay_fd(), ptr);
-                        ptr = next;
-                    } else {
-                        assert(h->_refcnt > 0);
-                        h->_refcnt--;
-                        delete ptr;
-                        ptr = next;
+                        continue;
                     }
+                    assert(h->_refcnt > 0);
+                    h->_refcnt--;
+                    delete ptr;
                 }
             }
+            --h->_refcnt;
         }
         // Erase empty entries, unlinking from key list as we go
         auto *prev_next = &_key_head;
