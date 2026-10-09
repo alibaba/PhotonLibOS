@@ -92,3 +92,29 @@ jobs:
         run: |
           cd build
           ctest -E test-lockfree --timeout 3600 -V
+<<<<<<< HEAD
+=======
+          pkill redis-server
+
+  debug-build-from-source:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: arc-runner-set-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          sudo dnf install -y 'dnf-command(config-manager)'
+          sudo dnf config-manager --set-enabled powertools
+          sudo dnf -q -y install git gcc-c++ cmake gcc-toolset-9-gcc-c++ nasm
+          source /opt/rh/gcc-toolset-9/enable
+          cmake -B build -D CMAKE_BUILD_TYPE=Debug        \
+                         -D PHOTON_BUILD_DEPENDENCIES=ON  \
+                         -D PHOTON_BUILD_TESTING=ON       \
+                         -D PHOTON_ENABLE_ECOSYSTEM=ON    \
+                         -D PHOTON_ENABLE_SASL=OFF        \
+                         -D PHOTON_ENABLE_FUSE=OFF        \
+                         -D PHOTON_ENABLE_URING=ON        \
+                         -D PHOTON_ENABLE_LIBCURL=OFF     \
+                         -D PHOTON_ENABLE_EXTFS=OFF
+          cmake --build build -j $(nproc)
+>>>>>>> fe28bc5 ([Backport][main to 0.9] ci: complete ARC runner migration (#1675))

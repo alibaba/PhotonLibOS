@@ -199,10 +199,14 @@ jobs:
 
   fstack:
     if: ${{ !github.event.pull_request.draft }}
+<<<<<<< HEAD
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/alibaba/photon-ut-fstack:latest
       options: --cpus 4 --privileged
+=======
+    runs-on: photon-arc-runner-fstack
+>>>>>>> fe28bc5 ([Backport][main to 0.9] ci: complete ARC runner migration (#1675))
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -211,3 +215,28 @@ jobs:
             -D PHOTON_BUILD_TESTING=ON \
             -D PHOTON_ENABLE_FSTACK_DPDK=ON
           cmake --build build -j $(nproc) -t fstack-dpdk-demo
+<<<<<<< HEAD
+=======
+
+  RocksDB:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: arc-acs-runner-set
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          export PHOTON_SRC_DIR="$(pwd)"
+          sudo dnf install -q -y git gcc-c++ cmake openssl-devel libcurl-devel libaio-devel zlib-devel epel-release
+          sudo dnf config-manager --set-enabled powertools
+          sudo dnf install -q -y gflags-devel snappy-devel zlib-devel bzip2-devel lz4-devel libzstd-devel nasm
+          rocksdbBuildDir=$(mktemp -d "${RUNNER_TEMP}/rocksdb.XXXXXX")
+          trap 'rm -rf "$rocksdbBuildDir"' EXIT
+          git clone -b photon-on-6.1.2 https://github.com/data-accelerator/rocksdb.git "$rocksdbBuildDir"
+          cd "$rocksdbBuildDir"
+          rm -rf third-party/PhotonLibOS
+          ln -s "$PHOTON_SRC_DIR" third-party/PhotonLibOS
+          ./photon-auto-convert.sh
+          cmake -B build -D WITH_TESTS=on -D INIT_PHOTON_IN_ENV=on -D WITH_LZ4=on -D WITH_SNAPPY=on \
+            -D CMAKE_BUILD_TYPE=Debug
+          cmake --build build -j `nproc`
+>>>>>>> fe28bc5 ([Backport][main to 0.9] ci: complete ARC runner migration (#1675))
