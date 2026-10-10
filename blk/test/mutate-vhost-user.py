@@ -347,17 +347,38 @@ Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence i
 stamp `backup` leaves, and `backup` refuses to run while that stamp still exists --
 because `restore` copies .orig over the source, an .orig of unknown age reverts the
 tree silently, and a `backup` taken mid-mutation makes the mutant itself the .orig.
+
+    ./mutate-vhost-user.py check     # verify every anchor, write nothing
+
+`check` is the re-anchoring discipline made runnable: it applies each mutant to an
+in-memory copy through the same `mutate()` a real mutation uses and reports whether
+each anchor matched exactly once, so a tree that has drifted is found before a round
+is spent building a binary that was never mutated. It needs no stamp and writes
+nothing. Run it after editing any file an anchor names: the descriptor-spelling change
+in `4423d05` rotted five anchors and took the seven mutants referencing them out of
+service, and four anchors embed C++ comments, so rewording one of those rots it just
+as dead. `sub_once` reports the damage only at mutation time, after `backup` has
+stamped the tree.
+
+PHOTON_VHU_ROOT overrides the tree root, which defaults to ~/PhotonLibOS. It exists
+so `check` can be run against any checkout, including the repository itself, without
+editing this file. The .orig backups and the stamp always stay in $HOME whichever
+root is in use, for the rsync reason below.
 """
+import os
 import pathlib
 import sys
 
 # NOT inside the rsync tree: the VM copy is refreshed with `rsync --delete`, which
 # removes anything the repository does not have, so a sibling backup would vanish
 # mid-experiment and leave `restore` with nothing to restore from.
+ROOT = pathlib.Path(os.environ.get("PHOTON_VHU_ROOT")
+                    or (pathlib.Path.home() / "PhotonLibOS"))
+
 SRCS = {
-    "vhost-user": (pathlib.Path.home() / "PhotonLibOS/blk/vhost-user.cpp",
+    "vhost-user": (ROOT / "blk/vhost-user.cpp",
                    pathlib.Path.home() / "vhost-user.cpp.orig"),
-    "utils": (pathlib.Path.home() / "PhotonLibOS/blk/utils.cpp",
+    "utils": (ROOT / "blk/utils.cpp",
               pathlib.Path.home() / "utils.cpp.orig"),
 }
 
@@ -711,8 +732,12 @@ def span_of_toplevel(text, mark, what):
 
 def main():
     if len(sys.argv) != 2:
-        die("usage: mutate-vhost-user.py {backup|restore|%s}" % "|".join(MUTANTS))
+        die("usage: mutate-vhost-user.py {backup|restore|check|%s}" % "|".join(MUTANTS))
     mode = sys.argv[1]
+
+    if mode == "check":
+        check()
+        return
 
     if mode == "backup":
         # An in-flight stamp means a mutant may still be in one of these sources.
@@ -750,7 +775,20 @@ def main():
         die("unknown mutation %r" % mode)
     require_stamp(mode)
     src = SRCS[MUTANTS[mode]][0]
-    text = src.read_text()
+    if not src.exists():
+        die("no source at %s (set PHOTON_VHU_ROOT if this is not the tree the "
+            "experiment runs against)" % src)
+    text = mutate(mode, src.read_text())
+    src.write_text(text)
+    print("MUTATED", mode, src)
+
+
+def mutate(mode, text):
+    """Apply one mutant to `text` and return the result.
+
+    Pure, and deliberately the only place a mutation is expressed: `check` runs this
+    same function on a string it never writes back, so the self-check cannot drift
+    away from the thing it is checking."""
     if mode == "overread":
         s, e = span_of(text, RECV_MSG_MARK, "recv_msg")
         text = text[:s] + OLD_RECV_MSG + text[e:]
@@ -834,8 +872,70 @@ def main():
     elif mode == "snapall":
         text = sub_once(text, STALE_BASE_GUARD, STALE_BASE_GUARD_ANY,
                         "the ring size the stale-cursor guard compares against")
-    src.write_text(text)
-    print("MUTATED", mode, src)
+    else:
+        # A mode MUTANTS lists but no branch implements would otherwise fall through
+        # and write the text back unchanged, printing MUTATED for a mutation that
+        # never happened -- the one silent failure this script exists to avoid.
+        # `check` reports the same thing as CHECK_NOOP; the real path must not be
+        # quieter than the self-check. AssertionError rather than die() so `check`
+        # does not file a script bug under anchor rot.
+        raise AssertionError("no mutation body for %r, though MUTANTS lists it" % mode)
+    return text
+
+
+def check():
+    """Re-grep every anchor against the live tree and write nothing.
+
+    This is the discipline a round otherwise lacks: an anchor that has drifted is
+    found here, before a build and a test run are spent on a binary that was never
+    mutated. It needs no stamp, because it reads the sources and applies each mutant
+    to an in-memory copy.
+
+    Run it against the tree the experiment will use, and after any edit to a file an
+    anchor names. Anchors here are literal against literal, so the descriptor-spelling
+    change in `4423d05` (`de->` to `de.`) rotted five of them and took the seven
+    mutants that reference them out of service; a reworded comment inside an anchor
+    breaks it the same way, and did to mutate-blk.py's. `sub_once` reports the damage
+    only at mutation time, after `backup` has already stamped the tree."""
+    for mode, key in MUTANTS.items():
+        if key not in SRCS:
+            die("mutant %s targets %r, which SRCS does not know" % (mode, key))
+    if STAMP.exists():
+        # Not a refusal -- the read is safe -- but the verdict needs the caveat: the
+        # mutant currently applied has already consumed its own anchor, so that one
+        # reports CHECK_ANCHOR for a reason that is not rot.
+        print("CHECK_WARN mid-experiment: %s exists, so a mutant is applied to these "
+              "sources right now and its own anchor will report CHECK_ANCHOR for a "
+              "reason that is not rot; `restore` first for a clean verdict" % STAMP)
+    bad = 0
+    for mode in sorted(MUTANTS):
+        src = SRCS[MUTANTS[mode]][0]
+        if not src.exists():
+            print("CHECK_MISSING %s %s" % (mode, src))
+            bad += 1
+            continue
+        text = src.read_text()
+        try:
+            mutated = mutate(mode, text)
+        except (SystemExit, ValueError):
+            # SystemExit is sub_once's and span_of's die(); ValueError is text.index()
+            # inside them when the mark is there but the closing brace after it is not.
+            # Both mean the anchor no longer names exactly one editable place.
+            print("CHECK_ANCHOR %s %s" % (mode, src))
+            bad += 1
+            continue
+        if mutated == text:
+            print("CHECK_NOOP %s %s" % (mode, src))
+            bad += 1
+            continue
+        if mutated.count("{") - mutated.count("}") != text.count("{") - text.count("}"):
+            print("CHECK_BRACES %s %s" % (mode, src))
+            bad += 1
+            continue
+        print("CHECK_OK %s %s" % (mode, src))
+    if bad:
+        die("%d of %d mutants failed the anchor check" % (bad, len(MUTANTS)))
+    print("CHECK_ALL_OK %d mutants, nothing written" % len(MUTANTS))
 
 
 if __name__ == "__main__":
