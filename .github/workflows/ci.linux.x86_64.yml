@@ -15,10 +15,7 @@ on:
 jobs:
   gcc850:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+    runs-on: arc-acs-runner-set
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -51,10 +48,7 @@ jobs:
 
   gcc921:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+    runs-on: arc-acs-runner-set
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -88,10 +82,7 @@ jobs:
 
   gcc1031:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+    runs-on: arc-acs-runner-set
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -125,10 +116,7 @@ jobs:
 
   gcc1121:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+    runs-on: arc-acs-runner-set
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -162,10 +150,7 @@ jobs:
 
   gcc1211:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-base:latest
-      options: --cpus 4 --privileged
+    runs-on: arc-acs-runner-set
     steps:
       - uses: szenius/set-timezone@v2.0
         with:
@@ -199,10 +184,7 @@ jobs:
 
   fstack:
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/alibaba/photon-ut-fstack:latest
-      options: --cpus 4 --privileged
+    runs-on: photon-arc-runner-fstack
     steps:
       - uses: actions/checkout@v4
       - name: Build
