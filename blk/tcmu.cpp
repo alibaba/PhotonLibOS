@@ -918,8 +918,46 @@ struct TcmuServer {
         return off > dev_size || len > dev_size - off;
     }
 
+    // Transfer length in bytes that the CDB itself asks for, or 0 for an opcode
+    // whose count this does not parse. The kernel sizes the ring's data area from
+    // the CDB, but for a data command target_core_device.c sets SCF_SCSI_DATA_CDB
+    // and returns TCM_NO_SENSE WITHOUT running target_cmd_size_check -- so a CDB
+    // whose count disagrees with the data area reaches us instead of being refused
+    // upstream. Bound the I/O to the CDB's own count and reject a mismatch rather
+    // than trust data_len (the whole ring area) to equal what the initiator asked
+    // to move. READ/WRITE(6) encode a count of 0 as 256; (10) is a be16 at cdb[7];
+    // (12) a be32 at cdb[7]; (16) a be32 at cdb[10].
+    uint64_t cdb_xfer_bytes(uint8_t op, const uint8_t* cdb) {
+        uint64_t blocks;
+        switch (op) {
+        case OPC_READ_6:  case OPC_WRITE_6:
+            blocks = cdb[4] ? cdb[4] : 256;
+            break;
+        case OPC_READ_10: case OPC_WRITE_10:
+            blocks = cdb_be16(cdb + 7);
+            break;
+        case OPC_READ_12: case OPC_WRITE_12:
+            blocks = cdb_be32(cdb + 7);
+            break;
+        case OPC_READ_16: case OPC_WRITE_16:
+            blocks = cdb_be32(cdb + 10);
+            break;
+        default:
+            return 0;
+        }
+        return blocks_to_bytes(blocks);
+    }
+
     void emul_read(uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt, size_t data_len,
                    tcmu_cmd_entry* ent) {
+        // Reject a CDB whose transfer count disagrees with the ring's data area
+        // BEFORE any backend I/O (see cdb_xfer_bytes): the kernel does not re-check
+        // the count for a data command, so serving data_len blindly would move the
+        // wrong number of bytes.
+        if (cdb_xfer_bytes(cdb[0], cdb) != data_len) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         if (data_len == 0) { set_status(ent, SAM_GOOD); return; }
         uint64_t off = cdb_byte_off(cdb[0], cdb);
         if (out_of_bounds(off, data_len)) {
@@ -934,8 +972,16 @@ struct TcmuServer {
     void emul_write(uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt, size_t data_len,
                     tcmu_cmd_entry* ent) {
         if (read_only) { set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0); return; }
-        if (data_len == 0) { set_status(ent, SAM_GOOD); return; }
         uint8_t op = cdb[0];
+        // Bound the write to the CDB's own transfer count, not the ring's data area
+        // (see cdb_xfer_bytes): the kernel does not re-check the count for a data
+        // command, so a CDB that disagrees with data_len is refused before any
+        // backend I/O rather than writing the wrong number of bytes.
+        if (cdb_xfer_bytes(op, cdb) != data_len) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        if (data_len == 0) { set_status(ent, SAM_GOOD); return; }
         uint64_t off = cdb_byte_off(op, cdb);
         if (out_of_bounds(off, data_len)) {
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE, 0);
@@ -1038,6 +1084,13 @@ struct TcmuServer {
         memset(buf, 0, 64);
         buf[1] = 0xB0;
         put_be16(buf + 2, 0x3C);             // page length 60 -> total 64
+        // WSNZ (byte 4 bit 0) = 1: a WRITE SAME count of zero is invalid, NOT
+        // "zero from here to the end of the device". emul_write_same rejects a zero
+        // count to match -- which is also what the kernel's own target hardcodes.
+        // Linux's sd_read_block_limits never reads this byte, so nothing changes for
+        // a Linux initiator; a spec-following one is simply told the truth instead
+        // of being handed a silent no-op it read as "zeroed the rest".
+        buf[4] = 0x01;
         if (features & FEATURE_DISCARD) {
             put_be32(buf + 20, 0x100000);    // max unmap LBA count
             put_be32(buf + 24, 32);          // max unmap block descriptor count
@@ -1102,14 +1155,36 @@ struct TcmuServer {
         if (page == 0x08 || page == 0x3f) {   // caching page (also for "all pages")
             buf[n + 0] = 0x08;
             buf[n + 1] = 0x0a;                // page length 10
-            // buf[n+2] WCE bit left 0: write cache reported disabled
+            // WCE (bit 2 of the caching flags) says whether a volatile write cache
+            // sits in front of stable storage. Report it enabled exactly when
+            // FEATURE_FLUSH is negotiated -- the same condition under which
+            // create_backstore sets the kernel's emulate_write_cache attrib -- so an
+            // initiator that needs durability sees a cache to flush and issues
+            // SYNCHRONIZE CACHE, which emul_sync honours via fdatasync. A plain write
+            // here is a bare pwritev into the backend's cache, so leaving WCE 0 would
+            // claim every write is already durable and the initiator would skip the
+            // flush that actually makes it so. The chosen semantics: advertise the
+            // cache and rely on flush/FUA for durability, rather than force every
+            // write through (which is what dropping emul_write's `fua &&` guard would
+            // do, at the cost of a sync per write).
+            if (features & FEATURE_FLUSH)
+                buf[n + 2] |= 0x04;           // WCE
             n += 12;
         }
+        // DPOFUA (bit 4 of the device-specific byte) reports that the FUA bit in
+        // WRITE(10/12/16) is honoured. It is, and unconditionally: emul_write does
+        // pwritev then fdatasync whenever cdb[1] & 0x08, and fdatasync is pure
+        // virtual so every backend answers it. FUA is a per-write durability path
+        // distinct from the cache WCE describes, so this bit does not track
+        // FEATURE_FLUSH -- it is set whenever FUA genuinely works, which is always.
+        uint8_t devspec = 0x10;               // DPOFUA
+        if (read_only)
+            devspec |= 0x80;                  // write-protect
         if (ten) {
-            buf[3] = read_only ? 0x80 : 0;    // device-specific: write-protect
+            buf[3] = devspec;                 // device-specific: WP | DPOFUA
             put_be16(buf, (uint16_t)(n - 2)); // mode data length
         } else {
-            buf[2] = read_only ? 0x80 : 0;
+            buf[2] = devspec;
             buf[0] = (uint8_t)(n - 1);
         }
         iovector_view(iov, iov_cnt).memcpy_from(buf, n);
@@ -1150,8 +1225,20 @@ struct TcmuServer {
             const uint8_t* d = p.data() + 8 + i * 16;
             uint64_t off = blocks_to_bytes(cdb_be64(d));
             uint64_t len = blocks_to_bytes(cdb_be32(d + 8));
-            if (len == 0 || out_of_bounds(off, len)) continue;
-            if (backend->trim(off, len) < 0 && errno != EOPNOTSUPP && errno != ENOSYS) {
+            if (len == 0 || out_of_bounds(off, len))
+                continue;
+            // LBPRZ (advertised in RC16 byte 14) promises reads after an unmap
+            // return zeros, so a backend that cannot punch a hole -- trim() answers
+            // EOPNOTSUPP/ENOSYS -- must still zero the range instead of reporting
+            // GOOD over untouched blocks. Handled per descriptor, so ranges already
+            // trimmed or zeroed above survive a later descriptor's failure.
+            if (backend->trim(off, len) == 0)
+                continue;
+            if (errno != EOPNOTSUPP && errno != ENOSYS) {
+                set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                return;
+            }
+            if (zero_fill(backend, off, len) < 0) {
                 set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
                 return;
             }
@@ -1165,20 +1252,50 @@ struct TcmuServer {
                          tcmu_cmd_entry* ent) {
         if (read_only) { set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0); return; }
         bool sixteen = (cdb[0] == OPC_WRITE_SAME_16);
+        // cdb[1] flags, per the kernel's sbc_setup_write_same -- which it applies to
+        // BOTH the 10- and 16-byte forms: 0x01 NDOB (16 only), 0x02 LBDATA,
+        // 0x04 PBDATA, 0x08 UNMAP, 0x10 ANCHOR. We emulate WRITE SAME as a
+        // discard/zero operation with no logical or physical block data, so
+        // LBDATA/PBDATA are invalid; ANC_SUP is 0, so ANCHOR is invalid too (and
+        // bit 4 is reserved in the 10-byte form, likewise an invalid field). Reject
+        // them BEFORE the UNMAP branch, which reads the same byte.
+        if (cdb[1] & 0x06) {   // LBDATA | PBDATA
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        if (cdb[1] & 0x10) {   // ANCHOR (reserved in the 10-byte form)
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         bool unmap = cdb[1] & 0x08;
-        bool ndob = sixteen && (cdb[1] & 0x10);
+        bool ndob = sixteen && (cdb[1] & 0x01);   // NDOB is a WRITE SAME(16) bit
         uint64_t off = cdb_byte_off(cdb[0], cdb);
         uint32_t nblocks = sixteen ? cdb_be32(cdb + 10) : cdb_be16(cdb + 7);
+        // WSNZ=1 (VPD 0xB0 byte 4): a zero count is invalid, not "to the end of the
+        // device" -- matching the kernel's target, which rejects count 0 for both
+        // forms rather than compute the remaining range.
+        if (nblocks == 0) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         uint64_t len = (uint64_t)nblocks * block_size;
-        if (len == 0) { set_status(ent, SAM_GOOD); return; }
         if (out_of_bounds(off, len)) {
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE, 0);
             return;
         }
         if (unmap) {
-            if (backend->trim(off, len) < 0 && errno != EOPNOTSUPP && errno != ENOSYS) {
-                set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
-                return;
+            // LBPRZ promises reads after an unmap return zeros, so a backend that
+            // cannot punch a hole must still zero the range rather than report GOOD
+            // over untouched blocks.
+            if (backend->trim(off, len) < 0) {
+                if (errno != EOPNOTSUPP && errno != ENOSYS) {
+                    set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                    return;
+                }
+                if (zero_fill(backend, off, len) < 0) {
+                    set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                    return;
+                }
             }
             set_status(ent, SAM_GOOD);
             return;
@@ -1212,8 +1329,8 @@ struct TcmuDeviceImpl;   // the device: defined just below
 // Device <-> HBA linkage. Written by the HBA's listener vcpu, read
 // by the device on whatever vcpu its caller runs on -- so every field both of those
 // sides write is atomic. `dev` and `fam` are plain because each is set once in the
-// device's constructor, before register_link publishes this struct, and neither is
-// ever reassigned: later readers on any vcpu see a value nothing changes.
+// device's constructor, before try_register_link publishes this struct, and neither
+// is ever reassigned: later readers on any vcpu see a value nothing changes.
 struct TcmuLink {
     TcmuDeviceImpl* dev = nullptr;              // back-pointer, for orphaning on
                                                 // HBA teardown
@@ -1276,23 +1393,47 @@ struct TcmuRegistry {
     };
     std::vector<PendingAdded> pending_added;   // reg_lock
 
-    TcmuLink* find_link(const char* bs) {
+    // Run fn(TcmuLink&) for the link named `bs`, if there is one, ENTIRELY under
+    // reg_lock, and report whether it was found. find_link() used to return
+    // it->second AFTER the SCOPED_LOCK released; the listener is a separate OS
+    // thread and a TcmuLink is a member of the device that ~TcmuDeviceImpl frees, so
+    // that borrowed pointer could dangle by the time the listener dereferenced it --
+    // a use-after-free WRITE (on_removed stores removed_id through it). fn therefore
+    // runs while the entry cannot be unregistered from under it, and may touch ONLY
+    // the link's atomics and copy values out: nothing here may log or block, because
+    // reg_lock is a spinlock shared with the caller's vcpu (see the note below).
+    template <class Fn>
+    bool with_link(const char* bs, Fn fn) {
         SCOPED_LOCK(reg_lock);
         auto it = devs.find(bs);
-        return it == devs.end() ? nullptr : it->second;
+        if (it == devs.end())
+            return false;
+        fn(*it->second);
+        return true;
     }
 
-    void register_link(TcmuLink* link, const char* bs_name) {
+    // Register `link` under bs_name UNLESS a different device already owns that
+    // name; report whether `link` is now the registered owner. Refusing rather than
+    // evicting is the fix for a same-named second device silently unregistering a
+    // first one at construction -- before the second's start() could reach the EBUSY
+    // a live first device would otherwise have produced -- and then leaving the name
+    // unregistered when the second was destroyed. Runs wholly under reg_lock, so it
+    // cannot log (shared spinlock, see with_link).
+    bool try_register_link(TcmuLink* link, const char* bs_name) {
         if (!bs_name[0])
-            return;
+            return false;
         SCOPED_LOCK(reg_lock);
-        // The key BORROWS this device's bs_name buffer, and operator[] keeps the key
-        // already stored -- so re-inserting under an equal name would leave it
-        // pointing at the OTHER device's buffer, which may die first. Erase by name.
         auto it = devs.find(bs_name);
-        if (it != devs.end())
+        if (it != devs.end()) {
+            if (it->second->dev != link->dev)
+                return false;   // a different live device owns this name
+            // Our own stale entry. The key BORROWS this device's bs_name buffer and
+            // operator[] keeps the key already stored, so erase before re-inserting
+            // rather than leave the map keyed by a buffer that may die first.
             devs.erase(it);
+        }
         devs[bs_name] = link;
+        return true;
     }
 
     void unregister_link(TcmuLink* link) {
@@ -1419,6 +1560,7 @@ struct TcmuDeviceImpl : IBlkDevice {
     bool kern_reply = false;    // our HBA engaged the reply protocol, so a backstore
                                 // we create must NOT opt out of the kernel's wait
     bool own_backend = false;
+    bool registered = false;    // this device's link is the registry's owner of bs_name
     bool started = false;
     bool created = false;       // we created the registration (vs attached an existing one)
     bool lun_attached = false;
@@ -1446,8 +1588,15 @@ struct TcmuDeviceImpl : IBlkDevice {
         snprintf(dev_config_prefix, sizeof(dev_config_prefix), "%s", prefix);
         snprintf(lock_dir, sizeof(lock_dir), "%s", ldir);
         sanitize(bs_name, sizeof(bs_name), cfg.info.identity.c_str());
-        reg->register_link(&link, bs_name);
-        link.added_id = reg->take_added(bs_name);
+        // Refuse rather than evict: a second device for a name another live device
+        // already owns must not unregister it (see try_register_link). Claim the
+        // handed-over ADDED only if this device really became the owner -- an
+        // unregistered one must not steal the owner's dev_id.
+        registered = reg->try_register_link(&link, bs_name);
+        if (registered)
+            link.added_id = reg->take_added(bs_name);
+        else
+            LOG_WARN("tcmu backstore ` is already owned by another device; this one is constructed but start() will refuse it with EBUSY until that owner goes", bs_name);
         // The effective half of the descriptor; blk.h documents each axis. tcmu honours
         // all three FEATURE_* operations, so offered is the full set and a request is
         // never silently dropped here. The ring lives in the uio mapping and outlives
@@ -1457,9 +1606,20 @@ struct TcmuDeviceImpl : IBlkDevice {
         // does NOT skip the I/O wait: serve_stop gates only its ring drain on the flag
         // and waits out in_flight unconditionally, which is the clearest case of the two
         // promises in blk.h being different promises.
+        //
+        // shutdown_refusal is Disconnects, NOT RefusesWhenAttached. do_shutdown unlinks
+        // the tcm_loop LUN FIRST -- deliberately, while the pump still answers the
+        // SYNCHRONIZE CACHE / START STOP UNIT that the kernel's disk-remove path issues
+        // -- and tcm_loop_port_unlink -> scsi_remove_device ends the owned consumer's
+        // session with no open/mount refusal of its own; its next request then fails.
+        // loopback_lun defaults true, so on the default path the LUN this device
+        // attached is gone before the backstore rmdir that is the only EBUSY source
+        // runs. That rmdir's EBUSY (destroy_backstore) therefore fires only for a LUN an
+        // EXTERNAL initiator attached, which shutdown() neither owns nor disconnects --
+        // so the refusal is real but covers only that external case, not the owned LUN.
         cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
         cfg.info.backlog = BlkBacklog::KernelSide;
-        cfg.info.shutdown_refusal = BlkShutdownRefusal::RefusesWhenAttached;
+        cfg.info.shutdown_refusal = BlkShutdownRefusal::Disconnects;
         cfg.info.resize_effect = BlkResizeEffect::NotifiedOrFailed;
         cfg.info.adoption = BlkAdoption::IdentityAndSize;
         cfg.info.detach_no_wait = false;
@@ -1535,7 +1695,7 @@ struct TcmuDeviceImpl : IBlkDevice {
                      bs_name, id);
             tcmu_send_done(link.fam, TCMU_CMD_ADDED_DEVICE_DONE, id, -ENOSYS);
         }
-        if (reg)
+        if (reg && registered)
             reg->unregister_link(&link);
         release_backend();
     }
@@ -1552,6 +1712,12 @@ struct TcmuDeviceImpl : IBlkDevice {
     int start(fs::IFile* bk, bool ownership) override {
         if (started)
             LOG_ERROR_RETURN(EALREADY, -1, "tcmu device already started");
+        // Construction refused the registration because another live device already
+        // owns this backstore name (try_register_link). Serving needs that name, so
+        // report the conflict the way a live owner's flock would -- EBUSY -- rather
+        // than take over a backstore this device does not own.
+        if (!registered)
+            LOG_ERROR_RETURN(EBUSY, -1, "tcmu device ` does not own its backstore name; another device holds it", bs_name);
         if (!bk)
             LOG_ERROR_RETURN(EINVAL, -1, "backend IFile is null");
 
@@ -2364,15 +2530,18 @@ struct TcmuHBAImpl : TcmuHBA {
         // recycled that dev_id onto another backstore by then
         if (ev.kind == TcmuHBA::EventKind::ADDED)
             reg.forget_added(ev.bs_name, ev.dev_id);
-        if (auto l = reg.find_link(ev.bs_name)) {
-            // the device must not answer an event we just refused
-            if (ev.kind == TcmuHBA::EventKind::ADDED && l->added_id.load() == ev.dev_id)
-                l->added_id = 0;
-            if (ev.kind == TcmuHBA::EventKind::RECONFIG && l->reconfig_id.load() == ev.dev_id) {
-                l->reconfig_id = 0;
-                l->pending_size = 0;
+        // Clear any claim the device holds on the refused event's dev_id, under the
+        // registry lock (with_link): the device must not answer an event we just
+        // refused. Atomics only -- deny() runs on the caller's vcpu while the
+        // listener may hold reg_lock, and nothing may log or block under it.
+        reg.with_link(ev.bs_name, [&](TcmuLink& l) {
+            if (ev.kind == TcmuHBA::EventKind::ADDED && l.added_id.load() == ev.dev_id)
+                l.added_id = 0;
+            if (ev.kind == TcmuHBA::EventKind::RECONFIG && l.reconfig_id.load() == ev.dev_id) {
+                l.reconfig_id = 0;
+                l.pending_size = 0;
             }
-        }
+        });
         return tcmu_send_done(fam, done, ev.dev_id, err ? -abs(err) : -ENOSYS);
     }
 
@@ -2497,6 +2666,38 @@ struct TcmuHBAImpl : TcmuHBA {
             // will consume the queue any more, so draining also refuses events.
             draining = true;
             drain_replies(lsk, rsk, fam);
+            // drain_replies only revisits notifications still resident in the socket;
+            // events already queue()d for wait_for_event() are never looked at again
+            // and ~TcmuHBAImpl would drop them with no *_DONE. Each armed the kernel's
+            // tcmu_wait_genl_cmd_reply -- an unbounded wait_for_completion that the
+            // SET_FEATURES below cannot wake -- so an operator's `echo 1 > enable`
+            // would hang until reset_netlink. Swap the queue out and refuse every
+            // event in it, then drop the hand-over table and each link's claim on
+            // those dev_ids, so a device destroyed or resized later cannot send a
+            // second *_DONE for a wait the kernel has already completed.
+            std::deque<TcmuHBA::Event> drained;
+            {
+                SCOPED_LOCK(q_lock);
+                drained.swap(q);
+            }
+            for (auto& ev : drained) {
+                if (!ev.dev_id)
+                    continue;   // synthesized by initial_scan: armed no kernel wait
+                send_done(rsk, fam, tcmu_done_cmd(ev.kind), ev.dev_id, -ENOSYS);
+                // at most one lock hold per event, atomics only (see with_link)
+                reg.with_link(ev.bs_name, [&](TcmuLink& l) {
+                    if (ev.kind == TcmuHBA::EventKind::ADDED && l.added_id.load() == ev.dev_id)
+                        l.added_id = 0;
+                    if (ev.kind == TcmuHBA::EventKind::RECONFIG && l.reconfig_id.load() == ev.dev_id) {
+                        l.reconfig_id = 0;
+                        l.pending_size = 0;
+                    }
+                });
+            }
+            {
+                SCOPED_LOCK(reg.reg_lock);
+                reg.pending_added.clear();   // their dev_ids die with this subscription
+            }
             if (set_reply_supported(rsk, fam, 0) < 0)
                 LOG_WARN("failed to restore tcmu netlink reply support, ", ERRNO());
         }
@@ -2625,8 +2826,14 @@ struct TcmuHBAImpl : TcmuHBA {
 
     void on_added(GenlSock& rsk, const char* bs, const char* dev_cfg,
                   uint32_t minor, uint32_t dev_id) {
-        auto mine = reg.find_link(bs);
-        if (mine && (mine->starting.load() || mine->serving.load())) {
+        // Read the link's state under the registry lock and copy it out (with_link):
+        // a TcmuLink is a member of the device that ~TcmuDeviceImpl frees on another
+        // vcpu, so the pointer find_link borrowed could dangle before this ran.
+        bool bringing_up = false;
+        reg.with_link(bs, [&](TcmuLink& l) {
+            bringing_up = l.starting.load() || l.serving.load();
+        });
+        if (bringing_up) {
             // ours, and a ring is on its way up: start() is blocked in `echo 1 >
             // enable` on the caller's vcpu, so nothing there could ever send the
             // reply that unblocks it. A device that is merely CONSTRUCTED does not
@@ -2674,35 +2881,51 @@ struct TcmuHBAImpl : TcmuHBA {
         // named a backstore that is about to stop existing -- and its dev_id is
         // about to be free for the kernel to hand to another one.
         reg.forget_added(bs, 0);
-        if (auto l = reg.find_link(bs)) {
-            if (!l->serving.load()) {
-                // Nothing to stop: either the device is detached, or this REMOVED
-                // was fired by our own shutdown()/rollback() -- whose configfs
-                // write is blocked on the caller's vcpu and, in reply mode, could
-                // never answer itself. So answer here.
-                reply_done(rsk, fam, TCMU_CMD_REMOVED_DEVICE_DONE, dev_id, 0);
-                return;
-            }
-            TcmuHBA::Event ev{};
-            ev.kind = TcmuHBA::EventKind::REMOVED;
-            ev.dev_id = dev_id;
-            snprintf(ev.bs_name, sizeof(ev.bs_name), "%s", bs);
-            // arm the device BEFORE queueing: the consumer runs on another vcpu
-            // and may call shutdown() the instant the event is delivered. The
-            // device answers once it has stopped serving, because the kernel
-            // unregisters the uio right after its wait and our mmap must be gone.
-            l->removed_id = dev_id;
-            if (!deliver(rsk, ev))
-                l->removed_id = 0;   // refused while draining: leave it to its owner
+        // Arm the device and read its state under ONE registry-lock hold (with_link):
+        // the link is a member of the device, and the pointer find_link borrowed was
+        // dereferenced -- and removed_id STORED through -- after the lock dropped, a
+        // use-after-free write once ~TcmuDeviceImpl freed it on another vcpu.
+        bool found = false, serving = false;
+        reg.with_link(bs, [&](TcmuLink& l) {
+            found = true;
+            serving = l.serving.load();
+            // arm the device BEFORE queueing: the consumer runs on another vcpu and
+            // may call shutdown() the instant the event is delivered. The device
+            // answers once it has stopped serving, because the kernel unregisters the
+            // uio right after its wait and our mmap must be gone. An atomic store is
+            // all this callback may do under the spinlock.
+            if (serving)
+                l.removed_id = dev_id;
+        });
+        if (!found) {
+            reply_done(rsk, fam, TCMU_CMD_REMOVED_DEVICE_DONE, dev_id, 0);   // not ours
             return;
         }
-        reply_done(rsk, fam, TCMU_CMD_REMOVED_DEVICE_DONE, dev_id, 0);   // not ours
+        if (!serving) {
+            // Nothing to stop: either the device is detached, or this REMOVED
+            // was fired by our own shutdown()/rollback() -- whose configfs
+            // write is blocked on the caller's vcpu and, in reply mode, could
+            // never answer itself. So answer here.
+            reply_done(rsk, fam, TCMU_CMD_REMOVED_DEVICE_DONE, dev_id, 0);
+            return;
+        }
+        TcmuHBA::Event ev{};
+        ev.kind = TcmuHBA::EventKind::REMOVED;
+        ev.dev_id = dev_id;
+        snprintf(ev.bs_name, sizeof(ev.bs_name), "%s", bs);
+        if (!deliver(rsk, ev))
+            // refused while draining: leave it to its owner. Back under the lock --
+            // the link may have been freed since the arm above.
+            reg.with_link(bs, [&](TcmuLink& l) { l.removed_id = 0; });
     }
 
     void on_reconfig(GenlSock& rsk, const char* bs, uint32_t dev_id,
                      const char* attrs, size_t alen) {
-        auto l = reg.find_link(bs);
-        if (!l) {   // not ours: never make an operator wait on a device we do not serve
+        // Existence under the registry lock (with_link, touching nothing): the
+        // pointer find_link borrowed was used throughout this handler and could
+        // dangle once ~TcmuDeviceImpl freed the device on another vcpu.
+        if (!reg.with_link(bs, [](TcmuLink&) {})) {
+            // not ours: never make an operator wait on a device we do not serve
             reply_done(rsk, fam, TCMU_CMD_RECONFIG_DEVICE_DONE, dev_id, 0);
             return;
         }
@@ -2717,19 +2940,29 @@ struct TcmuHBAImpl : TcmuHBA {
             // after the reply, so the attrib still reads the old one
             memcpy(&ev.size, p, sizeof(ev.size));
             snprintf(ev.attr, sizeof(ev.attr), "dev_size");
-            if (ev.size == l->self_size.load()) {
+            // Check self_size and arm the device under ONE lock hold: resize() may be
+            // changing self_size on the caller's vcpu, and the arm must be atomic with
+            // the check so our own resize() is never queued back at us. Atomics only.
+            bool our_own = false;
+            reg.with_link(bs, [&](TcmuLink& l) {
+                if (ev.size == l.self_size.load())
+                    our_own = true;
+                else {
+                    // arm resize() to answer it BEFORE queueing: the consumer runs on
+                    // another vcpu and may call resize() the instant it gets the event
+                    l.pending_size = ev.size;
+                    l.reconfig_id = dev_id;
+                }
+            });
+            if (our_own) {
                 // our own resize() is blocked in that very write on the caller's
                 // vcpu: answer for it and do not report it back at ourselves
                 reply_done(rsk, fam, TCMU_CMD_RECONFIG_DEVICE_DONE, dev_id, 0);
                 return;
             }
-            // arm resize() to answer it BEFORE queueing: the consumer runs on
-            // another vcpu and may call resize() the instant it gets the event
-            l->pending_size = ev.size;
-            l->reconfig_id = dev_id;
             if (!deliver(rsk, ev)) {
-                l->reconfig_id = 0;
-                l->pending_size = 0;
+                // refused while draining: leave it to its owner. Back under the lock.
+                reg.with_link(bs, [&](TcmuLink& l) { l.reconfig_id = 0; l.pending_size = 0; });
                 return;
             }
         } else if ((p = nla_find(attrs, alen, TCMU_ATTR_DEV_CFG, &pl))) {

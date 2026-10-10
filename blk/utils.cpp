@@ -690,8 +690,21 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             bad = true;
             break;
         }
-        const vring_desc* de = &desc[d];
-        if (de->flags & VRING_DESC_F_INDIRECT) {
+        // A copy, and the copy IS the containment. The ring is guest memory that stays
+        // writable while its request is served -- nothing retires a descriptor until the
+        // used ring publishes it, and a driver that means us harm does not wait for that
+        // either -- so a field read twice can answer twice, and on one transport the
+        // window between the two reads is a translate that can be an ioctl and an mmap.
+        // What that buys a hostile guest is a mapping validated for one length and an
+        // iovec built with a longer one, so the backend reaches bytes past the range
+        // that was checked; the same window lets it clear NEXT and end the walk early,
+        // which truncates the chain into a request whose status byte is a data byte.
+        // Reading every field out of this one copy makes both unrepresentable: the copy
+        // is materialized before the translate and no later use goes back to guest
+        // memory. A copy torn BETWEEN fields is still one set of values, checked and
+        // used together, which is why this needs no atomicity the fields do not have.
+        const vring_desc de = desc[d];
+        if (de.flags & VRING_DESC_F_INDIRECT) {
             // §2.7.5.3.2: "The device MUST handle the case of zero or more normal
             // chained descriptors followed by a single descriptor with
             // flags&VIRTQ_DESC_F_INDIRECT." So this branch is reachable at any step,
@@ -709,7 +722,7 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             // request -- if the dropped tail was the status, wr.tail(1) below hands out
             // the last DATA byte and the request completes one byte short of what the
             // driver asked for.
-            if (de->flags & VRING_DESC_F_NEXT) {
+            if (de.flags & VRING_DESC_F_NEXT) {
                 LOG_ERROR("virtio-blk `: indirect descriptor at ` also carries NEXT", tag, d);
                 bad = true;
                 break;
@@ -720,13 +733,13 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             // than an empty walk, and a partial trailing entry is not inside the buffer
             // the driver declared -- on a transport whose regions are the whole guest
             // RAM it is inside somebody else's request.
-            if (de->len == 0 || de->len % sizeof(vring_desc)) {
+            if (de.len == 0 || de.len % sizeof(vring_desc)) {
                 LOG_ERROR("virtio-blk `: indirect table length ` is not a whole number of `-byte entries",
-                          tag, de->len, sizeof(vring_desc));
+                          tag, de.len, sizeof(vring_desc));
                 bad = true;
                 break;
             }
-            uint32_t n = (uint32_t)(de->len / sizeof(vring_desc));
+            uint32_t n = (uint32_t)(de.len / sizeof(vring_desc));
             // Checked BEFORE the translate: mapping a range only to refuse it is a
             // wasted round trip on a transport whose translate is an ioctl.
             if (n > MAX_INDIRECT_ENTRIES) {
@@ -740,16 +753,16 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             // permission checks that make a translate a translate live inside that
             // delegate -- a private path for tables would bypass both. §2.7.5.3.2's "The
             // device MUST ignore the write-only flag (flags&VIRTQ_DESC_F_WRITE) in the
-            // descriptor that refers to an indirect table" is why de->flags is not
+            // descriptor that refers to an indirect table" is why de.flags is not
             // consulted here.
-            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, false);
+            const vring_desc* tbl = (const vring_desc*)translate(de.addr, de.len, false);
             if (!tbl) {
-                LOG_ERROR("virtio-blk `: unmappable indirect table address ` len `", tag, de->addr, de->len);
+                LOG_ERROR("virtio-blk `: unmappable indirect table address ` len `", tag, de.addr, de.len);
                 bad = true;
                 break;
             }
             // A SECOND index space. `t` is bounded by `n` -- a count our own arithmetic
-            // produced from de->len and then clamped -- and never by ring_num: a table
+            // produced from de.len and then clamped -- and never by ring_num: a table
             // entry's next has nothing to do with the ring, and testing it against
             // ring_num passes for values that read past the table. Indexing desc[] with
             // it instead of tbl[] is worse than a read past the end: it serves this
@@ -768,8 +781,11 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
                     bad = true;
                     break;
                 }
-                const vring_desc* te = &tbl[t];
-                if (te->flags & VRING_DESC_F_INDIRECT) {
+                // Copied, for the reason the ring descriptor above is. This walk is
+                // where the window is widest: every entry costs a translate of its
+                // own, and the length each one validated is the length pushed below.
+                const vring_desc te = tbl[t];
+                if (te.flags & VRING_DESC_F_INDIRECT) {
                     // §2.7.5.3.1: "The driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag
                     // within an indirect descriptor (ie. only one table per descriptor)."
                     // That is a DRIVER requirement -- §2.7.5.3.2 gives the device no
@@ -785,11 +801,11 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
                 // answer instead of a vacuous success. Note the pair this forms with the
                 // entry-count bound -- it is BECAUSE a zero-length entry still reaches
                 // translate that a table of them is the carrier for that bound.
-                bool tw = te->flags & VRING_DESC_F_WRITE;
-                void* tva = translate(te->addr, te->len ? te->len : 1, tw);
+                bool tw = te.flags & VRING_DESC_F_WRITE;
+                void* tva = translate(te.addr, te.len ? te.len : 1, tw);
                 if (!tva) {
                     LOG_ERROR("virtio-blk `: unmappable indirect buffer address ` len ` writable ` at entry `",
-                              tag, te->addr, te->len, (int)tw, t);
+                              tag, te.addr, te.len, (int)tw, t);
                     bad = true;
                     break;
                 }
@@ -797,17 +813,17 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
                 // instead of storing past the end of a stack array. A mixed chain spends
                 // ONE budget, not two.
                 DescStream& ts = tw ? wr : rd;
-                if (!ts.push(tva, te->len)) {
+                if (!ts.push(tva, te.len)) {
                     LOG_ERROR("virtio-blk `: indirect table overflows the `-element scatter list",
                               tag, MAX_DESC_CHAIN);
                     bad = true;
                     break;
                 }
-                if (!(te->flags & VRING_DESC_F_NEXT)) {
+                if (!(te.flags & VRING_DESC_F_NEXT)) {
                     tbl_end = true;
                     break;
                 }
-                t = te->next;
+                t = te.next;
             }
             // tbl_end, NOT chain_end, and the distinction is deliberate: chain_end means
             // "the ring walk reached a descriptor without NEXT", and the refusal below
@@ -820,13 +836,14 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
             // The table descriptor itself carries NO data: its len bytes ARE the table,
             // and pushing them would hand the descriptor array to pwritev as a WRITE's
             // payload -- the bytes the guest sees would be our own view of its request.
-            // This is also why there is no push(de->addr, de->len) anywhere above.
+            // This is also why there is no push(de.addr, de.len) anywhere above.
             //
-            // `tbl` is not re-validated after the walk, and the walk yields (translate
-            // takes a mutex and may ioctl on one transport). That is argued, not tested:
-            // the mappings a request holds are released only once no queue has anything
-            // in flight, and this request is counted in in_flight from before dispatch
-            // returned until handle_req's DEFER runs.
+            // `tbl` is not re-validated after the walk, and the walk is not atomic:
+            // translate takes a mutex that yields under contention, and on one transport
+            // it also ioctls and mmaps, which block this vcpu rather than yielding it.
+            // That is argued, not tested: the mappings a request holds are released only
+            // once no queue has anything in flight, and this request is counted in
+            // in_flight from before dispatch returned until handle_req's DEFER runs.
             if (bad)
                 break;
             // An indirect descriptor cannot carry NEXT (refused above), so there is
@@ -838,25 +855,25 @@ uint8_t virtio_blk_serve_chain(fs::IFile* backend, bool read_only, bool write_th
         // is the same bit that sorts the descriptor into a stream below. Deriving
         // it in one place is what keeps the permission a mapping is checked
         // against from being able to disagree with the stream the bytes land in.
-        bool writable = de->flags & VRING_DESC_F_WRITE;
-        void* va = translate(de->addr, de->len ? de->len : 1, writable);
+        bool writable = de.flags & VRING_DESC_F_WRITE;
+        void* va = translate(de.addr, de.len ? de.len : 1, writable);
         if (!va) {
             LOG_ERROR("virtio-blk `: unmappable buffer address ` len ` writable `",
-                      tag, de->addr, de->len, (int)writable);
+                      tag, de.addr, de.len, (int)writable);
             bad = true;
             break;
         }
         DescStream& s = writable ? wr : rd;
-        if (!s.push(va, de->len)) {
+        if (!s.push(va, de.len)) {
             LOG_ERROR("virtio-blk `: chain overflows the `-element scatter list", tag, MAX_DESC_CHAIN);
             bad = true;
             break;
         }
-        if (!(de->flags & VRING_DESC_F_NEXT)) {
+        if (!(de.flags & VRING_DESC_F_NEXT)) {
             chain_end = true;
             break;
         }
-        d = de->next;
+        d = de.next;
     }
     if (!chain_end && !bad) {
         // longer than MAX_DESC_CHAIN or circular (a buggy/malicious guest can
@@ -1087,6 +1104,16 @@ void VirtQueueServer::set_ring(vring_desc* d, vring_avail* a, vring_used* u, uin
 
 void VirtQueueServer::clear_ring() {
     set_ring(nullptr, nullptr, nullptr, 0);
+}
+
+void VirtQueueServer::republish_ring(vring_desc* d, vring_avail* a, vring_used* u, uint32_t n) {
+    desc = d;
+    avail = a;
+    used = u;
+    num = n;
+    // No bump, and so no release store either -- that omission is the whole point of
+    // this being a separate method rather than a set_ring() call. The two
+    // preconditions that make it admissible are the caller's; see the declaration.
 }
 
 bool VirtQueueServer::should_notify(uint16_t old_used_idx) {
@@ -1367,9 +1394,12 @@ void VirtQueueServer::handle_req(uint16_t head, uint64_t gen) {
     // This gates serve_chain and not only the completion below, because this
     // coroutine was queued by dispatch_avail and may run long after. serve_chain
     // bounds the descriptor INDEX against num but cannot tell a null desc from a
-    // valid one; no transport assigns those three directly -- set_ring() and
-    // clear_ring() are the only writers -- so the bump above is also what retires a
-    // request in front of a null one, and no separate validity hook is needed.
+    // valid one; no transport assigns those three directly -- set_ring(),
+    // clear_ring() and republish_ring() are the only writers -- so the bump above is
+    // also what retires a request in front of a null one, and no separate validity
+    // hook is needed. The third writer does not bump, and does not weaken this: it
+    // republishes a ring whose identity is unchanged, so it is no path to a request
+    // standing in front of a null desc.
     // (`num` is the exception: a transport may write it directly, and then the
     // engine is relying on that transport to have quiesced this queue first, since
     // num bounds serve_chain's descriptor index and divides in vring_used_append.

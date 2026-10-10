@@ -28,7 +28,7 @@ limitations under the License.
 // from accept_loop and the API calls, which is what BlkConfig::pool is for. They used
 // to need no guard, and three separate comments said so, on the strength of every
 // serving coroutine sharing the vcpu that called start(). What still needs no guard is
-// noted where it is relied on (depth/bytes, Conn::wlock).
+// noted where it is relied on (depth/bytes, Conn::wlock, Conn::stall_nesting).
 
 #include "blk.h"
 #include "nbd-proto.h"
@@ -240,27 +240,60 @@ static uint32_t errno_to_nbd(int e) {
     }
 }
 
-// Bounds the reads that must not wait forever. A photon socket stream applies its
-// timeout to a read() as a whole -- one deadline for the entire count -- so a WRITE
-// payload read under this guard either arrives or fails within `us`. skip_read is
-// weaker and this says so rather than pretending otherwise: it loops over 1 KiB
-// read()s, so what the guard bounds there is each chunk, and a client that dribbles
-// a byte every `us` keeps it alive. That costs nothing where it is used with
+// Bounds the reads and writes that must not wait forever. A photon socket stream
+// applies its timeout to a read() as a whole -- one deadline for the entire count --
+// so a WRITE payload read under this guard either arrives or fails within `us`.
+// skip_read is weaker and this says so rather than pretending otherwise: it loops over
+// 1 KiB read()s, so what the guard bounds there is each chunk, and a client that
+// dribbles a byte every `us` keeps it alive. That costs nothing where it is used with
 // skip_read, because neither of those two sites holds a gate while draining.
 // us == 0 means no deadline, and the stream's own timeout is restored rather than
 // assumed to have been unlimited.
+//
+// Guards on one stream OVERLAP, because the sites run on different coroutines of the
+// same connection: serve_conn arms one to read a WRITE payload while an execute
+// coroutine arms another to write its reply, and two execute coroutines arm one each
+// whenever a client pipelines. The stream has a single timeout, so a guard that saved
+// and restored it on its own account captured whatever a concurrent guard had already
+// installed instead of the stream's real baseline -- and the guard that left LAST wrote
+// that captured value back. What it captured was `us`, so the stream kept a deadline it
+// never had: the next read serve_conn performs is the idle wait for the client's next
+// request, which is the job and not a stall, so a merely thoughtful client got dropped
+// after stall_timeout. The other interleaving is worse -- the first guard to leave
+// clears the deadline while a second one is still counting on it.
+//
+// So the arming is depth-counted through state the connection owns: the guard that
+// takes the count off zero installs the deadline and remembers the baseline, the one
+// that brings it back to zero restores it, and the ones in between leave the stream
+// alone. Departure order then cannot matter, and a deadline stays installed for as long
+// as ANY guard on that stream is armed. No lock and no atomic: every guard on a
+// connection is armed by serve_conn or by an execute coroutine serve_conn created, and a
+// connection changes vcpu only at the single migration spawn_serve_conn performs before
+// any of those exist, so one OS thread performs every modification -- and each
+// modification is itself yield-free, so nothing can interleave with it.
+struct stall_state {
+    uint32_t depth = 0;   // guards armed on this stream right now
+    uint64_t saved = 0;   // the stream's timeout from before depth left zero
+};
+
 struct stall_guard {
     net::ISocketStream* s;
-    uint64_t saved;
+    stall_state* st;
     bool armed;
-    stall_guard(net::ISocketStream* stream, uint64_t us)
-        : s(stream), saved(stream->timeout()), armed(us != 0) {
-        if (armed)
+    stall_guard(net::ISocketStream* stream, uint64_t us, stall_state* nesting)
+        : s(stream), st(nesting), armed(us != 0) {
+        if (!armed)
+            return;
+        if (st->depth++ == 0) {
+            st->saved = s->timeout();
             s->timeout(us);
+        }
     }
     ~stall_guard() {
-        if (armed)
-            s->timeout(saved);
+        if (!armed)
+            return;
+        if (--st->depth == 0)
+            s->timeout(st->saved);
     }
 };
 
@@ -280,6 +313,12 @@ struct NbdDeviceImpl : NbdDevice {
                                 // detach(wait_pending) polls it on the caller's
                                 // vcpu while the execute coroutines bump it on
                                 // whichever vcpu serve_conn runs on.
+        // Shared by every stall_guard armed on `s` -- see stall_guard for why the
+        // arming has to be counted rather than saved-and-restored per guard, and for
+        // why this needs neither a lock nor an atomic. LAST, because the three
+        // `new Conn{s, ...}` sites are aggregate inits that pin only the leading
+        // members and leave the rest to their default initializers.
+        stall_state stall_nesting{};
     };
 
     NbdConfig cfg;
@@ -402,10 +441,18 @@ struct NbdDeviceImpl : NbdDevice {
         // detach() retains backend and own_backend (the caller keeps the backend
         // on a failed start, so detach-as-rollback must not delete it), but a
         // subsequent start() with a NEW backend would overwrite both without
-        // releasing the old ownership -- double-free at the next shutdown or
-        // destructor. Release any previously owned backend before taking the
-        // new one; only reachable after detach(true) since started guards above.
-        if (own_backend && backend) {
+        // releasing the old ownership -- the old backend is then unreachable, a
+        // leak. Release any previously owned backend before taking the new one;
+        // only reachable after detach(true) since started guards above.
+        //
+        // `!= bk` is what makes re-serving the SAME backend legal rather than fatal:
+        // a restart that hands back the pointer this object already owns is the
+        // caller re-asserting one ownership, not transferring a second one, and
+        // deleting here would assign the freed pointer straight back into backend --
+        // so shutdown() and the destructor would each delete it once more. blk.h's
+        // contract is exactly one delete per owned backend, whichever way the caller
+        // restarts.
+        if (own_backend && backend && backend != bk) {
             delete backend;
             backend = nullptr;
             own_backend = false;
@@ -668,7 +715,7 @@ struct NbdDeviceImpl : NbdDevice {
             retire_self();
         });
 
-        if (c->negotiate && negotiate(c->s) < 0)
+        if (c->negotiate && negotiate(c) < 0)
             return;
 
         while (!stopping.load(std::memory_order_relaxed)) {
@@ -688,7 +735,7 @@ struct NbdDeviceImpl : NbdDevice {
             bool need_buf = req.type == NBD_CMD_READ || req.type == NBD_CMD_WRITE;
             if (need_buf && req.length > MAX_BLOCK_SIZE) {
                 if (req.type == NBD_CMD_WRITE) {
-                    stall_guard stall(c->s, stall_us);
+                    stall_guard stall(c->s, stall_us, &c->stall_nesting);
                     if (!c->s->skip_read(req.length))
                         break;
                 }
@@ -727,7 +774,7 @@ struct NbdDeviceImpl : NbdDevice {
                     bytes.signal(cost);
                     depth.signal(1);
                     if (req.type == NBD_CMD_WRITE) {
-                        stall_guard stall(c->s, stall_us);
+                        stall_guard stall(c->s, stall_us, &c->stall_nesting);
                         if (!c->s->skip_read(req.length))
                             break;
                     }
@@ -744,7 +791,7 @@ struct NbdDeviceImpl : NbdDevice {
                     // Dropping the connection is the answer: the client still owes
                     // bytes this request will never receive, so the stream is out
                     // of step from here on whatever we replied.
-                    stall_guard stall(c->s, stall_us);
+                    stall_guard stall(c->s, stall_us, &c->stall_nesting);
                     if (c->s->read(buf, req.length) != (ssize_t)req.length) {
                         LOG_WARN("nbd: stall-timeout read failed on connection, dropping");
                         free(buf);
@@ -951,8 +998,24 @@ struct NbdDeviceImpl : NbdDevice {
         // reply write. The stall_guard bounds that wait so the tokens are freed
         // within stall_timeout rather than held indefinitely.
         {
-            stall_guard stall(c->s, stall_us);
-            send_reply(c, handle, err, (type == NBD_CMD_READ && err == NBD_SUCCESS) ? buf : nullptr, len);
+            stall_guard stall(c->s, stall_us, &c->stall_nesting);
+            // write() is the full-count variant, so what comes back is never a partial
+            // reply: -1 once that deadline expires or the peer is gone, a short count
+            // only at EOF. Either way this answer did not reach the client and never
+            // will, and there is nothing left to serve it -- every request behind this
+            // one fails the same way, each parking a queue-depth slot and its share of
+            // the byte budget for a whole stall_timeout, which is how a single client
+            // that stopped reading ends up holding the device's entire depth. Dropping
+            // the connection is the write-side twin of the stalled WRITE payload
+            // serve_conn drops for the same reason, and the half-close is what makes
+            // serve_conn's wait for the NEXT request return instead of blocking on a
+            // client that has just been written its last reply -- the same thing
+            // cleanup_runtime does to release an execute coroutine blocked here.
+            const void* data = (type == NBD_CMD_READ && err == NBD_SUCCESS) ? buf : nullptr;
+            if (send_reply(c, handle, err, data, len) < 0) {
+                LOG_WARN("nbd: reply write failed on a stalled or gone client, dropping the connection, handle `", handle);
+                c->s->shutdown(ShutdownHow::ReadWrite);
+            }
         }
     }
 
@@ -1098,14 +1161,18 @@ struct NbdDeviceImpl : NbdDevice {
         return match ? Name::MATCH : Name::MISMATCH;
     }
 
-    int negotiate(net::ISocketStream* s) {
+    // Takes the Conn rather than the bare stream because the handshake's guard has to
+    // share the connection's arming depth with the ones serve_conn and execute arm
+    // later on the same stream.
+    int negotiate(Conn* c) {
+        net::ISocketStream* s = c->s;
         // Every read of the handshake is bounded: a client that connects and then
         // stops mid-handshake holds a connection slot and this coroutine's stack
         // for as long as it likes, and cfg.timeout releases neither -- that one is
         // the kernel's request timeout for the loopback device. Restored on the way
         // out, because the transmission phase that follows has to leave an idle
         // client alone: waiting for its next request is the job, not a stall.
-        stall_guard stall(s, stall_us);
+        stall_guard stall(s, stall_us, &c->stall_nesting);
         NbdGreeting greeting{NBD_FLAG_FIXED_NEWSTYLE | NBD_FLAG_NO_ZEROES};
         greeting.encode();
         if (s->write(&greeting, sizeof(greeting)) != (ssize_t)sizeof(greeting))

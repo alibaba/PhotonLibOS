@@ -363,8 +363,17 @@ static constexpr uint64_t SENT_WAIT_US = (SENT_DEL_TIMEOUT_SECS + 30) * 1000000u
 static constexpr int SENT_SETTLE_TRIES = 50;
 
 // The sentinel's whole program: state and steps in one class, because this file has a
-// suite in it and nothing here may be reachable from a case. Every method is inline per
-// AGENTS.md's rule for a class defined entirely inside a .cpp.
+// suite in it and the child a case spawns cannot reach anything the parent's fixture
+// holds. Every method is inline per AGENTS.md's rule for a class defined entirely
+// inside a .cpp.
+//
+// One case drives serve_vq() directly rather than through run(): the recipe's serving
+// loop is the only part of blk/vduse-cli.cc this suite can reach at all, since the tool
+// itself needs root plus /dev/vduse/control and CI has neither, and the cursors that
+// loop ends on are 16 bits for reasons that have nothing to do with a live kernel. That
+// case builds its own rings and installs test_translate below, so nothing about the
+// child's own path changes -- run() never sets it, and every step the child takes is
+// still the recipe's.
 class VduseSentinel {
 public:
     // The report the harness publishes once run() returns. `stage` and `child_errno`
@@ -379,8 +388,25 @@ public:
     vring_desc* desc = nullptr;
     vring_avail* avail = nullptr;
     vring_used* used = nullptr;
-    uint32_t last_avail = 0, used_idx = 0;
+    // uint16_t because the vring's own indices are, and these two are compared with
+    // `!=` against `avail->idx` and stored into `used->idx`. Wider, serve_vq()'s exit
+    // test does not hold at the wrap: with last_avail at 65535 and avail->idx at 0 the
+    // loop keeps walking the ring instead of stopping after the one pending entry,
+    // leaking one mmap per descriptor it walks (map_iova never unmaps, deliberately)
+    // until the process hits vm.max_map_count -- and past 65535 the slot arithmetic
+    // takes the remainder of the WIDE cursor while the `used->idx` store that
+    // announces it truncates, so the consumer reads a used ring whose elements sit in
+    // slots its own index does not describe. The recipe's GET_VQ_STATE reply truncates
+    // the same way. serve_stops_at_the_avail_index_wrap is the case that pins this.
+    uint16_t last_avail = 0, used_idx = 0;
     bool vq_live = false;
+    // The suite's seam over the recipe's IOVA translation, and the one member here a
+    // sentinel child leaves alone: a child resolves through the kernel's lazy iotlb,
+    // while a case that drives serve_vq() on rings this process built has no
+    // registration to ask and installs its own. Null means "ask the kernel", which is
+    // what run() gets, so the child's behaviour is untouched by this existing.
+    void* (*test_translate)(void* ctx, uint64_t iova, size_t len) = nullptr;
+    void* test_ctx = nullptr;
 
     // The first failure wins, which is the rule the harness's own bodies follow: a later
     // one is usually the same cause surfacing somewhere else, and the first is the one
@@ -398,11 +424,16 @@ public:
     // vduse-cli.cc's map_iova(). The mapping is leaked on purpose, for the reason that
     // function's own header comment gives: a request's buffer can arrive while a
     // consumer is blocked waiting for it, so there is no safe moment to unmap -- and
-    // this process is one _exit() away from handing all of them back at once. No logging
-    // on the two failure paths, unlike the recipe's: this child's stdout and stderr are
-    // /dev/null (consumer_spawn redirects them so an abandoned child cannot hold a
-    // capture pipe open), so the failures travel in the report instead.
+    // this process is one _exit() away from handing all of them back at once. That leak
+    // is the kernel path's alone: an installed test_translate hands back pointers into
+    // the case's own arena and maps nothing, which is what lets a case drive serve_vq()
+    // in a loop without exhausting vm.max_map_count. No logging on the two failure
+    // paths, unlike the recipe's: this child's stdout and stderr are /dev/null
+    // (consumer_spawn redirects them so an abandoned child cannot hold a capture pipe
+    // open), so the failures travel in the report instead.
     void* map_iova(uint64_t iova, size_t need) {
+        if (test_translate)
+            return test_translate(test_ctx, iova, need);
         vduse_iotlb_entry e;
         memset(&e, 0, sizeof(e));
         e.start = iova;
@@ -462,7 +493,9 @@ public:
         if (!vq_live)
             return 0;
         __sync_synchronize();
-        uint32_t aidx = avail->idx;
+        // uint16_t, the width of the field it copies: see the cursor pair's declaration
+        // for what a wider one does to the exit test below.
+        uint16_t aidx = avail->idx;
         int served = 0;
         while (last_avail != aidx) {
             uint32_t head = avail->ring[last_avail % vq_num];
@@ -569,8 +602,11 @@ public:
                 vq_live = false;   // unmap-all: the vring is gone
             return reply(req.request_id, VDUSE_REQ_RESULT_OK, 0, 0);
         case VDUSE_GET_VQ_STATE:
+            // No cast, and that is the point of the cursor's width: this reply used to
+            // truncate a 32-bit cursor into the uapi's 16-bit avail_index, so the
+            // kernel was told a resume point the serve loop had already walked past.
             return reply(req.request_id, VDUSE_REQ_RESULT_OK, req.vq_state.index,
-                         (uint16_t)last_avail);
+                         last_avail);
         default:
             return reply(req.request_id, VDUSE_REQ_RESULT_OK, 0, 0);
         }
@@ -2214,6 +2250,57 @@ TEST_F(VduseTest, daemon_restart_io) {
     w.stop();
 }
 
+// A restart that hands back the SAME backend. detach() deliberately retains
+// `backend` and `own_backend` -- a caller keeps its backend when a start fails, so
+// detach-as-rollback must not delete it -- and start() therefore releases a previously
+// owned backend before taking the new one. "Previously owned" is not the same as
+// "different": start(bk, true) after detach(true) hands the identical pointer back, and
+// a release that fires on it deletes the caller's object and then stores the freed
+// pointer with ownership set again, so the new session serves through a dangling
+// backend and shutdown() frees it a second time.
+//
+// The oracle is the descriptor count, read across two otherwise identical
+// start/detach cycles. The backend here is a localfs IFile, so the destructor the buggy
+// release runs closes its fd -- which is what makes the second cycle come back one
+// descriptor short, BEFORE anything frees twice. Asserting on that rather than only on
+// surviving shutdown is what turns the failure into a reported expectation instead of an
+// allocator abort that takes the rest of the suite's cases with it.
+//
+// No consumer attaches, and that is deliberate: the question is who owns the IFile, not
+// whether a ring is served, and the second start reaches the adoption path either way
+// (detach left the registration standing for exactly that). With no ring ready, the
+// adoption's resolve of it never runs, so this case says nothing about that check.
+TEST_F(VduseTest, restart_with_the_same_backend_frees_it_once) {
+    if (skip_reason) return;
+    BlkConfig cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    // OWNED by the device from here on, so this case must not delete it: start(bk, true)
+    // is what makes shutdown() the thing that finally releases it, and a second owner
+    // would be the same defect this case exists to catch.
+    auto* owned = lfs_open_dummy();
+    ASSERT_NE(nullptr, owned);
+
+    ASSERT_EQ(0, dev->start(owned, true));
+    ASSERT_EQ(0, dev->detach(true));
+    int fds_first_cycle = fd_count();
+
+    ASSERT_EQ(0, dev->start(owned, true));   // the identical pointer
+    ASSERT_EQ(0, dev->detach(true));
+    // A release that fired on the pointer it already held closed `owned`'s fd during
+    // the second start, so this is the difference between the two cycles and nothing
+    // else: both starts end holding the same three descriptors and both detaches give
+    // all three back.
+    EXPECT_EQ(fds_first_cycle, fd_count())
+        << "the second start released a backend it was handed back, not a new one";
+
+    // The free itself. Once, here -- under the mutation this is the second one, and it
+    // is reached only because the expectation above already recorded the cause.
+    ASSERT_EQ(0, dev->start(owned, true));
+    EXPECT_EQ(0, dev->shutdown());
+}
+
 // BlkConfig::queues decides how many virtqueues a vduse device serves, and the
 // count is observable without trusting our own config: the kernel creates one
 // directory per hardware queue under /sys/block/<node>/mq/ -- the node being
@@ -3154,6 +3241,162 @@ TEST_F(VduseTest, indirect_desc_is_not_offered_on_this_transport) {
         << "SEG_MAX is offered on both transports";
     // and the device still serves: refusing to offer bit 28 is not refusing to work
     EXPECT_EQ(0, device_io(node, pattern(0x5a), true));
+}
+
+// The rings one case drives the rescue sentinel's serve loop with, built entirely in
+// this process: no registration, no consumer, no kernel and no root, which is what
+// makes this the one part of blk/vduse-cli.cc's recipe the suite can reach. IOVA space
+// is the byte offset into `data`, so a descriptor's address reads as an offset and the
+// translation below still bounds-checks it the way Iotlb::resolve does.
+struct SentinelRing {
+    // 128 is the ring size vduse-cli.cc's probe declares, and a power of two so that
+    // the two remainders serve_vq() takes are the ones a real driver's ring produces.
+    static constexpr uint32_t NUM = 128;
+    static constexpr uint16_t HEAD = 0;
+    // The one pending request is a FLUSH: two descriptors, a device-readable header and
+    // the device-writable status byte, and no data buffer -- so the used element it
+    // publishes has a length the case can state exactly.
+    static constexpr uint64_t HDR_IOVA = 0;
+    static constexpr uint64_t STATUS_IOVA = 64;
+    static constexpr uint64_t DATA_BYTES = 128;
+    // The cursors sit one short of the wrap, which is the only place their width is
+    // observable: avail->idx has gone round to 0 while used->idx has not.
+    static constexpr uint16_t WRAP_FROM = 65535;
+    static constexpr uint32_t SLOT = WRAP_FROM % NUM;
+    // The mutation's deadline rather than a limit the recipe has. serve_vq() treats a
+    // null translation exactly as it treats a descriptor the kernel would not map and
+    // returns what it has served so far, so cursors widened past 16 bits fail the
+    // assertions below after a couple of thousand iterations instead of running 2^32 of
+    // them and taking the whole suite's timeout with them. One FLUSH costs two
+    // translations, so this is three orders of magnitude above what the case asks for --
+    // and the case asserts it was never reached, which is what separates "the loop
+    // ended" from "the arena refused".
+    static constexpr int TRANSLATE_BUDGET = 4096;
+    static constexpr size_t AVAIL_ELEMS = 3 + NUM;   // flags, idx, ring[], used_event
+    static constexpr size_t USED_BYTES = sizeof(uint16_t) * 3 + sizeof(vring_used_elem) * NUM;
+
+    // uint64_t and uint32_t rather than bytes, so that the two casts below are to a
+    // pointer whose alignment the storage already has instead of one it might not.
+    std::vector<uint64_t> data;
+    std::vector<vring_desc> desc;
+    std::vector<uint16_t> avail_mem;
+    std::vector<uint32_t> used_mem;
+    vring_avail* avail = nullptr;
+    vring_used* used = nullptr;
+    int translations = 0;
+
+    SentinelRing() {
+        data.resize(DATA_BYTES / sizeof(uint64_t), 0);
+        desc.resize(NUM);
+        avail_mem.resize(AVAIL_ELEMS, 0);
+        used_mem.resize((USED_BYTES + sizeof(uint32_t) - 1) / sizeof(uint32_t), 0);
+        avail = (vring_avail*)avail_mem.data();
+        used = (vring_used*)used_mem.data();
+
+        auto* hdr = (::virtio_blk_outhdr*)data.data();
+        hdr->type = VIRTIO_BLK_T_FLUSH;
+        hdr->ioprio = 0;
+        hdr->sector = 0;
+
+        desc[HEAD].addr = HDR_IOVA;
+        desc[HEAD].len = sizeof(::virtio_blk_outhdr);
+        desc[HEAD].flags = VRING_DESC_F_NEXT;
+        desc[HEAD].next = HEAD + 1;
+        desc[HEAD + 1].addr = STATUS_IOVA;
+        desc[HEAD + 1].len = 1;
+        desc[HEAD + 1].flags = VRING_DESC_F_WRITE;
+        desc[HEAD + 1].next = 0;
+
+        // The driver has published one entry past the wrap and its own index has gone
+        // round, so exactly one completion is owed and the serve loop has to stop after
+        // publishing it. Every other slot holds a chain head of 0 by construction, which
+        // is what a widened cursor walks into instead.
+        avail->flags = 0;
+        avail->idx = 0;
+        avail->ring[SLOT] = HEAD;
+        used->flags = 0;
+        used->idx = WRAP_FROM;
+    }
+
+    uint8_t status_byte() const {
+        return *(const uint8_t*)((const uint8_t*)data.data() + STATUS_IOVA);
+    }
+
+    // Installed as the sentinel's test_translate. Bounds-checked on both ends, since a
+    // descriptor's address and length are exactly as hostile here as they are in the
+    // recipe -- the difference is that the answer comes out of an arena instead of an
+    // mmap.
+    static void* translate(void* ctx, uint64_t iova, size_t len) {
+        auto* r = (SentinelRing*)ctx;
+        if (++r->translations > TRANSLATE_BUDGET)
+            return nullptr;
+        if (len > DATA_BYTES || iova > DATA_BYTES - len)
+            return nullptr;
+        return (uint8_t*)r->data.data() + iova;
+    }
+};
+
+// The rescue recipe's serve loop ends where the driver said it should, at the wrap.
+//
+// WHY THIS IS PINNED HERE AND NOT ONLY IN blk/vduse-cli.cc. That file's laxity note
+// covers what a hostile ring may make its walk do -- the 32-step descriptor cap, the
+// indices it does not bound against the ring size, the drain with no in-flight limit --
+// and none of it covers this. The cursors are the instrument's own correctness, in the
+// tool that gets copied onto a machine which is ALREADY wedged, and rescue's main loop
+// stops polling for control messages while it is inside serve_vq: a serve that does not
+// end is a rescue that stops answering the kernel, which bricks the device at
+// msg_timeout and turns the recovery into the recovery's own failure. Widened to 32
+// bits the loop also leaks one mmap per descriptor walked until vm.max_map_count, and
+// publishes a used ring whose slots were chosen with the wide cursor while the
+// `used->idx` store that announces them truncated.
+//
+// Ungated on purpose: the recipe needs root plus /dev/vduse/control, which CI has
+// neither of, and this needs neither. It is also the only thing in this file that can
+// reach the rescue recipe's serving loop at all -- every other case either drives the
+// transport or spawns the sentinel as a child, and a child's cursors are not something
+// a parent can assert on.
+TEST(VduseSentinelTest, serve_stops_at_the_avail_index_wrap) {
+    SentinelRing ring;
+    VduseSentinel s;
+    s.test_translate = &SentinelRing::translate;
+    s.test_ctx = &ring;
+    s.vq_num = SentinelRing::NUM;
+    s.desc = ring.desc.data();
+    s.avail = ring.avail;
+    s.used = ring.used;
+    // The state vq_refresh() leaves on the rescue side, which is where these cursors
+    // come from in a real run: resume from used->idx, because the kernel's avail_index
+    // is only what the daemon that is now gone last reported.
+    s.used_idx = s.used->idx;
+    s.last_avail = s.used_idx;
+    s.vq_live = true;
+
+    int served = s.serve_vq();
+
+    // One completion, and the loop is out: the cursor wrapped round to meet avail->idx
+    // instead of running away from it.
+    EXPECT_EQ(1, served);
+    EXPECT_EQ(0, (int)s.last_avail);
+    EXPECT_EQ(0, (int)s.used_idx);
+    EXPECT_EQ(0, (int)s.used->idx);
+    // Published into the slot the 16-bit cursor names, describing the chain that was
+    // really served: a FLUSH moves no data, so the length is the status byte alone.
+    EXPECT_EQ((uint32_t)SentinelRing::HEAD, ring.used->ring[SentinelRing::SLOT].id);
+    EXPECT_EQ(1u, ring.used->ring[SentinelRing::SLOT].len);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, ring.status_byte());
+    // Non-vacuity, and the half that makes the four above mean something: the loop
+    // ended because it was finished, not because the arena ran out of translations and
+    // serve_vq() bailed on a null the way it does for a descriptor the kernel would not
+    // map. Without this, a mutation that widens the cursors could look like a pass on
+    // `served` alone only if it also happened to stop -- and the budget is what stops
+    // it, at 2048 rather than at 1.
+    //
+    // Copied into a local first: gtest binds an expectation's operands by reference, and
+    // this suite builds at C++14 by default, where a reference bound to a static
+    // constexpr member is an odr-use that needs an out-of-line definition the class does
+    // not have. Every other read of these constants above is a value read and is fine.
+    const int budget = SentinelRing::TRANSLATE_BUDGET;
+    EXPECT_LT(ring.translations, budget);
 }
 
 }  // namespace blk

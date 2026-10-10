@@ -838,6 +838,34 @@ TEST(iovector, pipe) {
             {172, 83, 123, 128, 32, 64}, 321);
 }
 
+TEST(iovector, is_zero)
+{
+    // is_zero() reads eight bytes at a time, but slice() can start a view at
+    // any byte offset, so those reads must not assume alignment. Misaligned
+    // loads are UB that only UBSan reports, and no target here builds with
+    // -fsanitize=, so in CI this case passes whether or not the loads are
+    // aligned: it pins the returned values, not the alignment fix.
+    {
+    // 16 bytes from one past an 8-byte boundary, so the set byte falls inside
+    // the second word rather than in the tail
+    alignas(8) unsigned char bytes[17]{};
+    bytes[9] = 1;
+    iovec iov{bytes + 1, 16};
+    EXPECT_FALSE(iovector_view(&iov, 1).is_zero());
+    bytes[9] = 0;
+    EXPECT_TRUE(iovector_view(&iov, 1).is_zero());
+    }
+    {
+    // 10 bytes from three past an 8-byte boundary: one word, then a 2-byte
+    // tail that holds the set byte
+    alignas(8) unsigned char bytes[13]{};
+    iovec iov{bytes + 3, 10};
+    EXPECT_TRUE(iovector_view(&iov, 1).is_zero());
+    bytes[12] = 1;
+    EXPECT_FALSE(iovector_view(&iov, 1).is_zero());
+    }
+}
+
 // #ifdef GIT_VERSION
 #define _STR(x) #x
 #define STR(x) _STR(x)

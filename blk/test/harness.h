@@ -137,7 +137,14 @@ public:
     // order assertable at all -- ungated, the window the drain has to win is a few
     // microseconds wide and an assertion on it would be a timing guess. Off by
     // default, so an ungated RecordingFile stays exactly the placement probe above.
-    bool gated = false;
+    //
+    // atomic, and not a plain bool guarded by m_lock: the writer is the test body on
+    // its own OS thread and the readers are serving coroutines on the pool vcpus, so
+    // the flag crosses threads. A lock would be correct but would also destroy the
+    // instrument -- record() has to test this BEFORE taking m_lock, because parking
+    // under the lock admits the gated IOs one at a time and the pinned state this
+    // exists to create never arises. See record().
+    std::atomic<bool> gated{false};
     // Resume every parked IO at once. `n` only has to be at least the number still
     // parked, which a teardown's interrupt can make fewer than reached the gate;
     // whatever is left over stays in the count and is harmless.

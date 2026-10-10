@@ -290,7 +290,24 @@ struct Vq {
     struct vring_desc *desc;
     struct vring_avail *avail;
     struct vring_used *used;
-    unsigned last_avail, used_idx;
+    // uint16_t because the vring's own indices are, and these two are compared with
+    // `!=` against `avail->idx` and stored into `used->idx`. Wider, the comparison
+    // does not terminate at the wrap: with last_avail at 65535 and avail->idx at 0
+    // the serve loop keeps walking the ring instead of stopping after the one entry
+    // that was pending, leaking one mmap per descriptor it walks (map_iova never
+    // unmaps, deliberately) until the process hits vm.max_map_count. Past 65535 the
+    // two also stop agreeing with what is published: the slot arithmetic below takes
+    // the remainder of the WIDE cursor while the `used->idx` store that announces it
+    // truncates, so the consumer reads a used ring whose elements sit in slots its own
+    // index does not describe -- and GET_VQ_STATE answers the kernel with a truncated
+    // cursor it derived from a wide one. rescue's main loop stops polling for control
+    // messages while it is inside serve_vq, so a serve that does not end is a rescue
+    // that stops answering the kernel and bricks the device at msg_timeout.
+    //
+    // This is the instrument's own correctness, and is NOT one of the laxities the
+    // header comment above declares: that list is about what a hostile ring may make
+    // this walk do, while these two are about the walk ending where the driver said.
+    uint16_t last_avail, used_idx;
     int live;             // rings mapped and safe to serve
 };
 static struct Vq vqs[MAX_VQS];
@@ -437,7 +454,9 @@ static int serve_vq(struct Vq &vq) {
     if (!vq.live)
         return 0;
     __sync_synchronize();
-    unsigned aidx = vq.avail->idx;
+    // uint16_t, the width of the field it copies: see struct Vq's cursors for what a
+    // wider one does to the loop's exit test.
+    uint16_t aidx = vq.avail->idx;
     int served = 0;
     while (vq.last_avail != aidx) {
         unsigned head = vq.avail->ring[vq.last_avail % vq.vq_num];
@@ -588,7 +607,7 @@ static bool handle_one_msg() {
         // about to serve -- the same mistake as serving the wrong queue.
         if (i >= nvqs)
             LOG_ERROR("MSG #` GET_VQ_STATE for index ` of ` discovered queues", msgs, i, nvqs);
-        unsigned la = i < nvqs ? vqs[i].last_avail : 0;
+        uint16_t la = i < nvqs ? vqs[i].last_avail : 0;
         LOG_INFO("MSG #` GET_VQ_STATE vq ` -> avail ", msgs, i, la);
         reply(req.request_id, VDUSE_REQ_RESULT_OK, i, la);
         break;

@@ -361,6 +361,46 @@ void* directed_translate(void* a, uint64_t addr, size_t len, bool writable) {
     return chain_translate(&g->c, addr, len, writable);
 }
 
+// A translate that models the guest rewriting its own descriptor while the device is
+// mapping it. That interleaving needs no cooperation from our scheduler: the ring is
+// guest memory, another of the guest's vCPUs can store into it at any instruction of
+// ours, and on one transport the window between two reads of one descriptor can be an
+// ioctl and an mmap wide.
+//
+// The rewrite is placed INSIDE the hook rather than raced from a second thread
+// because the hook IS the window -- a thread would have to win a few-instruction race
+// to land its store there, and a case that only usually fails is a case that usually
+// books a kill it did not make. What this expresses is the interleaving without the
+// timing: the first read of the descriptor has happened, the second has not.
+struct RacingGuest {
+    GuestChain c;
+    // Which descriptor to rewrite, named by the buffer address its translate arrives
+    // with, plus where that descriptor lives -- the ring, or a table inside c.mem.
+    // Both halves are needed: the address says WHEN, and the hook has no other way to
+    // name the slot.
+    uint64_t mutate_addr = UINT64_MAX;
+    vring_desc* slot = nullptr;
+    uint32_t new_len = 0;
+    bool rewrite_flags = false;
+    uint16_t new_flags = 0;
+    int mutations = 0;               // the non-vacuity control every case asserts on
+    std::vector<uint32_t> asked_len;   // the length translate was asked to validate
+};
+
+void* racing_translate(void* a, uint64_t addr, size_t len, bool writable) {
+    auto* g = (RacingGuest*) a;
+    g->asked_len.push_back((uint32_t) len);
+    if (addr == g->mutate_addr) {
+        g->mutations++;
+        g->slot->len = g->new_len;
+        if (g->rewrite_flags)
+            g->slot->flags = g->new_flags;
+    }
+    // Containment is answered for the length THIS call was given, which is what a
+    // transport does: it validated that length and no other.
+    return chain_translate(&g->c, addr, len, writable);
+}
+
 // The containment predicate the translate obligation is discharged with, against the
 // two rows the review that added it demonstrated: a mapping of [0x2000,0x2fff] was
 // being accepted both for a request that ran past its end and for one that started
@@ -524,6 +564,16 @@ public:
         return virtio_blk_serve_chain(img.file, false, false, allow_indirect, CHAIN_SERIAL, "vq",
                                       g.c.desc.data(), 0, RING_NUM, CHAIN_CAPACITY,
                                       tr, written);
+    }
+    // The same walk through a translate that rewrites one descriptor on the way past,
+    // which is the window between the engine's two reads of it. `backend` defaults to
+    // the image; the cases that read the scatter list pass a ScatterProbe.
+    uint8_t serve_racing(RacingGuest& g, uint32_t* written, fs::IFile* backend = nullptr) {
+        VirtioBlkTranslate tr;
+        tr.bind(&g, &racing_translate);
+        return virtio_blk_serve_chain(backend ? backend : img.file, false, false, true,
+                                      CHAIN_SERIAL, "vq", g.c.desc.data(), 0, RING_NUM,
+                                      CHAIN_CAPACITY, tr, written);
     }
 };
 
@@ -1187,6 +1237,129 @@ TEST_F(ChainFixture, a_buffer_whose_mapping_forbids_the_access_is_refused_as_ioe
 }
 
 // ---------------------------------------------------------------------------
+// One read of a guest-owned field
+//
+// Range-checking a peer-supplied integer is only half the obligation: the value
+// checked and the value used have to be the same value, and the ring stays writable
+// while its request is served, so a field read twice can answer twice. The window
+// between the two reads of one descriptor is that descriptor's translate -- which can
+// be an ioctl and an mmap on one transport, and is a few integer comparisons on the
+// other -- and the field whose second read costs something is the length: translate
+// validated one range and the iovec carries another.
+//
+// Three cases, one per site where a re-read changes an answer: the length of a ring
+// descriptor, the length of a table entry (further down, with the indirect cases,
+// because that is a second walk with its own copy), and the NEXT flag, whose second
+// read has a different consequence -- a chain that ends early is treated as complete,
+// so the writable stream's last byte is a DATA byte and the request is served one byte
+// short of what the driver named.
+//
+// What these cases pin is the invariant, not a timing: they cannot witness how WIDE
+// the production window is, and on the transport where it is a few integer comparisons
+// wide a hostile guest still gets to retry it in a loop.
+// ---------------------------------------------------------------------------
+
+// The reviewer's probe in the engine's own terms: validated_mapping=512,
+// backend_read_length=1024, result=OK. Which assertion carries what:
+//   mutations == 1        non-vacuity. Without it a rewrite that never landed would
+//                         leave a normally served chain passing every check below, and
+//                         the case would book a kill it did not make.
+//   asked_len == iov_len  THE invariant, and the one a second read of the length
+//                         breaks: the left side stays 512 either way, the right side
+//                         is what push() was handed.
+//   the victim memcmp     the consequence rather than the bookkeeping -- preadv filled
+//                         512 bytes of a guest range no descriptor named. In a
+//                         transport that is past the end of an mmap.
+//   w, the status byte    the request completed, so the three above are not the
+//   and the payload       silence of a refusal
+TEST_F(ChainFixture, a_descriptor_lengthened_while_it_is_translated_does_not_lengthen_the_request) {
+    RacingGuest g;
+    put_header(g.c, VIRTIO_BLK_T_IN);        // readable, descriptor 0
+    size_t doff = g.c.place(nullptr, 512);   // the READ's destination, descriptor 1
+    memset(g.c.at(doff), SENTINEL, 512);
+    g.c.add(doff, 512, VRING_DESC_F_WRITE);
+    size_t voff = g.c.place(nullptr, 512);   // guest memory just past that buffer
+    memset(g.c.at(voff), SENTINEL, 512);
+    size_t st = put_status(g.c);             // writable, descriptor 2
+    g.c.finish();
+
+    // Two sectors of source, so a READ that overruns its buffer has backend bytes to
+    // put in the victim, and so the request stays inside capacity either way -- the
+    // length is what differs here, not the bound on it.
+    std::vector<uint8_t> src(1024);
+    fill_pattern(src.data(), src.size(), 0x55);
+    ASSERT_EQ((ssize_t) 1024,
+              img.file->pwrite(src.data(), src.size(), (off_t) (CHAIN_SECTOR << 9)));
+    ScatterProbe backend(img.file);
+
+    g.mutate_addr = doff;
+    g.slot = &g.c.desc[1];
+    g.new_len = 1024;   // twice what translate is about to be asked to validate
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_racing(g, &w, &backend));
+    EXPECT_EQ(1, g.mutations) << "the rewrite never landed, so this case proved nothing";
+
+    ASSERT_EQ(3u, g.asked_len.size());   // header, destination, status
+    EXPECT_EQ(512u, g.asked_len[1]) << "translate was not asked about the buffer it validated";
+    ASSERT_EQ(1u, backend.calls.size());
+    ASSERT_EQ(1, backend.calls[0].iovcnt);
+    EXPECT_EQ(g.asked_len[1], backend.calls[0].len[0])
+        << "the scatter list carries a length translate never validated";
+
+    std::vector<uint8_t> victim(512, SENTINEL);
+    EXPECT_EQ(0, memcmp(victim.data(), g.c.at(voff), victim.size()))
+        << "the backend wrote past the buffer its descriptor named";
+    EXPECT_EQ(0, memcmp(src.data(), g.c.at(doff), 512))
+        << "the buffer that WAS named did not get the bytes";
+    EXPECT_EQ(513u, w);   // 512 of data plus the status byte
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *g.c.at(st));
+}
+
+// The flag whose second read changes an answer, and a different consequence: a NEXT
+// that disappears mid-walk ends the chain at the descriptor before the status, the
+// engine takes that for a complete chain, and wr.tail(1) then hands out the payload's
+// last byte as the status. That is precisely the shape the indirect branch refuses at
+// its own INDIRECT-with-NEXT check, arriving instead through the back door of a
+// re-read. The backend call count is the assertion that cannot be satisfied by a
+// refusal: a chain that ended early issues no IO at all.
+TEST_F(ChainFixture, a_next_flag_cleared_while_the_buffer_is_translated_does_not_end_the_chain) {
+    RacingGuest g;
+    put_header(g.c, VIRTIO_BLK_T_IN);
+    size_t doff = g.c.place(nullptr, 512);
+    memset(g.c.at(doff), SENTINEL, 512);
+    g.c.add(doff, 512, VRING_DESC_F_WRITE);
+    size_t st = put_status(g.c);
+    g.c.finish();
+
+    std::vector<uint8_t> src(512);
+    fill_pattern(src.data(), src.size(), 0x66);
+    ASSERT_EQ((ssize_t) 512,
+              img.file->pwrite(src.data(), src.size(), (off_t) (CHAIN_SECTOR << 9)));
+    ScatterProbe backend(img.file);
+
+    g.mutate_addr = doff;
+    g.slot = &g.c.desc[1];
+    g.new_len = 512;   // the length is not this case's subject
+    g.rewrite_flags = true;
+    g.new_flags = VRING_DESC_F_WRITE;   // what it held, minus NEXT
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_racing(g, &w, &backend));
+    EXPECT_EQ(1, g.mutations) << "the rewrite never landed, so this case proved nothing";
+
+    ASSERT_EQ(1u, backend.calls.size()) << "the walk ended before the status descriptor";
+    ASSERT_EQ(1, backend.calls[0].iovcnt);
+    EXPECT_EQ(512u, backend.calls[0].len[0]);
+    EXPECT_EQ(513u, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *g.c.at(st));
+    // The payload kept all 512 of its bytes: the truncated chain writes the status
+    // over the last of them and leaves the guest's own status byte untouched.
+    EXPECT_EQ(0, memcmp(src.data(), g.c.at(doff), src.size()))
+        << "the payload's last byte was handed out as the status";
+}
+
+// ---------------------------------------------------------------------------
 // indirect tables
 //
 // GuestChain::mem IS the guest memory, so a table is just another placed range:
@@ -1583,6 +1756,56 @@ TEST_F(ChainFixture, the_table_is_translated_read_only_and_first) {
     EXPECT_EQ(1, g.asked_writable[2]);
     EXPECT_EQ((uint64_t) st, g.asked_addr[3]);
     EXPECT_EQ(1, g.asked_writable[3]);
+}
+
+// The length re-read inside a TABLE walk, which is a second walk with its own copy of
+// each entry and its own translate per entry. Every expectation is the direct chain's,
+// with the asked-length index shifted by the table's own translate -- which comes
+// first, as the case above pins.
+TEST_F(ChainFixture, a_table_entry_lengthened_while_it_is_translated_does_not_lengthen_the_request) {
+    RacingGuest g;
+    size_t hoff = put_table_header(g.c, VIRTIO_BLK_T_IN);
+    size_t doff = g.c.place(nullptr, 512);   // the READ's destination
+    memset(g.c.at(doff), SENTINEL, 512);
+    size_t voff = g.c.place(nullptr, 512);   // guest memory just past that buffer
+    memset(g.c.at(voff), SENTINEL, 512);
+    size_t st = g.c.place(nullptr, 1);
+    *g.c.at(st) = SENTINEL;
+
+    IndirectTable t;
+    t.c = &g.c;
+    vring_desc* tbl = t.begin(3, 3);
+    tbl[0] = vring_desc{hoff, sizeof(virtio_blk_outhdr), VRING_DESC_F_NEXT, 1};
+    tbl[1] = vring_desc{doff, 512, (uint16_t) (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT), 2};
+    tbl[2] = vring_desc{st, 1, VRING_DESC_F_WRITE, 0};
+    t.publish(0);
+
+    std::vector<uint8_t> src(1024);
+    fill_pattern(src.data(), src.size(), 0x77);
+    ASSERT_EQ((ssize_t) 1024,
+              img.file->pwrite(src.data(), src.size(), (off_t) (CHAIN_SECTOR << 9)));
+    ScatterProbe backend(img.file);
+
+    g.mutate_addr = doff;
+    g.slot = &tbl[1];   // the table is guest memory too, and this is where it lives
+    g.new_len = 1024;
+
+    uint32_t w = 0;
+    EXPECT_EQ(VIRTIO_BLK_S_OK, serve_racing(g, &w, &backend));
+    EXPECT_EQ(1, g.mutations) << "the rewrite never landed, so this case proved nothing";
+
+    ASSERT_EQ(4u, g.asked_len.size());   // the table itself, then its three entries
+    EXPECT_EQ(512u, g.asked_len[2]);
+    ASSERT_EQ(1u, backend.calls.size());
+    ASSERT_EQ(1, backend.calls[0].iovcnt);
+    EXPECT_EQ(g.asked_len[2], backend.calls[0].len[0])
+        << "the scatter list carries a length translate never validated";
+
+    std::vector<uint8_t> victim(512, SENTINEL);
+    EXPECT_EQ(0, memcmp(victim.data(), g.c.at(voff), victim.size()))
+        << "the backend wrote past the buffer its table entry named";
+    EXPECT_EQ(513u, w);
+    EXPECT_EQ(VIRTIO_BLK_S_OK, *g.c.at(st));
 }
 
 // The table descriptor carries NO data. Its len bytes ARE the table, so pushing them

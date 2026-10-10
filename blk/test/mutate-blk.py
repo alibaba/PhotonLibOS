@@ -27,6 +27,11 @@ no-op. An anchor that matched nothing would leave an unmutated binary in place,
 and the green that binary then reports is the worst possible outcome -- it books
 a kill that never happened.
 
+An anchor that embeds a C++ comment rots when that comment is reworded, which is
+an edit nobody thinks of as touching this file. One of them did rot that way. So
+run `check` after editing any file an anchor names: it fails loudly, but only
+when someone runs it, and nothing else in the build notices.
+
 A third outcome is possible and is worse than a survival: a mutation that does
 not compile. It is neither killed nor survived, and it poisons the next round,
 because the build leaves the previous binary in place and that binary still
@@ -478,17 +483,17 @@ NBD_CONN_NO_MIGRATE = """    }
 """
 
 # ---- blk/utils.cpp ----
-# The guard's own comment goes with the term it explains; keeping it would leave a
-# four-line justification for a check that is no longer performed.
+# Deliberately excludes the guard's own comment. Embedding the comment made this anchor
+# rot the first time that comment was reworded: f3f01d9 grew it from three lines to six,
+# and `check` then reported CHECK_ANCHOR for a mutant whose target code was untouched.
+# What this mutant changes is the CODE -- it drops the empty-pool term -- so the anchor
+# names only code. The consequence is that the mutant leaves a comment explaining a check
+# it just removed; that reads oddly and is inert.
 UTILS_MIGRATE_GUARD = """    if (!pool || !th || pool->get_vcpu_num() == 0)
-        return;   // the empty-pool test is load-bearing, not tidiness: WorkPool
-                  // resolves an out-of-range index with `vcpu_index++ % size`,
-                  // and size == 0 there is a SIGFPE
-"""
+        return;"""
 
 UTILS_MIGRATE_GUARD_NO_EMPTY = """    if (!pool || !th)
-        return;
-"""
+        return;"""
 
 # The three pieces noenginecheck has to remove together; see its entry above for
 # the -Werror chain that makes one or two of them a build failure.

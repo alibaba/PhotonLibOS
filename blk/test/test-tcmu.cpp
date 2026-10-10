@@ -333,6 +333,72 @@ struct Operator {
     }
 };
 
+// A backend whose fallocate always fails EOPNOTSUPP, so IFile::trim() and
+// IFile::zero_range() -- both plain wrappers over the VIRTUAL fallocate -- are
+// unsupported and zero_fill() must fall back to writing zeroes through pwritev.
+// This is the backend shape that makes the LBPRZ contract observable: the device
+// advertises LBPRZ (reads after an unmap return zeros), so an unmap the backend
+// cannot punch a hole for still has to zero the range rather than report GOOD over
+// the old bytes. Does NOT own the wrapped file, exactly as BackendProbe does not.
+class NoTrimFile : public test::BackendProbe {
+public:
+    explicit NoTrimFile(fs::IFile* f) : test::BackendProbe(f) {}
+    int fallocate(int, off_t, off_t) override { errno = EOPNOTSUPP; return -1; }
+};
+
+// One SG_IO passthrough to the tcm_loop LUN, so a case can send a raw CDB the block
+// layer would never build (a malformed WRITE SAME, a transfer count that disagrees
+// with the buffer) and read back OUR sense. tcmu forwards the raw CDB to the ring
+// (the kernel's tcmu_parse_cdb is passthrough_parse_cdb), so what returns is
+// emul_*'s own reply -- the same property unknown_opcode relies on. CALL FROM OFF
+// THE VCPU: open_node and the ioctl block. Returns 0 if SG_IO itself ran (status
+// and sense are then valid), else the errno.
+struct SgResult {
+    uint8_t status = 0xff;      // SAM_STAT_*
+    unsigned sb_len = 0;        // sense bytes returned
+    uint8_t sense[64] = {};
+    int key()  const { return sb_len >= 3  ? (int)(sense[2] & 0x0f) : -1; }
+    int asc()  const { return sb_len >= 13 ? (int)sense[12] : -1; }
+    int ascq() const { return sb_len >= 14 ? (int)sense[13] : -1; }
+};
+
+static int sg_io(const std::string& sd, const uint8_t* cdb, size_t cdb_len,
+                 void* data, size_t data_len, int dxfer, SgResult& out) {
+    int fd = open_sd(sd, O_RDWR);
+    if (fd < 0) fd = open_sd(sd, O_RDONLY);
+    if (fd < 0) return errno ? errno : EIO;
+    DEFER(::close(fd));
+    sg_io_hdr_t h;
+    memset(&h, 0, sizeof(h));
+    h.interface_id = 'S';
+    h.cmdp = const_cast<uint8_t*>(cdb);
+    h.cmd_len = cdb_len;
+    if (data && data_len) {
+        h.dxferp = data;
+        h.dxfer_len = data_len;
+        h.dxfer_direction = dxfer;
+    } else {
+        h.dxfer_direction = SG_DXFER_NONE;
+    }
+    h.sbp = out.sense;
+    h.mx_sb_len = sizeof(out.sense);
+    h.timeout = 30000;
+    if (::ioctl(fd, SG_IO, &h) < 0) return errno ? errno : EIO;
+    out.status = h.status;
+    out.sb_len = h.sb_len_wr;
+    return 0;
+}
+
+// Assert `r` is CHECK CONDITION carrying ILLEGAL_REQUEST / INVALID FIELD IN CDB,
+// the sense emul_* returns for a malformed CDB. Spelled once because four cases
+// below pin exactly this and a wrong sense key or ASC must fail them all alike.
+#define EXPECT_INVALID_FIELD(r) do {                                            \
+        EXPECT_EQ(0x02, (int)(r).status) << "expected CHECK CONDITION";         \
+        ASSERT_GE((r).sb_len, 14u) << "no usable sense, sb_len_wr=" << (r).sb_len; \
+        EXPECT_EQ(0x05, (r).key()) << "sense key is not ILLEGAL_REQUEST";       \
+        EXPECT_EQ(0x24, (r).asc()) << "ASC is not INVALID FIELD IN CDB";        \
+    } while (0)
+
 class TcmuTest : public test::SkippableTest {
 public:
     test::TestImage img;
@@ -478,12 +544,14 @@ TEST_F(TcmuTest, capabilities_descriptor) {
     const BlkDevInfo& i = dev->get_info();
 
     // The ring lives in the uio mapping and outlives this process, so a later start()
-    // takes over and harvests it. The backstore rmdir refuses while an initiator holds
-    // the device, which is a real refusal rather than the absence of one. resize()
-    // writes the dev_size attrib and a failure there is an error return, with the kernel
-    // raising the UNIT ATTENTION that tells the initiator.
+    // takes over and harvests it. shutdown() unlinks the owned tcm_loop LUN FIRST --
+    // scsi_remove_device ends the consumer's session with no refusal of its own -- so
+    // this Disconnects rather than refuses; the backstore rmdir's EBUSY, the only
+    // refusal there is, covers a LUN an EXTERNAL initiator attached, not the owned one.
+    // resize() writes the dev_size attrib and a failure there is an error return, with
+    // the kernel raising the UNIT ATTENTION that tells the initiator.
     EXPECT_EQ(BlkBacklog::KernelSide, i.backlog);
-    EXPECT_EQ(BlkShutdownRefusal::RefusesWhenAttached, i.shutdown_refusal);
+    EXPECT_EQ(BlkShutdownRefusal::Disconnects, i.shutdown_refusal);
     EXPECT_EQ(BlkResizeEffect::NotifiedOrFailed, i.resize_effect);
     // start() compares the registered identity and size against this config and refuses
     // a mismatch with EINVAL, and stops there: the feature set is not compared, which is
@@ -545,6 +613,33 @@ TEST_F(TcmuTest, config_validation) {
     EXPECT_EQ(EALREADY, errno);
     EXPECT_EQ(0, dev->shutdown());
     EXPECT_NE(0, ::access(BS_PATH, F_OK));  // registration gone
+}
+
+// Two devices for one identity map to one backstore name, and the registry keys by that
+// name. The second construction must be REFUSED, not allowed to evict the first: an
+// unconditional register unregistered a constructed-but-idle first device and let the
+// second's start() take over the backstore, and the first's later destructor then erased
+// the second -- leaving the name unregistered while a device still believed it served
+// it. With the fix the second is not the registered owner, so start() reports EBUSY
+// before touching configfs or the flock, and the first stays the owner. Killing
+// mutation: restore register_link's unconditional erase+insert and drop start()'s
+// !registered EBUSY -- the second device then evicts the first and start()s (returns 0).
+TEST_F(TcmuTest, a_second_device_for_a_taken_name_is_refused) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/false);
+    auto a = sys->new_device(cfg);
+    ASSERT_NE(nullptr, a);
+    DEFER(delete a);
+    auto b = sys->new_device(cfg);   // same identity => same backstore name
+    ASSERT_NE(nullptr, b);
+    DEFER(delete b);
+    // b was refused the registration, so start() reports EBUSY without serving
+    errno = 0;
+    EXPECT_EQ(-1, b->start(file));
+    EXPECT_EQ(EBUSY, errno);
+    // a is still the sole registered owner and can start
+    ASSERT_EQ(0, a->start(file));
+    EXPECT_EQ(0, a->shutdown());
 }
 
 // blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
@@ -1287,6 +1382,231 @@ TEST_F(TcmuTest, write_zeroes) {
     int e = rc;
     ASSERT_EQ(0, e) << "BLKZEROOUT/readback failed (errno=" << e << ")";
 
+    std::vector<char> bbuf(IO_LEN, 0x5a);
+    struct iovec iov{bbuf.data(), IO_LEN};
+    ASSERT_EQ((ssize_t)IO_LEN, file->preadv(&iov, 1, IO_OFF));
+    for (size_t i = 0; i < IO_LEN; i++)
+        ASSERT_EQ(0, bbuf[i]) << "backend range not zeroed at byte " << i;
+}
+
+// The mode-page half of the durability advertisement. A plain write is a bare pwritev
+// into the backend's cache, so reporting WCE=0 would tell the initiator every write is
+// already durable and it would skip the SYNCHRONIZE CACHE that actually makes it so.
+// With FEATURE_FLUSH negotiated (make_info sets it) the caching page must report the
+// write cache ENABLED, and DPOFUA must be set because emul_write honours the FUA bit
+// (pwritev then fdatasync). Killing mutation: drop `buf[n+2] |= 0x04` (WCE reads back
+// 0) or build the device-specific byte without the 0x10 DPOFUA bit.
+TEST_F(TcmuTest, mode_sense_reports_write_cache_and_fua) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    uint8_t data[64] = {};
+    SgResult r;
+    int rc = -1;
+    test::run_off_vcpu([&] {
+        // MODE SENSE(6), page code 8 (caching), PC=0; we return no block descriptor
+        uint8_t cdb[6] = {0x1a, 0x00, 0x08, 0x00, (uint8_t)sizeof(data), 0x00};
+        rc = sg_io(sd, cdb, sizeof(cdb), data, sizeof(data), SG_DXFER_FROM_DEV, r);
+    });
+    ASSERT_EQ(0, rc) << "SG_IO failed, errno=" << rc;
+    EXPECT_EQ(0x00, (int)r.status) << "MODE SENSE(6) did not return GOOD";
+    // mode parameter header byte 2 is device-specific; DPOFUA is bit 4
+    EXPECT_TRUE(data[2] & 0x10) << "DPOFUA not advertised, but emul_write honours FUA";
+    // caching page begins at byte 4 (block-descriptor length is 0): [4]=page code,
+    // [5]=page length, [6]=flags with WCE at bit 2
+    ASSERT_EQ(0x08, (int)data[4]) << "caching page not returned at byte 4";
+    EXPECT_TRUE(data[6] & 0x04) << "WCE not set despite FEATURE_FLUSH being negotiated";
+}
+
+// The kernel forwards a data CDB to tcmu WITHOUT target_cmd_size_check
+// (target_core_device.c sets SCF_SCSI_DATA_CDB then returns TCM_NO_SENSE), so a CDB
+// whose transfer count disagrees with the ring's data area reaches emul_read/emul_write.
+// data_len is the whole ring area, not the CDB's count; serving it blindly would move
+// the wrong number of bytes. Both must refuse the mismatch with INVALID FIELD before
+// any backend I/O. This is the end-to-end SG_IO probe the finding called for. Killing
+// mutation: drop the cdb_xfer_bytes()!=data_len guard in either handler (the command
+// then completes GOOD and, for the write, lands bytes it was never asked to).
+TEST_F(TcmuTest, data_cdb_count_must_match_the_transfer) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    // a known pattern at IO_OFF, so "the refused write changed nothing" is checkable
+    std::vector<char> before(4096, 0x5a);
+    struct iovec iov_b{before.data(), before.size()};
+    ASSERT_EQ((ssize_t)before.size(), file->preadv(&iov_b, 1, IO_OFF));
+
+    const uint32_t lba = (uint32_t)(IO_OFF / 512);
+    std::vector<char> big(4096, 0x11);   // buffer far larger than the CDB's one block
+    SgResult rr, wr;
+    int rrc = -1, wrc = -1;
+    test::run_off_vcpu([&] {
+        // READ(10) and WRITE(10): transfer count 1 (512B) against a 4096B buffer
+        uint8_t rcdb[10] = {0x28, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+                            (uint8_t)(lba >> 8), (uint8_t)lba, 0, 0, 1, 0};
+        rrc = sg_io(sd, rcdb, sizeof(rcdb), big.data(), big.size(), SG_DXFER_FROM_DEV, rr);
+        uint8_t wcdb[10] = {0x2a, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+                            (uint8_t)(lba >> 8), (uint8_t)lba, 0, 0, 1, 0};
+        wrc = sg_io(sd, wcdb, sizeof(wcdb), big.data(), big.size(), SG_DXFER_TO_DEV, wr);
+    });
+    ASSERT_EQ(0, rrc) << "READ SG_IO failed, errno=" << rrc;
+    ASSERT_EQ(0, wrc) << "WRITE SG_IO failed, errno=" << wrc;
+    EXPECT_INVALID_FIELD(rr);
+    EXPECT_INVALID_FIELD(wr);
+
+    // the refused write must not have touched the backend
+    std::vector<char> after(4096, 0);
+    struct iovec iov_a{after.data(), after.size()};
+    ASSERT_EQ((ssize_t)after.size(), file->preadv(&iov_a, 1, IO_OFF));
+    EXPECT_EQ(0, memcmp(before.data(), after.data(), before.size()))
+        << "a WRITE whose CDB count mismatched the data still modified the backend";
+}
+
+// WRITE SAME(16) cdb[1] flag bits, per the kernel's sbc_setup_write_same (which it
+// applies to both the 10- and 16-byte forms): 0x01 NDOB, 0x02 LBDATA, 0x04 PBDATA,
+// 0x08 UNMAP, 0x10 ANCHOR. The old code read 0x10 as NDOB -- it is ANCHOR -- and
+// accepted LBDATA/PBDATA. ANCHOR must be refused (ANC_SUP is 0) and LBDATA/PBDATA
+// refused (no logical/physical block data), while true NDOB (0x01) still zero-fills.
+// Killing mutation: read ndob from 0x10 (ANCHOR then zero-fills and returns GOOD
+// instead of INVALID FIELD) or drop either the 0x06 or the 0x10 rejection.
+TEST_F(TcmuTest, write_same_rejects_anchor_and_block_data_bits) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    // a non-zero pattern at IO_OFF, so "NDOB zeroed it" is not "it was already zero"
+    const uint32_t nblocks = 8;   // 4 KiB
+    std::vector<char> pat(nblocks * 512);
+    for (size_t i = 0; i < pat.size(); i++) pat[i] = (char)(i * 13 + 7);
+    struct iovec piov{pat.data(), pat.size()};
+    ASSERT_EQ((ssize_t)pat.size(), file->pwritev(&piov, 1, IO_OFF));
+
+    const uint64_t lba = IO_OFF / 512;
+    SgResult anchor, lbdata, ndob;
+    int arc = -1, lrc = -1, nrc = -1;
+    test::run_off_vcpu([&] {
+        auto ws16 = [&](uint8_t flags, uint8_t* cdb) {
+            memset(cdb, 0, 16);
+            cdb[0] = 0x93;   // WRITE SAME(16)
+            cdb[1] = flags;
+            for (int i = 0; i < 8; i++) cdb[2 + i] = (uint8_t)(lba >> (56 - 8 * i));
+            cdb[10] = (uint8_t)(nblocks >> 24); cdb[11] = (uint8_t)(nblocks >> 16);
+            cdb[12] = (uint8_t)(nblocks >> 8);  cdb[13] = (uint8_t)nblocks;
+        };
+        uint8_t c[16];
+        ws16(0x10, c); arc = sg_io(sd, c, 16, nullptr, 0, SG_DXFER_NONE, anchor);   // ANCHOR
+        ws16(0x02, c); lrc = sg_io(sd, c, 16, nullptr, 0, SG_DXFER_NONE, lbdata);   // LBDATA
+        ws16(0x01, c); nrc = sg_io(sd, c, 16, nullptr, 0, SG_DXFER_NONE, ndob);     // NDOB
+    });
+    ASSERT_EQ(0, arc); ASSERT_EQ(0, lrc); ASSERT_EQ(0, nrc);
+    EXPECT_INVALID_FIELD(anchor);   // ANCHOR: ANC_SUP is 0
+    EXPECT_INVALID_FIELD(lbdata);   // LBDATA: no logical block data
+    // NDOB (0x01) is the real no-data-out-buffer zero write: it must succeed and zero
+    // the range, not be mistaken for the ANCHOR bit the old code keyed on.
+    EXPECT_EQ(0x00, (int)ndob.status) << "NDOB WRITE SAME(16) did not return GOOD";
+    std::vector<char> bbuf(pat.size(), 0x5a);
+    struct iovec iov{bbuf.data(), bbuf.size()};
+    ASSERT_EQ((ssize_t)bbuf.size(), file->preadv(&iov, 1, IO_OFF));
+    for (size_t i = 0; i < bbuf.size(); i++)
+        ASSERT_EQ(0, bbuf[i]) << "NDOB did not zero the backend at byte " << i;
+}
+
+// WSNZ=1 in VPD 0xB0 byte 4 says a WRITE SAME count of zero is invalid, not "zero from
+// here to the end of the device". The old page reported WSNZ=0 while emul_write_same
+// returned GOOD for count 0 as a no-op before even the bounds check -- a spec-following
+// initiator would read that as "you just zeroed the rest of the disk". Both halves must
+// match the kernel's target, which hardcodes WSNZ=1 and rejects count 0 for both forms.
+// Killing mutation: leave buf[4]=0 in build_vpd_b0, or restore the `len==0 -> GOOD`
+// no-op in emul_write_same.
+TEST_F(TcmuTest, write_same_count_zero_is_invalid_and_vpd_b0_reports_wsnz) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    uint8_t b0[64] = {};
+    SgResult vpd_r, ws_r;
+    int vrc = -1, wrc = -1;
+    test::run_off_vcpu([&] {
+        // INQUIRY EVPD page 0xB0 (block limits): byte 4 bit 0 is WSNZ
+        uint8_t icdb[6] = {0x12, 0x01, 0xb0, 0x00, (uint8_t)sizeof(b0), 0x00};
+        vrc = sg_io(sd, icdb, sizeof(icdb), b0, sizeof(b0), SG_DXFER_FROM_DEV, vpd_r);
+        // WRITE SAME(16) with a count of zero (cdb[10..13] left 0)
+        const uint64_t lba = IO_OFF / 512;
+        uint8_t c[16] = {};
+        c[0] = 0x93;
+        for (int i = 0; i < 8; i++) c[2 + i] = (uint8_t)(lba >> (56 - 8 * i));
+        wrc = sg_io(sd, c, 16, nullptr, 0, SG_DXFER_NONE, ws_r);
+    });
+    ASSERT_EQ(0, vrc) << "INQUIRY SG_IO failed, errno=" << vrc;
+    EXPECT_EQ(0x00, (int)vpd_r.status) << "INQUIRY VPD 0xB0 did not return GOOD";
+    EXPECT_EQ(0xb0, (int)b0[1]) << "not the block-limits VPD page";
+    EXPECT_TRUE(b0[4] & 0x01) << "WSNZ not set in VPD 0xB0 byte 4";
+    ASSERT_EQ(0, wrc) << "WRITE SAME SG_IO failed, errno=" << wrc;
+    EXPECT_INVALID_FIELD(ws_r);   // count 0 is invalid under WSNZ=1
+}
+
+// LBPRZ, advertised in RC16 byte 14, promises reads after an unmap return zeros. When
+// the backend cannot punch a hole -- trim() answers EOPNOTSUPP and zero_range() with it,
+// so zero_fill() falls back to writing zeroes -- emul_unmap must still zero the range
+// instead of swallowing the error and reporting GOOD over the old bytes. NoTrimFile
+// makes that fallback the only path. Killing mutation: restore
+// `trim() < 0 && errno != EOPNOTSUPP && errno != ENOSYS` (the unsupported trim is
+// swallowed, the range keeps its pattern, and the backend readback below is non-zero).
+TEST_F(TcmuTest, unmap_zeroes_when_the_backend_cannot_trim) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);
+    NoTrimFile backend(file);   // trim/zero_range unsupported; pwritev reaches `file`
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&backend));   // ownership=false: `file` stays the fixture's
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    std::vector<char> wbuf(IO_LEN);
+    for (size_t i = 0; i < IO_LEN; i++) wbuf[i] = (char)(i * 13 + 7);
+    int rc = -1;
+    test::run_off_vcpu([&] {
+        int fd = open_sd(sd, O_RDWR);
+        if (fd < 0) { rc = errno ? errno : EIO; return; }
+        DEFER(::close(fd));
+        if (::pwrite(fd, wbuf.data(), IO_LEN, IO_OFF) != (ssize_t)IO_LEN) { rc = errno ? errno : EIO; return; }
+        if (::fsync(fd) < 0) { rc = errno ? errno : EIO; return; }
+        uint64_t range[2] = {IO_OFF, IO_LEN};
+        if (::ioctl(fd, BLKDISCARD, range) < 0) { rc = errno ? errno : EIO; return; }
+        rc = 0;
+    });
+    int e = rc;
+    ASSERT_EQ(0, e) << "write/BLKDISCARD with a no-trim backend failed (errno=" << e << ")";
+
+    // authoritative check on the backend image: the trim was unsupported, so the fix
+    // zero-filled the range rather than leave the pattern and report GOOD.
     std::vector<char> bbuf(IO_LEN, 0x5a);
     struct iovec iov{bbuf.data(), IO_LEN};
     ASSERT_EQ((ssize_t)IO_LEN, file->preadv(&iov, 1, IO_OFF));
@@ -2039,6 +2359,42 @@ TEST_F(TcmuTest, passive_daemon) {
     EXPECT_EQ(0, dev->shutdown());
     EXPECT_EQ(0, rm.join());
     EXPECT_TRUE(lock_free(PASSIVE_BS));
+}
+
+// Stopping the HBA must refuse every event still queued for wait_for_event, not only
+// the notifications drain_replies finds resident in the socket. Each queued event armed
+// the kernel's tcmu_wait_genl_cmd_reply -- an unbounded wait_for_completion that the
+// SET_FEATURES restore cannot wake -- so dropping it hangs the operator's `echo 1 >
+// enable` until reset_netlink. The fix swaps the queue out and answers each with
+// -ENOSYS. Killing mutation: delete the queue drain in vcpu_main -- the ADDED below is
+// already queued (the sleep lets the listener dequeue it from the socket), so nothing
+// answers it and op.join() never returns, which is exactly the hang this fixes.
+TEST_F(TcmuTest, stopping_the_hba_refuses_an_unconsumed_added) {
+    if (skip_reason) return;
+    delete sys;   // SetUp built this one with netlink_reply off; the drain needs it on
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS,
+                       /*netlink_reply=*/true);
+    ASSERT_NE(nullptr, sys);
+
+    // The operator enables a backstore by raw configfs; the ADDED is queued for
+    // wait_for_event and the kernel blocks the enable write on ADDED_DEVICE_DONE. We
+    // deliberately never consume the event, so it is still in the queue at stop().
+    Operator op;
+    op.run([] {
+        if (::mkdir(PASSIVE_BS_PATH, 0755) != 0) return -errno;
+        if (int rc = cfs_write(std::string(PASSIVE_BS_PATH) + "/attrib/dev_config", PASSIVE_IMG)) return rc;
+        if (int rc = cfs_write(std::string(PASSIVE_BS_PATH) + "/attrib/dev_size", std::to_string(PASSIVE_SIZE))) return rc;
+        return cfs_write(std::string(PASSIVE_BS_PATH) + "/enable", "1");   // blocks until answered
+    });
+    // let the listener dequeue the notification and queue() the event, so it is the
+    // queue drain -- not drain_replies' socket pass -- that has to answer it
+    photon::thread_usleep(1000 * 1000);
+
+    delete sys;   // -> stop() -> vcpu_main drains the queue with -ENOSYS
+    sys = nullptr;
+    // the enable failed cleanly (refused) rather than hung; -ENOSYS is the status the
+    // drain sent. TearDown's force_cleanup removes the disabled backstore dir.
+    EXPECT_EQ(-ENOSYS, op.join());
 }
 
 // netlink_reply=false: no synchronous feedback. Every operator write returns at

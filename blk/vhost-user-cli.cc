@@ -21,7 +21,10 @@ limitations under the License.
 //
 // Listens on <sock_path> (SERVER role) and serves <image_path> as a virtio-blk
 // device. size_bytes defaults to the image's fstat size. The controller's scope
-// directory is dirname(<sock_path>), created if absent.
+// directory is dirname(<sock_path>), created if absent -- so <sock_path> has to carry
+// a directory. A bare filename is refused rather than resolved against the cwd: the
+// controller matches a socket to its directory TEXTUALLY, and a bare name has no
+// directory to match, so nothing this program could pass it would be accepted.
 //
 // WHY THIS EXISTS. test-vhost-user.cpp drives blk/vhost-user.cpp with a MOCK
 // frontend that lives in the same file and keeps its own copy of the wire
@@ -102,14 +105,19 @@ static void on_term(int) { g_term.signal(1); }
 // static storage, and this runs on argv[1] which the log lines still quote.
 static int scope_dir_of(const char* sock_path, char* out, size_t outsz) {
     const char* slash = strrchr(sock_path, '/');
-    size_t n = slash ? (size_t)(slash - sock_path) : 0;
-    if (n == 0) {   // a bare filename: its directory is the cwd
-        if (outsz < 2)
-            LOG_ERROR_RETURN(ENAMETOOLONG, -1, "buffer too small for the scope directory");
-        out[0] = '.';
-        out[1] = '\0';
-        return 0;
-    }
+    // Refused here rather than two calls later, where it surfaces as the controller
+    // declining a socket that looks perfectly fine. No stand-in for the cwd works:
+    // the match is textual and never resolved, so "." is not the same directory as
+    // "/disk.sock" lives in and the comparison loses either way.
+    if (!slash)
+        LOG_ERROR_RETURN(EINVAL, -1, "socket path ` has no directory; pass a path, not a bare filename",
+                         sock_path);
+    // n == 0 means the only slash IS the first character, and the directory of "/x" is
+    // "/" rather than "" -- an empty directory name matches nothing. mkdir("/") then
+    // answers EEXIST, which main() already tolerates.
+    size_t n = (size_t)(slash - sock_path);
+    if (n == 0)
+        n = 1;
     if (n + 1 > outsz)
         LOG_ERROR_RETURN(ENAMETOOLONG, -1, "socket path ` does not fit a `-byte buffer",
                          sock_path, outsz);

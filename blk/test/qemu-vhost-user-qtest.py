@@ -111,6 +111,11 @@ def base_env(args):
     env["QTEST_QEMU_BINARY"] = args.qemu_binary
     env["QTEST_QEMU_STORAGE_DAEMON_BINARY"] = args.storage_daemon
     env["PHOTON_VHU_BACKEND"] = args.backend
+    # The other half of the isolation main() sets up. glib's g_get_tmp_dir() reads
+    # TMPDIR on Unix, and that is what puts the peer's socket and log where this
+    # driver's globs are looking -- without it the peer keeps writing to /tmp and
+    # every case comes back logs=0, i.e. NO-LOG and a failed control.
+    env["TMPDIR"] = args.tmpdir
     # Deliberately NOT set: PHOTON_VHU_QUEUES. The patched test derives it from each
     # case's own num_queues, so exporting a value here would hide a regression in that
     # forwarding -- which is how a peer that always served one queue once shipped.
@@ -174,6 +179,8 @@ def discover_paths(args):
 
 
 def collect_logs(tmpdir):
+    # `tmpdir` is this run's private directory, which is what makes this glob mean
+    # "the logs of the case that just ran" -- see main() for why it cannot be /tmp.
     return sorted(glob.glob(os.path.join(tmpdir, PEER_LOG_GLOB)),
                   key=os.path.getmtime, reverse=True)
 
@@ -213,8 +220,12 @@ def verdict_for(rc, nrun, negotiated, serving, logs):
 
 
 def run_case(args, case, path, tmpdir):
+    # Per-case isolation: a leftover log is a false count. This pattern is only safe
+    # to sweep because `tmpdir` is private to this run -- against a shared /tmp the
+    # same glob would unlink a concurrent run's LIVE socket, and hotplug and
+    # multiqueue both reconnect into theirs.
     for stale in glob.glob(os.path.join(tmpdir, "photon-vhu-*")):
-        os.remove(stale)          # per-case isolation: a leftover log is a false count
+        os.remove(stale)
 
     cmd = [args.qos_test, "-p", path]
     print("  $ (cd %s && %s)" % (args.qemu_build, " ".join(cmd)))
@@ -262,20 +273,28 @@ def main():
         args.qemu_build, "storage-daemon", "qemu-storage-daemon")
     args.out_dir = args.out_dir or tempfile.mkdtemp(prefix="photon-qtest-")
     os.makedirs(args.out_dir, exist_ok=True)
+    # NOT tempfile.gettempdir(). The peer names its files photon-vhu-<pid>-<i> inside
+    # g_get_tmp_dir(), so two runs never collide on a NAME -- but every glob in this
+    # driver is photon-vhu-*, and against a shared /tmp that glob also reaches a
+    # CONCURRENT run's files: run_case()'s sweep unlinks its live socket and
+    # collect_logs() counts its logs as ours, so a clean run reports DRIFT and the run
+    # being watched breaks. Isolation has to be the directory, because the glob is all
+    # this driver can see. Created before discover_paths(), the first base_env() caller.
+    args.tmpdir = tempfile.mkdtemp(prefix="photon-vhu-run-")
 
     check_prereqs(args)
     paths = discover_paths(args)
-    tmpdir = tempfile.gettempdir()   # the peer's g_get_tmp_dir() resolves the same
 
     print("backend:  %s" % args.backend)
     print("qos-test: %s" % args.qos_test)
     print("logs:     %s" % args.out_dir)
+    print("tmpdir:   %s" % args.tmpdir)
     print()
 
     rows = {}
     for case in args.cases:
         print("=== %s ===" % case)
-        rc, nrun, nlogs, counts = run_case(args, case, paths[case], tmpdir)
+        rc, nrun, nlogs, counts = run_case(args, case, paths[case], args.tmpdir)
         rows[case] = (rc, nrun, nlogs, counts)
         print("  rc=%d tests=%s logs=%d %s" %
               (rc, nrun, nlogs, " ".join("%s=%d" % (k, counts[k]) for k in PATTERNS)))

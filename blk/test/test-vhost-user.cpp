@@ -1713,6 +1713,35 @@ TEST_F(VhostUserTest, shutdown_releases_a_backend_it_owns) {
     EXPECT_EQ(3, destroyed.load());
 }
 
+// detach(true) deliberately retains backend and own_backend, so the next start()
+// can be handed the SAME pointer while the device still owns it. The release that
+// guards a start() against overwriting an owned pointer must not fire on that one:
+// deleting the backend and storing the freed pointer back as owned leaves a
+// dangling pointer that the next release deletes again. The counter is what tells
+// the two apart -- exactly one destruction, at the shutdown that ends the session.
+TEST_F(VhostUserTest, repassing_an_owned_backend_after_detach_never_deletes_it_twice) {
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    auto* bk = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    ASSERT_EQ(0, dev->detach(true));   // retains backend AND own_backend
+    // detach left the socket node behind and bind() refuses it, so the dead node
+    // goes first -- the product's own recovery path (destroy_orphan refuses a live
+    // one), not a test-only unlink.
+    BlkDevInfo orphan;
+    orphan.identity = SOCK_PATH;
+    ASSERT_EQ(0, ctl->destroy_orphan(orphan));
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));   // the SAME pointer again
+    EXPECT_EQ(0, destroyed.load()) << "a re-passed backend was deleted on re-entry";
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load()) << "the owned backend must die exactly once";
+}
+
 TEST_F(VhostUserTest, server_basic_io) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -1748,12 +1777,16 @@ TEST_F(VhostUserTest, server_basic_io) {
 
 // #208: the serial a guest reads back must identify THIS device, not the transport.
 // A fixed per-transport string made every device one daemon serves report the same
-// serial to its guest, which is what a guest uses to tell two disks apart. The value
-// is spelled out rather than derived from SOCK_PATH's basename: deriving it would
-// repeat the rule the implementation uses and so agree with itself if the rule were
-// wrong. What the fixed-width fill itself does -- all 20 bytes written, NUL past the
-// end, used length covering the field -- is witnessed against the shared engine in
-// test-blk-vq.cpp, so this case is about the value the transport supplies to it.
+// serial to its guest, which is what a guest uses to tell two disks apart. The
+// identity hashed is the FULL socket path: a basename is unique only inside one flat
+// directory, and two controllers may legally scope /scope-a/disk.sock and
+// /scope-b/disk.sock, which a basename hash answered with one ID -- the two-scope
+// case right below pins the difference. The value is spelled out rather than derived
+// from SOCK_PATH: deriving it would repeat the rule the implementation uses and so
+// agree with itself if the rule were wrong. What the fixed-width fill itself does --
+// all 20 bytes written, NUL past the end, used length covering the field -- is
+// witnessed against the shared engine in test-blk-vq.cpp, so this case is about the
+// value the transport supplies to it.
 TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -1763,11 +1796,11 @@ TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
     ASSERT_EQ(0, dev->start(file));
     DEFER(dev->shutdown());
 
-    // GET_ID returns an FNV-1a hash of the identity, not the raw basename
+    // GET_ID returns an FNV-1a hash of the identity, not the raw path
     char want[ID_BYTES] = {};
     {
         uint64_t h = 14695981039346656037ULL;
-        for (const char* p = "vhu.sock"; *p; p++) {
+        for (const char* p = "/tmp/photon-blk-vhu-dir/vhu.sock"; *p; p++) {
             h ^= (uint8_t)*p;
             h *= 1099511628211ULL;
         }
@@ -1783,6 +1816,86 @@ TEST_F(VhostUserTest, get_id_reports_this_device_not_the_transport) {
     });
     ASSERT_EQ(0, rc);
     EXPECT_EQ(0, memcmp(want, got, strlen(want)));
+}
+
+// Two scopes, one basename. inside() confines each controller to its own directory
+// and nothing else separates the two, so <SOCK_DIR>-a/same.sock and
+// <SOCK_DIR>-b/same.sock are both legal and both can be served by one daemon. The
+// GET_ID answer is the whole of what a guest has to tell two disks apart, so the
+// two IDs must differ -- under a basename identity they were byte-identical. No
+// value is pinned here on purpose: the case above pins what one full path hashes
+// to, and this one only asks the two answers to be distinct, which is the property
+// the choice of identity exists for.
+TEST_F(VhostUserTest, get_id_separates_two_scopes_sharing_a_basename) {
+    char dir_a[96], dir_b[96], path_a[128], path_b[128];
+    snprintf(dir_a, sizeof(dir_a), "%s-a", SOCK_DIR);
+    snprintf(dir_b, sizeof(dir_b), "%s-b", SOCK_DIR);
+    snprintf(path_a, sizeof(path_a), "%s/same.sock", dir_a);
+    snprintf(path_b, sizeof(path_b), "%s/same.sock", dir_b);
+    if (::mkdir(dir_a, 0755) != 0) {
+        ASSERT_EQ(EEXIST, errno) << dir_a;
+    }
+    if (::mkdir(dir_b, 0755) != 0) {
+        ASSERT_EQ(EEXIST, errno) << dir_b;
+    }
+    // Swept rather than named: a started device leaves its identity lock beside
+    // the socket, and a sweep does not have to know what either is called.
+    DEFER({
+        for (const char* d : {dir_a, dir_b}) {
+            if (DIR* dd = ::opendir(d)) {
+                struct dirent* e;
+                char p[PATH_MAX];
+                while ((e = readdir(dd))) {
+                    if (e->d_name[0] == '.') continue;
+                    snprintf(p, sizeof(p), "%s/%s", d, e->d_name);
+                    ::unlink(p);
+                }
+                ::closedir(dd);
+            }
+            ::rmdir(d);
+        }
+    });
+
+    auto ctl_a = new_vhost_user_controller(dir_a);
+    ASSERT_NE(nullptr, ctl_a);
+    DEFER(delete ctl_a);
+    auto ctl_b = new_vhost_user_controller(dir_b);
+    ASSERT_NE(nullptr, ctl_b);
+    DEFER(delete ctl_b);
+
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = path_a;
+    auto dev_a = ctl_a->new_device(cfg);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    cfg.sock_path = path_b;
+    auto dev_b = ctl_b->new_device(cfg);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    // One backend, two devices: GET_ID never touches it, so sharing cannot leak
+    // into either answer -- only the socket path can.
+    ASSERT_EQ(0, dev_a->start(file));
+    DEFER(dev_a->shutdown());
+    ASSERT_EQ(0, dev_b->start(file));
+    DEFER(dev_b->shutdown());
+
+    char id_a[ID_BYTES] = {}, id_b[ID_BYTES] = {};
+    int rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(path_a)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.get_id(id_a, sizeof(id_a)) != S_OK) return EIO;
+        return 0;
+    });
+    ASSERT_EQ(0, rc) << "scope a: " << path_a;
+    rc = run_frontend([&](MockFrontend& fe) -> int {
+        if (!fe.connect_to(path_b)) return ECONNREFUSED;
+        if (!fe.negotiate(false)) return EPROTO;
+        if (fe.get_id(id_b, sizeof(id_b)) != S_OK) return EIO;
+        return 0;
+    });
+    ASSERT_EQ(0, rc) << "scope b: " << path_b;
+    EXPECT_NE(0, memcmp(id_a, id_b, ID_BYTES))
+        << "two scopes sharing a basename reported one guest-visible ID";
 }
 
 // The control for the case below, and the reason that case's count is a
@@ -2537,6 +2650,88 @@ TEST_F(VhostUserTest, destroy_orphan_refuses_a_live_endpoint) {
         if (fe.read_dev(1 << 19, rbuf.data(), rbuf.size()) != S_OK) return EIO;
         return memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
     }));
+}
+
+// The window do_listen() walks and destroy_orphan() must not unlink inside: a
+// socket bound but not yet listening answers a connect probe with ECONNREFUSED,
+// byte for byte what a dead listener answers, so the probe cannot tell a start
+// mid-window from a crash -- only the identity lock can, and destroy_orphan() takes
+// it before it probes. Without that lock this call returned 0 and deleted the node,
+// and the starter's listen() then succeeded on an unnamed inode no frontend could
+// ever connect to, while a second start was free to bind the name again.
+TEST_F(VhostUserTest, destroy_orphan_refuses_a_bound_socket_whose_starter_holds_the_lock) {
+    // Discover the lock the way start_claims_an_identity_lock_and_refuses_a_held_one
+    // does: a start leaves exactly one non-socket claim in the scope directory and
+    // it outlives the session. Discovered rather than spelled, so a change to the
+    // naming rule cannot quietly leave this case holding a file nothing contends on.
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    std::string lock;
+    if (DIR* d = ::opendir(SOCK_DIR)) {
+        struct dirent* e;
+        char p[PATH_MAX];
+        struct stat st;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            snprintf(p, sizeof(p), "%s/%s", SOCK_DIR, e->d_name);
+            if (::stat(p, &st) == 0 && !S_ISSOCK(st.st_mode))
+                lock = p;
+        }
+        ::closedir(d);
+    }
+    ASSERT_FALSE(lock.empty());
+    ASSERT_EQ(0, dev->shutdown());   // unlinks the node; the claim stays
+
+    // Hold the claim the way a concurrent starter's do_listen() would -- a bare
+    // POSIX exclusive lock, an independent peer of devlock_acquire rather than a
+    // call into it -- and stand in the window: bound, NOT listening. The window is
+    // a state of the node, not a timing, so no second thread is needed to pin it.
+    int lfd = ::open(lock.c_str(), O_RDWR);
+    ASSERT_GE(lfd, 0);
+    DEFER(::close(lfd));
+    ASSERT_EQ(0, ::flock(lfd, LOCK_EX | LOCK_NB));
+    int sfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_GE(sfd, 0);
+    DEFER(::close(sfd));
+    sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", SOCK_PATH);
+    ASSERT_EQ(0, ::bind(sfd, (sockaddr*)&un, sizeof(un)));
+
+    // The window's defining property, witnessed against the kernel rather than
+    // through our own probe: this connect is REFUSED, exactly like one to a dead
+    // listener -- which is why the probe below cannot be the gate.
+    {
+        int pfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        ASSERT_GE(pfd, 0);
+        DEFER(::close(pfd));
+        errno = 0;
+        ASSERT_EQ(-1, ::connect(pfd, (sockaddr*)&un, sizeof(un)));
+        ASSERT_EQ(ECONNREFUSED, errno);
+    }
+
+    BlkDevInfo o;
+    o.identity = SOCK_PATH;
+    errno = 0;
+    int rc = ctl->destroy_orphan(o);
+    int e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e);
+    EXPECT_EQ(0, ::access(SOCK_PATH, F_OK))
+        << "the node was unlinked out from under the starter holding its identity";
+
+    // Positive control: release the claim and the same call removes the same node
+    // -- still bound, still not listening -- so the EBUSY above came from the lock
+    // and not from anything this path always answers.
+    ASSERT_EQ(0, ::flock(lfd, LOCK_UN));
+    errno = 0;
+    EXPECT_EQ(0, ctl->destroy_orphan(o));
+    EXPECT_NE(0, ::access(SOCK_PATH, F_OK));
 }
 
 // The identity is caller-supplied and names something to delete, so scope is the
@@ -5406,14 +5601,25 @@ TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_a
 // is not a contiguous prefix of consumed avail entries: resuming from it both loses
 // uncompleted entries below it and re-serves completed ones above it, producing
 // duplicate used elements for heads the driver has already reclaimed. BASE is the
-// previous backend's own last_avail for a clean handover -- GET_VRING_BASE drains,
-// stops and returns it -- so resuming there accepts that dispatched-but-uncompleted
-// entries are genuinely unrecoverable without publishing duplicates.
+// previous backend's own last_avail -- GET_VRING_BASE drains, stops and returns it
+// -- so resuming there accepts that dispatched-but-uncompleted entries are genuinely
+// unrecoverable without publishing duplicates.
 //
-// Discriminating by construction: BASE (7) differs from used_idx (5), so a device
-// that resumed from used_idx would dispatch slot 5 again while one that honours
-// BASE skips it. The assertion is on what was SERVED, not on an internal counter,
-// so a mutant that silently ignored BASE cannot pass by accident.
+// Discriminating by construction: BASE (7) differs from the planted used_idx (5),
+// and SEVEN driven requests leave avail entries 5 and 6 holding real heads that
+// point at slots 5 and 6 -- the two entries a used_idx resume replays, each with a
+// status byte a replay has to write. Two oracles watch them, because neither one
+// alone is race-free. serve_chain writes the status byte BEFORE complete_req
+// appends the used element, so a bare read right after the status poll below can
+// still see the planted 5 in the honoured regime; the used ring is therefore polled
+// until it stops moving, bounded, and the settled value is the assertion: 6 honours
+// BASE, 8 resumed from used_idx and replayed first. The sentinels re-armed on slots
+// 5 and 6 are the order-independent oracle: a replay overwrites them before the
+// entry at BASE is even dispatched -- dispatch consumes entries in cursor order on
+// one vcpu and a request coroutine does not yield before its status write -- while
+// a device that honours BASE never touches them at all. Neither avail->idx nor
+// avail_event can answer this question: the first is driver-owned and submit()
+// wrote it; the second ends at 8 under both regimes.
 TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -5428,24 +5634,33 @@ TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
         ASSERT_TRUE(fe.connect_to(SOCK_PATH));
         ASSERT_TRUE(fe.negotiate(false));
 
-        // Drive five requests to completion so used_idx advances to 5.
+        // Drive SEVEN requests to completion: slots 0..6, so avail entries 5 and 6
+        // hold the heads that point at slots 5 and 6.
         char buf[512] = {};
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 7; i++)
             ASSERT_EQ(0, fe.write_dev((uint64_t)i * 512, buf, sizeof(buf)));
 
         ASSERT_TRUE(fe.set_vring_enable(false));   // vq_stop() JOINS the loop
 
+        // The fiction: a previous backend consumed all seven entries and completed
+        // five before it died, so entries 5 and 6 are dispatched-but-uncompleted --
+        // the loss a BASE resume accepts -- and its own last_avail (7) is what the
+        // frontend hands back. Roll the ring's used index back to 5 to plant it.
         const uint16_t BASE = 7;
         ((vused*)(fe.mem + L_USED))->idx = 5;
         ((vavail*)(fe.mem + L_AVAIL))->idx = BASE;
         fe.used_idx = 5;
         fe.avail_idx = BASE;
         fe.set_used_event(BASE);
+        // Re-arm the sentinels on the two entries a used_idx resume replays:
+        // round 1 left both at S_OK, and submit() arms only the slot it builds.
+        *(uint8_t*)(fe.mem + fe.status_off(5)) = 0xff;
+        *(uint8_t*)(fe.mem + fe.status_off(6)) = 0xff;
         ASSERT_TRUE(fe.restart_with_base(BASE));
         (void)fe.callfd_drain();
 
         // Submit ONE request at slot BASE. A device that resumed from used_idx (5)
-        // would serve slot 5 again before reaching BASE; one that honours BASE
+        // serves slots 5 and 6 again before reaching BASE; one that honours BASE
         // serves exactly slot BASE.
         ASSERT_EQ(0, fe.submit(BASE, T_OUT, 0, sizeof(buf), false));
         ASSERT_TRUE(fe.kick());
@@ -5459,19 +5674,30 @@ TEST_F(VhostUserTest, adopt_resumes_from_the_frontends_base_not_used_idx) {
         EXPECT_EQ(0, (int)*(uint8_t*)(fe.mem + fe.status_off(BASE)))
             << "served, but with a nonzero virtio-blk status";
 
-        // And the slot that would have been re-served under used_idx resume was
-        // NOT touched after the restart. Its status byte is still whatever the
-        // first round left it as -- which is 0 (VIRTIO_BLK_S_OK). So this check
-        // only works because we know the first round succeeded. What makes it
-        // discriminate is the AVAIL idx: ring-side avail->idx is BASE, so a
-        // device that resumed from used_idx would have consumed slots 5 and 6
-        // BEFORE BASE, advancing last_avail past them. We catch that by reading
-        // the ring back: if last_avail moved past BASE, the device did not honour
-        // the base.
-        uint16_t avail_after = ((vavail*)(fe.mem + L_AVAIL))->idx;
-        EXPECT_EQ((uint16_t)(BASE + 1), avail_after)
-            << "last_avail did not advance by exactly one from BASE; the device"
-               " either skipped BASE or re-consumed entries below it";
+        // Settle, then read: the status byte precedes the used append and a
+        // replay's extra appends land in an order nothing promises from here, so
+        // wait for the ring to stop moving -- 50 stable 1 ms polls, 5 s bound --
+        // and assert on the settled value.
+        uint16_t settled = 0, prev = 0;
+        int stable = 0;
+        for (int i = 0; i < 5000 && stable < 50; i++) {
+            settled = ((vused*)(fe.mem + L_USED))->idx;
+            stable = (settled == prev) ? stable + 1 : 0;
+            prev = settled;
+            ::usleep(1000);
+        }
+        EXPECT_EQ(6u, (unsigned)settled)
+            << "used->idx settled at " << (unsigned)settled << ", not 6: the planted"
+               " 5 plus the one request at BASE. 8 is a resume from used_idx that"
+               " replayed entries 5 and 6";
+        // The order-independent half: both sentinels were re-armed above, and a
+        // replay writes S_OK over them before the entry at BASE is dispatched.
+        EXPECT_EQ(0xff, (int)*(uint8_t*)(fe.mem + fe.status_off(5)))
+            << "entry 5 was re-served after the restart: the device resumed from"
+               " used_idx, not from BASE";
+        EXPECT_EQ(0xff, (int)*(uint8_t*)(fe.mem + fe.status_off(6)))
+            << "entry 6 was re-served after the restart: the device resumed from"
+               " used_idx, not from BASE";
     });
     if (!fe.err.empty())
         LOG_ERROR("mock frontend: `", fe.err);

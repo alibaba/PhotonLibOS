@@ -44,6 +44,7 @@ limitations under the License.
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <linux/fs.h>
 
@@ -153,6 +154,60 @@ static uint64_t node_inflight(const std::string& node) {
     if (n <= 0 || sscanf(buf, "%lu %lu", &rd, &wr) != 2)
         return 0;
     return rd + wr;
+}
+
+// The kernel's nr_cpu_ids, which is what ublk_drv clamps ADD_DEV's nr_hw_queues to:
+// setup_nr_cpu_ids() sets it to find_last_bit(cpu_possible_mask) + 1, and this file
+// prints exactly that mask. So the POSSIBLE count is the oracle and the online one is
+// not -- sysconf(_SC_NPROCESSORS_ONLN) and std::thread::hardware_concurrency() both
+// report online, which a host carrying present-but-offline cpus makes smaller, so a
+// case keyed on either would run on a host where the clamp does not bite and read its
+// own request back as the kernel's answer. 0 if the file cannot be read.
+static uint32_t possible_cpus() {
+    int fd = ::open("/sys/devices/system/cpu/possible", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    char buf[256] = {};
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0)
+        return 0;
+    // a cpu list ("0-7", "0-3,8-11"): the highest index is the last number in it,
+    // whatever the list's shape
+    uint32_t last = 0, v = 0;
+    bool in_num = false;
+    for (const char* p = buf; ; p++) {
+        if (*p >= '0' && *p <= '9') {
+            v = v * 10 + (uint32_t)(*p - '0');
+            in_num = true;
+            continue;
+        }
+        if (in_num) { last = v; v = 0; in_num = false; }
+        if (*p == '\0' || *p == '\n')
+            break;
+    }
+    return last + 1;
+}
+
+// This thread's own CPU time, in milliseconds. CLOCK_THREAD_CPUTIME_ID rather than
+// getrusage(RUSAGE_SELF): the oracle has to see exactly the vcpu that serves the queue
+// and nothing else -- not the consumer child device_io spawns, not the off-vcpu helper
+// thread, not photon's ancillary threads. That is what lets a case read "the pump was
+// busy-polling" off it, provided the case first establishes the pump is on this thread.
+static uint64_t thread_cpu_ms() {
+    struct timespec ts = {};
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) < 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / (1000 * 1000);
+}
+
+// Sleep `ms` on the vcpu and report the CPU this thread burned doing it. A coroutine
+// busy-polling on this vcpu spends nearly all of the wall time; one blocked in the
+// kernel's event wait spends none of it.
+static uint64_t thread_cpu_ms_during(uint64_t ms) {
+    uint64_t t0 = thread_cpu_ms();
+    photon::thread_usleep(ms * 1000);
+    return thread_cpu_ms() - t0;
 }
 
 // Forwards to the wrapped file and counts the three things an FUA dispatch can be told
@@ -462,6 +517,33 @@ TEST_F(UblkConfigTest, config_validation) {
     EXPECT_EQ(EINVAL, errno);
 }
 
+// The serving loop speaks only the plain ublk data plane: FETCH hands the kernel a
+// buffer address and COMMIT carries the result. Two flags negotiate a different
+// protocol it does not implement -- NEED_GET_DATA makes a WRITE's FETCH complete with
+// a positive result tag_loop reads as fatal (it exits, stranding the request and
+// burning the tag), and USER_COPY moves data by pread/pwrite on the cdev with a zero
+// FETCH address the loop never sends. Both must be refused at construction, before
+// ADD_DEV, so no object exists to strand anything. The values are from
+// <linux/ublk_cmd.h>; this TU cannot see ublk.cpp's private copy of the UAPI.
+TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
+    constexpr uint64_t NEED_GET_DATA = 1ULL << 2;
+    constexpr uint64_t USER_COPY     = 1ULL << 7;
+    for (uint64_t f : {NEED_GET_DATA, USER_COPY, NEED_GET_DATA | USER_COPY}) {
+        UblkController::Config bad(make_info());
+        bad.flags = f;
+        errno = 0;
+        EXPECT_EQ(nullptr, ctl->new_device(bad)) << "flags=" << f;
+        EXPECT_EQ(EINVAL, errno) << "flags=" << f;
+    }
+    // control: a config that asks for no exotic data plane still constructs, so the
+    // refusals above key on the flags and are not a blanket reject
+    UblkController::Config good(make_info());
+    good.flags = 0;
+    auto dev = ctl->new_device(good);
+    EXPECT_NE(nullptr, dev);
+    delete dev;
+}
+
 TEST_F(UblkTest, a_second_start_on_the_same_object_is_ealready) {
     if (skip_reason) return;
     UblkController::Config good(make_info());
@@ -542,6 +624,40 @@ TEST_F(UblkTest, basic_io) {
     EXPECT_EQ(0, device_io(node, pattern(0x5a), /*verify_backend=*/true));
     // and a second range, crossing queues' tags
     EXPECT_EQ(0, device_io(node, pattern(0xa5), true, IMG_SIZE - IO_OFF - IO_LEN));
+}
+
+// Every other case here pins sector_size_shift = 9, where the ublk 512-byte wire ABI
+// and the logical block size are the same number -- which is exactly why the shift bug
+// this guards survived review. At 12 (4 KiB logical blocks) they differ 8x, and the
+// ABI's nr_sectors / start_sector / dev_sectors are 512-byte counts that must NOT be
+// scaled by the logical shift. Capacity and IO placement are the two observable halves,
+// and mirror the reviewer's probe: a requested 64 MiB came back 8 MiB, and a 4 KiB
+// write at 4 KiB landed as 32 KiB at 32 KiB.
+TEST_F(UblkTest, sector_shift_12_places_io_and_reports_true_capacity) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.sector_size_shift = 12;   // 4 KiB logical block
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    // The kernel sets capacity from dev_sectors, a 512-byte count. Deriving it with
+    // the logical shift instead reported 1/8 of IMG_SIZE.
+    uint64_t cap = 0;
+    test::run_off_vcpu([&] {
+        int fd = ::open(node.c_str(), O_RDONLY);
+        if (fd >= 0) { if (::ioctl(fd, BLKGETSIZE64, &cap) < 0) cap = 0; ::close(fd); }
+    });
+    EXPECT_EQ(IMG_SIZE, cap);
+
+    // One logical block written at one logical block's offset must land at that byte
+    // offset in the backend with that length. Scaling the ABI sectors by the logical
+    // shift sent 4 KiB at 4 KiB to 32 KiB at 32 KiB instead, so the backend's copy at
+    // 4 KiB stayed empty and the verify reads back a mismatch.
+    EXPECT_EQ(0, device_io(node, pattern(0x5a, 4096), /*verify_backend=*/true, 4096));
 }
 
 // High-concurrency stress across MULTIPLE hardware queues: the kernel spreads
@@ -676,6 +792,84 @@ TEST_F(UblkTest, detach_reattach) {
     });
     ASSERT_EQ(0, rc);
     EXPECT_EQ(0, memcmp(pattern(0x11).data(), rbuf.data(), IO_LEN));
+}
+
+// BlkAdoption::Full is documented as checking the geometry AND the registered feature
+// set. FEATURE_DISCARD and FEATURE_WRITE_ZEROES are not in basic.attrs -- they are an
+// optional param type plus the two caps inside it -- so a drift in either direction used
+// to pass the comparison while start() went on to publish cfg.info.negotiated from the
+// REQUEST and the kernel queue kept the registration's limits. SET_PARAMS is refused once
+// a device has been used, so an adoption cannot close that gap; blk.h's `negotiated`
+// contract for ublk is that a refusal there fails start(), which is what this pins.
+//
+// Gated, and CI cannot run it: it needs root and ublk_drv.
+TEST_F(UblkTest, adoption_refuses_a_feature_set_the_registration_does_not_have) {
+    if (skip_reason) return;
+    constexpr uint64_t F   = FEATURE_FLUSH;
+    constexpr uint64_t D   = FEATURE_FLUSH | FEATURE_DISCARD;
+    constexpr uint64_t DW  = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    constexpr uint64_t W   = FEATURE_FLUSH | FEATURE_WRITE_ZEROES;
+    struct Row { uint64_t created, adopted; const char* what; };
+    const Row rows[] = {
+        {F,  DW, "ask for more than the registration has"},
+        {DW, F,  "ask for less than the registration has"},
+        {D,  W,  "swap one capability for another"},
+    };
+    for (const auto& row : rows) {
+        UblkController::Config cfg(make_info());
+        cfg.info.features = row.created;
+        auto dev = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev) << row.what;
+        DEFER(delete dev);
+        ASSERT_EQ(0, dev->start(file)) << row.what;
+        std::string node = node_of(dev);
+        uint32_t id = node_dev_id(node.c_str());
+        ASSERT_NE(UINT32_MAX, id) << row.what;
+        ASSERT_EQ(0, dev->detach(true)) << row.what;   // quiesced + lock free = orphan
+
+        // Non-vacuity, and on both sides of the comparison. The row's own premise first:
+        // a row whose two sets were equal would make the refusal below prove nothing.
+        ASSERT_NE(row.created, row.adopted) << row.what;
+        // Then the registration's side, read back out of the kernel through the control
+        // channel rather than off our own descriptor: the orphan record's features come
+        // from the same GET_PARAMS reply the adoption validates against, so this shows
+        // what the refusal is actually refusing.
+        bool listed = false;
+        for (auto& r : ctl->list_orphans()) {
+            if (r.identity != std::to_string(id))
+                continue;
+            listed = true;
+            EXPECT_EQ(row.created, r.features) << row.what;
+        }
+        ASSERT_TRUE(listed) << row.what;
+
+        UblkController::Config cfg2(make_info());
+        cfg2.info.features = row.adopted;
+        cfg2.dev_id = id;
+        auto dev2 = ctl->new_device(cfg2);
+        ASSERT_NE(nullptr, dev2) << row.what;
+        DEFER(delete dev2);
+        errno = 0;
+        EXPECT_EQ(-1, dev2->start(file)) << row.what;
+        EXPECT_EQ(EINVAL, errno) << row.what;
+        // the refused start() published nothing: a negotiated set is a claim about a
+        // session, and there is no session
+        EXPECT_EQ(0ull, dev2->get_info().negotiated) << row.what;
+
+        // The refusal left the registration alone, so a config matching it still adopts.
+        // This is also the leg that removes the device the row created, and the control
+        // that the refusal above keys on the feature set and is not a blanket reject of
+        // every adoption.
+        UblkController::Config cfg3(make_info());
+        cfg3.info.features = row.created;
+        cfg3.dev_id = id;
+        auto dev3 = ctl->new_device(cfg3);
+        ASSERT_NE(nullptr, dev3) << row.what;
+        DEFER(delete dev3);
+        DEFER(dev3->shutdown());
+        ASSERT_EQ(0, dev3->start(file)) << row.what;
+        EXPECT_EQ(node, node_of(dev3)) << row.what;
+    }
 }
 
 TEST_F(UblkTest, orphan_list) {
@@ -1070,6 +1264,48 @@ TEST_F(UblkTest, resize_recover) {
     ASSERT_EQ(0, dev2->start(file));
     EXPECT_EQ(node, node_of(dev2));
     EXPECT_EQ(0, device_io(node, pattern(0x67), true, IMG_SIZE + IO_OFF));
+}
+
+// The resize and orphan-scan paths convert between bytes and the ABI's 512-byte
+// sectors too: UPDATE_SIZE takes a 512-byte count, dev_sectors is one, and
+// list_orphans() scales the registered dev_sectors back to bytes. At a 4 KiB logical
+// block all three must use the fixed 9. If the capacity conversion (above) and the
+// scan conversion disagree -- one 512-based, one logical-based -- the orphan reports
+// 8x the true size, which is why the sites move together.
+TEST_F(UblkTest, sector_shift_12_resize_and_orphan_report_true_byte_size) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.sector_size_shift = 12;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    std::string node = node_of(dev);
+    uint32_t id = node_dev_id(node.c_str());
+    ASSERT_NE(UINT32_MAX, id);
+
+    constexpr uint64_t NEW_SIZE = 96ull << 20;   // a multiple of the 4 KiB block
+    ASSERT_EQ(0, file->ftruncate(NEW_SIZE));
+    ASSERT_EQ(0, dev->resize(NEW_SIZE));
+
+    uint64_t cap = 0;
+    test::run_off_vcpu([&] {
+        int fd = ::open(node.c_str(), O_RDONLY);
+        if (fd >= 0) { if (::ioctl(fd, BLKGETSIZE64, &cap) < 0) cap = 0; ::close(fd); }
+    });
+    EXPECT_EQ(NEW_SIZE, cap);
+    // IO past the old 64 MiB end reaches the grown region at the right byte offset
+    EXPECT_EQ(0, device_io(node, pattern(0x66, 4096), true, IMG_SIZE + 4096));
+
+    ASSERT_EQ(0, dev->detach(true));   // quiesced + lock free = orphan
+    DEFER(dev->shutdown());
+    bool found = false;
+    BlkDevInfo rec;
+    for (auto& i : ctl->list_orphans())
+        if (i.identity == std::to_string(id)) { found = true; rec = i; }
+    ASSERT_TRUE(found);
+    EXPECT_EQ(NEW_SIZE, rec.size);
+    EXPECT_EQ(12, (int)rec.sector_size_shift);
 }
 
 TEST_F(UblkTest, shutdown_busy) {
@@ -1582,6 +1818,10 @@ TEST_F(UblkTest, pool_null_serves_on_the_caller_vcpu) {
 // served from the caller's vcpu.
 TEST_F(UblkTest, multiqueue_without_a_pool) {
     if (skip_reason) return;
+    // ADD_DEV clamps the queue count to nr_cpu_ids, so four queues is a request this
+    // host has to be able to satisfy for the count below to be the one asked for
+    if (possible_cpus() < 4)
+        return report_skip("needs >= 4 possible CPUs for ADD_DEV to grant four queues");
     test::RecordingFile rec(file);
     auto* caller = photon::get_vcpu();
 
@@ -1601,6 +1841,51 @@ TEST_F(UblkTest, multiqueue_without_a_pool) {
     EXPECT_EQ(0, test::stress_node_both_modes(node, IMG_SIZE, "mq, no pool", 8));
     EXPECT_EQ(1u, rec.vcpu_count());
     EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// ADD_DEV NEGOTIATES the queue count: ublk_drv clamps nr_hw_queues to nr_cpu_ids and
+// copies the clamped dev_info back, and the tag set it built has that many queues. So
+// the reply, not the request, is what make_queues() has to serve -- serving the request
+// mmaps descriptor rings for queue ids the device does not have, and ublk_ch_mmap bounds
+// the mapping at nr_hw_queues and answers EINVAL, which failed start() on the first queue
+// past the clamp. The clamp is on POSSIBLE cpus, which is why this asks for the transport's
+// own maximum: on any host smaller than that the clamp is guaranteed to bite, and a case
+// keyed on the online count could silently ask for a number the kernel grants unchanged.
+//
+// Gated, and CI cannot run it: it needs root and ublk_drv.
+TEST_F(UblkTest, add_dev_serves_the_queue_count_the_kernel_negotiated) {
+    if (skip_reason) return;
+    // utils.h's MAX_QUEUES is the most this transport asks for; this file includes
+    // blk.h and harness.h only, so the number is spelled out here.
+    constexpr uint32_t ASKED = 64;
+    uint32_t possible = possible_cpus();
+    ASSERT_GT(possible, 0u) << "cannot read /sys/devices/system/cpu/possible";
+    if (possible >= ASKED)
+        return report_skip("this host has >= 64 possible CPUs, so ADD_DEV cannot clamp");
+
+    UblkController::Config cfg(make_info());
+    cfg.queues = ASKED;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    // the defect: this came back -1/EINVAL, from the descriptor mmap of the first queue
+    // id past the clamp
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+
+    // blk-mq's own directories, i.e. the kernel's answer rather than anything this
+    // library recorded, and strictly fewer than what was asked for -- without that
+    // second half the equality below could hold by the request never having been
+    // clamped at all.
+    std::string kname = node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node;
+    int mq = test::count_mq_dirs(kname);
+    ASSERT_GT(mq, 0);
+    EXPECT_EQ((int)possible, mq);
+    EXPECT_LT((uint32_t)mq, ASKED);
+    // and the device still serves on the geometry it actually got
+    EXPECT_EQ(0, device_io(node, pattern(0x5a), /*verify_backend=*/true));
 }
 
 // An empty pool must degrade to the caller's vcpu, not divide by zero:
@@ -1927,6 +2212,67 @@ TEST_F(UblkTest, spin_us_modes) {
             << "I/O failed under spin_us=" << sp;
         dev->shutdown();
     }
+}
+
+// spin_us' finite mode is documented as busy-polling for that many microseconds AFTER
+// THE LAST COMPLETION, then blocking. The queue pump cannot witness a completion itself:
+// CascadingEventEngine::wait_for_events returns the number of fd-interest events it
+// delivered, and a queue ring registers none -- every cqe it reaps belongs to a parked
+// tag coroutine, which it resumes without counting anything. So the return value it used
+// to key the window on was always 0 here, the window opened once at queue setup and never
+// again, and a queue that had served I/O a second ago was already blocking. The tags now
+// stamp the queue's window themselves; this measures the CONTRACT rather than the counter.
+//
+// The oracle is this thread's CPU time, and the case is built so that the pump is on this
+// thread: an idle pump past its window blocks and costs it nothing, while one whose window
+// a completion just rearmed busy-polls and costs it nearly the whole wall second. The
+// placement that makes the clock valid is asserted below, not assumed.
+//
+// Gated, and CI cannot run it: it needs root and ublk_drv.
+TEST_F(UblkTest, finite_spin_rearms_after_a_completion) {
+    if (skip_reason) return;
+    constexpr uint64_t SPIN_US = 3 * 1000 * 1000;
+    test::RecordingFile rec(file);
+    UblkController::Config cfg(make_info());
+    cfg.pool = nullptr;   // the queue's pump and tags then live on THIS thread
+    cfg.spin_us = (uint32_t)SPIN_US;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+    ASSERT_FALSE(node.empty());
+
+    // Phase 1 -- the control. Idle past the window that opens at queue setup, then
+    // measure. A rearmed pump and one that never rearmed are BOTH blocking here, so what
+    // this establishes is that the oracle can read "not spinning" at all: that spin_us is
+    // not being honoured as UINT32_MAX, and that nothing else on this thread burns CPU.
+    // The quiet loop is not decoration -- udev's probe of a fresh block device is I/O like
+    // any other and stamps the window, so a fixed sleep could measure a spin the pump is
+    // entitled to be in. Bounded, and a host that will not leave the node alone fails the
+    // assertion below rather than looping.
+    photon::thread_usleep(SPIN_US + 2 * 1000 * 1000);
+    uint64_t idle_ms = 0;
+    for (int i = 0; i < 20; i++) {
+        idle_ms = thread_cpu_ms_during(500);
+        if (idle_ms < 100)
+            break;   // quiet: the pump is blocking, which is what this phase measures
+    }
+
+    // Phase 2 -- one completion through the device, then measure inside the window that
+    // completion must have rearmed. The ASSERT is also the non-vacuity control on this
+    // phase: no I/O would mean no completion and nothing to rearm with.
+    ASSERT_EQ(0, device_io(node, pattern(0x5a), /*verify_backend=*/true));
+    uint64_t spin_ms = thread_cpu_ms_during(1000);
+
+    // The serving coroutines really ran on this thread, which is the whole licence for
+    // reading a per-thread clock as a statement about the pump.
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(photon::get_vcpu()));
+
+    EXPECT_LT(idle_ms, 200u) << "the pump never blocked, so the spin_ms below measured nothing";
+    EXPECT_GT(spin_ms, 500u) << "the pump did not rearm its spin window after the completion";
 }
 
 }  // namespace blk

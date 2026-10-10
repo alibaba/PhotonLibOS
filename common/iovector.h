@@ -210,9 +210,12 @@ struct iovector_view
         for (int i = 0; i < iovcnt; i++) {
             auto p = (const uint8_t*)iov[i].iov_base;
             auto end = p + iov[i].iov_len;
-            for (; p + 8 <= end; p += 8)     // word at a time first
-                if (*(const uint64_t*)p)
+            for (; p + 8 <= end; p += 8) {   // word at a time first
+                uint64_t w;
+                memcpy(&w, p, sizeof(w));    // slice() may leave p unaligned
+                if (w)
                     return false;
+            }
             for (; p < end; ++p)             // then the tail bytes
                 if (*p)
                     return false;

@@ -32,6 +32,7 @@ limitations under the License.
 #include <photon/thread/thread11.h>   // thread_create11 for the stress clients
 
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -1595,6 +1596,57 @@ TEST_F(NbdTest, shutdown_releases_a_backend_it_owns) {
     EXPECT_EQ(3, destroyed.load());
 }
 
+// The other half of the same contract: OWNERSHIP is counted once per backend, not once
+// per start(). detach() keeps both the pointer and the ownership so that a failed
+// start() can hand the backend back to its caller, which also makes the very same
+// pointer reachable by the next start() -- and start() released a previously owned
+// backend before taking the new one, so re-serving the pointer it already owned deleted
+// it on the spot, stored the freed pointer straight back into `backend`, and left
+// shutdown() and the destructor each one more delete of it to perform. The counter makes
+// the first delete visible without waiting for the allocator to notice the second.
+TEST_F(NbdTest, restarting_with_the_same_owned_backend_deletes_it_exactly_once) {
+    std::atomic<int> destroyed{0};
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    fs::IFile* bk = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+
+    // The transition that makes the same pointer reachable twice: detach() is also a
+    // failed start()'s rollback, so it deliberately does not release.
+    ASSERT_EQ(0, dev->detach(true));
+    EXPECT_EQ(0, destroyed.load());
+
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    // This is where the premature delete landed. The backend is the one this device is
+    // serving right now, so nothing may have been destroyed yet.
+    EXPECT_EQ(0, destroyed.load());
+
+    // And it is still that backend: a freed one could not answer these. The listener is
+    // re-bound by the second start(), so the port has to be read back again.
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(4096, 0x6b), rbuf(4096);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    cli.force_close();
+
+    // Exactly one delete for exactly one ownership.
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+}
+
 // FUA means the bytes are durable before the reply, and the reply is the device's
 // word that they are. pwritev2(RWF_DSYNC) cannot carry that word: IFile::pwritev2 is
 // not pure virtual and its base body discards `flags` and forwards to pwritev, so a
@@ -1899,6 +1951,202 @@ TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
     honest.force_close();
     photon::thread_usleep(500 * 1000);
     EXPECT_EQ(0u, dev->get_client_connections().size());
+}
+
+// Cap one of a socket's buffers, so that a write of any real size cannot be absorbed by
+// the kernel and has to block on its peer instead. Blocking is the only way to make the
+// server's OWN reply write reach its stall deadline from a case that controls nothing but
+// the peer, and it takes both ends: the writer's send buffer alone still swallows a reply
+// the reader was always going to take. What the kernel actually grants is read back by
+// shut_the_window rather than trusted, because both Linux and macOS clamp the request.
+static int cap_socket_buf(net::ISocketStream* s, int option, int bytes) {
+    return s->setsockopt(SOL_SOCKET, option, &bytes, sizeof(bytes));
+}
+
+// Close the window on one client connection: the client's receive buffer, which is the
+// peer that will not read, and the server side of the same connection, which is the end
+// that writes the replies. The connection has to be registered by then, i.e. this runs
+// after a handshake that has returned. `room` reports what the two ends can now absorb
+// between them, because a kernel is free to clamp a SO_*BUF request upward -- and a case
+// whose reply still fitted would then wait for a deadline that never arrives and prove
+// nothing. 0 on success, -1 if a socket refused.
+static int shut_the_window(NbdTestClient& cli, NbdDevice* dev, int* room) {
+    auto conns = dev->get_client_connections();
+    if (conns.size() != 1)
+        return -1;
+    if (cap_socket_buf(cli.s, SO_RCVBUF, 4096) < 0)
+        return -1;
+    if (cap_socket_buf(conns[0], SO_SNDBUF, 4096) < 0)
+        return -1;
+    int rcv = 0, snd = 0;
+    socklen_t n = sizeof(rcv);
+    if (cli.s->getsockopt(SOL_SOCKET, SO_RCVBUF, &rcv, &n) < 0)
+        return -1;
+    n = sizeof(snd);
+    if (conns[0]->getsockopt(SOL_SOCKET, SO_SNDBUF, &snd, &n) < 0)
+        return -1;
+    *room = rcv + snd;
+    return 0;
+}
+
+// The reply both cases below provoke: far larger than any buffer a kernel leaves on a
+// socket that was asked for 4 KiB, and far inside both the image and MAX_BLOCK_SIZE.
+static constexpr uint32_t STALL_REPLY_LEN = 1u << 20;
+
+// A reply write that cannot complete is not something to shrug at. write() is the
+// full-count variant, so the -1 that execute() used to throw away meant the client never
+// got that answer and never would -- and the connection stayed up, so serve_conn kept
+// dispatching into a socket nobody was reading, each request parking a queue-depth slot
+// and its share of the byte budget for a whole stall_timeout. One client that stopped
+// reading could hold the device's entire depth that way. The half-close execute() now
+// performs is what turns that into a dropped connection.
+TEST_F(NbdTest, a_reply_nobody_reads_drops_the_connection_instead_of_being_discarded) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    // Lowered from the 30s default, and deliberately: the case has to sit out one whole
+    // stall_timeout to watch the reply write fail, and nothing about the finding depends
+    // on 30 in particular. At the default this one case would cost half a minute.
+    cfg.stall_timeout = 1;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    // Bound this client's own reads and writes: a server that never answers has to fail
+    // the case rather than hang it.
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    // After the handshake, so that starving the handshake is not what this measures.
+    int room = 0;
+    ASSERT_EQ(0, shut_the_window(cli, dev, &room));
+    // The premise, measured rather than assumed: if the reply fitted in what the two ends
+    // can still absorb, the write would complete, no deadline would ever be reached, and
+    // the case would be waiting on nothing.
+    ASSERT_LT(room, (int)(STALL_REPLY_LEN / 2));
+
+    // A READ whose reply dwarfs the buffers left at either end, from a client that never
+    // reads again. send_header_only is the whole request -- a READ carries no payload --
+    // so from here on the only thing that can end the server's write is its deadline.
+    ASSERT_EQ(0, cli.send_header_only(NBD_CMD_READ, 0, STALL_REPLY_LEN));
+
+    // Poll rather than sleep one fixed grace period: a loaded runner stretches the
+    // teardown without changing the answer, and an execute() that ignored send_reply's
+    // -1 never gets there at all -- its serve_conn is parked in an unbounded wait for a
+    // request this client has no intention of sending.
+    for (int i = 0; i < 50 && !dev->get_client_connections().empty(); i++)
+        photon::thread_usleep(100 * 1000);
+    EXPECT_EQ(0u, dev->get_client_connections().size());
+
+    // The server dropped this connection, so there is no DISC to send it.
+    cli.force_close();
+}
+
+// Two stall_guards on one stream overlap as soon as a client pipelines: every execute
+// coroutine arms one around its own reply write, and send_reply's write lock makes the
+// second of them wait with its guard ALREADY armed. The stream has one timeout, so a
+// guard that saved and restored it privately captured whatever the guard before it had
+// installed instead of the stream's real baseline, and the one that left last wrote that
+// captured value back. What it captured was stall_timeout, so the connection kept a
+// deadline it was never supposed to have -- and the next read serve_conn performs is the
+// idle wait for the client's next request, which is the job and not a stall. Counting the
+// arming depth is what makes the order the two leave in stop mattering.
+TEST_F(NbdTest, overlapping_reply_guards_restore_the_idle_wait_they_found) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    // Has to exceed the time the two replies below take to drain, and to stay under the
+    // idle wait at the end of the case, which is what makes a leaked deadline visible.
+    // Both numbers are measured, not guessed: on a 4 KiB window the drain of a payload
+    // this size runs at a few tens of KiB/s, because each window's worth costs a
+    // delayed-ACK round rather than a memcpy -- sizing the payload 4x over the bar made
+    // the drain alone take longer than a 1 s deadline and the case failed for a reason
+    // that had nothing to do with the nesting it exists to pin.
+    cfg.stall_timeout = 3;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    // Bound this client's own reads and writes: a server that never answers has to fail
+    // the case rather than hang it.
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    auto conns = dev->get_client_connections();
+    ASSERT_EQ(1u, conns.size());
+    // What the transmission phase has to leave behind for the idle wait. It has to be a
+    // value the leak cannot produce, or a guard that restored the wrong thing would look
+    // exactly like one that restored the right thing and this case would prove nothing.
+    uint64_t baseline = conns[0]->timeout();
+    ASSERT_NE((uint64_t)cfg.stall_timeout * 1000 * 1000, baseline);
+    int room = 0;
+    ASSERT_EQ(0, shut_the_window(cli, dev, &room));
+    // Same measured premise as the case above: the first reply has to be too big for
+    // what the two ends can absorb, or it would go straight out and the second execute
+    // coroutine would never have to wait on the write lock with its guard armed.
+    //
+    // Sized FROM `room` rather than a fixed constant, and that is not tidiness. The
+    // kernel is free to clamp a SO_*BUF request, so what counts as "too big" is
+    // whatever this host says; a constant clears the bar by an arbitrary margin, and
+    // every byte of that margin has to be pushed through a window a few KiB wide
+    // before the case reaches its own assertions. So clear it by a fixed slack instead
+    // of a multiplier: enough that a kernel handing back a slightly different room
+    // still cannot let the reply fit, small enough that the drain stays a small
+    // multiple of one window rather than of four.
+    const uint32_t len = (uint32_t)(((uint64_t)room + 4096 + 511) & ~(uint64_t)511);
+    // The real premise, and not a tautology: if the kernel clamped the buffers far
+    // enough upward, four times them would no longer fit in the image and this case
+    // cannot be built on this host at all. Say so instead of reading past the end.
+    ASSERT_LE((uint64_t)len * 2, (uint64_t)cfg.info.size);
+
+    // Two READs too large for the window, pipelined and left unread. The first reply
+    // fills what little buffer is left and blocks with its guard armed; the second
+    // execute coroutine arms its own guard and then queues on the reply write lock, so
+    // it is armed and still waiting when the first one leaves. That order is forced
+    // rather than raced: both coroutines were created before either ran, and neither
+    // can finish while the window is shut.
+    std::vector<char> b1(len), b2(len);
+    ASSERT_NE(0u, cli.submit(NBD_CMD_READ, 0, b1.data(), len));
+    ASSERT_NE(0u, cli.submit(NBD_CMD_READ, len, b2.data(), len));
+    // Both guards are armed once the scheduler has been through both coroutines, and
+    // neither can get past its own while the window is shut, so this only has to outlast
+    // the scheduler rather than any I/O.
+    photon::thread_usleep(200 * 1000);
+
+    // Draining lets both replies out in completion order, and so lets both guards leave:
+    // the first while the second is still armed, the second last of all.
+    EXPECT_EQ(0, cli.collect());
+    EXPECT_EQ(0, cli.collect());
+    photon::thread_usleep(200 * 1000);
+
+    conns = dev->get_client_connections();
+    ASSERT_EQ(1u, conns.size());
+    EXPECT_EQ(baseline, conns[0]->timeout());
+
+    // The consequence too, so this pins a behaviour and not only a field. One more
+    // request puts serve_conn back into its idle read, which inherits whatever the last
+    // guard left on the stream; thinking for longer than stall_timeout is not a stall,
+    // and a client doing it must still be there afterwards. The wait therefore has to
+    // stay above cfg.stall_timeout, or a guard that leaked its deadline onto the idle
+    // read would not have had time to kill the connection and this half proves nothing.
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+    photon::thread_usleep((cfg.stall_timeout + 1) * 1000 * 1000);
+    EXPECT_EQ(1u, dev->get_client_connections().size());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+
+    cli.force_close();
 }
 
 }  // namespace blk

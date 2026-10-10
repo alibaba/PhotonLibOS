@@ -346,8 +346,12 @@ struct BlkConfig {
 
     uint32_t queues = 0;          // serving parallelism; 0 = transport-chosen default.
                                   // Honored by ublk, vhost-user and vduse, all clamping it
-                                  // to their maximum -- by a start() that CREATES the
-                                  // registration. One that ADOPTS serves the count the
+                                  // to their maximum -- for ublk, to the lesser of that
+                                  // and the kernel's own nr_cpu_ids, which ADD_DEV
+                                  // negotiates and returns, so a count inside our maximum
+                                  // can still come back lower. All of this by a start()
+                                  // that CREATES the registration. One that ADOPTS serves
+                                  // the count the
                                   // registration already has, and this value does not
                                   // decide it, 0 included: ublk takes the registered count
                                   // outright, up or down, and vduse treats this one as a

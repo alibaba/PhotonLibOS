@@ -376,15 +376,15 @@ struct GenlSock {
 // shift has to be range-checked before it is used. What is checked today,
 // each line naming a symbol you can grep for:
 //
-//   head, de->next  descriptor indices. Both are peer-written and both are
+//   head, de.next   descriptor indices. Both are peer-written and both are
 //                   tested against ring_num before desc[] is indexed.
 //                   MAX_DESC_CHAIN bounds how many steps the walk takes, not
 //                   where they land, so it is not this guard; chain_end is
 //                   what refuses a chain that never terminates -- longer
 //                   than MAX_DESC_CHAIN, or circular.
-//   de->addr,       an address goes to the translate delegate together with
-//   de->len,        its length and the access the walk is about to make of
-//   de->flags       it -- writable when the descriptor carries
+//   de.addr,        an address goes to the translate delegate together with
+//   de.len,         its length and the access the walk is about to make of
+//   de.flags        it -- writable when the descriptor carries
 //                   VRING_DESC_F_WRITE, readable otherwise. translate must
 //                   fail unless the whole [addr, addr + len) is mapped with
 //                   no wrap in the sum, and mapped for that access: a VA
@@ -392,6 +392,16 @@ struct GenlSock {
 //                   fault the engine would take on the guest's behalf. A
 //                   zero len asks for one byte, so a zero-length desc gets
 //                   that answer instead of a vacuous success.
+//   de, te          each descriptor is COPIED before any of its fields is
+//                   used, in both walks. The ring and a table are guest
+//                   memory that stays writable while the request is served,
+//                   so a field read twice can answer twice, and the window
+//                   between two reads of one descriptor is its translate.
+//                   What that buys a hostile guest is a mapping validated
+//                   for one length and an iovec built with a longer one, or
+//                   a NEXT cleared so the chain ends before its status. The
+//                   copy makes the checked value and the used value the same
+//                   value -- which the checks above all quietly assume.
 //   hdr             gather-copied off the front of the readable stream by
 //                   take_front, which refuses a stream shorter than
 //                   sizeof(hdr): a header split across two descriptors is
@@ -423,7 +433,7 @@ struct GenlSock {
 //                   nesting is refused (one table per descriptor); and the table
 //                   descriptor itself is never pushed into a stream, so its len bytes
 //                   cannot reach pwritev as a payload.
-//   tbl[t], te->next
+//   tbl[t], te.next
 //                   a table entry's index lives in a SECOND index space: it is bounded
 //                   by that table's own entry count, never by ring_num, and the array
 //                   indexed is the translated table, never desc[]. Taking either the
@@ -871,9 +881,10 @@ public:
     std::atomic<uint64_t> generation{0};
 
     // the ring, set up by the transport once the frontend/driver published it.
-    // Change these four through set_ring()/clear_ring(), not by assignment: the
-    // pair bumps `generation` above, which is what tells an in-flight request
-    // that the ring it was dispatched against is gone.
+    // Change these four through set_ring()/clear_ring()/republish_ring(), not by
+    // assignment: the first two bump `generation` above, which is what tells an
+    // in-flight request that the ring it was dispatched against is gone, and the
+    // third is the one path that must not.
     vring_desc* desc = nullptr;
     vring_avail* avail = nullptr;
     vring_used* used = nullptr;
@@ -1008,6 +1019,18 @@ public:
     // true again for the new one.
     void set_ring(vring_desc* d, vring_avail* a, vring_used* u, uint32_t n);
     void clear_ring();
+
+    // Publish a retranslation of the SAME ring: the four fields, with no generation
+    // bump. For a transport whose invalidation replaces the MAPPING behind a ring
+    // whose identity has not changed -- the requests in flight were dispatched into a
+    // ring that is still the published one, so retiring them would drop completions
+    // their driver is still waiting for, and nothing re-serves an entry whose head the
+    // driver has already reclaimed.
+    // Two preconditions, both the caller's. It has established that desc/avail/used and
+    // num are unchanged in identity. And no other vcpu reads these four: the missing
+    // release store is admissible only because set_ring()'s bump exists to publish them
+    // to a reader elsewhere, and there is none here.
+    void republish_ring(vring_desc* d, vring_avail* a, vring_used* u, uint32_t n);
 
     // Decide whether the used element just appended warrants a notification.
     // `old_used_idx` is the used index BEFORE the append -- §2.7.7.2's "the idx

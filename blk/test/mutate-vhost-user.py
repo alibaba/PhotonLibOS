@@ -4,11 +4,13 @@
 Three groups, each with a different relationship to the real frontend, so do not read
 a detection claimed here as a QEMU detection unless it says so.
 
-The four protocol mutants guard transport-level behaviours. Do not book this group
+The five protocol mutants guard transport-level behaviours. Do not book this group
 as "found by QEMU": that is substantiated for nocallsignal only -- it is a defect
 the real frontend catches at its qvirtio_wait_queue_isr and a polling mock
 structurally cannot. overread and nobound go the other way, and have long been
-caught in-repo by pipelined_messages and oversized_payload.
+caught in-repo by pipelined_messages and oversized_payload. snapall is in-repo only,
+killed by adopt_resumes_from_the_frontends_base_not_used_idx; nothing establishes a
+real-frontend detection for it, and it does not claim one.
 
 The eight EVENT_IDX mutants are a different case, and each is annotated where it is
 listed below: several of them have no real-frontend detection at all, so do not read
@@ -320,12 +322,31 @@ blk/vhost-user.cpp -- the INDIRECT_DESC offer and the seg_max it publishes:
                     # number. Deleting the assignment outright has the same effect as not
                     # offering SEG_MAX and goes red on the same assertion reading 0, so no
                     # second mutant is needed.
+    snapall         # discard ANY stale-cursor BASE, not only one the ring cannot vouch
+                    # for. The guard's real test is `in_flight > q->srv.num`; this makes
+                    # it `in_flight > 0`, so every BASE with anything outstanding is
+                    # thrown away and the queue resumes from used_idx -- the "restored
+                    # from used_idx and replayed" regime. Killed by
+                    # adopt_resumes_from_the_frontends_base_not_used_idx on BOTH oracles:
+                    # the settled used->idx reads 8 where it expects 6, and the two
+                    # re-armed sentinel status bytes read 0 where they expect 0xff. That
+                    # case owns this mutant alone -- no other caller of
+                    # restart_with_base constructs 0 < last_avail - used_idx <= num.
+                    #
+                    # NOT the same as ignoring SET_VRING_BASE, and the difference matters:
+                    # deleting the handler's last_avail store is indistinguishable in that
+                    # case BY CONSTRUCTION, because the BASE it plants equals the cursor
+                    # the ring naturally had after the requests it drove, and any coherent
+                    # crash fiction forces that equality. It should die in event_idx_wrap
+                    # instead (BASE 65534 against a natural 0). Reasoned, NOT measured --
+                    # measure it before booking it as killed.
 
 Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence is
 `backup`, then one mutation at a time with a build and a run between it and the next
 `backup`, then `restore`; `restore` and every mutation refuse to run without the
-stamp `backup` leaves, because `restore` copies .orig over the source and an .orig of
-unknown age reverts the tree silently.
+stamp `backup` leaves, and `backup` refuses to run while that stamp still exists --
+because `restore` copies .orig over the source, an .orig of unknown age reverts the
+tree silently, and a `backup` taken mid-mutation makes the mutant itself the .orig.
 """
 import pathlib
 import sys
@@ -386,6 +407,7 @@ MUTANTS = {
     "gateonoffer": "vhost-user",
     "noreset": "vhost-user",
     "segmaxfull": "vhost-user",
+    "snapall": "vhost-user",
 }
 
 RECV_MSG_MARK = "    int recv_msg(int fd, vhost_user_msg* m, int* fds, int* nfds) {\n"
@@ -534,18 +556,18 @@ INDIRECT_GATE = """            if (!allow_indirect) {
             }
 """
 
-INDIRECT_WITH_NEXT = """            if (de->flags & VRING_DESC_F_NEXT) {
+INDIRECT_WITH_NEXT = """            if (de.flags & VRING_DESC_F_NEXT) {
                 LOG_ERROR("virtio-blk `: indirect descriptor at ` also carries NEXT", tag, d);
                 bad = true;
                 break;
             }
 """
 
-TBL_LEN_CHECK = "            if (de->len == 0 || de->len % sizeof(vring_desc)) {\n"
+TBL_LEN_CHECK = "            if (de.len == 0 || de.len % sizeof(vring_desc)) {\n"
 
-TBL_LEN_ONLY_ZERO = "            if (de->len == 0) {\n"
+TBL_LEN_ONLY_ZERO = "            if (de.len == 0) {\n"
 
-TBL_LEN_ONLY_PARTIAL = "            if (de->len % sizeof(vring_desc)) {\n"
+TBL_LEN_ONLY_PARTIAL = "            if (de.len % sizeof(vring_desc)) {\n"
 
 TBL_CAP_BLOCK = """            if (n > MAX_INDIRECT_ENTRIES) {
                 LOG_ERROR("virtio-blk `: indirect table at ` declares ` entries, the limit is `",
@@ -562,24 +584,28 @@ TBL_CAP_TEST = "            if (n > MAX_INDIRECT_ENTRIES) {\n"
 
 TBL_CAP_TEST_OFFBYONE = "            if (n >= MAX_INDIRECT_ENTRIES) {\n"
 
-TBL_TRANSLATE = "            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, false);\n"
+TBL_TRANSLATE = "            const vring_desc* tbl = (const vring_desc*)translate(de.addr, de.len, false);\n"
 
-TBL_TRANSLATE_WRITABLE = "            const vring_desc* tbl = (const vring_desc*)translate(de->addr, de->len, true);\n"
+TBL_TRANSLATE_WRITABLE = "            const vring_desc* tbl = (const vring_desc*)translate(de.addr, de.len, true);\n"
 
 # tblwrite only; the cast is needed because push() takes void* and tbl is const.
 # Inserted BEFORE the `if (!tbl)` refusal, hence the guard.
 TBL_AS_DATA = (TBL_TRANSLATE +
-               "            if (tbl) ((de->flags & VRING_DESC_F_WRITE) ? wr : rd).push((void*)tbl, de->len);\n")
+               "            if (tbl) ((de.flags & VRING_DESC_F_WRITE) ? wr : rd).push((void*)tbl, de.len);\n")
 
 TBL_INDEX_BOUND = "                if (t >= n) {\n"
 
 TBL_INDEX_BOUND_RING = "                if (t >= ring_num) {\n"
 
-TBL_ARRAY = "                const vring_desc* te = &tbl[t];\n"
+# The descriptor is a COPY, not a pointer: the walk snapshots each entry out of guest
+# memory before reading any of its fields, so a field cannot answer one way to the
+# check and another to the use. Both spellings below therefore drop the `*` and the
+# `&` -- that is not a typo, and an anchor written the old way matches nothing.
+TBL_ARRAY = "                const vring_desc te = tbl[t];\n"
 
-TBL_ARRAY_RING = "                const vring_desc* te = &desc[t];\n"
+TBL_ARRAY_RING = "                const vring_desc te = desc[t];\n"
 
-TBL_NESTED = """                if (te->flags & VRING_DESC_F_INDIRECT) {
+TBL_NESTED = """                if (te.flags & VRING_DESC_F_INDIRECT) {
                     // \u00a72.7.5.3.1: "The driver MUST NOT set the VIRTQ_DESC_F_INDIRECT flag
                     // within an indirect descriptor (ie. only one table per descriptor)."
                     // That is a DRIVER requirement -- \u00a72.7.5.3.2 gives the device no
@@ -614,6 +640,12 @@ RESET_INDIRECT = """            // Same hazard, and a more concrete one: a true 
 SEG_MAX_ADVERTISED = "        bc->seg_max = VIRTIO_BLK_SEG_MAX_ADVERTISED;\n"
 
 SEG_MAX_FULL = "        bc->seg_max = MAX_INDIRECT_ENTRIES;\n"
+
+# vq_start's stale-cursor guard. `num` is what makes the test "can this ring vouch for
+# that BASE"; `0` discards every BASE with anything outstanding.
+STALE_BASE_GUARD = "        if (in_flight > q->srv.num)\n"
+
+STALE_BASE_GUARD_ANY = "        if (in_flight > 0)\n"
 
 
 def die(msg):
@@ -683,6 +715,22 @@ def main():
     mode = sys.argv[1]
 
     if mode == "backup":
+        # An in-flight stamp means a mutant may still be in one of these sources.
+        # Backing up then would capture the mutation as pristine, and the restore
+        # that follows would faithfully put it back -- silently, and with a stamp
+        # saying the tree is clean. Restore first.
+        #
+        # This guard buys more here than in a script with private backups, because
+        # `utils.cpp.orig` is shared with mutate-blk.py by design: a backup that
+        # captures a mutant also poisons the copy that script restores from. Its
+        # restore digests each .orig and would die on the mismatch; this script's
+        # restore has no such check, so whatever it copies back is trusted on sight.
+        # The sibling direction -- backing up while mutate-blk.py is the one
+        # mid-experiment -- is a separate question and is deliberately not closed
+        # here; that script checks this one's stamp, this one does not check its.
+        if STAMP.exists():
+            die("backup refused: this script is already mid-experiment (%s exists), "
+                "so a source may still carry a mutant; run `restore` first" % STAMP)
         for src, bak in SRCS.values():
             bak.write_bytes(src.read_bytes())
             print("BACKUP_OK", bak)
@@ -783,6 +831,9 @@ def main():
     elif mode == "segmaxfull":
         text = sub_once(text, SEG_MAX_ADVERTISED, SEG_MAX_FULL,
                         "the two framing descriptors subtracted from seg_max")
+    elif mode == "snapall":
+        text = sub_once(text, STALE_BASE_GUARD, STALE_BASE_GUARD_ANY,
+                        "the ring size the stale-cursor guard compares against")
     src.write_text(text)
     print("MUTATED", mode, src)
 

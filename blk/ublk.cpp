@@ -141,9 +141,11 @@ namespace blk {
 #define UBLK_MAX_QUEUE_DEPTH    4096
 #define UBLK_MAX_NR_QUEUES      (1U << 12)
 
+#define UBLK_F_NEED_GET_DATA            (1ULL << 2)
 #define UBLK_F_USER_RECOVERY            (1ULL << 3)
 #define UBLK_F_USER_RECOVERY_REISSUE    (1ULL << 4)
 #define UBLK_F_CMD_IOCTL_ENCODE         (1ULL << 6)
+#define UBLK_F_USER_COPY                (1ULL << 7)
 #define UBLK_F_UPDATE_SIZE              (1ULL << 10)
 #define UBLK_F_SAFE_STOP_DEV            (1ULL << 17)
 #define UBLK_F_NO_AUTO_PART_SCAN        (1ULL << 18)
@@ -255,6 +257,22 @@ struct ublk_params {
 };
 static_assert(sizeof(ublk_params) == 152, "ublk_params size");
 
+// The BlkDevInfo::features a registered ublk_params describes. ublk has no feature
+// word for any of them: FLUSH is two attrs bits, and DISCARD and WRITE_ZEROES are an
+// optional param type plus the two caps inside it, where a zero cap is how the queue
+// says it does not have that op at all. ONE derivation, shared by the adoption drift
+// check and by the orphan scan, so a listing of a registration and an adoption of the
+// same registration cannot disagree about what it offers.
+static uint64_t params_features(const ublk_params& p) {
+    uint64_t f = 0;
+    if (p.types & UBLK_PARAM_TYPE_DISCARD) {
+        if (p.discard.max_discard_sectors) f |= FEATURE_DISCARD;
+        if (p.discard.max_write_zeroes_sectors) f |= FEATURE_WRITE_ZEROES;
+    }
+    if (p.basic.attrs & (UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA)) f |= FEATURE_FLUSH;
+    return f;
+}
+
 // ----------------------------------------------------------------------------
 // UblkCtrl: the control channel -- one SQE128 ring on /dev/ublk-control
 // issuing synchronous commands (the cqe's res is the command's return value:
@@ -329,8 +347,11 @@ struct UblkCtrl {
         return 0;
     }
 
-    // dev_info is IN/OUT: dev_id (U32_MAX = auto-assign) comes back assigned,
-    // flags comes back masked to what the driver supports
+    // dev_info is IN/OUT: dev_id (U32_MAX = auto-assign) comes back assigned, flags
+    // comes back masked to what the driver supports, and nr_hw_queues / queue_depth /
+    // max_io_buf_bytes come back as the driver NEGOTIATED them -- it clamps the queue
+    // count to nr_cpu_ids and rounds the buffer size down to a page. The reply is the
+    // authority on the serving geometry, not the request that produced it.
     int add_dev(ublksrv_ctrl_dev_info* info) {
         return transact(info->dev_id, UBLK_U_CMD_ADD_DEV, info, sizeof(*info), 0);
     }
@@ -362,6 +383,26 @@ struct UblkCtrl {
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 128;
 static constexpr uint32_t IO_BUF_BYTES = 512 << 10;   // per-tag data buffer
+
+// The ublk wire ABI counts sectors in fixed 512-byte units, whatever logical block
+// size the device advertises: the kernel fills ublksrv_io_desc's nr_sectors and
+// start_sector from blk_rq_sectors()/blk_rq_pos(), hands basic.dev_sectors to
+// set_capacity(), bounds basic.max_sectors by max_io_buf_bytes >> 9, and takes
+// UPDATE_SIZE's argument as a 512-byte count. The member sector_shift is the LOGICAL
+// block shift (sector_size_shift) and configures geometry alone -- the *_bs_shift
+// params, discard_granularity and resize alignment. Every byte<->sector conversion on
+// the data and control paths therefore uses this 9, never sector_shift: at a 4 KiB
+// logical block the two differ 8x, and converting with the logical shift transfers 8x
+// the bytes at 8x the offset and reports 1/8 of the capacity.
+static constexpr uint32_t UBLK_SECTOR_SHIFT = 9;
+
+// Data-plane modes the serving loop does not implement. NEED_GET_DATA makes a WRITE's
+// FETCH complete with UBLK_IO_RES_NEED_GET_DATA, which tag_loop reads as a fatal
+// positive result and exits, stranding the request; USER_COPY moves data by pread/
+// pwrite on the cdev and wants a zero FETCH address, but tag_loop always supplies a
+// buffer. Refuse both at validation, and reject an adopted registration carrying them.
+static constexpr uint64_t UBLK_F_UNSUPPORTED_DATA_PLANE =
+    UBLK_F_NEED_GET_DATA | UBLK_F_USER_COPY;
 
 struct UblkDeviceImpl : IBlkDevice {
     UblkController::Config cfg;
@@ -413,6 +454,17 @@ struct UblkDeviceImpl : IBlkDevice {
         photon::vcpu_base* home = nullptr;
         std::vector<photon::thread*> tag_ths;   // one coroutine per tag
         photon::semaphore fetches_issued;   // queue_setup waits for the initial fetches
+        // photon::now at the last completion this queue's ring delivered -- the anchor
+        // of the pump's finite spin_us window. The TAGS stamp it, not the pump, because
+        // the pump cannot see a completion: CascadingEventEngine::wait_for_events
+        // returns the number of fd-interest events it delivered, and a queue ring
+        // registers none -- every cqe it reaps belongs to a parked tag, which it resumes
+        // without counting anything. So the count the pump would key a window on is
+        // always 0, and without this stamp the window would open once at setup and then
+        // stay closed for the life of the queue however much I/O it served. Written by
+        // the tags and read by the pump, both of which queue_setup puts on `home`, so it
+        // needs no synchronisation.
+        uint64_t last_work = 0;
         std::atomic<uint32_t> in_flight{0};   // serving (fetched-not-yet-committed)
         uint16_t qid = 0;
         bool stopping = false;       // tags: exit at the next checkpoint
@@ -439,7 +491,7 @@ struct UblkDeviceImpl : IBlkDevice {
         features = cfg.info.features;
         read_only = cfg.read_only;
         spin_us = cfg.spin_us;
-        dev_sectors = cfg.info.size >> sector_shift;
+        dev_sectors = cfg.info.size >> UBLK_SECTOR_SHIFT;
         // a cfg field left 0 means "default", and the config is immutable, so
         // these are derived exactly once -- no per-start() reset needed
         if (cfg.queue_depth)
@@ -471,6 +523,12 @@ struct UblkDeviceImpl : IBlkDevice {
     static int validate(const UblkController::Config& c) {
         if (validate_info(c.info, /*virtio=*/false) < 0)
             return -1;
+        // The serving loop speaks only the plain data plane: FETCH hands over a buffer
+        // address and COMMIT carries the result. NEED_GET_DATA and USER_COPY negotiate
+        // a different sequence it does not implement, so a WRITE would strand rather
+        // than complete -- refuse them here, before ADD_DEV, rather than at run time.
+        if (c.flags & UBLK_F_UNSUPPORTED_DATA_PLANE)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk: cfg.flags ` negotiates a data-plane mode this transport does not serve", c.flags);
         return 0;
     }
 
@@ -516,8 +574,8 @@ struct UblkDeviceImpl : IBlkDevice {
     int32_t serve_req(Queue* q, uint16_t tag) {
         const auto iod = &q->cmd_buf[tag];
         uint8_t op = iod->op_flags & 0xff;
-        uint64_t len = (uint64_t)iod->nr_sectors << sector_shift;
-        uint64_t off = iod->start_sector << sector_shift;
+        uint64_t len = (uint64_t)iod->nr_sectors << UBLK_SECTOR_SHIFT;
+        uint64_t off = iod->start_sector << UBLK_SECTOR_SHIFT;
         int32_t res;
         switch (op) {
         case UBLK_IO_OP_READ: {
@@ -596,6 +654,11 @@ struct UblkDeviceImpl : IBlkDevice {
         q->fetches_issued.signal(1);
         for (;;) {
             int32_t r = iouring_uring_cmd(cdev_fd, op, &c, sizeof(c), Timeout(), q->ce);
+            // This return IS a reaped uring_cmd completion -- the ring's only kind --
+            // and the pump is told nothing about it (see Queue::last_work), so the tag
+            // rearms the queue's finite spin window itself. Stamped before the stopping
+            // check because a completion is a completion whichever way the loop leaves.
+            q->last_work = photon::now;
             if (q->stopping)
                 break;   // teardown: leave any arrived request to the REISSUE
             if (r != UBLK_IO_RES_OK) {
@@ -618,10 +681,13 @@ struct UblkDeviceImpl : IBlkDevice {
     // must outlive them: an interrupted tag's ASYNC_CANCEL choreography needs
     // the pump to reap cqes (possibly in separate batches) until the tag exits
     void pump(Queue* q) {
-        uint64_t last_work = photon::now;
         while (!q->pump_stop) {
+            // The window is anchored on the tags' stamp rather than on anything this
+            // loop can observe: the wait below counts fd-interest deliveries, which a
+            // queue ring never has, so it returns 0 on a pass that reaped completions
+            // and resumed tags just the same.
             bool spin = spin_us == UINT32_MAX ||
-                        (spin_us && photon::now - last_work < spin_us);
+                        (spin_us && photon::now - q->last_work < spin_us);
             ssize_t n = q->ce->wait_for_events(nullptr, 0, spin ? Timeout(0) : Timeout());
             if (n < 0) {
                 if (q->pump_stop) break;
@@ -631,9 +697,7 @@ struct UblkDeviceImpl : IBlkDevice {
                 }
                 continue;
             }
-            if (n > 0)
-                last_work = photon::now;
-            else if (spin)
+            if (spin)
                 photon::thread_yield();
         }
     }
@@ -663,6 +727,10 @@ struct UblkDeviceImpl : IBlkDevice {
         q->stopping = false;
         q->pump_stop = false;
         q->in_flight = 0;
+        // the finite spin window opens here: a queue that has completed nothing yet is
+        // exactly one whose last completion is now. Set before the pump is created, so
+        // its first pass cannot read the field's zero initialiser as an expired window.
+        q->last_work = photon::now;
         q->pump_th = photon::thread_create11(&UblkDeviceImpl::pump, this, q);
         photon::thread_enable_join(q->pump_th);
         // queue_depth long-lived coroutines per queue, each calling into the
@@ -899,7 +967,7 @@ struct UblkDeviceImpl : IBlkDevice {
         p->basic.physical_bs_shift = sector_shift;
         p->basic.io_opt_shift = sector_shift;
         p->basic.io_min_shift = sector_shift;
-        p->basic.max_sectors = max_io_buf_bytes >> sector_shift;
+        p->basic.max_sectors = max_io_buf_bytes >> UBLK_SECTOR_SHIFT;
         p->basic.dev_sectors = dev_sectors.load();
         if (features & (FEATURE_DISCARD | FEATURE_WRITE_ZEROES)) {
             p->types |= UBLK_PARAM_TYPE_DISCARD;
@@ -908,7 +976,7 @@ struct UblkDeviceImpl : IBlkDevice {
             // result reads as -errno: cap the advertised range so a full-size
             // request still encodes. Any non-negative result completes these ops,
             // so the cap only has to keep the byte count inside int32.
-            uint32_t cap = std::min<uint32_t>(1u << 22, (uint32_t)(INT32_MAX >> sector_shift));
+            uint32_t cap = std::min<uint32_t>(1u << 22, (uint32_t)(INT32_MAX >> UBLK_SECTOR_SHIFT));
             p->discard.max_discard_sectors =
                 (features & FEATURE_DISCARD) ? cap : 0;
             p->discard.max_write_zeroes_sectors =
@@ -930,6 +998,20 @@ struct UblkDeviceImpl : IBlkDevice {
                 "ublk device ` config drift: registered size ` shift ` attrs `, requested size ` shift ` attrs `",
                 dev_id, p.basic.dev_sectors, (int)p.basic.logical_bs_shift,
                 (int)p.basic.attrs, dev_sectors.load(), (int)sector_shift, (int)want_attrs());
+        // BlkAdoption::Full is documented as checking the geometry AND the registered
+        // feature set, and the attrs comparison above carries only FEATURE_FLUSH plus
+        // the read-only flag: FEATURE_DISCARD and FEATURE_WRITE_ZEROES live in an
+        // optional param type and in the two caps inside it, so a registration created
+        // without them matched a config asking for them, and the other way round too.
+        // SET_PARAMS is refused once a device has been used, so an adoption cannot bring
+        // the kernel's queue limits up to (or down to) the request -- it can only
+        // refuse, which is what keeps start() from publishing a cfg.info.negotiated the
+        // registration does not have. Compared against exactly the value start()
+        // publishes, so the two cannot disagree by construction.
+        uint64_t want_feats = cfg.info.features & cfg.info.offered;
+        uint64_t got_feats = params_features(p);
+        if (got_feats != want_feats)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk device ` feature drift: registered `, requested `", dev_id, got_feats, want_feats);
         return 0;
     }
 
@@ -966,6 +1048,18 @@ struct UblkDeviceImpl : IBlkDevice {
             LOG_ERROR_RETURN(0, -1, "ublk ADD_DEV failed, want `", want);
         set_dev_id(info.dev_id);
         negotiated_flags = info.flags;
+        // ADD_DEV's reply is the NEGOTIATED geometry, not an echo of the request: the
+        // driver clamps nr_hw_queues to nr_cpu_ids (the count of POSSIBLE cpus, which a
+        // host with offline cpus makes larger than the online count) and rounds
+        // max_io_buf_bytes down to a page before it builds the tag set and copies the
+        // dev_info back. make_queues() below has to serve the count the device actually
+        // got -- serving the requested one mmaps descriptor rings for queue ids it does
+        // not have, and ublk_ch_mmap bounds the mapping at nr_hw_queues and answers
+        // EINVAL, so start() fails on the first queue past the clamp. Same adoption
+        // attach_existing() does from GET_DEV_INFO.
+        nr_queues = info.nr_hw_queues;
+        queue_depth = info.queue_depth;
+        max_io_buf_bytes = info.max_io_buf_bytes;
         created = true;
         select_ops();
         if (want == UINT32_MAX && acquire_lock((uint32_t)dev_id) < 0)
@@ -1017,6 +1111,11 @@ struct UblkDeviceImpl : IBlkDevice {
         max_io_buf_bytes = info.max_io_buf_bytes;
         negotiated_flags = info.flags;
         select_ops();
+        // An adopted registration may have been created by a daemon that spoke a data
+        // plane this loop does not serve; attaching would strand its requests, so
+        // refuse the adoption rather than take it over unservable.
+        if (negotiated_flags & UBLK_F_UNSUPPORTED_DATA_PLANE)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk device ` is registered with data-plane flags ` this transport does not serve", dev_id, negotiated_flags);
         if (validate_params() < 0)
             return -1;
         if (open_cdev() < 0)
@@ -1265,14 +1364,14 @@ struct UblkDeviceImpl : IBlkDevice {
         if (new_size % bs)
             LOG_ERROR_RETURN(EINVAL, -1, "resize size ` is not a multiple of the `-byte sector",
                              new_size, bs);
-        uint64_t cur = dev_sectors.load() * bs;
+        uint64_t cur = dev_sectors.load() << UBLK_SECTOR_SHIFT;
         if (new_size == cur)
             return 0;
         if (new_size < cur)
             LOG_ERROR_RETURN(EINVAL, -1, "ublk resize: shrink (` -> `) is rejected", cur, new_size);
-        if (ctrl.update_size((uint32_t)dev_id, new_size >> sector_shift) < 0)
+        if (ctrl.update_size((uint32_t)dev_id, new_size >> UBLK_SECTOR_SHIFT) < 0)
             LOG_ERROR_RETURN(0, -1, "ublk UPDATE_SIZE failed, dev `", dev_id);
-        dev_sectors = new_size >> sector_shift;
+        dev_sectors = new_size >> UBLK_SECTOR_SHIFT;
         cfg.info.size = new_size;
         LOG_INFO("ublk device resized, ", VALUE(dev_id), VALUE(cur), VALUE(new_size));
         return 0;
@@ -1366,15 +1465,11 @@ struct UblkControllerImpl : UblkController {
                 continue;
             BlkDevInfo bi;
             bi.identity = std::to_string(id);
-            bi.size = p.basic.dev_sectors << p.basic.logical_bs_shift;
+            bi.size = p.basic.dev_sectors << UBLK_SECTOR_SHIFT;
             bi.sector_size_shift = (uint8_t)p.basic.logical_bs_shift;
-            bi.features = 0;
-            if (p.types & UBLK_PARAM_TYPE_DISCARD) {
-                if (p.discard.max_discard_sectors) bi.features |= FEATURE_DISCARD;
-                if (p.discard.max_write_zeroes_sectors) bi.features |= FEATURE_WRITE_ZEROES;
-            }
-            if (p.basic.attrs & (UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA))
-                bi.features |= FEATURE_FLUSH;
+            // the same derivation the adoption drift check uses, so a listing of a
+            // registration and an adoption of it cannot disagree about its features
+            bi.features = params_features(p);
             ret.push_back(bi);
         }
         return ret;

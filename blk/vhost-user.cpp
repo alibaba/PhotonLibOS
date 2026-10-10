@@ -350,19 +350,20 @@ struct VhostUserDeviceImpl : IBlkDevice {
     // Log this as `(const char*)sock_path`, never as VALUE(sock_path): VALUE on a
     // char array deduces a reference to the whole array and alog then emits all
     // SUN_PATH_MAX bytes, path followed by NUL padding (measured).
+    //
+    // This is also what VIRTIO_BLK_T_GET_ID answers with: vq_bind hands it to the
+    // engine as `serial`, and it has to be the FULL path. A basename is unique only
+    // inside one flat directory, and two controllers may legally scope
+    // /scope-a/disk.sock and /scope-b/disk.sock -- inside() confines a device to its
+    // own directory and nothing else separates the two -- so a basename hash gave
+    // two devices one daemon serves the same guest-visible ID. No truncation
+    // either: validate() refuses a sock_path this buffer does not hold, so the ID
+    // hashes the whole of the identity bind() and the log tag already use.
     char sock_path[SUN_PATH_MAX] = {};   // bounded by sockaddr_un::sun_path
     // The controller's directory, which is where this device's identity lock
     // lives. A copy, not a back-pointer: a device may outlive the controller that
     // made it, and do_listen() needs the directory for as long as serving does.
     char lock_dir[SCOPE_DIR_BUF] = {};
-    // What VIRTIO_BLK_T_GET_ID answers with. The socket's basename, so that two
-    // devices served by one daemon do not report the same serial to their guests --
-    // a fixed per-transport string did. It is as unique as that basename is within
-    // this controller's scope, which is the flat-one-level-of-sockets assumption the
-    // orphan scan already makes. Two sockets sharing a basename in different
-    // subdirectories of one scope would report the same serial: the identity lock
-    // refuses them while their two starts overlap, and nothing refuses them after.
-    char serial[SUN_PATH_MAX] = {};
 
     bool own_backend = false;
     bool started = false;
@@ -378,12 +379,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         sector_shift = cfg.info.sector_size_shift;
         read_only = cfg.read_only;
         capacity_sectors = cfg.info.size >> 9;
+        // Cannot truncate: validate() refused a sock_path this buffer does not hold.
         snprintf(sock_path, sizeof(sock_path), "%s", cfg.sock_path.c_str());
-        // The same basename vhu_lock_name() locks on. A path with no basename leaves
-        // this empty, and such a device is refused later by that function -- so an
-        // empty serial is never served, only constructed.
-        const char* base = strrchr(sock_path, '/');
-        snprintf(serial, sizeof(serial), "%s", base ? base + 1 : sock_path);
         // bounded: the factory checked the length before it got here, and a
         // truncated directory would lock in a DIFFERENT one than the scan reads
         snprintf(lock_dir, sizeof(lock_dir), "%s", dir);
@@ -742,7 +739,7 @@ struct VhostUserDeviceImpl : IBlkDevice {
         q->srv.stack_size = cfg.stack_size;
         q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
-        q->srv.serial = serial;
+        q->srv.serial = sock_path;   // the GET_ID identity: the full path, see the member
         q->srv.tag = sock_path;
         q->srv.hooks.translate.bind(q, &translate_thunk);
         q->srv.hooks.notify.bind(q, &notify_thunk);
@@ -1512,20 +1509,25 @@ struct VhostUserDeviceImpl : IBlkDevice {
     int do_listen() {
         // The identity lock, taken by EVERY server start -- including the ones that go
         // on to bind a path nothing held. bind() below already excludes a second
-        // starter of the same path, so what this adds is the BASENAME: the lock name
-        // is derived from it, and so is the serial this device answers
-        // VIRTIO_BLK_T_GET_ID with, so two sockets in one scope that would report the
-        // same serial to their guests refuse each other here instead.
+        // starter of the same path, so what this adds is what bind() cannot see:
+        //
+        // The BASENAME. The lock name is derived from it (vhu_lock_name), so two
+        // sockets in one scope whose paths differ only by subdirectory still
+        // serialize their starts here -- the flat-one-level assumption that function
+        // states, a false refusal rather than a missed one.
+        //
+        // The bind -> listen WINDOW, and this is the load-bearing half: between the
+        // two calls the node answers a connect probe with ECONNREFUSED, byte for byte
+        // what a DEAD listener answers, so destroy_orphan()'s probe cannot tell this
+        // start from a crash, and an unlink licensed by it would leave the listen()
+        // below succeeding on an unnamed inode no frontend can ever connect to.
+        // destroy_orphan() takes this same lock before it probes and unlinks: the
+        // node cannot answer the question, so the lock is the whole distinction.
         //
         // It is a concurrency guard and nothing wider. Released when do_listen
-        // returns, so two such sockets started one after the other both serve and both
-        // report the same serial; what it excludes is the case that actually happens,
-        // which is two daemons starting at once. EBUSY here is that refusal.
-        //
-        // It does NOT exclude destroy_orphan(), which takes no lock: that call probes
-        // the node itself and refuses a live listener, but a socket this start has
-        // bound and not yet listened on answers its probe as dead. Pre-existing and
-        // unchanged by the removal of the takeover path above.
+        // returns: once listen() has succeeded the probe CAN tell the two apart, so
+        // what the lock excludes is the case that actually happens -- two daemons
+        // racing through the window at once. EBUSY here is that refusal.
         char lname[VHU_LOCK_BUF];
         if (vhu_lock_name(sock_path, lname, sizeof(lname)) < 0)
             return -1;   // vhu_lock_name logged it
@@ -1644,8 +1646,11 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // detach() retains backend and own_backend (the caller keeps the backend
         // on a failed start, so rollback must not delete it), but a subsequent
         // start() with a NEW backend would overwrite both without releasing the
-        // old ownership -- double-free at the next shutdown or destructor.
-        if (own_backend && backend) {
+        // old ownership -- the old backend is then unreachable, a leak. The
+        // != bk half covers re-passing the SAME pointer, which detach(true)
+        // invites: deleting it and then storing it back owned leaves a dangling
+        // pointer the next release deletes again.
+        if (own_backend && backend && backend != bk) {
             delete backend;
             backend = nullptr;
             own_backend = false;
@@ -1970,6 +1975,22 @@ struct VhostUserControllerImpl : VhostUserController {
         if (!inside(sock_dir, path))
             LOG_ERROR_RETURN(EINVAL, -1, "refusing to destroy `: not inside this controller's directory `",
                              path, sock_dir);
+        // The identity lock do_listen() holds across its bind -> listen window,
+        // taken before anything here is probed or removed. A socket bound but not
+        // yet listening answers the probe below with ECONNREFUSED, exactly what a
+        // dead listener answers, so the probe alone would license unlinking the
+        // node of a start that is one listen() away from serving on it -- and that
+        // listen() would then succeed on an unnamed inode no frontend can ever
+        // reach, while a second start binds the name again. The two states are
+        // indistinguishable at the node; the lock is the whole distinction, and
+        // EBUSY is the routine answer for an identity a live starter holds.
+        char lname[VHU_LOCK_BUF];
+        if (vhu_lock_name(path, lname, sizeof(lname)) < 0)
+            return -1;   // vhu_lock_name logged it
+        int lock_fd = -1;
+        if (devlock_acquire(sock_dir, lname, &lock_fd) < 0)
+            LOG_ERRNO_RETURN(0, -1, "cannot claim the identity lock of the vhost-user socket to destroy ", path);
+        DEFER(devlock_release(lock_fd));
         struct stat st;
         if (::stat(path, &st) != 0)
             LOG_ERRNO_RETURN(0, -1, "cannot stat the vhost-user socket to destroy ", path);

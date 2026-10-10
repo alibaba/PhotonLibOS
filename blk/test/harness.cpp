@@ -100,10 +100,23 @@ uint64_t stress_now_us() {
 struct StressCounters {
     std::atomic<uint64_t> ios{0}, bytes{0};
     std::atomic<int> failures{0};
+    // The claim on errbuf, not a lock around it. Two workers can fail at the same
+    // instant -- an absent node makes every worker's open fail -- and a plain
+    // `if (errbuf[0]) return;` in front of the snprintf is a data race in the C++
+    // sense even though its outcome looks harmless: both can pass the test and both
+    // can then write the same bytes. Claiming a flag first leaves exactly one writer,
+    // which keeps the first-writer-wins reading `first_error` has always had.
+    // errbuf itself needs no synchronisation: it is written only by the claimer and
+    // read only after every worker has been joined.
+    //
+    // Not a photon::mutex: these are std::threads inside a posix_spawn'ed child doing
+    // raw ::pwrite, and photon may not be initialised there at all.
+    std::atomic<bool> noted{false};
     char errbuf[320] = {};
-    // benign race: the first writer wins, the rest see a non-empty buffer
     void note(const std::string& msg, uint64_t a = 0, uint64_t b = 0) {
-        if (errbuf[0]) return;
+        bool unclaimed = false;
+        if (!noted.compare_exchange_strong(unclaimed, true))
+            return;
         snprintf(errbuf, sizeof(errbuf), "%s (a=%llu b=%llu)", msg.c_str(),
                  (unsigned long long)a, (unsigned long long)b);
     }
