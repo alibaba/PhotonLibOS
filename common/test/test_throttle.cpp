@@ -302,13 +302,14 @@ INSTANTIATE_TEST_P(Throttle, ThrottlePriorityTest, testing::Values(
         },
         PriorityTestSuite{
                 // 5. Real socket. For now there is no way to balance throttle throughput of the same priority.
-                // Maybe we need a WFQ in the future.
+                // Maybe we need a WFQ in the future. The initial tokens allow either stream to consume one
+                // extra time window of bandwidth during the test.
                 PriorityTestSuite::RealSocket,
                 1'000'000'000,
                 {1'000'000'000, 1048576, photon::throttle::Priority::High},
                 {1'000'000'000, 1048576, photon::throttle::Priority::High},
-                0.0, 1.0,
-                0.0, 1.0,
+                0.0, 1.1,
+                0.0, 1.1,
         },
         PriorityTestSuite{
                 // 6. Real socket. High priority get most BW
