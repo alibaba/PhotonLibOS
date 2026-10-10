@@ -101,10 +101,10 @@ TEST(http_client, DISABLED_SNI) {
 }
 #endif
 
-// HTTP-level test: verify set_ca_cert works through the HTTP client.
-// Must run in a separate std::thread because the thread_local PooledDialer
-// caches the TLS context from previous tests; reusing it after the context
-// is freed would be a use-after-free.
+// HTTP-level test: verify set_ca_cert works through the HTTP client. Runs in
+// its own std::thread with a dedicated photon runtime so the client and its
+// per-client dialer (and the TLS context they hold) are created and torn down
+// in isolation from the other tests.
 //
 // The certificate must carry DNS:localhost, since loading a CA turns on peer
 // verification and the client now also checks the name in the URL against the
@@ -168,9 +168,9 @@ TEST(client_tls, http_with_ca_cert) {
     EXPECT_EQ("test", test_handle);
 }
 
-// Verify HTTP clients with different CA configs are isolated across OS threads.
-// Each client runs in its own std::thread to get an independent PooledDialer,
-// avoiding use-after-free on the thread_local dialer's cached TLS context.
+// Verify HTTP clients with different CA configs are isolated. Each client owns
+// its own PooledDialer (one per vCPU), so a TLS context loaded into one client
+// never leaks into another; running each in its own std::thread proves it.
 TEST(client_tls, http_client_cross_thread_isolation) {
     // Reached over https://127.0.0.1, so the certificate needs IP:127.0.0.1.
     auto chain = generate_ca_signed_cert({"DNS:localhost", "IP:127.0.0.1"}, "localhost");

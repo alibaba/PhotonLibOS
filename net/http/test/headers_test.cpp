@@ -29,11 +29,13 @@ limitations under the License.
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <gflags/gflags.h>
 
 #include "../../socket.h"
 #include "../../base_socket.h"
 #include <photon/common/alog-stdstring.h>
+#include <photon/common/memory-stream/memory-stream.h>
 #include <photon/io/fd-events.h>
 #include <photon/thread/thread11.h>
 #include <photon/common/stream.h>
@@ -53,6 +55,101 @@ public:
 protected:
     char _buffer[BUF_CAPACITY];
 };
+TEST(headers, send_header_terminator) {
+    RequestHeadersStored<> req(Verb::GET, "http://example.com/");
+    req.headers.content_length(0);
+    std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+    EXPECT_EQ(0, req.send_header(stream.get()));
+    EXPECT_NE(std::string::npos, stream->output().find("\r\n\r\n"));
+}
+
+TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
+    CommonHeaders<256> source, destination;
+    ASSERT_EQ(0, source.insert("Z-Last", "first", 1));
+    ASSERT_EQ(0, source.insert("X-Repeated", "one", 1));
+    ASSERT_EQ(0, source.insert("x-repeated", "two", 1));
+    ASSERT_EQ(0, source.insert("A-First", "last", 1));
+    ASSERT_EQ(0, destination.insert("X-Repeated", "existing"));
+    auto expected = std::string(destination.serialized()) + std::string(source.serialized());
+    ASSERT_EQ(0, destination.merge(source, 1));
+    EXPECT_EQ(expected, destination.serialized());
+    auto duplicates = destination.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    ASSERT_TRUE(destination.value_append(" appended"));
+    EXPECT_EQ("last appended", destination["A-First"]);
+    EXPECT_EQ("first", destination["Z-Last"]);
+
+    CommonHeaders<64> tight;
+    ASSERT_EQ(0, tight.insert("Keep", "retained"));
+    auto before = std::string(tight.serialized());
+    errno = 0;
+    EXPECT_EQ(-1, tight.merge(source, 1));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ(before, tight.serialized());
+    EXPECT_EQ("retained", tight["Keep"]);
+    CommonHeaders<16> empty;
+    EXPECT_EQ(0, tight.merge(empty, 1));
+
+    char parsed[128] = "X-Dup: first\r\nx-dup: second\r\n\r\n";
+    Headers input;
+    ASSERT_EQ(0, input.reset(parsed, sizeof(parsed), strlen(parsed)));
+    CommonHeaders<128> output;
+    ASSERT_EQ(0, output.merge(input, 1));
+    EXPECT_EQ("X-Dup: first\r\nx-dup: second\r\n", output.serialized());
+
+    CommonHeaders<256> seed;
+    ASSERT_EQ(0, seed.insert("X-Repeated", "existing"));
+    auto exactCapacity = seed.size() + source.serialized().size() +
+                         seed.kv_size() + source.kv_size();
+    std::vector<char> exactBuffer(exactCapacity);
+    Headers exact;
+    ASSERT_EQ(0, exact.reset(exactBuffer.data(), exactBuffer.size()));
+    ASSERT_EQ(0, exact.insert("X-Repeated", "existing"));
+    ASSERT_EQ(0, exact.merge(source, 1));
+    EXPECT_EQ(expected, exact.serialized());
+    EXPECT_EQ(0U, exact.space_remain());
+    duplicates = exact.equal_range("X-Repeated");
+    EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
+    EXPECT_EQ("last", exact["A-First"]);
+    EXPECT_EQ("first", exact["Z-Last"]);
+
+    constexpr char parsedText[] = "X: value\r\n\r\n";
+    char parsedExactBuffer[sizeof(parsedText) - 1 + sizeof(HeadersBase::KV)];
+    memcpy(parsedExactBuffer, parsedText, sizeof(parsedText) - 1);
+    Headers parsedExact;
+    ASSERT_EQ(0, parsedExact.reset(parsedExactBuffer,
+                                  sizeof(parsedExactBuffer),
+                                  sizeof(parsedText) - 1));
+    EXPECT_EQ("X: value\r\n", parsedExact.serialized());
+    EXPECT_EQ("value", parsedExact["X"]);
+    EXPECT_EQ(0U, parsedExact.space_remain());
+}
+
+TEST(headers, serialized_excludes_terminator_and_partial_body) {
+    for (auto fields : {"", "Z: last\r\nA: first\r\nX-Dup: one\r\nx-dup: two\r\nEmpty: \r\n"}) {
+        for (auto body : {"", "partial-body"}) {
+            char requestBuffer[1024], responseBuffer[1024];
+            Request request(requestBuffer, sizeof(requestBuffer));
+            auto requestText = std::string("POST / HTTP/1.1\r\n") + fields + "\r\n" + body;
+            memcpy(requestBuffer, requestText.data(), requestText.size());
+            ASSERT_EQ(0, request.append_bytes(requestText.size()));
+            EXPECT_EQ(fields, request.headers.serialized());
+            EXPECT_EQ(body, request.partial_body());
+
+            Response response(responseBuffer, sizeof(responseBuffer));
+            auto responseText = std::string("HTTP/1.1 200 OK\r\n") + fields + "\r\n" + body;
+            memcpy(responseBuffer, responseText.data(), responseText.size());
+            ASSERT_EQ(0, response.append_bytes(responseText.size()));
+            EXPECT_EQ(fields, response.headers.serialized());
+            EXPECT_EQ(body, response.partial_body());
+
+            CommonHeaders<1024> copied;
+            ASSERT_EQ(0, copied.merge(response.headers, 1));
+            EXPECT_EQ(fields, copied.serialized());
+        }
+    }
+}
+
 TEST(headers, req_header) {
     // char std_req_stream[] = "GET /targetName HTTP/1.1\r\n"
     //                          "Host: HostName\r\n"
@@ -214,19 +311,85 @@ TEST(ReqHeaders, redirect) {
     EXPECT_EQ(req.headers["test_key"], "test_value");
     auto value = req.headers["Host"];
     LOG_DEBUG(VALUE(value));
-    req.redirect(Verb::DELETE, "https://domain.redirect1/targetName", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/targetName");
+    // a plaintext origin is forwarded by the proxy, in absolute-URI form
+    req.redirect(Verb::DELETE, "http://domain.redirect1/targetName", true);
+    EXPECT_EQ(req.target(), "http://domain.redirect1/targetName");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test", true);
-    EXPECT_EQ(req.target(), "https://domain.redirect1/redirect_test");
+    EXPECT_EQ(req.target(), "http://domain.redirect1/redirect_test");
     EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    LOG_DEBUG(VALUE(req.target()));
+    // a TLS origin is reached through a CONNECT tunnel, so the request inside it
+    // is in origin-form, just like a direct one
+    req.redirect(Verb::GET, "https://domain.redirect2/targetName", true);
+    EXPECT_EQ(req.target(), "/targetName");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
     req.redirect(Verb::GET, "/redirect_test1", false);
     EXPECT_EQ(req.target(), "/redirect_test1");
-    EXPECT_EQ(req.headers["Host"], "domain.redirect1");
+    EXPECT_EQ(req.headers["Host"], "domain.redirect2");
     LOG_DEBUG(VALUE(req.target()));
 }
+
+// A CONNECT names its target in authority-form: it asks for a tunnel to a host,
+// not for a resource, so it carries neither scheme nor path.
+TEST(ReqHeaders, connect_is_in_authority_form) {
+    RequestHeadersStored<> req(Verb::CONNECT, "https://origin:4321/ignored?q=1");
+    EXPECT_EQ(req.target(), "origin:4321");
+    EXPECT_EQ(req.headers["Host"], "origin:4321");
+    EXPECT_EQ(req.query(), "");
+    EXPECT_EQ(4321, req.port());
+
+    RequestHeadersStored<> default_port(Verb::CONNECT, "https://origin:443/");
+    EXPECT_EQ(default_port.target(), "origin:443");
+    EXPECT_EQ(default_port.headers["Host"], "origin:443");
+
+    char buf[128];
+    Request bounded(buf, sizeof(buf));
+    std::string long_host(256, 'a');
+    auto url = estring().appends("https://", long_host, ":443/");
+    EXPECT_EQ(-1, bounded.reset(Verb::CONNECT, url));
+    EXPECT_EQ(ENOBUFS, errno);
+}
+
+TEST(ReqHeaders, connect_redirect_preserves_headers_and_explicit_port) {
+    for (bool proxy : {false, true}) {
+        RequestHeadersStored<> req(Verb::CONNECT, "https://origin:8080/");
+        ASSERT_EQ(0, req.headers.insert("X-Preserved", "value"));
+        std::string host(220, 'a');
+        auto url = estring().appends("https://", host, "/?ignored=1");
+        ASSERT_EQ(0, req.redirect(Verb::CONNECT, url, proxy));
+        auto authority = estring().appends(host, ":443");
+        EXPECT_EQ(authority, req.target());
+        EXPECT_EQ(authority, req.headers["Host"]);
+        EXPECT_EQ("value", req.headers["X-Preserved"]);
+        EXPECT_TRUE(req.query().empty());
+        EXPECT_EQ(443, req.port());
+        std::unique_ptr<StringSocketStream> stream(new_string_socket_stream());
+        ASSERT_EQ(0, req.send_header(stream.get()));
+        EXPECT_EQ(0U, stream->output().find(estring().appends(
+            "CONNECT ", authority, " HTTP/1.1\r\nHost: ", authority, "\r\n")));
+    }
+}
+
+TEST(ReqHeaders, connect_redirect_rejects_insufficient_space_without_changes) {
+    char buf[128];
+    Request req(buf, sizeof(buf), Verb::CONNECT, "https://origin:8080/");
+    ASSERT_EQ(0, req.headers.insert("X-Preserved", "value"));
+    // The new request line fits alone, but not with its Host and other headers.
+    auto url = estring().appends("https://", std::string(80, 'a'), "/");
+    EXPECT_EQ(-1, req.redirect(Verb::CONNECT, url));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ("origin:8080", req.target());
+    EXPECT_EQ("origin:8080", req.headers["Host"]);
+    EXPECT_EQ("value", req.headers["X-Preserved"]);
+    url = estring().appends("https://", std::string(256, 'a'), "/");
+    EXPECT_EQ(-1, req.redirect(Verb::CONNECT, url, true));
+    EXPECT_EQ(ENOBUFS, errno);
+    EXPECT_EQ("origin:8080", req.target());
+}
+
 TEST(debug, debug) {
     RequestHeadersStored<> req(Verb::PUT, "http://domain2asjdhuyjabdhcuyzcbvjankdjcniaxnkcnkn.com:80/target1?param1=x1");
     req.headers.content_length(0);
