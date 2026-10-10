@@ -780,8 +780,14 @@ uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
 }
 
 // Pop the basic SSE/PCLMUL pragma that was pushed at the beginning of this file
-#if defined(__x86_64__) && !defined(__clang__)
+#if defined(__x86_64__)
+#ifdef __clang__
+#ifdef __APPLE__ // otherwise it has been popped before the avx-512 code
+#pragma clang attribute pop
+#endif
+#else // __GNUC__
 #pragma GCC pop_options
+#endif
 #elif defined(__aarch64__)
 #ifdef __clang__
 #pragma clang attribute pop
