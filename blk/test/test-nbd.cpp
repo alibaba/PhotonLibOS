@@ -1,0 +1,2172 @@
+/*
+Copyright 2022 The Photon Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+#include "../blk.h"
+#include "../nbd-proto.h"
+
+#include "../../test/gtest.h"
+#include "harness.h"
+
+#include <photon/photon.h>
+#include <photon/common/alog.h>
+#include <photon/common/utility.h>
+
+#include <csignal>
+#include <photon/fs/localfs.h>
+#include <photon/net/socket.h>
+#include <photon/thread/stack-allocator.h>   // the default stack allocator, wrapped to count
+#include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>   // thread_create11 for the stress clients
+
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace photon {
+namespace blk {
+
+static inline uint16_t be16rd(const void* p) { return __builtin_bswap16(*(const uint16_t*)p); }
+static inline uint32_t be32rd(const void* p) { return __builtin_bswap32(*(const uint32_t*)p); }
+static inline uint64_t be64rd(const void* p) { return __builtin_bswap64(*(const uint64_t*)p); }
+static inline void be16wr(void* p, uint16_t v) { *(uint16_t*)p = __builtin_bswap16(v); }
+static inline void be32wr(void* p, uint32_t v) { *(uint32_t*)p = __builtin_bswap32(v); }
+static inline void be64wr(void* p, uint64_t v) { *(uint64_t*)p = __builtin_bswap64(v); }
+
+// A minimal newstyle-fixed nbd client for protocol validation
+struct NbdTestClient {
+    net::ISocketStream* s = nullptr;
+    uint16_t trans_flags = 0;
+    uint64_t export_size = 0;
+    uint64_t next_handle = 1;
+    // The NBD_INFO_BLOCK_SIZE triple, all three still 0 if the server sent no such
+    // item, and the type of the first NBD_REP_INFO it did send -- 0xffff is not an
+    // info type, so that one also distinguishes "no info reply at all".
+    uint32_t min_block = 0, pref_block = 0, max_block = 0;
+    uint16_t first_info_type = 0xffff;
+
+    ~NbdTestClient() {
+        if (s) {
+            disc();
+            delete s;
+        }
+    }
+
+    void disconnect() {
+        if (s) {
+            disc();
+            delete s;
+            s = nullptr;
+        }
+    }
+
+    // Close without sending DISC: for connections the server already dropped
+    // (e.g. stall-timeout), where writing to the socket may fault on some
+    // platforms or deliver SIGPIPE on others.
+    void force_close() {
+        if (s) {
+            s->close();
+            delete s;
+            s = nullptr;
+        }
+    }
+
+    int connect_tcp(const char* ip, uint16_t port) {
+        auto c = net::new_tcp_socket_client();
+        if (!c)
+            return -1;
+        DEFER(delete c);
+        s = c->connect(net::EndPoint(ip, port));
+        return s ? 0 : -1;
+    }
+
+    int connect_unix(const char* path) {
+        auto c = net::new_uds_client();
+        if (!c)
+            return -1;
+        DEFER(delete c);
+        s = c->connect(path);
+        return s ? 0 : -1;
+    }
+
+    // the greeting and the client flags, stopping short of the OPT_GO that
+    // handshake() sends -- the cases that need a payload of their own start here
+    int handshake_front() {
+        char hdr[18];
+        if (read_exact(hdr, sizeof(hdr)) < 0)
+            return -1;
+        if (be64rd(hdr) != NBD_INIT_MAGIC || be64rd(hdr + 8) != NBD_OPTS_MAGIC)
+            return -1;
+        char cf[4];
+        be32wr(cf, NBD_FLAG_C_FIXED_NEWSTYLE | NBD_FLAG_C_NO_ZEROES);
+        return write_exact(cf, sizeof(cf));
+    }
+
+    // A well-formed OPT_GO / OPT_INFO payload: a 32-bit export-name length, the
+    // name, then a 16-bit count of requested information items. `items` only sets
+    // the count -- a count with no items behind it is itself one of the malformed
+    // payloads a case needs to be able to send.
+    static std::vector<char> go_payload(const char* export_name, uint16_t items = 0) {
+        size_t n = strlen(export_name);
+        std::vector<char> d(4 + n + 2);
+        be32wr(d.data(), (uint32_t)n);
+        memcpy(d.data() + 4, export_name, n);
+        be16wr(d.data() + 4 + n, items);
+        return d;
+    }
+
+    // go_payload()'s `items` is only the count, so a case that wants the server to
+    // actually see a request needs a type code behind it. One is enough: the answer
+    // does not depend on where in the list the code sits.
+    static std::vector<char> go_payload_requesting(const char* export_name, uint16_t item) {
+        std::vector<char> d = go_payload(export_name, 1);
+        char c[2];
+        be16wr(c, item);
+        d.insert(d.end(), c, c + 2);
+        return d;
+    }
+
+    // OPT_EXPORT_NAME's payload is the raw export name -- no uint32 length prefix,
+    // no item count. Its answer is the export meta rather than an option reply.
+    static std::vector<char> name_payload(const char* export_name) {
+        size_t n = strlen(export_name);
+        std::vector<char> d(n);
+        memcpy(d.data(), export_name, n);
+        return d;
+    }
+
+    // A payload whose name MATCHES and whose item count parses, with bytes left over
+    // behind it. Every individual read in the walk succeeds and the name is the right
+    // one, so the only thing that can refuse it is the requirement that the walk land
+    // exactly on the option's own declared length. That is what makes this the payload
+    // which witnesses that check: with a name that did not match, the name policy
+    // would refuse it on its own and the length check could be deleted unnoticed.
+    static std::vector<char> go_payload_with_trailer(const char* export_name,
+                                                     size_t trailer) {
+        std::vector<char> d = go_payload(export_name);
+        d.insert(d.end(), trailer, '\0');
+        return d;
+    }
+
+    int read_raw(void* buf, size_t n) { return read_exact(buf, n); }
+
+    int send_raw_option(uint32_t opt, const void* data, uint32_t len) {
+        return send_option(opt, data, len);
+    }
+
+    // One option reply: its type in *type_out and its payload in *data_out.
+    // Returns -1 on a transport error, which is what a server that closed the
+    // connection without replying looks like from here.
+    int read_opt_reply(uint32_t* type_out, std::vector<char>* data_out) {
+        char rh[20];
+        if (read_exact(rh, sizeof(rh)) < 0)
+            return -1;
+        if (be64rd(rh) != NBD_REP_MAGIC)
+            return -1;
+        *type_out = be32rd(rh + 12);
+        uint32_t len = be32rd(rh + 16);
+        data_out->resize(len);
+        if (len && read_exact(data_out->data(), len) < 0)
+            return -1;
+        return 0;
+    }
+
+    // A request header with no payload behind it: exactly what a client that
+    // stalls mid-WRITE has sent, and what makes the server wait for bytes while
+    // holding both of its device-wide gates.
+    int send_header_only(uint16_t type, uint64_t offset, uint32_t len, uint16_t flags = 0) {
+        char req[28];
+        encode_req(req, type, flags, next_handle++, offset, len);
+        return write_exact(req, sizeof(req));
+    }
+
+    // bound this client's own reads and writes, so that a server which never
+    // answers fails the case instead of hanging it
+    void set_timeout(uint64_t us) { s->timeout(us); }
+
+    // Drives OPT_GO by default. Passing NBD_OPT_INFO instead leaves the connection
+    // in the option phase after the ACK, so a caller that asks for it must not go on
+    // to xfer() -- it reads the same replies and reports the same members.
+    int handshake(const char* export_name = "", bool request_sizes = false,
+                  uint32_t opt = NBD_OPT_GO) {
+        if (handshake_front() < 0)
+            return -1;
+
+        // the name length is 32 bits on the wire. Encoding it as 16 was the same
+        // wrong assumption the server made when it skipped the payload instead of
+        // parsing it, so a 4-byte OPT_GO looked well formed to both sides.
+        std::vector<char> data = request_sizes
+                                     ? go_payload_requesting(export_name, NBD_INFO_BLOCK_SIZE)
+                                     : go_payload(export_name);
+        if (send_option(opt, data.data(), (uint32_t)data.size()) < 0)
+            return -1;
+
+        while (true) {
+            char rh[20];
+            if (read_exact(rh, sizeof(rh)) < 0)
+                return -1;
+            if (be64rd(rh) != NBD_REP_MAGIC)
+                return -1;
+            uint32_t type = be32rd(rh + 12);
+            uint32_t len = be32rd(rh + 16);
+            std::vector<char> d(len);
+            if (len && read_exact(d.data(), len) < 0)
+                return -1;
+            if (type & (1u << 31))
+                return -1;
+            if (type == NBD_REP_INFO && len >= 2) {
+                uint16_t info = be16rd(d.data());
+                if (first_info_type == 0xffff)
+                    first_info_type = info;
+                // NBD_INFO_BLOCK_SIZE's length is exactly 14: 2 for the type and 4
+                // each for the three sizes. QEMU's client refuses anything else.
+                if (info == NBD_INFO_BLOCK_SIZE && len == 14) {
+                    min_block = be32rd(d.data() + 2);
+                    pref_block = be32rd(d.data() + 6);
+                    max_block = be32rd(d.data() + 10);
+                } else if (info == NBD_INFO_EXPORT && len >= 12) {
+                    export_size = be64rd(d.data() + 2);
+                    trans_flags = be16rd(d.data() + 10);
+                }
+            }
+            if (type == NBD_REP_ACK)
+                return 0;
+        }
+    }
+
+    static void encode_req(char* req, uint16_t type, uint16_t flags, uint64_t handle,
+                           uint64_t offset, uint32_t len) {
+        be32wr(req, NBD_REQ_MAGIC);
+        be16wr(req + 4, flags);
+        be16wr(req + 6, type);
+        be64wr(req + 8, handle);
+        be64wr(req + 16, offset);
+        be32wr(req + 24, len);
+    }
+
+    // returns the nbd status code of the reply (0 = success), -1 on transport error
+    int xfer(uint16_t type, uint64_t offset, void* buf, uint32_t len, uint16_t flags = 0) {
+        uint64_t handle = next_handle++;
+        char req[28];
+        encode_req(req, type, flags, handle, offset, len);
+        if (write_exact(req, sizeof(req)) < 0)
+            return -1;
+        if (type == NBD_CMD_WRITE && len && write_exact(buf, len) < 0)
+            return -1;
+        char rep[16];
+        if (read_exact(rep, sizeof(rep)) < 0)
+            return -1;
+        if (be32rd(rep) != NBD_SIMPLE_REP_MAGIC || be64rd(rep + 8) != handle)
+            return -1;
+        uint32_t err = be32rd(rep + 4);
+        if (type == NBD_CMD_READ && err == NBD_SUCCESS && read_exact(buf, len) < 0)
+            return -1;
+        return (int)err;
+    }
+
+    // ---- pipelining: many requests in flight on ONE connection ----
+    // The server dispatches every request to its own coroutine (gated by the
+    // device's queue_depth) and each writes its own reply, so replies arrive in
+    // COMPLETION order, not request order: a pipelined client must match them
+    // by handle.
+    struct Pending { uint16_t type; uint32_t len; void* buf; };
+    std::unordered_map<uint64_t, Pending> pending;
+
+    // queue a request without waiting; returns its handle, or 0 on error
+    uint64_t submit(uint16_t type, uint64_t offset, void* buf, uint32_t len,
+                    uint16_t flags = 0) {
+        uint64_t handle = next_handle++;
+        char req[28];
+        encode_req(req, type, flags, handle, offset, len);
+        if (write_exact(req, sizeof(req)) < 0)
+            return 0;
+        if (type == NBD_CMD_WRITE && len && write_exact(buf, len) < 0)
+            return 0;
+        pending[handle] = Pending{type, len, buf};
+        return handle;
+    }
+
+    // collect one outstanding reply; returns its nbd status, or -1 on a
+    // transport error or a reply for a request we never sent
+    int collect(uint64_t* handle_out = nullptr) {
+        char rep[16];
+        if (read_exact(rep, sizeof(rep)) < 0)
+            return -1;
+        if (be32rd(rep) != NBD_SIMPLE_REP_MAGIC)
+            return -1;
+        uint64_t handle = be64rd(rep + 8);
+        auto it = pending.find(handle);
+        if (it == pending.end())
+            return -1;
+        uint32_t err = be32rd(rep + 4);
+        if (it->second.type == NBD_CMD_READ && err == NBD_SUCCESS &&
+            read_exact(it->second.buf, it->second.len) < 0)
+            return -1;
+        if (handle_out) *handle_out = handle;
+        pending.erase(it);
+        return (int)err;
+    }
+
+    void disc() {
+        char req[28] = {};
+        be32wr(req, NBD_REQ_MAGIC);
+        be16wr(req + 6, NBD_CMD_DISC);
+        write_exact(req, sizeof(req));
+    }
+
+private:
+    // photon's read/write return a short count at EOF and -1 with errno set on
+    // error. Collapsing both into -1 without touching errno leaves the caller
+    // reporting whatever the last fd wait happened to leave there, and that is
+    // photon's EOK sentinel -- ENXIO (io/fd-events.h) -- so a peer that closed
+    // mid-handshake reads out as "no such device". Naming the close is what lets
+    // the errno a case reports about a failed exchange mean the failure.
+    static int exact(ssize_t r, size_t n) {
+        if (r == (ssize_t)n)
+            return 0;
+        if (r >= 0)
+            errno = ECONNRESET;
+        return -1;
+    }
+    int read_exact(void* buf, size_t n) { return exact(s->read(buf, n), n); }
+    int write_exact(const void* buf, size_t n) { return exact(s->write(buf, n), n); }
+    int send_option(uint32_t opt, const void* data, uint32_t len) {
+        char h[16];
+        be64wr(h, NBD_OPTS_MAGIC);
+        be32wr(h + 8, opt);
+        be32wr(h + 12, len);
+        if (write_exact(h, sizeof(h)) < 0)
+            return -1;
+        if (len && write_exact(data, len) < 0)
+            return -1;
+        return 0;
+    }
+};
+
+static const char IMG_PATH[] = "/tmp/photon-blk-nbd-test.img";
+static const char IMG2_PATH[] = "/tmp/photon-blk-nbd-test2.img";
+static constexpr uint64_t IMG_SIZE = 4u << 20;
+
+class NbdTest : public test::SkippableTest {
+public:
+    test::TestImage img;
+    fs::IFile* file = nullptr;
+
+    void SetUp() override {
+        ASSERT_EQ(0, img.create(IMG_PATH, IMG_SIZE));
+        file = img.file;
+    }
+
+    void TearDown() override {
+        img.release();
+    }
+
+    BlkDevInfo make_info() {
+        BlkDevInfo i;
+        i.identity = "photon-nbd-test";
+        i.size = IMG_SIZE;
+        i.features = FEATURE_FLUSH;
+#ifdef __linux__
+        // localfs fallocate (trim / zero_range) exists on Linux only
+        i.features |= FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+#endif
+        return i;
+    }
+};
+
+// The capability half of BlkDevInfo: what lets a caller branch on behaviour instead of
+// inferring it from which factory built the object. The axes are properties of the
+// transport, so they are already correct on a constructed device; `negotiated` is the
+// one member that start() has to fill in.
+TEST_F(NbdTest, capabilities_descriptor) {
+    NbdConfig cfg(make_info());
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.loopback_device = false;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    const BlkDevInfo& i = dev->get_info();
+
+    // nbd's connections ARE its queue and detach() closes them on both paths, so there
+    // is no backlog for a later start() to harvest and no registration to adopt or
+    // drift against. shutdown() closes the connections rather than refusing a client.
+    // The export's size is fixed at handshake, so resize() is not implemented at all.
+    EXPECT_EQ(BlkBacklog::None, i.backlog);
+    EXPECT_EQ(BlkShutdownRefusal::Disconnects, i.shutdown_refusal);
+    EXPECT_EQ(BlkResizeEffect::Unsupported, i.resize_effect);
+    EXPECT_EQ(BlkAdoption::NoRegistration, i.adoption);
+    // detach(false) skips the in_flight poll but still runs cleanup_runtime(), which
+    // joins workers that are waiting on backend I/O -- the measurement behind blk.h no
+    // longer promising an immediate return
+    EXPECT_EQ(false, i.detach_no_wait);
+    // `offered` describes this transport's command set, not what any given backend can
+    // do: it serves TRIM and WRITE_ZEROES by translating them, and a backend without
+    // them answers per-request.
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
+    EXPECT_EQ(0ull, i.negotiated);   // nothing advertised yet
+
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    // A client cannot decline an individual transmission flag -- it accepts the set or
+    // does not connect -- so what start() advertised is what is in force. Spelled out
+    // per platform rather than derived from `features & offered`, which is how the
+    // implementation computes it and would therefore agree with itself if it were wrong.
+    uint64_t want = FEATURE_FLUSH;
+#ifdef __linux__
+    want |= FEATURE_DISCARD | FEATURE_WRITE_ZEROES;   // make_info() requests them here
+#endif
+    EXPECT_EQ(want, dev->get_info().negotiated);
+}
+
+TEST_F(NbdTest, config_validation) {
+    // the pure config checks are construction-time now: no object at all
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    errno = 0;
+    EXPECT_EQ(nullptr, new_nbd_device(cfg));
+    EXPECT_EQ(EINVAL, errno);
+
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.info.size = 0;
+    errno = 0;
+    EXPECT_EQ(nullptr, new_nbd_device(cfg));
+    EXPECT_EQ(EINVAL, errno);
+
+    cfg.info.size = IMG_SIZE + 500;  // not a multiple of the sector size
+    errno = 0;
+    EXPECT_EQ(nullptr, new_nbd_device(cfg));
+    EXPECT_EQ(EINVAL, errno);
+
+    cfg.info.size = IMG_SIZE;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EALREADY, errno);
+    EXPECT_EQ(0, dev->shutdown());
+
+    // a second object must not steal the unix path of a LIVE server. It is refused
+    // with EEXIST rather than EBUSY: start() does not connect to the node, so it
+    // cannot say whether a live server holds it or a crashed one left it, and it
+    // reports the one thing it does know -- something is already there. The socket
+    // file survives either way.
+    const char* path = "/tmp/photon-blk-nbd-test.sock";
+    ::unlink(path);
+    NbdConfig ucfg(make_info());
+    ucfg.loopback_device = false;
+    ucfg.unix_path = path;
+    auto udev = new_nbd_device(ucfg);
+    ASSERT_NE(nullptr, udev);
+    DEFER(delete udev);
+    ASSERT_EQ(0, udev->start(file));
+    auto dev2 = new_nbd_device(ucfg);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    errno = 0;
+    EXPECT_EQ(-1, dev2->start(file));
+    EXPECT_EQ(EEXIST, errno);
+    EXPECT_EQ(0, ::access(path, F_OK));
+    EXPECT_EQ(0, udev->shutdown());
+
+#ifndef __linux__
+    NbdConfig lcfg(make_info());  // loopback_device on by default
+    auto ldev = new_nbd_device(lcfg);
+    ASSERT_NE(nullptr, ldev);
+    DEFER(delete ldev);
+    errno = 0;
+    EXPECT_EQ(-1, ldev->start(file));
+    EXPECT_EQ(ENOSYS, errno);
+#endif
+}
+
+TEST_F(NbdTest, tcp_roundtrip) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    EXPECT_EQ(nullptr, dev->get_device_node());
+
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+    ASSERT_NE(0, ep.port);
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_EQ(IMG_SIZE, cli.export_size);
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_FLUSH);
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_FUA);
+#ifdef __linux__
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_TRIM);
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
+#endif
+
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    memset(rbuf.data(), 0, rbuf.size());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    // write reached the backend file
+    memset(rbuf.data(), 0, rbuf.size());
+    struct iovec iov{rbuf.data(), 4096};
+    ASSERT_EQ((ssize_t)4096, file->preadv(&iov, 1, 4096));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), 4096));
+
+    // FUA write
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), 4096, NBD_REQ_FUA));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+
+    // out-of-bounds and unknown command
+    EXPECT_EQ((int)NBD_EINVAL, cli.xfer(NBD_CMD_READ, IMG_SIZE - 10, rbuf.data(), 4096));
+    EXPECT_EQ((int)NBD_ENOTSUP, cli.xfer(7, 0, nullptr, 0));
+
+#ifdef __linux__
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 4096, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 4096, nullptr, 8192));
+    memset(rbuf.data(), 1, rbuf.size());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096, rbuf.data(), 4096));
+    for (int i = 0; i < 4096; i++)
+        ASSERT_EQ(0, rbuf[i]);
+#endif
+
+    EXPECT_EQ(1u, dev->get_client_connections().size());
+}
+
+// sector_size_shift reaches the kernel over the loopback path only, as
+// NBD_ATTR_BLOCK_SIZE_BYTES or NBD_SET_BLKSIZE. A socket client has one source for
+// it and that source is NBD_INFO_BLOCK_SIZE, so without that item an export
+// configured 4096 was served over TCP looking like a 512-byte one. The three shapes
+// below are the spec's own: a client that asks in an OPT_GO MUST then abide by what
+// it receives, one that sends OPT_INFO is only probing, and an OPT_GO that did not
+// ask promised nothing -- and this server does not reject an unaligned request, so
+// quoting such a client a real minimum would claim an enforcement that is not there.
+// Each shape is a separate operand of that decision, so dropping either half of it
+// changes one of the three.
+TEST_F(NbdTest, block_size_info_carries_the_configured_sector_size_to_a_socket_client) {
+    BlkDevInfo i = make_info();
+    i.sector_size_shift = 12;
+    NbdConfig cfg(i);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+
+    {   // (1) an OPT_GO that asks is told the real granularity
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/true));
+        EXPECT_EQ(4096u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+        // A minimum that does not divide the export would leave the last bytes
+        // unreachable, which is why validate_info rejects such a config outright.
+        EXPECT_EQ(0u, cli.export_size % cli.min_block);
+        // The order is the server's to pick -- a client must not rely on one -- but
+        // this is the pick QEMU's client needs: it runs that divisibility check in
+        // its EXPORT branch, reading a min_block that is still 0 if EXPORT came
+        // first, so the check only happens when BLOCK_SIZE arrives ahead of it.
+        EXPECT_EQ(NBD_INFO_BLOCK_SIZE, cli.first_info_type);
+    }
+    {   // (2) an OPT_GO that does not ask still gets the item, with a permissive
+        // minimum: preferred and maximum are true whatever the minimum is
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        EXPECT_EQ(1u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+    }
+    {   // (3) an OPT_INFO that does not ask is a probe and is told the truth
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/false, NBD_OPT_INFO));
+        EXPECT_EQ(4096u, cli.min_block);
+        EXPECT_EQ(4096u, cli.pref_block);
+        EXPECT_EQ(32u << 20, cli.max_block);
+        cli.force_close();   // still in the option phase, so no DISC
+    }
+}
+
+// The other end of the same decision, and the one that keeps (1) honest: a 512-shift
+// export has to report 512, not the 4096 that (1) sees. Without this the minimum
+// could be a constant and every assertion above would still hold. It also shows the
+// two sizes differing -- the spec requires preferred to be at least max(minimum,
+// 512), and here it is strictly larger.
+TEST_F(NbdTest, block_size_info_of_a_512_shift_export_keeps_the_preferred_size_at_4096) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake("", /*request_sizes=*/true));
+    EXPECT_EQ(512u, cli.min_block);
+    EXPECT_EQ(4096u, cli.pref_block);
+    EXPECT_EQ(32u << 20, cli.max_block);
+}
+
+TEST_F(NbdTest, unix_path_mode) {
+    const char* path = "/tmp/photon-blk-nbd-test.sock";
+    ::unlink(path);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    EXPECT_NE(nullptr, dev->get_server_sockets().uds);
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_unix(path));
+    ASSERT_EQ(0, cli.handshake("photon-nbd-test"));
+    EXPECT_EQ(IMG_SIZE, cli.export_size);
+
+    std::vector<char> wbuf(4096, 0x6b), rbuf(4096);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+}
+
+// The same refusal on the nbd side. A caller's ordinary file at unix_path was once
+// deleted and a socket bound in its place, with start() reporting success -- so the
+// assertion is not only that the file survived but that the start was refused. The
+// errno is EEXIST rather than the EINVAL a type check gave: nothing stats the node
+// to classify it any more, because the classification never changed the answer.
+TEST_F(NbdTest, unix_path_holding_a_regular_file_is_refused_and_preserved) {
+    static const char WANT[] = "not a socket, and not ours to remove";
+    const char* path = "/tmp/photon-blk-nbd-regular-file";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    int fd = ::open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ((ssize_t) sizeof(WANT), ::write(fd, WANT, sizeof(WANT)));
+    ::close(fd);
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EEXIST, errno);
+
+    struct stat st;
+    ASSERT_EQ(0, ::stat(path, &st));
+    EXPECT_TRUE(S_ISREG(st.st_mode));
+    EXPECT_EQ(sizeof(WANT), (size_t) st.st_size);
+    fd = ::open(path, O_RDONLY);
+    ASSERT_GE(fd, 0);
+    DEFER(::close(fd));
+    char back[sizeof(WANT)] = {};
+    EXPECT_EQ((ssize_t) sizeof(WANT), ::read(fd, back, sizeof(back)));
+    EXPECT_EQ(0, memcmp(WANT, back, sizeof(WANT)));
+}
+
+// A socket node with nobody behind it. This used to be taken over: start() probed
+// it, read "no listener", and photon's autoremove cleared it on the way to bind.
+// Nothing is removed now, so the answer is the same EEXIST a live listener gets --
+// start() does not connect, so it cannot tell the two apart, and it does not delete
+// what it cannot prove is dead. What makes this worth more than the live-listener
+// case is the second half: the node is still there, and it is still the same node.
+TEST_F(NbdTest, a_dead_socket_at_unix_path_is_refused_and_preserved) {
+    const char* path = "/tmp/photon-blk-nbd-dead.sock";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    // Bound and then closed without ever listening: the node survives with nobody
+    // behind it and a connect answers ECONNREFUSED. That is what a crashed daemon
+    // leaves, and it is also what a start() between its own bind and listen looks
+    // like from outside -- the two are not distinguishable, which is the reason
+    // nothing here probes.
+    int lfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_GE(lfd, 0);
+    sockaddr_un un;
+    memset(&un, 0, sizeof(un));
+    un.sun_family = AF_UNIX;
+    snprintf(un.sun_path, sizeof(un.sun_path), "%s", path);
+    ASSERT_EQ(0, ::bind(lfd, (sockaddr*)&un, sizeof(un)));
+    struct stat before;
+    ASSERT_EQ(0, ::stat(path, &before));
+    ::close(lfd);
+    ASSERT_EQ(0, ::access(path, F_OK));
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(file));
+    EXPECT_EQ(EEXIST, errno);
+
+    // A refusal is worth nothing if the removal already happened, so this is on the
+    // inode: same node, still a socket, and not one this start() bound.
+    struct stat after;
+    ASSERT_EQ(0, ::stat(path, &after));
+    EXPECT_TRUE(S_ISSOCK(after.st_mode));
+    EXPECT_EQ(before.st_ino, after.st_ino) << "the node was replaced rather than refused";
+}
+
+// shutdown() removes the node this device bound, which is the only unlink nbd does.
+// Not tidiness: start() refuses an occupied path and nothing else will clear it, so
+// a device that left its socket behind could never serve that path again. photon's
+// autoremove used to do this in the server's destructor -- but it also unlinks at
+// bind time, which is exactly the removal the case above rules out.
+TEST_F(NbdTest, shutdown_removes_its_own_node_so_the_path_can_be_bound_again) {
+    const char* path = "/tmp/photon-blk-nbd-restart.sock";
+    ::unlink(path);
+    DEFER(::unlink(path));
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    ASSERT_EQ(0, ::access(path, F_OK));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_NE(0, ::access(path, F_OK)) << "shutdown left its own socket behind";
+
+    // and the path is bindable again, which is the whole point of removing it
+    auto dev2 = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev2);
+    DEFER(delete dev2);
+    ASSERT_EQ(0, dev2->start(file));
+    DEFER(dev2->shutdown());
+    EXPECT_EQ(0, ::access(path, F_OK));
+}
+
+TEST_F(NbdTest, both_endpoints) {
+    const char* path = "/tmp/photon-blk-nbd-test.sock";
+    ::unlink(path);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient a, b;
+    ASSERT_EQ(0, a.connect_unix(path));
+    ASSERT_EQ(0, a.handshake());
+    ASSERT_EQ(0, b.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, b.handshake());
+
+    std::vector<char> wbuf(4096, 0x39), rbuf(4096);
+    EXPECT_EQ(0, a.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, b.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    EXPECT_EQ(2u, dev->get_client_connections().size());
+}
+
+// High-concurrency stress at the PROTOCOL level: in this mode nbd has no
+// kernel node, so the concurrency is (1) many simultaneous client connections
+// and (2) one connection with many requests in flight. The server gives every
+// request its own coroutine behind a device-wide queue_depth gate, and each
+// writes its own reply -- so replies arrive in completion order and a
+// pipelined client must match them by handle. Blocks are self-describing
+// (harness.h), which makes a misrouted or torn reply attributable rather than
+// just "wrong bytes".
+TEST_F(NbdTest, concurrent_stress) {
+    static const char* const BIG_PATH = "/tmp/photon-blk-nbd-stress.img";
+    constexpr uint64_t BIG = 64ull << 20;   // the fixture image is only 4 MiB
+    test::TestImage big_img;
+    ASSERT_EQ(0, big_img.create(BIG_PATH, BIG));
+    auto big = big_img.file;
+
+    BlkDevInfo info;
+    info.identity = "photon-nbd-stress";
+    info.size = BIG;
+    info.sector_size_shift = 9;
+    info.features = FEATURE_FLUSH;
+    NbdConfig cfg(info);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.queue_depth = 256;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(big));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    constexpr uint64_t BASE = 1ull << 20;
+
+    // (1) K connections, private regions, mixed request sizes
+    constexpr int K = 16, ITERS = 24;
+    constexpr uint64_t REGION = (BIG - BASE) / 2 / K;   // the pipelined phase
+                                                        // owns the upper half
+    std::atomic<int> bad{0};
+    photon::semaphore done;
+    for (int t = 0; t < K; t++)
+        photon::thread_create11([&, t] {
+            DEFER(done.signal(1));
+            NbdTestClient cli;
+            if (cli.connect_tcp("127.0.0.1", ep.port) < 0 || cli.handshake() < 0) {
+                LOG_ERROR("stress client ` failed to connect or handshake", t);
+                bad++;
+                return;
+            }
+            test::StressRnd rnd(0x5eed1234u ^ ((uint32_t)t * 7919u));
+            static const uint32_t SIZES[] = {4096, 16384, 65536};
+            std::vector<char> wbuf(65536), rbuf(65536);
+            for (int i = 0; i < ITERS; i++) {
+                uint32_t bs = SIZES[rnd.below(3)];
+                uint64_t off = BASE + (uint64_t)t * REGION +
+                               rnd.below((REGION - bs) / 4096 + 1) * 4096;
+                test::stress_format(wbuf.data(), bs, off, (uint32_t)t, (uint32_t)i + 1);
+                int w = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), bs);
+                int r = cli.xfer(NBD_CMD_READ, off, rbuf.data(), bs);
+                uint32_t tid = 0, seq = 0;
+                int v = test::stress_validate(rbuf.data(), bs, off, &tid, &seq);
+                if (v == 0 && (tid != (uint32_t)t || seq != (uint32_t)i + 1))
+                    v = EILSEQ;   // another client's block inside OUR region
+                if (w || r || v) {
+                    LOG_ERROR("stress client ` iter ` off ` len `: write ` read ` validate ` (owner tid=` seq=`)",
+                              t, i, off, bs, w, r, v, tid, seq);
+                    bad++;
+                    return;
+                }
+            }
+        });
+    done.wait(K);
+    EXPECT_EQ(0, bad.load());
+
+    // (2) one connection, PIPE requests in flight per round: a fresh grid of
+    // slots each round, so a read-back has exactly one legitimate writer
+    constexpr int PIPE = 32, ROUNDS = 8;
+    constexpr uint32_t PB = 16384;
+    constexpr uint32_t PTID = 99;
+    constexpr uint64_t PBASE = BASE + (BIG - BASE) / 2;
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf((size_t)PIPE * PB), rbuf((size_t)PIPE * PB);
+    int pipe_bad = 0;
+    for (int r = 0; r < ROUNDS && !pipe_bad; r++) {
+        uint64_t base = PBASE + (uint64_t)r * PIPE * PB;
+        auto seq_of = [&](int i) { return (uint32_t)(r * PIPE + i + 1); };
+        for (int i = 0; i < PIPE && !pipe_bad; i++) {
+            uint64_t off = base + (uint64_t)i * PB;
+            test::stress_format(&wbuf[(size_t)i * PB], PB, off, PTID, seq_of(i));
+            if (!cli.submit(NBD_CMD_WRITE, off, &wbuf[(size_t)i * PB], PB))
+                pipe_bad = EIO;
+        }
+        if (!pipe_bad && !cli.submit(NBD_CMD_FLUSH, 0, nullptr, 0))
+            pipe_bad = EIO;
+        for (int i = 0; i < PIPE + 1 && !pipe_bad; i++) {
+            int st = cli.collect();
+            if (st != 0) {
+                LOG_ERROR("pipelined write/flush reply `, round `", st, r);
+                pipe_bad = st < 0 ? EIO : st;
+            }
+        }
+        for (int i = 0; i < PIPE && !pipe_bad; i++) {
+            uint64_t off = base + (uint64_t)i * PB;
+            if (!cli.submit(NBD_CMD_READ, off, &rbuf[(size_t)i * PB], PB))
+                pipe_bad = EIO;
+        }
+        for (int i = 0; i < PIPE && !pipe_bad; i++) {
+            int st = cli.collect();
+            if (st != 0) {
+                LOG_ERROR("pipelined read reply `, round `", st, r);
+                pipe_bad = st < 0 ? EIO : st;
+            }
+        }
+        for (int i = 0; i < PIPE && !pipe_bad; i++) {
+            uint64_t off = base + (uint64_t)i * PB;
+            uint32_t tid = 0, seq = 0;
+            int v = test::stress_validate(&rbuf[(size_t)i * PB], PB, off, &tid, &seq);
+            if (v == 0 && (tid != PTID || seq != seq_of(i)))
+                v = EILSEQ;
+            if (v) {
+                LOG_ERROR("pipelined slot ` off ` round `: ` (owner tid=` seq=`)",
+                          i, off, r, v, tid, seq);
+                pipe_bad = v;
+            }
+        }
+    }
+    EXPECT_EQ(0, pipe_bad);
+    EXPECT_TRUE(cli.pending.empty());
+}
+
+TEST_F(NbdTest, read_only) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.read_only = true;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_READ_ONLY);
+
+    std::vector<char> buf(4096, 0x11);
+    EXPECT_EQ((int)NBD_EPERM, cli.xfer(NBD_CMD_WRITE, 0, buf.data(), buf.size()));
+#ifdef __linux__
+    EXPECT_EQ((int)NBD_EPERM, cli.xfer(NBD_CMD_TRIM, 0, nullptr, 4096));
+#endif
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, buf.data(), buf.size()));
+}
+
+#ifdef __linux__
+TEST_F(NbdTest, loopback_device) {
+    if (geteuid() != 0)
+        return report_skip("loopback test requires root");
+    if (::access("/sys/block/nbd0", F_OK) != 0)
+        return report_skip("nbd kernel module not loaded");
+
+    NbdConfig cfg(make_info());  // anonymous UDS + loopback device
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    const char* node = dev->get_device_node();
+    ASSERT_NE(nullptr, node);
+    auto srvs = dev->get_server_sockets();
+    EXPECT_EQ(nullptr, srvs.uds);
+    EXPECT_EQ(nullptr, srvs.tcp);
+    for (int i = 0; i < 1000 && dev->get_client_connections().empty(); i++)
+        photon::thread_usleep(1000);
+    EXPECT_EQ(1u, dev->get_client_connections().size());
+
+    // device IO must run off the photon vcpu: the requests loop back through
+    // the serve coroutines on this very vcpu
+    int result = -1;
+    std::string devnode(node);
+    test::run_off_vcpu([&] {
+        std::vector<char> wbuf(4096, 0x5a), rbuf(4096);
+        int fd = ::open(devnode.c_str(), O_RDWR);
+        if (fd < 0) {
+            result = errno;
+            return;
+        }
+        DEFER(::close(fd));
+        if (::pwrite(fd, wbuf.data(), wbuf.size(), 8192) != (ssize_t)wbuf.size()) {
+            result = errno;
+            return;
+        }
+        // buffered writes sit in the kernel page cache until writeback; fsync
+        // forces them through the loopback into the backend file
+        if (::fsync(fd) < 0) {
+            result = errno;
+            return;
+        }
+        if (::pread(fd, rbuf.data(), rbuf.size(), 8192) != (ssize_t)rbuf.size()) {
+            result = errno;
+            return;
+        }
+        result = memcmp(wbuf.data(), rbuf.data(), wbuf.size()) ? EILSEQ : 0;
+    });
+    EXPECT_EQ(0, result);
+
+    // the written pattern shows up in the backend file
+    std::vector<char> rbuf(4096);
+    struct iovec iov{rbuf.data(), rbuf.size()};
+    ASSERT_EQ((ssize_t)rbuf.size(), file->preadv(&iov, 1, 8192));
+    for (int i = 0; i < 4096; i++)
+        ASSERT_EQ(0x5a, (uint8_t)rbuf[i]);
+}
+#endif
+
+// nbd's parallelism is its client connection count, so the fan-out unit is the
+// connection, not a queue. Two clients on a two-vcpu pool must land on two
+// different vcpus; if the migration in spawn_serve_conn were missing, both
+// serve_conn coroutines would sit on this vcpu and the count would be 1.
+TEST_F(NbdTest, connections_spread_over_the_pool) {
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    // two clients, each with its own connection, both doing real IO so the
+    // serving coroutines actually touch the backend
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    for (int c = 0; c < 2; c++) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        uint64_t base = 4096u + (uint64_t)c * 65536;   // this test's own region
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size()));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, base, rbuf.data(), rbuf.size()));
+        EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+        // An FUA write, so this connection drives the durability branch too. What it
+        // asserts here is only that a write asking for durability still succeeds on a
+        // pool vcpu; the case that counts the sync itself, and so can tell "persisted"
+        // from "acked", is an_fua_write_is_durable_before_its_reply.
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size(), NBD_REQ_FUA));
+#ifdef __linux__
+        // TRIM lands on the VIRTUAL fallocate, because IFile::trim is a plain
+        // method that calls it: a pass-through backend that forgot to forward
+        // fallocate would answer ENOSYS, and nbd reports that to the client as
+        // NBD_ENOTSUP. WRITE_ZEROES proves nothing on its own any more -- ENOSYS
+        // is one of the two "no hole-punch" answers nbd falls back on, so it
+        // would succeed by writing zeroes instead. Offsets are inside this
+        // client's own region, disjoint from the pair above.
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, base + 16384, nullptr, 8192));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, base + 16384, nullptr, 8192));
+#endif
+    }
+
+    // accept_th deliberately stays on this vcpu (the control plane does not
+    // move), so the caller's vcpu appearing in the set would mean a serve_conn
+    // did NOT move. No backend verification here on purpose: it would run on
+    // this vcpu through `rec` and record the caller as a false placement.
+    EXPECT_EQ(2u, rec.vcpu_count());
+    EXPECT_FALSE(rec.ran_on(caller));
+}
+
+// More connections than pool vcpus, which is nbd's version of "more queues than
+// vcpus": the connection is the unit spawn_serve_conn migrates, so it is the unit
+// that draws WorkPool's cursor. The two-client case above never draws past that
+// cursor's first cycle, and within it a cursor that saturates at the last index it
+// drew is indistinguishable from one that wraps -- both hand out vcpus[0] and
+// vcpus[1] once and both read 2. Four connections push the cursor past the pool
+// size, and attributing each one to its own vcpu is what tells the two apart:
+// wrapping alternates, saturating lands the last three together, and a cursor that
+// stopped advancing altogether lands all four together.
+//
+// Sequential, and the attribution is why: record() dedups into a member vector that
+// nothing drops until reset(), so a closed connection's placement survives the
+// disconnect and the reset between connections sees one connection's IO only --
+// overlapping connections would each find the other's entries already there.
+// Sequential is also what makes the ORDER assertable: with two clients in flight the
+// order of their two draws belongs to the scheduler. One connection whose reply has
+// arrived has certainly been migrated: spawn_serve_conn creates serve_conn, registers
+// it and migrates it without yielding -- thread_enable_join sets a flag and
+// conns_lock is a photon::spinlock, whose lock spins rather than yielding -- so
+// serve_conn cannot have run, and cannot have touched the backend, before the draw
+// that placed it.
+TEST_F(NbdTest, more_connections_than_pool_vcpus_use_every_vcpu) {
+    constexpr int CONNS = 4;      // twice the pool, so the cursor has to wrap
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    std::vector<photon::vcpu_base*> per_conn;
+    for (int c = 0; c < CONNS; c++) {
+        rec.reset();
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        uint64_t base = 4096u + (uint64_t)c * 65536;   // this connection's own region
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, base, wbuf.data(), wbuf.size()));
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, base, rbuf.data(), rbuf.size()));
+        EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+        // One connection is one serve_conn plus the execute coroutines it creates
+        // WITHOUT migrating them, so its whole backend IO shares one vcpu -- and a
+        // pool one: accept_th stays on this vcpu and touches no backend, so the
+        // caller appearing here would mean this connection never moved.
+        ASSERT_EQ(1u, rec.vcpu_count());
+        EXPECT_FALSE(rec.ran_on(caller));
+        per_conn.push_back(rec.vcpus().front());
+    }
+
+    // Both pool vcpus got traffic at all: a cursor pinned to one index from the start
+    // reads 1 here. This does NOT prove the wrap -- saturating after the first cycle
+    // also reads 2 -- which is what the neighbour assert below is for.
+    std::vector<photon::vcpu_base*> distinct;
+    for (auto* v : per_conn) {
+        bool seen = false;
+        for (auto* u : distinct)
+            if (u == v)
+                seen = true;
+        if (!seen)
+            distinct.push_back(v);
+    }
+    EXPECT_EQ(2u, distinct.size());
+    // Neighbours differ, and this is the wrap itself: one draw per connection over
+    // two vcpus has to alternate. It is also the assertion the two-client case
+    // cannot make -- a cursor that saturates after its first cycle satisfies that
+    // case's count of 2 and fails here on the third connection.
+    for (int c = 1; c < CONNS; c++)
+        EXPECT_NE(per_conn[c - 1], per_conn[c]);
+}
+
+// Two devices on ONE pool. WorkPool's cursor belongs to the pool, not to the caller,
+// and migrate_to_pool passes an out-of-range index on purpose so that cursor is what
+// picks the vcpu -- so device B's first connection continues where device A's left
+// off instead of restarting at vcpus[0]. The NE below is the strongest form the
+// property has, and it says nothing without the three asserts around it: the two
+// counts of 1 mean each device contributes exactly one serving coroutine, and the two
+// ran_on(caller) exclusions mean neither vcpu they name is this one. Together those
+// make "the union covers both pool vcpus" and "the two vcpus differ" the same
+// statement.
+// Nothing stronger is assertable, because WHICH of the two a device gets is not
+// decidable -- WorkPool's impl fills its vcpus vector from add_vcpu(), i.e. in
+// worker-thread startup order, and asserting an absolute index would pin that order
+// as if it were a contract.
+//
+// The order of the two DRAWS is decidable, and that is what makes the NE a guarantee
+// rather than a coin flip: A is driven to a completed reply before B exists, and
+// B's own start() draws nothing, because check_pool_engines migrates its probes by
+// in-range index precisely so that every vcpu is checked exactly once. So the two
+// draws are consecutive, and consecutive values of `vcpu_index++ % 2` differ
+// wherever the cursor happened to start -- which is why nothing here depends on it
+// starting at zero.
+TEST_F(NbdTest, two_devices_share_one_pool) {
+    // B needs its own backend and its own probe: one shared RecordingFile would
+    // merge the two devices' placements into a single set and leave the comparison
+    // below nothing to compare. img2 is declared first so that reverse destruction
+    // drops rec_b, then rec_a, then the image's file handle.
+    test::TestImage img2;
+    ASSERT_EQ(0, img2.create(IMG2_PATH, IMG_SIZE));
+    test::RecordingFile rec_a(file);
+    test::RecordingFile rec_b(img2.file);
+    auto* caller = photon::get_vcpu();
+    test::TestPool pool(2);
+    ASSERT_EQ(2, pool->get_vcpu_num());
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+
+    auto dev_a = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev_a);
+    DEFER(delete dev_a);
+    ASSERT_EQ(0, dev_a->start(&rec_a));
+    DEFER(dev_a->shutdown());
+    net::EndPoint ep_a;
+    ASSERT_EQ(0, dev_a->get_server_sockets().tcp->getsockname(ep_a));
+
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    NbdTestClient cli_a;
+    ASSERT_EQ(0, cli_a.connect_tcp("127.0.0.1", ep_a.port));
+    ASSERT_EQ(0, cli_a.handshake());
+    EXPECT_EQ(0, cli_a.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli_a.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    // the same config again: port 0 makes the kernel hand B a listener of its own,
+    // and the identity is only the export name, which each listener answers for
+    // itself
+    auto dev_b = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev_b);
+    DEFER(delete dev_b);
+    ASSERT_EQ(0, dev_b->start(&rec_b));
+    DEFER(dev_b->shutdown());
+    net::EndPoint ep_b;
+    ASSERT_EQ(0, dev_b->get_server_sockets().tcp->getsockname(ep_b));
+    ASSERT_NE(ep_a.port, ep_b.port);
+
+    NbdTestClient cli_b;
+    ASSERT_EQ(0, cli_b.connect_tcp("127.0.0.1", ep_b.port));
+    ASSERT_EQ(0, cli_b.handshake());
+    EXPECT_EQ(0, cli_b.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli_b.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    ASSERT_EQ(1u, rec_a.vcpu_count());
+    ASSERT_EQ(1u, rec_b.vcpu_count());
+    EXPECT_FALSE(rec_a.ran_on(caller));
+    EXPECT_FALSE(rec_b.ran_on(caller));
+    EXPECT_NE(rec_a.vcpus().front(), rec_b.vcpus().front())
+        << "both devices' connections landed on one pool vcpu";
+}
+
+// Eight OS threads churn connections while the caller's vcpu traverses the
+// connection list and, mid-churn, drains and restarts the device. Since the
+// migration the list is written from the pool vcpus (spawn_serve_conn's
+// push_back, serve_conn's DEFER erase) and read from this one
+// (get_client_connections, detach's drain), so the traversals race the
+// reallocations if the list loses its lock. The assertions are structural:
+// returned pointers are never null and the list never grows past the live
+// clients. The streams are NOT dereferenced -- a returned pointer may belong
+// to a connection that closed right after the copy, which is legitimate;
+// dereferencing it would be this test's own use-after-free.
+TEST_F(NbdTest, concurrent_connect_disconnect_under_pool_serving) {
+    test::TestPool pool(4);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = pool;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+    ASSERT_NE(0, ep.port);
+
+    // The restart rebinds an ephemeral port, so the workers re-read `port` per
+    // attempt, and `gen` brackets the restart window (bumped once before the
+    // detach and once after the new port is published, with `down` covering the
+    // stretch in between): a failed attempt that overlapped the window is
+    // expected, one that did not is a real error. A data mismatch is never
+    // excused -- a transfer torn by the restart returns -1, not wrong bytes.
+    std::atomic<uint16_t> port{ep.port};
+    std::atomic<uint32_t> gen{0};
+    std::atomic<bool> down{false};
+    std::atomic<int> bad{0};
+    std::atomic<int> ok{0};        // fully verified connect/write/read cycles
+    std::atomic<int> finished{0};
+
+    constexpr int THREADS = 8, ITERS = 20;
+    // Every client operation is bounded, and the polling loop's deadline below has
+    // to exceed whatever a thread can still need. The loop's exit is followed by
+    // join(), which blocks THIS OS thread -- and this thread's vcpu is where
+    // accept_loop lives, so any client still waiting can never be served and the
+    // join never returns. Bounding the clients is what makes the join terminate.
+    constexpr uint64_t CLIENT_TIMEOUT_US = 5ull * 1000 * 1000;
+    constexpr uint64_t DEADLINE_US = 300ull * 1000 * 1000;
+    static_assert(DEADLINE_US > (uint64_t) ITERS * CLIENT_TIMEOUT_US,
+                  "a thread could still be working when the polling loop gives up, "
+                  "and the join that follows would then deadlock this vcpu");
+    std::vector<std::thread> ths;
+    for (int t = 0; t < THREADS; t++)
+        ths.emplace_back([&, t] {
+            // NbdTestClient speaks photon sockets, whose fd waits go through
+            // the CURRENT vcpu's event engine, so each OS thread brings its own
+            if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) != 0) {
+                bad++;
+                finished++;
+                return;
+            }
+            DEFER({ photon::fini(); finished++; });
+            // per-thread buffers: a shared read-back buffer would have the
+            // threads scribble over each other's validation
+            std::vector<char> wbuf(4096), rbuf(4096);
+            for (size_t i = 0; i < wbuf.size(); i++)
+                wbuf[i] = (char)(i * 31 + 7);
+            uint64_t off = 4096 + (uint64_t)t * (IMG_SIZE / THREADS);
+            for (int i = 0; i < ITERS; i++) {
+                // Do not spend iterations inside the restart window: every
+                // connect fails there and is legitimately excused, so without
+                // this wait a worker can burn its whole budget doing no
+                // verifiable work at all -- and `bad == 0` would still hold.
+                while (down.load(std::memory_order_acquire))
+                    photon::thread_usleep(200);
+                uint32_t g0 = gen.load(std::memory_order_acquire);
+                uint16_t p0 = port.load(std::memory_order_acquire);
+                int st = -1;
+                // which step produced st: connect/handshake/write/read all collapse
+                // to -1, and only the step says whether the server refused the
+                // connection or dropped it mid-request
+                const char* phase = "connect";
+                int err = 0;
+                {
+                    NbdTestClient cli;
+                    if (cli.connect_tcp("127.0.0.1", p0) != 0) {
+                        err = errno;
+                    } else {
+                        // after the connect: set_timeout() forwards to the stream,
+                        // which only exists once connect_tcp has stored it
+                        cli.set_timeout(CLIENT_TIMEOUT_US);
+                        phase = "handshake";
+                        if (cli.handshake() != 0) {
+                            err = errno;
+                        } else {
+                            phase = "write";
+                            st = cli.xfer(NBD_CMD_WRITE, off, wbuf.data(), wbuf.size());
+                            if (st) {
+                                err = errno;
+                            } else {
+                                phase = "read";
+                                st = cli.xfer(NBD_CMD_READ, off, rbuf.data(), rbuf.size());
+                                if (st) {
+                                    err = errno;
+                                } else if (memcmp(wbuf.data(), rbuf.data(), wbuf.size())) {
+                                    bad++;   // corruption is never a restart-window artifact
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }   // errno must be captured above: this destructor sends DISC and
+                    // closes the socket, which overwrites whatever the failure set
+                if (st && gen.load(std::memory_order_acquire) == g0 &&
+                    !down.load(std::memory_order_acquire)) {
+                    LOG_ERROR("client ` iter ` failed at ` with ` errno ` on port ` (current `) outside the restart window",
+                              t, i, phase, st, err, p0, port.load(std::memory_order_acquire));
+                    bad++;
+                }
+                if (!st)
+                    ok++;   // connected, wrote, read back, and the bytes matched
+            }
+        });
+
+    // Poll on the caller's vcpu -- accept_loop lives here, so this loop must
+    // keep yielding or no worker can even connect -- and restart once while
+    // connections are live. detach(true) drains the in-flight requests and
+    // drops every connection; start() rebinds and publishes the new port.
+    // No semaphore here: blocking would stop the yields accept_loop needs.
+    bool restarted = false;
+    uint64_t deadline = photon::now + DEADLINE_US;
+    bool timeout_hit = false;
+    while (finished.load() < THREADS) {
+        auto conns = dev->get_client_connections();
+        // a closing client's Conn can still be listed while the same client's
+        // next attempt is already accepted, so the bound is twice the thread
+        // count; unbounded growth or a null stream is what a lost lock causes
+        EXPECT_LE(conns.size(), (size_t)THREADS * 2);
+        for (auto s : conns)
+            EXPECT_NE(nullptr, s);
+        if (!restarted && !conns.empty()) {
+            restarted = true;
+            down = true;
+            gen++;
+            EXPECT_EQ(0, dev->detach(/*wait_pending=*/true));
+            EXPECT_EQ(0, dev->start(file));
+            net::EndPoint ep2;
+            EXPECT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep2));
+            port = ep2.port;
+            gen++;
+            down = false;
+        }
+        if (photon::now >= deadline) {
+            timeout_hit = true;
+            break;
+        }
+        photon::thread_usleep(200);
+    }
+    if (finished.load() < THREADS)
+        LOG_ERROR("giving up with ` of ` client threads finished, `; joining them now blocks this vcpu, which is where accept_loop lives",
+                  finished.load(), THREADS, VALUE(timeout_hit));
+    for (auto& th : ths)
+        th.join();
+    EXPECT_FALSE(timeout_hit);
+    EXPECT_TRUE(restarted);
+    EXPECT_EQ(0, bad.load());
+    // `bad == 0` on its own would also hold if the workers never completed a
+    // cycle, so count the cycles too. The workers wait out the restart window
+    // instead of spending iterations in it, which leaves at most one attempt
+    // per thread that the window can still catch (the one already in flight
+    // when `down` went up); every other one must have been a fully verified
+    // connect / write / read-back / compare cycle.
+    EXPECT_GE(ok.load(), THREADS * ITERS - THREADS);
+}
+
+// accept_th never moves -- nbd's control plane stays on the caller's vcpu -- and
+// with no pool neither does serve_conn, so the only vcpu that touches the backend
+// is this one. No backend verification here on purpose: it would run on this vcpu
+// through `rec` and record the caller as a placement twice over.
+TEST_F(NbdTest, pool_null_serves_on_the_caller_vcpu) {
+    test::RecordingFile rec(file);
+    auto* caller = photon::get_vcpu();
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = nullptr;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rec));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(8192), rbuf(8192);
+    for (size_t i = 0; i < wbuf.size(); i++)
+        wbuf[i] = (char)(i * 7 + 3);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+
+    EXPECT_EQ(1u, rec.vcpu_count());
+    EXPECT_TRUE(rec.ran_on(caller));
+}
+
+// check_pool_engines' integration half: the helper is unit-tested on its own, this
+// proves the transport actually asks. A pool whose vcpus cannot host the serving
+// coroutines is a configuration error, so start() refuses it up front, before any
+// endpoint is bound.
+TEST_F(NbdTest, pool_without_an_event_engine_is_refused) {
+    photon::WorkPool bad(2);      // ev_engine defaults to 0: no engine at all
+    test::RecordingFile rec(file);
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.pool = &bad;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    errno = 0;
+    EXPECT_EQ(-1, dev->start(&rec));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(0u, rec.vcpu_count());
+}
+
+// ---------------------------------------------------------------------------
+// backends and instruments the cases below need and the harness does not have
+// ---------------------------------------------------------------------------
+
+// No hole-punch, and zero writes that come back one byte short with errno clean --
+// the shape that used to be acked as NBD_SUCCESS, because a short count does not set
+// errno and errno_to_nbd(0) is NBD_SUCCESS.
+class ShortZeroFile : public test::BackendProbe {
+public:
+    explicit ShortZeroFile(fs::IFile* f) : test::BackendProbe(f) {}
+    int fallocate(int mode, off_t offset, off_t len) override {
+        errno = EOPNOTSUPP;   // no ZERO_RANGE: the fallback is the path under test
+        return -1;
+    }
+    ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override {
+        ssize_t r = test::BackendProbe::pwritev(iov, iovcnt, offset);
+        if (r > 1) {
+            r -= 1;
+            errno = 0;   // nothing failed, which is exactly what a short count means
+        }
+        return r;
+    }
+};
+
+// Counts coroutine stacks rather than measuring the process: whether a freed stack's
+// address space goes back to the OS is the allocator's business, while a stack that
+// was allocated and never freed IS the leak. Forwards to the default allocator, so
+// nothing else about allocation changes while it is installed.
+struct StackCounter {
+    std::atomic<long> allocs{0}, deallocs{0};
+    long live() const { return allocs.load() - deallocs.load(); }
+    void* alloc(size_t size) {
+        allocs.fetch_add(1);
+        return photon::default_photon_thread_stack_alloc(nullptr, size);
+    }
+    void dealloc(void* ptr, size_t size) {
+        deallocs.fetch_add(1);
+        photon::default_photon_thread_stack_dealloc(nullptr, ptr, size);
+    }
+    // stack-allocator.h calls trim() and stats() optional, but the
+    // set_photon_thread_stack_allocator(T&) convenience binds an object by taking
+    // the address of all four members, so an object without these two does not
+    // compile. The default allocator this forwards to pools nothing, so a zeroed
+    // answer from both is the honest one rather than a stub.
+    size_t trim(size_t) { return 0; }
+    photon::StackPoolStats stats() { return {}; }
+};
+
+// The device object outlives a shutdown(), and start() overwrites the backend
+// pointer, so a backend released only by the destructor is leaked by the next
+// start() -- which is what blk.h's contract means by deleting it on shutdown.
+TEST_F(NbdTest, shutdown_releases_a_backend_it_owns) {
+    std::atomic<int> destroyed{0};
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+
+    // Usable again, which is the transition the leak hid behind: a second start()
+    // serves a second backend instead of overwriting a pointer to a live one.
+    ASSERT_EQ(0, dev->start(new test::CountingFile(file, &destroyed), true));
+    EXPECT_EQ(1, destroyed.load());
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+
+    // An UNOWNED backend stays the caller's to delete, through shutdown and through
+    // the destructor alike.
+    fs::IFile* mine = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(mine, false));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(2, destroyed.load());
+    delete mine;
+    EXPECT_EQ(3, destroyed.load());
+}
+
+// The other half of the same contract: OWNERSHIP is counted once per backend, not once
+// per start(). detach() keeps both the pointer and the ownership so that a failed
+// start() can hand the backend back to its caller, which also makes the very same
+// pointer reachable by the next start() -- and start() released a previously owned
+// backend before taking the new one, so re-serving the pointer it already owned deleted
+// it on the spot, stored the freed pointer straight back into `backend`, and left
+// shutdown() and the destructor each one more delete of it to perform. The counter makes
+// the first delete visible without waiting for the allocator to notice the second.
+TEST_F(NbdTest, restarting_with_the_same_owned_backend_deletes_it_exactly_once) {
+    std::atomic<int> destroyed{0};
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    fs::IFile* bk = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+
+    // The transition that makes the same pointer reachable twice: detach() is also a
+    // failed start()'s rollback, so it deliberately does not release.
+    ASSERT_EQ(0, dev->detach(true));
+    EXPECT_EQ(0, destroyed.load());
+
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    // This is where the premature delete landed. The backend is the one this device is
+    // serving right now, so nothing may have been destroyed yet.
+    EXPECT_EQ(0, destroyed.load());
+
+    // And it is still that backend: a freed one could not answer these. The listener is
+    // re-bound by the second start(), so the port has to be read back again.
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(4096, 0x6b), rbuf(4096);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    cli.force_close();
+
+    // Exactly one delete for exactly one ownership.
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load());
+}
+
+// FUA means the bytes are durable before the reply, and the reply is the device's
+// word that they are. pwritev2(RWF_DSYNC) cannot carry that word: IFile::pwritev2 is
+// not pure virtual and its base body discards `flags` and forwards to pwritev, so a
+// backend that does not override it acks a cached write. The probe counts syncs, and
+// xfer() returns only once the reply has arrived, so a count read here is a count
+// read after the ack.
+TEST_F(NbdTest, an_fua_write_is_durable_before_its_reply) {
+    test::BackendProbe probe(file);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    std::vector<char> wbuf(8192, 0x5a);
+
+    // a write without FUA persists nothing on its own
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(1, probe.writes.load());
+    EXPECT_EQ(0, probe.datasyncs.load());
+
+    // with FUA it is one more write and exactly one more fdatasync -- fdatasync and
+    // not fsync, because the request is for data, and the WRITE_ZEROES branch has
+    // always synced this way, so the two branches have to agree
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size(), NBD_REQ_FUA));
+    EXPECT_EQ(2, probe.writes.load());
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+#ifdef __linux__
+    // TRIM and WRITE_ZEROES carry FUA too, and neither syncs without it
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 16384, nullptr, 8192, NBD_REQ_FUA));
+    EXPECT_EQ(2, probe.datasyncs.load());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 32768, nullptr, 8192, NBD_REQ_FUA));
+    EXPECT_EQ(3, probe.datasyncs.load());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 16384, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 32768, nullptr, 8192));
+    EXPECT_EQ(3, probe.datasyncs.load());
+#endif
+}
+
+// A short count is a legal pwritev result and leaves errno alone. Translating it with
+// errno therefore reported whatever the last unrelated failure happened to leave
+// behind -- and errno_to_nbd(0) is NBD_SUCCESS, so a zero-fill that wrote 8191 of
+// 8192 bytes was acked as complete and the last byte was never anybody's problem.
+TEST_F(NbdTest, a_short_zero_fill_is_not_success) {
+#ifndef __linux__
+    // A skip has to be a preprocessor branch here, not an early return: the body below
+    // names NBD_CMD_WRITE_ZEROES, which this file defines only where the server has a
+    // WRITE_ZEROES handler at all, so on another platform it would not compile.
+    report_skip("IFile::zero_range is fallocate-based, so WRITE_ZEROES is Linux-only");
+#else
+    ShortZeroFile probe(file);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_EQ((int)NBD_EIO, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 8192));
+    // the fallback really did run and really did write: this is a short write, not a
+    // refused one, and the distinction is the whole finding
+    EXPECT_GT(probe.writes.load(), 0);
+#endif
+}
+
+// An option payload used to be skip_read and discarded, which let a 4-byte OPT_GO
+// through although even an empty name with no items needs 6, and left the export name
+// unread -- so any name at all was served this export. It is parsed now: the framing
+// has to add up exactly, and the name has to be this export's, or empty, which asks
+// for the default export.
+TEST_F(NbdTest, an_option_payload_is_parsed_not_skipped) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    const std::string& id = cfg.info.identity;
+    struct Row {
+        uint32_t opt;
+        std::vector<char> payload;
+        bool reply_comes;   // the protocol allows none for EXPORT_NAME
+        uint32_t expected_type;  // NBD_REP_ERR_INVALID or NBD_REP_ERR_UNKNOWN
+        const char* why;
+    };
+    const Row rows[] = {
+        {NBD_OPT_GO, std::vector<char>(4, 0), true, NBD_REP_ERR_INVALID,
+         "four bytes: a name length, and no room for the item count"},
+        {NBD_OPT_GO, NbdTestClient::go_payload("", 1), true, NBD_REP_ERR_INVALID,
+         "one information item requested and no bytes behind the count"},
+        {NBD_OPT_GO, NbdTestClient::go_payload("some-other-export"), true, NBD_REP_ERR_UNKNOWN,
+         "an export this device does not serve"},
+        {NBD_OPT_INFO, NbdTestClient::go_payload("some-other-export"), true, NBD_REP_ERR_UNKNOWN,
+         "the same refusal on OPT_INFO"},
+        {NBD_OPT_GO, NbdTestClient::go_payload_with_trailer(id.c_str(), 2), true, NBD_REP_ERR_INVALID,
+         "the name matches and every read succeeds, but two bytes are left over"},
+        {NBD_OPT_EXPORT_NAME, NbdTestClient::name_payload("some-other-export"), false, 0,
+         "EXPORT_NAME is answered with the export meta or with a close, never a reply"},
+    };
+    for (const auto& r : rows) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake_front());
+        ASSERT_EQ(0, cli.send_raw_option(r.opt, r.payload.data(), (uint32_t)r.payload.size()));
+        uint32_t type = 0;
+        std::vector<char> data;
+        int got = cli.read_opt_reply(&type, &data);
+        if (r.reply_comes) {
+            ASSERT_EQ(0, got) << r.why;
+            EXPECT_EQ(r.expected_type, type) << r.why;
+        } else {
+            EXPECT_EQ(-1, got) << r.why;
+        }
+    }
+
+    // Both ways in still work, which is what keeps the rows above from passing on a
+    // server that refuses everything. A matching name on OPT_GO reaches the
+    // transmission phase through INFO + ACK ...
+    {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake(id.c_str()));
+        EXPECT_EQ(IMG_SIZE, cli.export_size);
+        std::vector<char> rbuf(4096);
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }
+    // ... and on OPT_EXPORT_NAME through the export meta, with no option reply at all.
+    {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake_front());
+        std::vector<char> name = NbdTestClient::name_payload(id.c_str());
+        ASSERT_EQ(0, cli.send_raw_option(NBD_OPT_EXPORT_NAME, name.data(), (uint32_t)name.size()));
+        char meta[10];
+        ASSERT_EQ(0, cli.read_raw(meta, sizeof(meta)));
+        EXPECT_EQ(IMG_SIZE, be64rd(meta));
+        EXPECT_TRUE(be16rd(meta + 8) & NBD_TRANS_SEND_FLUSH);
+        std::vector<char> rbuf(4096);
+        EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }
+}
+
+// A server that closes mid-handshake has to read out as a CLOSE. photon's read()
+// answers a short count at EOF and -1 with errno set on error, and read_exact()
+// collapses the two into -1 -- so until it named the EOF case, errno held whatever the
+// last fd wait left behind, which is photon's EOK sentinel ENXIO (io/fd-events.h:33).
+// A client failure then reported "no such device" for a socket the peer had simply
+// closed, and that reading sent two separate investigations after a phantom device
+// error: this one, and an Oct-3 log whose leftover happened to be ENOSYS instead.
+TEST_F(NbdTest, a_server_close_mid_handshake_reports_the_close_not_a_leftover_errno) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    auto srv = dev->get_server_sockets().tcp;
+    ASSERT_NE(nullptr, srv);
+    net::EndPoint ep;
+    ASSERT_EQ(0, srv->getsockname(ep));
+    ASSERT_NE(0, ep.port);
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake_front());
+    // OPT_EXPORT_NAME for an export this device does not serve. The protocol allows no
+    // reply to that option at all, and nbd.cpp's answer to a name mismatch is to close,
+    // so what comes back is a short count at EOF rather than an error.
+    std::vector<char> name = NbdTestClient::name_payload("not-photon-nbd-test");
+    ASSERT_EQ(0, cli.send_raw_option(NBD_OPT_EXPORT_NAME, name.data(), (uint32_t)name.size()));
+    char meta[10];
+    EXPECT_EQ(-1, cli.read_raw(meta, sizeof(meta)));
+    // Captured here rather than asserted in place, because the destructor sends DISC and
+    // closes the socket, overwriting whatever the failure set. force_close() instead of
+    // letting it: this is precisely the "server already dropped it" case that exists for.
+    int e = errno;
+    cli.force_close();
+    EXPECT_EQ(ECONNRESET, e) << "a peer that closed mid-handshake reported errno " << e;
+}
+
+// Every connection coroutine is joinable, because cleanup_runtime has to be able to
+// interrupt one that is parked in a gate wait -- and a joinable photon thread keeps
+// its stack until somebody joins it. Reaping them only at cleanup therefore made the
+// device hold one stack per connection ever MADE rather than per connection live:
+// 8 MiB each at the default stack_size, which is how 40 connect/disconnect cycles
+// came to 320 MiB of address space. Each worker now hands its own handle to a
+// throwaway coroutine that joins it, so the count comes back.
+TEST_F(NbdTest, connection_churn_does_not_accumulate_stacks) {
+    StackCounter counter;
+    ASSERT_EQ(0, photon::set_photon_thread_stack_allocator(counter));
+    // Restored LAST -- a stack has to be freed by the allocator that created it,
+    // and the DEFERs below destroy the device, and with it its workers, first.
+    // Restored to photon's DEFAULT, not to what get_photon_thread_stack_allocator()
+    // hands back: that facade is empty until something installs one, installing an
+    // empty one is rejected, and a rejected restore would leave `counter` -- a local
+    // of this frame -- as the process-wide allocator, so every coroutine stack
+    // allocated after this test returned would bump counters in dead stack.
+    DEFER(photon::set_photon_thread_stack_allocator());
+
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    const int CYCLES = 24;
+    long base = counter.live();
+    std::vector<char> rbuf(4096);
+    for (int i = 0; i < CYCLES; i++) {
+        NbdTestClient cli;
+        ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+        ASSERT_EQ(0, cli.handshake());
+        ASSERT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    }   // each client's destructor sends DISC and closes, so its worker finishes
+
+    // Retiring a worker is asynchronous against this vcpu -- a reaper coroutine joins
+    // it -- so wait for the stacks to come back, bounded, instead of sampling once.
+    long live = counter.live();
+    for (int i = 0; i < 250 && live > base; i++) {
+        photon::thread_usleep(20 * 1000);
+        live = counter.live();
+    }
+    EXPECT_LE(live, base) << CYCLES << " connections came and went and are still "
+                             "holding stacks; each one holds stack_size bytes";
+    // the control: a counter that never saw an allocation would report live == base
+    // and pass the assertion above without measuring anything
+    EXPECT_GT(counter.allocs.load(), (long)CYCLES);
+}
+
+// A WRITE's payload is read while the request holds BOTH device-wide gates, so a
+// client that sends the header and then stops holds a queue-depth slot and its share
+// of the byte budget for as long as it likes -- with queue_depth 1 that is every slot
+// there is, and the honest client behind it waits. cfg.timeout releases nothing here:
+// it is the kernel's request timeout for the loopback device.
+TEST_F(NbdTest, a_stalled_write_payload_cannot_starve_another_client) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    cfg.queue_depth = 1;
+    cfg.stall_timeout = 2;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient stalled;
+    ASSERT_EQ(0, stalled.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, stalled.handshake());
+    ASSERT_EQ(0, stalled.send_header_only(NBD_CMD_WRITE, 0, 65536));
+
+    NbdTestClient honest;
+    ASSERT_EQ(0, honest.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, honest.handshake());
+    honest.set_timeout(10 * 1000 * 1000);
+    std::vector<char> wbuf(4096, 0x33);
+    EXPECT_EQ(0, honest.xfer(NBD_CMD_WRITE, 4096, wbuf.data(), wbuf.size()));
+    std::vector<char> rbuf(4096);
+    EXPECT_EQ(0, honest.xfer(NBD_CMD_READ, 4096, rbuf.data(), rbuf.size()));
+    EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+    // The server already dropped this connection via stall_timeout, so
+    // disc() will write to a closed socket. That is fine: SIGPIPE is
+    // ignored in main(), and write_exact returns -1 which disc() ignores.
+    stalled.disconnect();
+    honest.force_close();
+    photon::thread_usleep(500 * 1000);
+    EXPECT_EQ(0u, dev->get_client_connections().size());
+}
+
+// Cap one of a socket's buffers, so that a write of any real size cannot be absorbed by
+// the kernel and has to block on its peer instead. Blocking is the only way to make the
+// server's OWN reply write reach its stall deadline from a case that controls nothing but
+// the peer, and it takes both ends: the writer's send buffer alone still swallows a reply
+// the reader was always going to take. What the kernel actually grants is read back by
+// shut_the_window rather than trusted, because both Linux and macOS clamp the request.
+static int cap_socket_buf(net::ISocketStream* s, int option, int bytes) {
+    return s->setsockopt(SOL_SOCKET, option, &bytes, sizeof(bytes));
+}
+
+// Close the window on one client connection: the client's receive buffer, which is the
+// peer that will not read, and the server side of the same connection, which is the end
+// that writes the replies. The connection has to be registered by then, i.e. this runs
+// after a handshake that has returned. `room` reports what the two ends can now absorb
+// between them, because a kernel is free to clamp a SO_*BUF request upward -- and a case
+// whose reply still fitted would then wait for a deadline that never arrives and prove
+// nothing. 0 on success, -1 if a socket refused.
+static int shut_the_window(NbdTestClient& cli, NbdDevice* dev, int* room) {
+    auto conns = dev->get_client_connections();
+    if (conns.size() != 1)
+        return -1;
+    if (cap_socket_buf(cli.s, SO_RCVBUF, 4096) < 0)
+        return -1;
+    if (cap_socket_buf(conns[0], SO_SNDBUF, 4096) < 0)
+        return -1;
+    int rcv = 0, snd = 0;
+    socklen_t n = sizeof(rcv);
+    if (cli.s->getsockopt(SOL_SOCKET, SO_RCVBUF, &rcv, &n) < 0)
+        return -1;
+    n = sizeof(snd);
+    if (conns[0]->getsockopt(SOL_SOCKET, SO_SNDBUF, &snd, &n) < 0)
+        return -1;
+    *room = rcv + snd;
+    return 0;
+}
+
+// The reply both cases below provoke: far larger than any buffer a kernel leaves on a
+// socket that was asked for 4 KiB, and far inside both the image and MAX_BLOCK_SIZE.
+static constexpr uint32_t STALL_REPLY_LEN = 1u << 20;
+
+// A reply write that cannot complete is not something to shrug at. write() is the
+// full-count variant, so the -1 that execute() used to throw away meant the client never
+// got that answer and never would -- and the connection stayed up, so serve_conn kept
+// dispatching into a socket nobody was reading, each request parking a queue-depth slot
+// and its share of the byte budget for a whole stall_timeout. One client that stopped
+// reading could hold the device's entire depth that way. The half-close execute() now
+// performs is what turns that into a dropped connection.
+TEST_F(NbdTest, a_reply_nobody_reads_drops_the_connection_instead_of_being_discarded) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    // Lowered from the 30s default, and deliberately: the case has to sit out one whole
+    // stall_timeout to watch the reply write fail, and nothing about the finding depends
+    // on 30 in particular. At the default this one case would cost half a minute.
+    cfg.stall_timeout = 1;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    // Bound this client's own reads and writes: a server that never answers has to fail
+    // the case rather than hang it.
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    // After the handshake, so that starving the handshake is not what this measures.
+    int room = 0;
+    ASSERT_EQ(0, shut_the_window(cli, dev, &room));
+    // The premise, measured rather than assumed: if the reply fitted in what the two ends
+    // can still absorb, the write would complete, no deadline would ever be reached, and
+    // the case would be waiting on nothing.
+    ASSERT_LT(room, (int)(STALL_REPLY_LEN / 2));
+
+    // A READ whose reply dwarfs the buffers left at either end, from a client that never
+    // reads again. send_header_only is the whole request -- a READ carries no payload --
+    // so from here on the only thing that can end the server's write is its deadline.
+    ASSERT_EQ(0, cli.send_header_only(NBD_CMD_READ, 0, STALL_REPLY_LEN));
+
+    // Poll rather than sleep one fixed grace period: a loaded runner stretches the
+    // teardown without changing the answer, and an execute() that ignored send_reply's
+    // -1 never gets there at all -- its serve_conn is parked in an unbounded wait for a
+    // request this client has no intention of sending.
+    for (int i = 0; i < 50 && !dev->get_client_connections().empty(); i++)
+        photon::thread_usleep(100 * 1000);
+    EXPECT_EQ(0u, dev->get_client_connections().size());
+
+    // The server dropped this connection, so there is no DISC to send it.
+    cli.force_close();
+}
+
+// Two stall_guards on one stream overlap as soon as a client pipelines: every execute
+// coroutine arms one around its own reply write, and send_reply's write lock makes the
+// second of them wait with its guard ALREADY armed. The stream has one timeout, so a
+// guard that saved and restored it privately captured whatever the guard before it had
+// installed instead of the stream's real baseline, and the one that left last wrote that
+// captured value back. What it captured was stall_timeout, so the connection kept a
+// deadline it was never supposed to have -- and the next read serve_conn performs is the
+// idle wait for the client's next request, which is the job and not a stall. Counting the
+// arming depth is what makes the order the two leave in stop mattering.
+TEST_F(NbdTest, overlapping_reply_guards_restore_the_idle_wait_they_found) {
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    // Has to exceed the time the two replies below take to drain, and to stay under the
+    // idle wait at the end of the case, which is what makes a leaked deadline visible.
+    // Both numbers are measured, not guessed: on a 4 KiB window the drain of a payload
+    // this size runs at a few tens of KiB/s, because each window's worth costs a
+    // delayed-ACK round rather than a memcpy -- sizing the payload 4x over the bar made
+    // the drain alone take longer than a 1 s deadline and the case failed for a reason
+    // that had nothing to do with the nesting it exists to pin.
+    cfg.stall_timeout = 3;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    // Bound this client's own reads and writes: a server that never answers has to fail
+    // the case rather than hang it.
+    cli.set_timeout(10 * 1000 * 1000);
+    ASSERT_EQ(0, cli.handshake());
+    auto conns = dev->get_client_connections();
+    ASSERT_EQ(1u, conns.size());
+    // What the transmission phase has to leave behind for the idle wait. It has to be a
+    // value the leak cannot produce, or a guard that restored the wrong thing would look
+    // exactly like one that restored the right thing and this case would prove nothing.
+    uint64_t baseline = conns[0]->timeout();
+    ASSERT_NE((uint64_t)cfg.stall_timeout * 1000 * 1000, baseline);
+    int room = 0;
+    ASSERT_EQ(0, shut_the_window(cli, dev, &room));
+    // Same measured premise as the case above: the first reply has to be too big for
+    // what the two ends can absorb, or it would go straight out and the second execute
+    // coroutine would never have to wait on the write lock with its guard armed.
+    //
+    // Sized FROM `room` rather than a fixed constant, and that is not tidiness. The
+    // kernel is free to clamp a SO_*BUF request, so what counts as "too big" is
+    // whatever this host says; a constant clears the bar by an arbitrary margin, and
+    // every byte of that margin has to be pushed through a window a few KiB wide
+    // before the case reaches its own assertions. So clear it by a fixed slack instead
+    // of a multiplier: enough that a kernel handing back a slightly different room
+    // still cannot let the reply fit, small enough that the drain stays a small
+    // multiple of one window rather than of four.
+    const uint32_t len = (uint32_t)(((uint64_t)room + 4096 + 511) & ~(uint64_t)511);
+    // The real premise, and not a tautology: if the kernel clamped the buffers far
+    // enough upward, four times them would no longer fit in the image and this case
+    // cannot be built on this host at all. Say so instead of reading past the end.
+    ASSERT_LE((uint64_t)len * 2, (uint64_t)cfg.info.size);
+
+    // Two READs too large for the window, pipelined and left unread. The first reply
+    // fills what little buffer is left and blocks with its guard armed; the second
+    // execute coroutine arms its own guard and then queues on the reply write lock, so
+    // it is armed and still waiting when the first one leaves. That order is forced
+    // rather than raced: both coroutines were created before either ran, and neither
+    // can finish while the window is shut.
+    std::vector<char> b1(len), b2(len);
+    ASSERT_NE(0u, cli.submit(NBD_CMD_READ, 0, b1.data(), len));
+    ASSERT_NE(0u, cli.submit(NBD_CMD_READ, len, b2.data(), len));
+    // Both guards are armed once the scheduler has been through both coroutines, and
+    // neither can get past its own while the window is shut, so this only has to outlast
+    // the scheduler rather than any I/O.
+    photon::thread_usleep(200 * 1000);
+
+    // Draining lets both replies out in completion order, and so lets both guards leave:
+    // the first while the second is still armed, the second last of all.
+    EXPECT_EQ(0, cli.collect());
+    EXPECT_EQ(0, cli.collect());
+    photon::thread_usleep(200 * 1000);
+
+    conns = dev->get_client_connections();
+    ASSERT_EQ(1u, conns.size());
+    EXPECT_EQ(baseline, conns[0]->timeout());
+
+    // The consequence too, so this pins a behaviour and not only a field. One more
+    // request puts serve_conn back into its idle read, which inherits whatever the last
+    // guard left on the stream; thinking for longer than stall_timeout is not a stall,
+    // and a client doing it must still be there afterwards. The wait therefore has to
+    // stay above cfg.stall_timeout, or a guard that leaked its deadline onto the idle
+    // read would not have had time to kill the connection and this half proves nothing.
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+    photon::thread_usleep((cfg.stall_timeout + 1) * 1000 * 1000);
+    EXPECT_EQ(1u, dev->get_client_connections().size());
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+
+    cli.force_close();
+}
+
+}  // namespace blk
+}  // namespace photon
+
+int main(int argc, char** arg) {
+    // A consumer child is this binary re-executed with a sentinel in argv[1]:
+    // dispatch it before photon::init() and before gtest sees that argument.
+    int cons = photon::blk::test::consumer_child_main(argc, arg);
+    if (cons != photon::blk::test::CONS_NOT_A_CHILD)
+        return cons;
+    if (photon::init(photon::blk::test::TEST_EVENT_ENGINE,
+                     photon::blk::test::TEST_IO_ENGINE))
+        return -1;
+    DEFER(photon::fini());
+    // photon's signalfd clears the signal mask after init, so SIGPIPE's
+    // default disposition (terminate) is still in effect. NBD test clients
+    // send DISC on sockets the server may have already closed; without
+    // MSG_NOSIGNAL (macOS) this delivers SIGPIPE and kills the process.
+    signal(SIGPIPE, SIG_IGN);
+    ::testing::InitGoogleTest(&argc, arg);
+    return RUN_ALL_TESTS();
+}

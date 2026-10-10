@@ -194,6 +194,35 @@ struct iovector_view
         return memcpy_iov(*this, *iov, size);
     }
 
+    // fill the whole view with the byte `c`
+    // return # of bytes filled
+    size_t memset(int c) {
+        size_t n = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            ::memset(iov[i].iov_base, c, iov[i].iov_len);
+            n += iov[i].iov_len;
+        }
+        return n;
+    }
+
+    // true iff every byte of the view is 0
+    bool is_zero() const {
+        for (int i = 0; i < iovcnt; i++) {
+            auto p = (const uint8_t*)iov[i].iov_base;
+            auto end = p + iov[i].iov_len;
+            for (; p + 8 <= end; p += 8) {   // word at a time first
+                uint64_t w;
+                memcpy(&w, p, sizeof(w));    // slice() may leave p unaligned
+                if (w)
+                    return false;
+            }
+            for (; p < end; ++p)             // then the tail bytes
+                if (*p)
+                    return false;
+        }
+        return true;
+    }
+
     // copy data to a buffer of `size` bytes, while extracting from *this
     // return # of bytes actually copied (and extracted)
     size_t pipe_to(void* buf, size_t size) {
@@ -537,7 +566,7 @@ public:
         if (va.sum() < bytes) {
             return nullptr;
         }
-        
+
         auto buf = do_malloc(bytes);
         if (buf) {
             extract_front(bytes, buf);
@@ -675,6 +704,17 @@ public:
     size_t memcpy_from(const iovector* iov, size_t size=SIZE_MAX) const {
         auto v = iov->view();
         return memcpy_from(&v, size);
+    }
+
+    // fill the whole iovector with the byte `c`
+    // return # of bytes filled
+    size_t memset(int c) {
+        return view().memset(c);
+    }
+
+    // true iff every byte of the iovector is 0
+    bool is_zero() const {
+        return view().is_zero();
     }
 
     // copy data to a buffer of `size` bytes, while extracting from *this

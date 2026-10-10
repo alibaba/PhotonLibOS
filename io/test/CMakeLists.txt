@@ -11,7 +11,10 @@ endif ()
 # (no libaio, no io_uring) and Windows (neither).
 if (LINUX)
     photon_add_test(test-syncio test-syncio.cpp)
-    photon_add_test(test-iouring test-iouring.cpp)
+    # PHOTON_URING reaches photon_obj alone, so a test that calls an iouring_*
+    # entry point needs it too -- same as test-fork above.
+    photon_add_test(test-iouring test-iouring.cpp
+        DEFS $<$<BOOL:${PHOTON_ENABLE_URING}>:PHOTON_URING=on>)
     photon_add_test(test-iouring-uaf test-iouring-uaf.cpp)
 endif ()
 

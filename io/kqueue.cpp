@@ -153,6 +153,8 @@ public:
         return do_kevent(&entry, 1, nullptr, 0, &tm00);
     }
 
+    std::string_view get_engine_name() const override { return "kqueue"; }
+
     // This vector is used to filter invalid add/rm_interest requests which may affect kevent's
     // functionality.
     std::vector<InFlightEvent> _inflight_events;

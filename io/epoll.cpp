@@ -293,6 +293,8 @@ ok:     entry.interests |= eint;
     }
     virtual int cancel_wait() override { return eventfd_write(_evfd, 1); }
 
+    std::string_view get_engine_name() const override { return "epoll"; }
+
     int wait_for_fd(int fd, uint32_t interest, Timeout timeout) override {
         if (fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid fd");

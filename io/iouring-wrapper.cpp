@@ -21,12 +21,15 @@ limitations under the License.
 #include <sys/resource.h>
 #include <fcntl.h>
 #include <cstdint>
+#include <cstddef>
+#include <cstring>
 #include <limits>
 #include <atomic>
 #include <unordered_map>
 
 #include <liburing.h>
 #include <photon/common/alog.h>
+#include <photon/common/alog-stdstring.h>   // logging the engine name, a string_view
 #include <photon/thread/thread11.h>
 #include <photon/io/fd-events.h>
 #include "events_map.h"
@@ -59,6 +62,36 @@ public:
         // in _async_io.
         m_generation++;
         return init();
+    }
+
+    // Release callers parked in async_io WITHOUT their operations completing:
+    // a subsequent thread_interrupt() makes each parked caller return -1
+    // immediately (the generation check in _async_io's interrupt branch),
+    // skipping the ASYNC_CANCEL dance -- the escape hatch for commands the
+    // kernel cannot cancel on request (e.g. a parked ublk FETCH_REQ, whose
+    // driver has no cancel hook).
+    //
+    // Such a caller returns WITHOUT waiting for its ioCtx.done, so its
+    // stack-allocated context dies while the kernel still points at it.
+    // reap_events routes every completion unconditionally -- it has no way to
+    // tell a live context from a dead one -- so the caller MUST stop reaping
+    // this ring before interrupting the abandoned callers, and destroy the ring
+    // after joining them. A completion reaped in between would be written into
+    // freed (and pool-recycled) coroutine stack and would interrupt a stale
+    // photon::thread*. Once the reaper is gone, late completions simply die
+    // unreaped with the ring.
+    void abandon() {
+        m_generation++;
+    }
+
+    // How many bytes fit in this ring's sqe->cmd. cmd is a zero-length array at
+    // offset 48 of a 64-byte SQE, so 16 bytes; IORING_SETUP_SQE128 doubles the
+    // SQE and the kernel documents the field as 80 bytes there (see
+    // <linux/io_uring.h>). init()'s retry path only ever drops DEFER_TASKRUN,
+    // COOP_TASKRUN and CQSIZE, so m_args still describes the live ring.
+    size_t sqe_cmd_capacity() const {
+        size_t sqe_size = m_args.setup_sqe128 ? 2 * sizeof(io_uring_sqe) : sizeof(io_uring_sqe);
+        return sqe_size - offsetof(io_uring_sqe, cmd);
     }
 
     int fini() {
@@ -108,9 +141,12 @@ public:
                 params.sq_thread_cpu = args.sq_thread_cpu;
             }
         }
+        if (args.setup_sqe128)
+            params.flags |= IORING_SETUP_SQE128;
 
     retry:
-        int ret = io_uring_queue_init_params(QUEUE_DEPTH, m_ring, &params);
+        int ret = io_uring_queue_init_params(args.queue_depth ? args.queue_depth : QUEUE_DEPTH,
+                                             m_ring, &params);
         if (ret != 0) {
             if (-ret == EINVAL) {
                 auto& p = params;
@@ -163,7 +199,7 @@ public:
         }
 
         // Register files. Init with sparse entries
-        if (register_files_enabled()) {
+        if (args.register_files && register_files_enabled()) {
             auto entries = new int[REGISTER_FILES_MAX_NUM];
             DEFER(delete[] entries);
             for (int i = 0; i < REGISTER_FILES_MAX_NUM; ++i) {
@@ -487,6 +523,8 @@ public:
         return 0;
     }
 
+    std::string_view get_engine_name() const override { return "iouring"; }
+
     static bool register_files_enabled() {
         return m_register_files_flag == 1;
     }
@@ -520,7 +558,10 @@ private:
         bool is_event;
         // Set by reap_events when the final CQE of this request arrives.
         // Stack-allocated contexts in _async_io must not go out of scope
-        // before this flag turns true. No atomic needed, since a vCPU is
+        // before this flag turns true -- the one exception is abandon(), which
+        // releases callers without their completions and therefore requires
+        // the reaper to be stopped first (see its contract).
+        // No atomic needed, since a vCPU is
         // single OS thread and work stealing is paused during the wait.
         bool done = false;
     };
@@ -648,99 +689,201 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
+// The ring behind an iouring_* entry point. Every one of them casts the engine it
+// is handed to iouringEngine and dereferences it, so a wrong engine is not a wrong
+// answer but a read through the wrong object layout -- it faults rather than fails.
+// Both sources of that pointer are therefore identified here before either is cast:
+//
+// * `cee` non-null -- a cascading engine the caller built. CascadingEventEngine has
+//   no get_engine_name() (that belongs to MasterEventEngine), so identity is RTTI,
+//   which the build enables and which answers exactly: an epoll cascading engine
+//   derives from the same two bases as iouringEngine does, so nothing about the
+//   pointer distinguishes them -- only the object's own type does. Every in-tree
+//   caller passes new_iouring_cascading_engine()'s.
+// * `cee` null -- this vcpu's master engine, which is io_uring only if photon::init()
+//   was asked for INIT_EVENT_IOURING *and* got it. Asking is not getting: init()
+//   walks a recommended order and keeps the first engine that initializes, so the
+//   mask a caller passed says nothing about what ended up running. Only the engine
+//   knows, hence the name. master_event_engine itself is never null -- a vcpu starts
+//   on NullEventEngine and returns to it (thread/thread.cpp), which answers with the
+//   empty name.
+//
+// ENOSYS rather than EINVAL, so that "there is no io_uring here" stays tellable from
+// the EINVAL these entry points report for a bad argument of their own -- e.g.
+// iouring_register_files() answers EINVAL when the kernel has no fixed-file table,
+// which is a different failure reached by a different route.
 inline iouringEngine* get_ring(CascadingEventEngine* cee) {
-    return cee ? static_cast<iouringEngine*>(cee) :
-                 static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
+    if (cee) {
+        auto* ring = dynamic_cast<iouringEngine*>(cee);
+        if (!ring)
+            LOG_ERROR_RETURN(ENOSYS, nullptr, "iouring: the cascading engine given is not an io_uring one");
+        return ring;
+    }
+    auto* mee = get_vcpu()->master_event_engine;
+    auto name = mee->get_engine_name();
+    // No engine at all is as unusable as the wrong one, but the remedy differs
+    // (init() with any event engine, versus init() with INIT_EVENT_IOURING), so it
+    // gets its own message. Both are errors here.
+    if (name.empty())
+        LOG_ERROR_RETURN(ENOSYS, nullptr, "iouring: no master event engine is installed on this vcpu, so there is no io_uring ring to use");
+    if (name != "iouring")
+        LOG_ERROR_RETURN(ENOSYS, nullptr, "iouring: this vcpu's master event engine is `, not io_uring", name);
+    return static_cast<iouringEngine*>(mee);
 }
 
 ssize_t iouring_splice(int fd_in, int64_t off_in, int fd_out, int64_t off_out, unsigned int nbytes, uint64_t flags, Timeout timeout, CascadingEventEngine *cee) {
     uint32_t splice_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_splice, timeout, ring_flags, fd_in, off_in, fd_out, off_out, nbytes, splice_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_splice, timeout, ring_flags, fd_in, off_in, fd_out, off_out, nbytes, splice_flags);
 }
 
 ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_read, timeout, ring_flags, fd, buf, count, offset);
 }
 
 ssize_t iouring_pwrite(int fd, const void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_write, timeout, ring_flags, fd, buf, count, offset);
 }
 
 ssize_t iouring_preadv(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_readv, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
 ssize_t iouring_pwritev(int fd, const iovec* iov, int iovcnt, off_t offset, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_writev, timeout, ring_flags, fd, iov, iovcnt, offset);
 }
 
 ssize_t iouring_send(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_send, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
 ssize_t iouring_send_zc(int fd, const void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_send_zc, timeout, ring_flags, fd, buf, len, io_flags, 0);
 }
 
 ssize_t iouring_sendmsg(int fd, const msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_sendmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
 ssize_t iouring_sendmsg_zc(int fd, const msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_sendmsg_zc, timeout, ring_flags, fd, msg, io_flags);
 }
 
 ssize_t iouring_recv(int fd, void* buf, size_t len, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_recv, timeout, ring_flags, fd, buf, len, io_flags);
 }
 
 ssize_t iouring_recvmsg(int fd, msghdr* msg, uint64_t flags, Timeout timeout, CascadingEventEngine* cee) {
     uint32_t io_flags = flags & 0xffffffff;
     uint32_t ring_flags = flags >> 32;
-    return get_ring(cee)->async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_recvmsg, timeout, ring_flags, fd, msg, io_flags);
 }
 
 int iouring_connect(int fd, const sockaddr* addr, socklen_t addrlen, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_connect, timeout, 0, fd, addr, addrlen);
 }
 
 int iouring_accept(int fd, sockaddr* addr, socklen_t* addrlen, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_accept, timeout, 0, fd, addr, addrlen, 0);
 }
 
 int iouring_fsync(int fd, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_fsync, timeout, 0, fd, 0);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_fsync, timeout, 0, fd, 0);
 }
 
 int iouring_fdatasync(int fd, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_fsync, timeout, 0, fd, IORING_FSYNC_DATASYNC);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_fsync, timeout, 0, fd, IORING_FSYNC_DATASYNC);
 }
 
 int iouring_open(const char* path, int flags, mode_t mode, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_openat, timeout, 0, AT_FDCWD, path, flags, mode);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_openat, timeout, 0, AT_FDCWD, path, flags, mode);
 }
 
 int iouring_mkdir(const char* path, mode_t mode, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_mkdirat, timeout, 0, AT_FDCWD, path, mode);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_mkdirat, timeout, 0, AT_FDCWD, path, mode);
 }
 
 int iouring_close(int fd, Timeout timeout, CascadingEventEngine* cee) {
-    return get_ring(cee)->async_io(&io_uring_prep_close, timeout, 0, fd);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->async_io(&io_uring_prep_close, timeout, 0, fd);
+}
+
+int32_t iouring_uring_cmd(int fd, uint32_t cmd_op, const void* cmd, size_t cmd_len, Timeout timeout, CascadingEventEngine* cee) {
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    // The bound the header documents. Copying past sqe->cmd runs into the NEXT
+    // sqe slot, which io_uring_submit then hands to the kernel as an unrelated
+    // operation -- so refuse before entering async_io.
+    size_t cap = ring->sqe_cmd_capacity();
+    if (cmd_len > cap)
+        LOG_ERROR_RETURN(EINVAL, -1, "iouring_uring_cmd: cmd_len ` exceeds this ring's `-byte sqe cmd area (needs setup_sqe128?)",
+                         cmd_len, cap);
+    return ring->async_io([fd, cmd_op, cmd, cmd_len](io_uring_sqe* sqe) {
+        io_uring_prep_uring_cmd(sqe, cmd_op, fd);
+        sqe->flags = 0;   // prep doesn't clear it and _async_io ORs onto it: a
+                          // reused sqe slot could carry a stale IOSQE_IO_LINK
+        memcpy(sqe->cmd, cmd, cmd_len);
+    }, timeout, 0);
+}
+
+void iouring_abandon(CascadingEventEngine* cee) {
+    if (!cee)
+        LOG_ERROR_RETURN(EINVAL, , "iouring_abandon: null cascading engine");
+    // cee is non-null, so get_ring identifies it and never falls back to this
+    // vcpu's master engine -- which abandon() must not touch, since its callers
+    // park on a dedicated ring.
+    auto* ring = get_ring(cee);
+    if (!ring) return;
+    ring->abandon();
 }
 
 bool iouring_register_files_enabled() {
@@ -748,11 +891,15 @@ bool iouring_register_files_enabled() {
 }
 
 int iouring_register_files(int fd, CascadingEventEngine* cee) {
-    return get_ring(cee)->register_unregister_files(fd, true);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->register_unregister_files(fd, true);
 }
 
 int iouring_unregister_files(int fd, CascadingEventEngine* cee) {
-    return get_ring(cee)->register_unregister_files(fd, false);
+    auto* ring = get_ring(cee);
+    if (!ring) return -1;
+    return ring->register_unregister_files(fd, false);
 }
 
 void* new_iouring_event_engine(iouring_args args) {
@@ -760,6 +907,9 @@ void* new_iouring_event_engine(iouring_args args) {
         make_named_value("is_master",     args.is_master),
         make_named_value("setup_sqpoll",  args.setup_sqpoll),
         make_named_value("setup_sq_aff",  args.setup_sq_aff),
+        make_named_value("setup_sqe128",  args.setup_sqe128),
+        make_named_value("register_files", args.register_files),
+        make_named_value("queue_depth",   args.queue_depth),
         make_named_value("sq_thread_cpu", args.sq_thread_cpu));
     auto uring = NewObj<iouringEngine>() -> init(args);
     if (args.is_master) return uring;

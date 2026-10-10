@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 #pragma once
+#include <cstdlib>
 #include <typeinfo>
 #include <cxxabi.h>
 #include <photon/common/alog.h>
