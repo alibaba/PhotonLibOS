@@ -4,13 +4,14 @@
 Three groups, each with a different relationship to the real frontend, so do not read
 a detection claimed here as a QEMU detection unless it says so.
 
-The five protocol mutants guard transport-level behaviours. Do not book this group
+The six protocol mutants guard transport-level behaviours. Do not book this group
 as "found by QEMU": that is substantiated for nocallsignal only -- it is a defect
 the real frontend catches at its qvirtio_wait_queue_isr and a polling mock
 structurally cannot. overread and nobound go the other way, and have long been
-caught in-repo by pipelined_messages and oversized_payload. snapall is in-repo only,
-killed by adopt_resumes_from_the_frontends_base_not_used_idx; nothing establishes a
-real-frontend detection for it, and it does not claim one.
+caught in-repo by pipelined_messages and oversized_payload. snapall and nobasestore
+are in-repo only, killed respectively by
+adopt_resumes_from_the_frontends_base_not_used_idx and by five cases; nothing
+establishes a real-frontend detection for either, and neither claims one.
 
 The eight EVENT_IDX mutants are a different case, and each is annotated where it is
 listed below: several of them have no real-frontend detection at all, so do not read
@@ -253,7 +254,8 @@ blk/utils.cpp -- VIRTIO_RING_F_INDIRECT_DESC, the table walk:
                     # frontend cannot catch it: QEMU's indirect helper hard-codes a table
                     # of two entries and never builds a nested one.
 
-blk/vhost-user.cpp -- the INDIRECT_DESC offer and the seg_max it publishes:
+blk/vhost-user.cpp -- the INDIRECT_DESC offer, the seg_max it publishes, and the
+SET_VRING_BASE cursor:
 
     nooffer         # stop offering device feature bit 28. Caught by
                     # indirect_desc_is_offered_and_negotiated on its offer precondition.
@@ -337,9 +339,63 @@ blk/vhost-user.cpp -- the INDIRECT_DESC offer and the seg_max it publishes:
                     # deleting the handler's last_avail store is indistinguishable in that
                     # case BY CONSTRUCTION, because the BASE it plants equals the cursor
                     # the ring naturally had after the requests it drove, and any coherent
-                    # crash fiction forces that equality. It should die in event_idx_wrap
-                    # instead (BASE 65534 against a natural 0). Reasoned, NOT measured --
-                    # measure it before booking it as killed.
+                    # crash fiction forces that equality. That is now measured rather than
+                    # argued -- see nobasestore below, which leaves this case green -- and
+                    # the two are separable by a third case as well: nobasestore fails both
+                    # halves of adopt_keeps_a_full_ring_cursor_and_snaps_one_entry_past_it,
+                    # while this mutant is booked to adopt_resumes... alone.
+    nobasestore     # delete the SET_VRING_BASE handler's own store of the cursor. The
+                    # message still stops and drains the queue and still publishes
+                    # avail_event, so what is left is a BASE that arrives and is ignored:
+                    # last_avail stays wherever the ring put it. DETECTED, and far more
+                    # widely than snapall's reasoning predicted -- five cases, not the one
+                    # it named. Measured on the whole suite: 83 run, 78 pass, 5 fail,
+                    # 0 skipped, 70 s against a 1.5 s pristine suite that is 83/83.
+                    #
+                    # Three of the five are reconnect cases, and they fail on a ~22 s
+                    # frontend timeout rather than on a cursor assertion, so the wall time
+                    # is the tell and rc alone does not explain it. frontend_reconnect
+                    # (:2242) and a_reconnect_that_declines_the_feature_stops_walking_tables
+                    # (:6106) each log `used ring: Connection timed out`, the first with its
+                    # frontend lambda returning EIO and the second with do_request's return
+                    # reading -1 where the 0xff sentinel was expected.
+                    # a_truncated_mem_table_ends_the_session_and_a_reconnect_still_serves
+                    # (:4454) takes the same 22.6 s and returns EIO=5 where 0 was expected.
+                    # None of the three calls restart_with_base; what they share is a second
+                    # negotiate(), and negotiate() sends SET_VRING_BASE(0) like any
+                    # conformant setup does. That 0 is the only thing that clears the dead
+                    # session's cursor, and the vq_start lines say so: the pristine second
+                    # session starts at `last_avail 0 used_idx 0`, the mutant's at
+                    # `last_avail 1 used_idx 0`, the 1 being the one write the first session
+                    # drove. run_frontend builds a fresh MockFrontend per call, so the
+                    # second session's ring starts empty and its first request lands at
+                    # avail index 0; a queue that already thinks it consumed entry 0 never
+                    # dispatches it, and the case's read never completes.
+                    #
+                    # The other two fail on the cursor. event_idx_wrap reads avail_event in
+                    # the hundreds where it expects 65535 (:4852), then its next write_dev
+                    # returns -1 (:4849) with `used elem id: Protocol error`.
+                    # adopt_keeps_a_full_ring_cursor_and_snaps_one_entry_past_it fails both
+                    # halves (:5815 reads 7 where it expects 5 + VQ_NUM, :5829 reads 266
+                    # where it expects 5). Do NOT turn those into expected values: they are
+                    # whatever the loop had got to when the case looked, and event_idx_wrap
+                    # read 259 in a two-case run and 262 in the full one. The assertion is
+                    # "not the planted cursor", and only that is stable.
+                    #
+                    # event_idx_wrap's mechanism is in the log rather than in its assertions,
+                    # and it adds the part the reasoning did not cover: its vq_start prints
+                    # `num 256 last_avail 0 used_idx 65534`, and that line sits downstream
+                    # of the stale-cursor guard, so the guard let a cursor 65534 entries
+                    # behind used_idx straight through -- (uint16_t)(0 - 65534) is 2 in
+                    # flight. There, at least, the guard cannot see this mutant, which is
+                    # the strongest form of the point snapall's entry makes about keeping
+                    # the two separate.
+                    #
+                    # adopt_resumes_from_the_frontends_base_not_used_idx survives, and its
+                    # own vq_start line is the proof of why: it reads `last_avail 7
+                    # used_idx 5` under the mutant, the 7 being both the BASE the case
+                    # plants and the cursor its seven requests naturally left. In-repo
+                    # detection only; nothing here establishes a real-frontend one.
 
 Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence is
 `backup`, then one mutation at a time with a build and a run between it and the next
@@ -347,6 +403,10 @@ Run on the VM against ~/PhotonLibOS (a copy, not the repository). The sequence i
 stamp `backup` leaves, and `backup` refuses to run while that stamp still exists --
 because `restore` copies .orig over the source, an .orig of unknown age reverts the
 tree silently, and a `backup` taken mid-mutation makes the mutant itself the .orig.
+The stamp is a record rather than a marker: it holds the tree root and a sha256 of
+each .orig, `restore` validates both before overwriting anything, and every
+operation refuses to run while mutate-blk.py holds its own stamp -- the two scripts
+share `utils.cpp.orig`, so either one's backup can capture the other's mutant.
 
     ./mutate-vhost-user.py check     # verify every anchor, write nothing
 
@@ -365,6 +425,8 @@ so `check` can be run against any checkout, including the repository itself, wit
 editing this file. The .orig backups and the stamp always stay in $HOME whichever
 root is in use, for the rsync reason below.
 """
+import hashlib
+import json
 import os
 import pathlib
 import sys
@@ -392,11 +454,78 @@ SRCS = {
 # applied to a tree that is not mid-experiment.
 STAMP = pathlib.Path.home() / "mutate-vhost-user.inflight"
 
+# The other half of the shared-.orig hazard. mutate-blk.py has always refused to
+# run while this stamp existed; this script did not check its, so the corruption
+# only ever ran one way -- and it ran towards the side with no digest to notice.
+SIBLING_STAMP = pathlib.Path.home() / "mutate-blk.inflight"
+
 
 def require_stamp(what):
     if not STAMP.exists():
         die("%s needs a backup taken in this experiment; run `backup` first "
             "(a .orig of unknown age would revert the tree silently)" % what)
+
+
+def require_no_sibling(what):
+    if SIBLING_STAMP.exists():
+        die("%s refused: mutate-blk.py is mid-experiment (%s exists) and both "
+            "scripts back up blk/utils.cpp to the same .orig. A backup taken now "
+            "captures that script's mutant as pristine, and a restore would then "
+            "install it as such -- in this tree, with a stamp saying it is clean. "
+            "Finish that experiment first" % (what, SIBLING_STAMP))
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def stamp_read(what):
+    # require_stamp has already proved the file exists. One that will not parse is
+    # a stamp an older version wrote -- this one used to write an empty file -- or
+    # a truncated one, and guessing at either is what the digests are here to stop.
+    try:
+        st = json.loads(STAMP.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        die("%s refused: %s does not hold a stamp this version wrote (%s); "
+            "recover both sources from git and start the round again"
+            % (what, STAMP, e))
+    if not isinstance(st, dict) or st.get("root") != str(ROOT):
+        die("%s refused: the experiment in flight backed up %s, but "
+            "PHOTON_VHU_ROOT now selects %s. Continuing would mutate one tree "
+            "against another's backups, and restoring would write one tree's bytes "
+            "into the other, consume the stamp, and leave the first tree still "
+            "carrying its mutant"
+            % (what, st.get("root") if isinstance(st, dict) else None, ROOT))
+    return st
+
+
+def stamp_write(st):
+    STAMP.write_text(json.dumps(st, sort_keys=True), encoding="utf-8")
+
+
+def validate_backups(what, st):
+    """Refuse before ANY write if the .orig set is not the one this experiment took.
+
+    Called from `restore` and from the mutation path alike, and the mutation path is
+    not a courtesy: a .orig that fails validation is a .orig `restore` will refuse,
+    so mutating first strands the tree -- a mutated source, a live stamp, and no way
+    back. That is the state the sibling and root checks exist to make unreachable,
+    and this is the same argument with a different trigger.
+
+    Validated as a whole set before any write, in both callers. Checking inside
+    `restore`'s write loop instead would die after one source was already reverted,
+    leaving the tree part-restored and part-mutated with a RESTORE_OK printed for the
+    former. The stamp survives a death here, so a re-run is the recovery and it
+    re-validates from the start."""
+    recorded = st.get("digest") or {}
+    for name, (src, bak) in SRCS.items():
+        if not bak.exists():
+            die("%s refused: no backup at %s for %s, so this script cannot restore "
+                "the tree -- recover %s from git" % (what, bak, name, src))
+        if digest(bak) != recorded.get(name):
+            die("%s refused: the backup at %s is not the one this experiment took, "
+                "so it belongs to another tree or another round; refusing to touch "
+                "anything. Recover %s from git" % (what, bak, src))
 
 MUTANTS = {
     "overread": "vhost-user",
@@ -429,6 +558,7 @@ MUTANTS = {
     "noreset": "vhost-user",
     "segmaxfull": "vhost-user",
     "snapall": "vhost-user",
+    "nobasestore": "vhost-user",
 }
 
 RECV_MSG_MARK = "    int recv_msg(int fd, vhost_user_msg* m, int* fds, int* nfds) {\n"
@@ -668,6 +798,13 @@ STALE_BASE_GUARD = "        if (in_flight > q->srv.num)\n"
 
 STALE_BASE_GUARD_ANY = "        if (in_flight > 0)\n"
 
+# The SET_VRING_BASE handler's own store of the cursor the frontend handed over.
+# Deleting it makes the message a no-op -- vq_stop and vq_drain still run, so the
+# queue keeps the cursor the ring naturally had, which is what "ignore BASE" means.
+BASE_STORE = "            q->srv.last_avail = (uint16_t)m->payload.state.num;\n"
+
+BASE_STORE_IGNORED = ""
+
 
 def die(msg):
     print("MUTATE-FAILED: " + msg, file=sys.stderr)
@@ -687,8 +824,14 @@ def span_of(text, mark, what):
     if text.count(mark) != 1:
         die("anchor for %s matched %d times, expected 1" % (what, text.count(mark)))
     start = text.index(mark)
-    end = text.index("\n    }\n", start)
-    if end < 0:
+    # str.index RAISES when the needle is absent; it never returns a negative. The
+    # `if end < 0` this replaces therefore could not fire, and a target whose
+    # closing brace had moved died with a ValueError traceback instead of this
+    # message -- anchor rot reported as a crash in the harness rather than as a
+    # dead anchor, which is the one reading that sends you debugging the script.
+    try:
+        end = text.index("\n    }\n", start)
+    except ValueError:
         die("no closing brace after %s" % what)
     return start, end + len("\n    }\n")
 
@@ -745,27 +888,32 @@ def main():
         # that follows would faithfully put it back -- silently, and with a stamp
         # saying the tree is clean. Restore first.
         #
-        # This guard buys more here than in a script with private backups, because
-        # `utils.cpp.orig` is shared with mutate-blk.py by design: a backup that
-        # captures a mutant also poisons the copy that script restores from. Its
-        # restore digests each .orig and would die on the mismatch; this script's
-        # restore has no such check, so whatever it copies back is trusted on sight.
-        # The sibling direction -- backing up while mutate-blk.py is the one
-        # mid-experiment -- is a separate question and is deliberately not closed
-        # here; that script checks this one's stamp, this one does not check its.
+        # `utils.cpp.orig` is shared with mutate-blk.py by design, so the same
+        # hazard arrives from the other side too: that script leaves its own stamp
+        # standing while a mutant is in utils.cpp. It has always refused to run
+        # while THIS stamp existed; the refusal is now mutual, and the digest below
+        # is what makes a breach of it visible instead of merely unlikely.
         if STAMP.exists():
             die("backup refused: this script is already mid-experiment (%s exists), "
                 "so a source may still carry a mutant; run `restore` first" % STAMP)
+        require_no_sibling("backup")
         for src, bak in SRCS.values():
             bak.write_bytes(src.read_bytes())
             print("BACKUP_OK", bak)
-        STAMP.write_text("")
+        # Written last, so an interrupted backup leaves no stamp and every later
+        # operation refuses rather than restoring from a partial set.
+        stamp_write({"root": str(ROOT),
+                     "digest": {n: digest(b) for n, (_, b) in SRCS.items()}})
         return
     if mode == "restore":
         require_stamp("restore")
+        # Guarded for a different reason than `backup` is, and it is the reason this
+        # call exists here rather than only there: a sibling backup can already have
+        # overwritten the shared utils.cpp.orig with a mutated copy, and restoring
+        # from that installs the mutation as pristine and then reports success.
+        require_no_sibling("restore")
+        validate_backups("restore", stamp_read("restore"))
         for src, bak in SRCS.values():
-            if not bak.exists():
-                die("no backup at %s" % bak)
             src.write_bytes(bak.read_bytes())
             print("RESTORE_OK", src)
         STAMP.unlink()
@@ -774,6 +922,17 @@ def main():
     if mode not in MUTANTS:
         die("unknown mutation %r" % mode)
     require_stamp(mode)
+    # Refused here too, and not only at the two ends of the round: a mutation
+    # applied while the sibling is mid-experiment cannot be restored until that
+    # experiment finishes, because `restore` refuses for the same reason. What
+    # would be left is a mutated source with a live stamp and no way to undo it --
+    # the stranded-tree state this whole scheme exists to make unreachable.
+    require_no_sibling(mode)
+    # Root-checked and digest-checked here rather than only in `restore`, because
+    # this is the step that picks which tree to write into: a mutant landed in the
+    # wrong tree, or landed with a backup set `restore` will refuse, is a mutant no
+    # restore will ever undo.
+    validate_backups(mode, stamp_read(mode))
     src = SRCS[MUTANTS[mode]][0]
     if not src.exists():
         die("no source at %s (set PHOTON_VHU_ROOT if this is not the tree the "
@@ -872,6 +1031,9 @@ def mutate(mode, text):
     elif mode == "snapall":
         text = sub_once(text, STALE_BASE_GUARD, STALE_BASE_GUARD_ANY,
                         "the ring size the stale-cursor guard compares against")
+    elif mode == "nobasestore":
+        text = sub_once(text, BASE_STORE, BASE_STORE_IGNORED,
+                        "the SET_VRING_BASE handler's store of the frontend's cursor")
     else:
         # A mode MUTANTS lists but no branch implements would otherwise fall through
         # and write the text back unchanged, printing MUTATED for a mutation that
