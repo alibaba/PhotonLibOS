@@ -14,10 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Built only on Linux (the vduse transport is LINUX-gated). Requires root, the
-// vduse + virtio_vdpa modules and iproute2's `vdpa` tool; without them every
-// case prints a skip notice and returns (see test::SkippableTest).
+// Built only on Linux (the vduse transport is LINUX-gated). The VduseTest cases require
+// root, the vduse + virtio_vdpa modules and iproute2's `vdpa` tool; without them those
+// print a skip notice and return (see test::SkippableTest). VduseConfigTest and the
+// iotlbBudget cases at the bottom are ungated and run wherever this file builds.
 //
+// blk/vduse.cpp, TEXTUALLY, and it has to be here rather than further down: the
+// iotlbBudget cases need Iotlb, VduseDeviceImpl, vq_tick and VDUSE_STALE_FLUSH_BYTES,
+// all file-local to that translation unit and in no header, and the split-ring structs
+// the rescue sentinel walks come from blk/utils.h through it -- so everything below,
+// the sentinel included, has to see those definitions.
+//
+// Two consequences, both measured on the linked binary rather than inferred.
+//
+// This executable now DEFINES the transport and imports none of it from libphoton.so
+// (`nm -C` on it shows VduseDeviceImpl and new_vduse_controller defined locally;
+// `nm -DC --undefined-only` shows no VduseDeviceImpl imports). Every case below
+// therefore exercises a textual copy built with this target's flags, not the shipped
+// library. That is inert today -- vduse.cpp and everything it includes from blk/
+// reference none of the library-only defines (PHOTON_URING, ENABLE_CURL,
+// PHOTON_GLOBAL_INIT_OPENSSL), and -fPIE vs -fPIC is not semantic -- but it becomes a
+// silent divergence the day one of them gains such a conditional. If a case here ever
+// fails in a way the library does not reproduce, check that first.
+//
+// And the sentinel lost a property it used to have. It still hand-rolls its own ring
+// walk and never calls the engine, so it stays a diagnostic peer of the kernel's driver
+// rather than a user of the engine; but its split-ring layout is now the engine's own
+// copy from blk/utils.h, where it used to be an independent one in this file. A layout
+// bug in the engine's copy would now break the tool whose job is to rescue from the
+// engine. That was traded deliberately, for one vduse test binary instead of two.
+#include "../vduse.cpp"
+
 // The consumer side (the vdpa bus attach that turns the VDUSE registration into
 // a /dev/vdX) is orchestrated by the tests themselves -- mirroring production,
 // where QEMU's vhost-vdpa or an operator's `vdpa dev add` plays that role.
@@ -61,8 +88,9 @@ limitations under the License.
 #include <unistd.h>
 #include <linux/fs.h>
 // All three are C++-safe; <linux/virtio_ring.h> is the one that is not -- its inline
-// vring_init() assigns void* to typed pointers -- so the split-ring structs the rescue
-// sentinel walks are copied below, exactly as vduse-cli.cc and blk/utils.h copy them.
+// vring_init() assigns void* to typed pointers -- which is why the split-ring structs
+// the rescue sentinel walks are a hand copy in blk/utils.h, reached through the include
+// of vduse.cpp above. blk/vduse-cli.cc keeps its own copy for the same reason.
 #include <linux/virtio_blk.h>
 #include <linux/virtio_config.h>
 #include <linux/virtio_ids.h>
@@ -100,18 +128,12 @@ static const char SUITE_LOCKS[] = "/run/photon-blk";
 static constexpr uint64_t IO_OFF = 1ull << 20;   // 1 MiB
 static constexpr size_t   IO_LEN = 256ull << 10; // 256 KiB
 
-// blk/vduse.cpp's observation seam over its iotlb cache, declared here because that
-// is the only place it is declared: the cache's type is local to vduse.cpp and
-// appears in no header, so without these nothing outside that translation unit could
-// read how much mapping it holds. The signatures have to match vduse.cpp exactly --
-// a mismatch is a link error rather than a silent one, which is the point of keeping
-// them to three scalars. UINT64_MAX is the answer for a handle that is not a vduse
-// device, so a wrong-typed argument cannot read as "nothing retained". The two byte
-// counters take the cache's photon::mutex, so they are called on the vcpu, as every
-// case here is.
-uint64_t vduse_iotlb_live_bytes(IBlkDevice* dev);
-uint64_t vduse_iotlb_stale_bytes(IBlkDevice* dev);
-uint64_t vduse_iotlb_flush_budget();
+// The iotlb byte counters the mapping-budget cases below call -- vduse_iotlb_live_bytes,
+// vduse_iotlb_stale_bytes, vduse_iotlb_flush_budget -- used to be declared here, because
+// the cache's type is local to blk/vduse.cpp and appears in no header, so nothing outside
+// that translation unit could read how much mapping it holds. The textual include above
+// now supplies their definitions, so there is nothing left to declare; vduse.cpp's own
+// comment on the seam block is where their contract lives.
 
 // attach a vduse registration to the vdpa bus; returns the new /dev/vdX ("" on
 // failure). Identifies OUR device by diffing /sys/block -- never by guessing a
@@ -279,39 +301,14 @@ static bool rescue_serve(const char* name) {
 //     place. Do not copy it into the library.
 // ---------------------------------------------------------------------------
 
-// The split vring, copied verbatim from <linux/virtio_ring.h> exactly as
-// vduse-cli.cc's `split vring` block and blk/utils.h's own copy both exist because
-// that header's inline vring_init() assigns void* to typed pointers, which C++ rejects.
-// NOT taken from blk/utils.h, whose copies these are identical to -- the standing rule
-// stated at raw_vduse_create below is that this file does not reach into blk/'s
-// internals, and the sentinel is a diagnostic peer of the kernel's driver rather than a
-// user of the engine. VRING_DESC_F_INDIRECT is the one macro not carried over: the walk
-// below does not test it, and neither does the recipe's (serve_vq()'s "no indirect
-// descriptors" note on its chain walk).
-struct vring_desc {
-    uint64_t addr;    // guest/IOVA address -- resolved through VDUSE_IOTLB_GET_FD
-    uint32_t len;
-    uint16_t flags;
-    uint16_t next;
-};
-#define VRING_DESC_F_NEXT     1
-#define VRING_DESC_F_WRITE    2
-
-struct vring_avail {
-    uint16_t flags;
-    uint16_t idx;
-    uint16_t ring[];
-};
-
-struct vring_used_elem {
-    uint32_t id;     // descriptor chain head
-    uint32_t len;    // bytes written into device-writable buffers
-};
-struct vring_used {
-    uint16_t flags;
-    uint16_t idx;
-    struct vring_used_elem ring[];
-};
+// The split vring the rescue sentinel walks is blk/utils.h's copy, reached through the
+// textual include of vduse.cpp at the top of this file. It used to be an independent
+// copy here -- identical to utils.h's but for VRING_DESC_F_INDIRECT, which the walk does
+// not test and which the recipe's does not either (serve_vq()'s "no indirect
+// descriptors" note on its chain walk). Keeping two was what allowed this file to claim
+// it did not reach into blk/'s internals; the include removed that option, since one
+// translation unit holding both copies is four redefinition errors. What the sentinel
+// still has is its own walk: it never calls the engine.
 
 // The sentinel's step codes, written into ConsumerReport::stage. SENT_DONE is
 // ConsumerStage's CONS_DONE and means the same thing; the rest start at 1000 so that
@@ -1219,11 +1216,20 @@ public:
             // through VDUSE_VQ_GET_INFO, and on this registration -- one whose
             // consumer had been removed, and whose removal had finished -- that
             // ioctl answered EPERM instead of the EINVAL the walk reads as "no such
-            // index", so the adopt gave up and left the registration standing. Why it
-            // answered EPERM is NOT established: a registration that was never bound
-            // answers rc=0 for an in-range index, so being unbound is not by itself
-            // the trigger, and the state this one had been through (bound, wedged
-            // mid-removal, then drained) is not one the walk was measured against.
+            // index", so the adopt gave up and left the registration standing. EPERM
+            // is not about the index and not about binding: vduse_dev_ioctl returns
+            // it from exactly one place, its leading `if (unlikely(dev->broken))`,
+            // and `broken` is set only when a message to userspace timed out
+            // (drivers/vdpa/vdpa_user/vduse_dev.c). That is the state this
+            // registration had been through -- bound, wedged mid-removal, drained --
+            // so the refusal says the device had gone broken, and serving it was
+            // never on offer. This note used to record the trigger as unestablished
+            // and to rule out "unbound" only by the measurement that an unbound
+            // registration answers rc=0 in range; the source settles it, and settles
+            // it as something worse than unbound. The product path already logs the
+            // errno that stopped its walk, in adopt_queue_count()'s
+            // LOG_ERRNO_RETURN; blk/vduse-cli.cc's discover_vqs() did not, and now
+            // does.
             // destroy_orphan() asks no ioctl of the queues, so it does not depend on
             // the answer. Ordered AFTER the adopt rather than instead of it: an
             // orphan whose consumer is still mid-removal can only be drained by
@@ -1475,6 +1481,35 @@ TEST_F(VduseTest, basic_io) {
 // quiesce it triggers is reachable from here. The two `stale` assertions below are
 // therefore a baseline and not a bound: they cannot go red on a mutation of that
 // comparison, only on one that retains a mapping past teardown.
+//
+// What makes that message arrive, MEASURED on 7.0.0-38-generic rather than only read
+// out of the source: a consumer on the vhost-vdpa bus, driven by write(2) of a
+// `struct vhost_msg_v2` carrying VHOST_IOTLB_UPDATE to /dev/vhost-vdpa-N.
+// vhost_chr_write_iter() hands it straight to dev->msg_handler, which for vhost-vdpa is
+// vhost_vdpa_process_iotlb_msg(), and its only prerequisite is vhost_dev_check_owner()
+// -- a prior VHOST_SET_OWNER, with no features, mem table or DRIVER_OK needed. Asking
+// for iova 0x100000 size 4096, the daemon was told
+//     UPDATE_IOTLB [0x0, 0xFFFFFFFFFFFFFFFF]
+// i.e. all of memory, because vduse_vdpa_set_map() calls
+// vduse_dev_update_iotlb(dev, asid, 0ULL, ULLONG_MAX) -- the shape the C4 fix was
+// written against. The daemon then resolved the range it actually wanted on its own,
+// via IOTLB GET_FD answering [0x100000, 0x100FFF]: the message is a "something changed,
+// drop everything" signal and never carries the consumer's range.
+//
+// Two traps on that route, both paid for. Binding a vduse registration to vhost_vdpa
+// rather than virtio_vdpa needs virtio_vdpa absent (VDUSE_CREATE_DEV goes through
+// device_add, and vdpa_dev_match() returns 1 for any driver when nothing overrides it);
+// `vdpa dev add` is not usable for it and answered EINVAL with virtio_vdpa unloaded.
+// And vduse is a use_va device, so vhost_vdpa_va_map() walks the VMAs behind `uaddr`
+// and does `goto next` -- skipping vhost_vdpa_map and therefore ops->set_map -- for any
+// VMA that is not a shared file-backed one. An anonymous MAP_PRIVATE buffer gives a
+// write() that returns the full message length and forwards nothing at all, which is
+// silent in both directions: no error to the consumer, no message to the daemon. A
+// memfd is what makes it real.
+//
+// The threshold itself is covered in-process by the iotlbBudget cases at the bottom of
+// this file, which drive vq_tick at the cap and one byte below it with no kernel and no
+// registration involved.
 TEST_F(VduseTest, teardown_releases_every_mapping_the_cache_retained) {
     if (skip_reason) return;
     BlkConfig cfg(make_info());
@@ -3398,6 +3433,257 @@ TEST(VduseSentinelTest, serve_stops_at_the_avail_index_wrap) {
     const int budget = SentinelRing::TRANSLATE_BUDGET;
     EXPECT_LT(ring.translations, budget);
 }
+
+// ---------------------------------------------------------------------------
+// The stale-mapping budget's THRESHOLD, driven in-process.
+//
+// teardown_releases_every_mapping_the_cache_retained above is a baseline and not a
+// bound. The only writer that leaves anything on `stale` is invalidate_locked() as the
+// VDUSE_UPDATE_IOTLB handler calls it, and that message reaches a vduse daemon only
+// through the vDPA `.set_map` op, every caller of which is in drivers/vhost/vdpa.c --
+// while this suite's consumer is `vdpa dev add mgmtdev vduse`, i.e. the virtio_vdpa
+// bus, which has no .set_map at all. So no invalidation arrives from a real
+// registration here, `stale` stays empty, and vq_tick's comparison against
+// VDUSE_STALE_FLUSH_BYTES is unreachable that way. These cases reach it by fabricating
+// the cache state instead, which the textual include of vduse.cpp at the top of this
+// file is what makes possible: Iotlb, VduseDeviceImpl and the cap constant appear in no
+// header, and the three read-only observation seams report byte counts through an
+// IBlkDevice* but can neither install a mapping nor drive a tick.
+//
+// Ungated, like VduseConfigTest and unlike everything under VduseTest: no root, no
+// vduse module, no vdpa tool, no /dev/vdX. VduseDeviceImpl's constructor is pure field
+// initialisation and a device built here is never start()ed, so nothing touches
+// /dev/vduse/control or the vdpa bus, and the destructor reaches no ioctl either (both
+// shutdown guards test fields these cases leave at their defaults). These run on CI.
+//
+// WHAT THEY PROVE AND WHAT THEY DO NOT. They prove the arithmetic and the decision:
+// that an invalidation moves an entry to `stale` and accounts its bytes, that a range
+// missing every entry accounts nothing while one merely touching an end does, and that
+// vq_tick quiesces and flushes at the cap and not one byte below it. They do NOT prove
+// the kernel ever sends the message, nor that the range it sends is [0, ULLONG_MAX];
+// those are measured facts about a vhost-vdpa binding, recorded on the teardown case.
+//
+// Fabricating is sound here because stale_bytes() sums `last - start + 1` over the
+// recorded ranges and never dereferences them, and flush_locked() hands munmap that same
+// expression -- so one anonymous mmap registered as one Map is accounted and released
+// exactly as a real IOTLB_GET_FD mapping would be, and a fabricated entry is
+// indistinguishable from a genuine one to everything under test.
+// ---------------------------------------------------------------------------
+namespace {
+
+// The cap under test, named rather than re-typed: a second copy of the literal would let
+// the two drift, and the boundary case's whole value is that it sits ON the production
+// constant.
+constexpr size_t   BUDGET    = VDUSE_STALE_FLUSH_BYTES;
+constexpr uint64_t FAKE_IOVA = 0x4000;
+
+// A registered mapping backed by a real anonymous mmap, so that flush_locked()'s munmap
+// has something genuine to release. Never touched after the mmap, so the pages are never
+// committed -- a 64 MiB entry costs address space and nothing else. `released` is what
+// keeps cleanup honest: the flush owns the range once it runs, and munmapping it a second
+// time would be a bug this file introduced.
+struct Fake {
+    char* base = nullptr;
+    size_t len = 0;
+    bool released = false;
+
+    bool make(size_t n) {
+        base = (char*)::mmap(nullptr, n, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base == MAP_FAILED) {
+            base = nullptr;
+            return false;
+        }
+        len = n;
+        return true;
+    }
+    Iotlb::Map entry() const {
+        return Iotlb::Map{FAKE_IOVA, FAKE_IOVA + len - 1, base, VDUSE_ACCESS_RW};
+    }
+    ~Fake() {
+        if (base && !released)
+            ::munmap(base, len);
+    }
+};
+
+// Install one mapping in the lookup and then invalidate it, which is the whole of what an
+// UPDATE_IOTLB does to the budget: the entry leaves `maps`, lands on `stale`, and stays
+// mmapped until something flushes.
+void install_then_invalidate(Iotlb& t, const Fake& f) {
+    SCOPED_LOCK(t.lock);
+    t.maps.push_back(f.entry());
+    t.invalidate_locked(FAKE_IOVA, FAKE_IOVA + f.len - 1);
+}
+
+// SUITE_LOCKS and not a writable stand-in, for the reason VduseConfigTest states: nothing
+// here opens it, and if a case ever starts to, a non-root run fails loudly instead of
+// passing against a directory only some machines happen to permit.
+BlkConfig budget_cfg(const char* identity) {
+    BlkConfig cfg;
+    cfg.info.identity = identity;
+    cfg.info.size = 64ull << 20;
+    cfg.info.sector_size_shift = 9;
+    cfg.queues = 1;
+    return cfg;
+}
+
+TEST(iotlbBudget, an_invalidation_moves_the_entry_to_stale_and_accounts_its_bytes) {
+    Iotlb t;
+    const size_t LEN = 2ull << 20;
+    Fake f;
+    ASSERT_TRUE(f.make(LEN));
+
+    {
+        SCOPED_LOCK(t.lock);
+        t.maps.push_back(f.entry());
+    }
+    EXPECT_EQ(LEN, t.live_bytes());
+    EXPECT_EQ(0u, t.stale_bytes());
+    const uint64_t gen_before = t.gen;
+
+    std::vector<Iotlb::Map> dropped;
+    {
+        SCOPED_LOCK(t.lock);
+        t.invalidate_locked(FAKE_IOVA, FAKE_IOVA + LEN - 1, &dropped);
+    }
+    EXPECT_EQ(0u, t.live_bytes());
+    EXPECT_EQ(LEN, t.stale_bytes());
+    // The counter moved, the entry left the lookup, and the caller was told WHICH entry:
+    // that list is what the handler retires queues by, so an empty one here would mean an
+    // invalidation that silently left a ready queue holding rings into a mapping that is
+    // no longer in the lookup.
+    ASSERT_EQ(1u, dropped.size());
+    EXPECT_EQ(f.base, dropped[0].base);
+    EXPECT_GT(t.gen, gen_before)
+        << "the generation did not move, so a resolve() already in flight would "
+           "publish the mapping this just dropped";
+
+    // Still mapped at this point -- releasing it is the flush's job, not the
+    // invalidation's, and that separation is the reason a budget exists at all.
+    t.flush_stale();
+    EXPECT_EQ(0u, t.stale_bytes());
+    f.released = true;
+}
+
+TEST(iotlbBudget, a_range_that_misses_every_entry_accounts_nothing_and_one_that_touches_an_end_does) {
+    Iotlb t;
+    const size_t LEN = 2ull << 20;
+    Fake f;
+    ASSERT_TRUE(f.make(LEN));
+    {
+        SCOPED_LOCK(t.lock);
+        t.maps.push_back(f.entry());
+    }
+
+    std::vector<Iotlb::Map> dropped;
+    {
+        // Disjoint above the entry. The guard is `m.start > last || m.last < start`, so
+        // this is the only shape that must account nothing.
+        SCOPED_LOCK(t.lock);
+        t.invalidate_locked(FAKE_IOVA + LEN, FAKE_IOVA + LEN + 4095, &dropped);
+    }
+    EXPECT_TRUE(dropped.empty());
+    EXPECT_EQ(0u, t.stale_bytes());
+    EXPECT_EQ(LEN, t.live_bytes());
+
+    // Touching the last byte IS an intersection, and this is the half a containment test
+    // gets wrong. Both ends matter in production for different reasons: the kernel's
+    // unmap-all arrives as [0, ULLONG_MAX], which contains everything, while a driver
+    // replacing one range arrives as something that merely overlaps.
+    {
+        SCOPED_LOCK(t.lock);
+        t.invalidate_locked(FAKE_IOVA + LEN - 1, FAKE_IOVA + LEN - 1, &dropped);
+    }
+    ASSERT_EQ(1u, dropped.size());
+    EXPECT_EQ(LEN, t.stale_bytes());
+    EXPECT_EQ(0u, t.live_bytes());
+
+    t.flush_stale();
+    f.released = true;
+}
+
+// The cap itself. Two devices one byte apart, and the assertions differ between them: at
+// the cap vq_tick quiesces every queue and releases the mappings, one byte below it does
+// neither. That difference is the whole tooth -- turn `>=` into `>`, move the cap by one,
+// or delete the quiesce call, and the at-cap half stops flushing while the under-cap half
+// is unchanged, so neither mutation can hide behind the other.
+//
+// in_flight is held at 1 across the entry to vq_tick on purpose. The opportunistic flush
+// above the budget check runs only when nothing is in flight and nothing is reading, so
+// holding it at 1 forces the decision through the cap rather than through the free path
+// -- which is also the only situation the cap exists for, since an idle device releases
+// its mappings without being asked.
+TEST(iotlbBudget, vq_tick_quiesces_at_the_cap_and_not_one_byte_below_it) {
+    // --- one byte below the cap: nothing may be released ---------------------
+    {
+        VduseDeviceImpl d(budget_cfg("iotlb-under"), SUITE_LOCKS);
+        ASSERT_EQ(1u, d.vqs.size());
+        Fake f;
+        ASSERT_TRUE(f.make(BUDGET - 1));
+        install_then_invalidate(d.iotlb, f);
+        ASSERT_EQ(BUDGET - 1, d.iotlb.stale_bytes());
+
+        d.vqs[0]->srv.in_flight.store(1);
+        d.vq_tick(0);
+        d.vqs[0]->srv.in_flight.store(0);
+
+        EXPECT_EQ(BUDGET - 1, d.iotlb.stale_bytes())
+            << "a device below the cap released its mappings, so the flush is not "
+               "bounded by the cap at all";
+        EXPECT_FALSE(d.vqs[0]->x.needs_refresh.load())
+            << "quiesce_and_flush ran below the cap: re-arming every queue's refresh "
+               "flag is the last thing it does and nothing else does it";
+        EXPECT_FALSE(d.quiescing.load());
+    }
+
+    // --- exactly at the cap: quiesce, drain, release --------------------------
+    {
+        VduseDeviceImpl d(budget_cfg("iotlb-atcap"), SUITE_LOCKS);
+        ASSERT_EQ(1u, d.vqs.size());
+        Fake f;
+        ASSERT_TRUE(f.make(BUDGET));
+        install_then_invalidate(d.iotlb, f);
+        ASSERT_EQ(BUDGET, d.iotlb.stale_bytes());
+
+        d.vqs[0]->srv.in_flight.store(1);
+        // The quiesce waits for in_flight to fall, bounded by its own deadline, so
+        // something has to drop it -- otherwise this case would assert on the "gave up,
+        // still holding" branch, which is a legitimate outcome and not the one under
+        // test. Joined rather than left running: the coroutine writes into `d`, and `d`
+        // dies at the end of this block.
+        //
+        // The join is AFTER vq_tick and not before it, which is the whole ordering:
+        // joining first would let in_flight reach 0 while nothing is looking, and vq_tick
+        // would then take the opportunistic flush above the budget check and release the
+        // same bytes without ever consulting the cap. The test would still pass and would
+        // have measured nothing.
+        struct Arg { VduseDeviceImpl* d; } arg{&d};
+        auto* th = photon::thread_create([](void* a) -> void* {
+            photon::thread_usleep(20 * 1000);
+            static_cast<Arg*>(a)->d->vqs[0]->srv.in_flight.store(0);
+            return nullptr;
+        }, &arg);
+        ASSERT_NE(nullptr, th);
+        auto* jh = photon::thread_enable_join(th);
+
+        d.vq_tick(0);
+        photon::thread_join(jh);
+
+        // Two independent witnesses that the cap fired rather than the free path: the
+        // bytes are gone, and the queue was left needing a re-resolve. The second is what
+        // separates the two flushes -- the opportunistic one above the budget check
+        // releases the same bytes and re-arms nothing.
+        EXPECT_EQ(0u, d.iotlb.stale_bytes())
+            << "the cap was reached and the mappings were held anyway";
+        EXPECT_TRUE(d.vqs[0]->x.needs_refresh.load())
+            << "the mappings went but no queue was retired, so this was the "
+               "opportunistic flush and the cap was never consulted";
+        EXPECT_FALSE(d.quiescing.load()) << "the test-and-set was not released";
+        f.released = true;   // flush_stale munmapped it from inside the quiesce
+    }
+}
+
+}  // namespace
 
 }  // namespace blk
 }  // namespace photon

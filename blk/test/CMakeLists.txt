@@ -26,6 +26,13 @@ if (LINUX)
     # tcmu is LINUX-gated (blk_tcmu), so its symbols are absent from photon_shared
     # on other platforms; only build the test where the transport exists.
     photon_add_test(test-blk-tcmu test-tcmu.cpp ${BLK_TEST_SRC})
+    # test-vduse.cpp includes blk/vduse.cpp TEXTUALLY, so this binary defines the vduse
+    # transport itself instead of importing it from photon_shared. The note at the top of
+    # that file carries the full argument, what it costs, and the two `nm` commands that
+    # show it; the short version is that the iotlbBudget cases at its bottom need Iotlb,
+    # VduseDeviceImpl, vq_tick and VDUSE_STALE_FLUSH_BYTES, all file-local to vduse.cpp
+    # and in no header, and vduse.cpp's three observation seams are read-only, so they can
+    # report the mapping byte counts but can neither install a mapping nor drive a tick.
     photon_add_test(test-blk-vduse test-vduse.cpp ${BLK_TEST_SRC})
     photon_add_test(test-blk-vhost-user test-vhost-user.cpp ${BLK_TEST_SRC})
     if (PHOTON_ENABLE_URING)
