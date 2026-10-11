@@ -132,9 +132,21 @@ limitations under the License.
 // there is no /dev/vdX to wedge and no IOTLB stall to wait out. rescue leans on
 // that answer: discover_vqs() counts the indices VDUSE_VQ_GET_INFO replies to and
 // stops at the first one it refuses, so the refusal -- not any field of a reply
-// -- is the queue count. Which errno the refusal carries is not predictable from
-// the header either: out of range was measured as EINVAL, and the same probe on
-// an unbound orphan (a registration no consumer has ever attached to) as EPERM.
+// -- is the queue count. The header does not say which errno that refusal carries,
+// and the possibilities do not mean the same thing, so discover_vqs() logs it:
+// EINVAL is the kernel's own `index >= dev->vq_num` and says the list ended, while
+// any other errno says the kernel declined to answer at all, leaving the count a
+// floor. EPERM in particular has nothing to do with binding, which an earlier
+// version of this note claimed. In drivers/vdpa/vdpa_user/vduse_dev.c,
+// vduse_dev_ioctl returns it from exactly one place, its leading
+// `if (unlikely(dev->broken))` -- true in both trees this was read in, v7.0 and
+// 7.2.3, where the VQ_GET_INFO handler is also identical -- and `broken` is set
+// only by vduse_dev_broken(), whose sole caller in 7.2.3 is vduse_dev_msg_sync()
+// when a message to userspace timed out. VQ_GET_INFO reads dev->vqs[index]
+// directly and sends no message, so a registration no consumer ever attached to
+// answers it normally. What was measured as "an unbound orphan answers EPERM" was
+// therefore an orphan that had already gone broken -- a worse fact, and one about
+// a wedged device rather than an unbound one.
 //
 // HAZARD (probe): it can block for MINUTES inside VDUSE_IOTLB_GET_FD for a
 // request's DATA buffer while `vdpa dev add` sits in D state waiting for that very
@@ -392,21 +404,32 @@ static void *map_iova(unsigned long long iova, size_t need, bool quiet) {
 // How many virtqueues the registration has, measured rather than declared: the
 // count belongs to whoever ran VDUSE_CREATE_DEV and nothing in the uapi hands it
 // back, so it is the number of indices VDUSE_VQ_GET_INFO replies to. The walk
-// stops at the first index the ioctl refuses, whatever errno it refuses with --
-// out of range answers EINVAL and an unbound orphan answers EPERM, and calling
-// either one "out of range" would be a guess, so only the refusal itself counts.
+// stops at the first index the ioctl refuses, and the errno it refuses with is
+// what separates an answer from a non-answer: EINVAL is the kernel's own
+// `index >= dev->vq_num`, so the list ended and `n` is the count, while anything
+// else -- EPERM from a device that has gone broken, EFAULT from an argument of
+// ours the kernel could not read -- leaves `n` a floor. blk/vduse.cpp's
+// adopt_queue_count() makes the same split and refuses to adopt on the second
+// half; this tool cannot refuse, because rescue is what runs when a registration
+// is already wedged and serving a floor of its queues still beats serving none.
+// So it serves what it counted and says out loud that the count may be short.
 static unsigned discover_vqs() {
     unsigned n;
+    int err = 0;
     for (n = 0; n < MAX_VQS; n++) {
         struct vduse_vq_info vi;
         memset(&vi, 0, sizeof(vi));
         vi.index = n;
-        if (ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) < 0)
+        if (ioctl(dev_fd, VDUSE_VQ_GET_INFO, &vi) < 0) {
+            err = errno;
             break;
+        }
         vqs[n].index = n;
     }
     if (n == MAX_VQS)
         LOG_WARN("` indices answered VDUSE_VQ_GET_INFO, which is the cap this tool holds: queues beyond it are NOT served", MAX_VQS);
+    else if (err != EINVAL)
+        LOG_ERROR("VDUSE_VQ_GET_INFO refused index ` with errno `, not the EINVAL that means the list ended, so ` queue(s) is a floor: the registration may hold more, and they will NOT be served", n, err, n);
     else
         LOG_INFO("` virtqueue(s) discovered by probing VDUSE_VQ_GET_INFO", n);
     return n;
@@ -563,12 +586,15 @@ static bool handle_one_msg() {
                     ioctl(dev_fd, VDUSE_DEV_GET_FEATURES, &f);
                     LOG_INFO("negotiated features 0x`", HEX(f));
                 }
-                // A rescue can be started before any consumer has attached, and on
-                // an unbound orphan this same probe was measured answering EPERM --
-                // a refusal whose meaning for an IN-RANGE index is not measured. So
-                // a count of zero taken that early means "not knowable yet" as much
-                // as "no queues", and DRIVER_OK is the first moment the
-                // registration is bound: ask again before refreshing.
+                // Ask again if the startup walk counted nothing. Binding is not the
+                // reason: VQ_GET_INFO reads dev->vqs[index] and sends no message to
+                // userspace, so it answers before any consumer attaches, and the
+                // kernel fixes vq_num at CREATE_DEV. Zero still deserves a second
+                // ask because it is what a refusal produces as well, and creation
+                // rejects only `vq_num > 0xffff`, so a genuinely queueless
+                // registration is legal too -- the number alone cannot say which of
+                // the two this was. The errno discover_vqs() logs can; DRIVER_OK is
+                // the last moment before serving to re-read it.
                 if (!nvqs)
                     nvqs = discover_vqs();
                 for (unsigned i = 0; i < nvqs; i++) {
