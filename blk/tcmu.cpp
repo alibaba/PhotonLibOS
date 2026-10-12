@@ -127,6 +127,35 @@ struct tcmu_cmd_entry_hdr {
 } __attribute__((packed));
 static_assert(sizeof(tcmu_cmd_entry_hdr) == 8, "tcmu entry header layout");
 
+// OURS, not the kernel's. The uapi defines TCMU_UFLAG_UNKNOWN_OP (0x1),
+// TCMU_UFLAG_READ_LEN (0x2) and TCMU_UFLAG_KEEP_BUF (0x4), and target_core_user.c
+// only ever tests those three by name -- it never validates uflags, so a bit it does
+// not know is inert to it. There is no reserved-bit convention in the header either,
+// so claiming one is this file's decision alone; 0x80 rather than 0x08 because the
+// kernel assigns ascending, which makes the low free bits the ones a future release
+// is likelier to take.
+//
+// What it is for: req and rsp share a union, so an entry that has been answered is
+// indistinguishable from one that has not -- except through this bit, which lives in
+// the header, outside the union. Without it a successor daemon that resumes from
+// cmd_tail re-dispatches an entry its predecessor already answered, reading iov_cnt
+// out of {scsi_status, padding} and cdb_off out of sense_buffer[8..15]; that address
+// is gigabytes outside the mapping, so it faults, and because the tail can never pass
+// the entry it faults on again, every restart re-poisons the same slot. Only the
+// operator writing configfs `reset_ring` gets out of that.
+//
+// Set BEFORE the response bytes are written, not after. Neither ordering is atomic
+// against a crash, and the two windows are not equally bad: dying after the response
+// but before the mark leaves the successor re-dispatching, which is the fault loop
+// above; dying after the mark but before the response leaves it retiring an entry
+// whose status byte may be stale, which costs one command a wrong status and still
+// drains the ring. Advancing the tail is also safe whether or not the kernel had
+// already expired the command -- expiry (tcmu_check_expired_ring_cmd) sets
+// TCMU_CMD_BIT_EXPIRED but does not xa_erase, so the lookup in tcmu_handle_completions
+// still finds it, and tcmu_handle_completion treats an expired cmd as "reclaim the
+// data area and free it" rather than as a broken ring.
+static constexpr uint8_t TCMU_UFLAG_RESPONDED = 0x80;
+
 struct tcmu_cmd_req {    // natural alignment: cdb_off lands at req offset 16
     uint32_t iov_cnt;
     uint32_t iov_bidi_cnt;
@@ -198,14 +227,18 @@ static constexpr uint8_t SK_MEDIUM_ERROR    = 0x3;
 static constexpr uint8_t SK_ILLEGAL_REQUEST = 0x5;
 static constexpr uint8_t SK_UNIT_ATTENTION  = 0x6;
 static constexpr uint8_t SK_DATA_PROTECT    = 0x7;
+static constexpr uint8_t SK_ABORTED_COMMAND = 0xb;
 
 static constexpr uint8_t ASC_INVALID_OPCODE   = 0x20;
 static constexpr uint8_t ASC_INVALID_FIELD    = 0x24;
+static constexpr uint8_t ASC_INVALID_PARAM    = 0x26;   // invalid field in parameter list
+static constexpr uint8_t ASC_PARAM_LEN_ERROR  = 0x1a;   // parameter list length error
 static constexpr uint8_t ASC_LBA_OUT_OF_RANGE = 0x21;
 static constexpr uint8_t ASC_WRITE_PROTECTED  = 0x27;
 static constexpr uint8_t ASC_CAPACITY_CHANGED = 0x2a;   // ASCQ 09: capacity data has changed
 static constexpr uint8_t ASC_READ_ERROR       = 0x11;
 static constexpr uint8_t ASC_WRITE_ERROR      = 0x0c;
+static constexpr uint8_t ASC_INTERNAL_ERROR   = 0x44;   // internal target error
 
 static constexpr uint8_t OPC_TEST_UNIT_READY       = 0x00;
 static constexpr uint8_t OPC_REQUEST_SENSE         = 0x03;
@@ -219,6 +252,7 @@ static constexpr uint8_t OPC_PREVENT_ALLOW_REMOVAL = 0x1e;
 static constexpr uint8_t OPC_READ_CAPACITY_10      = 0x25;
 static constexpr uint8_t OPC_READ_10               = 0x28;
 static constexpr uint8_t OPC_WRITE_10              = 0x2a;
+static constexpr uint8_t OPC_VERIFY                = 0x2f;
 static constexpr uint8_t OPC_SYNC_CACHE_10         = 0x35;
 static constexpr uint8_t OPC_WRITE_SAME_10         = 0x41;
 static constexpr uint8_t OPC_UNMAP                 = 0x42;
@@ -226,6 +260,7 @@ static constexpr uint8_t OPC_MODE_SELECT_10        = 0x55;
 static constexpr uint8_t OPC_MODE_SENSE_10         = 0x5a;
 static constexpr uint8_t OPC_READ_16               = 0x88;
 static constexpr uint8_t OPC_WRITE_16              = 0x8a;
+static constexpr uint8_t OPC_VERIFY_16             = 0x8f;
 static constexpr uint8_t OPC_SYNC_CACHE_16         = 0x91;
 static constexpr uint8_t OPC_WRITE_SAME_16         = 0x93;
 static constexpr uint8_t OPC_SERVICE_ACTION_IN_16  = 0x9e;
@@ -235,6 +270,15 @@ static constexpr uint8_t OPC_WRITE_12              = 0xaa;
 static constexpr uint8_t SAI_READ_CAPACITY_16      = 0x10;
 
 static constexpr uint32_t DEFAULT_QUEUE_DEPTH = 64;
+
+// The UNMAP and WRITE SAME limits this device advertises in VPD 0xB0. Both the
+// advertisement (build_vpd_b0) and the enforcement (emul_unmap, emul_write_same)
+// read these, because a device that accepts more than it advertised has told the
+// initiator something false, and the two numbers drifting apart is exactly the
+// kind of disagreement nothing else would catch.
+static constexpr uint32_t MAX_UNMAP_LBA_COUNT   = 0x100000;
+static constexpr uint32_t MAX_UNMAP_DESC_COUNT  = 32;
+static constexpr uint32_t MAX_WRITE_SAME_BLOCKS = 0x100000;
 
 // tcmu genetlink ABI names (uapi <linux/target_core_user.h>; stable literals,
 // hand-defined because that header is C++-hostile -- same reason as the ring).
@@ -580,6 +624,16 @@ struct TcmuServer {
     std::atomic<bool> pending_capacity_ua{false};   // one-shot UNIT ATTENTION after resize
     bool read_only = false;
     bool stopping = false;
+    // Make an ordinary write durable before its GOOD, because the device told the
+    // initiator there is no volatile cache to flush. Derived in start() as
+    // `!(features & FEATURE_FLUSH)`: with FEATURE_FLUSH the caching page reports
+    // WCE=1 and emul_sync/emul_write's FUA path are how durability is asked for, so
+    // syncing every write would be a needless syscall per write; without it WCE is 0,
+    // and sd_set_flush_flag() then clears BLK_FEAT_WRITE_CACHE *and* BLK_FEAT_FUA
+    // together, so a Linux initiator sends neither SYNCHRONIZE CACHE nor FUA and has
+    // no way to ask. Same field name, same default and same reasoning as the shared
+    // virtio engine's write_through (utils.h), which nbd and ublk also follow.
+    bool write_through = true;
 
     struct CmdArg { TcmuServer* srv; tcmu_cmd_entry* ent; };
     static void* trampoline(void* a) {
@@ -756,14 +810,25 @@ struct TcmuServer {
                 break;
             }
             uint32_t op = ent->hdr.len_op & TCMU_OP_MASK;
+            // A CMD this daemon's PREDECESSOR already answered. Its union holds a
+            // response rather than a request, so dispatching it would read iov_cnt
+            // out of {scsi_status, padding} and cdb_off out of sense_buffer[8..15]
+            // -- see TCMU_UFLAG_RESPONDED. Retire it instead and let the kernel
+            // consume the response when the tail reaches it. The bit cannot be a
+            // leftover from a reused slot: queue_cmd_ring() memsets the whole entry,
+            // header included, before writing it.
+            bool answered = op == TCMU_OP_CMD && (ent->hdr.uflags & TCMU_UFLAG_RESPONDED);
             // take a dispatch slot BEFORE advancing parse_pos: an interruption
             // (serve_stop() interrupts the pump) must leave the entry queued, with
-            // parse_pos still pointing at it, for the flush drain to pick up
-            if (op == TCMU_OP_CMD && slots.wait_interruptible(1) < 0)
+            // parse_pos still pointing at it, for the flush drain to pick up. An
+            // already-answered entry needs no slot -- it dispatches nothing -- so it
+            // is excluded, which also keeps a backlog of them from blocking behind
+            // the queue-depth semaphore.
+            if (op == TCMU_OP_CMD && !answered && slots.wait_interruptible(1) < 0)
                 break;
             uint32_t off = uio.parse_pos;
             uio.parse_pos = (uio.parse_pos + len) % uio.cmdr_size;
-            if (op == TCMU_OP_CMD) {
+            if (op == TCMU_OP_CMD && !answered) {
                 // in-flight until handle_cmd completes -- set BEFORE the create
                 // and left set if the create fails, so advance_tail cannot
                 // reclaim the space of an entry nobody answered
@@ -784,8 +849,9 @@ struct TcmuServer {
                     LOG_ERROR("tcmu: cannot create the command coroutine at ring offset `, leaving it pending", off);
                 }
             } else {
-                // PAD needs no response; TMR cannot appear (tmr_notification=0).
-                // Mark done so advance_tail reclaims the ring space.
+                // PAD needs no response; TMR cannot appear (tmr_notification=0); and
+                // an already-answered CMD carries one. Mark done so advance_tail
+                // reclaims the ring space.
                 uio.done[off >> 3] = true;
                 marked = true;
             }
@@ -794,15 +860,53 @@ struct TcmuServer {
             coalesced_doorbell();
     }
 
+    // The ring stores every iov_base as an OFFSET into the mmap -- target_core_user.c
+    // says so twice ("write offset relative to mb_addr", "All offsets relative to
+    // mb_addr, not start of entry"). Converting those in place, which is what this
+    // used to do, writes process-local virtual addresses into memory the kernel and
+    // every future daemon can read, and the entry stays where it is until the
+    // contiguous tail reaches it. A process that dies between the conversion and that
+    // tail advance therefore leaves absolute pointers in shared memory, and its
+    // successor -- which resumes from cmd_tail and maps the ring at its own address --
+    // adds its base to them, putting every buffer outside its mapping. So the
+    // conversion goes into a private array and the shared entry is written only at
+    // response time.
+    //
+    // IOV_INLINE covers what the kernel actually hands over: the data area is one page
+    // per block and hw_max_sectors bounds the request, so the spill is a slow path for
+    // a pathological ring rather than the normal case. iov_cnt is read from shared
+    // memory and now sizes an allocation, so it is bounded by the entry's own length
+    // first -- hdr.len covers the 48-byte header-plus-fixed-req and 16 bytes per iov.
+    static constexpr uint32_t IOV_INLINE = 64;
+
     void handle_cmd(tcmu_cmd_entry* ent) {
         DEFER({ in_flight--; slots.signal(1); });
-        uint8_t* cdb = (uint8_t*)((char*)uio.map + ent->req.cdb_off);
+        uint32_t elen = ent->hdr.len_op & ~TCMU_OP_MASK;
         uint32_t iov_cnt = ent->req.iov_cnt;
-        struct iovec* iov = tcmu_entry_iov(ent);
-        // the ring stores iov_base as an OFFSET into the mmap; convert in place
-        // (req and rsp share a union, so this must precede writing the response)
-        for (uint32_t i = 0; i < iov_cnt; i++)
-            iov[i].iov_base = (char*)uio.map + (uintptr_t)iov[i].iov_base;
+        if (elen < 48 || iov_cnt > (elen - 48) / sizeof(struct iovec)) {
+            LOG_ERROR("tcmu: entry at offset ` claims ` iovecs in ` bytes, refusing it",
+                      (uint32_t)((char*)ent - uio.ring), iov_cnt, elen);
+            set_sense(ent, SK_ABORTED_COMMAND, ASC_INTERNAL_ERROR, 0);
+            return;   // the DEFER still releases the slot
+        }
+        uint8_t* cdb = (uint8_t*)((char*)uio.map + ent->req.cdb_off);
+        struct iovec inline_iov[IOV_INLINE];
+        struct iovec* spill = nullptr;
+        DEFER(delete[] spill);
+        struct iovec* iov = inline_iov;
+        if (iov_cnt > IOV_INLINE) {
+            spill = new (std::nothrow) struct iovec[iov_cnt];
+            if (!spill) {
+                set_sense(ent, SK_ABORTED_COMMAND, ASC_INTERNAL_ERROR, 0);
+                return;
+            }
+            iov = spill;
+        }
+        const struct iovec* src = tcmu_entry_iov(ent);
+        for (uint32_t i = 0; i < iov_cnt; i++) {
+            iov[i].iov_len  = src[i].iov_len;
+            iov[i].iov_base = (char*)uio.map + (uintptr_t)src[i].iov_base;
+        }
         size_t data_len = iovector_view(iov, iov_cnt).sum();
 
         emulate(cdb, iov, iov_cnt, data_len, ent);
@@ -828,8 +932,17 @@ struct TcmuServer {
 
     // ----- response writers -----
 
-    void set_status(tcmu_cmd_entry* ent, uint8_t st) { ent->rsp.scsi_status = st; }
+    // The only two writers of a response, and both mark the entry BEFORE touching
+    // the union -- see TCMU_UFLAG_RESPONDED for why that order and not the other.
+    // Nothing else in this file writes ent->rsp, so an entry is marked if and only if
+    // some daemon answered it.
+    void mark_responded(tcmu_cmd_entry* ent) { ent->hdr.uflags |= TCMU_UFLAG_RESPONDED; }
+    void set_status(tcmu_cmd_entry* ent, uint8_t st) {
+        mark_responded(ent);
+        ent->rsp.scsi_status = st;
+    }
     void set_sense(tcmu_cmd_entry* ent, uint8_t key, uint8_t asc, uint8_t ascq) {
+        mark_responded(ent);
         ent->rsp.scsi_status = SAM_CHECK_CONDITION;
         auto s = (uint8_t*)ent->rsp.sense_buffer;
         memset(s, 0, 18);
@@ -865,31 +978,38 @@ struct TcmuServer {
         case OPC_INQUIRY:               emul_inquiry(cdb, iov, iov_cnt, ent); return;
         case OPC_TEST_UNIT_READY:       set_status(ent, SAM_GOOD); return;
         case OPC_SERVICE_ACTION_IN_16:
-            if ((cdb[1] & 0x1f) == SAI_READ_CAPACITY_16) emul_read_capacity(iov, iov_cnt, ent, true);
+            if ((cdb[1] & 0x1f) == SAI_READ_CAPACITY_16) emul_read_capacity(cdb, iov, iov_cnt, ent, true);
             else unknown_op(ent);
             return;
-        case OPC_READ_CAPACITY_10:      emul_read_capacity(iov, iov_cnt, ent, false); return;
+        case OPC_READ_CAPACITY_10:      emul_read_capacity(cdb, iov, iov_cnt, ent, false); return;
         case OPC_MODE_SENSE_6:          emul_mode_sense(cdb, iov, iov_cnt, ent, false); return;
         case OPC_MODE_SENSE_10:         emul_mode_sense(cdb, iov, iov_cnt, ent, true); return;
         case OPC_MODE_SELECT_6:
-        case OPC_MODE_SELECT_10:        set_status(ent, SAM_GOOD); return;  // no-op accept
+        case OPC_MODE_SELECT_10:        emul_mode_select(cdb, iov, iov_cnt, data_len, ent); return;
         case OPC_READ_6: case OPC_READ_10: case OPC_READ_12: case OPC_READ_16:
             emul_read(cdb, iov, iov_cnt, data_len, ent); return;
         case OPC_WRITE_6: case OPC_WRITE_10: case OPC_WRITE_12: case OPC_WRITE_16:
             emul_write(cdb, iov, iov_cnt, data_len, ent); return;
+        case OPC_VERIFY: case OPC_VERIFY_16: emul_verify(cdb, ent); return;
         case OPC_SYNC_CACHE_10: case OPC_SYNC_CACHE_16: emul_sync(ent); return;
-        case OPC_UNMAP:                 emul_unmap(iov, iov_cnt, data_len, ent); return;
+        case OPC_UNMAP:                 emul_unmap(cdb, iov, iov_cnt, data_len, ent); return;
         case OPC_WRITE_SAME_10:
         case OPC_WRITE_SAME_16:         emul_write_same(cdb, iov, iov_cnt, data_len, ent); return;
         case OPC_START_STOP_UNIT:
         case OPC_PREVENT_ALLOW_REMOVAL: set_status(ent, SAM_GOOD); return;  // no-op
-        case OPC_REQUEST_SENSE:         emul_request_sense(iov, iov_cnt, ent); return;
-        case OPC_REPORT_LUNS:           emul_report_luns(iov, iov_cnt, ent); return;
+        case OPC_REQUEST_SENSE:         emul_request_sense(cdb, iov, iov_cnt, ent); return;
+        // REPORT LUNS deliberately has no case. passthrough_parse_cdb() in
+        // target_core_device.c claims it before the command is ever queued to the
+        // ring and answers it with spc_emulate_report_luns(), which reports the LUNs
+        // actually mapped to this backstore -- something a daemon serving one
+        // backstore cannot know. A hand-built reply here was dead code that was also
+        // wrong (it hardcoded LUN 0), so it is gone and the opcode falls through to
+        // unknown_op, which nothing can reach.
         default:                        unknown_op(ent); return;
         }
     }
 
-    // LBA -> byte offset for the read/write/write-same families
+    // LBA -> byte offset for the read/write/write-same/verify families
     uint64_t cdb_byte_off(uint8_t op, const uint8_t* cdb) {
         uint64_t lba;
         switch (op) {
@@ -897,6 +1017,7 @@ struct TcmuServer {
             lba = ((uint64_t)(cdb[1] & 0x1f) << 16) | ((uint64_t)cdb[2] << 8) | cdb[3];
             break;
         case OPC_READ_16: case OPC_WRITE_16: case OPC_WRITE_SAME_16:
+        case OPC_VERIFY_16:
             lba = cdb_be64(cdb + 2);
             break;
         default:  // 10/12-byte forms: 32-bit LBA at cdb[2..5]
@@ -926,7 +1047,13 @@ struct TcmuServer {
     // upstream. Bound the I/O to the CDB's own count and reject a mismatch rather
     // than trust data_len (the whole ring area) to equal what the initiator asked
     // to move. READ/WRITE(6) encode a count of 0 as 256; (10) is a be16 at cdb[7];
-    // (12) a be32 at cdb[7]; (16) a be32 at cdb[10].
+    // (12) a be32 at cdb[6]; (16) a be32 at cdb[10]. The four offsets are the
+    // kernel's own -- transport_get_sectors_{6,10,12,16} in target_core_sbc.c --
+    // and they are not a progression: (12) shares (10)'s LBA width but not its
+    // count offset, because the 12-byte form has no group-number byte between the
+    // LBA and the count. Reading (12)'s be32 at +7 shifts the count left by eight
+    // and folds in cdb[10], the control byte, so a one-block CDB parses as 256
+    // blocks and every legitimate (12) is refused as INVALID FIELD.
     uint64_t cdb_xfer_bytes(uint8_t op, const uint8_t* cdb) {
         uint64_t blocks;
         switch (op) {
@@ -937,7 +1064,7 @@ struct TcmuServer {
             blocks = cdb_be16(cdb + 7);
             break;
         case OPC_READ_12: case OPC_WRITE_12:
-            blocks = cdb_be32(cdb + 7);
+            blocks = cdb_be32(cdb + 6);
             break;
         case OPC_READ_16: case OPC_WRITE_16:
             blocks = cdb_be32(cdb + 10);
@@ -994,13 +1121,23 @@ struct TcmuServer {
             else                     set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
             return;   // nothing landed, so there is nothing to make durable
         }
-        // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is not pure
-        // virtual and its base body discards `flags` and forwards to pwritev, so a
-        // backend that does not override it would report GOOD for this command
+        // Durability is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is not
+        // pure virtual and its base body discards `flags` and forwards to pwritev, so
+        // a backend that does not override it would report GOOD for this command
         // before the bytes were durable. fdatasync is pure virtual, so every backend
         // answers it. Same choice and same reasoning as the shared virtio engine's
         // write-through path, nbd's FUA write and ublk's.
-        if (fua && backend->fdatasync() < 0)
+        //
+        // Two asks reach this sync. `fua` is the initiator asking about this one
+        // write. `write_through` is this device having promised there was no cache to
+        // ask about: it is set exactly when FEATURE_FLUSH is absent, which is when the
+        // caching page reports WCE=0 -- and sd_set_flush_flag() clears BLK_FEAT_FUA
+        // along with BLK_FEAT_WRITE_CACHE when WCE is 0, so such an initiator sends
+        // neither FUA nor SYNCHRONIZE CACHE and every GOOD it receives is this line's
+        // word that the bytes are already durable. A backend opened O_DIRECT makes
+        // the extra fdatasync redundant rather than wrong, which is the same trade the
+        // virtio engine already accepts.
+        if ((fua || write_through) && backend->fdatasync() < 0)
             set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
         else
             set_status(ent, SAM_GOOD);
@@ -1024,9 +1161,27 @@ struct TcmuServer {
         if (!evpd) {
             memset(buf, 0, 36);
             buf[0] = 0x00;   // peripheral qualifier 0, device type 0 (disk)
-            buf[2] = 0x05;   // version: SPC-3
+            // VERSION 0x06 = SPC-4, which is the vintage of what this device
+            // actually implements (READ CAPACITY(16), VPD 0xB0/0xB2, UNMAP,
+            // WRITE SAME(16)). Linux turns the raw byte into scsi_level by adding
+            // one (scsi_scan.c: `sdev->scsi_level = inq_result[2] & 0x0f` then
+            // `if (scsi_level >= 2) scsi_level++`), so 0x05 read as SPC-3 and 0x06
+            // reads as SPC-4; both clear sd.c's `scsi_level > SCSI_SPC_2` gate, so
+            // READ CAPACITY(16) is still the one selected.
+            buf[2] = 0x06;
             buf[3] = 0x02;   // response data format: SPC-3
             buf[4] = 31;     // additional length (36 - 5)
+            // CmdQue (byte 7 bit 1): this device serves commands concurrently --
+            // one coroutine per ring entry, bounded by the queue_depth semaphore --
+            // so tagged queueing is exactly what it supports. Leaving the bit clear
+            // told the initiator the opposite: scsi_scan.c gates
+            // `sdev->tagged_supported`/`simple_tags` on `inq_result[7] & 2`, so a
+            // cleared bit made Linux report queue_type "none" and skip SCMD_TAGGED.
+            // It does not cap queue depth on blk-mq (tcm_loop is not one of the
+            // legacy LLDs that read simple_tags), so this was a capability lie with
+            // a narrow effect rather than a throughput bug -- the same class as the
+            // LBPRZ one: an advertisement that contradicts what the code does.
+            buf[7] = 0x02;
             memcpy(buf + 8,  "PHOTON  ", 8);
             memcpy(buf + 16, "PHOTON BLK      ", 16);
             memcpy(buf + 32, "0001", 4);
@@ -1092,12 +1247,12 @@ struct TcmuServer {
         // of being handed a silent no-op it read as "zeroed the rest".
         buf[4] = 0x01;
         if (features & FEATURE_DISCARD) {
-            put_be32(buf + 20, 0x100000);    // max unmap LBA count
-            put_be32(buf + 24, 32);          // max unmap block descriptor count
+            put_be32(buf + 20, MAX_UNMAP_LBA_COUNT);
+            put_be32(buf + 24, MAX_UNMAP_DESC_COUNT);
             put_be32(buf + 28, 1);           // optimal unmap granularity (blocks)
         }
         if (features & FEATURE_WRITE_ZEROES)
-            put_be64(buf + 36, 0x100000);    // max write same length
+            put_be64(buf + 36, MAX_WRITE_SAME_BLOCKS);
         return 64;
     }
 
@@ -1115,7 +1270,18 @@ struct TcmuServer {
         return 8;
     }
 
-    void emul_read_capacity(struct iovec* iov, uint32_t iov_cnt, tcmu_cmd_entry* ent, bool v16) {
+    void emul_read_capacity(const uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt,
+                            tcmu_cmd_entry* ent, bool v16) {
+        // The 10-byte form's PMI bit (cdb[8] bit 0) and its LBA field are obsolete
+        // in SBC-3 but not ignorable: sbc_emulate_read_capacity rejects a nonzero
+        // LBA when PMI is clear, because a nonzero LBA with PMI clear asks for the
+        // capacity at a specific block, which this device does not compute. Some
+        // compliance tests still send it. The 16-byte form gets no such check
+        // upstream, so it gets none here either.
+        if (!v16 && !(cdb[8] & 0x01) && (cdb[2] | cdb[3] | cdb[4] | cdb[5])) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         // RC16 byte layout the Linux SCSI disk driver parses: [0-7] last LBA,
         // [8-11] block length, [12] protection type + RC basis, [13] low nibble =
         // physical block exponent, [14-15] LBPME/LBPRZ + lowest-aligned LBA. Zero
@@ -1145,6 +1311,41 @@ struct TcmuServer {
         set_status(ent, SAM_GOOD);
     }
 
+    // The caching mode page (0x08), built once and used by both MODE SENSE and
+    // MODE SELECT -- which is the point of it being a function: MODE SELECT has to
+    // reject a parameter list that does not match what MODE SENSE reported, and two
+    // copies of the page are two chances for the advertisement and the enforcement
+    // to disagree. Returns the page's total size in bytes.
+    int build_caching_page(uint8_t* p) {
+        p[0] = 0x08;
+        // Page length 0x12 = 18 bytes of page content after the two-byte header, so
+        // 20 bytes total. This was 0x0a, which described a 12-byte page: the SPC
+        // caching page is 20 bytes and the kernel's own spc_emulate_caching_page
+        // writes 0x12 and returns 20. Linux's sd only reads p[2] (the flags byte),
+        // so the wrong length was invisible to it -- but a MODE SENSE(10) for "all
+        // pages" uses the length field to find the NEXT page, and a MODE SELECT
+        // comparing bytes would have compared the wrong number of them.
+        p[1] = 0x12;
+        memset(p + 2, 0, 18);
+        // WCE (bit 2 of the flags byte) says whether a volatile write cache sits in
+        // front of stable storage. Report it enabled exactly when FEATURE_FLUSH is
+        // negotiated -- the same condition under which create_backstore sets the
+        // kernel's emulate_write_cache attrib -- and make the rest of the device
+        // agree with whichever way it is reported:
+        //   WCE=1: writes land in the backend's cache and the initiator is expected
+        //          to ask for durability, which it can, because it was also told
+        //          SEND FLUSH/FUA -- emul_sync and emul_write's FUA path honour it.
+        //   WCE=0: the initiator is told there is no cache to flush, so it will not
+        //          ask. emul_write therefore makes every ordinary write durable
+        //          itself (`write_through`), which is what a device claiming no
+        //          volatile cache is asserting on every GOOD it returns.
+        // The old code advertised WCE=0 and still acked a bare pwritev into a
+        // buffered file. That is the lie this pairing removes.
+        if (features & FEATURE_FLUSH)
+            p[2] |= 0x04;
+        return 20;
+    }
+
     void emul_mode_sense(uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt, tcmu_cmd_entry* ent,
                          bool ten) {
         uint8_t page = cdb[2] & 0x3f;
@@ -1152,31 +1353,21 @@ struct TcmuServer {
         int hdr = ten ? 8 : 4;
         int n = hdr;
         iovector_view(iov, iov_cnt).memset(0);   // kernel gathers data_length bytes; no stale tail
-        if (page == 0x08 || page == 0x3f) {   // caching page (also for "all pages")
-            buf[n + 0] = 0x08;
-            buf[n + 1] = 0x0a;                // page length 10
-            // WCE (bit 2 of the caching flags) says whether a volatile write cache
-            // sits in front of stable storage. Report it enabled exactly when
-            // FEATURE_FLUSH is negotiated -- the same condition under which
-            // create_backstore sets the kernel's emulate_write_cache attrib -- so an
-            // initiator that needs durability sees a cache to flush and issues
-            // SYNCHRONIZE CACHE, which emul_sync honours via fdatasync. A plain write
-            // here is a bare pwritev into the backend's cache, so leaving WCE 0 would
-            // claim every write is already durable and the initiator would skip the
-            // flush that actually makes it so. The chosen semantics: advertise the
-            // cache and rely on flush/FUA for durability, rather than force every
-            // write through (which is what dropping emul_write's `fua &&` guard would
-            // do, at the cost of a sync per write).
-            if (features & FEATURE_FLUSH)
-                buf[n + 2] |= 0x04;           // WCE
-            n += 12;
-        }
+        if (page == 0x08 || page == 0x3f)        // caching page (also for "all pages")
+            n += build_caching_page(buf + n);
         // DPOFUA (bit 4 of the device-specific byte) reports that the FUA bit in
         // WRITE(10/12/16) is honoured. It is, and unconditionally: emul_write does
         // pwritev then fdatasync whenever cdb[1] & 0x08, and fdatasync is pure
-        // virtual so every backend answers it. FUA is a per-write durability path
-        // distinct from the cache WCE describes, so this bit does not track
-        // FEATURE_FLUSH -- it is set whenever FUA genuinely works, which is always.
+        // virtual so every backend answers it.
+        //
+        // It does NOT give an initiator a durability path when WCE is clear, and an
+        // earlier comment here claimed it did. sd_set_flush_flag() in drivers/scsi/
+        // sd.c reads WCE first and, when it is 0, clears BLK_FEAT_WRITE_CACHE *and*
+        // BLK_FEAT_FUA together -- DPOFUA is parsed and then discarded -- so a Linux
+        // initiator facing WCE=0 sends neither SYNCHRONIZE CACHE nor FUA. The bit is
+        // still reported honestly (the handler does honour FUA), it is simply inert
+        // in that configuration, which is why write_through and not DPOFUA is what
+        // makes a FEATURE_FLUSH-less device tell the truth.
         uint8_t devspec = 0x10;               // DPOFUA
         if (read_only)
             devspec |= 0x80;                  // write-protect
@@ -1191,7 +1382,58 @@ struct TcmuServer {
         set_status(ent, SAM_GOOD);
     }
 
-    void emul_request_sense(struct iovec* iov, uint32_t iov_cnt, tcmu_cmd_entry* ent) {
+    // MODE SELECT. A device with no changeable parameters still has to validate the
+    // parameter list rather than answer GOOD to anything: spc_emulate_modeselect
+    // accepts only a list that writes back what MODE SENSE reported, and rejecting
+    // anything else is what stops an initiator believing it changed something.
+    void emul_mode_select(uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt, size_t data_len,
+                          tcmu_cmd_entry* ent) {
+        bool ten = (cdb[0] == OPC_MODE_SELECT_10);
+        int off = ten ? 8 : 4;
+        if (data_len == 0) { set_status(ent, SAM_GOOD); return; }   // nothing to change
+        if (data_len < (size_t)off + 2) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_PARAM_LEN_ERROR, 0);
+            return;
+        }
+        if (!(cdb[1] & 0x10)) {          // PF must be set: a 4-byte page format is SCSI-1
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        std::vector<uint8_t> p(data_len);
+        iovector_view(iov, iov_cnt).memcpy_to(p.data(), data_len);
+        uint8_t page = p[off] & 0x3f;
+        if (p[off] & 0x40) {             // SPF: a subpage we do not implement
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        if (page != 0x08) {              // the caching page is the only one we report
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        uint8_t want[20];
+        int len = build_caching_page(want);
+        if (data_len < (size_t)off + len) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_PARAM_LEN_ERROR, 0);
+            return;
+        }
+        if (memcmp(p.data() + off, want, len) != 0) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_PARAM, 0);
+            return;
+        }
+        set_status(ent, SAM_GOOD);
+    }
+
+    void emul_request_sense(const uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt,
+                            tcmu_cmd_entry* ent) {
+        // The DESC bit asks for the descriptor format. Everything this device builds
+        // is fixed format (0x70), and spc_emulate_request_sense refuses the request
+        // rather than answer it in the wrong format -- answering with fixed-format
+        // bytes to a descriptor-format ask is how an initiator ends up parsing
+        // garbage.
+        if (cdb[1] & 0x01) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         uint8_t s[18] = {};
         s[0] = 0x70; s[2] = SK_NO_SENSE; s[7] = 10;
         iovector_view(iov, iov_cnt).memset(0);   // kernel gathers data_length bytes; no stale tail
@@ -1199,21 +1441,42 @@ struct TcmuServer {
         set_status(ent, SAM_GOOD);
     }
 
-    void emul_report_luns(struct iovec* iov, uint32_t iov_cnt, tcmu_cmd_entry* ent) {
-        uint8_t buf[16] = {};
-        put_be32(buf, 8);   // LUN list length = 8 (a single LUN 0, all-zero)
-        iovector_view(iov, iov_cnt).memset(0);   // kernel gathers data_length bytes; no stale tail
-        iovector_view(iov, iov_cnt).memcpy_from(buf, 16);
+    // VERIFY: sbc_parse_cdb sets size = 0 and routes both forms to
+    // sbc_emulate_noop, so there is no data phase and nothing to read back -- but it
+    // does run check_lba on the range, so an out-of-range VERIFY is refused rather
+    // than answered GOOD. Verified here for the same reason: this device has no
+    // media to verify against beyond the backend's own error reporting, so the range
+    // check is the whole of the command.
+    void emul_verify(const uint8_t* cdb, tcmu_cmd_entry* ent) {
+        uint8_t op = cdb[0];
+        uint64_t blocks = (op == OPC_VERIFY_16) ? cdb_be32(cdb + 10) : cdb_be16(cdb + 7);
+        uint64_t off = cdb_byte_off(op, cdb);
+        if (out_of_bounds(off, blocks_to_bytes(blocks))) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE, 0);
+            return;
+        }
         set_status(ent, SAM_GOOD);
     }
 
     // UNMAP: the initiator sends a parameter list (8-byte header + 16-byte
     // descriptors) in the data buffer; trim each range. overlaybd skips UNMAP
     // entirely (fstrim fails there); we honor it.
-    void emul_unmap(struct iovec* iov, uint32_t iov_cnt, size_t data_len, tcmu_cmd_entry* ent) {
+    void emul_unmap(const uint8_t* cdb, struct iovec* iov, uint32_t iov_cnt, size_t data_len,
+                    tcmu_cmd_entry* ent) {
         if (read_only) { set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0); return; }
-        if (data_len < 8 || data_len > (1u << 20)) {
+        // cdb[1] is the ANCHOR byte and we never set ANC_SUP, so any nonzero value
+        // asks for something this device does not do. Checked before the length
+        // rules because it is a CDB fault, not a parameter-list one.
+        if (cdb[1]) {
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        if (data_len == 0) { set_status(ent, SAM_GOOD); return; }   // no descriptors: nothing to do
+        if (data_len < 8 || data_len > (1u << 20)) {
+            // Too short to hold the header is a parameter list length error, not an
+            // invalid CDB field; the upper bound is this implementation's own guard
+            // on the allocation below and is reported the same way.
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_PARAM_LEN_ERROR, 0);
             return;
         }
         std::vector<uint8_t> p(data_len);
@@ -1221,17 +1484,41 @@ struct TcmuServer {
         uint16_t list_len = cdb_be16(p.data() + 2);
         if ((size_t)8 + list_len > data_len) list_len = (uint16_t)(data_len - 8);
         int ndesc = list_len / 16;
+        // Enforce the descriptor count this device advertised in VPD 0xB0. Accepting
+        // more than was advertised is the same defect as advertising a limit and not
+        // honouring it, only pointed the other way.
+        if (ndesc > (int)MAX_UNMAP_DESC_COUNT) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_PARAM, 0);
+            return;
+        }
         for (int i = 0; i < ndesc; i++) {
             const uint8_t* d = p.data() + 8 + i * 16;
+            uint64_t nblk = cdb_be32(d + 8);
+            if (nblk > MAX_UNMAP_LBA_COUNT) {
+                set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_PARAM, 0);
+                return;
+            }
             uint64_t off = blocks_to_bytes(cdb_be64(d));
-            uint64_t len = blocks_to_bytes(cdb_be32(d + 8));
-            if (len == 0 || out_of_bounds(off, len))
+            uint64_t len = blocks_to_bytes(nblk);
+            // A zero-length range is a no-op, not an error -- the kernel's
+            // sbc_execute_unmap guards its own execute_unmap call with `if (range)`.
+            if (nblk == 0)
                 continue;
+            // An out-of-range descriptor fails the WHOLE command. Skipping it and
+            // reporting GOOD -- what this did before -- told the initiator the range
+            // was unmapped when nothing had happened to it, which matters because
+            // LBPRZ is advertised: the initiator is entitled to read zeros back from
+            // a range a successful UNMAP covered.
+            if (out_of_bounds(off, len)) {
+                set_sense(ent, SK_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE, 0);
+                return;
+            }
             // LBPRZ (advertised in RC16 byte 14) promises reads after an unmap
             // return zeros, so a backend that cannot punch a hole -- trim() answers
             // EOPNOTSUPP/ENOSYS -- must still zero the range instead of reporting
             // GOOD over untouched blocks. Handled per descriptor, so ranges already
-            // trimmed or zeroed above survive a later descriptor's failure.
+            // trimmed or zeroed above survive a later descriptor's failure, which is
+            // also what the kernel does (it unwinds nothing on the error path).
             if (backend->trim(off, len) == 0)
                 continue;
             if (errno != EOPNOTSUPP && errno != ENOSYS) {
@@ -1252,18 +1539,38 @@ struct TcmuServer {
                          tcmu_cmd_entry* ent) {
         if (read_only) { set_sense(ent, SK_DATA_PROTECT, ASC_WRITE_PROTECTED, 0); return; }
         bool sixteen = (cdb[0] == OPC_WRITE_SAME_16);
-        // cdb[1] flags, per the kernel's sbc_setup_write_same -- which it applies to
-        // BOTH the 10- and 16-byte forms: 0x01 NDOB (16 only), 0x02 LBDATA,
-        // 0x04 PBDATA, 0x08 UNMAP, 0x10 ANCHOR. We emulate WRITE SAME as a
-        // discard/zero operation with no logical or physical block data, so
-        // LBDATA/PBDATA are invalid; ANC_SUP is 0, so ANCHOR is invalid too (and
-        // bit 4 is reserved in the 10-byte form, likewise an invalid field). Reject
-        // them BEFORE the UNMAP branch, which reads the same byte.
+        // cdb[1] flags, as SBC defines them for BOTH the 10- and 16-byte forms:
+        // bits 7-5 WRPROTECT, 0x10 ANCHOR, 0x08 UNMAP, 0x04 PBDATA, 0x02 LBDATA,
+        // 0x01 NDOB (16-byte form only; reserved in the 10-byte one).
+        //
+        // The authority for what this device rejects is SBC, not LIO, and the
+        // distinction is load-bearing: a tcmu backstore's CDB is parsed by
+        // passthrough_parse_cdb() in target_core_device.c, which claims only REPORT
+        // LUNS and the reservation opcodes and never calls sbc_parse_cdb(). So
+        // sbc_setup_write_same()'s verdicts never run for this device, and copying
+        // them would be copying a peer implementation's policy rather than a
+        // standard. Two places they differ, deliberately:
+        //   - LIO answers LBDATA/PBDATA with UNSUPPORTED SCSI OPCODE (ASC 0x20).
+        //     This is a known opcode carrying an unsupported field, so INVALID FIELD
+        //     IN CDB (0x24) is the SBC answer and the one used here.
+        //   - LIO rejects NDOB outright. This device supports it: NDOB means "no
+        //     data-out buffer, write zeros", which is precisely what the zero-fill
+        //     branch below already does, and supporting it is the device's choice.
+        // Reject the unsupported bits BEFORE the UNMAP branch, which reads the same
+        // byte.
+        if (cdb[1] & 0xe0) {   // WRPROTECT: RC16 byte 12 advertises no protection
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
         if (cdb[1] & 0x06) {   // LBDATA | PBDATA
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
             return;
         }
         if (cdb[1] & 0x10) {   // ANCHOR (reserved in the 10-byte form)
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        if (!sixteen && (cdb[1] & 0x01)) {   // NDOB does not exist in the 10-byte form
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
             return;
         }
@@ -1275,6 +1582,13 @@ struct TcmuServer {
         // device" -- matching the kernel's target, which rejects count 0 for both
         // forms rather than compute the remaining range.
         if (nblocks == 0) {
+            set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
+            return;
+        }
+        // Honour the maximum this device advertised in VPD 0xB0. An initiator sizes
+        // its WRITE SAME requests from that field, so exceeding it means either a
+        // broken initiator or an advertisement that drifted from what is enforced.
+        if (nblocks > MAX_WRITE_SAME_BLOCKS) {
             set_sense(ent, SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD, 0);
             return;
         }
@@ -1781,6 +2095,7 @@ struct TcmuDeviceImpl : IBlkDevice {
         snprintf(server.identity, sizeof(server.identity), "%s", cfg.info.identity.c_str());
         server.read_only = cfg.read_only;
         server.features = cfg.info.features;
+        server.write_through = !(cfg.info.features & FEATURE_FLUSH);
         server.spin_us = cfg.spin_us;
         server.pending_capacity_ua = false;
 
@@ -1878,7 +2193,12 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (!started) {
             if (!bs_path[0])
                 return 0;   // virgin, or already shut down: nothing tracked
-            if (acquire_lock() < 0)
+            // Guarded on lock_fd: a previous shutdown() can have left this object
+            // still holding the claim (see the failure path below), and flock is per
+            // open file description, so acquiring again through a fresh open would
+            // answer EWOULDBLOCK -- against ourselves -- and report the device as
+            // held by another server.
+            if (lock_fd < 0 && acquire_lock() < 0)
                 return -1;
             char node[64];
             if (find_uio(node, sizeof(node)) < 0 ||
@@ -1894,13 +2214,27 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (lun_attached)
             detach_lun();
         server.run_serve_stop(/*flush=*/true);
-        release_lock();
         started = false;
         // BEFORE destroy_backstore(): our own disable/rmdir fires a REMOVED that
         // the listener must answer for us, since this vcpu is inside that write
         link.serving = false;
+        // The claim outlives the teardown, not the serving. destroy_backstore() can
+        // fail -- EBUSY when a LUN still references the backstore, or the node is
+        // mounted -- and releasing the lock before it left an ENABLED backstore
+        // wearing a FREE tombstone, which is exactly what list_orphans() and the
+        // HBA's initial_scan hand to the next adopter: a fresh daemon would take over
+        // a registration this one still owns and still has to remove. ublk orders it
+        // the same way for the same reason (DEL_DEV, then release_lock: "the lock is
+        // the only ownership test there is"), and this file's own rollback() already
+        // destroys before releasing. On failure the claim stays held and the retry
+        // above reuses it rather than re-acquiring.
+        //
+        // Holding it across the rmdir is safe against the listener: on_removed() reads
+        // link.serving, which the line above already cleared, so it takes the
+        // "nothing to stop" branch and answers the kernel without touching the lock.
         if (destroy_backstore() < 0)
             return -1;
+        release_lock();
         bs_path[0] = '\0';  // registration gone: shutdown() is now idempotent
         return 0;
     }
@@ -2492,6 +2826,39 @@ struct TcmuHBAImpl : TcmuHBA {
                 return -1;   // devlock_unlink logged it
             return 0;
         }
+        // Claim the tombstone for the whole of the teardown that follows.
+        //
+        // devlock_free above is a PROBE: it takes the flock and drops it before
+        // returning, so between it and the rmdir below a successor daemon can claim
+        // this identity and register its own backstore. What this function would then
+        // tear down is the successor's -- it would rmdir a live registration and
+        // unlink the lock file that holder is sitting on, and since devlock_unlink
+        // removes by path, the successor's next devlock_acquire lands on a NEW inode:
+        // two processes each holding a successful exclusive lock on the same name.
+        // The backstore-only configuration has nothing else to catch that; configfs
+        // answers EBUSY on an rmdir only while a LUN symlink references the backstore
+        // (s_dependent_count), so with no tcm_loop LUN attached the kernel guards
+        // nothing. ublk, vduse and vhost-user all hold their claim across destructive
+        // cleanup. This was the one that probed.
+        //
+        // EISDIR falls through UNCLAIMED, deliberately. devlock_free reads a directory
+        // standing in for the tombstone as free -- open(O_RDONLY) and flock both
+        // succeed on a directory fd -- while devlock_acquire refuses one, because
+        // O_CREAT|O_RDWR on a directory is EISDIR. Claiming unconditionally would
+        // therefore turn "an operator put a directory in the lock dir" into a refusal
+        // to remove the registration, and blk.h's contract for this call, which
+        // test-tcmu.cpp pins, is that the registration goes first and the EISDIR is
+        // reported afterwards. Leaving it unclaimed costs nothing: a directory is not
+        // a tombstone any daemon can claim, so there is no successor to race with.
+        int claim_fd = -1;
+        if (devlock_acquire(lock_dir, lock, &claim_fd) < 0 && errno != EISDIR) {
+            if (errno == EBUSY)
+                LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` was claimed between the probe and here; leaving it alone", bs_name);
+            return -1;   // devlock_acquire logged it
+        }
+        // Preserve errno across the release: every return below has already decided
+        // what the caller sees, and flock/close inside devlock_release would clobber it.
+        DEFER({ int e = errno; devlock_release(claim_fd); errno = e; });
         // disable is best-effort exactly as in destroy_backstore(): the kernel may
         // already have torn the device down, and the rmdir is the real cleanup.
         char p[PATH_MAX];

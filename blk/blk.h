@@ -43,9 +43,17 @@ static constexpr uint64_t FEATURE_WRITE_ZEROES  = 1ull << 2;
 // Where a request backlog survives detach() -- that is, what a later start(),
 // possibly in another process, has to harvest. KernelSide: our own registration
 // retains it and start() picks it up. What it retains is the backlog nobody fetched
-// yet; entries a daemon already dispatched are not recoverable from a split ring, so
-// a start() that finds any outstanding refuses the adoption rather than guess (see
-// BlkAdoption). PeerSide: the frontend retains it, so only a reconnecting peer can
+// yet; an entry a daemon had already DISPATCHED when it died is a different thing,
+// and the three KernelSide transports answer it three ways, so this axis promises
+// only that the queue survives and not how a half-finished command is settled:
+// ublk asks the kernel to reissue in-flight I/O to the next daemon
+// (UBLK_F_USER_RECOVERY_REISSUE); vduse refuses an adoption whose ring it cannot
+// prove quiescent rather than guess at a cursor it has no readback for; tcmu marks
+// each entry it answers in the shared ring header, so a successor can tell an
+// answered entry from an unanswered one and retire the former instead of
+// re-dispatching a union that now holds a response. BlkAdoption is what grades the
+// config comparison an adoption performs -- read it alongside this, not instead.
+// PeerSide: the frontend retains it, so only a reconnecting peer can
 // bring it back and there is nothing for us to harvest. None: the transport keeps no
 // queue across a detach(), so "left pending for the next start()" describes nothing.
 enum class BlkBacklog : uint8_t { None, KernelSide, PeerSide };
