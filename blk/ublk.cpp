@@ -478,6 +478,15 @@ struct UblkDeviceImpl : IBlkDevice {
     bool started = false;
     bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
     bool read_only = false;
+    // An ordinary WRITE has to be on stable storage before its completion is
+    // published. The exact complement of want_attrs()'s volatile-cache/FUA
+    // advertisement, derived from the same word in the constructor so the two cannot
+    // drift. Same name, same decision and same default as the shared virtio engine's
+    // write_through (utils.h) and nbd's, which is where the reasoning is written out;
+    // serve_req()'s WRITE has the ublk half of it. The default is never observed --
+    // the constructor always derives it -- and is true for the same reason theirs is:
+    // a path that failed to derive it would be slow rather than lossy.
+    bool write_through = true;
     uint8_t sector_shift = 9;
 
     // The scope directory this device claims its tombstone in, handed over by the
@@ -490,6 +499,13 @@ struct UblkDeviceImpl : IBlkDevice {
         sector_shift = cfg.info.sector_size_shift;
         features = cfg.info.features;
         read_only = cfg.read_only;
+        // Derived once, off the same word want_attrs() advertises from: no
+        // FEATURE_FLUSH means no UBLK_ATTR_VOLATILE_CACHE and no UBLK_ATTR_FUA, and a
+        // device registered without either has no command the kernel can send to ask
+        // it to persist anything. The config is immutable, so this needs no per-start()
+        // reset -- and deriving it anywhere else would risk the two halves of one
+        // decision disagreeing about which mode the device is in.
+        write_through = !(features & FEATURE_FLUSH);
         spin_us = cfg.spin_us;
         dev_sectors = cfg.info.size >> UBLK_SECTOR_SHIFT;
         // a cfg field left 0 means "default", and the config is immutable, so
@@ -603,16 +619,30 @@ struct UblkDeviceImpl : IBlkDevice {
                 res = -EIO;
                 break;   // nothing landed, so there is nothing to make durable
             }
-            // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is not
-            // pure virtual and its base body discards `flags` and forwards to
+            // The persist is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is
+            // not pure virtual and its base body discards `flags` and forwards to
             // pwritev, so a backend that does not override it would complete this
             // request before the bytes were durable -- and the completion is the
-            // device's word that they are. fdatasync is pure virtual, so every
-            // backend answers it. Same choice and same reasoning as the shared
-            // virtio engine's write-through path and nbd's FUA write, which is what
-            // keeps a backend that does override pwritev2 from behaving differently
-            // per transport.
-            res = (!fua || backend->fdatasync() == 0) ? (int32_t)len : -EIO;
+            // device's word that they are. fdatasync is pure virtual, so every backend
+            // answers it. Same choice and same reasoning as the shared virtio engine's
+            // write-through path and nbd's FUA write, which is what keeps a backend that
+            // does override pwritev2 from behaving differently per transport.
+            //
+            // Two callers of that persist, and they are disjoint rather than redundant.
+            // `fua` is a request the kernel made, and it could only make it because
+            // want_attrs() advertised UBLK_ATTR_FUA. write_through is the case where
+            // want_attrs() advertised neither that nor UBLK_ATTR_VOLATILE_CACHE, and
+            // then the kernel sets no write cache on the gendisk: the block layer reads
+            // every completion as already durable, so it sends no UBLK_IO_OP_FLUSH and
+            // can set no UBLK_IO_F_FUA either, and this ordinary WRITE's completion is
+            // the only place durability was ever promised. A buffered backend has not
+            // reached stable storage when pwritev returns, so the promise would be
+            // false. That is what a client with no FEATURE_FLUSH is entitled not to have
+            // to ask about -- the same entitlement utils.h states for a driver that
+            // declined VIRTIO_BLK_F_FLUSH. Syncing while FEATURE_FLUSH IS present would
+            // be the needless syscall per write that advertising the cache exists to
+            // avoid: there the kernel has a FLUSH command and uses it.
+            res = (!(fua || write_through) || backend->fdatasync() == 0) ? (int32_t)len : -EIO;
             break;
         }
         case UBLK_IO_OP_FLUSH:
@@ -953,7 +983,23 @@ struct UblkDeviceImpl : IBlkDevice {
     // ----- params -----
 
     // the attrs to register for the CURRENT config; fill_params publishes
-    // them, validate_params compares the registered ones against them
+    // them, validate_params compares the registered ones against them.
+    //
+    // Dropping BOTH cache bits when the config has no FEATURE_FLUSH is a claim about
+    // the device, not a missing feature: the kernel turns them into
+    // blk_queue_write_cache(q, false, false), so the block layer believes every
+    // completion is already durable and will ask for persistence with neither a
+    // UBLK_IO_OP_FLUSH nor a UBLK_IO_F_FUA. serve_req()'s WRITE has to make that claim
+    // true, and does it through write_through -- derived from this same test, in the
+    // constructor. Keeping the two halves on one predicate is what stops an attrs
+    // change here from silently turning a durable device into a lying one.
+    //
+    // Not advertised unconditionally, either: params_features() reads FEATURE_FLUSH back
+    // out of these two bits, so a VOLATILE_CACHE the config never asked for would make
+    // list_orphans() report a feature the registration does not have and fail the
+    // feature-drift half of validate_params() for every device built from a config
+    // without FEATURE_FLUSH -- and SET_PARAMS is refused once a device has been used, so
+    // nothing could repair the registration.
     uint32_t want_attrs() const {
         return (read_only ? UBLK_ATTR_READ_ONLY : 0) |
                ((features & FEATURE_FLUSH) ? (UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA) : 0);

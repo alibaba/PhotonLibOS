@@ -1697,6 +1697,103 @@ TEST_F(NbdTest, an_fua_write_is_durable_before_its_reply) {
 #endif
 }
 
+// The other half of the durability contract, and the one the FUA case above
+// cannot reach. An export that did NOT offer FLUSH leaves its client no way to
+// ask: the kernel's nbd client clears the queue's write-cache and FUA flags for
+// such an export, never sends NBD_CMD_FLUSH and never sets NBD_REQ_FUA, and
+// trusts every acked write to be durable already. So an ORDINARY write has to be
+// durable before its reply -- write_through, the same decision the shared virtio
+// engine makes when the driver declined VIRTIO_BLK_F_FLUSH. writes == datasyncs
+// is an exact assertion, not a lower bound: one fdatasync per write that reached
+// the backend. syncs == 0 pins the call to fdatasync, the one the FUA path and
+// the FLUSH handler both use -- a write-through write has to match them rather
+// than reach for the heavier one. The two flag checks pin the premise on what
+// actually went out: the descriptor says FLUSH was not negotiated, and the
+// client's handshake really was not offered a way to ask.
+TEST_F(NbdTest, an_ordinary_write_is_durable_when_flush_is_not_offered) {
+    test::BackendProbe probe(file);
+    BlkDevInfo info = make_info();
+    info.features &= ~FEATURE_FLUSH;
+    NbdConfig cfg(info);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    EXPECT_EQ(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_EQ(0, cli.trans_flags & NBD_TRANS_SEND_FLUSH);
+    std::vector<char> wbuf(8192, 0x2b);
+
+    // two ordinary writes, no FUA: each one's reply may arrive only after its
+    // bytes are durable, so the counts move together
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 8192, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(2, probe.writes.load());
+    EXPECT_EQ(2, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+    // The persist asked for and FAILED: the reply has to carry the failure, not a
+    // success the data never earned. fail_syncs still counts (harness.h), so the
+    // third datasync says "tried and failed" where a stuck count of 2 would say
+    // "never tried", and the NBD_EIO reply is what keeps the two halves -- sync
+    // attempted, success withheld -- pinned together.
+    probe.fail_syncs = true;
+    EXPECT_EQ((int)NBD_EIO, cli.xfer(NBD_CMD_WRITE, 16384, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(3, probe.writes.load());
+    EXPECT_EQ(3, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
+// The control the case above needs. WITH FLUSH offered, the client keeps
+// NBD_CMD_FLUSH and NBD_REQ_FUA and can batch durability behind one FLUSH after
+// many writes, so an ordinary write must NOT pay a per-write fdatasync. Without
+// this case, a build that syncs unconditionally would pass the no-FLUSH case
+// too, and the write_through guard would be untestable in the direction that
+// protects write-back. The FLUSH at the end is the "other way to ask" whose
+// existence is what justifies the difference: it reaches the backend exactly
+// once, and it is the only thing that does.
+TEST_F(NbdTest, an_ordinary_write_stays_cached_when_flush_is_offered) {
+    test::BackendProbe probe(file);
+    NbdConfig cfg(make_info());   // make_info() requests FEATURE_FLUSH
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    EXPECT_NE(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_FLUSH);
+    std::vector<char> wbuf(8192, 0x77);
+
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 8192, wbuf.data(), wbuf.size()));
+    EXPECT_EQ(2, probe.writes.load());
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+    // the batched ask the client kept the ability to make
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
 // A short count is a legal pwritev result and leaves errno alone. Translating it with
 // errno therefore reported whatever the last unrelated failure happened to leave
 // behind -- and errno_to_nbd(0) is NBD_SUCCESS, so a zero-fill that wrote 8191 of

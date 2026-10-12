@@ -2063,6 +2063,133 @@ TEST_F(UblkTest, fua) {
     EXPECT_EQ(0u, cf.dsync_writes.load());
 }
 
+// The write phase the durability cases below measure: O_DIRECT writes that the
+// child never asks to be persisted. StressCfg::flush is false, so this phase is the
+// only source of I/O the probe's counters can describe. device_io is NOT usable here
+// and the reason is the one test-vduse's write_back_when_flush_is_negotiated records:
+// its consumer child fsyncs the node after every write, and on a device that
+// advertised a volatile write cache that fsync arrives as a FLUSH -- so the control
+// below would count one datasync and read as a failure of the thing it exists to
+// rule out. For the same reason the mode stays DISJOINT (the default): SHARED's
+// poison pass fsyncs unconditionally, `flush` or not. One definition here, so the
+// cases cannot drift onto two different phases and compare counters that never meant
+// the same thing.
+static test::StressResult unpersisted_writes(const std::string& node) {
+    test::StressCfg sc;
+    sc.node = node;
+    sc.size = IMG_SIZE;
+    sc.threads = 2;
+    sc.iters = 4;
+    return test::stress_off_vcpu(sc);
+}
+
+// `fua` above pins the durability the kernel ASKS for. The three cases below pin the
+// other half: what the device owes when the kernel has no way to ask.
+//
+// make_info() sets FEATURE_FLUSH, so every other case in this suite registers
+// UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA and the features=0 configuration was
+// entirely uncovered. Without FEATURE_FLUSH want_attrs() advertises neither cache bit,
+// the kernel calls blk_queue_write_cache(q, false, false), and the block layer then
+// believes every completion is already durable -- it issues no UBLK_IO_OP_FLUSH and
+// sets no UBLK_IO_F_FUA. serve_req() has to make that belief true itself, which is the
+// shared virtio engine's write_through (utils.h) reached from a ublk config instead of
+// from a declined VIRTIO_BLK_F_FLUSH.
+//
+// The control comes first and is not decoration. Without it the experiment also passes
+// on a build that syncs unconditionally, and an unconditional sync is the exact
+// regression advertising the volatile cache exists to avoid: one extra syscall per
+// write on every device in the FEATURE_FLUSH configuration, which is the default one.
+
+// CONTROL: FEATURE_FLUSH present, so a volatile write cache is advertised and an
+// ordinary WRITE's completion promises nothing about stable storage. Nothing asked for
+// persistence, so nothing may have persisted.
+TEST_F(UblkTest, write_back_when_flush_is_configured) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());   // FEATURE_FLUSH | DISCARD | WRITE_ZEROES
+    test::BackendProbe probe(file);   // declared before dev: it does not own what it
+                                      // wraps, and the device's last IO must land
+                                      // while it is alive
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    test::StressResult sr = unpersisted_writes(node);
+    // the success counter first: a phase that wrote nothing would satisfy every count
+    // below by doing nothing at all
+    ASSERT_GT(sr.ios, 0u) << sr.first_error;
+    ASSERT_EQ(0, sr.failures) << sr.first_error;
+    EXPECT_GT(probe.writes.load(), 0);
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+    // the descriptor half of the same fact: the mode is derived from the feature set
+    // this config asked for and start() published, not from anything guessed later
+    EXPECT_EQ(FEATURE_FLUSH, dev->get_info().negotiated & FEATURE_FLUSH);
+}
+
+// EXPERIMENT: no FEATURE_FLUSH, so no cache bit was advertised and no flush command
+// exists. Every WRITE has to be durable before its completion, which makes the two
+// counts equal -- an equality rather than a `> 0`, so a device that synced once and
+// then stopped is caught too.
+TEST_F(UblkTest, write_through_when_flush_is_not_configured) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.features = 0;   // nothing asked for, so nothing advertised
+    test::BackendProbe probe(file);
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    test::StressResult sr = unpersisted_writes(node);
+    ASSERT_GT(sr.ios, 0u) << sr.first_error;
+    ASSERT_EQ(0, sr.failures) << sr.first_error;
+    EXPECT_GT(probe.writes.load(), 0);
+    EXPECT_EQ(probe.writes.load(), probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+    EXPECT_EQ(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+}
+
+// The failure half of the experiment, and the only guard on "a persist that failed must
+// not be reported as a completed write". harness.h's fail_syncs still COUNTS the
+// attempt, so the two counters separate "tried and failed" from "never tried" -- and
+// that distinction is the whole case: a device that skipped the sync would leave both
+// at 0 and hand the consumer a success for bytes that are in the backend's page cache
+// and nowhere else. The completion is the device's word that the bytes are durable, so
+// the word has to be withdrawn, and a ublk case can only see the withdrawal as the
+// consumer child's own failed pwrite.
+TEST_F(UblkTest, a_failed_write_through_persist_fails_the_write) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.features = 0;   // the mode where an ordinary WRITE owes the persist
+    test::BackendProbe probe(file);
+    probe.fail_syncs = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    test::StressResult sr = unpersisted_writes(node);
+    // The write REACHED the backend and its persist was ASKED FOR -- one of each per
+    // thread, because the first failure ends that thread's phase. `writes` is also the
+    // non-vacuity guard: without it an open() that never got a node would satisfy every
+    // count below by doing nothing at all.
+    EXPECT_GT(probe.writes.load(), 0);
+    EXPECT_EQ(probe.writes.load(), probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+    // ... and the failure reached the consumer as a failed pwrite, not as a completion
+    // that claimed durable bytes. ios counts only validated write+read-back pairs, so 0
+    // says no write was accepted.
+    EXPECT_GT(sr.failures, 0);
+    EXPECT_EQ(0u, sr.ios);
+}
+
 // One controller = one scope. This one builds a SECOND controller on a custom dir
 // and checks that its device and its orphan list agree on it, while the fixture's
 // controller -- on SUITE_LOCKS -- sees neither.

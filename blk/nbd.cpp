@@ -374,6 +374,18 @@ struct NbdDeviceImpl : NbdDevice {
     // so no holder can be preempted while another vcpu spins.
     photon::spinlock conns_lock;
     uint16_t trans_flags = 0;
+    // An ordinary (non-FUA) NBD_CMD_WRITE is made durable before its ack exactly
+    // when FLUSH was NOT advertised: a client of an export without
+    // NBD_FLAG_SEND_FLUSH has no command to ask for durability with and believes
+    // every acked write is already on stable storage. Same name and same decision
+    // as the shared virtio engine's write_through (utils.h), derived here from
+    // what start() put in trans_flags. Set in start() before any connection is
+    // served and read from execute() coroutines afterwards, so a plain bool.
+    // Defaults to write-through, the same wrong-way-round-looking default the
+    // virtio engine chose: a start() that never derived this is slow, whereas one
+    // that defaulted the other way is lossy, and the slow one is the one a test
+    // notices.
+    bool write_through = true;
     uint32_t stack_size = DEFAULT_STACK_SIZE;   // copied from cfg at start()
     uint64_t stall_us = 0;                      // cfg.stall_timeout in us; 0 = none
 
@@ -482,9 +494,18 @@ struct NbdDeviceImpl : NbdDevice {
 
         trans_flags = NBD_TRANS_HAS_FLAGS;
         if (cfg.read_only)                            trans_flags |= NBD_TRANS_READ_ONLY;
+        // Not offering SEND_FLUSH is a promise about the writes we ack, not only
+        // about the commands the client may send: the kernel's nbd client clears
+        // the queue's write-cache and FUA flags for such an export, never sends
+        // NBD_CMD_FLUSH and never sets NBD_REQ_FUA, and trusts every ack as
+        // durable. execute()'s WRITE path honours that trust via write_through.
         if (cfg.info.features & FEATURE_FLUSH)        trans_flags |= NBD_TRANS_SEND_FLUSH | NBD_TRANS_SEND_FUA;
         if (cfg.info.features & FEATURE_DISCARD)      trans_flags |= NBD_TRANS_SEND_TRIM;
         if (cfg.info.features & FEATURE_WRITE_ZEROES) trans_flags |= NBD_TRANS_SEND_WRITE_ZEROES;
+        // read back off trans_flags rather than re-derived from the request, same
+        // one-source-of-truth rule as cfg.info.negotiated at the success tail:
+        // what we advertised is what the write path must live up to
+        write_through = !(trans_flags & NBD_TRANS_SEND_FLUSH);
 
         uint32_t cap = cfg.queue_depth ? cfg.queue_depth : DEFAULT_QUEUE_DEPTH;
         if (depth.count() == 0)
@@ -930,18 +951,28 @@ struct NbdDeviceImpl : NbdDevice {
                     err = errno_to_nbd(w < 0 ? errno : EIO);
                     break;   // nothing landed, so there is nothing to make durable
                 }
-                // FUA is pwritev + fdatasync, not pwritev2(RWF_DSYNC): pwritev2 is
-                // not pure virtual, and its base body discards `flags` and forwards
-                // to pwritev, so a backend that does not override it would have
-                // acked this write before it was durable -- and the reply below is
-                // the device's word that it is. fdatasync IS pure virtual, so every
-                // backend answers it. Same choice and same reasoning as the shared
-                // virtio engine's write-through path, which this must not disagree
-                // with. It costs a second syscall, and one that waits for the whole
-                // file's dirty data rather than only this range, which is what the
-                // client asked for by setting FUA on this request instead of
-                // batching a FLUSH.
-                if ((cflags & NBD_REQ_FUA) && backend->fdatasync() < 0)
+                // The sync after a landed write is pwritev + fdatasync, never
+                // pwritev2(RWF_DSYNC): pwritev2 is not pure virtual, and its base
+                // body discards `flags` and forwards to pwritev, so a backend that
+                // does not override it would have acked this write before it was
+                // durable -- and the reply below is the device's word that it is.
+                // fdatasync IS pure virtual, so every backend answers it. Same
+                // choice and same reasoning as the shared virtio engine's
+                // write-through path, which this must not disagree with.
+                //
+                // Two asks reach this sync, and either alone is sufficient. The
+                // client set FUA on THIS request, choosing to pay for durability
+                // now instead of batching a FLUSH. Or write_through: we did not
+                // advertise SEND_FLUSH, so the client has no command to ask with
+                // and believes every acked write is already durable -- the ack
+                // must not be a lie. When FLUSH WAS advertised the sync must stay
+                // conditional: the client can batch many writes behind one FLUSH,
+                // and fdatasync is a second syscall per write, one that waits for
+                // the whole file's dirty data rather than only this range. A
+                // failed sync is reported exactly like the FUA path's: the err
+                // below replaces NBD_SUCCESS in the reply, so a write whose
+                // durability could not be had is not acked as durable.
+                if (((cflags & NBD_REQ_FUA) || write_through) && backend->fdatasync() < 0)
                     err = errno_to_nbd(errno);
             }
             break;
