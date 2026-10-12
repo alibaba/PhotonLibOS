@@ -3147,10 +3147,433 @@ TEST_F(TcmuTest, shutdown_keeps_the_claim_when_backstore_removal_fails) {
     EXPECT_NE(0, ::access(BS_PATH, F_OK)) << "the registration survived a successful shutdown";
 }
 
+// ---------------------------------------------------------------------------
+// The abrupt-exit witness for the ring-replay fix.
+//
+// Everything else in this suite reaches a dead daemon through detach(), and no
+// detach() can produce the state this needs: serve_stop()'s `while (in_flight)`
+// wait is unconditional, and every handle_cmd advances cmd_tail before it
+// decrements in_flight, so on any orderly exit nothing dispatched is left
+// un-tailed. The bug lives in the window between a handler writing into the
+// shared ring and the tail reaching it, and the only way into that window is a
+// process that dies without running any of its teardown.
+//
+// So this is a child, in the harness's suite-child mode -- the mode that exists
+// for a child which is not a consumer, and which drops the inherited fd table and
+// bounds the wait before the body runs. The child builds a whole server (photon,
+// HBA, device, LUN), parks the ring in the target state, and _exit()s: no
+// serve_stop, no munmap, no devlock_release, no destructors. The kernel keeps the
+// ring for it: tcmu_release() frees only the data of KEEP_BUF commands and clears
+// TCMU_DEV_BIT_OPEN, so neither cmd_head, cmd_tail nor the entries between them are
+// a daemon's to lose, and its successor resumes from cmd_tail exactly as an
+// adopting start() after a detach() does.
+//
+// The state it leaves, and why it exercises BOTH halves of the fix:
+//   entry A -- dispatched, parked inside the backend's pwritev, never answered.
+//              Its union still holds a request, so a successor must re-dispatch
+//              it. Before the fix the iov_base fields had been converted to
+//              absolute pointers IN PLACE, so the successor added its own mapping
+//              base to them and every buffer landed outside its mapping.
+//   entry B -- dispatched, answered GOOD, marked. Its bytes are already in the
+//              backend, so this is the "committed data survives the crash" half.
+//   entry X -- dispatched, answered CHECK CONDITION, marked. This is the one that
+//              gives the marker teeth, and B alone cannot: a GOOD response leaves
+//              the whole sense buffer zero, so a successor that re-dispatched it
+//              would read cdb_off 0 and decode the mailbox's version byte as an
+//              unknown opcode -- harmless. X's sense carries an ASC at
+//              sense_buffer[12], which is cdb_off's byte 4, so re-dispatching it
+//              reads cdb_off = ASC << 32, an address tens of gigabytes past the
+//              mapping, and faults on the first byte of the CDB.
+//
+// B and X are both stuck behind A because advance_tail() publishes only a
+// contiguous run, and a re-dispatch of either reads iov_cnt out of
+// {scsi_status, padding} and cdb_off out of sense_buffer[8..15].
+//
+// The parent then adopts and asserts on the machine, not on the child's word: a
+// successful start() that did not fault, entry A's pattern present (the successor
+// harvested it), B's and X's patterns present from the writes the dead daemon
+// already completed, an untouched region still zero -- the corruption detector --
+// and one live write through the adopted ring.
+// ---------------------------------------------------------------------------
+
+// The child's failure codes, written into ConsumerReport::stage. There is no code
+// for success and there cannot be one: the success path is _exit(), which is the
+// only thing that stops the destructors and serve_stop() from draining the ring the
+// case is about, and a child that exits without the harness publishing `magic` gives
+// the parent nothing but its wait status. So the parent reads success as
+// "status 0 and stage CONS_EXIT" -- the one combination this body can produce, since
+// every failure returns an errno and the harness publishes that. 1000+ because the
+// codes below that are the harness's own.
+enum : int32_t {
+    CRASH_DONE  = 0,
+    CRASH_ARGV  = 1000,   // its argv did not decode
+    CRASH_INIT,           // photon::init
+    CRASH_IMAGE,          // opening the backend image
+    CRASH_HBA,            // new_tcmu_hba
+    CRASH_START,          // new_device / start()
+    CRASH_NODE,           // waiting for the scsi node
+    CRASH_PARK,           // the first write never reached the gate
+    CRASH_LAND,           // the second write never returned from the backend
+    CRASH_SHORT,          // the short write never returned from the backend
+};
+
+static const char* crash_step_name(int32_t s) {
+    switch (s) {
+    case CRASH_DONE:  return "nothing failed";
+    case CRASH_ARGV:  return "decoding its argv";
+    case CRASH_INIT:  return "photon::init";
+    case CRASH_IMAGE: return "opening the backend image";
+    case CRASH_HBA:   return "creating the HBA";
+    case CRASH_START: return "creating or starting the device";
+    case CRASH_NODE:  return "waiting for the scsi node";
+    case CRASH_PARK:  return "parking the first write in the backend";
+    case CRASH_LAND:  return "the second write reaching the backend";
+    case CRASH_SHORT: return "the short write reaching the backend";
+    default:          return "an unknown step";
+    }
+}
+
+// The child builds an HBA, starts a device, attaches a loopback LUN and waits for
+// the node, so it needs room for a scsi scan on top of the two writes -- and the
+// scan is the expensive part, measured at a minute in this suite's own
+// shutdown_keeps_the_claim case. Generous because an abandoned child is worse than
+// a slow one: the harness never kills it, and this one would still be serving.
+static constexpr uint64_t CRASH_WAIT_US = 240ull * 1000000;
+// cmd_time_out for the child's device, in seconds. Short on purpose: the three
+// commands it leaves behind are never answered, and letting the kernel expire them
+// is the more interesting case for the successor -- tcmu_check_expired_ring_cmd()
+// sets TCMU_CMD_BIT_EXPIRED, completes the se_cmd and leaves both the ring entry and
+// its data area alone, so retiring a marked entry still finds the command and
+// tcmu_handle_completion() treats an expired one as reclaim-and-free rather than as a
+// broken ring. Freeing the data area waits for the tail to reach the entry, which is
+// why an expired entry A still carries the payload its successor is about to write.
+static constexpr uint64_t CRASH_CMD_TIMEOUT = 5;
+// How long the child waits between the short write returning from the backend and
+// _exit(). handle_cmd writes the response and the mark immediately after emul_write
+// returns -- no blocking step in between -- so this is margin, not a race being
+// papered over.
+static constexpr uint64_t CRASH_SETTLE_US = 500000;
+
+// One page per write, so each is a single SCSI command and therefore a single ring
+// entry. IO_LEN (256 KiB) would be several: hw_max_sectors bounds a request and the
+// block layer splits what exceeds it, and a split turns "entry A is parked, entries B
+// and X are answered behind it" into a race over how many of A's pieces are still
+// queued.
+static constexpr size_t CRASH_LEN = 4096;
+
+// Where the three writes land, a region nothing ever writes -- the corruption
+// detector, since a successor that re-dispatched an answered entry would take cdb_off
+// out of its sense data and put its buffers somewhere else -- and a fourth region for
+// the live IO that ends the case, so that check cannot be read as having disturbed
+// any of the three it follows.
+static constexpr uint64_t CRASH_OFF_A = IO_OFF;                 // parked, un-answered
+static constexpr uint64_t CRASH_OFF_B = 9ull << 20;             // answered GOOD
+static constexpr uint64_t CRASH_OFF_X = 17ull << 20;            // answered CHECK CONDITION
+static constexpr uint64_t CRASH_OFF_C = 32ull << 20;            // never touched
+static constexpr uint64_t CRASH_OFF_D = 40ull << 20;            // the adopted device's own IO
+
+// A backend that parks its FIRST pwritev and never lets it go, so the command
+// carrying it stays dispatched and un-answered while later ones are served and
+// answered behind it. That ordering is the whole fixture: the ring's tail can only
+// advance contiguously, so answered entries behind a parked one are exactly the
+// state a crash leaves for a successor to misread.
+//
+// The wait is photon::thread_usleep, not usleep: this runs on a handle_cmd
+// coroutine, and blocking the vcpu would stop the pump that has to dispatch the
+// later commands. `open` is never set -- the process ends by _exit() with the write
+// still parked, which is the point, so the loop below is not a leak.
+//
+// `shorten` is the other knob, and it is what makes the third entry a CHECK
+// CONDITION: emul_write answers a short count with MEDIUM ERROR, whose ASC lands at
+// sense_buffer[12] -- cdb_off's byte 4 -- so a successor that re-dispatched that
+// entry would fault tens of gigabytes outside its mapping rather than decode
+// something harmless. The count is shortened, not the write: the bytes do land, so
+// the parent can see that the dead daemon really served it.
+class FirstWriteGate : public test::BackendProbe {
+public:
+    // does NOT own f, exactly as BackendProbe does not
+    explicit FirstWriteGate(fs::IFile* f) : test::BackendProbe(f) {}
+
+    std::atomic<int> parked{0};   // 1 while the first write is held
+    std::atomic<int> landed{0};   // writes that reached the underlying file
+    std::atomic<bool> open{false};
+    std::atomic<bool> shorten{false};
+
+    ssize_t pwritev(const struct iovec* iov, int iovcnt, off_t offset) override {
+        if (landed.load() + parked.load() == 0) {
+            parked.store(1);
+            while (!open.load())
+                photon::thread_usleep(2000);
+            parked.store(0);
+        }
+        ssize_t r = test::BackendProbe::pwritev(iov, iovcnt, offset);
+        if (r > 0) {
+            landed.fetch_add(1);
+            if (shorten.load())
+                r -= 1;
+        }
+        return r;
+    }
+};
+
+// The child. Returns only on a failure; the success path is _exit(), which is what
+// makes the ring state survive it.
+static int tcmu_crash_child(const test::ConsumerSuiteChild& c) {
+    // argv is [0] this binary, [1] the sentinel, [2] the tag, [3] the channel fd,
+    // [4..] the suite's fields with the node LAST. This body takes no fields of its
+    // own: the identity, image path, subtype, prefix and lock dir are all constants
+    // of this same binary, which is what the child is.
+    if (c.argc < 5 || !c.rep) {
+        if (c.rep)
+            c.rep->stage = CRASH_ARGV;
+        return EINVAL;
+    }
+    test::ConsumerReport* rep = c.rep;
+    int32_t step = CRASH_DONE;
+    // Written straight into the page rather than kept locally and copied at the end,
+    // because the success path never reaches an end: _exit() runs no destructors.
+    auto note = [&](int32_t s, int e) {
+        if (step != CRASH_DONE) return;
+        step = s;
+        rep->stage = s;
+        rep->child_errno = e;
+    };
+
+    if (photon::init(test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE) != 0) {
+        note(CRASH_INIT, EIO);
+        return EIO;
+    }
+    // No photon::fini() and no DEFER anywhere below: this child's contract is that
+    // nothing of its teardown runs.
+
+    // NOT TestImage::create(), which unlinks the path and makes a new inode: the
+    // parent's `file` was opened on the inode its own SetUp created, and every
+    // assertion in the case is read through it. SetUp already sized IMG_PATH, so the
+    // child opens that inode -- which is also the honest shape of a crash, where the
+    // dead daemon and its successor share a backend rather than each making one.
+    auto* lfs = fs::new_localfs_adaptor();
+    if (!lfs) {
+        note(CRASH_IMAGE, ENOMEM);
+        return ENOMEM;
+    }
+    fs::IFile* img_file = lfs->open(IMG_PATH, O_RDWR);
+    if (!img_file) {
+        int e = errno ? errno : ENOENT;
+        note(CRASH_IMAGE, e);
+        return e;
+    }
+
+    auto* hba = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
+    if (!hba) {
+        note(CRASH_HBA, errno);
+        return errno;
+    }
+
+    BlkDevInfo info;
+    info.identity = TEST_IDENTITY;
+    info.size = IMG_SIZE;
+    info.sector_size_shift = 9;   // tcmu is always a 512-byte sector
+    info.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    TcmuHBA::Config cfg(info);
+    cfg.loopback_lun = true;
+    cfg.loopback_wwn = TEST_WWN;
+    cfg.timeout = CRASH_CMD_TIMEOUT;
+
+    FirstWriteGate gate(img_file);
+    auto* dev = hba->new_device(cfg);
+    if (!dev || dev->start(&gate) < 0) {
+        note(CRASH_START, errno);
+        return errno ? errno : EIO;
+    }
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    if (sd.empty()) {
+        note(CRASH_NODE, ENODEV);
+        return ENODEV;
+    }
+
+    // Submitted from coroutines rather than this one: an sg_io here would block the
+    // vcpu that serves the ring, and the first of these is never going to be
+    // answered at all. WRITE(10)'s transfer length is cdb[7..8], in 512-byte sectors.
+    auto submit_write = [&](uint64_t off, void* data) {
+        photon::thread_create11([&, off, data] {
+            test::run_off_vcpu([&] {
+                SgResult r;
+                uint32_t lba = (uint32_t)(off / 512);
+                uint8_t cdb[10] = {0x2a, 0, (uint8_t)(lba >> 24), (uint8_t)(lba >> 16),
+                                   (uint8_t)(lba >> 8), (uint8_t)lba, 0,
+                                   (uint8_t)(CRASH_LEN / 512 / 256), (uint8_t)(CRASH_LEN / 512), 0};
+                sg_io(sd, cdb, sizeof(cdb), data, CRASH_LEN, SG_DXFER_TO_DEV, r);
+            });
+        });
+    };
+    // Poll on the vcpu, yielding: whatever sets the condition is a handle_cmd
+    // coroutine that has to run for this wait to end. 10s per predicate.
+    auto spin_until = [&](auto pred) {
+        for (int i = 0; i < 5000; i++) {
+            if (pred())
+                return true;
+            photon::thread_usleep(2000);
+        }
+        return pred();
+    };
+
+    auto p1 = test::pattern(0xa1, CRASH_LEN);
+    auto p2 = test::pattern(0xb2, CRASH_LEN);
+    auto p3 = test::pattern(0xcc, CRASH_LEN);
+
+    submit_write(CRASH_OFF_A, p1.data());
+    // Entry A must be dispatched and parked BEFORE B is submitted, or the ring order
+    // -- and with it which entries the tail is stuck behind -- is a coin toss.
+    if (!spin_until([&] { return gate.parked.load() != 0; })) {
+        note(CRASH_PARK, ETIMEDOUT);
+        return ETIMEDOUT;
+    }
+
+    submit_write(CRASH_OFF_B, p2.data());
+    if (!spin_until([&] { return gate.landed.load() >= 1; })) {
+        note(CRASH_LAND, ETIMEDOUT);
+        return ETIMEDOUT;
+    }
+
+    // X, the entry that gives the marker its teeth. B's GOOD response leaves the
+    // sense buffer all zeros, so a successor that re-dispatched B would read
+    // cdb_off 0 and decode the mailbox's version byte as an unknown opcode --
+    // harmless, and the marker would be untested. X answers CHECK CONDITION instead,
+    // and an ASC at sense_buffer[12] is cdb_off's byte 4, so re-dispatching it faults
+    // tens of gigabytes outside the mapping. `landed` reaching 2 is the child's own
+    // proof that X was served; that it was then ANSWERED is what CRASH_SETTLE_US
+    // covers, exactly as for B.
+    gate.shorten.store(true);
+    submit_write(CRASH_OFF_X, p3.data());
+    if (!spin_until([&] { return gate.landed.load() >= 2; })) {
+        note(CRASH_SHORT, ETIMEDOUT);
+        return ETIMEDOUT;
+    }
+
+    // Both answered entries have reached the backend; give handle_cmd the moment it
+    // needs to write each response and mark, then die with all three in the ring.
+    photon::thread_usleep(CRASH_SETTLE_US);
+    ::_exit(0);
+}
+
+// Installed from main() ahead of consumer_child_main(), because the child is this
+// same binary re-executed and so runs the same main(). See consumer_set_suite_body
+// for why an installation call site beats a namespace-scope initializer.
+static void install_tcmu_crash_child() {
+    test::consumer_set_suite_body(tcmu_crash_child);
+}
+
+TEST_F(TcmuTest, a_daemon_that_dies_mid_ring_is_recovered_by_its_successor) {
+    if (skip_reason) return;
+    // ONE listener. The child creates its own HBA, and two HBAs on a subtype both
+    // receive the multicast ADDED for the backstore it enables, so the fixture's has
+    // to go first -- the same reason destroy_orphan_removes_a_dead_registration
+    // deletes it before planting.
+    delete sys;
+    sys = nullptr;
+
+    test::ConsumerIoResult r;
+    test::run_off_vcpu([&] {
+        r = test::consumer_spawn_suite(std::vector<std::string>(), TEST_IDENTITY, CRASH_WAIT_US);
+    });
+    // The child's last act is _exit(), so the harness never publishes `magic` and
+    // there is no report to read: what comes back is the wait status alone. Status 0
+    // with stage CONS_EXIT is the combination only that _exit() produces -- every
+    // failure returns an errno, which the harness publishes with the stage it noted,
+    // and a signal sets status to EIO. Diagnostic only: the witness is the machine
+    // state asserted below, not anything the child said about itself.
+    ASSERT_FALSE(r.hung) << "the child was abandoned; pid " << (int64_t)r.pid << " may still be serving";
+    ASSERT_EQ(0, r.status)
+        << "the child died at "
+        << ((int32_t)r.stage >= CRASH_ARGV ? crash_step_name((int32_t)r.stage)
+                                           : test::consumer_stage_name(r.stage))
+        << ", errno " << r.child_errno << ", exit " << r.exit_code;
+    ASSERT_EQ((int32_t)test::CONS_EXIT, (int32_t)r.stage)
+        << "the child reported instead of dying abruptly, so it ran its teardown and "
+           "drained the ring this case is about";
+
+    // What the death must have left behind, checked here rather than trusted: an
+    // enabled registration, a LUN and therefore a node, and a tombstone the flock
+    // died with.
+    ASSERT_EQ(0, ::access(BS_PATH, F_OK)) << "the backstore the child created is gone";
+    EXPECT_STREQ("not-held", lock_state(TEST_IDENTITY))
+        << "the child's claim outlived it, so this is not a crash recovery at all";
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty()) << "no scsi node survived the child";
+
+    sys = new_tcmu_hba(SUITE_SUBTYPE, DEV_CONFIG_PREFIX, SUITE_LOCKS);
+    ASSERT_NE(nullptr, sys);
+    auto cfg = make_cfg(/*loopback=*/true);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    // THE WITNESS, and it is that this process is still alive to run the assertions
+    // below. Before the fix, start()'s drain_ring re-dispatched entry X and read its
+    // cdb_off out of the ASC the dead daemon had written into sense_buffer[12], which
+    // is that field's byte 4: an address tens of gigabytes past the mapping, faulting
+    // on the first byte of the CDB. And because the tail can never pass an entry the
+    // handler faulted on, every restart re-poisons the same slot.
+    ASSERT_EQ(0, dev->start(file))
+        << "adopting a ring a dead daemon left half-finished was refused, errno " << errno;
+    DEFER(dev->shutdown());
+
+    // Give the successor's pump the moment it needs to harvest entry A, whose write
+    // was parked in a backend that died with the child and is re-run now against
+    // this one.
+    auto p1 = test::pattern(0xa1, CRASH_LEN);
+    auto p2 = test::pattern(0xb2, CRASH_LEN);
+    auto p3 = test::pattern(0xcc, CRASH_LEN);
+    for (int i = 0; i < 2500; i++) {
+        std::vector<char> a(CRASH_LEN, 0);
+        struct iovec iov{a.data(), a.size()};
+        if (file->preadv(&iov, 1, CRASH_OFF_A) == (ssize_t)CRASH_LEN &&
+            memcmp(a.data(), p1.data(), CRASH_LEN) == 0)
+            break;
+        photon::thread_usleep(2000);
+    }
+    auto read_at = [&](uint64_t off) {
+        std::vector<char> b(CRASH_LEN, 0);
+        struct iovec iov{b.data(), b.size()};
+        EXPECT_EQ((ssize_t)CRASH_LEN, file->preadv(&iov, 1, off));
+        return b;
+    };
+    // Entry A was dispatched and never answered, so it was still a pristine request
+    // and the successor served it. This is the half the private iovec copy fixes:
+    // its iov_base fields used to be converted in place, and the successor added its
+    // own mapping base to pointers that were already absolute.
+    EXPECT_EQ(0, memcmp(read_at(CRASH_OFF_A).data(), p1.data(), CRASH_LEN))
+        << "the un-answered entry was not harvested by the successor";
+    // Entries B and X were answered and marked, so the successor retired them
+    // instead of re-dispatching. Their bytes are what the dead daemon wrote -- for X
+    // that is a write it reported as an error, since the short count was synthetic --
+    // and neither was run a second time.
+    EXPECT_EQ(0, memcmp(read_at(CRASH_OFF_B).data(), p2.data(), CRASH_LEN))
+        << "the entry answered GOOD does not hold what the dead daemon wrote";
+    EXPECT_EQ(0, memcmp(read_at(CRASH_OFF_X).data(), p3.data(), CRASH_LEN))
+        << "the entry answered CHECK CONDITION does not hold what the dead daemon wrote";
+    // The corruption detector: nothing was ever written here, so a successor that
+    // re-dispatched an answered entry through a wild cdb_off would have left a mark.
+    std::vector<char> untouched(CRASH_LEN, 0x5a);
+    struct iovec uiov{untouched.data(), untouched.size()};
+    ASSERT_EQ((ssize_t)CRASH_LEN, file->preadv(&uiov, 1, CRASH_OFF_C));
+    for (size_t i = 0; i < untouched.size(); i++)
+        ASSERT_EQ(0, untouched[i]) << "a re-dispatched entry scribbled at byte " << i;
+
+    // And the device is a working device afterwards, not merely a survived one:
+    // one write through the adopted ring, checked in the backend it now points at.
+    EXPECT_EQ(0, device_io(sd, test::pattern(0xc3, CRASH_LEN), /*verify_backend=*/true, CRASH_OFF_D))
+        << "the adopted device does not serve I/O";
+}
+
 }  // namespace blk
 }  // namespace photon
 
 int main(int argc, char** argv) {
+    // The crash child is this same binary re-executed with the consumer sentinel in
+    // argv[1] and CONS_MODE_SUITE in argv[2], so its body has to be installed before
+    // the dispatch below -- and before photon::init() and InitGoogleTest(), which the
+    // dispatch itself has to precede.
+    photon::blk::install_tcmu_crash_child();
     // A consumer child is this binary re-executed with a sentinel in argv[1]:
     // dispatch it before photon::init() and before gtest sees that argument.
     int cons = photon::blk::test::consumer_child_main(argc, argv);
