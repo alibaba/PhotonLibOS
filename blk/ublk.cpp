@@ -48,9 +48,15 @@ limitations under the License.
 //   below) while a 64B sqe's cmd area is 16B, so the command does not fit; the
 //   per-queue rings stay 64B because ublksrv_io_cmd is exactly 16B.
 // - a tag's FETCH_REQ parks until a request arrives; the request descriptor
-//   (ublksrv_io_desc) is read from the per-queue mmap (PROT_READ; offset
-//   qid * UBLK_MAX_QUEUE_DEPTH * sizeof(desc), both constants from the UAPI
-//   header). A COMMIT_AND_FETCH_REQ's commit half takes effect when it is
+//   (ublksrv_io_desc) is read from the per-queue mmap (PROT_READ). BOTH the length
+//   of that mapping and its per-queue offset are the driver's own PAGE-SIZED
+//   arithmetic rather than a multiple of sizeof(desc) -- round_up(depth *
+//   sizeof(desc), PAGE_SIZE) for the length and qid * round_up(UBLK_MAX_QUEUE_DEPTH
+//   * sizeof(desc), PAGE_SIZE) for the offset -- which is what
+//   ublk_cmd_buf_geometry() reproduces from sysconf(_SC_PAGESIZE). A hardcoded 4096
+//   is wrong at every page size above it, and the driver answers EINVAL rather than
+//   rounding for us.
+//   A COMMIT_AND_FETCH_REQ's commit half takes effect when it is
 //   issued, before its fetch half parks -- so cancelling the parked cmd never
 //   un-commits the request.
 // - initial FETCH_REQs are accepted only before the device is ready (EBUSY
@@ -141,14 +147,22 @@ namespace blk {
 #define UBLK_MAX_QUEUE_DEPTH    4096
 #define UBLK_MAX_NR_QUEUES      (1U << 12)
 
+// The bits this transport asks for, reads back, or refuses. Several are vendored
+// only so UBLK_F_UNSUPPORTED_MODES below can name what it rejects -- this daemon
+// never requests them. Bit values re-verified against a 7.2.3 <linux/ublk_cmd.h>.
 #define UBLK_F_NEED_GET_DATA            (1ULL << 2)
 #define UBLK_F_USER_RECOVERY            (1ULL << 3)
 #define UBLK_F_USER_RECOVERY_REISSUE    (1ULL << 4)
 #define UBLK_F_CMD_IOCTL_ENCODE         (1ULL << 6)
 #define UBLK_F_USER_COPY                (1ULL << 7)
+#define UBLK_F_ZONED                    (1ULL << 8)
 #define UBLK_F_UPDATE_SIZE              (1ULL << 10)
+#define UBLK_F_AUTO_BUF_REG             (1ULL << 11)
+#define UBLK_F_BUF_REG_OFF_DAEMON       (1ULL << 14)
+#define UBLK_F_BATCH_IO                 (1ULL << 15)
 #define UBLK_F_SAFE_STOP_DEV            (1ULL << 17)
 #define UBLK_F_NO_AUTO_PART_SCAN        (1ULL << 18)
+#define UBLK_F_SHMEM_ZC                 (1ULL << 19)
 
 #define UBLK_S_DEV_DEAD         0
 #define UBLK_S_DEV_LIVE         1
@@ -263,6 +277,11 @@ static_assert(sizeof(ublk_params) == 152, "ublk_params size");
 // says it does not have that op at all. ONE derivation, shared by the adoption drift
 // check and by the orphan scan, so a listing of a registration and an adoption of the
 // same registration cannot disagree about what it offers.
+//
+// UBLK_ATTR_READ_ONLY is deliberately NOT part of that derivation: it is not a FEATURE_*
+// but a fact about the config, and the two callers that need it read it where it belongs
+// -- validate_params() inside the attrs comparison, list_orphans() into
+// BlkDevInfo::read_only.
 static uint64_t params_features(const ublk_params& p) {
     uint64_t f = 0;
     if (p.types & UBLK_PARAM_TYPE_DISCARD) {
@@ -271,6 +290,38 @@ static uint64_t params_features(const ublk_params& p) {
     }
     if (p.basic.attrs & (UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA)) f |= FEATURE_FLUSH;
     return f;
+}
+
+// The descriptor-ring mapping geometry, in the HOST's page size. Both halves are the
+// driver's own arithmetic and neither may be written with a 4096 in it:
+//   length  round_up(queue_depth * sizeof(ublksrv_io_desc), PAGE_SIZE) --
+//           __ublk_queue_cmd_buf_size(), drivers/block/ublk_drv.c:1247, and the value
+//           ublk_ch_mmap requires the mapping's length to EQUAL (:2663). Not a
+//           multiple of it: at a 16 KiB page a depth of 128 needs 16384, where a 4 KiB
+//           round-up hands over 4096 and the mmap is refused.
+//   offset  qid * round_up(UBLK_MAX_QUEUE_DEPTH * sizeof(ublksrv_io_desc), PAGE_SIZE)
+//           -- ublk_max_cmd_buf_size(), :1257, which is the STRIDE ublk_ch_mmap divides
+//           the mapping offset by to recover q_id (:2659, UBLKSRV_CMD_BUF_OFFSET being
+//           0). A stride rounded to the wrong page is not merely refused either:
+//           4096 * 24 = 98304 = 2^15 * 3, so at a 64 KiB page it is not page-aligned at
+//           all and mmap(2) itself answers EINVAL before the driver is reached -- and
+//           had it been aligned, q_id would have computed as 0 and queue 1 would have
+//           mapped queue 0's descriptors, silently.
+// `page` is injected rather than read here, so the geometry of a page size this host
+// does not have can still be stated and checked; queue_setup passes
+// sysconf(_SC_PAGESIZE). External linkage, and it is the one internal of this TU that
+// has it: test-ublk.cpp's ungated UblkConfigTest table-tests this function, and a
+// static one is invisible to that translation unit. The alternative -- including this
+// .cpp textually, as test-vduse.cpp does -- would make the whole ublk suite exercise a
+// copy instead of the shipped library.
+void ublk_cmd_buf_geometry(uint16_t depth, uint16_t qid, size_t page,
+                           size_t* sz, off_t* off) {
+    // `page` is a power of two, which sysconf(_SC_PAGESIZE) always is: both round-ups
+    // are masks rather than divisions on that assumption
+    *sz = ((size_t)depth * sizeof(ublksrv_io_desc) + page - 1) & ~(page - 1);
+    size_t stride = ((size_t)UBLK_MAX_QUEUE_DEPTH * sizeof(ublksrv_io_desc) + page - 1) &
+                    ~(page - 1);
+    *off = (off_t)(stride * qid);
 }
 
 // ----------------------------------------------------------------------------
@@ -396,13 +447,53 @@ static constexpr uint32_t IO_BUF_BYTES = 512 << 10;   // per-tag data buffer
 // the bytes at 8x the offset and reports 1/8 of the capacity.
 static constexpr uint32_t UBLK_SECTOR_SHIFT = 9;
 
-// Data-plane modes the serving loop does not implement. NEED_GET_DATA makes a WRITE's
-// FETCH complete with UBLK_IO_RES_NEED_GET_DATA, which tag_loop reads as a fatal
-// positive result and exits, stranding the request; USER_COPY moves data by pread/
-// pwrite on the cdev and wants a zero FETCH address, but tag_loop always supplies a
-// buffer. Refuse both at validation, and reject an adopted registration carrying them.
-static constexpr uint64_t UBLK_F_UNSUPPORTED_DATA_PLANE =
-    UBLK_F_NEED_GET_DATA | UBLK_F_USER_COPY;
+// Registrations this transport cannot serve: every mode that changes what the serving loop
+// has to DO -- the command sequence, the meaning of a FETCH's addr, or the op set -- and
+// none of which tag_loop implements. Refused at validate(), so no object is built for one,
+// and refused again on an adopted registration in attach_existing() -- an adoption may meet
+// a device a daemon that DID implement the mode created, and accepting it leaves a
+// registered device that serves nothing while looking registered: the driver answers every
+// tag_loop's uring_cmd with an -EOPNOTSUPP that is not -ENODEV, so the tag logs and
+// breaks, for every tag of every queue.
+//
+//   NEED_GET_DATA  a WRITE's FETCH completes with UBLK_IO_RES_NEED_GET_DATA, a positive
+//                  result tag_loop reads as fatal: it exits, stranding the request.
+//   USER_COPY      data moves by pread/pwrite on the cdev and FETCH wants a zero
+//                  address; tag_loop always supplies a buffer.
+//   BATCH_IO       the driver installs a different char-device fops
+//                  (ublk_ch_batch_io_fops) whose uring_cmd routes everything but
+//                  REGISTER/UNREGISTER_IO_BUF to -EOPNOTSUPP, and the UAPI says
+//                  UBLK_U_IO_FETCH_REQ and UBLK_U_IO_COMMIT_AND_FETCH_REQ -- the whole
+//                  of tag_loop -- are not supported under it.
+//   AUTO_BUF_REG   the uring_cmd's sqe->addr is read as a ublk_auto_buf_reg rather than
+//                  as a buffer address, and unless the ring carries a matching sparse
+//                  buffer table the driver FAILS both FETCH and COMMIT.
+//   ZONED          adds REPORT_ZONES and ZONE_APPEND, for which serve_req's switch has
+//                  no case: they fall through to its -EOPNOTSUPP.
+//   SHMEM_ZC       a request whose pages match a buffer registered through
+//                  UBLK_U_CMD_REG_BUF arrives with UBLK_IO_F_SHMEM_ZC set and an addr
+//                  encoding a buffer index instead of an address, which nothing here
+//                  decodes.
+//
+// NOT in the mask, each for its own reason. BUF_REG_OFF_DAEMON only widens WHO may
+// issue REGISTER_IO_BUF / UNREGISTER_IO_BUF -- commands this daemon never issues -- and
+// ublk_ctrl_add_dev force-sets it in the negotiated flags of EVERY device it creates
+// (drivers/block/ublk_drv.c:4784), so refusing it would refuse every adoption on such a
+// kernel rather than every unservable one. INTEGRITY requires USER_COPY -- the driver
+// refuses it without (drivers/block/ublk_drv.c:4718) -- so the only registration that could
+// carry it is one already refused for USER_COPY. QUIESCE, PER_IO_DAEMON,
+// USER_RECOVERY_FAIL_IO, UNPRIVILEGED_DEV and SAFE_STOP_DEV are control plane: they change
+// what a control command does or who may issue it, never what the serving loop has to do per
+// request, so they stay accepted.
+//
+// A BLACKLIST, deliberately, and this is the tradeoff it buys: a whitelist of the bits
+// this transport implements is structurally stronger, since an unknown future bit that
+// changed the data plane would be refused instead of silently accepted, but it would
+// also refuse every harmless future CONTROL-plane bit -- which is most of them -- and
+// make accepting one a library change rather than a kernel upgrade.
+static constexpr uint64_t UBLK_F_UNSUPPORTED_MODES =
+    UBLK_F_NEED_GET_DATA | UBLK_F_USER_COPY | UBLK_F_BATCH_IO |
+    UBLK_F_AUTO_BUF_REG | UBLK_F_ZONED | UBLK_F_SHMEM_ZC;
 
 struct UblkDeviceImpl : IBlkDevice {
     UblkController::Config cfg;
@@ -478,14 +569,15 @@ struct UblkDeviceImpl : IBlkDevice {
     bool started = false;
     bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
     bool read_only = false;
-    // An ordinary WRITE has to be on stable storage before its completion is
-    // published. The exact complement of want_attrs()'s volatile-cache/FUA
-    // advertisement, derived from the same word in the constructor so the two cannot
-    // drift. Same name, same decision and same default as the shared virtio engine's
-    // write_through (utils.h) and nbd's, which is where the reasoning is written out;
-    // serve_req()'s WRITE has the ublk half of it. The default is never observed --
-    // the constructor always derives it -- and is true for the same reason theirs is:
-    // a path that failed to derive it would be slow rather than lossy.
+    // An ordinary WRITE -- and a WRITE_ZEROES, which lands zeroes the same way -- has to
+    // be on stable storage before its completion is published. The exact complement of
+    // want_attrs()'s volatile-cache/FUA advertisement, derived from the same word in the
+    // constructor so the two cannot drift. Same name, same decision and same default as
+    // the shared virtio engine's write_through (utils.h) and nbd's, which is where the
+    // reasoning is written out; serve_req()'s WRITE and WRITE_ZEROES have the ublk half
+    // of it, and its DISCARD explains why a discard owes no persist at all. The default
+    // is never observed -- the constructor always derives it -- and is true for the same
+    // reason theirs is: a path that failed to derive it would be slow rather than lossy.
     bool write_through = true;
     uint8_t sector_shift = 9;
 
@@ -540,11 +632,12 @@ struct UblkDeviceImpl : IBlkDevice {
         if (validate_info(c.info, /*virtio=*/false) < 0)
             return -1;
         // The serving loop speaks only the plain data plane: FETCH hands over a buffer
-        // address and COMMIT carries the result. NEED_GET_DATA and USER_COPY negotiate
-        // a different sequence it does not implement, so a WRITE would strand rather
-        // than complete -- refuse them here, before ADD_DEV, rather than at run time.
-        if (c.flags & UBLK_F_UNSUPPORTED_DATA_PLANE)
-            LOG_ERROR_RETURN(EINVAL, -1, "ublk: cfg.flags ` negotiates a data-plane mode this transport does not serve", c.flags);
+        // address and COMMIT carries the result. The modes UBLK_F_UNSUPPORTED_MODES
+        // names negotiate a different sequence it does not implement, so a request would
+        // strand rather than complete -- refuse them here, before ADD_DEV, rather than at
+        // run time.
+        if (c.flags & UBLK_F_UNSUPPORTED_MODES)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk: cfg.flags ` negotiates a mode this transport does not serve", c.flags);
         return 0;
     }
 
@@ -572,7 +665,10 @@ struct UblkDeviceImpl : IBlkDevice {
     }
 
     // Delete a backend this object owns and forget it either way, so that neither
-    // the destructor nor a later start() can see it.
+    // caller can delete it a second time. The destructor and a successful shutdown()
+    // are the only two: start() releases a previous session's backend itself, guarded
+    // on `backend != bk`, because it is about to store a new one and may be storing
+    // back the very pointer it owns.
     void release_backend() {
         if (own_backend)
             delete backend;
@@ -642,6 +738,9 @@ struct UblkDeviceImpl : IBlkDevice {
             // declined VIRTIO_BLK_F_FLUSH. Syncing while FEATURE_FLUSH IS present would
             // be the needless syscall per write that advertising the cache exists to
             // avoid: there the kernel has a FLUSH command and uses it.
+            //
+            // WRITE_ZEROES below carries the same obligation on the same predicate;
+            // DISCARD carries none, and each of the two says why at its own case.
             res = (!(fua || write_through) || backend->fdatasync() == 0) ? (int32_t)len : -EIO;
             break;
         }
@@ -649,6 +748,13 @@ struct UblkDeviceImpl : IBlkDevice {
             res = backend->fdatasync() == 0 ? 0 : -EIO;
             break;
         case UBLK_IO_OP_DISCARD:
+            // The one write-ish op that persists NOTHING, and that is not an omission.
+            // Linux never attaches a durability ask to a discard in the first place:
+            // blk_alloc_discard_bio allocates REQ_OP_DISCARD with neither REQ_PREFLUSH
+            // nor REQ_FUA (block/blk-lib.c:37-46), and blk_insert_flush converts neither
+            // into a postflush for a payload-less hint. So a discard's completion has
+            // never been a durability promise, with a volatile cache advertised or not,
+            // and there is nothing here for write_through to make true.
             if (read_only) { res = -EROFS; break; }
             if (backend->trim(off, len) < 0 && errno != EOPNOTSUPP && errno != ENOSYS) {
                 res = -EIO;
@@ -656,10 +762,28 @@ struct UblkDeviceImpl : IBlkDevice {
             }
             res = (int32_t)len;
             break;
-        case UBLK_IO_OP_WRITE_ZEROES:
+        case UBLK_IO_OP_WRITE_ZEROES: {
             if (read_only) { res = -EROFS; break; }
-            res = zero_fill(backend, off, len) == 0 ? (int32_t)len : -EIO;
+            // Zeroing LANDS DATA -- zero_range's hole punch, or the fallback's pwritev of
+            // a zero buffer -- so it owes exactly what the ordinary WRITE above owes, for
+            // the same reason and under the same two callers: a UBLK_IO_F_FUA the kernel
+            // could only set because want_attrs() advertised FUA, or write_through, which
+            // is the case where want_attrs() advertised neither cache bit. Then the kernel
+            // sets no write cache on the gendisk, so blk_insert_flush builds no flush
+            // policy at all and strips REQ_PREFLUSH -- and, FUA being unsupported, REQ_FUA
+            // -- before the request reaches us (block/blk-flush.c:400-412; the contract is
+            // Documentation/block/writeback_cache_control.rst). No compensating flush
+            // exists to send, so this completion is the only place durability was ever
+            // promised, and a zero_range or pwritev that returned has left the zeroes in
+            // the backend's page cache and nowhere else.
+            bool fua = iod->op_flags & UBLK_IO_F_FUA;   // set only if we advertised FUA
+            if (zero_fill(backend, off, len) != 0) {
+                res = -EIO;
+                break;   // nothing was zeroed, so there is nothing to make durable
+            }
+            res = (!(fua || write_through) || backend->fdatasync() == 0) ? (int32_t)len : -EIO;
             break;
+        }
         default:
             res = -EOPNOTSUPP;
             break;
@@ -735,14 +859,25 @@ struct UblkDeviceImpl : IBlkDevice {
     // queue setup/teardown run on the queue's OWNING vcpu (the initial fetches
     // bind the per-tag daemon task)
     int queue_setup(Queue* q) {
-        q->cmd_buf_sz = (size_t)queue_depth * sizeof(ublksrv_io_desc);
-        q->cmd_buf_sz = (q->cmd_buf_sz + 4095) & ~(size_t)4095;   // page round-up
-        off_t off = (off_t)q->qid * UBLK_MAX_QUEUE_DEPTH * sizeof(ublksrv_io_desc);
+        // The mapping's length and offset are the driver's own PAGE-SIZED arithmetic, so
+        // the page has to be the host's rather than an assumed one -- see
+        // ublk_cmd_buf_geometry. A sysconf that answers nothing usable is fatal here
+        // instead of defaulted: guessing 4096 is the bug this derives around, and what it
+        // buys is an EINVAL from the mmap below or, at a stride that happens to align, a
+        // silent mapping of another queue's descriptors.
+        long pg = ::sysconf(_SC_PAGESIZE);
+        if (pg <= 0)
+            LOG_ERRNO_RETURN(0, -1, "ublk: the host page size is unknown, dev ` qid `", dev_id, q->qid);
+        off_t off = 0;
+        ublk_cmd_buf_geometry(queue_depth, q->qid, (size_t)pg, &q->cmd_buf_sz, &off);
         void* m = ::mmap(nullptr, q->cmd_buf_sz, PROT_READ, MAP_SHARED | MAP_POPULATE,
                          cdev_fd, off);
         if (m == MAP_FAILED)
             LOG_ERRNO_RETURN(0, -1, "ublk cmd buf mmap failed, dev ` qid `", dev_id, q->qid);
         q->cmd_buf = (const ublksrv_io_desc*)m;
+        // 4096 here is an ALIGNMENT FLOOR for the data buffers, not a page-derived
+        // quantity, and deliberately not sysconf(_SC_PAGESIZE): nothing in the ublk ABI
+        // asks for a page-aligned IO buffer, and a larger page would only over-align.
         if (::posix_memalign((void**)&q->bufs, 4096, (size_t)queue_depth * max_io_buf_bytes))
             LOG_ERROR_RETURN(ENOMEM, -1, "ublk io buffers alloc failed, dev ` qid `", dev_id, q->qid);
         iouring_args args;
@@ -989,10 +1124,11 @@ struct UblkDeviceImpl : IBlkDevice {
     // the device, not a missing feature: the kernel turns them into
     // blk_queue_write_cache(q, false, false), so the block layer believes every
     // completion is already durable and will ask for persistence with neither a
-    // UBLK_IO_OP_FLUSH nor a UBLK_IO_F_FUA. serve_req()'s WRITE has to make that claim
-    // true, and does it through write_through -- derived from this same test, in the
-    // constructor. Keeping the two halves on one predicate is what stops an attrs
-    // change here from silently turning a durable device into a lying one.
+    // UBLK_IO_OP_FLUSH nor a UBLK_IO_F_FUA. serve_req()'s WRITE and WRITE_ZEROES --
+    // every op that lands data -- have to make that claim true, and do it through
+    // write_through, derived from this same test in the constructor. Keeping the two
+    // halves on one predicate is what stops an attrs change here from silently turning a
+    // durable device into a lying one.
     //
     // Not advertised unconditionally, either: params_features() reads FEATURE_FLUSH back
     // out of these two bits, so a VOLATILE_CACHE the config never asked for would make
@@ -1039,11 +1175,29 @@ struct UblkDeviceImpl : IBlkDevice {
         if (!(p.types & UBLK_PARAM_TYPE_BASIC) ||
             p.basic.dev_sectors != dev_sectors.load() ||
             p.basic.logical_bs_shift != sector_shift ||
-            p.basic.attrs != want_attrs())
+            p.basic.attrs != want_attrs()) {
+            // Name the likely cause when READ_ONLY is the WHOLE difference, because that is
+            // the drift a config built by hand produces and the one a caller cannot repair:
+            // list_orphans() reads the registered bit back into BlkDevInfo::read_only, so
+            // the documented Config(record) recipe reproduces the registration and cannot
+            // land here -- a descriptor somebody invented instead can. SET_PARAMS is
+            // refused once a device has been used (see want_attrs()), so the answer is to
+            // rebuild the config with the registration's read_only, not to fix the
+            // registration. Gated on the size and shift agreeing so a missing BASIC param
+            // type -- whose attrs then read as a zeroed word -- is not blamed on read_only.
+            bool read_only_is_the_difference =
+                (p.types & UBLK_PARAM_TYPE_BASIC) != 0 &&
+                p.basic.dev_sectors == dev_sectors.load() &&
+                p.basic.logical_bs_shift == sector_shift &&
+                (p.basic.attrs ^ want_attrs()) == UBLK_ATTR_READ_ONLY;
+            const char* likely = read_only_is_the_difference ?
+                "the attrs differ by exactly READ_ONLY, so this config's read_only is not the registration's and no SET_PARAMS can repair a used device" :
+                "the registered geometry or cache attributes are not this config's";
             LOG_ERROR_RETURN(EINVAL, -1,
-                "ublk device ` config drift: registered size ` shift ` attrs `, requested size ` shift ` attrs `",
+                "ublk device ` config drift: registered size ` shift ` attrs `, requested size ` shift ` attrs ` -- ",
                 dev_id, p.basic.dev_sectors, (int)p.basic.logical_bs_shift,
-                (int)p.basic.attrs, dev_sectors.load(), (int)sector_shift, (int)want_attrs());
+                (int)p.basic.attrs, dev_sectors.load(), (int)sector_shift, (int)want_attrs(), likely);
+        }
         // BlkAdoption::Full is documented as checking the geometry AND the registered
         // feature set, and the attrs comparison above carries only FEATURE_FLUSH plus
         // the read-only flag: FEATURE_DISCARD and FEATURE_WRITE_ZEROES live in an
@@ -1160,8 +1314,8 @@ struct UblkDeviceImpl : IBlkDevice {
         // An adopted registration may have been created by a daemon that spoke a data
         // plane this loop does not serve; attaching would strand its requests, so
         // refuse the adoption rather than take it over unservable.
-        if (negotiated_flags & UBLK_F_UNSUPPORTED_DATA_PLANE)
-            LOG_ERROR_RETURN(EINVAL, -1, "ublk device ` is registered with data-plane flags ` this transport does not serve", dev_id, negotiated_flags);
+        if (negotiated_flags & UBLK_F_UNSUPPORTED_MODES)
+            LOG_ERROR_RETURN(EINVAL, -1, "ublk device ` is registered with mode flags ` this transport does not serve", dev_id, negotiated_flags);
         if (validate_params() < 0)
             return -1;
         if (open_cdev() < 0)
@@ -1197,7 +1351,24 @@ struct UblkDeviceImpl : IBlkDevice {
         // the caller keeps the backend, and shutdown() is the one that releases. So
         // this is the only place that can, and without it the two assignments below
         // drop the sole reference to a file this object promised to delete.
-        release_backend();
+        //
+        // `!= bk` is what makes re-serving the SAME backend legal rather than fatal, and
+        // detach(true) invites exactly that: blk.h's ownership contract releases an owned
+        // backend at shutdown() or, when a shutdown() fails, at destruction, and hands it
+        // back to the caller on a FAILED start() -- detach() is not one of its release
+        // points. So start(A, true) -> detach(true) -> start(A, true) is a valid sequence
+        // in which the caller re-asserts ONE ownership rather than transferring a second.
+        // An unconditional release_backend() here deleted A and then stored the freed
+        // pointer back into `backend` with own_backend still true: every later probe and
+        // every request used a freed object, and shutdown() deleted it a second time. nbd,
+        // vduse and vhost-user already guard this way. rollback() below still hands the
+        // backend back WITHOUT deleting it, which stays correct for the same reason: a
+        // failed start() is the caller's backend again, so there is nothing to leak.
+        if (own_backend && backend && backend != bk) {
+            delete backend;
+            backend = nullptr;
+            own_backend = false;
+        }
 
         backend = bk;
         own_backend = ownership;
@@ -1516,6 +1687,16 @@ struct UblkControllerImpl : UblkController {
             // the same derivation the adoption drift check uses, so a listing of a
             // registration and an adoption of it cannot disagree about its features
             bi.features = params_features(p);
+            // The registered READ_ONLY attribute, out of the same GET_PARAMS reply as the
+            // features rather than a second fetch. ublk grades its adoption Full, so
+            // validate_params() compares want_attrs() -- which ORs UBLK_ATTR_READ_ONLY in
+            // from cfg.read_only -- against the registration, and a descriptor omitting the
+            // bit makes a read-only orphan unadoptable through this listing. Nothing could
+            // repair the registration either: SET_PARAMS is refused once a device has been
+            // used. This readback is what makes blk.h's claim about this listing true --
+            // that identity -> Config(record) -> new_device() -> start(backend) is the
+            // COMPLETE recovery recipe here, and that ublk is the one transport where it is.
+            bi.read_only = (p.basic.attrs & UBLK_ATTR_READ_ONLY) != 0;
             ret.push_back(bi);
         }
         return ret;
@@ -1585,11 +1766,86 @@ struct UblkControllerImpl : UblkController {
             //       hazard the ordering above avoids.
             //    1  free: a tombstone outliving its device is our own litter, and it
             //       goes with it.
+            //
+            // The probe stays, and it stays FIRST, because it is the only thing here that
+            // can give all three answers: devlock_acquire is two-valued and its own
+            // open(O_CREAT) collapses "absent" into success, so classifying with the claim
+            // would plant a tombstone for a dev_id that was never a device, remove it again
+            // and report success about nothing -- where blk.h pins ENOENT for exactly that
+            // ("no such device and no tombstone either is ENOENT"). What the probe cannot
+            // do is AUTHORISE a removal, which is what the claim below is for.
             int lf = devlock_free(lock_dir, name);
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no ublk device ` and no tombstone for it that this call could use", want);
             if (lf == 0)
                 LOG_ERROR_RETURN(EBUSY, -1, "no ublk device ` yet, but its tombstone is locked, normally by a live server", want);
+            // CLAIM, and hold it across the absence recheck and the unlink. The probe above
+            // takes the flock and gives it back before returning, so between it and an
+            // unlink a concurrent starter can acquire the same name -- and the INODE is not
+            // stable, because devlock_acquire's open(O_CREAT) is on every starter path
+            // (acquire_lock) -- so what devlock_unlink then removes BY PATH is that live
+            // starter's lock file rather than the litter this call classified. A later
+            // claimant locks a new inode while the starter keeps an fd on the unlinked one,
+            // and the device the starter goes on to create has an ownership record no orphan
+            // scan can reach: list_orphans() skips a registration whose tombstone is missing.
+            //
+            // No EISDIR fall-through, unlike tcmu's registration-present branch, and the
+            // asymmetry is the reason rather than a preference. There, a registration has
+            // already been destroyed when the directory is met, so the recovery itself
+            // succeeded and blk.h pins that order for tcmu -- the EISDIR only says the lock
+            // directory needs a human. Here there is nothing to recover: the only work this
+            // branch does is remove our own litter, a directory at the tombstone path is not
+            // our litter, and devlock_unlink refuses one on exactly that reasoning (utils.h).
+            // So the acquire's EISDIR propagates as the failure it is, one step earlier than
+            // the unlink's and with no file created -- and it is the same errno this branch
+            // answered before the claim existed, where devlock_unlink's own EISDIR was what
+            // came back. ublk's claim IS its liveness gate (DEL_DEV is unconditional), so a
+            // path that cannot be opened is a path that cannot be established as ours.
+            int absent_fd = -1;
+            if (devlock_acquire(lock_dir, name, &absent_fd) < 0) {
+                if (errno == EBUSY)
+                    LOG_ERROR_RETURN(EBUSY, -1, "no ublk device ` yet, but its tombstone was claimed while this call was reaching it", want);
+                return -1;   // devlock_acquire logged it, EISDIR included
+            }
+            // Dropped on every exit below, errno preserved for the same reason the
+            // registration-present branch gives: devlock_release() calls flock() and
+            // close(), and either can set errno.
+            DEFER({ int e = errno; devlock_release(absent_fd); errno = e; });
+            // The load-bearing half, and it has to be AFTER the claim: a starter's ADD_DEV
+            // can land in the same window the claim closes -- the auto-assigned-id create
+            // claims its tombstone only AFTER ADD_DEV, so a registration can appear while
+            // nothing holds a lock at all -- and without this recheck the call would unlink
+            // the tombstone of a device that now exists and report success about a device it
+            // never touched, leaving that registration unreportable by every later scan.
+            // Refused rather than destroyed: this branch has torn nothing down, and a caller
+            // that retries reaches the branch below, which DEL_DEVs under the same claim.
+            // EBUSY, the errno blk.h pins this hazard to. It reads "another LIVE SERVER holds
+            // the tombstone" and here the server holds the dev_id rather than the tombstone --
+            // it has ADD_DEV'd and not yet claimed -- but it is the same fact a caller acts
+            // on, and the same action: back off, nothing was destroyed, retry reaches the
+            // other branch. A second errno for one hazard class would be a distinction with
+            // no caller-visible difference, and EEXIST is taken in this tree by the occupied
+            // SOCKET PATH that start() refuses, which the comment below spends its length
+            // explaining is a different ruling.
+            if (ctrl.get_info(want, &info) == 0)
+                LOG_ERROR_RETURN(EBUSY, -1, "ublk device ` was registered while this call was claiming its tombstone; leaving both alone", want);
+            // Any answer other than ENODEV leaves the absence UNPROVEN -- which also covers
+            // a control channel that failed the first GET_DEV_INFO above for a reason that
+            // was not "no such device", and sent this branch off to clean up a litter that
+            // may not be one. The licence to unlink rests on that absence, so refuse.
+            if (errno != ENODEV)
+                LOG_ERRNO_RETURN(0, -1, "ublk GET_DEV_INFO could not recheck dev `, so its tombstone stays", want);
+            // And this unlink stays, where nbd and vhost-user refuse an occupied socket path
+            // with EEXIST instead of probing and deleting. That ruling does not transfer: a
+            // socket node is the PEER's artifact, so refusing it costs nothing, while a
+            // tombstone is our own orphan-discovery record and destroy_orphan() is a public
+            // API whose documented job is to remove it. Refusing here would strand our
+            // litter forever, and every later scan would keep reporting a dev_id the kernel
+            // has already forgotten.
+            //
+            // Unlinked while the claim is still held -- the release is deferred to scope
+            // exit, after this statement -- so what goes is provably the tombstone this call
+            // opened, not one a starter created in between.
             if (devlock_unlink(lock_dir, name) < 0)
                 return -1;   // devlock_unlink logged it
             return 0;

@@ -1209,6 +1209,38 @@ struct MockFrontend {
         return true;
     }
 
+    // GET_VRING_BASE, split in two. transact() cannot serve the case that has to
+    // arm something BETWEEN the message going out and the reply coming back: the
+    // handler quiesces the queue, so a case about what that quiesce admits cannot
+    // also be the thread that unblocks the request the quiesce is waiting for.
+    // The reply's payload is the cursor the device stopped at and not an ack, so
+    // it is read as the vhost_vring_state it is -- scalar reads in place, per the
+    // wire header's access rule.
+    bool send_get_vring_base(uint32_t qid) {
+        if (!qid_valid(qid)) { errno = EINVAL; return fail("queue index"); }
+        vhost_user_msg m;
+        memset(&m, 0, sizeof(m));
+        m.request = VHOST_USER_GET_VRING_BASE;
+        m.flags = VHOST_USER_NEED_REPLY_MASK;   // send() adds the version
+        m.size = sizeof(vhost_vring_state);
+        m.payload.state = {qid, 0};
+        return send(&m);
+    }
+    bool recv_get_vring_base(uint32_t qid, uint32_t* base, int ms = 20000) {
+        vhost_user_msg r;
+        int got = 0;
+        if (!recv(&r, nullptr, &got, ms)) return false;
+        const uint32_t idx = r.payload.state.index;
+        if (!(r.flags & VHOST_USER_REPLY_MASK) ||
+            r.request != VHOST_USER_GET_VRING_BASE ||
+            r.size != sizeof(vhost_vring_state) || idx != qid) {
+            errno = EPROTO;
+            return fail("GET_VRING_BASE reply");
+        }
+        *base = r.payload.state.num;
+        return true;
+    }
+
     bool set_vring_enable(bool on) {
         vhost_user_msg m, r;
         memset(&m, 0, sizeof(m));
@@ -2965,7 +2997,8 @@ TEST_F(VhostUserTest, oob_descriptor_index) {
 // GET_VRING_BASE is only exercised at index 0xffff, not at 1: its accepted reply
 // is a vhost_vring_state that ECHOES the index in the low 32 bits, so at index 1
 // with last_avail 0 the accepted blob and the error ack are both the u64 value 1
-// and no assertion can tell them apart. At 0xffff they differ.
+// and no assertion can tell them apart. At 0xffff they differ. The ACCEPTED path
+// is a different case's subject: get_vring_base_stops_admission_before_it_reports_the_cursor.
 TEST_F(VhostUserTest, vring_index_out_of_range_is_rejected) {
     VhostUserController::Config cfg(make_info());
     cfg.sock_path = SOCK_PATH;
@@ -4066,6 +4099,209 @@ TEST_F(VhostUserTest, in_flight_requests_finish_before_a_call_fd_swap) {
     // across, and both counts would be wrong at once.
     EXPECT_EQ(1u, (uint32_t)old_signalled);
     EXPECT_EQ(1u, (uint32_t)new_signalled);
+}
+
+// GET_VRING_BASE's accepted path, which the index-bound case above deliberately
+// leaves uncovered, and the ORDER inside it. The protocol makes an ordinary
+// GET_VRING_BASE complete the inflight I/O before the vq stops, so the cursor it
+// returns may not outrun the used ring: a frontend that resumes the vq elsewhere
+// from a cursor ahead of the completions drops everything in between, because
+// nothing ever offers those buffers again.
+//
+// Draining first and stopping second cannot deliver that, and the reason is what
+// this case is built to make observable. The drain waits out in_flight while
+// `enabled` and `run` are both still up, so the loop it leaves alive is still
+// admitting, and the stop that follows is a SECOND hop onto the serving vcpu.
+// BlkConfig::pool below is not decoration, and it is worth being exact about what
+// it adds. With a null pool both helpers fire inline on the message loop's own
+// vcpu: the drain still yields while a request is parked, so a COMPLETION can
+// still admit the entry behind it, but the drain's last observation of zero and
+// the stop that follows it run with no yield between them -- the loop gets no turn
+// in that gap, and the window this case is named for (a kick or a
+// KICK_FALLBACK_US re-read landing between the two helpers) does not exist. With
+// a pool the stop is a second hop onto the serving vcpu, and that vcpu's loop has
+// been running the whole time.
+//
+// What fills the window deterministically is the dispatch cap, not a kick that
+// happens to land. queue_depth 1 holds the SECOND chain in the avail ring while
+// the first one sits parked in the gate, so at the instant the message arrives the
+// device has exactly one request of its own and exactly one entry it has not
+// taken. Freeing the parked one is then what frees the slot, and the completion
+// that frees it is the thing that reaches for the entry behind it:
+// redispatch_backlog runs from handle_req's DEFER, on the serving vcpu, while the
+// handler is still inside its wait. Admission therefore continues AFTER the
+// message was received, inside the handler's own critical section, on every round
+// -- this is a state, not a race the case hopes to win. A stop that came first
+// closes both admission paths at once, because `run` is what redispatch_backlog
+// tests before it ever consults `ready`, and what loop() gates on.
+//
+// Looped anyway, on the standing rule that an interleaving is asserted on a
+// counter and not on one observation. `admitted` is measured against a snapshot
+// taken BEFORE the send, so even a round whose gate opened early -- the release is
+// timed, so in principle it can beat the handler to the message -- still counts
+// everything the device admitted after the message went out. `capped` is the
+// non-vacuity guard: a round that reached the send with the second chain already
+// admitted would say nothing about the order, and cannot arise while the cap holds.
+TEST_F(VhostUserTest, get_vring_base_stops_admission_before_it_reports_the_cursor) {
+    constexpr int ROUNDS = 200;
+    constexpr uint64_t OFF = 12 << 20;
+    constexpr size_t LEN = 512;
+    // Four of the engine's KICK_FALLBACK_US re-reads; the cap case uses ten, once,
+    // while this one pays it per round. Four is enough for the same reason, and the
+    // gate being shut strengthens it: no completion can free the slot the second
+    // chain needs, so the count can only ever rise inside the window.
+    constexpr int SETTLE_MS = 20;
+    // Long enough for the message to reach the handler (a unix socket round trip is
+    // microseconds) and short enough that ROUNDS of them stay a few seconds. The
+    // idiom in_flight_requests_finish_before_a_call_fd_swap uses, with the signal
+    // moved AFTER the send so the delay runs from the message and not from the
+    // decision to send one.
+    constexpr uint64_t RELEASE_US = 10 * 1000;
+
+    test::TestPool pool(2);
+    VhostUserController::Config cfg(make_info());
+    cfg.sock_path = SOCK_PATH;
+    cfg.pool = pool;
+    cfg.queue_depth = 1;   // the cap that holds the second chain in the ring
+    // Declared before `dev`: RecordingFile does not own the backend, so its
+    // destruction has to come after the device's shutdown DEFER and its delete.
+    test::RecordingFile rf(file);
+    auto* caller = photon::get_vcpu();
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&rf));
+    DEFER(dev->shutdown());
+    // Runs BEFORE the shutdown above -- guards fire in reverse declaration order.
+    DEFER(rf.release_gate(1024));
+
+    // The gate has to open while the frontend thread is blocked waiting for the
+    // reply, so the release is a coroutine's and not the body's -- nothing on that
+    // thread can free the request the handler is waiting for. ONE token per round:
+    // exactly one IO is parked when it fires, and release_gate() clears `gated`
+    // first, so a chain admitted behind it (the defect) runs to completion instead
+    // of parking and turning the handler's own drain into a timeout.
+    photon::semaphore armed(0);
+    std::atomic<bool> rounds_over{false};
+    auto rth = photon::thread_create11([&] {
+        for (;;) {
+            armed.wait(1);
+            if (rounds_over.load(std::memory_order_relaxed))
+                return;
+            photon::thread_usleep(RELEASE_US);
+            rf.release_gate(1);
+        }
+    });
+    photon::thread_enable_join(rth);
+    DEFER({
+        rounds_over.store(true, std::memory_order_relaxed);
+        armed.signal(1);
+        photon::thread_join((photon::join_handle*)rth);
+    });
+
+    // `admitted` is the finding: work the device took AFTER the message that was
+    // supposed to stop it taking work. The other two are what the reply must look
+    // like once it does not, and each pins a different half of the handler.
+    uint64_t admitted = 0, cursor_ahead = 0, replied_early = 0, capped = 0;
+    auto w = pattern(0x5a, LEN);
+    MockFrontend fe;
+    test::run_off_vcpu([&] {
+        ASSERT_TRUE(fe.connect_to(SOCK_PATH));
+        ASSERT_TRUE(fe.negotiate(false));
+        for (int round = 0; round < ROUNDS; round++) {
+            // A distinct pair of slots per round, reused every SLOTS/2 of them: a
+            // round has consumed both of its own before the next one starts.
+            const uint16_t slot_a = (uint16_t)((2 * round) % SLOTS);
+            const uint16_t slot_b = (uint16_t)((2 * round + 1) % SLOTS);
+            const uint64_t a0 = rf.arrivals.load();
+            rf.gated = true;
+            memcpy(fe.mem + MockFrontend::data_off(slot_a), w.data(), LEN);
+            ASSERT_EQ(0, fe.submit(slot_a, T_OUT, OFF >> 9, LEN, false)) << "round " << round;
+            ASSERT_TRUE(fe.kick());
+            // The precondition everything below rests on: the first chain is
+            // provably inside the backend, and provably still there, before the
+            // message goes out. FLUSH is negotiated on this connection, so a WRITE
+            // is ONE recorded IO and not two -- the count a_paused_queue_completes_
+            // what_it_took_and_takes_nothing_more relies on for the same reason.
+            for (int i = 0; i < 5000 && rf.arrivals.load() == a0; i++)
+                ::usleep(1000);
+            ASSERT_EQ(a0 + 1, rf.arrivals.load())
+                << "round " << round << ": the first chain never reached the backend";
+            memcpy(fe.mem + MockFrontend::data_off(slot_b), w.data(), LEN);
+            ASSERT_EQ(0, fe.submit(slot_b, T_OUT, OFF >> 9, LEN, false)) << "round " << round;
+            ASSERT_TRUE(fe.kick());
+            // The gate is shut, so nothing completes and no slot frees: the count
+            // can only rise here, and a rise is a device that ignored queue_depth --
+            // which would let every assertion below pass for the wrong reason, since
+            // the second chain would already have been admitted before the message.
+            ::usleep(SETTLE_MS * 1000);
+            ASSERT_EQ(a0 + 1, rf.arrivals.load())
+                << "round " << round << ": the cap did not hold the second chain back";
+            capped++;
+
+            const uint16_t used_before = fe.used_idx_now();
+            ASSERT_TRUE(fe.send_get_vring_base(0));
+            armed.signal(1);   // the coroutine above opens the gate RELEASE_US from now
+            uint32_t base = 0;
+            ASSERT_TRUE(fe.recv_get_vring_base(0, &base));
+
+            // (1) Nothing may be admitted once this message arrived. a0+1 is the one
+            // chain the handler found in flight, and the second one was sitting
+            // published in the ring the whole time.
+            if (rf.arrivals.load() != a0 + 1)
+                admitted++;
+            // (2) The cursor the frontend resumes from may not outrun the
+            // completions it inherits along with it.
+            if ((uint16_t)base != fe.used_idx_now())
+                cursor_ahead++;
+            // (3) And the request that WAS in flight has to have finished first.
+            // This is the half a handler that stopped WITHOUT draining fails, and
+            // fails deterministically rather than by luck: its gate is still shut
+            // when it replies.
+            if (*(uint8_t*)(fe.mem + MockFrontend::status_off(slot_a)) == 0xff)
+                replied_early++;
+
+            // Consume the completion, hand the vq back at the cursor we were given,
+            // and check that the entry the stop stranded is served on the resume.
+            // That is the loss this order must not cause: BASE is a handover, not a
+            // discard, and a "fix" that closed admission by throwing the ring away
+            // lands here instead of in (1).
+            uint32_t head = VQ_NUM, ulen = 0;
+            ASSERT_TRUE(fe.collect(&head, &ulen, 5000)) << "round " << round;
+            ASSERT_LT(head, (uint32_t)VQ_NUM) << "round " << round;
+            ASSERT_EQ((int)slot_a, (int)fe.slot_of_head[head]) << "round " << round;
+            ASSERT_TRUE(fe.restart_with_base((uint16_t)base)) << "round " << round;
+            head = VQ_NUM; ulen = 0;
+            ASSERT_TRUE(fe.collect(&head, &ulen, 5000))
+                << "round " << round << ": the stranded chain was never served after the resume";
+            ASSERT_LT(head, (uint32_t)VQ_NUM) << "round " << round;
+            ASSERT_EQ((int)slot_b, (int)fe.slot_of_head[head]) << "round " << round;
+            ASSERT_EQ(S_OK, (int)*(uint8_t*)(fe.mem + MockFrontend::status_off(slot_b)))
+                << "round " << round;
+            // Both of this round's entries completed, in the order they were
+            // published: one before the reply and one after the resume.
+            ASSERT_EQ((uint16_t)(used_before + 2), fe.used_idx_now()) << "round " << round;
+        }
+    });
+    if (!fe.err.empty())
+        LOG_ERROR("mock frontend: `", fe.err);
+
+    // Placement observed, not inferred: the serving coroutines ran on the pool and
+    // the message loop stayed here, which is what turns the handler's two helpers
+    // into two hops. Deliberately not pinned to a count -- ROUNDS vq_starts over a
+    // two-vcpu pool land wherever WorkPool's own cursor takes them.
+    EXPECT_FALSE(rf.ran_on(caller));
+    EXPECT_GE(rf.vcpu_count(), 1u);
+    // The non-vacuity guard first: without it a device that never dispatched
+    // anything at all would satisfy all three below.
+    EXPECT_EQ((uint64_t)ROUNDS, capped) << "rounds that reached the message";
+    EXPECT_EQ(0u, admitted) << "rounds that admitted work after GET_VRING_BASE arrived";
+    EXPECT_EQ(0u, cursor_ahead) << "rounds whose reply outran the used ring";
+    EXPECT_EQ(0u, replied_early) << "rounds that replied with a request still in the backend";
+    // Through `file`, not `rf`, for the reason pool_placement gives: this read runs
+    // on the caller's vcpu, so routing it via the probe would record that vcpu as
+    // one of the device's own placements and EXPECT_FALSE above would be a lie.
+    EXPECT_EQ(0, verify_backend(OFF, w));
 }
 
 // detach(true) promises to wait out the pending work, and the teardown order that
@@ -5601,7 +5837,7 @@ TEST_F(VhostUserTest, reset_device_is_refused_when_its_protocol_feature_is_not_a
 // is not a contiguous prefix of consumed avail entries: resuming from it both loses
 // uncompleted entries below it and re-serves completed ones above it, producing
 // duplicate used elements for heads the driver has already reclaimed. BASE is the
-// previous backend's own last_avail -- GET_VRING_BASE drains, stops and returns it
+// previous backend's own last_avail -- GET_VRING_BASE stops, drains and returns it
 // -- so resuming there accepts that dispatched-but-uncompleted entries are genuinely
 // unrecoverable without publishing duplicates.
 //

@@ -75,9 +75,12 @@ enum class BlkResizeEffect : uint8_t { Unsupported, BestEffortNotify, NotifiedOr
 
 // How much of an existing registration start() validates before adopting it, graded by what
 // the transport can ASK the registration: Full checks geometry and the registered feature set,
-// IdentityAndSize checks only those two, QueueCountOnly checks the queue count and asks
-// nothing else of the registration's CONFIGURATION. A ring's cursors are not configuration
-// and do not count toward the grade -- see below. A transport may also keep a record of
+// IdentityAndSize checks only the identity and the size, and QueueCountOnly checks the queue
+// count, asking nothing else of the registration's CONFIGURATION. A registered read-only
+// attribute counts as configuration, and only a Full grade can see it: BlkDevInfo::read_only is
+// therefore recoverable from an orphan record exactly where the transport grades Full, and a
+// caller of a lower-graded one has to retain it out of band. A ring's cursors are not
+// configuration and do not count toward the grade -- see below. A transport may also keep a record of
 // its own and check against it, and that does not raise the grade, because its own record
 // can be missing where the registration's answer cannot. vduse is the case in point: its uapi
 // can write the device config but has no readback of it, so QueueCountOnly is the ceiling on
@@ -108,12 +111,12 @@ enum class BlkAdoption : uint8_t { NoRegistration, QueueCountOnly, IdentityAndSi
 // list_xxx_orphans() and as BlkConfig::info -- so it is what a recovery loop carries
 // from an orphan record back into a config.
 //
-// Two halves share this struct. identity, size, features and sector_size_shift are
-// the REQUESTED config: the caller writes them and the factory validates them. The
-// rest is the EFFECTIVE view: the transport writes it and a caller's value is
-// ignored, so a config built by hand may leave all of it at its default. The defaults
-// are the weakest value on every axis, which makes an unfilled descriptor promise
-// nothing rather than promise the common case.
+// Two halves share this struct. identity, size, features, sector_size_shift and
+// read_only are the REQUESTED config: the caller writes them and the factory
+// validates them. The rest is the EFFECTIVE view: the transport writes it and a
+// caller's value is ignored, so a config built by hand may leave all of it at its
+// default. The defaults are the weakest value on every axis, which makes an unfilled
+// descriptor promise nothing rather than promise the common case.
 struct BlkDevInfo {
     // The RECOVERY KEY: the transport-relative string naming the kernel-side
     // registration, stable across daemon restarts and unique within its
@@ -132,9 +135,15 @@ struct BlkDevInfo {
     // `features` is what was asked for; these are what exists. `offered` is what this
     // implementation can serve at all, and the two differ: vhost-user and vduse accept
     // FEATURE_DISCARD and FEATURE_WRITE_ZEROES in a config and offer neither, because
-    // their virtio command set serves IN/OUT/FLUSH/GET_ID only. `offered` does not
-    // depend on what was asked for, which is what makes `features & ~offered` show the
-    // requests a transport accepted and cannot honour.
+    // their virtio command set serves IN/OUT/FLUSH/GET_ID only. `offered` never depends
+    // on what was asked for, but it can depend on the platform: nbd offers
+    // FEATURE_WRITE_ZEROES everywhere and FEATURE_DISCARD only where IFile::trim's
+    // fallocate punch-hole exists, because zeroing has a portable spelling and
+    // discarding does not. So `features & ~offered` shows the requests a transport
+    // accepted and cannot honour only where it accepts them -- nbd turns `features`
+    // straight into transmission flags, which a client takes as a whole session or not
+    // at all, so its factory refuses an unoffered bit with EINVAL and the expression is
+    // 0 on any device nbd built.
     //
     // `negotiated` is the set actually IN FORCE for this session. How it settles differs
     // by transport: a virtio frontend accepts a subset of the offer, so a frontend that
@@ -150,6 +159,17 @@ struct BlkDevInfo {
     uint64_t negotiated = 0;        // FEATURE_*, effective
 
     uint8_t sector_size_shift = 9;  // 2^9 = 512 bytes, REQUESTED
+
+    // REQUESTED, and the one field here a recovery loop cannot do without: a
+    // transport that grades its adoption Full validates the registration's
+    // read-only attribute against it, so a descriptor that omits it makes a
+    // read-only orphan unadoptable through list_orphans() -- unrepairably, because
+    // a registration stops accepting parameters once it has been used. Filled by
+    // list_orphans() wherever the registration records it, which is not everywhere:
+    // tcmu holds read-only at handler level and never writes it to configfs, so its
+    // descriptor cannot carry it and a read-only tcmu orphan is indistinguishable
+    // from a writable one. See BlkAdoption.
+    bool read_only = false;
 
     BlkBacklog backlog = BlkBacklog::None;
     BlkShutdownRefusal shutdown_refusal = BlkShutdownRefusal::Disconnects;
@@ -180,7 +200,9 @@ struct BlkDevInfo {
 //
 // How much "reconciling" verifies is NOT common, and info().adoption is this
 // transport's answer. Full validates geometry and the registered feature set and
-// rejects a mismatch with EINVAL. IdentityAndSize validates only those two.
+// rejects a mismatch with EINVAL. IdentityAndSize validates only the identity and
+// the size, so a registration whose feature set or read-only attribute differs is
+// adopted without a word.
 // QueueCountOnly validates the queue count and asks the registration nothing else
 // about its CONFIGURATION, so an adoption can succeed with different geometry while
 // the consumer keeps the config it already has; a transport that also checks a
@@ -231,11 +253,11 @@ public:
     virtual int start(fs::IFile* backend, bool ownership = false) = 0;
 
     // The descriptor this device was built from, plus its effective view. identity,
-    // size, features and sector_size_shift are the requested config, kept current by
-    // resize(), and are what a recovery loop matches an orphan record against. The
-    // rest -- offered, negotiated and the four lifecycle axes -- is what this
-    // transport does; the axes are valid as soon as the object exists, while
-    // negotiated stays 0 until start() has something to report.
+    // size, features, sector_size_shift and read_only are the requested config, kept
+    // current by resize(), and are what a recovery loop matches an orphan record
+    // against. The rest -- offered, negotiated and the four lifecycle axes -- is what
+    // this transport does on this platform; the axes are valid as soon as the object
+    // exists, while negotiated stays 0 until start() has something to report.
     virtual const BlkDevInfo& get_info() const = 0;
 
     // The local block device node this object created and can name (ublk's
@@ -387,9 +409,15 @@ struct BlkConfig {
                                   // ring the frontend chose in SET_VRING_NUM. 0 leaves that ring
                                   // size as the whole bound, so a caller who wants a limit has to
                                   // ask for one -- the frontend will not set it for you
-                                  // vduse: also offered to the driver as the ring capacity
-                                  // (VDUSE_VQ_SETUP's max_size; default 256, never above 1024), so
-                                  // there it bounds the ring as well as the requests inside it
+                                  // vduse: the in-flight cap, as everywhere else. The ring capacity
+                                  // handed to the driver (VDUSE_VQ_SETUP's max_size) is DERIVED from
+                                  // it rather than equal to it: rounded up to a power of two, floored
+                                  // so one maximum-size request this device advertises still fits,
+                                  // and clamped to 1024. The rounding is not cosmetic -- virtio_ring.c
+                                  // rejects a non-power-of-two length in vring_create_virtqueue
+                                  // before the halving loop that would have accommodated it, so
+                                  // passing a depth of 3 straight through made the queue uncreatable
+                                  // for a configuration the factory had just accepted
 
     uint32_t stack_size = DEFAULT_STACK_SIZE;
                                   // Stack of each serving coroutine named above, handed
@@ -426,8 +454,12 @@ struct BlkConfig {
     bool read_only = false;       // export a read-only device; the write path fails:
                                   // tcmu SCSI WP (handler-level) / ublk UBLK_ATTR_READ_ONLY /
                                   // vduse + vhost-user VIRTIO_BLK_F_RO / nbd NBD_FLAG_READ_ONLY
+                                  // Seeded from info.read_only below, so a config built from a
+                                  // descriptor -- which is what a recovery loop builds -- carries
+                                  // it; assigning this one directly still works and is the caller's
+                                  // override, but then the two halves of info() disagree about it.
 
-    explicit BlkConfig(const BlkDevInfo& i) : info(i) {}
+    explicit BlkConfig(const BlkDevInfo& i) : info(i), read_only(i.read_only) {}
     BlkConfig() = default;
 };
 
@@ -610,9 +642,12 @@ public:
     //
     // EBUSY is the live-identity refusal, and it is what makes the call safe on a
     // BlkDevInfo taken from an earlier scan: a server may have adopted the
-    // registration since, so the flock is probed again here rather than trusted
-    // from the listing. The kernel's own refusal -- a LUN still references the
-    // backstore -- surfaces as EBUSY too.
+    // registration since, so the flock is CLAIMED and held here rather than merely
+    // probed and rather than trusted from the listing -- in the branch that removes a
+    // registration as well as in the one that removes only a tombstone, where the
+    // recheck under that claim is what catches a backstore appearing in between. The
+    // kernel's own refusal -- a LUN still references the backstore -- surfaces as
+    // EBUSY too.
     //
     // The registration goes first, the order shutdown() tears down in. So a
     // tombstone that is not a file is reported as EISDIR *after* the registration
@@ -787,7 +822,12 @@ public:
     // Registered devices (QUIESCED or FAIL_IO, i.e. left behind by a detached or
     // crashed daemon) whose flock in this lock_dir is free. identity is the decimal
     // dev_id -- the recovery key: build a cfg from the returned BlkDevInfo, hand it
-    // to new_device(), and start(backend).
+    // to new_device(), and start(backend). That recipe is complete here and only
+    // here: ublk grades its adoption Full, so it validates the registered
+    // READ_ONLY attribute, and this listing reads it back into
+    // BlkDevInfo::read_only -- without which a read-only orphan would be refused
+    // with EINVAL and could not be repaired, a registration having stopped
+    // accepting parameters once it was used.
     virtual std::vector<BlkDevInfo> list_orphans() = 0;
 
     // Remove one orphan: the kernel-side registration (DEL_DEV) and the tombstone
@@ -802,7 +842,12 @@ public:
     // rejected too: it is Config::dev_id's "let the kernel choose" sentinel, not a
     // device. Both are EINVAL, with nothing deleted.
     //
-    // EBUSY here means exactly one thing: another LIVE SERVER holds the tombstone.
+    // EBUSY here means exactly one thing: another LIVE SERVER owns this dev_id. It
+    // usually holds the tombstone, and then the flock attempt is what says so; the
+    // auto-assigned-id create claims its tombstone only AFTER ADD_DEV, so a starter
+    // can also own a registration it has not locked yet, and the recheck this call
+    // runs under its own claim is what catches that one. Both are the same answer
+    // because both leave the caller the same action: nothing was destroyed, back off.
     // The flock is CLAIMED and held across the DEL_DEV rather than merely probed,
     // because DEL_DEV is unconditional -- no EBUSY, no state check -- so a
     // probe-then-destroy pair leaves a window in which another daemon adopts the
@@ -848,6 +893,14 @@ public:
     // EBUSY: removing the file would leave the device it then creates with no
     // tombstone, and list_orphans() skips an entry whose tombstone is missing, so it
     // would stop being reported by every later scan while still being in the kernel.
+    //
+    // The same EBUSY answers the mirror-image case, where the flock attempt SUCCEEDS
+    // and the registration appears anyway: an auto-assigned-id create claims its
+    // tombstone only after ADD_DEV, so this call can hold the claim on a dev_id whose
+    // device another process is in the middle of registering. The absence is therefore
+    // rechecked under the claim rather than trusted from the leading probe, and a
+    // registration found there is left alone -- nothing destroyed, 0 not returned, and
+    // a retry reaches the branch that DEL_DEVs under the same claim.
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 
@@ -1030,6 +1083,15 @@ public:
     // attempt on it fails, which a live server's hold explains in the routine case
     // and which then means it is between claiming the name and CREATE_DEV. That is
     // EBUSY.
+    //
+    // So is the mirror image, where the flock attempt SUCCEEDS and the registration
+    // appears anyway: a server of this implementation claims before it CREATE_DEVs, so
+    // what the recheck under that claim catches is a creator the tombstone cannot see
+    // -- a `vdpa dev add` issued by hand, or a VduseController configured with a
+    // different lock_dir, whose tombstone for this name is a different file. Absence is
+    // therefore rechecked rather than trusted from the leading probe, and a registration
+    // found there is left alone: nothing destroyed, 0 not returned, and a retry reaches
+    // the branch that DESTROY_DEVs under the same claim.
     virtual int destroy_orphan(const BlkDevInfo& orphan) = 0;
 };
 

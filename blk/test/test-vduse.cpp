@@ -17,13 +17,17 @@ limitations under the License.
 // Built only on Linux (the vduse transport is LINUX-gated). The VduseTest cases require
 // root, the vduse + virtio_vdpa modules and iproute2's `vdpa` tool; without them those
 // print a skip notice and return (see test::SkippableTest). VduseConfigTest and the
-// iotlbBudget cases at the bottom are ungated and run wherever this file builds.
+// VduseDevlock / iotlbBudget / iotlbReclaim cases at the bottom are ungated and run
+// wherever this file builds.
 //
 // blk/vduse.cpp, TEXTUALLY, and it has to be here rather than further down: the
-// iotlbBudget cases need Iotlb, VduseDeviceImpl, vq_tick and VDUSE_STALE_FLUSH_BYTES,
-// all file-local to that translation unit and in no header, and the split-ring structs
-// the rescue sentinel walks come from blk/utils.h through it -- so everything below,
-// the sentinel included, has to see those definitions.
+// iotlbBudget and iotlbReclaim cases need Iotlb, VduseDeviceImpl, vq_tick,
+// VqVduse::begin_reading and VDUSE_STALE_FLUSH_BYTES, the derived-capacity case needs
+// derive_vq_capacity, and the tombstone case needs the devlock primitives vduse.cpp
+// reaches through blk/utils.h -- all of them file-local to that translation unit or
+// invisible through the public header -- and the split-ring structs the rescue sentinel
+// walks come from blk/utils.h through it, so everything below, the sentinel included,
+// has to see those definitions.
 //
 // Two consequences, both measured on the linked binary rather than inferred.
 //
@@ -1395,6 +1399,76 @@ TEST_F(VduseConfigTest, offered_exposes_requests_the_transport_cannot_honour) {
     EXPECT_EQ(FEATURE_FLUSH, i.offered);
     EXPECT_EQ(cfg.info.features, i.features);   // the request is recorded, not rewritten
     EXPECT_EQ(FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.features & ~i.offered);
+}
+
+// The ring capacity VDUSE_VQ_SETUP advertises is DERIVED from queue_depth rather than
+// equal to it, which is what blk.h's contract for this transport now says in those
+// words. The derivation fixes a defect no live run in this suite could have shown:
+// VDUSE stores max_size verbatim, and Linux refuses a ring length that is not a power
+// of two in vring_create_virtqueue BEFORE the halving loop that would have shrunk it
+// to something allocatable -- so a depth of 3, which the factory accepts because
+// blk.h promises this field is clamped rather than rejected, made the queue
+// uncreatable. The floor's second half is this transport's own: bit 28 is not
+// offered, so the advertised seg_max is a DIRECT chain bound and one maximum-size
+// request consumes seg_max + 2 ring entries. A ring derived from a small depth alone
+// could not hold a single request the config space advertises.
+//
+// Pure arithmetic on a file-local function, so it belongs to the ungated fixture: no
+// root, no module, no registration, no device. RED at the commit before the
+// derivation existed, where the answer was min(queue_depth ? queue_depth : 256, 1024)
+// -- 3 for a depth of 3, and 63 for 63.
+//
+// The floor is read from blk/utils.h rather than spelled locally, which is a
+// deliberate exception to this suite's rule that it must not learn its expected values
+// from the implementation's headers: the floor IS the engine's advertised seg_max plus
+// the two framing descriptors, and a second copy of that expression here is exactly
+// how the two would drift apart silently. The table's own numbers are literals, so a
+// change to the derivation still shows up as a value mismatch and not as a restated
+// expectation.
+TEST_F(VduseConfigTest, ring_capacity_is_derived_from_queue_depth) {
+    struct Row { uint32_t depth, cap; };
+    const Row table[] = {
+        {   0,  256},   // "you choose", unchanged
+        {   1,   64},   // the floor: one maximum-size advertised request must fit
+        {   3,   64},   // the reviewer's case, and the one that was red
+        {  63,   64},
+        {  64,   64},   // already a power of two at the floor
+        {  65,  128},   // rounds UP, never down
+        { 100,  128},
+        {1023, 1024},
+        {1024, 1024},   // the clamp
+        {1025, 1024},
+        {5000, 1024},   // clamped BEFORE the rounding, so the doubling cannot overflow
+    };
+    for (auto& t : table) {
+        const uint32_t r = derive_vq_capacity(t.depth);
+        EXPECT_EQ(t.cap, r) << "queue_depth " << t.depth;
+        EXPECT_EQ(0u, r & (r - 1))
+            << "queue_depth " << t.depth << " gave " << r << ", which is not a power "
+               "of two: vring_create_virtqueue refuses that length before it reduces "
+               "anything, so the queue could never be created";
+        EXPECT_GE(r, VIRTIO_BLK_SEG_MAX_ADVERTISED + 2)
+            << "queue_depth " << t.depth << " gave a ring that cannot hold one "
+               "seg_max-sized direct chain, which is a request this device advertises";
+    }
+
+    // The other half of the split: queue_depth is not consumed by the derivation, it
+    // stays the engine's in-flight cap. Driven through vq_bind, which is field
+    // assignment and hook binding with no ioctl in it, so it is reachable on a device
+    // that was never start()ed -- and asserting it there is the point, because a
+    // derivation that also overwrote the cap would raise the device's concurrency
+    // behind the caller's back.
+    BlkConfig cfg(make_info());
+    cfg.queues = 1;
+    cfg.queue_depth = 3;
+    VduseDeviceImpl d(cfg, SUITE_LOCKS);
+    ASSERT_EQ(1u, d.vqs.size());
+    d.vq_bind(0);
+    EXPECT_EQ(3u, d.vqs[0]->srv.queue_depth)
+        << "the in-flight cap followed the derived ring capacity instead of the "
+           "caller's queue_depth";
+    EXPECT_EQ(64u, derive_vq_capacity(d.vqs[0]->srv.queue_depth))
+        << "the two are not independent: the cap is what the capacity is derived FROM";
 }
 
 // blk.h's start() contract, the half test::CountingFile exists to witness: an OWNED
@@ -3435,6 +3509,72 @@ TEST(VduseSentinelTest, serve_stops_at_the_avail_index_wrap) {
 }
 
 // ---------------------------------------------------------------------------
+// The tombstone primitives destroy_orphan()'s absent-registration branch depends on.
+//
+// That branch classifies with devlock_free() and then removes under a devlock_acquire()
+// claim, and the asymmetry between the two is load-bearing rather than incidental: they
+// answer DIFFERENTLY about a path that is not a file, and about a path that is not there
+// at all.
+//
+//   - a DIRECTORY: devlock_free() opens O_RDONLY and flocks, and both succeed on a
+//     directory fd, so it reports 1 -- "free, ours to remove". devlock_acquire() opens
+//     O_CREAT|O_RDWR, which a directory refuses, so it reports -1/EISDIR. Classifying
+//     with the probe and removing on that answer would aim a removal at operator state.
+//   - an ABSENT path: devlock_free() reports -1, and that is the only source of the
+//     ENOENT blk.h pins for "no such device and no tombstone either". devlock_acquire()
+//     CREATES the file and reports success, so it cannot tell "was litter" from "never
+//     existed" -- which is why the branch keeps the probe in front of the claim.
+//
+// Both halves are pinned below, and neither needs a registration: the cross-process
+// interleaving the claim exists for is VM-only, but the primitive asymmetry it is built
+// on is not.
+//
+// Ungated: no root, no vduse module, no kernel. This is the one case in the file that
+// opens what it names, so it uses its own scratch directory under /tmp rather than
+// SUITE_LOCKS -- nothing here is a tombstone this suite's controllers could otherwise
+// have planted or swept.
+// ---------------------------------------------------------------------------
+TEST(VduseDevlock, the_probe_and_the_claim_disagree_about_a_directory_and_about_absence) {
+    static const char DIR[] = "/tmp/photon-blk-vduse-devlock-test";
+    static const char LN[]  = "vduse-photon-devlock-dir.lock";
+    ::system(("rm -rf " + std::string(DIR)).c_str());
+    DEFER(::system(("rm -rf " + std::string(DIR)).c_str()));
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", DIR, LN);
+    ASSERT_EQ(0, ::mkdir(DIR, 0755));
+    ASSERT_EQ(0, ::mkdir(path, 0755));   // operator state where a tombstone should be
+
+    EXPECT_EQ(1, devlock_free(DIR, LN))
+        << "the probe cannot tell a directory from a free tombstone, so it cannot be "
+           "what authorises a removal";
+    int fd = -1;
+    errno = 0;
+    EXPECT_EQ(-1, devlock_acquire(DIR, LN, &fd));
+    EXPECT_EQ(EISDIR, errno) << "a directory at the tombstone path has to be refused, "
+                                "not fallen through on";
+    EXPECT_EQ(-1, fd) << "a refused claim left an fd behind";
+    // and nothing removed it on the way: a directory there is operator state, and
+    // devlock_unlink() reports EISDIR rather than recursing into it
+    errno = 0;
+    EXPECT_EQ(-1, devlock_unlink(DIR, LN));
+    EXPECT_EQ(EISDIR, errno);
+    EXPECT_EQ(0, ::access(path, F_OK)) << "the directory was removed on the operator's behalf";
+
+    ASSERT_EQ(0, ::rmdir(path));
+    EXPECT_EQ(-1, devlock_free(DIR, LN))
+        << "an absent tombstone is not 'free', it is absent, and the two have to stay "
+           "different answers or a name that was never a device reports success";
+    int fd2 = -1;
+    ASSERT_EQ(0, devlock_acquire(DIR, LN, &fd2));
+    DEFER(devlock_release(fd2));
+    EXPECT_EQ(0, ::access(path, F_OK))
+        << "the claim did not create the file the probe had just reported absent, so "
+           "it cannot be the thing that classifies";
+    EXPECT_EQ(0, devlock_free(DIR, LN))
+        << "a claim this process holds read as free to a probe of its own";
+}
+
+// ---------------------------------------------------------------------------
 // The stale-mapping budget's THRESHOLD, driven in-process.
 //
 // teardown_releases_every_mapping_the_cache_retained above is a baseline and not a
@@ -3681,6 +3821,139 @@ TEST(iotlbBudget, vq_tick_quiesces_at_the_cap_and_not_one_byte_below_it) {
         EXPECT_FALSE(d.quiescing.load()) << "the test-and-set was not released";
         f.released = true;   // flush_stale munmapped it from inside the quiesce
     }
+}
+
+// ---------------------------------------------------------------------------
+// The reclamation GATE's placement, driven in-process.
+//
+// Not the budget: the threshold cases above hold in_flight at 1 to force the decision
+// through the cap, and the cap is a byte count. This one is about WHERE the
+// eligibility test runs, which the cap has no bearing on -- the ordinary
+// opportunistic flush reaches it on every tick of a device that is anywhere below the
+// budget.
+//
+// The interleaving is the reviewer's, and it needs three vcpus in production but only
+// two coroutines here, because what makes it go is the ORDER of the lock acquisitions
+// rather than the threads: queue 1's tick decides the flush is safe, parks waiting for
+// the cache lock, and only then does queue 0 admit a reader and take the invalidation
+// that retires it. A gate evaluated before the lock is a decision about a state the
+// munmap does not see.
+//
+// Scope, so this case is not read as claiming more than it shows: in production the
+// flusher and the reader have to be on different OS threads -- a pool with at least two
+// serving vcpus and at least two queues. On one vcpu the interleaving is reachable only
+// when iotlb.lock happens to be contended, since photon::mutex::lock is a non-yielding
+// CAS on the fast path. This case supplies the contention by hand, which is the honest
+// in-process equivalent and the reason it can run on CI at all.
+// ---------------------------------------------------------------------------
+
+// The whole of the interleaving after the helper has the lock: admit a reader on queue
+// 0, then invalidate and retire it as ONE locked step, exactly as the
+// VDUSE_UPDATE_IOTLB handler does. Retire preserves the reading bit -- that is the
+// documented behaviour the gate depends on -- so a flush that re-checks under the lock
+// sees the reader, and one that checked before taking it does not.
+struct ReclaimArg {
+    VduseDeviceImpl* d = nullptr;
+    uint64_t iova = 0;
+    uint64_t len = 0;
+    // Reported back rather than asserted in here: this is a coroutine entry returning
+    // void*, so a gtest ASSERT would not compile in it, and a reader that was NOT
+    // admitted would make the case pass without measuring anything.
+    bool admitted = false;
+    photon::semaphore locked{0};   // NSDMI, not {}: semaphore's ctor is explicit
+};
+
+void* reclaim_racer(void* a) {
+    auto* arg = (ReclaimArg*)a;
+    auto* d = arg->d;
+    auto* q0 = d->vqs[0];
+    SCOPED_LOCK(d->iotlb.lock);
+    arg->locked.signal(1);
+    // Hands the vcpu to the case body, which is what lets queue 1's tick evaluate its
+    // gate and park in the flush before the reader below exists. Without this yield the
+    // helper would finish first, the gate would see the reader, and the case would pass
+    // against the unfixed code having measured nothing.
+    photon::thread_usleep(20 * 1000);
+    arg->admitted = q0->x.begin_reading();
+    std::vector<Iotlb::Map> dropped;
+    d->iotlb.invalidate_locked(arg->iova, arg->iova + arg->len - 1, &dropped);
+    for (uint32_t i = 0; i < d->nqueues; i++) {
+        bool covered = false;
+        for (auto& m : dropped)
+            if (d->vqs[i]->x.rings_in(m.start, m.last)) {
+                covered = true;
+                break;
+            }
+        if (!covered)
+            continue;
+        d->vqs[i]->x.retire();
+        d->vqs[i]->x.needs_refresh.store(true, std::memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+TEST(iotlbReclaim, a_reader_admitted_after_the_gate_is_still_seen_by_the_flush) {
+    const size_t LEN = 2ull << 20;
+    BlkConfig cfg = budget_cfg("iotlb-reclaim");
+    cfg.queues = 2;
+    VduseDeviceImpl d(cfg, SUITE_LOCKS);
+    ASSERT_EQ(2u, d.vqs.size());
+
+    Fake f;
+    ASSERT_TRUE(f.make(LEN));
+    {
+        SCOPED_LOCK(d.iotlb.lock);
+        d.iotlb.maps.push_back(f.entry());
+    }
+    ASSERT_EQ(LEN, d.iotlb.live_bytes());
+    ASSERT_EQ(0u, d.iotlb.stale_bytes());
+
+    // Queue 0 is the reader: published, with its avail ring recorded as the range the
+    // fabricated mapping covers, so the invalidation below retires it by intersection
+    // the way the handler does. Queue 1 is the flusher and records nothing.
+    auto* q0 = d.vqs[0];
+    q0->x.record_ring(1, FAKE_IOVA, LEN);
+    ASSERT_TRUE(q0->x.publish_ready(q0->x.gen()));
+
+    ReclaimArg arg{&d, FAKE_IOVA, LEN};
+    auto* th = photon::thread_create(&reclaim_racer, &arg);
+    ASSERT_NE(nullptr, th);
+    auto* jh = photon::thread_enable_join(th);
+    arg.locked.wait(1);   // the helper holds the cache lock from here on
+
+    // Passes the gate (nothing is in flight, nothing is reading YET) and parks in the
+    // flush, because the helper has the lock. The fixed code has not decided anything
+    // at this point; the unfixed code has already decided and is about to act on it.
+    d.vq_tick(1);
+    photon::thread_join(jh);
+
+    ASSERT_TRUE(arg.admitted)
+        << "queue 0 was not admitted, so nothing was holding the mapping and the "
+           "assertion below would have passed without measuring the gate";
+    ASSERT_EQ(LEN, d.iotlb.stale_bytes())
+        << "the flush released a mapping a reader admitted after the gate was "
+           "evaluated was still holding, so the eligibility test is not running "
+           "inside the lock the munmap runs under";
+    // Only reached once the bytes are still accounted, and that ordering is what keeps
+    // a red run a failure rather than a crash: on the unfixed code these pages are
+    // munmapped by now, so dereferencing them would take the whole binary down and
+    // every case after this one with it.
+    EXPECT_EQ(0, (int)((vring_avail*)f.base)->flags)
+        << "the avail ring the reader was admitted to is no longer mapped";
+    EXPECT_FALSE(d.quiescing.load());
+    EXPECT_TRUE(q0->x.needs_refresh.load())
+        << "the invalidation did not re-arm the queue it retired";
+
+    // Control, and the half that makes the assertion above mean something: with the
+    // reader gone the identical tick DOES release the mapping, so what the first half
+    // witnessed was the gate and not a flush that stopped working. A mutation that
+    // deletes the release, or makes the predicate answer false unconditionally, is
+    // killed here and not there.
+    q0->x.end_reading();
+    d.vq_tick(1);
+    EXPECT_EQ(0u, d.iotlb.stale_bytes())
+        << "nothing was holding a reference and the mappings were retained anyway";
+    f.released = true;   // the flush above munmapped it
 }
 
 }  // namespace

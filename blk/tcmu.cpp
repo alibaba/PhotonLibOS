@@ -1519,6 +1519,13 @@ struct TcmuServer {
             // GOOD over untouched blocks. Handled per descriptor, so ranges already
             // trimmed or zeroed above survive a later descriptor's failure, which is
             // also what the kernel does (it unwinds nothing on the error path).
+            //
+            // The REAL trim gets no sync, with the cache advertised on or off, and
+            // that is not an omission worth "fixing": Linux never attaches a
+            // durability ask to a discard -- blk_alloc_discard_bio() allocates
+            // REQ_OP_DISCARD with neither REQ_PREFLUSH nor REQ_FUA (block/blk-lib.c),
+            // and blk_insert_flush() turns neither into a postflush for a payload-less
+            // hint -- so a discard completion has never been a durability promise.
             if (backend->trim(off, len) == 0)
                 continue;
             if (errno != EOPNOTSUPP && errno != ENOSYS) {
@@ -1526,6 +1533,19 @@ struct TcmuServer {
                 return;
             }
             if (zero_fill(backend, off, len) < 0) {
+                set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                return;
+            }
+            // The FALLBACK is a write, though, and a write this device acks is a
+            // write it promised was durable once it advertised no cache to ask about
+            // -- emul_write_same's zero path states the kernel half of that. Gated on
+            // write_through ALONE, with no FUA term: UNMAP's cdb[1] is the ANCHOR bit
+            // and nothing else (checked above), so there is no FUA in this CDB to
+            // read, and LBPRZ is a same-power-cycle READ promise rather than a
+            // durability claim -- the device's own cache advertisement is therefore
+            // the whole of what this completion owes. Per descriptor, for the same
+            // reason the zeroing above is.
+            if (write_through && backend->fdatasync() < 0) {
                 set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
                 return;
             }
@@ -1600,7 +1620,8 @@ struct TcmuServer {
         if (unmap) {
             // LBPRZ promises reads after an unmap return zeros, so a backend that
             // cannot punch a hole must still zero the range rather than report GOOD
-            // over untouched blocks.
+            // over untouched blocks. The successful trim gets no sync, for the reason
+            // emul_unmap states: Linux never attaches a durability ask to a discard.
             if (backend->trim(off, len) < 0) {
                 if (errno != EOPNOTSUPP && errno != ENOSYS) {
                     set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
@@ -1610,13 +1631,51 @@ struct TcmuServer {
                     set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
                     return;
                 }
+                // write_through alone, and no FUA term, exactly as in emul_unmap's
+                // fallback: the UNMAP bit this branch took is cdb[1] & 0x08, the bit
+                // an ordinary WRITE carries FUA in, so this CDB has spent it on
+                // something else -- there is no FUA to honour here.
+                if (write_through && backend->fdatasync() < 0) {
+                    set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                    return;
+                }
             }
             set_status(ent, SAM_GOOD);
             return;
         }
         if (ndob || data_len == 0 || iovector_view(iov, iov_cnt).is_zero()) {
-            if (zero_fill(backend, off, len) == 0) set_status(ent, SAM_GOOD);
-            else                          set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+            if (zero_fill(backend, off, len) < 0) {
+                set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+                return;
+            }
+            // Durability of a ZEROING completion, gated on write_through ALONE -- no
+            // FUA term, unlike emul_write's `(fua || write_through)`. SBC gives WRITE
+            // SAME no FUA bit: cdb[1] is WRPROTECT(7-5) | ANCHOR | UNMAP | PBDATA |
+            // LBDATA | NDOB, every bit of which this handler already reads above. The
+            // kernel reads that byte the same way -- sbc_setup_write_same() takes
+            // 0x04/0x02 as PBDATA/LBDATA, 0x10 as ANCHOR, 0x01 as NDOB and 0x08 as
+            // UNMAP, and sbc_check_dpofua() (the only place SCF_FUA is set, from
+            // cdb[1] & 0x08) is called by sbc_parse_cdb() from the READ/WRITE/
+            // WRITE_VERIFY/WRITE_ATOMIC/COMPARE_AND_WRITE cases only, never from
+            // WRITE_SAME or WRITE_SAME_16. Linux's initiator agrees and could not
+            // send one: sd_setup_write_same16_cmnd() writes cmnd[1] = 0x08 for UNMAP
+            // and nothing else, and sd_setup_write_zeroes_cmnd() reads no FUA flag
+            // off the request. So 0x08 in this CDB is UNMAP, which returned above,
+            // and a `fua` term here would be dead code that misreads the layout.
+            //
+            // What is left is the promise this device made. write_through is set
+            // exactly when FEATURE_FLUSH is absent, which is when the caching page
+            // reports WCE=0 -- and blk_insert_flush() builds a flush policy only
+            // `if (blk_queue_write_cache(q))`, then unconditionally clears
+            // REQ_PREFLUSH and (FUA being unsupported too: sd_set_flush_flag() clears
+            // BLK_FEAT_FUA with BLK_FEAT_WRITE_CACHE) REQ_FUA. A no-cache device
+            // never receives the compensating flush or FUA a cached one would, so
+            // this GOOD is the only durability promise there is -- for zeros exactly
+            // as emul_write's is for bytes. Same primitive, same sense on failure.
+            if (write_through && backend->fdatasync() < 0)
+                set_sense(ent, SK_MEDIUM_ERROR, ASC_WRITE_ERROR, 0);
+            else
+                set_status(ent, SAM_GOOD);
             return;
         }
         // recognized command but an unsupported (non-zero) pattern: report an
@@ -1916,7 +1975,11 @@ struct TcmuDeviceImpl : IBlkDevice {
         // never silently dropped here. The ring lives in the uio mapping and outlives
         // this process, which is what makes the backlog KernelSide and adoption worth
         // validating at all -- though start() checks the identity and the size and
-        // nothing else, so the value is IdentityAndSize rather than Full. detach(false)
+        // nothing else, so the value is IdentityAndSize rather than Full. Among the
+        // things "nothing else" covers is read-only-ness, which this transport grades
+        // out of rather than validates: cfg.read_only reaches TcmuServer::read_only and
+        // no configfs attrib, so a registration cannot be asked about it and
+        // list_orphans() cannot report it. detach(false)
         // does NOT skip the I/O wait: serve_stop gates only its ring drain on the flag
         // and waits out in_flight unconditionally, which is the clearest case of the two
         // promises in blk.h being different promises.
@@ -2014,8 +2077,10 @@ struct TcmuDeviceImpl : IBlkDevice {
         release_backend();
     }
 
-    // Delete a backend this object owns and forget it either way, so that neither
-    // the destructor nor a later start() can see it.
+    // Delete a backend this object owns and forget it either way. Callers are the
+    // destructor, a successful shutdown() and a start() that is handed a DIFFERENT
+    // backend -- see the guard at that call site for why a re-passed one must
+    // survive it.
     void release_backend() {
         if (own_backend)
             delete backend;
@@ -2040,7 +2105,21 @@ struct TcmuDeviceImpl : IBlkDevice {
         // the caller keeps the backend, and shutdown() is the one that releases. So
         // this is the only place that can, and without it the two assignments below
         // drop the sole reference to a file this object promised to delete.
-        release_backend();
+        //
+        // `backend != bk` is what keeps that release from firing on the restart
+        // detach(true) invites, namely start(A, true) -> detach(true) -> start(A,
+        // true): detach() retains both backend and own_backend, so re-passing A is
+        // the caller re-asserting ONE ownership rather than transferring a second
+        // one. Deleting unconditionally here -- what this did -- freed A and then
+        // stored the freed pointer straight back into backend as owned, so every
+        // later probe and I/O used a dead object and shutdown()'s release deleted it
+        // a second time. blk.h's contract is exactly one delete per owned backend,
+        // and detach() is not one of its release points; it does not oblige a caller
+        // to hand back a different object. nbd, vduse and vhost-user guard this way
+        // already. A FAILED start() still hands the backend back to the caller,
+        // because rollback() drops backend and own_backend without deleting.
+        if (own_backend && backend && backend != bk)
+            release_backend();
 
         backend = bk;
         own_backend = ownership;
@@ -2686,7 +2765,8 @@ struct TcmuHBAImpl : TcmuHBA {
     // exists under the HBA and no live server holds its flock. The returned
     // identity is the recovery key. features cannot be reconstructed from
     // configfs and is left 0 -- the recovering caller supplies the backend's
-    // real feature set.
+    // real feature set. read_only cannot be reconstructed either, and that gap
+    // is the more dangerous of the two: see the descriptor fill below.
     std::vector<BlkDevInfo> list_orphans() override {
         std::vector<BlkDevInfo> ret;
         const size_t plen = strlen(dev_config_prefix);
@@ -2749,6 +2829,31 @@ struct TcmuHBAImpl : TcmuHBA {
             uint64_t hbs = cfg_read_u64(p, 512);
             info.sector_size_shift = (uint8_t)(hbs ? __builtin_ctzll(hbs) : 9);
             info.features = 0;
+            // read_only stays at its DEFAULT (false) because there is nothing here to
+            // read it from. tcmu's write-protect is TcmuServer::read_only: start()
+            // takes it from cfg.read_only and only the SCSI emulation ever consults it
+            // (WRITE, UNMAP and WRITE SAME answer DATA PROTECT / WRITE PROTECTED, and
+            // MODE SENSE sets the WP bit). No configfs attrib carries it, so a backstore
+            // directory holds no trace of it -- unlike ublk, whose registration records
+            // READ_ONLY and whose list_orphans() therefore fills the field.
+            //
+            // The consequence, plainly: this transport grades its adoption
+            // IdentityAndSize and validate_existing() checks only dev_config's identity
+            // and dev_size, so adopting a READ-ONLY orphan through the documented recipe
+            // -- Config(record) -> new_device() -> start(backend) -- SUCCEEDS and then
+            // serves it writable. The descriptor said false, BlkConfig seeded
+            // cfg.read_only from it, and server.read_only is the only thing the
+            // handlers ask. Nothing refuses and nothing logs a drift, because from this
+            // device's side there is no drift to see: the registration it validated
+            // against never held the fact.
+            //
+            // So a caller that exports read-only tcmu backstores has to retain that fact
+            // OUT OF BAND -- its own record keyed by identity, exactly as it must for
+            // features above -- and write it back into info.read_only before building
+            // the config. Opening the backend O_RDONLY is a second line of defence and
+            // not a substitute: it turns writes into failures (EROFS, which emul_write
+            // reports as WRITE PROTECTED, and a failed zero_fill for UNMAP/WRITE SAME)
+            // rather than into the up-front refusals a write-protected device gives.
             ret.push_back(info);
         }
         return ret;
@@ -2820,8 +2925,79 @@ struct TcmuHBAImpl : TcmuHBA {
             // absent, or there and not openable by this caller, which devlock_free
             // does not tell apart -- is reported as no such backstore, and nothing
             // is removed.
+            //
+            // The probe stays, and it stays FIRST, because it is the only thing here
+            // that can give that ENOENT: devlock_acquire is two-valued and its own
+            // open(O_CREAT) collapses "absent" into success, so classifying with the
+            // claim would plant a tombstone for a backstore that never existed, take
+            // it out again and report success about nothing. What the probe cannot do
+            // is AUTHORISE the removal below, which is what the claim is for.
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no tcmu backstore ` under this HBA, and no tombstone for it that this call could use", bs_name);
+            // CLAIM, and hold it across the absence recheck and the unlink -- the
+            // present branch below gives the mechanism in full, and it is the same
+            // one: the probe takes the flock and gives it back before returning, and
+            // the inode is not stable, because devlock_acquire's open(O_CREAT) is on
+            // every starter path (acquire_lock). So what devlock_unlink then removes
+            // BY PATH is whatever stands there when it runs -- a concurrent starter's
+            // fresh lock file rather than the litter this call classified -- and a
+            // later claimant locks a new inode while that starter keeps an fd on the
+            // unlinked one. The backstore the starter goes on to enable then has an
+            // ownership record no orphan scan can reach: list_orphans() skips a
+            // registration whose tombstone is missing.
+            //
+            // No EISDIR fall-through here, unlike the present branch, and the
+            // asymmetry is the reason rather than a preference. There, a registration
+            // has already been destroyed when the directory is met, so the recovery
+            // itself succeeded and blk.h pins that order for tcmu -- the EISDIR only
+            // says the lock directory needs a human. Here there is nothing to
+            // recover, so there is no order to pin and no success the exception could
+            // preserve: this branch's only work is removing our own litter, a
+            // directory at that path is not our litter, and devlock_unlink refuses one
+            // on exactly that reasoning (utils.h: unlink(), never remove()). So the
+            // acquire's EISDIR propagates as the failure it is, one step earlier than
+            // the unlink's and with no file created -- and it is the same errno this
+            // branch answered before the claim existed, so what a caller sees did not
+            // change.
+            int absent_fd = -1;
+            if (devlock_acquire(lock_dir, lock, &absent_fd) < 0) {
+                if (errno == EBUSY)
+                    LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` has no registration yet, but its tombstone was claimed while this call was reaching it", bs_name);
+                return -1;   // devlock_acquire logged it, EISDIR included
+            }
+            // Dropped on every exit below, errno preserved for the reason the present
+            // branch gives: devlock_release() calls flock() and close(), and either
+            // can set errno.
+            DEFER({ int e = errno; devlock_release(absent_fd); errno = e; });
+            // The load-bearing half, and it has to be AFTER the claim: a starter's
+            // configfs `enable` can land in the window this claim just closed, and so
+            // can an operator's targetcli backstore, which takes no tombstone of ours
+            // at all. Without the recheck this call would unlink the tombstone of a
+            // registration that now exists and report success about a backstore it
+            // never touched, leaving that registration unreportable by every later
+            // scan. Refused rather than destroyed: this branch has written nothing to
+            // configfs, and a caller that retries reaches the branch below, which does
+            // the whole teardown under the same claim.
+            //
+            // EBUSY, which blk.h's paragraph for THIS call defines as "the
+            // live-identity refusal ... a server may have adopted the registration
+            // since" -- exactly what was just observed -- and which is also what the
+            // leading probe answers for the same hazard met a few instructions
+            // earlier. ublk's and vduse's absent branches answer the same errno for
+            // the same recheck, so one hazard class has one answer across all three.
+            if (path_exists(bs_path))
+                LOG_ERROR_RETURN(EBUSY, -1, "tcmu backstore ` was registered while this call was claiming its tombstone; leaving both alone", bs_name);
+            // Unlinked while the claim is still held -- the release is deferred to
+            // scope exit, after this statement -- so what goes is provably the
+            // tombstone this call opened, not one a starter created in between.
+            //
+            // And this unlink stays, where nbd and vhost-user refuse an occupied path
+            // with EEXIST instead of probing and deleting. That ruling does not
+            // transfer: a socket node is the PEER's artifact, so refusing it costs
+            // nothing, while a tombstone is our own orphan-discovery record and
+            // destroy_orphan() is a public API whose documented job is to remove it.
+            // Refusing here would strand our litter forever, and every later scan
+            // would keep reporting a backstore that is gone.
             if (devlock_unlink(lock_dir, lock) < 0)
                 return -1;   // devlock_unlink logged it
             return 0;

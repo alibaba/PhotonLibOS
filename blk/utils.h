@@ -74,9 +74,20 @@ int validate_info(const BlkDevInfo& info, bool virtio);
 // ----------------------------------------------------------------------------
 
 // zero_range, falling back to chunked zero writes when the backend's fallocate
-// lacks ZERO_RANGE (e.g. tmpfs). Returns 0, or -1 with errno after logging.
-// Linux-only, because IFile::zero_range itself is (fs/virtual-file.cpp) -- and
-// so are the callers (tcmu, ublk).
+// lacks ZERO_RANGE (e.g. tmpfs) -- or when there is no zero_range to call at all.
+// Returns 0, or -1 with errno after logging, and that contract is the same on every
+// platform.
+//
+// Portable, but not uniformly: IFile::zero_range is DECLARED unconditionally
+// (fs/filesystem.h) yet DEFINED only under __linux__ (fs/virtual-file.cpp, a
+// fallocate shorthand), so calling it elsewhere is a LINK error rather than a
+// runtime one. Only that fast path sits behind an #ifdef in the definition; every
+// other platform -- macOS today -- takes the pwritev path and writes the zeroes
+// itself. Same answer, more syscalls, and no de-allocation: the bytes are
+// overwritten, so a sparse backend does not become sparse and a caller must not read
+// "zeroed" as "trimmed". IFile::trim() has no portable form at all, because punching
+// a hole is not writing zeroes; that is why a transport's DISCARD capability stays
+// Linux-only even though its WRITE_ZEROES one, served by this helper, does not.
 int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len);
 
 // Take the exclusive lock for `name` inside the lock dir, creating the dir and the
@@ -225,6 +236,15 @@ void migrate_to_pool(photon::WorkPool* pool, photon::thread* th);
 // Refuse a pool whose vcpus cannot host blk's serving coroutines, BEFORE anything
 // is parked on them. Returns 0, or -1 with errno=EINVAL after logging the
 // offending vcpu index.
+//
+// EINVAL is the engine-mismatch answer and the only one that describes the pool. Two
+// others are possible and describe this call instead: the errno of a refused
+// migration into a pool vcpu, and the errno of a probe whose wait was interrupted --
+// a caller's own thread_interrupt(th, error_number), which reaches here as ETIMEDOUT
+// or ESHUTDOWN. The interrupted one is NOT an engine verdict: the probe never
+// reported, so the engine is unknown rather than wrong, and that is why the errno is
+// passed through instead of being folded into EINVAL. Every path joins the probe
+// coroutine before returning, so no helper outlives the frame it was handed.
 //
 // One requirement is checked, and it is derived from the CALLER's own vcpu rather
 // than declared in the config -- a serving coroutine does to the backend exactly
@@ -812,11 +832,29 @@ bool vring_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old);
 // in-flight requests. What hops onto the loop's vcpu is not the message loop
 // alone -- teardown hops too. Between them they send everything that has to reach
 // the loop or the requests it dispatched: a vq state read, and teardown's stop,
-// drain and backlog wait, the last of which dereferences an avail ring whose pages
-// its own flush_stale is what munmaps. The readiness conflict is settled
-// with a per-queue generation counter: an invalidation bumps the counter before it
-// clears, so a refresh already resolving that ring withholds its own publish.
-// loop()'s readiness re-check after its one yield is the backstop on top.
+// drain and backlog wait. The last of those dereferences an avail ring whose pages
+// a reclamation flush munmaps, and the hop does NOT by itself make that safe: under
+// a pool, stop_serving stops queues one at a time, so queues i+1..n-1 are still
+// ticking and still eligible to be the flusher while queue i waits, and the
+// device-wide `stopping` that silences the message loop is set only after that whole
+// per-queue loop -- so an UPDATE_IOTLB can move this queue's ring mapping into
+// `stale` and another vcpu can release it in between. What covers the read is a pin
+// plus a locked re-check, and it takes both halves. The reader sets the per-queue
+// READING bit before it dereferences: through the readiness gate when it never
+// touches iotlb.lock -- the backlog read -- so its pin and the invalidator's retire
+// are two compare-exchanges on one word and are totally ordered, and
+// unconditionally when it reaches its addresses THROUGH that lock -- a refresh -- so
+// its pin is sequenced before the acquisition. Reclamation then evaluates its
+// eligibility test (nothing in flight, nothing reading) INSIDE the same iotlb lock
+// its munmap runs under, so the answer is about the state the release actually acts
+// on and a reader admitted after an unlocked gate was evaluated is still seen. That
+// is the whole guarantee, and it is narrower than "nothing can interleave": an
+// interleaving flush either observes the pin and defers, or ran its retire first and
+// the gated compare-exchange refuses to admit this reader at all, leaving no read to
+// protect. The readiness conflict is settled with a per-queue generation counter: an
+// invalidation bumps the counter before it clears, so a refresh already resolving
+// that ring withholds its own publish. loop()'s readiness re-check after its one
+// yield is the backstop on top.
 //
 // Bound: dispatch_avail() stops at min(num, queue_depth) outstanding chains.
 // avail->idx is a guest-written free-running counter, so without a cap a single

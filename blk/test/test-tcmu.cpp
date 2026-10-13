@@ -16,7 +16,10 @@ limitations under the License.
 
 // Built only on Linux (the tcmu transport is LINUX-gated). Requires root and
 // the target_core_user + tcm_loop modules with configfs mounted; without them
-// every case prints a skip notice and returns (see test::SkippableTest).
+// every case prints a skip notice and returns (see test::SkippableTest). The one
+// exception is tcmu_devlock.a_probe_and_a_claim_are_not_the_same_question, which
+// exercises the tombstone primitive in its own mkdtemp directory and so runs
+// ungated -- it is the only case here that does not need a kernel device.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE   // O_DIRECT
@@ -693,6 +696,49 @@ TEST_F(TcmuTest, shutdown_releases_a_backend_it_owns) {
     EXPECT_EQ(5, destroyed.load());
 }
 
+// The leg the case above cannot reach, because it restarts with a DISTINCT object
+// every time: detach(true) deliberately retains backend AND own_backend, so the next
+// start() may be handed the SAME pointer while this device still owns it. The release
+// that guards a start() against overwriting an owned pointer must not fire on that one
+// -- deleting the backend and storing the freed pointer back as owned leaves a dangling
+// pointer that the shutdown() below deletes a second time, and every probe and I/O in
+// between uses a dead object. blk.h's start() contract is exactly one delete per owned
+// backend and detach() is not one of its release points, so re-passing A is one
+// ownership re-asserted rather than a second one transferred. The counter is the only
+// oracle that tells the two apart.
+//
+// Backstore only, no tcm_loop LUN: the defect is in start()'s pointer handling, so
+// nothing here needs a node -- and attaching a LUN to a backstore that is enabled and
+// being served costs this suite about 61 seconds (measured, in
+// shutdown_keeps_the_claim_when_backstore_removal_fails).
+//
+// Killing mutations: drop `&& backend != bk` from start()'s guard (destroyed is 1
+// before the second start returns, and the shutdown double-deletes); call
+// release_backend() unconditionally there, which is what this used to do (same two
+// failures); move the release into detach() (the case above reddens at its
+// "detach released a backend it is meant to keep").
+TEST_F(TcmuTest, repassing_an_owned_backend_after_detach_never_deletes_it_twice) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/false);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    auto* bk = new test::CountingFile(file, &destroyed);   // does not own `file`
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    EXPECT_EQ(0, destroyed.load());
+    ASSERT_EQ(0, dev->detach(/*wait_pending=*/true));   // retains backend AND own_backend
+    EXPECT_EQ(0, destroyed.load()) << "detach released a backend it is meant to keep";
+    // tcmu's registration survives detach(), so unlike vhost-user there is no path to
+    // clear before re-serving the same identity: the second start() takes
+    // validate_existing()'s adoption path on the backstore the first one registered.
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));   // the SAME pointer again
+    EXPECT_EQ(0, destroyed.load()) << "a re-passed backend was deleted on re-entry";
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load()) << "the owned backend must die exactly once";
+}
+
 TEST_F(TcmuTest, loopback_io) {
     if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
@@ -1023,6 +1069,65 @@ TEST_F(TcmuTest, destroy_orphan_removes_a_dead_registration) {
     }
 }
 
+// The absent-registration branch's own witness: a tombstone outliving its backstore is our
+// litter, and destroy_orphan() removes it and reports success. devlock_release() unlocks
+// and closes but never unlinks, so this is exactly what a daemon that died after its
+// registration went leaves behind -- and it is the only state in which that branch runs at
+// all, which is why it has a case: the branch now CLAIMS the tombstone across the absence
+// recheck and the unlink, so it also has to survive holding a lock it never used to take.
+// Cheap, unlike the LUN cases: no registration, no configfs write, no node to wait for.
+//
+// The second half pins the refusal the leading probe makes on the same branch. A held
+// tombstone with no registration is a starter between claiming the name and enabling its
+// backstore, so it is EBUSY and nothing is removed: removing it would leave the backstore
+// that starter goes on to enable with no tombstone, and list_orphans() skips a registration
+// whose tombstone is missing, so it would stop being recoverable by every later scan.
+//
+// Killing mutations: answer ENOENT instead of unlinking in that branch (the first half
+// reddens); point the absence recheck at the tombstone rather than at the registration (the
+// first half reddens with EBUSY, because the tombstone this call just claimed is necessarily
+// there); drop the leading `lf == 0` EBUSY (the second half reddens). Deleting the recheck
+// itself is NOT caught here and cannot be -- only an interleaving would, and no harness
+// primitive can park a second process between a starter's devlock_acquire and its configfs
+// enable, so that half stays fixed by argument.
+// VM-only like every gated case here: root plus target_core_user and tcm_loop, so CI skips
+// it and never runs it.
+TEST_F(TcmuTest, destroy_orphan_removes_a_tombstone_whose_backstore_is_gone) {
+    if (skip_reason) return;
+    const char LITTER[] = "photon-tcmu-litter";
+    const std::string bs = std::string(SUITE_CORE SUITE_SUBTYPE "/") + LITTER;
+    const std::string lp = lock_path(LITTER);
+    DEFER(::unlink(lp.c_str()));
+    // the state under test: a tombstone, and no registration behind it
+    ASSERT_NE(0, ::access(bs.c_str(), F_OK)) << "an earlier run left this backstore registered";
+    int fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0) << "cannot plant the tombstone, errno=" << errno;
+    ::close(fd);
+    EXPECT_STREQ("not-held", lock_state(LITTER));
+
+    BlkDevInfo rec = make_info();
+    rec.identity = LITTER;   // size is not consulted: the identity names what to delete
+    errno = 0;
+    int rc = sys->destroy_orphan(rec);
+    int e = errno;
+    EXPECT_EQ(0, rc) << "a tombstone with no registration was not removed, errno=" << e;
+    EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "the litter survived a successful destroy_orphan";
+    EXPECT_NE(0, ::access(bs.c_str(), F_OK)) << "destroy_orphan created a backstore it was told does not exist";
+
+    // the same branch, held: the leading probe refuses it and leaves the file alone
+    fd = ::open(lp.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0) << "cannot re-plant the tombstone, errno=" << errno;
+    DEFER(::close(fd));
+    ASSERT_EQ(0, ::flock(fd, LOCK_EX | LOCK_NB));
+    errno = 0;
+    rc = sys->destroy_orphan(rec);
+    e = errno;
+    EXPECT_EQ(-1, rc);
+    EXPECT_EQ(EBUSY, e) << "a held tombstone with no registration must be refused, not forced";
+    EXPECT_EQ(0, ::access(lp.c_str(), F_OK))
+        << "a refused destroy_orphan removed a lock file it does not hold";
+}
+
 TEST_F(TcmuTest, destroy_orphan_refuses_a_live_device) {
     if (skip_reason) return;
     auto cfg = make_cfg(/*loopback=*/true);
@@ -1295,6 +1400,86 @@ TEST_F(TcmuTest, destroy_orphan_outlives_a_directory_tombstone) {
     e = errno;
     EXPECT_EQ(-1, rc);
     EXPECT_EQ(ENOENT, e);
+}
+
+// The devlock primitive asymmetry destroy_orphan()'s absent-registration branch is built
+// on. It pins the PRIMITIVE, not the interleaving: no harness primitive can park a second
+// process between a starter's devlock_acquire and its configfs `enable`, so the window
+// that branch now claims across stays booked as an argument rather than covered by a case
+// -- and this one is green both before and after the change. What it does hold down is
+// every fact that argument rests on, each of which a change to utils.cpp could otherwise
+// break silently:
+//   - devlock_free is three-valued and NON-CREATING. It is the only thing that can answer
+//     "no such backstore and no tombstone either", which is the ENOENT blk.h pins for this
+//     call, and the reason the probe stays in front of the claim.
+//   - devlock_acquire is two-valued and DOES create, because its open() carries O_CREAT.
+//     Classifying with it would plant a tombstone for a backstore that never existed, take
+//     it out again and report success about nothing -- which is why the absence check has
+//     to be re-run AFTER the acquire.
+//   - A DIRECTORY at the tombstone path reads FREE to the probe and EISDIR to the claim,
+//     and the claim creates nothing there. That is the asymmetry the registration-present
+//     branch falls through unclaimed for, and the one the absent branch deliberately does
+//     not copy: there is no registration to recover, so there is no success to preserve.
+//   - devlock_unlink removes BY PATH, so a tombstone a live claimant is sitting on goes
+//     away underneath it and the next acquire succeeds on a NEW inode: two exclusive
+//     holders of one name, and the registration the first one goes on to enable then has an
+//     ownership record no orphan scan can reach. That is the harm, demonstrated rather than
+//     asserted in prose.
+//
+// UNGATED, unlike every other case here: no root, no configfs, no modules -- its own
+// mkdtemp directory, so it touches none of the suite's namespaces. It therefore also runs
+// when the fixture skips everything else.
+// Killing mutations (all in blk/utils.cpp, which this suite does not own): give
+// devlock_free an O_CREAT (the first access assertion reddens); make devlock_unlink
+// tolerate a held file by refusing instead (the second acquire reddens); make
+// devlock_acquire fall back to O_RDONLY for a directory (the EISDIR assertion reddens).
+TEST(tcmu_devlock, a_probe_and_a_claim_are_not_the_same_question) {
+    char dir[] = "/tmp/photon-tcmu-devlock-XXXXXX";
+    ASSERT_NE(nullptr, ::mkdtemp(dir)) << "mkdtemp failed, errno=" << errno;
+    const char NAME[] = "tcmu-unit.lock";
+    const std::string path = std::string(dir) + "/" + NAME;
+    // unlink for the regular-file shapes, rmdir for the directory one; each pair member
+    // fails harmlessly on the shape that is not there
+    DEFER({ ::unlink(path.c_str()); ::rmdir(path.c_str()); ::rmdir(dir); });
+
+    // absent: the probe says so and creates nothing
+    EXPECT_EQ(-1, devlock_free(dir, NAME));
+    EXPECT_NE(0, ::access(path.c_str(), F_OK)) << "the non-creating probe created a tombstone";
+
+    // the claim says success for that same name -- and leaves a file where there was none
+    int fd = -1;
+    ASSERT_EQ(0, devlock_acquire(dir, NAME, &fd));
+    ASSERT_GE(fd, 0);
+    EXPECT_EQ(0, ::access(path.c_str(), F_OK)) << "the claim did not create the tombstone it locks";
+    // held now, so the same probe reads 0: it classifies, it does not authorise
+    EXPECT_EQ(0, devlock_free(dir, NAME)) << "a held tombstone did not read as held";
+
+    // the harm: unlink by path under a live claimant, then claim the name again
+    ASSERT_EQ(0, devlock_unlink(dir, NAME));
+    EXPECT_EQ(-1, devlock_free(dir, NAME)) << "the unlinked tombstone is still visible to a scan";
+    int fd2 = -1;
+    ASSERT_EQ(0, devlock_acquire(dir, NAME, &fd2))
+        << "a second claim of the same name was refused while the first still held an unlinked inode";
+    EXPECT_GE(fd2, 0);
+    struct stat s1, s2;
+    ASSERT_EQ(0, ::fstat(fd, &s1));
+    ASSERT_EQ(0, ::fstat(fd2, &s2));
+    EXPECT_TRUE(s1.st_ino != s2.st_ino)
+        << "both claimants hold the same inode, so flock alone would have caught this";
+    devlock_release(fd2);
+    devlock_release(fd);
+
+    // a directory: free to the probe, EISDIR to the claim, and nothing created
+    ASSERT_EQ(0, devlock_unlink(dir, NAME));
+    ASSERT_EQ(0, ::mkdir(path.c_str(), 0755));
+    EXPECT_EQ(1, devlock_free(dir, NAME)) << "a directory did not read as free to the probe";
+    int fd3 = -1;
+    errno = 0;
+    EXPECT_EQ(-1, devlock_acquire(dir, NAME, &fd3));
+    EXPECT_EQ(EISDIR, errno) << "a directory tombstone was claimable after all";
+    struct stat st;
+    ASSERT_EQ(0, ::stat(path.c_str(), &st));
+    EXPECT_TRUE(S_ISDIR(st.st_mode)) << "the refused claim replaced the operator's directory";
 }
 
 TEST_F(TcmuTest, discard_write_zeroes) {
@@ -2699,6 +2884,250 @@ TEST_F(TcmuTest, an_ordinary_write_stays_cached_when_flush_is_configured) {
     EXPECT_EQ(1, probe.writes.load());
     EXPECT_EQ(0, probe.datasyncs.load())
         << "a device that offered FLUSH synced per write; the initiator can batch";
+}
+
+// The two cases above cover an ordinary WRITE. A ZEROING completion is a separate
+// promise and had no oracle at all: WRITE SAME's zero path and the two LBPRZ fallbacks
+// (UNMAP whose descriptor is zero-filled rather than trimmed, and WRITE SAME with the
+// UNMAP bit falling back to zeroing) all reported GOOD straight after zero_fill(), on a
+// device that advertised no volatile cache. Linux suppresses the compensating request in
+// exactly that configuration -- blk_insert_flush() builds a flush policy only
+// `if (blk_queue_write_cache(q))` and then clears REQ_PREFLUSH and, FUA being
+// unsupported too, REQ_FUA -- so nothing follows the completion and the completion is the
+// whole promise. The bytes are indistinguishable either way (a write into the page cache
+// is already visible to the next read), so BackendProbe's counters are the only oracle.
+//
+// All three commands go out as raw CDBs through SG_IO rather than through BLKZEROOUT /
+// BLKDISCARD: the ioctl routes are the kernel's choice (zeroing_mode, provisioning_mode)
+// and can land on UNMAP, on WRITE SAME with the UNMAP bit, or on WRITE SAME without it,
+// while a CDB names the exact handler branch under test -- and all three of those landings
+// is exactly what this case sends, one per branch. WRITE SAME(16) with NDOB is the
+// no-data-out-buffer zero write; WRITE SAME(16) with the UNMAP bit and UNMAP(10) with one
+// descriptor both take a zero fallback against a backend whose trim is EOPNOTSUPP, which
+// is the only path NoTrimFile leaves.
+//
+// VM-ONLY like every case in this suite: root plus target_core_user and tcm_loop with
+// configfs mounted, so CI skips it and never runs it (see the fixture's SetUp).
+//
+// Killing mutations, one per delta: drop `write_through` from emul_write_same's zero-buffer
+// path (d1 reddens); drop it from the fallback inside its UNMAP branch (d2 reddens); drop it
+// from emul_unmap's fallback (d3 reddens); delete any one sync (its delta reddens); use
+// fsync instead of fdatasync (`syncs` reddens). Each of the three sites is the only one its
+// own command reaches, which is what makes the three deltas separately attributable.
+TEST_F(TcmuTest, zeroing_completions_are_durable_when_flush_is_not_configured) {
+    if (skip_reason) return;
+    BlkDevInfo no_flush = make_info();
+    no_flush.features = 0;
+    TcmuHBA::Config cfg(no_flush);
+    cfg.loopback_lun = true;
+    cfg.loopback_wwn = TEST_WWN;
+    cfg.timeout = 30;
+    NoTrimFile backend(file);   // trim/zero_range unsupported, so zeroing is zero_fill's writes
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&backend));   // ownership=false: `file` stays the fixture's
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    // a non-zero pattern first, so "zeroed" is not "was already zero"
+    const uint32_t nblocks = 8;   // 4 KiB
+    std::vector<char> pat(nblocks * 512);
+    for (size_t i = 0; i < pat.size(); i++) pat[i] = (char)(i * 13 + 7);
+    struct iovec piov{pat.data(), pat.size()};
+    ASSERT_EQ((ssize_t)pat.size(), file->pwritev(&piov, 1, IO_OFF));
+
+    const uint64_t lba = IO_OFF / 512;
+    std::vector<uint8_t> p(8 + 16, 0);   // 8-byte header + one 16-byte descriptor
+    p[1] = (uint8_t)(p.size() - 2);      // UNMAP data length
+    p[3] = 16;                           // block descriptor data length
+    for (int b = 0; b < 8; b++) p[8 + b] = (uint8_t)(lba >> (56 - 8 * b));
+    p[8 + 11] = (uint8_t)nblocks;        // count: SBC's descriptor is LBA in bytes 0-7,
+                                         // NUMBER OF LOGICAL BLOCKS in 8-11, 12-15 reserved
+                                         // -- the kernel reads get_unaligned_be32(&ptr[8])
+
+    SgResult ws, wu, um;
+    int wrc = -1, wurc = -1, urc = -1;
+    // Sampled BETWEEN the commands, not once after all of them. `datasyncs` is a running
+    // total, so a single read at the end cannot say which command paid for a sync -- and
+    // the attribution is the whole point here, since each mutation below has to redden
+    // one delta and not the others. Read inside the lambda because that is where the
+    // commands are issued, so each sample brackets exactly one of them.
+    //
+    // THREE commands, because zeroing has three distinct handlers and each carries its own
+    // copy of the durability gate: WRITE SAME(16) with NDOB (emul_write_same's zero-buffer
+    // branch), WRITE SAME(16) with the UNMAP bit against a backend that cannot punch a
+    // hole (emul_write_same's UNMAP fallback), and UNMAP(10) against the same backend
+    // (emul_unmap's fallback). One command per gate is what makes "drop the gate here"
+    // distinguishable from "drop it there".
+    int d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+    test::run_off_vcpu([&] {
+        d0 = backend.datasyncs.load();
+        uint8_t c[16] = {};
+        c[0] = 0x93;   // WRITE SAME(16)
+        c[1] = 0x01;   // NDOB: no data-out buffer, write zeros
+        for (int i = 0; i < 8; i++) c[2 + i] = (uint8_t)(lba >> (56 - 8 * i));
+        c[13] = (uint8_t)nblocks;
+        wrc = sg_io(sd, c, sizeof(c), nullptr, 0, SG_DXFER_NONE, ws);
+        d1 = backend.datasyncs.load();
+        c[1] = 0x08;   // same CDB with the UNMAP bit instead: the other zeroing branch
+        wurc = sg_io(sd, c, sizeof(c), nullptr, 0, SG_DXFER_NONE, wu);
+        d2 = backend.datasyncs.load();
+        uint8_t u[10] = {0x42, 0, 0, 0, 0, 0, 0, 0, (uint8_t)p.size(), 0};
+        urc = sg_io(sd, u, sizeof(u), p.data(), p.size(), SG_DXFER_TO_DEV, um);
+        d3 = backend.datasyncs.load();
+    });
+    ASSERT_EQ(0, wrc) << "WRITE SAME SG_IO failed, errno=" << wrc;
+    ASSERT_EQ(0, wurc) << "WRITE SAME(UNMAP) SG_IO failed, errno=" << wurc;
+    ASSERT_EQ(0, urc) << "UNMAP SG_IO failed, errno=" << urc;
+
+    EXPECT_EQ(0x00, (int)ws.status) << "WRITE SAME(16) NDOB was refused, asc=" << ws.asc();
+    EXPECT_EQ(1, d1 - d0)
+        << "a zeroing WRITE SAME was acked without being made durable, on a device that "
+           "advertised no write cache and gave the initiator no FLUSH to ask with";
+    EXPECT_EQ(0x00, (int)wu.status) << "WRITE SAME(16) UNMAP was refused, asc=" << wu.asc();
+    EXPECT_EQ(1, d2 - d1)
+        << "a WRITE SAME whose UNMAP bit fell back to zeroing was acked without being made durable";
+    EXPECT_EQ(0x00, (int)um.status) << "UNMAP was refused, asc=" << um.asc();
+    EXPECT_EQ(1, d3 - d2)
+        << "the LBPRZ zero fallback was acked without being made durable";
+    EXPECT_EQ(0, backend.syncs.load()) << "fdatasync is the primitive, not fsync";
+
+    // the zeros are really there too, so "durable" is not the only thing these owed
+    std::vector<char> bbuf(pat.size(), 0x5a);
+    struct iovec iov{bbuf.data(), bbuf.size()};
+    ASSERT_EQ((ssize_t)bbuf.size(), file->preadv(&iov, 1, IO_OFF));
+    for (size_t i = 0; i < bbuf.size(); i++)
+        ASSERT_EQ(0, bbuf[i]) << "backend range not zeroed at byte " << i;
+}
+
+// The control for the case above, and the one that keeps it honest: with FEATURE_FLUSH
+// the caching page reports WCE=1, sd_set_flush_flag() then leaves BLK_FEAT_WRITE_CACHE
+// and BLK_FEAT_FUA set, and the initiator has SYNCHRONIZE CACHE and FUA to ask with --
+// so syncing every zeroing completion would be a needless syscall per command. Same three
+// CDBs, same no-trim backend, opposite expectation. All three because the case above
+// attributes one gate to each: a control that omitted one would let that gate's
+// `write_through &&` be dropped and still look green here.
+// VM-only, as above. Killing mutation: drop `write_through &&` from any of the three
+// sites (this case reddens on a nonzero datasyncs count while the one above stays green).
+TEST_F(TcmuTest, zeroing_completions_stay_cached_when_flush_is_configured) {
+    if (skip_reason) return;
+    auto cfg = make_cfg(/*loopback=*/true);   // make_info() sets FEATURE_FLUSH
+    NoTrimFile backend(file);
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&backend));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    const uint32_t nblocks = 8;
+    std::vector<char> pat(nblocks * 512);
+    for (size_t i = 0; i < pat.size(); i++) pat[i] = (char)(i * 7 + 3);
+    struct iovec piov{pat.data(), pat.size()};
+    ASSERT_EQ((ssize_t)pat.size(), file->pwritev(&piov, 1, IO_OFF));
+
+    const uint64_t lba = IO_OFF / 512;
+    std::vector<uint8_t> p(8 + 16, 0);
+    p[1] = (uint8_t)(p.size() - 2);
+    p[3] = 16;
+    for (int b = 0; b < 8; b++) p[8 + b] = (uint8_t)(lba >> (56 - 8 * b));
+    p[8 + 11] = (uint8_t)nblocks;   // count, in descriptor bytes 8-11 (see the case above)
+
+    SgResult ws, wu, um;
+    int wrc = -1, wurc = -1, urc = -1;
+    test::run_off_vcpu([&] {
+        uint8_t c[16] = {};
+        c[0] = 0x93;
+        c[1] = 0x01;   // NDOB
+        for (int i = 0; i < 8; i++) c[2 + i] = (uint8_t)(lba >> (56 - 8 * i));
+        c[13] = (uint8_t)nblocks;
+        wrc = sg_io(sd, c, sizeof(c), nullptr, 0, SG_DXFER_NONE, ws);
+        c[1] = 0x08;   // UNMAP bit: the second zeroing branch
+        wurc = sg_io(sd, c, sizeof(c), nullptr, 0, SG_DXFER_NONE, wu);
+        uint8_t u[10] = {0x42, 0, 0, 0, 0, 0, 0, 0, (uint8_t)p.size(), 0};
+        urc = sg_io(sd, u, sizeof(u), p.data(), p.size(), SG_DXFER_TO_DEV, um);
+    });
+    ASSERT_EQ(0, wrc); ASSERT_EQ(0, wurc); ASSERT_EQ(0, urc);
+    EXPECT_EQ(0x00, (int)ws.status);
+    EXPECT_EQ(0x00, (int)wu.status);
+    EXPECT_EQ(0x00, (int)um.status);
+    EXPECT_EQ(0, backend.datasyncs.load())
+        << "a device that offered FLUSH synced per zeroing command; the initiator can batch";
+}
+
+// A sync that was asked for and FAILED must reach the initiator, not be swallowed into
+// the GOOD that zero_fill's success would otherwise have produced. This is the half
+// neither case above can see: both of them only tell "synced" from "did not sync", and
+// a device that tried and lost the data answers the same as one that never tried.
+// MEDIUM_ERROR / WRITE ERROR is emul_write's own reporting for the same failure on an
+// ordinary write, so a zeroing completion now reports it identically.
+//
+// Both sites in one case, because one backend serves both: fail_syncs makes every
+// fdatasync answer EIO, and the counters still count the attempts -- so datasyncs
+// distinguishes "never tried" (0) from "tried and failed" (at least one per command).
+// VM-only, as above. Killing mutations: drop the `set_sense` and `set_status(SAM_GOOD)`
+// instead (either status assertion reddens); make the sync failure non-fatal by ignoring
+// fdatasync's return (both reddens).
+TEST_F(TcmuTest, a_failed_sync_after_a_zeroing_completion_reaches_the_initiator) {
+    if (skip_reason) return;
+    BlkDevInfo no_flush = make_info();
+    no_flush.features = 0;
+    TcmuHBA::Config cfg(no_flush);
+    cfg.loopback_lun = true;
+    cfg.loopback_wwn = TEST_WWN;
+    cfg.timeout = 30;
+    NoTrimFile backend(file);
+    backend.fail_syncs = true;   // every fdatasync answers -1/EIO
+    auto dev = sys->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&backend));
+    DEFER(dev->shutdown());
+    std::string sd = wait_photon_sd(IMG_SIZE / 512);
+    ASSERT_FALSE(sd.empty());
+
+    const uint32_t nblocks = 8;
+    const uint64_t lba = IO_OFF / 512;
+    std::vector<uint8_t> p(8 + 16, 0);
+    p[1] = (uint8_t)(p.size() - 2);
+    p[3] = 16;
+    for (int b = 0; b < 8; b++) p[8 + b] = (uint8_t)(lba >> (56 - 8 * b));
+    p[8 + 11] = (uint8_t)nblocks;   // count, in descriptor bytes 8-11 (see the case above)
+
+    SgResult ws, um;
+    int wrc = -1, urc = -1;
+    test::run_off_vcpu([&] {
+        uint8_t c[16] = {};
+        c[0] = 0x93;
+        c[1] = 0x01;   // NDOB
+        for (int i = 0; i < 8; i++) c[2 + i] = (uint8_t)(lba >> (56 - 8 * i));
+        c[13] = (uint8_t)nblocks;
+        wrc = sg_io(sd, c, sizeof(c), nullptr, 0, SG_DXFER_NONE, ws);
+        uint8_t u[10] = {0x42, 0, 0, 0, 0, 0, 0, 0, (uint8_t)p.size(), 0};
+        urc = sg_io(sd, u, sizeof(u), p.data(), p.size(), SG_DXFER_TO_DEV, um);
+    });
+    ASSERT_EQ(0, wrc) << "WRITE SAME SG_IO failed, errno=" << wrc;
+    ASSERT_EQ(0, urc) << "UNMAP SG_IO failed, errno=" << urc;
+
+    // CHECK CONDITION with MEDIUM ERROR (0x03) / WRITE ERROR (0x0c), for both
+    EXPECT_EQ(0x02, (int)ws.status) << "a WRITE SAME whose sync failed was acked GOOD";
+    ASSERT_GE(ws.sb_len, 14u) << "no usable sense, sb_len_wr=" << ws.sb_len;
+    EXPECT_EQ(0x03, ws.key()) << "WRITE SAME's sense key is not MEDIUM_ERROR";
+    EXPECT_EQ(0x0c, ws.asc()) << "WRITE SAME's ASC is not WRITE ERROR";
+    EXPECT_EQ(0x02, (int)um.status) << "an UNMAP whose zero fallback failed to sync was acked GOOD";
+    ASSERT_GE(um.sb_len, 14u) << "no usable sense, sb_len_wr=" << um.sb_len;
+    EXPECT_EQ(0x03, um.key()) << "UNMAP's sense key is not MEDIUM_ERROR";
+    EXPECT_EQ(0x0c, um.asc()) << "UNMAP's ASC is not WRITE ERROR";
+    // tried, and at least once per command -- which is what separates this from "never
+    // asked". A lower bound rather than the exact 2 the two cases above assert, because
+    // these completions FAILED: the scsi mid-layer is free to re-run a command it did not
+    // like, and a retry would add syncs without changing what the initiator was told.
+    // The status and sense above are the witnesses; this one only has to prove the syncs
+    // were attempted rather than skipped.
+    EXPECT_GE(backend.datasyncs.load(), 2) << "the syncs were not even attempted";
 }
 
 // The caching page's length byte said 0x0a, describing a 12-byte page; the SPC

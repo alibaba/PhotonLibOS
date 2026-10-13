@@ -374,13 +374,18 @@ struct NbdDeviceImpl : NbdDevice {
     // so no holder can be preempted while another vcpu spins.
     photon::spinlock conns_lock;
     uint16_t trans_flags = 0;
-    // An ordinary (non-FUA) NBD_CMD_WRITE is made durable before its ack exactly
-    // when FLUSH was NOT advertised: a client of an export without
-    // NBD_FLAG_SEND_FLUSH has no command to ask for durability with and believes
-    // every acked write is already on stable storage. Same name and same decision
-    // as the shared virtio engine's write_through (utils.h), derived here from
-    // what start() put in trans_flags. Set in start() before any connection is
-    // served and read from execute() coroutines afterwards, so a plain bool.
+    // An ordinary (non-FUA) request that WRITES DATA -- NBD_CMD_WRITE and
+    // NBD_CMD_WRITE_ZEROES alike -- is made durable before its ack exactly when
+    // FLUSH was NOT advertised: a client of an export without NBD_FLAG_SEND_FLUSH
+    // has no command to ask for durability with and believes every acked write is
+    // already on stable storage. Zeroing is in that set because the zeroes are data
+    // the completion vouches for, whether they came from a hole-punch or from
+    // pwritev. NBD_CMD_TRIM is NOT, and its handler says why: Linux asks no discard
+    // to be durable, so write_through would have nothing to honour there.
+    // Same name and same decision as the shared virtio engine's write_through
+    // (utils.h), derived here from what start() put in trans_flags. Set in start()
+    // before any connection is served and read from execute() coroutines afterwards,
+    // so a plain bool.
     // Defaults to write-through, the same wrong-way-round-looking default the
     // virtio engine chose: a start() that never derived this is slow, whereas one
     // that defaulted the other way is lossy, and the slow one is the one a test
@@ -401,13 +406,30 @@ struct NbdDeviceImpl : NbdDevice {
     char loopback_node[64] = {};    // "/dev/nbdN" while attached; empty = detached
 #endif
 
+    // The FEATURE_* bits this build's execute() can actually serve: what `offered` is
+    // set to below, and the most `features` may ask for (validate refuses the rest).
+    // WRITE_ZEROES is portable -- zero_fill writes the zeroes through pwritev where
+    // IFile::zero_range does not exist -- but DISCARD is not: IFile::trim is a
+    // fallocate shorthand defined only under __linux__ (fs/virtual-file.cpp), a
+    // punch-hole has no portable spelling, and writing zeroes is not punching a hole.
+    // Offering a bit whose handler can only answer NBD_ENOTSUP breaks both promises at
+    // once -- blk.h's `offered` ("what this implementation can serve at all") and the
+    // NBD transmission-flag contract, which forbids advertising a feature the server
+    // will not serve -- and unlike a per-request backend failure it is a property of
+    // this platform handler that no backend can fix.
+#ifdef __linux__
+    static constexpr uint64_t PLATFORM_FEATURES = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+#else
+    static constexpr uint64_t PLATFORM_FEATURES = FEATURE_FLUSH | FEATURE_WRITE_ZEROES;
+#endif
+
     explicit NbdDeviceImpl(const NbdConfig& c) : cfg(c) {
         // The effective half of the descriptor; blk.h documents each axis. nbd keeps
         // no queue across detach() -- the connections ARE the queue, and cleanup_runtime
         // closes them on both paths -- so there is no backlog to harvest and no
         // registration for a later start() to drift against. detach(false) still joins
         // workers that are waiting on backend I/O, which is why detach_no_wait is false.
-        cfg.info.offered = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+        cfg.info.offered = PLATFORM_FEATURES;
         cfg.info.backlog = BlkBacklog::None;
         cfg.info.shutdown_refusal = BlkShutdownRefusal::Disconnects;
         cfg.info.resize_effect = BlkResizeEffect::Unsupported;
@@ -420,6 +442,21 @@ struct NbdDeviceImpl : NbdDevice {
     static int validate(const NbdConfig& c) {
         if (validate_info(c.info, /*virtio=*/false) < 0)
             return -1;
+        // A requested bit outside PLATFORM_FEATURES is one this build cannot honour,
+        // and nbd cannot do what vhost-user and vduse do with such a bit -- accept it,
+        // leave it out of `offered` and let the caller read the gap off
+        // `features & ~offered`. Here `features` goes straight onto the wire as
+        // transmission flags, so accepting DISCARD on a build with no portable discard
+        // means advertising NBD_FLAG_SEND_TRIM for a whole session and then answering
+        // NBD_ENOTSUP per request: a client that accepted the flags has no way to learn
+        // the promise was empty. Refused rather than masked off, for the same reason
+        // vhost-user refuses a SET_FEATURES outside its offer -- masking would settle a
+        // different word than the caller asked for and leave it nothing to read back.
+        uint64_t offered = PLATFORM_FEATURES;   // what the constructor writes to cfg.info.offered
+        uint64_t unsupported = c.info.features & ~offered;
+        if (unsupported)
+            LOG_ERROR_RETURN(EINVAL, -1, "nbd: requested feature bits ` are outside this build's offer `, and its command handlers cannot serve them",
+                             HEX(unsupported), HEX(offered));
         if (c.unix_path.empty() && !c.enable_tcp && !c.loopback_device)
             LOG_ERROR_RETURN(EINVAL, -1, "no endpoint enabled: configure unix_path, enable_tcp, or loopback_device");
         return 0;
@@ -498,9 +535,15 @@ struct NbdDeviceImpl : NbdDevice {
         // about the commands the client may send: the kernel's nbd client clears
         // the queue's write-cache and FUA flags for such an export, never sends
         // NBD_CMD_FLUSH and never sets NBD_REQ_FUA, and trusts every ack as
-        // durable. execute()'s WRITE path honours that trust via write_through.
+        // durable. execute()'s WRITE and WRITE_ZEROES paths honour that trust via
+        // write_through.
         if (cfg.info.features & FEATURE_FLUSH)        trans_flags |= NBD_TRANS_SEND_FLUSH | NBD_TRANS_SEND_FUA;
+        // Cannot be set by a build that offers no DISCARD: validate() refused the
+        // config that would have had to ask for it, so SEND_TRIM is never advertised
+        // where NBD_CMD_TRIM's handler could only answer NBD_ENOTSUP.
         if (cfg.info.features & FEATURE_DISCARD)      trans_flags |= NBD_TRANS_SEND_TRIM;
+        // Advertised on every platform, because it is served on every platform:
+        // zero_fill writes the zeroes where IFile::zero_range does not exist.
         if (cfg.info.features & FEATURE_WRITE_ZEROES) trans_flags |= NBD_TRANS_SEND_WRITE_ZEROES;
         // read back off trans_flags rather than re-derived from the request, same
         // one-source-of-truth rule as cfg.info.negotiated at the success tail:
@@ -991,16 +1034,33 @@ struct NbdDeviceImpl : NbdDevice {
             // FUA is legal on TRIM as well, and a punch-hole the client asked to be
             // durable is not durable until the filesystem's metadata is: the same
             // fdatasync as the WRITE path, for the same reason.
+            //
+            // write_through stops at the two data-writing commands and does not reach
+            // here, which is not the omission it looks like beside them: Linux never
+            // asks a discard to be durable. blk_alloc_discard_bio allocates
+            // REQ_OP_DISCARD with neither REQ_PREFLUSH nor REQ_FUA (block/blk-lib.c),
+            // so the flush-less export -- the one that makes write_through true --
+            // still receives discards carrying no durability request, and
+            // blk_insert_flush has nothing to turn into a postflush for a hint with no
+            // payload. A discard is a claim about space, not a promise about data.
+            // What can still set FUA here is a non-Linux client asking on its own
+            // account.
             if ((cflags & NBD_REQ_FUA) && backend->fdatasync() < 0)
                 err = errno_to_nbd(errno);
 #else
+            // Unreachable through negotiation on this platform: DISCARD is not in
+            // PLATFORM_FEATURES, validate() refuses a config that requests it, and
+            // start() therefore never advertises NBD_TRANS_SEND_TRIM. Kept as the
+            // backstop for a client that sends the command anyway -- one that ignored
+            // the transmission flags, or a peer driving this socket by hand -- because
+            // answering ENOTSUP still beats pretending to have punched a hole.
             err = NBD_ENOTSUP;  // IFile::trim is fallocate-based, Linux-only
 #endif
             break;
         case NBD_CMD_WRITE_ZEROES:
-#ifdef __linux__
             if (cfg.read_only) { err = NBD_EPERM; break; }
             if (oob) { err = NBD_EINVAL; break; }
+#ifdef __linux__
             if (backend->zero_range(offset, len) < 0) {
                 // Both spellings of "this backend has no hole-punch": a filesystem
                 // whose fallocate lacks ZERO_RANGE answers EOPNOTSUPP, and an IFile
@@ -1016,11 +1076,36 @@ struct NbdDeviceImpl : NbdDevice {
                 if (err != NBD_SUCCESS)
                     break;
             }
-            if ((cflags & NBD_REQ_FUA) && backend->fdatasync() < 0)
-                err = errno_to_nbd(errno);
 #else
-            err = NBD_ENOTSUP;  // IFile::zero_range is fallocate-based, Linux-only
+            // Zeroing is portable, which is why this platform offers it and advertises
+            // it: where IFile::zero_range does not exist, zero_fill writes the zeroes
+            // through pwritev -- the same fallback the Linux branch above reaches by
+            // hand, and one a client expects of us, since we never advertise
+            // NBD_FLAG_SEND_FAST_ZERO. `errno ? errno : EIO` is the short-count guard
+            // the Linux branch gets from write_zeroes_fallback: a short pwritev count is
+            // a legal result that leaves errno alone, and errno_to_nbd(0) is
+            // NBD_SUCCESS, which would ack as zeroed a range that was not.
+            if (zero_fill(backend, offset, len) < 0) {
+                err = errno_to_nbd(errno ? errno : EIO);
+                break;
+            }
 #endif
+            // The zeroes are data, so this completion is bound by the same durability
+            // policy as an ordinary WRITE, and the same two asks each suffice on their
+            // own: the client set FUA on THIS request, or write_through -- we did not
+            // advertise SEND_FLUSH, so a Linux client was given no FLUSH to ask with and
+            // no FUA to set (drivers/block/nbd.c clears BLK_FEAT_WRITE_CACHE and
+            // BLK_FEAT_FUA for such an export, and block/blk-flush.c then strips
+            // REQ_PREFLUSH and REQ_FUA before the request reaches a driver), and it
+            // believes an acked zeroing is already on stable storage. That is a Linux
+            // integration fact rather than a reading of the wire spec, which does not
+            // require a non-FUA WRITE_ZEROES to be durable -- but a client with no way
+            // to ask has nowhere else to put the requirement, and a buffered backend can
+            // complete either zero_range or the pwritev fallback with the zeroes still
+            // volatile. A failed sync is reported exactly like the WRITE path's, so
+            // zeroing whose durability could not be had is not acked as durable.
+            if (((cflags & NBD_REQ_FUA) || write_through) && backend->fdatasync() < 0)
+                err = errno_to_nbd(errno);
             break;
         default:
             err = NBD_ENOTSUP;
@@ -1052,7 +1137,13 @@ struct NbdDeviceImpl : NbdDevice {
 
     // backends whose fallocate lacks ZERO_RANGE support (e.g. tmpfs) still get
     // correct semantics: we never advertise NBD_FLAG_SEND_FAST_ZERO, so the
-    // client accepts zeroing by explicit writes
+    // client accepts zeroing by explicit writes.
+    //
+    // This is the Linux branch's own spelling of that fallback rather than a call to
+    // the shared zero_fill the portable branch uses, and the difference is the return
+    // type: this hands back an nbd error code, so a SHORT pwritev count becomes
+    // NBD_EIO here, where zero_fill's -1-with-errno contract has no errno to report
+    // one with (a short count is a legal pwritev result and leaves errno alone).
     uint32_t write_zeroes_fallback(uint64_t offset, uint32_t len) {
         static const char zeros[256 << 10] = {};  // only ever read
         while (len) {

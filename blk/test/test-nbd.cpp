@@ -386,10 +386,17 @@ public:
         BlkDevInfo i;
         i.identity = "photon-nbd-test";
         i.size = IMG_SIZE;
-        i.features = FEATURE_FLUSH;
+        // WRITE_ZEROES is requested on every platform because the server serves it on
+        // every platform: zero_fill writes the zeroes where IFile::zero_range does not
+        // exist. Requesting it only under __linux__ -- as this did -- is what kept a
+        // non-Linux build's handler out of every case in this file, so a handler that
+        // answered NBD_ENOTSUP for an advertised command had no witness.
+        i.features = FEATURE_FLUSH | FEATURE_WRITE_ZEROES;
 #ifdef __linux__
-        // localfs fallocate (trim / zero_range) exists on Linux only
-        i.features |= FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+        // DISCARD stays Linux-only because it is OFFERED Linux-only: localfs trim() is
+        // a fallocate shorthand, a punch-hole has no portable spelling, and validate()
+        // now refuses a feature this build cannot serve.
+        i.features |= FEATURE_DISCARD;
 #endif
         return i;
     }
@@ -423,8 +430,19 @@ TEST_F(NbdTest, capabilities_descriptor) {
     EXPECT_EQ(false, i.detach_no_wait);
     // `offered` describes this transport's command set, not what any given backend can
     // do: it serves TRIM and WRITE_ZEROES by translating them, and a backend without
-    // them answers per-request.
+    // them answers per-request. It IS platform-dependent, and through DISCARD alone:
+    // WRITE_ZEROES is portable (zero_fill writes the zeroes where IFile::zero_range does
+    // not exist) while a punch-hole has no portable spelling at all. Asserting one
+    // unconditional triple here is what pinned the defect, because `offered` is the
+    // promise a caller reads BEFORE it chooses `features`: on a non-Linux build a caller
+    // that believed it got SEND_TRIM advertised for a session whose every NBD_CMD_TRIM
+    // was then answered NBD_ENOTSUP. That caller is
+    // a_feature_this_build_cannot_serve_yields_no_device below.
+#ifdef __linux__
     EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, i.offered);
+#else
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_WRITE_ZEROES, i.offered);
+#endif
     EXPECT_EQ(0ull, i.negotiated);   // nothing advertised yet
 
     ASSERT_EQ(0, dev->start(file));
@@ -433,11 +451,39 @@ TEST_F(NbdTest, capabilities_descriptor) {
     // does not connect -- so what start() advertised is what is in force. Spelled out
     // per platform rather than derived from `features & offered`, which is how the
     // implementation computes it and would therefore agree with itself if it were wrong.
-    uint64_t want = FEATURE_FLUSH;
+    uint64_t want = FEATURE_FLUSH | FEATURE_WRITE_ZEROES;
 #ifdef __linux__
-    want |= FEATURE_DISCARD | FEATURE_WRITE_ZEROES;   // make_info() requests them here
+    want |= FEATURE_DISCARD;   // make_info() requests it only where it is offered
 #endif
     EXPECT_EQ(want, dev->get_info().negotiated);
+}
+
+// The other half of the same platform rule, at the point a caller can still act on it.
+// On a build with no portable discard, requesting FEATURE_DISCARD must yield no device
+// at all: nbd turns `features` straight into transmission flags, so accepting the bit
+// would advertise NBD_FLAG_SEND_TRIM for the whole session and then answer NBD_ENOTSUP
+// for every NBD_CMD_TRIM in it. That is why nbd refuses where vhost-user and vduse
+// accept-and-do-not-offer (see the `features & ~offered` cases in their suites): their
+// frontends negotiate per-feature and can be told no, while an nbd client accepts the
+// advertised set or does not connect. At HEAD this constructed a device on a non-Linux
+// build and advertised a command it could not serve.
+TEST_F(NbdTest, a_feature_this_build_cannot_serve_yields_no_device) {
+    BlkDevInfo info = make_info();
+    info.features = FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES;
+    NbdConfig cfg(info);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    errno = 0;
+    auto dev = new_nbd_device(cfg);
+    DEFER(delete dev);   // nullptr on the refusing platform, and delete(nullptr) is legal
+#ifdef __linux__
+    ASSERT_NE(nullptr, dev);
+    EXPECT_EQ(FEATURE_FLUSH | FEATURE_DISCARD | FEATURE_WRITE_ZEROES, dev->get_info().offered);
+#else
+    EXPECT_EQ(nullptr, dev);
+    EXPECT_EQ(EINVAL, errno);
+#endif
 }
 
 TEST_F(NbdTest, config_validation) {
@@ -528,9 +574,12 @@ TEST_F(NbdTest, tcp_roundtrip) {
     EXPECT_EQ(IMG_SIZE, cli.export_size);
     EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_FLUSH);
     EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_FUA);
+    // WRITE_ZEROES is served on every platform, so it is advertised on every platform;
+    // TRIM is the one flag a non-Linux build must not send, because it has no discard
+    // to serve behind it (a_feature_this_build_cannot_serve_yields_no_device).
+    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
 #ifdef __linux__
     EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_TRIM);
-    EXPECT_TRUE(cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
 #endif
 
     std::vector<char> wbuf(8192), rbuf(8192);
@@ -557,12 +606,16 @@ TEST_F(NbdTest, tcp_roundtrip) {
 
 #ifdef __linux__
     EXPECT_EQ(0, cli.xfer(NBD_CMD_TRIM, 4096, nullptr, 8192));
+#endif
+    // Zeroing is not Linux-only any more, so the roundtrip below runs everywhere and is
+    // this case's witness that the flag advertised above has a command behind it: the
+    // pattern written at 4096 is gone, and gone by an NBD_SUCCESS rather than by an
+    // NBD_ENOTSUP that left the range alone.
     EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 4096, nullptr, 8192));
     memset(rbuf.data(), 1, rbuf.size());
     EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 4096, rbuf.data(), 4096));
     for (int i = 0; i < 4096; i++)
         ASSERT_EQ(0, rbuf[i]);
-#endif
 
     EXPECT_EQ(1u, dev->get_client_connections().size());
 }
@@ -682,6 +735,50 @@ TEST_F(NbdTest, unix_path_mode) {
     EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, wbuf.data(), wbuf.size()));
     EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
     EXPECT_EQ(0, memcmp(wbuf.data(), rbuf.data(), wbuf.size()));
+}
+
+// The wire half of the platform rule that a_feature_this_build_cannot_serve_yields_no_device
+// checks at construction, over a unix socket so that nothing but the handshake and one
+// command of each kind is involved: what a client is TOLD has to match what this build
+// serves. On a non-Linux build that means WRITE_ZEROES advertised -- zero_fill writes the
+// zeroes through pwritev where IFile::zero_range does not exist -- and TRIM not advertised
+// at all, rather than advertised and then answered NBD_ENOTSUP for the rest of a session
+// whose flags the client had no way to decline one of. At HEAD neither half was reachable
+// from this file: make_info() did not request WRITE_ZEROES off Linux, so no case ever saw
+// the flag, the command behind it, or the refusal that should have replaced it.
+TEST_F(NbdTest, the_advertised_commands_are_the_ones_this_build_serves) {
+    const char* path = "/tmp/photon-blk-nbd-advertised.sock";
+    ::unlink(path);
+    NbdConfig cfg(make_info());
+    cfg.loopback_device = false;
+    cfg.unix_path = path;
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(file));
+    DEFER(dev->shutdown());
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_unix(path));
+    ASSERT_EQ(0, cli.handshake("photon-nbd-test"));
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
+#ifdef __linux__
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_TRIM);
+#else
+    EXPECT_EQ(0, cli.trans_flags & NBD_TRANS_SEND_TRIM);
+    // The handler's NBD_ENOTSUP stays as a backstop for a client that sends the command
+    // without having been offered it. What changed is that negotiation can no longer
+    // lead one there.
+    EXPECT_EQ((int)NBD_ENOTSUP, cli.xfer(NBD_CMD_TRIM, 0, nullptr, 4096));
+#endif
+    // and the advertised zeroing is SERVED, not merely advertised: a pattern goes down
+    // first, so the zeroes read back are the command's work and not an untouched image
+    std::vector<char> zbuf(8192, 0x4f), rbuf(8192);
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE, 0, zbuf.data(), zbuf.size()));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, rbuf.data(), rbuf.size()));
+    for (int i = 0; i < 8192; i++)
+        ASSERT_EQ(0, rbuf[i]);
 }
 
 // The same refusal on the nbd side. A caller's ordinary file at unix_path was once
@@ -982,8 +1079,14 @@ TEST_F(NbdTest, read_only) {
     std::vector<char> buf(4096, 0x11);
     EXPECT_EQ((int)NBD_EPERM, cli.xfer(NBD_CMD_WRITE, 0, buf.data(), buf.size()));
 #ifdef __linux__
+    // TRIM's refusal is Linux-only because the command is: on another build this device
+    // never advertised SEND_TRIM and answers NBD_ENOTSUP before it looks at read_only.
     EXPECT_EQ((int)NBD_EPERM, cli.xfer(NBD_CMD_TRIM, 0, nullptr, 4096));
 #endif
+    // WRITE_ZEROES is served everywhere, so its read-only refusal is too -- and it comes
+    // before the zeroing, not after it: nothing may land on a read-only export, whether
+    // the zeroes would have come from a hole-punch or from pwritev.
+    EXPECT_EQ((int)NBD_EPERM, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 4096));
     EXPECT_EQ(0, cli.xfer(NBD_CMD_READ, 0, buf.data(), buf.size()));
 }
 
@@ -1794,16 +1897,127 @@ TEST_F(NbdTest, an_ordinary_write_stays_cached_when_flush_is_offered) {
     EXPECT_EQ(0, probe.syncs.load());
 }
 
+// The WRITE_ZEROES half of the same contract, and the half that runs on EVERY platform:
+// this suite's client drives the protocol over a socket, so no kernel is involved and
+// the case is gated on neither root nor a loaded module the way a tcmu or ublk zeroing
+// case has to be. Zeroing writes data -- whether the zeroes came from a hole-punch or
+// from pwritev -- so an export that did not offer FLUSH has to make them durable before
+// the ack, for exactly the reason an ordinary write does: a Linux client of such an
+// export was given no FLUSH to ask with and no FUA to set (drivers/block/nbd.c clears
+// BLK_FEAT_WRITE_CACHE and BLK_FEAT_FUA for it, and block/blk-flush.c then strips
+// REQ_PREFLUSH and REQ_FUA before the request reaches a driver), so this completion is
+// the only durability promise anybody makes about those zeroes. That is a statement about
+// Linux's write-cache contract, not a claim that the NBD wire spec requires a non-FUA
+// WRITE_ZEROES to be durable -- but a client with no way to ask has nowhere else to put
+// the requirement.
+//
+// `datasyncs` is the count asserted here and `writes` deliberately is not, which is a
+// platform difference rather than a weakening: on Linux a zeroing may be a hole-punch
+// that reaches no pwritev at all, while on a build without IFile::zero_range it is
+// nothing but pwritevs. What has to hold on both is one fdatasync per acked zeroing, and
+// syncs == 0 pins the call to fdatasync -- the one the FUA and FLUSH paths use -- rather
+// than to the heavier fsync.
+TEST_F(NbdTest, a_zeroing_is_durable_when_flush_is_not_offered) {
+    test::BackendProbe probe(file);
+    BlkDevInfo info = make_info();
+    info.features &= ~FEATURE_FLUSH;
+    NbdConfig cfg(info);
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    EXPECT_EQ(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_EQ(0, cli.trans_flags & NBD_TRANS_SEND_FLUSH);
+    // the premise on the wire: zeroing was offered, and no way to ask for it to be
+    // durable afterwards was
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
+
+    // two zeroings, no FUA: each one's reply may arrive only after its zeroes are
+    // durable, so the counts move together
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 8192, nullptr, 8192));
+    EXPECT_EQ(2, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+    // The persist asked for and FAILED: the reply has to carry the failure, not a
+    // success the zeroes never earned. fail_syncs still counts (harness.h), so the third
+    // datasync says "tried and failed" where a stuck count of 2 would say "never tried"
+    // -- and a sync failure that was logged and dropped is the shape this case exists to
+    // make impossible.
+    probe.fail_syncs = true;
+    EXPECT_EQ((int)NBD_EIO, cli.xfer(NBD_CMD_WRITE_ZEROES, 16384, nullptr, 8192));
+    EXPECT_EQ(3, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
+// The control the case above needs, on every platform for the same reason. WITH FLUSH
+// offered the client keeps NBD_CMD_FLUSH and NBD_REQ_FUA and can batch durability behind
+// one FLUSH after many zeroings, so an ordinary WRITE_ZEROES must NOT pay a per-request
+// fdatasync: without this case a build that synced unconditionally would pass the
+// no-FLUSH case too, and the guard would be untestable in the direction that protects
+// write-back. The FUA zeroing in the middle is the per-request ask whose existence
+// justifies that difference, and it is asserted on both platforms because at HEAD a
+// non-Linux build answered it NBD_ENOTSUP. The FLUSH at the end is the batched one, and
+// it reaches the backend exactly once.
+TEST_F(NbdTest, a_zeroing_stays_cached_when_flush_is_offered) {
+    test::BackendProbe probe(file);
+    NbdConfig cfg(make_info());   // make_info() requests FEATURE_FLUSH
+    cfg.loopback_device = false;
+    cfg.enable_tcp = true;
+    cfg.tcp_endpoint = net::EndPoint("127.0.0.1", 0);
+    auto dev = new_nbd_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    EXPECT_NE(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+    net::EndPoint ep;
+    ASSERT_EQ(0, dev->get_server_sockets().tcp->getsockname(ep));
+
+    NbdTestClient cli;
+    ASSERT_EQ(0, cli.connect_tcp("127.0.0.1", ep.port));
+    ASSERT_EQ(0, cli.handshake());
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_FLUSH);
+    EXPECT_NE(0, cli.trans_flags & NBD_TRANS_SEND_WRITE_ZEROES);
+
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 0, nullptr, 8192));
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 8192, nullptr, 8192));
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+
+    // the per-request ask the client kept the ability to make
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_WRITE_ZEROES, 16384, nullptr, 8192, NBD_REQ_FUA));
+    EXPECT_EQ(1, probe.datasyncs.load());
+
+    // and the batched one
+    EXPECT_EQ(0, cli.xfer(NBD_CMD_FLUSH, 0, nullptr, 0));
+    EXPECT_EQ(2, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+}
+
 // A short count is a legal pwritev result and leaves errno alone. Translating it with
 // errno therefore reported whatever the last unrelated failure happened to leave
 // behind -- and errno_to_nbd(0) is NBD_SUCCESS, so a zero-fill that wrote 8191 of
 // 8192 bytes was acked as complete and the last byte was never anybody's problem.
 TEST_F(NbdTest, a_short_zero_fill_is_not_success) {
 #ifndef __linux__
-    // A skip has to be a preprocessor branch here, not an early return: the body below
-    // names NBD_CMD_WRITE_ZEROES, which this file defines only where the server has a
-    // WRITE_ZEROES handler at all, so on another platform it would not compile.
-    report_skip("IFile::zero_range is fallocate-based, so WRITE_ZEROES is Linux-only");
+    // Not the COMMAND that is Linux-only here -- WRITE_ZEROES is served on every
+    // platform -- but the fallback under test is: this case pins nbd's own
+    // write_zeroes_fallback, which only the Linux branch calls, because it maps a short
+    // pwritev count to NBD_EIO where the portable branch's zero_fill has nothing but
+    // errno to report one with. Off Linux the same probe would be exercising zero_fill
+    // rather than anything in nbd.cpp.
+    report_skip("the short-count-to-EIO mapping under test lives in nbd's Linux-only write_zeroes_fallback");
 #else
     ShortZeroFile probe(file);
     NbdConfig cfg(make_info());

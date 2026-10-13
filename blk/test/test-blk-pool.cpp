@@ -24,6 +24,14 @@ limitations under the License.
 // answers -1 at once, drops the timeout and leaves errno alone. The consequence
 // for a serving coroutine differs per transport -- tcmu among them still serves,
 // at the price of a poll -- and is documented at check_pool_engines.
+//
+// A third failure mode is a lifetime rather than a configuration one: the probe
+// check_pool_engines migrates onto a pool vcpu is handed the address of a frame in
+// the caller's own stack, so a caller that gives up waiting has to retire the probe
+// before it unwinds. The case at the bottom of this file drives the wakeup that is
+// not the probe's signal -- an interruption delivered through the public
+// thread_interrupt(th, error_number) API -- against a vcpu held busy so the probe is
+// genuinely still pending when it lands.
 
 #include "../utils.h"
 #include "../../test/gtest.h"
@@ -31,9 +39,12 @@ limitations under the License.
 
 #include <photon/photon.h>
 #include <photon/common/alog.h>
+#include <photon/common/utility.h>   // DEFER
 #include <photon/thread/thread.h>
 #include <photon/thread/workerpool.h>
 
+#include <atomic>      // the gate's release flag, read on a pool vcpu
+#include <cerrno>      // ESHUTDOWN, the errno the interrupted probe must report
 #include <set>
 #include <vector>
 
@@ -191,6 +202,146 @@ TEST(blk_pool, engines_accept_a_matching_pool) {
     photon::WorkPool pool(2, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
     ASSERT_EQ(2, pool.get_vcpu_num());
     EXPECT_EQ(0, check_pool_engines(&pool));
+}
+
+// ---------------------------------------------------------------------------
+// An interrupted probe.
+//
+// check_pool_engines hands a stack-allocated PoolProbe to a coroutine it migrates
+// onto the pool vcpu, and the join it performs before returning is the ONLY thing
+// that keeps the probe from writing into a dead frame. This case drives the one
+// wakeup that is not the probe's signal: semaphore::wait also answers -1 for
+// ETIMEDOUT and for ESHUTDOWN, and with no timeout passed at the call site the
+// source of either is a caller's own thread_interrupt(th, error_number) -- a
+// supported public API. thread_shutdown is NOT the trigger: it interrupts with
+// EPERM, which wait()'s retry loop swallows.
+//
+// errno is the discriminator. Unfixed, the wait's return was ignored, so an
+// interrupted caller read the still-empty p.ev, reported it as an engine MISMATCH
+// with EINVAL, and destroyed the frame while the delayed probe still held its
+// address -- EINVAL here, the interrupter's own ESHUTDOWN after the fix. An ASAN
+// build turns the same run into a hard use-after-free: the probe's write to p.ev
+// lands in a poisoned frame, and the signal that follows it lands on a destroyed
+// semaphore.
+//
+// The gate coroutine is what makes the delay real instead of a coin flip. It holds
+// the target vcpu in a spin with no yield, so a probe migrated there is not
+// scheduled until the gate is released -- which is not until after the interrupt has
+// landed. Nothing steals it back either: neither photon::init() nor WorkPool passes
+// VCPU_ENABLE_ACTIVE_WORK_STEALING or VCPU_ENABLE_PASSIVE_WORK_STEALING to
+// vcpu_init, so try_work_stealing answers false on every vcpu in this test.
+//
+// The migrate-failure half of the same fix is NOT covered, and cannot be honestly.
+// photon::thread_migrate refuses only a null argument, a thread that is not on the
+// current vcpu, or one that is not READY, and check_pool_engines arrives with a
+// thread the create just left READY on this vcpu with nothing in between that
+// yields. There is no public way to fail that call without changing the function
+// under test, so the join on that path is argued in its own comment rather than
+// pinned here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Holds its vcpu. Spins on `release` without yielding, which is the whole point:
+// the coroutine migrated here behind it does not run until the spin ends. `started`
+// is signalled from the vcpu itself, so a caller that has seen it knows the gate is
+// in place and ahead of anything migrated later -- photon's runq is FIFO and the
+// gate never yields, so the newcomer cannot pass it.
+struct Gate {
+    std::atomic<bool> release{false};
+    photon::semaphore started{0};   // NSDMI, not {}: semaphore's ctor is explicit
+};
+
+void* gate_thunk(void* a) {
+    auto* g = (Gate*)a;
+    g->started.signal(1);
+    while (!g->release.load(std::memory_order_relaxed))
+        ;   // no yield: this vcpu being unavailable IS the delay
+    return nullptr;
+}
+
+struct InterruptedCaller {
+    photon::WorkPool* pool = nullptr;
+    int rc = 0;
+    int err = 0;
+    photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+};
+
+void* caller_thunk(void* a) {
+    auto* c = (InterruptedCaller*)a;
+    errno = 0;
+    c->rc = check_pool_engines(c->pool);
+    c->err = errno;   // errno is this OS thread's, shared by every coroutine on it
+    c->done.signal(1);
+    return nullptr;
+}
+
+}   // namespace
+
+TEST(blk_pool, engines_report_an_interrupted_probe_rather_than_a_mismatch) {
+    photon::WorkPool pool(1, test::TEST_EVENT_ENGINE, test::TEST_IO_ENGINE);
+    ASSERT_EQ(1, pool.get_vcpu_num());
+    Gate gate;
+    InterruptedCaller c;
+    c.pool = &pool;
+    photon::thread *gth = nullptr, *cth = nullptr;
+    // Every exit, a gtest ASSERT's included, has to let the gate off its vcpu and
+    // retire both coroutines BEFORE `pool` dies: WorkPool's teardown waits its vcpus
+    // out, and a spin nothing can end turns an assertion failure into a hang.
+    // Declared after `pool` so it runs first, and it releases before it joins so a
+    // gate that never got migrated still exits at once. Null means the create itself
+    // failed and there is nothing to retire.
+    DEFER({
+        gate.release.store(true);
+        if (cth) photon::thread_join((photon::join_handle*)cth);
+        if (gth) photon::thread_join((photon::join_handle*)gth);
+    });
+
+    gth = photon::thread_create(&gate_thunk, &gate);
+    ASSERT_NE(nullptr, gth);
+    photon::thread_enable_join(gth);
+    ASSERT_EQ(0, pool.thread_migrate(gth, (size_t)0));
+    gate.started.wait(1);   // vcpu 0 is spinning from here on
+
+    cth = photon::thread_create(&caller_thunk, &c);
+    ASSERT_NE(nullptr, cth);
+    photon::thread_enable_join(cth);
+
+    // Wait for the caller to park rather than guess how long that takes. SLEEPING is
+    // reachable here only from the probe's semaphore wait: nothing between
+    // check_pool_engines' entry and it yields -- get_engine_name is a field read,
+    // thread_create only queues, and WorkPool::thread_migrate forwards to photon's,
+    // which does not switch for a thread that is not the caller. Bounded so a change
+    // that removes the wait fails this case instead of hanging the suite.
+    int spins = 0;
+    while (photon::thread_stat(cth) != photon::states::SLEEPING && ++spins < 1000000)
+        photon::thread_yield();
+    ASSERT_EQ(photon::states::SLEEPING, photon::thread_stat(cth))
+        << "the caller never parked in the probe wait, so the probe was not delayed "
+           "and nothing below measures the interrupted path";
+
+    photon::thread_interrupt(cth, ESHUTDOWN);
+    // Released AFTER the interrupt, and it has to be released: with the fix the
+    // caller joins the probe, so a gate that stayed closed would hang the case
+    // rather than pass it.
+    gate.release.store(true);
+
+    c.done.wait(1);
+    // A short yield before the DEFER retires the caller. On the fixed code the
+    // caller has already joined its probe, so this costs one sleep and proves
+    // nothing. On the unfixed code it is what usually keeps the demonstration a
+    // failed assertion: the probe still writes p.ev and signals p.done after the
+    // frame is gone, but the joinable caller's stack is only unwound, not yet
+    // returned to photon's allocator, so the write lands in mapped memory instead of
+    // racing the disposal. It does not make that code correct, and ASAN reports the
+    // use-after-free on the poisoned frame either way.
+    photon::thread_usleep(20 * 1000);
+
+    EXPECT_EQ(-1, c.rc);
+    EXPECT_EQ(ESHUTDOWN, c.err)
+        << "EINVAL here is the unfixed path: the interrupted wait's return was "
+           "ignored, so the still-empty probe view was reported as an event-engine "
+           "mismatch and the frame was destroyed under a probe that had not run";
 }
 
 int main(int argc, char** argv) {

@@ -23,6 +23,10 @@ limitations under the License.
 #endif
 
 #include "../blk.h"
+// For the devlock primitives alone, which the ungated case pinning the probe-vs-claim
+// asymmetry calls directly. The transport itself is reached through the shipped library,
+// not through a textual include of ../ublk.cpp -- see ublk_cmd_buf_geometry below.
+#include "../utils.h"
 
 #include "../../test/gtest.h"
 #include "harness.h"
@@ -62,6 +66,22 @@ limitations under the License.
 
 namespace photon {
 namespace blk {
+
+// The one internal of blk/ublk.cpp this file reaches, and it reaches it by DECLARATION
+// rather than by include. The descriptor-ring mapping geometry is pure arithmetic on a
+// page size, but the page size that matters is the one the mmap is issued with -- and a
+// 4 KiB host cannot make a wrong 4 KiB assumption visible, which is exactly how the bug
+// this pins survived: at 64 KiB pages the length is short and the queue stride is not
+// even page-aligned. So the arithmetic takes its page size as an argument and a case here
+// states the geometry of pages this host does not have.
+//
+// Declared rather than included because the alternative is including ../ublk.cpp textually
+// the way test-vduse.cpp includes ../vduse.cpp, and that would make EVERY case in this
+// suite exercise a copy built with this target's flags instead of the shipped library.
+// One declared function is the smaller divergence, and it is the only symbol here that is
+// not in a header: everything else goes through UblkController.
+void ublk_cmd_buf_geometry(uint16_t depth, uint16_t qid, size_t page,
+                           size_t* sz, off_t* off);
 
 static const char IMG_PATH[]       = "/tmp/photon-blk-ublk.img";
 static const char IMG2_PATH[]      = "/tmp/photon-blk-ublk2.img";
@@ -210,6 +230,88 @@ static uint64_t thread_cpu_ms_during(uint64_t ms) {
     return thread_cpu_ms() - t0;
 }
 
+// One unsigned sysfs word. UINT64_MAX is "this oracle could not answer" -- absent file,
+// unreadable, empty -- which a case must never read as a value.
+static uint64_t sysfs_u64(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        return UINT64_MAX;
+    char buf[64] = {};
+    ssize_t n = ::read(fd, buf, sizeof(buf) - 1);
+    ::close(fd);
+    if (n <= 0)
+        return UINT64_MAX;
+    return (uint64_t)strtoull(buf, nullptr, 10);
+}
+
+// What the queue advertises for zeroing, in BYTES. This is the oracle that makes a
+// BLKZEROOUT attributable, and the zeroing cases need one because the backend cannot tell
+// the two dispatches apart: with a nonzero limit blkdev_issue_zeroout sends
+// REQ_OP_WRITE_ZEROES -- the op whose persist is under test -- and with a zero limit it
+// FALLS BACK to writing zero pages through the ordinary write path, which lands the same
+// bytes and, in write-through, costs the same single fdatasync. A WRITE_ZEROES whose
+// zero_range the backend did not support also falls back to pwritev inside zero_fill, so
+// counting writes proves nothing either.
+//
+// Both spellings are read because the name and the unit moved together: the kernels this
+// suite has run on expose write_zeroes_max_sectors in 512-byte units, and 7.2.3 exposes
+// write_zeroes_max_bytes already scaled (block/blk-sysfs.c:642 and its
+// QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES).
+static uint64_t node_write_zeroes_bytes(const std::string& node) {
+    std::string q = "/sys/block/" +
+                    (node.compare(0, 5, "/dev/") == 0 ? node.substr(5) : node) + "/queue/";
+    uint64_t bytes = sysfs_u64(q + "write_zeroes_max_bytes");
+    if (bytes != UINT64_MAX)
+        return bytes;
+    uint64_t sectors = sysfs_u64(q + "write_zeroes_max_sectors");
+    return sectors == UINT64_MAX ? UINT64_MAX : sectors << 9;
+}
+
+// The zeroing phase the durability cases below measure. Seed the range THROUGH THE BACKEND
+// first, so that "it reads zero afterwards" is a fact about the request rather than about
+// a range that was already zero; then issue exactly ONE BLKZEROOUT of it off the vcpu and
+// nothing else -- no write through the node before it and no fsync after it, so the
+// probe's counters can only describe the zeroing. device_io is not usable here for the
+// reason unpersisted_writes() gives: its consumer child fsyncs the node after every write,
+// and on a device that advertised a volatile cache that fsync arrives as a FLUSH, i.e. one
+// datasync a control case would read as a failure of the very thing it exists to rule out.
+// Returns 0, or the errno BLKZEROOUT answered with.
+static int one_write_zeroes(const std::string& node, fs::IFile* backend,
+                            uint64_t off, size_t len) {
+    std::vector<char> seed(len, 0x5c);
+    if (backend->pwrite(seed.data(), seed.size(), (off_t)off) != (ssize_t)len)
+        return errno ? errno : EIO;
+    int result = 0;
+    test::run_off_vcpu([&] {
+        int fd = test::open_node(node, O_RDWR);
+        if (fd < 0) { result = errno ? errno : EIO; return; }
+        DEFER(::close(fd));
+        uint64_t range[2] = {off, len};
+        if (::ioctl(fd, BLKZEROOUT, range) < 0)
+            result = errno ? errno : EIO;
+    });
+    return result;
+}
+
+// Read a range back THROUGH THE BACKEND, not through the node: the question is what the
+// zeroing left in the file the device serves, and the node's own page cache would answer
+// it out of memory that the request never had to touch.
+static bool backend_range_is_zero(fs::IFile* backend, uint64_t off, size_t len) {
+    std::vector<char> buf(len, 0x7e);
+    struct iovec iov{buf.data(), buf.size()};
+    if (backend->preadv(&iov, 1, (off_t)off) != (ssize_t)len)
+        return false;
+    return iovector_view(&iov, 1).is_zero();
+}
+
+// The one zeroing range the cases below use. 4096 is inside every limit the device
+// advertises -- max_write_zeroes_sectors is capped at 1 << 22 and basic.max_sectors at
+// max_io_buf_bytes >> 9 -- so blkdev_issue_zeroout builds exactly one bio for it and the
+// datasync counts below can be equalities rather than lower bounds. Aligned to any logical
+// block size this suite configures, which blkdev_issue_zeroout requires.
+static constexpr uint64_t ZERO_OFF = IO_OFF;
+static constexpr size_t   ZERO_LEN = 4096;
+
 // Forwards to the wrapped file and counts the three things an FUA dispatch can be told
 // apart by. It is NOT the harness's test::CountingFile, which counts destructions for
 // the ownership contract; this one counts syncs, and the two are named differently
@@ -296,7 +398,9 @@ public:
 //
 // The controller still gets SUITE_LOCKS rather than a writable stand-in. Nothing
 // here opens it, and if a case ever starts to, a non-root run fails loudly instead
-// of passing against a directory only some machines happen to permit.
+// of passing against a directory only some machines happen to permit. The one case
+// below that does touch a lock directory -- the devlock primitive pin -- uses a
+// scratch directory under /tmp for exactly that reason, and never SUITE_LOCKS.
 class UblkConfigTest : public ::testing::Test {
 public:
     UblkController* ctl = nullptr;
@@ -518,17 +622,55 @@ TEST_F(UblkConfigTest, config_validation) {
 }
 
 // The serving loop speaks only the plain ublk data plane: FETCH hands the kernel a
-// buffer address and COMMIT carries the result. Two flags negotiate a different
-// protocol it does not implement -- NEED_GET_DATA makes a WRITE's FETCH complete with
-// a positive result tag_loop reads as fatal (it exits, stranding the request and
-// burning the tag), and USER_COPY moves data by pread/pwrite on the cdev with a zero
-// FETCH address the loop never sends. Both must be refused at construction, before
-// ADD_DEV, so no object exists to strand anything. The values are from
-// <linux/ublk_cmd.h>; this TU cannot see ublk.cpp's private copy of the UAPI.
+// buffer address and COMMIT carries the result. The flags below negotiate a different
+// protocol it does not implement, so each must be refused at construction, before
+// ADD_DEV, so that no object exists to strand anything -- and refused again on an
+// adoption, which the second half of this case cannot reach (see below). What each one
+// breaks:
+//   NEED_GET_DATA  a WRITE's FETCH completes with a positive result tag_loop reads as
+//                  fatal: it exits, stranding the request and burning the tag.
+//   USER_COPY      data moves by pread/pwrite on the cdev, with a zero FETCH address the
+//                  loop never sends.
+//   BATCH_IO       the driver installs a different char-device fops whose uring_cmd
+//                  answers anything but REGISTER/UNREGISTER_IO_BUF with -EOPNOTSUPP, and
+//                  the UAPI states that FETCH_REQ and COMMIT_AND_FETCH_REQ -- the whole
+//                  of tag_loop -- are not supported under it. ADD_DEV accepts the bit, so
+//                  without this refusal the result is a registered device that serves
+//                  nothing.
+//   AUTO_BUF_REG   the uring_cmd's sqe->addr is read as a ublk_auto_buf_reg instead of a
+//                  buffer address, and the driver fails both FETCH and COMMIT unless the
+//                  ring carries a matching sparse buffer table.
+//   ZONED          adds REPORT_ZONES and ZONE_APPEND, which serve_req's switch has no case
+//                  for: they fall through to its -EOPNOTSUPP.
+//   SHMEM_ZC       a request matching a registered shmem buffer arrives with
+//                  UBLK_IO_F_SHMEM_ZC and an addr encoding a buffer index rather than an
+//                  address, which nothing here decodes.
+// The values are from <linux/ublk_cmd.h>; this TU cannot see ublk.cpp's private copy of
+// the UAPI.
+//
+// The ADOPTION half -- attach_existing()'s check of the negotiated flags -- is honestly
+// untestable from here and deliberately has no case: validate() now refuses to create such
+// a registration, so reaching that check would need a raw UBLK_U_CMD_ADD_DEV issued behind
+// the validator's back, which no public API in this suite can do. It is guarded by the same
+// constant, and the constant is what this case pins.
 TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
-    constexpr uint64_t NEED_GET_DATA = 1ULL << 2;
-    constexpr uint64_t USER_COPY     = 1ULL << 7;
-    for (uint64_t f : {NEED_GET_DATA, USER_COPY, NEED_GET_DATA | USER_COPY}) {
+    constexpr uint64_t NEED_GET_DATA  = 1ULL << 2;
+    constexpr uint64_t USER_COPY      = 1ULL << 7;
+    constexpr uint64_t ZONED          = 1ULL << 8;
+    constexpr uint64_t AUTO_BUF_REG   = 1ULL << 11;
+    constexpr uint64_t BATCH_IO       = 1ULL << 15;
+    constexpr uint64_t SHMEM_ZC       = 1ULL << 19;
+    // INTEGRITY (1 << 16) is absent from this list on purpose and is covered twice over:
+    // it requires USER_COPY, which is refused, and the driver itself rejects it without
+    // USER_COPY (drivers/block/ublk_drv.c:4718), so there is no registration carrying it
+    // that this transport could be asked to serve.
+    const uint64_t refused[] = {
+        NEED_GET_DATA, USER_COPY, ZONED, AUTO_BUF_REG, BATCH_IO, SHMEM_ZC,
+        NEED_GET_DATA | USER_COPY,
+        BATCH_IO | ZONED,                       // more than one at a time
+        USER_COPY | (1ULL << 16),               // INTEGRITY, via the USER_COPY it requires
+    };
+    for (uint64_t f : refused) {
         UblkController::Config bad(make_info());
         bad.flags = f;
         errno = 0;
@@ -536,12 +678,155 @@ TEST_F(UblkConfigTest, unimplemented_data_plane_flags_are_refused) {
         EXPECT_EQ(EINVAL, errno) << "flags=" << f;
     }
     // control: a config that asks for no exotic data plane still constructs, so the
-    // refusals above key on the flags and are not a blanket reject
+    // refusals above key on the flags and are not a blanket reject.
     UblkController::Config good(make_info());
     good.flags = 0;
     auto dev = ctl->new_device(good);
     EXPECT_NE(nullptr, dev);
     delete dev;
+
+    // And the control-plane bits stay ACCEPTED, which is the other half of a blacklist and
+    // the one a whitelist would get wrong: none of these changes what a FETCH/COMMIT pair
+    // means, so refusing them would only make a kernel feature this daemon has no opinion
+    // about unusable through cfg.flags. BUF_REG_OFF_DAEMON is the pointed case -- it only
+    // widens who may issue REGISTER_IO_BUF, a command this daemon never issues, and the
+    // driver force-sets it in the negotiated flags of EVERY device it creates
+    // (drivers/block/ublk_drv.c:4784), so putting it in the mask would refuse every
+    // adoption on such a kernel rather than every unservable one. Whether the kernel
+    // accepts a given COMBINATION of these is ADD_DEV's business, not validate()'s.
+    constexpr uint64_t UNPRIVILEGED_DEV      = 1ULL << 5;
+    constexpr uint64_t USER_RECOVERY         = 1ULL << 3;
+    constexpr uint64_t USER_RECOVERY_REISSUE = 1ULL << 4;
+    constexpr uint64_t USER_RECOVERY_FAIL_IO = 1ULL << 9;
+    constexpr uint64_t UPDATE_SIZE           = 1ULL << 10;
+    constexpr uint64_t QUIESCE               = 1ULL << 12;
+    constexpr uint64_t PER_IO_DAEMON         = 1ULL << 13;
+    constexpr uint64_t BUF_REG_OFF_DAEMON    = 1ULL << 14;
+    constexpr uint64_t SAFE_STOP_DEV         = 1ULL << 17;
+    constexpr uint64_t NO_AUTO_PART_SCAN     = 1ULL << 18;
+    const uint64_t accepted[] = {
+        UNPRIVILEGED_DEV, USER_RECOVERY, USER_RECOVERY_REISSUE, USER_RECOVERY_FAIL_IO,
+        UPDATE_SIZE, QUIESCE, PER_IO_DAEMON, BUF_REG_OFF_DAEMON, SAFE_STOP_DEV,
+        NO_AUTO_PART_SCAN,
+        USER_RECOVERY | USER_RECOVERY_REISSUE | UPDATE_SIZE | QUIESCE | BUF_REG_OFF_DAEMON,
+    };
+    for (uint64_t f : accepted) {
+        UblkController::Config ok(make_info());
+        ok.flags = f;
+        errno = 0;
+        auto d = ctl->new_device(ok);
+        EXPECT_NE(nullptr, d) << "a control-plane flag was refused: flags=" << f
+                              << " errno=" << errno;
+        delete d;
+    }
+}
+
+// The descriptor-ring mapping geometry, table-tested over page sizes this host does not
+// have. Every assertion below is transcribed from the driver, which is the authority on
+// both numbers and the reason neither may be written with a 4096 in it:
+//   length   round_up(depth * sizeof(ublksrv_io_desc), PAGE_SIZE), which is what
+//            __ublk_queue_cmd_buf_size() computes (drivers/block/ublk_drv.c:1247) and what
+//            ublk_ch_mmap requires the mapping's length to EQUAL (:2663) -- not a multiple
+//            of, not at least.
+//   offset   qid * round_up(UBLK_MAX_QUEUE_DEPTH * sizeof(desc), PAGE_SIZE), because
+//            ublk_ch_mmap recovers q_id by DIVIDING the offset by ublk_max_cmd_buf_size()
+//            (:2659, with UBLKSRV_CMD_BUF_OFFSET == 0) and that stride is
+//            __ublk_queue_cmd_buf_size(UBLK_MAX_QUEUE_DEPTH) (:1257).
+//   alignment  mmap(2) itself rejects an offset that is not a multiple of the page, which
+//            is where a 64 KiB host used to fail before the driver was ever reached:
+//            4096 * 24 = 98304 = 2^15 * 3 is page-aligned at 4 KiB and at 16 KiB and not
+//            at 64 KiB.
+// sizeof(ublksrv_io_desc) is 24 -- static_asserted against the UAPI copy in ublk.cpp -- and
+// UBLK_MAX_QUEUE_DEPTH is 4096; both are restated here because this TU cannot see that
+// copy, and restated as literals so a change to either breaks this case loudly instead of
+// silently agreeing with the implementation.
+//
+// Ungated: pure arithmetic on injected arguments, so it runs wherever this binary builds
+// and is the one case of this round that CI can witness. At the commit before the fix it is
+// red on every host, as an undefined symbol -- the function did not exist and the arithmetic
+// sat inline in queue_setup with a 4096 in it, which no CI host could have shown up because
+// every one of them has a 4 KiB page.
+TEST_F(UblkConfigTest, cmd_buf_geometry_follows_the_host_page_size) {
+    constexpr size_t DESC = 24;        // sizeof(ublksrv_io_desc)
+    constexpr size_t MAXD = 4096;      // UBLK_MAX_QUEUE_DEPTH
+    const size_t pages[] = {4096, 16384, 65536};
+    const struct { uint16_t depth; uint16_t qid; } rows[] = {
+        {128, 0}, {128, 1}, {128, 2}, {128, 63},   // the default depth, and the queue ids
+                                                   // a multiqueue config actually uses
+        {1, 1},                                    // the shortest ring: still one page
+        {170, 3},                                  // 170 * 24 = 4080, inside one page
+        {171, 3},                                  // 171 * 24 = 4104, past it
+        {(uint16_t)MAXD, 1},                       // the deepest ring the ABI allows
+    };
+    for (size_t page : pages) {
+        // the driver's own stride, computed independently of the implementation
+        const size_t stride = (MAXD * DESC + page - 1) / page * page;
+        for (auto& r : rows) {
+            size_t sz = 0;
+            off_t off = -1;
+            ublk_cmd_buf_geometry(r.depth, r.qid, page, &sz, &off);
+            const size_t want_sz = ((size_t)r.depth * DESC + page - 1) / page * page;
+            EXPECT_EQ(want_sz, sz) << "page=" << page << " depth=" << r.depth << " qid=" << r.qid;
+            EXPECT_EQ(0ul, (unsigned long)(off % (off_t)page))
+                << "page=" << page << " qid=" << r.qid << ": mmap would reject this offset";
+            EXPECT_EQ((off_t)r.qid, (off_t)(off / (off_t)stride))
+                << "page=" << page << " qid=" << r.qid
+                << ": ublk_ch_mmap would recover a different queue id and map its descriptors";
+        }
+    }
+}
+
+// The asymmetry destroy_orphan()'s absent-registration branch is ordered around, pinned on
+// its own. devlock_free() is a three-valued PROBE (-1 absent / 0 held / 1 free) that creates
+// nothing; devlock_acquire() is a two-valued CLAIM whose own open(O_CREAT) collapses
+// "absent" into success, and whose O_RDWR refuses a directory that the probe just called
+// free. That is why the branch probes FIRST and then claims: classifying with the claim
+// would plant a tombstone for a dev_id that was never a device, unlink it again and report
+// success about nothing, where blk.h pins ENOENT for exactly that case -- while classifying
+// with the probe alone leaves the whole window open, because a probe gives the flock back
+// before it returns and so cannot authorise a removal.
+//
+// Ungated and rootless: a scratch directory under /tmp and no kernel state, so it runs
+// wherever this binary builds. What it pins is the PRIMITIVE, not the interleaving the fix
+// closes -- no harness primitive here can park a second process exactly between a starter's
+// devlock_acquire and its ADD_DEV, so that half is fixed by argument and is cross-process by
+// nature. This case is green before and after the change, by construction.
+TEST_F(UblkConfigTest, devlock_probe_and_claim_disagree_on_a_directory_and_on_nothing) {
+    static const char DIR[] = "/tmp/photon-blk-ublk-devlock";
+    ::system(("rm -rf " + std::string(DIR)).c_str());
+    DEFER(::system(("rm -rf " + std::string(DIR)).c_str()));
+    ASSERT_EQ(0, ::mkdir(DIR, 0755));
+    const std::string gone = std::string(DIR) + "/ublk-0.lock";
+    const std::string dir  = std::string(DIR) + "/ublk-1.lock";
+
+    // an ABSENT path: -1 from the probe, and a file the claim would create
+    EXPECT_EQ(-1, devlock_free(DIR, "ublk-0.lock"));
+    int fd = -1;
+    ASSERT_EQ(0, devlock_acquire(DIR, "ublk-0.lock", &fd));
+    EXPECT_LE(0, fd);
+    devlock_release(fd);
+    fd = -1;
+    EXPECT_EQ(0, ::access(gone.c_str(), F_OK))
+        << "the claim did not create the file the probe had just reported absent";
+    // ... and now that it exists, the same probe reads it as free, which is the answer the
+    // absent branch takes for "our own litter"
+    EXPECT_EQ(1, devlock_free(DIR, "ublk-0.lock"));
+    ASSERT_EQ(0, devlock_unlink(DIR, "ublk-0.lock"));
+    EXPECT_EQ(-1, devlock_free(DIR, "ublk-0.lock"));
+
+    // a DIRECTORY: free to the probe, EISDIR to the claim and to the unlink alike. So the
+    // branch propagates the acquire's EISDIR rather than falling through to a removal that
+    // was never going to happen -- the same errno it answered before the claim existed, one
+    // step earlier and with no file created.
+    ASSERT_EQ(0, ::mkdir(dir.c_str(), 0755));
+    EXPECT_EQ(1, devlock_free(DIR, "ublk-1.lock")) << "a directory reads as free to the probe";
+    errno = 0;
+    EXPECT_EQ(-1, devlock_acquire(DIR, "ublk-1.lock", &fd));
+    EXPECT_EQ(EISDIR, errno) << "the claim is what refuses a directory";
+    EXPECT_EQ(-1, fd) << "a refused claim must not hand back a descriptor";
+    errno = 0;
+    EXPECT_EQ(-1, devlock_unlink(DIR, "ublk-1.lock"));
+    EXPECT_EQ(EISDIR, errno);
 }
 
 TEST_F(UblkTest, a_second_start_on_the_same_object_is_ealready) {
@@ -606,6 +891,49 @@ TEST_F(UblkTest, shutdown_releases_a_backend_it_owns) {
     EXPECT_EQ(4, destroyed.load()) << "start() overwrote the owned backend detach had kept";
     ASSERT_EQ(0, dev->shutdown());
     EXPECT_EQ(5, destroyed.load());
+}
+
+// The same-pointer half of that contract, which the case above cannot reach: it restarts
+// with a FRESH CountingFile every time, so a start() that unconditionally released an owned
+// backend looked correct to it. detach(true) deliberately retains backend AND own_backend,
+// and blk.h releases an owned backend only at shutdown() or at destruction -- or back to the
+// caller on a FAILED start(). detach() is none of those, so start(A, true) -> detach(true)
+// -> start(A, true) is a valid sequence in which the caller re-asserts ONE ownership rather
+// than transferring a second one. Deleting A at that re-entry and storing the freed pointer
+// back as owned left every later request using a dead object and made the next release
+// delete it a second time. The counter is the only thing that tells the two apart.
+//
+// Note what the second start() does here, and it is the same as in the case above: cfg.dev_id
+// is the auto-assign sentinel and cfg.info.identity is not a decimal dev_id, so the second
+// start() ADD_DEVs a SECOND kernel device rather than adopting the detached one, which the
+// fixture's TearDown sweep then removes. That does not weaken the case -- the backend
+// ownership it asserts is entirely inside this object -- but it does mean one extra dev_id
+// per run.
+//
+// The shape is test-vhost-user's repassing_an_owned_backend_after_detach_never_deletes_it_
+// twice; ublk needs no node cleanup between the two starts, because a detached registration
+// is not something a second start() has to clear out of the way.
+//
+// Gated, and CI never runs it: it needs root and ublk_drv.
+TEST_F(UblkTest, repassing_an_owned_backend_after_detach_never_deletes_it_twice) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+
+    std::atomic<int> destroyed{0};
+    auto* bk = new test::CountingFile(file, &destroyed);
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));
+    ASSERT_EQ(0, dev->detach(true));   // retains backend AND own_backend
+    ASSERT_EQ(0, dev->start(bk, /*ownership=*/true));   // the SAME pointer again
+    EXPECT_EQ(0, destroyed.load()) << "a re-passed backend was deleted on re-entry";
+    // ... and what the retained pointer refers to is still a LIVE object rather than a freed
+    // one, which is the half a counter alone cannot see: one real I/O through the node,
+    // served through that backend and verified against the image behind it.
+    EXPECT_EQ(0, device_io(node_of(dev), pattern(0x9d), /*verify_backend=*/true));
+    EXPECT_EQ(0, dev->shutdown());
+    EXPECT_EQ(1, destroyed.load()) << "the owned backend must die exactly once";
 }
 
 TEST_F(UblkTest, basic_io) {
@@ -1196,6 +1524,60 @@ TEST_F(UblkTest, destroy_orphan_leaves_a_claimed_tombstone_alone) {
     int e = errno;
     EXPECT_EQ(0, rc) << "errno " << e;
     EXPECT_NE(0, ::access(lp.c_str(), F_OK)) << "a tombstone outliving its device survived";
+}
+
+// blk.h's claim about ublk's list_orphans(), pinned end to end: identity ->
+// Config(record) -> new_device() -> start(backend) is the COMPLETE recovery recipe here, and
+// the reason it can be is that this listing reads the registered UBLK_ATTR_READ_ONLY back
+// into BlkDevInfo::read_only. ublk grades its adoption Full, so validate_params() compares
+// want_attrs() -- which ORs that bit in from cfg.read_only -- against the registration and
+// answers EINVAL on a mismatch, and nothing can repair the registration afterwards because
+// SET_PARAMS is refused once the device has been used. A listing that omitted the bit
+// therefore made a read-only orphan unadoptable through the very listing whose job is to
+// recover it: at the commit before the fix, the read-only row below failed with EINVAL.
+//
+// Both rows are load-bearing. The writable one is the control that the bit is READ rather
+// than set: a listing that reported read_only for everything would adopt the read-only
+// orphan and fail here instead.
+//
+// Gated, and CI never runs it: the refusal this exercises lives in validate_params(), which
+// needs a live registration, so the case needs root and ublk_drv.
+TEST_F(UblkTest, orphan_record_carries_read_only_so_the_documented_recipe_adopts_it) {
+    if (skip_reason) return;
+    const struct { bool read_only; const char* what; } rows[] = {
+        {true,  "a read-only registration"},
+        {false, "a writable registration"},
+    };
+    for (auto& row : rows) {
+        BlkDevInfo want = make_info();
+        want.read_only = row.read_only;
+        IBlkDevice* dev = nullptr;
+        std::string id = detach_into_orphan(ctl, file, want, &dev);
+        ASSERT_FALSE(id.empty()) << row.what << ": could not fabricate an orphan";
+        DEFER(delete dev);
+
+        BlkDevInfo rec;
+        bool found = false;
+        for (auto& i : ctl->list_orphans())
+            if (i.identity == id) { rec = i; found = true; }
+        ASSERT_TRUE(found) << row.what << ": the quiesced device was not reported";
+        EXPECT_EQ(row.read_only, rec.read_only) << row.what;
+        // the rest of the record is still what the registration says, so the readback did
+        // not come at the cost of the fields orphan_list already pins
+        EXPECT_EQ(IMG_SIZE, rec.size) << row.what;
+        EXPECT_EQ(9, (int)rec.sector_size_shift) << row.what;
+
+        // the documented recipe, verbatim: not one field of the record edited
+        UblkController::Config cfg(rec);
+        EXPECT_EQ(row.read_only, cfg.read_only) << row.what;
+        auto dev2 = ctl->new_device(cfg);
+        ASSERT_NE(nullptr, dev2) << row.what;
+        DEFER(delete dev2);
+        DEFER(dev2->shutdown());
+        errno = 0;
+        ASSERT_EQ(0, dev2->start(file)) << row.what << ": errno " << errno;
+        EXPECT_EQ("/dev/ublkb" + id, node_of(dev2)) << row.what;
+    }
 }
 
 TEST_F(UblkTest, resize_dev) {
@@ -2188,6 +2570,119 @@ TEST_F(UblkTest, a_failed_write_through_persist_fails_the_write) {
     // says no write was accepted.
     EXPECT_GT(sr.failures, 0);
     EXPECT_EQ(0u, sr.ios);
+}
+
+// The three cases above are about an ordinary WRITE. These three are the same question one
+// operation over, and the answer used to be different: WRITE_ZEROES completes as soon as
+// zero_fill() returns, which for a buffered backend means the zeroes -- whether they came
+// from zero_range's hole punch or from the fallback's pwritev of a zero buffer -- can still
+// be sitting in the page cache when the completion goes back. A completion is the device's
+// word that the bytes are where it promised, and in the write-through mode the kernel has no
+// way to ask again: with neither cache bit advertised it strips REQ_PREFLUSH and, FUA being
+// unsupported, REQ_FUA before the request reaches us and sends no compensating flush, so
+// that word was the only promise made.
+//
+// DISCARD is NOT here and that is not an omission either: Linux never attaches a durability
+// ask to a discard (blk_alloc_discard_bio allocates REQ_OP_DISCARD with neither flag,
+// block/blk-lib.c:37-46), so a discard's completion has never been a durability promise and
+// there is nothing for write_through to make true. serve_req says the same at its own case.
+//
+// Same control/experiment/failure shape as the write trio, and the same reason for it: without
+// the control an unconditional sync passes all three, and an unconditional sync is the exact
+// regression advertising the volatile cache exists to avoid.
+
+// CONTROL: FEATURE_FLUSH present, so a volatile write cache is advertised and a zeroing's
+// completion promises nothing about stable storage. Nothing asked for persistence, so nothing
+// may have persisted.
+TEST_F(UblkTest, write_zeroes_is_write_back_when_flush_is_configured) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.features = FEATURE_FLUSH | FEATURE_WRITE_ZEROES;
+    test::BackendProbe probe(file);   // declared before dev: it does not own what it wraps,
+                                      // and the device's last IO must land while it is alive
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    // Attribution first, and it is what makes the counts below mean anything: if the queue
+    // advertised no zeroing offload, BLKZEROOUT would be served by the block layer writing
+    // zero pages and this case would have measured the ordinary WRITE path instead.
+    uint64_t wz = node_write_zeroes_bytes(node);
+    ASSERT_NE(UINT64_MAX, wz) << "no zeroing limit to read, so the phase below is unattributed";
+    ASSERT_GT(wz, 0u) << "the queue advertises no zeroing offload";
+
+    ASSERT_EQ(0, one_write_zeroes(node, file, ZERO_OFF, ZERO_LEN));
+    // the non-vacuity guard: a zeroing that reached nothing would satisfy every count below
+    // by doing nothing at all
+    EXPECT_TRUE(backend_range_is_zero(file, ZERO_OFF, ZERO_LEN))
+        << "the zeroing never reached the backend";
+    EXPECT_EQ(0, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
+    EXPECT_EQ(FEATURE_FLUSH, dev->get_info().negotiated & FEATURE_FLUSH);
+}
+
+// EXPERIMENT: no FEATURE_FLUSH, so no cache bit was advertised, no flush command exists and
+// no FUA can be set. One zeroing has to be durable before its completion, which makes the
+// count exactly one -- an equality rather than a `> 0`, so a device that synced for some
+// other reason, or synced twice, is caught too.
+TEST_F(UblkTest, write_zeroes_is_write_through_when_flush_is_not_configured) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.features = FEATURE_WRITE_ZEROES;   // nothing asked for FLUSH, so nothing advertised
+    test::BackendProbe probe(file);
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    uint64_t wz = node_write_zeroes_bytes(node);
+    ASSERT_NE(UINT64_MAX, wz) << "no zeroing limit to read, so the phase below is unattributed";
+    ASSERT_GT(wz, 0u) << "the queue advertises no zeroing offload";
+
+    ASSERT_EQ(0, one_write_zeroes(node, file, ZERO_OFF, ZERO_LEN));
+    EXPECT_TRUE(backend_range_is_zero(file, ZERO_OFF, ZERO_LEN))
+        << "the zeroing never reached the backend";
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());   // fdatasync, not the heavier fsync
+    EXPECT_EQ(0ull, dev->get_info().negotiated & FEATURE_FLUSH);
+}
+
+// The failure half, and the only guard on "a zeroing whose persist failed must not be
+// reported as durable". harness.h's fail_syncs still COUNTS the attempt, so the two counters
+// separate "tried and failed" from "never tried" -- and that distinction is the whole case:
+// a device that skipped the sync would leave both at 0 and hand the consumer a success for
+// zeroes that are in the backend's page cache and nowhere else. The withdrawal is visible
+// only as the consumer's own failed BLKZEROOUT.
+TEST_F(UblkTest, a_failed_write_zeroes_persist_fails_the_zeroing) {
+    if (skip_reason) return;
+    UblkController::Config cfg(make_info());
+    cfg.info.features = FEATURE_WRITE_ZEROES;   // the mode where a zeroing owes the persist
+    test::BackendProbe probe(file);
+    probe.fail_syncs = true;
+    auto dev = ctl->new_device(cfg);
+    ASSERT_NE(nullptr, dev);
+    DEFER(delete dev);
+    ASSERT_EQ(0, dev->start(&probe));
+    DEFER(dev->shutdown());
+    std::string node = node_of(dev);
+
+    uint64_t wz = node_write_zeroes_bytes(node);
+    ASSERT_NE(UINT64_MAX, wz) << "no zeroing limit to read, so the phase below is unattributed";
+    ASSERT_GT(wz, 0u) << "the queue advertises no zeroing offload";
+
+    errno = 0;
+    int rc = one_write_zeroes(node, file, ZERO_OFF, ZERO_LEN);
+    EXPECT_EQ(EIO, rc) << "a zeroing whose persist failed was completed as if it were durable";
+    // the persist was ASKED FOR, which is what separates this from a skipped one. The block
+    // layer only falls back to writing zero pages on an -EOPNOTSUPP, so an -EIO from the
+    // request reaches the ioctl as a failure rather than being retried into a success.
+    EXPECT_EQ(1, probe.datasyncs.load());
+    EXPECT_EQ(0, probe.syncs.load());
 }
 
 // One controller = one scope. This one builds a SECOND controller on a custom dir

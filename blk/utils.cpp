@@ -72,16 +72,20 @@ int validate_info(const BlkDevInfo& info, bool virtio) {
     return 0;
 }
 
-// IFile::zero_range is defined only under __linux__ (fs/virtual-file.cpp), so
-// this helper is too: an unguarded definition would reference a symbol that
-// does not exist on macOS and break the libphoton link. Its callers (tcmu,
-// ublk) are Linux-only anyway.
-#ifdef __linux__
+// Available on EVERY platform, and the portability is uneven in a way worth knowing:
+// IFile::zero_range is DECLARED unconditionally (fs/filesystem.h) but DEFINED only
+// under __linux__ (fs/virtual-file.cpp, where it is a fallocate shorthand), so
+// reaching it off Linux is a LINK error rather than a runtime one. Only that fast
+// path is therefore guarded; the pwritev fallback below is portable and is the whole
+// of what a non-Linux caller gets. Signature and return contract are identical on
+// both sides of the #ifdef.
 int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len) {
+#ifdef __linux__
     if (backend->zero_range(off, len) == 0)
         return 0;
     if (errno != EOPNOTSUPP && errno != ENOSYS)
         return -1;   // a real failure; zero_range logged it
+#endif
     static const char zeros[256 << 10] = {};
     while (len) {
         uint64_t k = std::min<uint64_t>(len, sizeof(zeros));
@@ -93,7 +97,6 @@ int zero_fill(fs::IFile* backend, uint64_t off, uint64_t len) {
     }
     return 0;
 }
-#endif  // __linux__
 
 // ----------------------------------------------------------------------------
 // the per-device flock: daemon exclusion + orphan detection. The DIRECTORY is
@@ -289,9 +292,19 @@ struct PoolProbe {
 // Runs ON the pool vcpu, so what it reports is that vcpu's: it asks the master
 // engine this vcpu is currently pointing at to name itself. The view is copied out
 // of a frame that dies with this coroutine, which the name's contract allows (see
-// MasterEventEngine::get_engine_name). Signals before returning; nothing of the
-// caller's is touched after the signal, so the caller may unwind as soon as it
-// wakes.
+// MasterEventEngine::get_engine_name).
+//
+// `a` is the caller's stack, and it stays valid for this whole body because the
+// caller JOINS this coroutine before it unwinds -- on every path, including the
+// ones where it never got the answer. The ordering below is not what makes that
+// safe: writing p->ev before the signal means only that a caller which woke
+// BECAUSE OF the signal may unwind at once, and semaphore::wait has other returns.
+// It answers -1 for ETIMEDOUT and for ESHUTDOWN, and with no timeout passed at the
+// call site the only source of either is a caller's own
+// thread_interrupt(th, error_number) -- a supported public API, and one this
+// coroutine has no way to observe. Such a caller wakes with p->ev unwritten and
+// this coroutine still pending, so the join, not the ordering, is what keeps the
+// two writes above off a dead frame.
 void* pool_probe_thunk(void* a) {
     auto* p = (PoolProbe*)a;
     p->ev = photon::get_vcpu()->master_event_engine->get_engine_name();
@@ -320,12 +333,54 @@ int check_pool_engines(photon::WorkPool* pool) {
         auto th = photon::thread_create(&pool_probe_thunk, &p);
         if (!th)
             LOG_ERROR_RETURN(ENOMEM, -1, "cannot create the work pool probe coroutine");
+        // enable_join BEFORE the migration, which is the order all four sibling hops
+        // in this tree use (tcmu run_serve_stop, ublk start_serving and
+        // run_queue_teardown, vduse run_on_home): the call writes a flag in the
+        // thread's own struct, and that struct belongs to another OS thread once the
+        // migration lands. Nothing between the create and the migration may yield
+        // either -- a yield lets the probe run here first and park, and a parked
+        // thread is not READY, which is the state photon::thread_migrate requires.
+        photon::thread_enable_join(th);
         // An in-range index, so this targets vcpus[i] instead of drawing the
         // round-robin cursor: every vcpu is checked exactly once, which a cursor
         // draw cannot promise.
-        if (pool->thread_migrate(th, (size_t)i) < 0)
-            LOG_ERRNO_RETURN(0, -1, "cannot reach work pool vcpu `", i);
-        p.done.wait(1);
+        if (pool->thread_migrate(th, (size_t)i) < 0) {
+            // Retire the probe here too, and before the return destroys `p`: a
+            // refused migration leaves `th` READY on THIS vcpu still holding &p, so
+            // it would run against a dead frame whenever this vcpu next yielded.
+            // The join runs it to completion here instead.
+            //
+            // Not reachable from any caller today, and that is a fact about photon
+            // rather than a property of this function: photon::thread_migrate fails
+            // only on a null argument, a thread that is not on the current vcpu, or
+            // one that is not READY, and the create above leaves `th` READY on this
+            // vcpu with nothing in between that yields. Stated because the join is
+            // what keeps it that way -- it is the correctness of this path resting on
+            // photon's refusal conditions, not on an assumption written here.
+            // errno is captured first: thread_join yields, and the condition_variable
+            // it waits on leaves errno holding its own resume code.
+            int e = errno;
+            photon::thread_join((photon::join_handle*)th);
+            LOG_ERROR_RETURN(e, -1, "cannot reach work pool vcpu `, ", i, ERRNO(e));
+        }
+        // Captured rather than ignored, and the join below is what makes it safe to
+        // act on. wait() returns -1 only for ETIMEDOUT or ESHUTDOWN -- it retries
+        // every other errno internally, which is why thread_shutdown's EPERM cannot
+        // reach here -- and with no timeout passed the only source of either is a
+        // caller's thread_interrupt(th, error_number). Such a return says NOTHING
+        // about p.ev: the probe may not have run at all, so the view is still the
+        // default-empty one and the mismatch test below would report an engine
+        // difference that was never established. Join first, unconditionally, so the
+        // probe cannot write p.ev or signal p.done once this frame is gone, and only
+        // then look at either. Same order the four siblings use; errno is captured
+        // across the join for the reason the migrate path gives.
+        int wr = p.done.wait(1);
+        int e = errno;
+        photon::thread_join((photon::join_handle*)th);
+        if (wr < 0)
+            LOG_ERROR_RETURN(e, -1,
+                "the probe of work pool vcpu ` was interrupted before it reported, so its event engine is unknown rather than wrong, ",
+                i, ERRNO(e));
         if (p.ev.empty() || p.ev != need)
             LOG_ERROR_RETURN(EINVAL, -1,
                 "work pool vcpu ` cannot host blk serving coroutines: event engine `, need ` (a pool built with the default ev_engine has none, and every fd wait on it fails at once)",

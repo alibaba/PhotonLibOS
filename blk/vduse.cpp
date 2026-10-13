@@ -107,6 +107,51 @@ namespace blk {
 static constexpr uint32_t DEFAULT_VQ_SIZE = 256;
 static constexpr uint32_t MAX_VQ_SIZE = 1024;
 
+// The floor on a derived ring capacity: one maximum-size request this device
+// advertises has to fit in it. seg_max is VIRTIO_BLK_SEG_MAX_ADVERTISED data
+// segments, and bit 28 is NOT offered (see offer_features), so the driver frames
+// them DIRECTLY -- one descriptor for the header, one per data segment, one for the
+// status. A ring shallower than seg_max + 2 therefore cannot hold a single request
+// the config space advertises, however small the caller's in-flight cap is.
+static constexpr uint32_t MIN_VQ_SIZE = VIRTIO_BLK_SEG_MAX_ADVERTISED + 2;   // 64
+
+// The ring capacity VDUSE_VQ_SETUP advertises, DERIVED from BlkConfig::queue_depth
+// rather than equal to it -- the split blk.h's contract for this transport states.
+// Three things have to hold and the caller's number satisfies none of them on its
+// own:
+//
+// - A power of two. VDUSE stores max_size verbatim (drivers/vdpa/vdpa_user/
+//   vduse_dev.c: `dev->vqs[index]->num_max = config.max_size`, and nothing in that
+//   ioctl case validates it), virtio-vdpa hands it to ring creation, and Linux
+//   refuses a length that is not a power of two in vring_create_virtqueue
+//   (drivers/virtio/virtio_ring.c: `if (!is_power_of_2(num)) { dev_warn(...);
+//   return -EINVAL; }`) BEFORE the `num /= 2` loop that would have shrunk it to
+//   something allocatable. Passing a depth of 3 straight through therefore made the
+//   queue uncreatable for a configuration the factory had just accepted. Refusing
+//   such a depth here instead is not the alternative: blk.h promises this field is
+//   "0 = auto, clamped by kernel limits", so a rejection would be a public API
+//   change that buys nothing a derivation does not.
+// - At least MIN_VQ_SIZE, for the direct-framing reason given there.
+// - At most MAX_VQ_SIZE.
+//
+// 0 keeps its "you choose" meaning and yields DEFAULT_VQ_SIZE, which already
+// satisfies all three. The caller's number is not lost by the derivation: it stays
+// the in-flight cap on its own, set on the engine in vq_bind and enforced there as
+// min(num, queue_depth), so rounding the capacity UP buys valid ring geometry and
+// not more concurrency.
+static uint32_t derive_vq_capacity(uint32_t queue_depth) {
+    if (!queue_depth)
+        return DEFAULT_VQ_SIZE;
+    // Clamped BEFORE the rounding rather than after it: doubling an unclamped
+    // 0xFFFFFFF0 would walk off the top of the type. MIN_VQ_SIZE is itself a power
+    // of two, so starting from it and doubling cannot overshoot the clamp.
+    uint32_t n = std::min<uint32_t>(std::max<uint32_t>(queue_depth, MIN_VQ_SIZE), MAX_VQ_SIZE);
+    uint32_t r = MIN_VQ_SIZE;
+    while (r < n)
+        r <<= 1;
+    return r;
+}
+
 // IOVA -> VA cache over VDUSE_IOTLB_GET_FD. Ranges are few (the vring's direct
 // map + the kernel's bounce region); a linear scan is fine.
 
@@ -159,9 +204,10 @@ struct Iotlb {
     // A photon::mutex, not a spinlock: resolve()'s slow path blocks in
     // VDUSE_IOTLB_GET_FD and then in mmap, and a spinlock held across a blocking
     // syscall leaves another OS thread's vcpu spinning for the whole kernel round
-    // trip. It guards the two vectors and nothing else -- in particular it does
-    // NOT keep a mapping alive, which is what `stale` plus the caller's in-flight
-    // drain are for (see invalidate).
+    // trip. It guards the two vectors, and it is what lets a reclamation decision and
+    // the release it authorizes be one step against an invalidation -- see
+    // flush_stale_if. Holding it does NOT keep a mapping alive, which is what `stale`
+    // plus the caller's in-flight drain are for (see invalidate).
     photon::mutex lock;
 
     // `err` is the answer's own channel, and it exists because errno is not one:
@@ -345,8 +391,9 @@ struct Iotlb {
     // next resolve re-fetches, but do NOT munmap yet -- request coroutines may
     // still hold VAs into it. The lock does not change that argument, it only
     // protects the vectors: it cannot tell whether some coroutine is mid-IO
-    // through `base`, so the unmap still waits for the in-flight drain that
-    // flush_stale's caller performs.
+    // through `base`, so the unmap still waits for the caller's eligibility test,
+    // which is why flush_stale_if evaluates that test in here rather than in front
+    // of the call.
     // The range is whatever the driver replaced, and it is not ours to predict:
     // a full replacement arrives as the whole address space and a partial one as
     // any subrange, including the single byte at IOVA 0.
@@ -367,6 +414,35 @@ struct Iotlb {
     void flush_stale() {
         SCOPED_LOCK(lock);
         flush_locked();
+    }
+    // The same release, with the caller's eligibility test moved INSIDE the lock the
+    // invalidation and the munmap both run under -- which is the only place that test
+    // can be answered about the state the munmap is going to act on.
+    //
+    // A gate evaluated in front of the call is a decision about a state the release
+    // does not see. The handler that answers UPDATE_IOTLB does its drop and its
+    // retire as ONE locked step, and retire() deliberately preserves the reading bit
+    // -- so a reader admitted between an unlocked scan and the munmap is invisible to
+    // that scan and its pages are released under it anyway. Three vcpus are enough:
+    // queue 1's tick scans and finds nothing in flight or reading, queue 0 admits a
+    // reader, the handler moves queue 0's ring mapping to `stale` and retires it, and
+    // queue 1's flush then unmaps without looking again. Deciding under the lock
+    // closes it, because the handler cannot interleave with the decision at all.
+    //
+    // `eligible` must take no lock of its own and must not yield, so that the answer
+    // and the release stay one step: every caller passes relaxed atomic scans over
+    // its queue vector, and the only other holder of this lock that does more than
+    // touch that vector is the message handler, which calls nothing but rings_in,
+    // retire and needs_refresh. No path takes another lock while holding this one, so
+    // there is no order to invert, and flush_locked already munmaps under it.
+    // Returns whether the release ran.
+    template <typename Eligible>
+    bool flush_stale_if(Eligible eligible) {
+        SCOPED_LOCK(lock);
+        if (!eligible())
+            return false;
+        flush_locked();
+        return true;
     }
     void clear() {
         SCOPED_LOCK(lock);
@@ -485,8 +561,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // consumes reset_pending, re-arms needs_refresh and both reads and sets
         // refreshed_once. Relaxed only: nothing else is published through them.
         //
-        // Readiness, its generation and the "an avail ring read is in flight" flag
-        // are ONE word because they are halves of one state transition, and two
+        // Readiness, its generation and the "this queue holds resolved ring VAs"
+        // flag are ONE word because they are halves of one state transition, and two
         // objects cannot be written as one. The control plane invalidates by bumping
         // the generation and clearing readiness; a refresh publishes readiness only
         // if the generation has not moved while it was resolving. Kept apart, an
@@ -498,20 +574,31 @@ struct VduseDeviceImpl : IBlkDevice {
         // caller goes through those.
         //
         // The reading flag joined them for the same reason on the other side of the
-        // transition. The reclamation gate in vq_tick releases invalidated mappings
-        // only while no queue is between passing hooks.ready and finishing its avail
-        // ring read, and with the flag in its own object the decision and the
-        // protection were two atomics: a reader that had passed readiness but not yet
-        // published was invisible to the gate, so a flush on another vcpu could unmap
-        // the pages it was about to dereference. Reordering the two does not close
-        // that, and neither does strengthening them -- a reader's (publish reading,
-        // observe ready) and an invalidator's (clear ready, observe reading) are a
-        // Dekker pair, and with the flags in two objects each side can miss the other
-        // however they are ordered. In one word they cannot: begin_reading sets the
-        // bit by compare-exchange and only on a word whose ready bit is set, so a
-        // reader either is protected or is not admitted, and there is no third state
-        // for the gate to overlook. Single-word coherence supplies the total order,
-        // so no fence is needed on either side.
+        // transition. The reclamation gate releases invalidated mappings only while
+        // no queue holds ring addresses it can still dereference -- which is a wider
+        // claim than "is between passing hooks.ready and finishing its avail ring
+        // read", the only meaning this bit used to have, and the reason it now has
+        // two setters: the engine's dispatch, and a vq_refresh that resolves three
+        // addresses for a queue that may not be ready yet. With the flag in its own
+        // object the decision and the protection were two atomics: a reader that had
+        // passed readiness but not yet published was invisible to the gate, so a
+        // flush on another vcpu could unmap the pages it was about to dereference.
+        // Reordering the two does not close that, and neither does strengthening them
+        // -- a reader's (publish reading, observe ready) and an invalidator's (clear
+        // ready, observe reading) are a Dekker pair, and with the flags in two
+        // objects each side can miss the other however they are ordered. In one word
+        // they cannot: begin_reading sets the bit by compare-exchange and only on a
+        // word whose ready bit is set, so a reader either is protected or is not
+        // admitted, and there is no third state for the gate to overlook.
+        // Single-word coherence supplies the total order, so no fence is needed on
+        // either side.
+        //
+        // That interlock is what makes the READY-gated setter sound, and it is the
+        // whole of the argument for a reader that never touches iotlb.lock. It does
+        // not extend to pin_reading, which does not test readiness and so has no
+        // interlock to have; a pin taken that way is sound only for a caller that
+        // reaches its addresses THROUGH that lock, which is what puts the pin in the
+        // mutex's happens-before chain. See both setters.
         //
         // Bit 0 is readiness, bit 1 the reading flag, bits 2..31 the generation. 30
         // bits is enough because this token never outlives a single vq_refresh -- it
@@ -576,7 +663,8 @@ struct VduseDeviceImpl : IBlkDevice {
         // because every operation below has to preserve the two it is not about, and
         // a literal that does that is a literal a reader has to decode.
         static constexpr uint32_t READY = 1u;      // bit 0: a ring is published
-        static constexpr uint32_t READING = 2u;    // bit 1: an avail ring read is live
+        static constexpr uint32_t READING = 2u;    // bit 1: this queue holds resolved
+                                                   // ring VAs it may still dereference
         static constexpr uint32_t GEN_ONE = 4u;    // one generation unit, bits 2..31
         static constexpr uint32_t GEN_SHIFT = 2;
 
@@ -586,11 +674,15 @@ struct VduseDeviceImpl : IBlkDevice {
         uint32_t gen() const {
             return ready_gen.load(std::memory_order_relaxed) >> GEN_SHIFT;
         }
-        // Is this queue between passing hooks.ready and finishing its avail ring
-        // read? The gate vq_tick puts in front of releasing invalidated mappings,
+        // Does this queue hold resolved ring addresses it has not finished with -- an
+        // engine dispatch between passing hooks.ready and finishing its avail ring
+        // read, or a vq_refresh between its first resolve and its last dereference?
+        // The gate the reclamation puts in front of releasing invalidated mappings,
         // and the reason it can trust a single relaxed load: the bit is set by a
         // compare-exchange on the same word the invalidator clears readiness in, so
-        // the two are totally ordered without a fence on either side.
+        // the two are totally ordered without a fence on either side. The gate reads
+        // it INSIDE iotlb.lock -- see flush_stale_if for why that is the other half of
+        // the argument.
         bool reading() const {
             return ready_gen.load(std::memory_order_relaxed) & READING;
         }
@@ -618,6 +710,25 @@ struct VduseDeviceImpl : IBlkDevice {
                                                     std::memory_order_relaxed))
                     return true;
             }
+        }
+        // Take the same protection WITHOUT testing readiness, for the one caller that
+        // holds ring addresses on a queue that may never have been ready: vq_refresh,
+        // whose first refresh runs before any publish (begin_reading would refuse it)
+        // and whose last one may run on a queue a retire just cleared.
+        //
+        // Sound for that caller and not a substitute for begin_reading elsewhere, and
+        // the difference is worth stating because the two look alike. A refresh reaches
+        // its addresses THROUGH iotlb.lock, so its pin is sequenced before that
+        // acquisition, the acquisition is ordered against the invalidation that could
+        // move the entry to `stale`, and that against the flush that would munmap it --
+        // all three under one mutex. The flush's load of this word therefore
+        // happens-after the pin and must observe it, with no interlock needed. A
+        // caller that never takes that lock has no such chain, and a relaxed fetch_or
+        // it performs is not obliged to be visible to a relaxed load on another vcpu:
+        // such a caller needs the readiness gate, whose compare-exchange IS totally
+        // ordered against the retire that accompanies an invalidation.
+        void pin_reading() {
+            ready_gen.fetch_or(READING, std::memory_order_relaxed);
         }
         // Drop the reading protection, and nothing else: readiness and the generation
         // both survive, because the reader that sets this bit is not the one that says
@@ -722,7 +833,10 @@ struct VduseDeviceImpl : IBlkDevice {
         // Teardown moves its work there, because the loop and the request coroutines
         // it spawned share it and are the only writers of last_avail, used_idx and
         // the used ring WHILE THE LOOP IS LIVE -- and because the backlog wait
-        // dereferences `avail`, which flush_stale on this same vcpu is what munmaps.
+        // dereferences `avail`, which a reclamation flush is what munmaps. Being on
+        // home is necessary for the first reason and not sufficient for the second:
+        // under a pool another vcpu's tick can be the flusher, which is why that
+        // dereference takes the reading protection -- see vq_backlog_drain.
         //
         // Control-plane field: written by vq_start, read by the three teardown
         // callers and by msg_loop's answer to the kernel's vq state read. All of
@@ -1149,16 +1263,41 @@ struct VduseDeviceImpl : IBlkDevice {
 
     // ----- the virtqueue -----
 
-    // (re)resolve the vring after DRIVER_OK or an adoption resync
+    // (re)resolve the vring after DRIVER_OK or an adoption resync.
+    //
+    // The whole of it runs under the reading pin: this queue holds resolved ring
+    // addresses from the first resolve to the last dereference, and neither the
+    // engine's in_flight count nor readiness describes that. A refreshing queue has
+    // nothing in flight, and on a FIRST refresh it is not ready either and its
+    // recorded ring ranges are still the empty {1, 0} -- so rings_in answers false
+    // and the message handler does not even retire it. Without the pin an
+    // UPDATE_IOTLB followed by another queue's reclamation tick can unmap those
+    // addresses while this one is between resolving them and reading used.idx or
+    // writing avail_event through them, and the generation re-check at the bottom
+    // cannot make an access that already happened safe.
+    //
+    // Costs one thing worth knowing: a refresh that spends its full drain_replaced
+    // bound -- VDUSE_QUIESCE_DRAIN_US, one second -- holds the pin for that long and
+    // so blocks the opportunistic flush for it, which pushes the device toward its
+    // stale-byte cap and a quiesce_and_flush. Bounded and self-healing: the quiesce's
+    // own wait tests reading() and has the same deadline, so the worst case is one
+    // deferred flush, not a stall.
     int vq_refresh(uint32_t idx) {
         auto* q = vqs[idx];
-        // First statement, before anything below can yield: the publish at the
-        // bottom is withheld if the control plane invalidates this ring while we
-        // are resolving it, and "while" has to span the whole resolve. The only
-        // yield point in it is the iotlb cache's mutex (the ioctls and the mmaps
-        // are blocking syscalls, which park the OS thread rather than handing the
-        // vcpu over), but a snapshot taken after that mutex would miss an
-        // invalidation that landed inside it.
+        // First statement, and before the snapshot below rather than after it: the
+        // pin has to be in place before the first resolve so that the mutex chain it
+        // is sound by (see pin_reading) starts here, and a fetch_or neither yields
+        // nor takes a lock, so it costs the snapshot nothing. The DEFER covers all six
+        // of this function's returns, including the two error ones, so the pin cannot
+        // outlive the refresh and park a queue inside the reclamation gate forever.
+        q->x.pin_reading();
+        DEFER(q->x.end_reading());
+        // Before anything below can yield: the publish at the bottom is withheld if
+        // the control plane invalidates this ring while we are resolving it, and
+        // "while" has to span the whole resolve. The only yield point in it is the
+        // iotlb cache's mutex (the ioctls and the mmaps are blocking syscalls, which
+        // park the OS thread rather than handing the vcpu over), but a snapshot taken
+        // after that mutex would miss an invalidation that landed inside it.
         uint32_t gen_snapshot = q->x.gen();
         // The cache's counter, for the two places below that re-check it. The
         // queue's own is not enough: an UPDATE_IOTLB that misses this queue's rings
@@ -1538,27 +1677,51 @@ struct VduseDeviceImpl : IBlkDevice {
         // three readers of a ring pointer are covered by two different facts -- the
         // two that admit work into a ring consult readiness, and the third, a
         // completion already running, is counted in the in_flight this waits for.
-        // The reading bit covers the window between hooks.ready passing and the
-        // avail ring read completing: a reader that passed ready but has not yet
-        // touched the ring is not counted in in_flight (it was decremented by the
-        // handle_req DEFER before redispatch_backlog ran), so without this check
-        // a flush on another vcpu could unmap the pages it is about to read. It
-        // lives in the same word as readiness so that "passed ready" and "is
+        //
+        // The reading bit covers what neither of those counts: a reader that passed
+        // ready but has not yet touched the ring, which is not in in_flight (the
+        // handle_req DEFER decremented it before redispatch_backlog ran), and a
+        // vq_refresh holding addresses it resolved for a queue that is not ready at
+        // all. It lives in the same word as readiness so that "passed ready" and "is
         // protected" cannot be observed as two states -- see its declaration.
-        if (!any_in_flight() && !any_reading()) {
-            iotlb.flush_stale();
+        //
+        // And the test itself runs INSIDE the lock the flush takes, not in front of
+        // it, which is the half that makes it a test of anything: the handler does its
+        // drop and its retire as one locked step, so a scan performed before taking
+        // the lock can pass, be overtaken by that step, and then unmap pages a reader
+        // the step deliberately left protected is about to read. Three vcpus are
+        // enough -- this queue scans and finds nothing, another queue admits a reader,
+        // the handler retires it while preserving the bit, and this queue's flush goes
+        // ahead without looking again. flush_stale_if carries the full argument.
+        //
+        // Scope, because it is easy to overstate: the flusher and the reader have to
+        // be on different OS threads, which means a pool with at least two serving
+        // vcpus and at least two queues. On one vcpu the interleaving is reachable
+        // only when iotlb.lock happens to be contended, since photon::mutex::lock is
+        // a non-yielding CAS on the fast path and a coroutine that takes it without
+        // contention does not hand the vcpu over.
+        if (iotlb.flush_stale_if([this] { return reclaim_eligible(); }))
             return;
-        }
         // Bounded, not merely opportunistic: a saturating guest has some request
         // outstanding at every tick, so the flush above can be starved for as long
         // as the driver keeps replacing ranges. Past the cap this stops dispatch
         // device-wide, waits the requests out and releases the mappings. It costs
         // one request latency of throughput on this device, it cannot deadlock --
         // readiness is cleared before the wait and stays cleared for the whole of
-        // it, so in_flight can only fall, and the wait has a deadline of its own --
-        // and it is bounded by the cap rather than by the driver's behaviour.
+        // it, so in_flight can only fall, and a refresh pinned across the wait has a
+        // bound of its own, and the wait has a deadline besides -- and it is bounded
+        // by the cap rather than by the driver's behaviour.
         if (iotlb.stale_bytes() >= VDUSE_STALE_FLUSH_BYTES)
             quiesce_and_flush();
+    }
+
+    // The reclamation eligibility predicate, evaluated INSIDE iotlb.lock by
+    // flush_stale_if and nowhere else: nothing in this device may hold a VA that
+    // reaches a mapping on `stale`. Both halves are relaxed atomic scans over `vqs`
+    // that take no lock of their own and do not yield, which is what keeps the
+    // decision and the munmap one step and leaves no lock order to invert.
+    bool reclaim_eligible() {
+        return !any_in_flight() && !any_reading();
     }
 
     bool any_in_flight() {
@@ -1568,11 +1731,13 @@ struct VduseDeviceImpl : IBlkDevice {
         return false;
     }
 
-    // True when any queue's engine is between passing hooks.ready and finishing
-    // its avail ring read. A flush that runs while this is true can unmap a ring
-    // that a reader on another vcpu is about to dereference through, so the flush
-    // must wait. See the ready_gen word's declaration for the full argument, and
-    // for why this reads a bit of that word rather than a flag of its own.
+    // True when any queue holds resolved ring addresses it has not finished with:
+    // an engine between passing hooks.ready and finishing its avail ring read, or a
+    // vq_refresh between its first resolve and its last dereference. A flush that
+    // runs while this is true can unmap a ring that a reader on another vcpu is
+    // about to dereference through, so the flush must wait. See the ready_gen word's
+    // declaration for the full argument, and for why this reads a bit of that word
+    // rather than a flag of its own.
     bool any_reading() {
         for (auto* o : vqs)
             if (o->x.reading())
@@ -1611,17 +1776,23 @@ struct VduseDeviceImpl : IBlkDevice {
         // deadline. Retiring first makes the deadline a formality in every case this
         // can be reached for, and what it is really for is the interleaving that can
         // still add work -- a renegotiation landing mid-quiesce sets the flag this
-        // just consumed -- and a backend that has stopped answering. Giving up is the
-        // cheap outcome: the mappings stay where they were, and the cap is still
+        // just consumed -- and a backend that has stopped answering. A refresh
+        // already inside drain_replaced is the third: the retire above makes its
+        // publish fail so it returns without re-arming itself, but it holds the
+        // reading pin until it does, and its own bound is this same cap. Giving up is
+        // the cheap outcome: the mappings stay where they were, and the cap is still
         // exceeded, so a later tick tries again.
         uint64_t deadline = photon::now + VDUSE_QUIESCE_DRAIN_US;
         for (auto* o : vqs)
             while ((o->srv.in_flight.load() || o->x.reading()) &&
                    photon::now < deadline)
                 photon::thread_usleep(1000);
-        bool drained = !any_in_flight() && !any_reading();
-        if (drained)
-            iotlb.flush_stale();
+        // Answered by the flush itself rather than by a scan in front of it, for the
+        // reason flush_stale_if gives: this path has just retired every queue, so the
+        // uncounted reader it has to worry about is exactly the vq_refresh another
+        // vcpu's tick started in response -- and a scan taken before the lock is a
+        // scan that refresh can slip past. `drained` now means "the release ran".
+        bool drained = iotlb.flush_stale_if([this] { return reclaim_eligible(); });
         // Every queue was retired, so every queue needs its ring re-resolved -- the
         // ones that drained and the ones that did not. This is also what lets the
         // queue whose loop is running here come back: it is inside its own tick, and
@@ -1631,7 +1802,7 @@ struct VduseDeviceImpl : IBlkDevice {
         if (drained)
             LOG_INFO("vduse ` quiesced every queue to release ` bytes of invalidated mappings", name, held);
         else
-            LOG_WARN("vduse ` quiesce still had requests in flight after ` us, holding ` bytes of invalidated mappings",
+            LOG_WARN("vduse ` quiesce still had a request in flight or a reader live after ` us, holding ` bytes of invalidated mappings",
                      name, VDUSE_QUIESCE_DRAIN_US, held);
     }
 
@@ -1649,9 +1820,12 @@ struct VduseDeviceImpl : IBlkDevice {
     }
     static void tick_thunk(void* a) {
         auto* q = (Vq*)a;
-        // Clear BEFORE the tick body: the previous iteration's dispatch is done,
-        // and this tick may flush stale mappings. The bit must be clear so the
-        // flush sees no active reader on this queue.
+        // Clear BEFORE the tick body: the previous iteration's dispatch is done, and
+        // this tick may flush stale mappings, so the bit must not still report that
+        // reader. What the flush may then see from this queue is the pin its own
+        // refresh takes -- vq_tick calls vq_refresh before the gate, and that pin is
+        // set and released inside the refresh -- which is the point of it, not a
+        // leak: a refresh holds ring addresses, so the gate has to see it.
         q->x.end_reading();
         q->impl->vq_tick(q->qid);
     }
@@ -1671,6 +1845,11 @@ struct VduseDeviceImpl : IBlkDevice {
         // the LBA bound serve_chain enforces
         q->srv.capacity.store(capacity_sectors << 9, std::memory_order_relaxed);
         q->srv.stack_size = cfg.stack_size;
+        // The caller's number, undistorted: this is the in-flight cap and the only
+        // one, enforced by the engine as min(num, queue_depth) against whatever ring
+        // actually arrived. The ring capacity setup_vq advertises is DERIVED from it
+        // rather than equal to it -- see derive_vq_capacity -- so a depth of 3 gives
+        // a 64-entry ring that still dispatches at most 3 requests at a time.
         q->srv.queue_depth = cfg.queue_depth;
         q->srv.read_only = read_only;
         // The device name, which is the identity and is unique in the transport's own
@@ -1776,11 +1955,13 @@ struct VduseDeviceImpl : IBlkDevice {
         q->th = nullptr;
         // The reading bit, and here rather than in the loop: the loop's own clearer is
         // hooks.tick, and the iteration that just exited never reached the next one.
-        // Nothing else can clear it either -- only ready_thunk sets it, and that runs
-        // inside the loop this just joined -- so leaving it set would park a dead queue
-        // permanently inside any_reading(), and every flush from now on would wait out
-        // a reader that does not exist and then time out. The join above is what makes
-        // this safe to do from here: the only setter is finished.
+        // Nothing else can clear it either -- its two setters are ready_thunk and
+        // vq_refresh's pin, and both run inside the loop this just joined (the pin's
+        // one other caller is start()'s own refresh loop, which releases it by DEFER
+        // before any loop exists to outlive) -- so leaving it set would park a dead
+        // queue permanently inside any_reading(), and every flush from now on would
+        // wait out a reader that does not exist and then time out. The join above is
+        // what makes this safe to do from here: both setters are finished.
         q->x.end_reading();
     }
 
@@ -1804,20 +1985,58 @@ struct VduseDeviceImpl : IBlkDevice {
     // avail backlog the loop has not consumed yet. This reads last_avail and
     // dereferences avail WHILE counting on the loop to keep advancing them, so it
     // cannot run anywhere else. The dereference is the vduse-specific half: an
-    // unmap-all clears `ready` without nulling the ring pointers, and the loop's
-    // own flush_stale is what munmaps the pages `avail` points into. On home the
-    // two sit in one coroutine, and the poll tests `ready` before it dereferences,
-    // so a flush can never land between the test and the read.
+    // unmap-all clears `ready` without nulling the ring pointers, and a flush is
+    // what munmaps the pages `avail` points into.
+    //
+    // Taken under the reading protection rather than after a bare readiness test.
+    // What this used to claim -- that on home the test and the read sit in one
+    // coroutine, so a flush can never land between them -- is false under a pool.
+    // stop_serving stops queues ONE AT A TIME, so queues i+1..n-1 are still ticking
+    // and still eligible to flush while queue i waits here, and the device-wide
+    // `stopping` that silences the message loop is set only after that whole
+    // per-queue loop, so an UPDATE_IOTLB can still move this queue's ring mapping
+    // into `stale` while another vcpu releases it. What is true is narrower and is
+    // what this now rests on: the body below is yield-free, so nothing on THIS vcpu
+    // interleaves with it, and the reclamation gate evaluates any_reading() INSIDE
+    // iotlb.lock, so a protection taken before the read is in the mutex's
+    // happens-before chain of every flush that could unmap what the read goes
+    // through.
     void vq_backlog_drain(uint32_t idx, bool drain_backlog) {
         run_on_home(vqs[idx]->x.home, [&] {
             auto* q = vqs[idx];
             if (!q->th)
                 return;
-            while (q->srv.in_flight.load() ||
-                   (drain_backlog && q->x.ready() &&
-                    q->srv.last_avail != vring_avail_idx(q->srv.avail)))
+            while (q->srv.in_flight.load() || (drain_backlog && backlog_pending(q)))
                 photon::thread_usleep(1000);
         });
+    }
+
+    // One poll of that wait: does this queue still have avail entries it has not
+    // consumed? False when it is not ready, which is also the answer that keeps the
+    // dereference safe -- no ring is published, so there is nothing to read.
+    //
+    // begin_reading and not pin_reading, and the difference is the whole of the
+    // soundness here. This caller never takes iotlb.lock, so it has no mutex chain to
+    // be covered by; what it has instead is begin_reading's readiness gate, which is
+    // one compare-exchange on the word retire() clears readiness in. The two are
+    // therefore totally ordered: either this reader's bit is in the word the
+    // invalidator's retire read -- and retire preserves it, so every later flush
+    // under that same lock observes it -- or the retire went first and this reader is
+    // not admitted, and there is no read left to protect. An unconditional pin has
+    // neither half.
+    //
+    // `held` keeps the release honest. The bit is sticky: the loop's dispatch takes it
+    // and the top of its NEXT tick is what clears it, so it can already be set by a
+    // dispatch that is parked in backend IO. Clearing it on the way out here would
+    // drop that dispatch's protection while it still holds ring pointers. Nothing
+    // between the two accesses yields, so `held` cannot go stale -- and this runs on
+    // `home`, the only vcpu the loop's own setter runs on.
+    bool backlog_pending(Vq* q) {
+        const bool held = q->x.reading();
+        if (!q->x.begin_reading())
+            return false;
+        DEFER(if (!held) q->x.end_reading());
+        return q->srv.last_avail != vring_avail_idx(q->srv.avail);
     }
 
     // Start one queue's loop coroutine, once its ring is resolved. Only start()
@@ -1991,18 +2210,25 @@ struct VduseDeviceImpl : IBlkDevice {
 
     // VQ_SETUP + kickfd; safe on both fresh and adopted devices (the kernel
     // only records max_size; the driver's negotiated size comes via GET_INFO).
-    // So queue_depth reaches this device twice and the two are not redundant:
-    // max_size is what the driver is OFFERED, and therefore bounds the ring it
-    // may negotiate, while the engine's own cap bounds the requests in flight
-    // inside whatever ring actually arrived. The second binds on its own only
-    // if that ring came back deeper than the offer.
+    //
+    // So queue_depth reaches this device twice and the two are NOT the same number:
+    // max_size is the ring capacity DERIVED from it by derive_vq_capacity -- a power
+    // of two, at least MIN_VQ_SIZE deep, at most MAX_VQ_SIZE -- and it is what the
+    // driver is OFFERED, and therefore what bounds the ring it may negotiate.
+    // queue_depth itself stays the in-flight cap, set on the engine in vq_bind and
+    // enforced there against whatever ring actually arrived. The second binds on its
+    // own only if that ring came back deeper than the cap.
     int setup_vq(uint32_t idx) {
         vduse_vq_config vqc;
         memset(&vqc, 0, sizeof(vqc));
         vqc.index = idx;
-        vqc.max_size = (uint16_t)std::min<uint32_t>(cfg.queue_depth ? cfg.queue_depth
-                                                                    : DEFAULT_VQ_SIZE,
-                                                    MAX_VQ_SIZE);
+        const uint32_t cap = derive_vq_capacity(cfg.queue_depth);
+        vqc.max_size = (uint16_t)cap;   // capped at MAX_VQ_SIZE, so this cannot truncate
+        // Logged rather than silently rounded or silently clamped: the caller asked
+        // for a depth and the ring that came out of it is a different number, and
+        // blk.h's contract for this transport says the capacity is derived. Per
+        // queue, which is what vq_refresh's "ready" line already costs.
+        LOG_INFO("vduse ` vq` ring capacity ` derived from ", name, idx, cap, VALUE(cfg.queue_depth));
         if (::ioctl(dev_fd, VDUSE_VQ_SETUP, &vqc) < 0)
             LOG_ERRNO_RETURN(0, -1, "vduse VQ_SETUP failed, dev `", name);
         vqs[idx]->srv.kickfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -2499,6 +2725,13 @@ struct VduseDeviceImpl : IBlkDevice {
         // resolve that raced an iotlb invalidation returns 0 with needs_refresh
         // re-armed and loop()'s first tick retries it; only a genuine failure
         // (ring IOVAs truly unmapped) may fail start().
+        //
+        // Exposed to invalidation here but not to reclamation, and the pin vq_refresh
+        // now takes does not change that: msg_th was created above, so an
+        // UPDATE_IOTLB can land mid-resolve and move an entry to `stale`, but the only
+        // two callers of the flush are vq_tick and quiesce_and_flush, and no serving
+        // loop exists until the vq_start loop below -- so nothing munmaps. The pin is
+        // set and released inside each of these calls, and costs nothing here.
         for (uint32_t i = 0; i < nqueues; i++)
             if (vq_refresh(i) < 0)
                 return -1;
@@ -2777,7 +3010,9 @@ struct VduseControllerImpl : VduseController {
     // strand every orphan it could otherwise have recovered.
     //
     // Features stay best-effort: DEV_GET_FEATURES only reflects a still-attached
-    // consumer's negotiation.
+    // consumer's negotiation. read_only is therefore NOT filled at all -- see the
+    // note at the readback below for why a value derived from it would be worse than
+    // the descriptor's default.
     std::vector<BlkDevInfo> list_orphans() override {
         std::vector<BlkDevInfo> ret;
         DIR* dd = ::opendir("/dev/vduse");
@@ -2808,6 +3043,26 @@ struct VduseControllerImpl : VduseController {
             if (::ioctl(fd, VDUSE_DEV_GET_FEATURES, &f) == 0) {
                 if (f & (1ULL << VIRTIO_BLK_F_FLUSH)) bi.features |= FEATURE_FLUSH;
                 // RO/DISCARD/WZ are not expressible in BlkDevInfo.features
+                //
+                // And read_only is left at the descriptor's default rather than
+                // derived from VIRTIO_BLK_F_RO in this word -- a decision, not an
+                // omission. The ioctl's name promises the device's features and it
+                // does not deliver them: the kernel's case is
+                // `put_user(dev->driver_features, ...)` under the comment "Just
+                // mirror what driver wrote here", i.e. the subset a CONSUMER last
+                // accepted, and vduse_dev_reset() zeroes it. device_features -- the
+                // word CREATE_DEV was given, and the only place F_RO lives -- has no
+                // readback in this uapi at all. An orphan is precisely the state where
+                // the mirror is empty or stale: it is listed because no daemon holds
+                // the char device, and a registration whose consumer was removed has
+                // been reset since. So a 0 here means "nobody negotiated", never
+                // "writable", and a read-only registration would be reported as
+                // writable. blk.h's descriptor says read_only is filled "wherever the
+                // registration records it, which is not everywhere" -- this is one of
+                // the places it does not. The grade is QueueCountOnly, so nothing
+                // downstream validates the value against the registration either; a
+                // wrong one would be silently wrong, while the default is honestly
+                // unrecorded.
             }
             ::close(fd);
             ret.push_back(bi);
@@ -2828,7 +3083,10 @@ struct VduseControllerImpl : VduseController {
     // by name.
     //
     // Registration first, tombstone second, so a failure leaves something a later
-    // scan still reports.
+    // scan still reports. BOTH branches hold the tombstone claim across whatever
+    // they remove, not only the one that destroys a registration: a removal decided
+    // from a probe that has already given the flock back can take away a file a
+    // concurrent starter has since claimed and gone on to create a device behind.
     int destroy_orphan(const BlkDevInfo& orphan) override {
         const std::string& id = orphan.identity;
         if (id.empty() || id.size() >= VDUSE_NAME_MAX)
@@ -2857,11 +3115,79 @@ struct VduseControllerImpl : VduseController {
             // removing the file would leave the device it then creates with no
             // tombstone, which list_orphans() skips -- unrecoverable by every later
             // scan.
+            //
+            // The probe stays, and it stays FIRST, because it is the only thing that
+            // can answer all three: devlock_acquire is two-valued and its own
+            // open(O_CREAT) collapses "absent" into success, so classifying with the
+            // claim would plant a tombstone for a name that was never a device, remove
+            // it again and report success about nothing -- where blk.h pins ENOENT for
+            // exactly that. What the probe cannot do is authorise a removal, which is
+            // what the claim below is for.
             int lf = devlock_free(lock_dir, ln);
             if (lf < 0)
                 LOG_ERROR_RETURN(ENOENT, -1, "no vduse device ` and no tombstone for it that this call could use", name);
             if (lf == 0)
                 LOG_ERROR_RETURN(EBUSY, -1, "no vduse device ` yet, but its tombstone is locked, normally by a live server", name);
+            // CLAIM, and hold it across the recheck and the unlink. devlock_free
+            // takes the flock and gives it back before it returns, so classifying
+            // with it alone leaves the whole window open: a concurrent starter can
+            // acquire that inode after the probe and before the unlink -- and the
+            // inode is not stable, because devlock_acquire's open(O_CREAT) is on every
+            // starter path -- so what the unlink then removes BY PATH is the live
+            // starter's lock file rather than the litter this call classified. A later
+            // claimant locks a new inode, and the device the starter goes on to create
+            // has an ownership and capacity record no orphan scan can reach.
+            //
+            // No EISDIR fall-through here, unlike tcmu's registration-present branch,
+            // and the asymmetry is the reason: there a registration has already been
+            // destroyed when the directory is met, so the recovery itself succeeded and
+            // the EISDIR only says the lock directory needs a human -- blk.h pins that
+            // order for it. Here there is nothing to recover. The only work this branch
+            // does is remove our own litter, a directory at the tombstone path is not
+            // our litter, and devlock_unlink refuses one on exactly that reasoning. So
+            // the acquire's EISDIR propagates as the failure it is, one step earlier
+            // than the unlink's and with no file created. Copying tcmu's exception here
+            // would invert a contract vduse never had.
+            int absent_fd = -1;
+            if (devlock_acquire(lock_dir, ln, &absent_fd) < 0) {
+                if (errno == EBUSY)
+                    LOG_ERROR_RETURN(EBUSY, -1, "no vduse device ` yet, but its tombstone was claimed while this call was reaching it", name);
+                return -1;   // devlock_acquire logged it, EISDIR included
+            }
+            // Dropped on every exit below, errno preserved for the same reason the
+            // registration-present branch gives: devlock_release() calls flock() and
+            // close(), either of which can set errno.
+            DEFER({ int e = errno; devlock_release(absent_fd); errno = e; });
+            // The load-bearing half, and it has to be AFTER the claim: the starter's
+            // CREATE_DEV can land in the same window the claim closes, so without this
+            // the call would unlink the tombstone of a registration that now exists
+            // and report success about a device it never touched. Refused rather than
+            // destroyed -- this branch has probed no char device, checked no consumer
+            // and opened no control fd, and a caller that retries reaches the branch
+            // below, which does all three under the same claim.
+            //
+            // EBUSY, the errno blk.h pins this hazard to. Its sentence reads "a live
+            // server holds the tombstone" and here the server holds the NAME rather
+            // than the tombstone -- it has CREATE_DEV'd and not yet claimed -- but it
+            // is the same fact a caller acts on, and the same action: back off, nothing
+            // was destroyed, retry reaches the other branch. A second errno for one
+            // hazard class would be a distinction with no caller-visible difference,
+            // and EEXIST is taken in this tree by the occupied SOCKET PATH that start()
+            // refuses, which the comment below spends its length explaining is a
+            // different ruling.
+            if (::access(path, F_OK) == 0)
+                LOG_ERROR_RETURN(EBUSY, -1, "vduse device ` was registered while this call was claiming its tombstone; leaving both alone", name);
+            // Unlinked while the claim is still held -- the release is deferred to
+            // scope exit, after this statement -- so what goes is provably the
+            // tombstone this call opened, not one a starter created in between.
+            //
+            // And this unlink stays, where nbd and vhost-user refuse an occupied
+            // socket path with EEXIST instead of probing and deleting. That ruling
+            // does not transfer: a socket node is the PEER's artifact, so refusing it
+            // costs nothing, while a tombstone is our own orphan-discovery record and
+            // destroy_orphan() is a public API whose documented job is to remove it.
+            // Refusing here would strand our litter forever, and every later scan
+            // would keep reporting a device that is gone.
             if (devlock_unlink(lock_dir, ln) < 0)
                 return -1;   // devlock_unlink logged it
             return 0;

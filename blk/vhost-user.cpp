@@ -305,10 +305,12 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // plain field, nothing ordering them. The loop's own vcpu never touches it.
         // vq_stop clears it once the loop is joined, so a drain that follows a stop
         // runs in place -- which it may, because drain() polls nothing but the
-        // atomic in_flight and therefore has no vcpu it must be on.
-        // The drains that precede a stop still hop. Clearing it is also what makes a
-        // restart inside one session safe: the next vq_start records the landing vcpu
-        // of the loop it just created instead of leaving the previous loop's here.
+        // atomic in_flight and therefore has no vcpu it must be on. Every vq_drain
+        // follows its stop now. The one wait that has to precede one, because it
+        // counts on the loop to keep advancing last_avail, is vq_backlog_drain, and
+        // it still hops. Clearing `home` is also what makes a restart inside one
+        // session safe: the next vq_start records the landing vcpu of the loop it
+        // just created instead of leaving the previous loop's here.
         //
         // Work stealing is what would break it: photon writes the field again only in
         // its two stealing scans, and those need a per-thread create flag and a
@@ -824,15 +826,20 @@ struct VhostUserDeviceImpl : IBlkDevice {
 
     // Cleared in the wrapper, not in vq_stop_here: that one runs after the hop, on
     // the serving vcpu, and `home` is only ever written on this one. This is late
-    // enough for the drains that precede a stop to still hop, and a vq_start that
-    // follows records the new loop's landing vcpu over the null.
+    // enough for the backlog wait that precedes a stop to still hop, and a vq_start
+    // that follows records the new loop's landing vcpu over the null.
     void vq_stop(uint32_t idx) {
         run_on_home(vqs[idx]->x.home, [&] { vq_stop_here(idx); });
         vqs[idx]->x.home = nullptr;
     }
 
     // The requests hold iovs into the memory table and complete into the used
-    // ring, both of which the caller is about to unmap or re-read.
+    // ring, both of which the caller is about to unmap or re-read -- and one
+    // caller (GET_VRING_BASE) is about to REPORT the cursor those completions
+    // have to agree with. Every caller but SET_VRING_ENABLE's re-enable pairs
+    // this with a vq_stop that already ran, and for those the hop below is a
+    // no-op: nothing dispatches any more, so what this waits out is a count that
+    // can only fall, and it can be waited out anywhere.
     void vq_drain(uint32_t idx) {
         run_on_home(vqs[idx]->x.home, [&] { vqs[idx]->srv.drain(); });
     }
@@ -871,8 +878,8 @@ struct VhostUserDeviceImpl : IBlkDevice {
         // here made the device silently serve nothing forever.
         q->srv.used_idx = vring_used_idx(q->srv.used);
         // Honour the cursor the frontend gave us in SET_VRING_BASE. For a clean
-        // handover between two of our daemons it is exact: GET_VRING_BASE drains,
-        // stops and returns our own last_avail, which the frontend stores and hands
+        // handover between two of our daemons it is exact: GET_VRING_BASE stops,
+        // drains and returns our own last_avail, which the frontend stores and hands
         // back on the next start. The previous daemon's dispatched-but-uncompleted
         // entries are genuinely unrecoverable -- they lived in its memory -- and
         // resuming at BASE accepts that loss without publishing duplicate
@@ -1328,12 +1335,31 @@ struct VhostUserDeviceImpl : IBlkDevice {
                 ack = 1;
                 break;
             }
-            // let dispatched requests complete FIRST: replying with a
-            // last_avail that outruns the used ring would drop them when the
-            // frontend resumes the vq elsewhere (their completions never land)
-            vq_drain(idx);
+            // Stop FIRST, then let the requests it dispatched complete -- the
+            // order the four other quiesce sites use, and the only one that
+            // answers this message honestly. The reply carries last_avail, and
+            // one that outruns the used ring drops those requests when the
+            // frontend resumes the vq elsewhere: their completions never land.
+            // So admission has to be closed BEFORE the wait, not after it. A
+            // drain that ran first waited out in_flight while `enabled` and
+            // `run` were both still up, and the loop it left alive took the
+            // next chain off the avail ring on its next kick or KICK_FALLBACK_US
+            // re-read -- between the drain observing zero and the stop that
+            // followed it, which is a second hop onto the serving vcpu when
+            // BlkConfig::pool put the queue there. vq_stop_here joins the LOOP
+            // and never the request coroutines, so that chain was still ours
+            // when the cursor below was read and sent. Stopping first closes
+            // both admission paths at once: `run` is what loop() gates on and
+            // what every completion's redispatch_backlog tests before it ever
+            // consults `ready`, and vq_stop_here clears `enabled` with it.
+            //
+            // The drain that follows needs no hop, which is why this order is
+            // also the cheaper one: vq_stop cleared `home`, and drain() polls
+            // nothing but the atomic in_flight (see `home`'s declaration).
             vq_stop(idx);
-            // read after the join: last_avail belongs to the loop's vcpu
+            vq_drain(idx);
+            // read after the join AND the drain: last_avail belongs to the loop's
+            // vcpu, and the drain is what makes it agree with the used ring
             vhost_vring_state s{m->payload.state.index, vqs[idx]->srv.last_avail};
             if (reply_blob(conn_fd, m->request, &s, sizeof(s)) < 0) return false;
             return true;
