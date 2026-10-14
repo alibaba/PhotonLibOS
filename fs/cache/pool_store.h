@@ -184,20 +184,20 @@ namespace fs
 
         void release(bool detach = false)
         {
-            bool should_delete = false;
-            {
-                SCOPED_LOCK(mt_);
-                if ((detach || need_detach_) && !detached_) {
-                    detached_ = true;
-                    pool_->store_release(this, true);
-                }
+            bool do_detach = detach &&
+                !(ref_.fetch_or(kDetachedBit, std::memory_order_acq_rel) & kDetachedBit);
+            // Detach first so the last releaser cannot delete a pool-owned store.
+            if (do_detach) pool_->store_release(this, true);
 
-                auto ref = ref_.fetch_sub(1, std::memory_order_relaxed);
-                if (ref == 1 && pool_) {
-                    if (!detached_) pool_->store_release(this);
-                    else should_delete = true;
-                } else if (ref == 0) should_delete = true;  // call do_open directly
-            }
+            auto state = ref_.fetch_sub(1, std::memory_order_acq_rel);
+            auto ref = state & kRefCountMask;
+            bool do_release = false, should_delete = false;
+            if (ref == 1 && pool_) {
+                if (!(state & kDetachedBit)) do_release = true;
+                else should_delete = true;
+            } else if (ref == 0) should_delete = true;  // call do_open directly
+
+            if (do_release) pool_->store_release(this);
             if (should_delete) delete this;
         }
 
@@ -277,6 +277,8 @@ namespace fs
         off_t cached_size_ = 0;
         off_t actual_size_ = 0;
         int open_flags_ = 0;
+        static constexpr uint32_t kDetachedBit = 1U << 31;
+        static constexpr uint32_t kRefCountMask = kDetachedBit - 1;
         std::atomic<uint32_t> ref_{0};
         photon::fs::IFile* src_file_ = nullptr;
         photon::fs::IFile* src_rwfile_ = nullptr;
@@ -289,8 +291,6 @@ namespace fs
         photon::spinlock mt_;
         bool truncated_ = false;
         bool recycled_ = false;
-        bool detached_ = false;
-        bool need_detach_ = false;
         friend class ICachePool;
     };
 

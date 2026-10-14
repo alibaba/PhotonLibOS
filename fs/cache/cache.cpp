@@ -101,7 +101,8 @@ ICacheStore* ICachePool::open(std::string_view filename, int flags, mode_t mode)
     };
     auto store = cast(m_stores)->acquire(store_sv, ctor);
     if (store) {
-        auto cnt = store->ref_.fetch_add(1, std::memory_order_relaxed);
+        auto cnt = store->ref_.fetch_add(1, std::memory_order_relaxed) &
+            ICacheStore::kRefCountMask;
         if (cnt) cast(m_stores)->release(store_sv);
     }
     return store;

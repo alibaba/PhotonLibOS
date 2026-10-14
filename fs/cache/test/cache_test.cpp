@@ -784,6 +784,14 @@ struct FileCachePoolTest {
     return p->idleTier_.contains(n);
   }
   static bool scan_done(FileCachePool *p) { return p->scanDone_.load(); }
+  static photon::mutex& pool_lock(FileCachePool* p) { return p->m_lock_; }
+  static bool all_files_closed(FileCachePool* p) {
+    SCOPED_LOCK(p->m_lock_);
+    for (auto& it : p->fileIndex_) {
+      if (it.second->openCount != 0) return false;
+    }
+    return true;
+  }
 };
 
 // Poll until the background index scan finishes (or timeout). Returns true on
@@ -803,6 +811,154 @@ static bool openClose(ICachePool* pool, const char* name) {
   bool success = (s != nullptr);
   if (s) s->release();
   return success;
+}
+
+// Pre-fix, release() held the busy-wait mt_ while store destruction waited
+// for m_lock_. A same-vCPU reader spinning on mt_ starved the lock holder.
+// /trap keeps the expire timer busy so release(true) reclaims /doomed itself.
+TEST(CachePool, release_detach_vs_same_vcpu_reader_no_hang) {
+  std::string root = "ease/cache/n3_repro/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  // TTL 1ms: a store is due for reclaim 1ms after its last release.
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr, 1000);
+  DEFER(delete roCachedFs);
+  auto pool = roCachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  ASSERT_EQ(0, photon_std::work_pool_init(1, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  std::atomic<bool> done{false};
+  photon_std::thread scenario([&] {
+    auto trap = pool->open("/trap", O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, trap);
+    auto doomed = pool->open("/doomed", O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, doomed);
+    // The first opener owns the cache reference released by detach.
+    auto s = pool->open("/victim", O_CREAT | O_RDWR, 0644);
+    ASSERT_NE(nullptr, s);
+
+    std::atomic<bool> readerReady{false};
+    std::atomic<bool> readerDone{false};
+    std::atomic<bool> stop{false};
+    auto reader = photon::thread_create11([&] {
+      auto s2 = pool->open("/victim", O_RDONLY, 0);
+      if (!s2) { readerDone = true; return; }
+      readerReady = true;
+      char buf[4 * 1024];
+      while (!stop) {
+        // Empty reads spin on mt_ without acquiring m_lock_.
+        struct iovec iov{buf, sizeof(buf)};
+        s2->preadv2(&iov, 1, 0, 0);
+        photon::thread_yield();
+      }
+      s2->release();
+      readerDone = true;
+    });
+    (void)reader;
+    while (!readerReady) photon::thread_yield();
+
+    trap->release();  // /trap is due 1ms from now
+
+    // Keep m_lock_ owned by this vCPU across the detach below.
+    std::atomic<bool> holding{false};
+    auto holder = photon::thread_create11([&] {
+      SCOPED_LOCK(FileCachePoolTest::pool_lock(filePool));
+      holding = true;
+      photon::thread_usleep(500 * 1000);
+    });
+    (void)holder;
+    while (!holding) photon::thread_yield();
+
+    photon::thread_usleep(5 * 1000);  // the timer claims /trap and blocks on it
+    doomed->release();                // /doomed is due 1ms from now, unclaimed
+    photon::thread_usleep(5 * 1000);
+
+    s->release(true);
+    stop = true;
+
+    while (!readerDone) photon::thread_usleep(1000);
+    done = true;
+  });
+
+  uint64_t waited = 0;
+  while (!done && waited < 10'000'000) {
+    photon::thread_usleep(10 * 1000);
+    waited += 10 * 1000;
+  }
+  // The separate watchdog vCPU turns a regression into a bounded failure.
+  ASSERT_TRUE(done) << "N3: release(true) deadlocked against a same-vCPU reader";
+  scenario.join();
+  photon_std::work_pool_fini();
+}
+
+TEST(CachePool, concurrent_open_release_stress) {
+  const int kVcpus = 4;
+  const int kThreads = 16;
+  const int kIters = 10'000;
+  const int kNameCount = 8;
+
+  std::string root = "ease/cache/concurrent_open_release/";
+  SetupTestDir(root);
+  auto cacheAllocator = new AlignedAlloc(4 * 1024);
+  DEFER(delete cacheAllocator);
+  auto mediaFs = new_localfs_adaptor(root.c_str(), ioengine_psync);
+  auto alignFs = new_aligned_fs_adaptor(mediaFs, 4 * 1024, true, true);
+  auto roCachedFs = new_full_file_cached_fs(nullptr, alignFs, 4 * 1024, 1,
+      1000 * 1000 * 1, 128ull * 1024 * 1024, cacheAllocator, 0, nullptr,
+      10'000'000);
+  DEFER(delete roCachedFs);
+  auto pool = roCachedFs->get_pool();
+  auto filePool = dynamic_cast<FileCachePool*>(pool);
+  ASSERT_NE(nullptr, filePool);
+
+  ASSERT_EQ(0, photon_std::work_pool_init(kVcpus, photon::INIT_EVENT_DEFAULT,
+                                          photon::INIT_IO_NONE));
+  DEFER(photon_std::work_pool_fini());
+
+  std::atomic<int> open_failures{0};
+  auto worker = [&](int tid) {
+    std::mt19937 rng(0x9e3779b9u ^ static_cast<uint32_t>(tid));
+    for (int it = 0; it < kIters; ++it) {
+      std::string name = "/f_" + std::to_string(rng() % kNameCount);
+      auto store = pool->open(name, O_CREAT | O_RDWR, 0644);
+      if (!store) {
+        open_failures.fetch_add(1);
+        continue;
+      }
+      if ((tid + it) % 16 == 0) {
+        // Detach while another handle keeps the old store alive.
+        auto old_handle = pool->open(name, O_RDONLY, 0);
+        if (!old_handle) {
+          open_failures.fetch_add(1);
+          store->release();
+          continue;
+        }
+        store->release(true);
+        old_handle->release();
+      } else {
+        store->release();
+      }
+    }
+  };
+
+  std::vector<photon_std::thread> threads;
+  for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker, i);
+  for (auto& t : threads) t.join();
+
+  EXPECT_EQ(0, open_failures.load());
+  for (int i = 0; i < kNameCount; ++i) {
+    std::string name = "/f_" + std::to_string(i);
+    EXPECT_TRUE(openClose(pool, name.c_str()));
+  }
+
+  pool->stores_clear();
+  EXPECT_TRUE(FileCachePoolTest::all_files_closed(filePool));
 }
 
 TEST(CachePool, test_demote_threshold) {
