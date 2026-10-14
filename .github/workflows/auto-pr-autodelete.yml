@@ -7,10 +7,11 @@ on:
 
 jobs:
   clean-auto-pr:
-    if: ${{ github.event.pull_request.merged }} &&
-        ${{ github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id }} &&
-        ${{ github.event.pull_request.head.ref == 'auto-pr-*' }}
-    runs-on: ubuntu-latest
+    if: >-
+        ${{ github.event.pull_request.merged &&
+            github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id &&
+            (startsWith(github.event.pull_request.head.ref, 'auto-pr-') || startsWith(github.event.pull_request.head.ref, 'backport-pr-')) }}
+    runs-on: arc-acs-runner-set
     steps:
         - uses: actions/checkout@v4
           with:
@@ -18,10 +19,12 @@ jobs:
             token: ${{ secrets.AUTOPR_SECRET }}
 
         - name: set git config
+          env:
+            PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           run: |
             git config --global user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
             git config --global user.name "${GITHUB_ACTOR}"
             git config --global advice.mergeConflict false
             git config --global --add safe.directory "${{ github.workspace }}"
             git config -l
-            git push -d origin ${{ github.event.pull_request.head.ref }}
+            git push -d origin "$PR_BRANCH"
