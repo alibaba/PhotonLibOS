@@ -33,6 +33,8 @@ struct ResolverState {
     std::atomic<int> created{0};
     std::atomic<int> destroyed{0};
     std::atomic<int> wrong_vcpu{0};
+    int factory_error = 0;
+    bool fail_factory = false;
 
     class TrackedResolver : public Resolver {
         ResolverState* state;
@@ -52,7 +54,13 @@ struct ResolverState {
         void discard_cache(std::string_view, IPAddr) override {}
     };
 
-    Resolver* make() { return new TrackedResolver(this); }
+    Resolver* make() {
+        if (fail_factory) {
+            errno = factory_error;
+            return nullptr;
+        }
+        return new TrackedResolver(this);
+    }
 };
 
 class TestSharedResolver : public SharedResolver {
@@ -66,6 +74,53 @@ public:
 };
 
 } // namespace
+
+TEST(shared_resolver, null_factory_does_not_publish_and_next_borrow_retries) {
+    ResolverState state;
+    TestSharedResolver shared(&state);
+    ASSERT_EQ(0, photon::init(INIT_EVENT_DEFAULT, INIT_IO_NONE));
+    DEFER(if (photon::CURRENT) photon::fini());
+    state.fail_factory = true;
+    for (auto error : {0, EAGAIN}) {
+        state.factory_error = error;
+        errno = EIO;   // unrelated stale error must not become the failure
+        auto lease = shared.borrow();
+        EXPECT_FALSE(bool(lease));
+        EXPECT_EQ(error ? error : ENOMEM, errno);
+        EXPECT_FALSE(shared.published());
+        EXPECT_EQ(0, state.created.load());
+    }
+    state.fail_factory = false;
+    {
+        auto lease = shared.borrow();
+        ASSERT_TRUE(bool(lease));
+        EXPECT_EQ(IPAddr("127.0.0.1"), lease->resolve("test"));
+        EXPECT_EQ(1, state.created.load());
+    }
+    EXPECT_EQ(0, photon::fini());
+    EXPECT_EQ(1, state.destroyed.load());
+}
+
+TEST(shared_resolver, transport_refuses_a_null_default_resolver) {
+    ResolverState state;
+    ASSERT_EQ(0, photon::init(INIT_EVENT_DEFAULT, INIT_IO_NONE));
+    DEFER(photon::fini());
+    auto factory = g_shared_resolver.m_factory;
+    DEFER(g_shared_resolver.m_factory = factory);
+    g_shared_resolver.m_factory = {&state, &ResolverState::make};
+    state.fail_factory = true;
+    TransportDialer transport({});
+    DialTarget target;
+    target.host = "example.test";
+    target.port = 80;
+    for (auto error : {0, EAGAIN}) {
+        state.factory_error = error;
+        errno = 0;
+        EXPECT_EQ(nullptr, transport.dial(target, 1000000));
+        EXPECT_EQ(error ? error : ENOMEM, errno);
+        EXPECT_EQ(nullptr, g_shared_resolver.m_current);
+    }
+}
 
 TEST(shared_resolver, shutdown_waits_for_only_its_generation_past_three_seconds) {
     ResolverState state;

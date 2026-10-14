@@ -56,6 +56,7 @@ public:
 
     class Ref {
     public:
+        Ref() : m_owner(nullptr), m_gen(nullptr), m_resolver(nullptr) {}
         Ref(SharedResolver* owner, Gen* gen, Resolver* resolver)
             : m_owner(owner), m_gen(gen), m_resolver(resolver) {}
         explicit Ref(std::shared_ptr<Resolver> resolver)
@@ -71,6 +72,7 @@ public:
             if (m_owner && m_resolver) m_owner->put(m_gen);
         }
         Resolver* operator->() const { return m_resolver; }
+        explicit operator bool() const { return m_resolver != nullptr; }
 
     protected:
         SharedResolver* m_owner;
@@ -86,7 +88,12 @@ public:
                 return ++m_current->users,
                        Ref(this, m_current, m_current->resolver);
         }
+        errno = 0;
         auto resolver = m_factory();
+        if (!resolver) {
+            if (!errno) errno = ENOMEM;
+            return {};
+        }
         Resolver* redundant = nullptr;
         Gen* gen;
         {
@@ -202,6 +209,8 @@ public:
         auto host = target.via_proxy() ? target.proxy_host : target.host;
         auto port = target.via_proxy() ? target.proxy_port : target.port;
         auto resolver = get_resolver(target);
+        if (!resolver)
+            LOG_ERRNO_RETURN(0, nullptr, "failed to create the DNS resolver");
         auto address = resolver->resolve(host);
         if (address.undefined())
             LOG_ERROR_RETURN(ENOENT, nullptr, "DNS resolve failed, name = `", host);
@@ -302,34 +311,38 @@ public:
 
 public:
     int handshake(ISocketStream* stream, const DialTarget& target) {
-        char buf[kTunnelReqSize];
-        Request request(buf, sizeof(buf));
-        request.keep_alive(true);
-        if (request.reset(Verb::CONNECT,
-                          estring().appends("https://", target.host, ":",
-                                            target.port)) < 0)
-            LOG_ERRNO_RETURN(0, -1, "failed to make a CONNECT for `:`",
-                             target.host, target.port);
-        if (target.proxy_headers &&
-            request.headers.merge(*target.proxy_headers, 1) < 0)
-            LOG_ERRNO_RETURN(0, -1,
-                             "failed to put proxy headers into CONNECT");
-        if (!target.proxy_auth.empty()) {
-            auto ret = request.headers.insert("Proxy-Authorization",
-                                              target.proxy_auth);
-            if (ret < 0 && ret != -EEXIST)
+        // Request and response share scratch storage after the request is gone.
+        // Keep protocol limits unchanged without putting both buffers on a
+        // caller's potentially small coroutine stack.
+        std::unique_ptr<char[]> scratch(new char[kTunnelReqSize]);
+        {
+            Request request(scratch.get(), kTunnelReqSize);
+            request.keep_alive(true);
+            if (request.reset(Verb::CONNECT,
+                              estring().appends("https://", target.host, ":",
+                                                target.port)) < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to make a CONNECT for `:`",
+                                 target.host, target.port);
+            if (target.proxy_headers &&
+                request.headers.merge(*target.proxy_headers, 1) < 0)
                 LOG_ERRNO_RETURN(0, -1,
-                                 "failed to set Proxy-Authorization on CONNECT");
+                                 "failed to put proxy headers into CONNECT");
+            if (!target.proxy_auth.empty()) {
+                auto ret = request.headers.insert("Proxy-Authorization",
+                                                  target.proxy_auth);
+                if (ret < 0 && ret != -EEXIST)
+                    LOG_ERRNO_RETURN(0, -1,
+                                     "failed to set Proxy-Authorization on CONNECT");
+            }
+            if (request.send_header(stream) < 0)
+                LOG_ERRNO_RETURN(0, -1, "failed to send CONNECT to proxy `:`",
+                                 target.proxy_host, target.proxy_port);
         }
-        if (request.send_header(stream) < 0)
-            LOG_ERRNO_RETURN(0, -1, "failed to send CONNECT to proxy `:`",
-                             target.proxy_host, target.proxy_port);
-
-        char response[kTunnelRespSize];
+        auto* response = scratch.get();
         size_t size = 0;
         size_t end;
         while (true) {
-            auto ret = stream->recv(response + size, sizeof(response) - size);
+            auto ret = stream->recv(response + size, kTunnelRespSize - size);
             if (ret == 0)
                 LOG_ERROR_RETURN(ECONNRESET, -1,
                                  "proxy closed before completing CONNECT, `:`",
@@ -340,7 +353,7 @@ public:
             size += ret;
             end = estring_view(response, size).find("\r\n\r\n");
             if (end != estring_view::npos) break;
-            if (size == sizeof(response))
+            if (size == kTunnelRespSize)
                 LOG_ERROR_RETURN(ENOBUFS, -1,
                                  "CONNECT response header is too long");
         }

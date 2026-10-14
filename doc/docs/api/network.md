@@ -280,9 +280,25 @@ caller configuration. Cookies are selected again for each redirect.
 
 `Proxy-Authorization` in caller or common headers is proxy configuration: it is used
 for a forwarded proxy request or CONNECT and is never sent to the origin. The
-configuration remains available for later calls, retries and redirects. A body writer
-still receives `&op.req` and sees the final outgoing headers and body framing during
-its callback; the caller configuration is restored when body transmission finishes.
+header configuration remains available for later hops and calls. Following a redirect
+rewrites the request line, target and `Host` in `op.req`; a later call reuses that
+redirected request. A body writer still receives `&op.req` and sees the final outgoing
+headers and body framing during its callback; the caller configuration is restored
+when body transmission finishes.
+
+When a proxy is configured, an HTTP origin uses ordinary forwarding. An HTTPS origin
+uses CONNECT followed by TLS to the origin inside the tunnel; this also applies to
+OSS endpoints without a scheme and to httpfs_v2 with `default_https=true`. An HTTPS
+proxy adds a separate TLS connection to the proxy before CONNECT. A proxy used for
+HTTPS origins must support CONNECT.
+
+Concurrent calls from different vCPUs use separate Operations. Configure the client
+before use: setters and mutation through header/proxy accessors must not race calls,
+except `set_resolver()`, which supports replacement during requests. Built-in dialers
+capture bind IPs on each vCPU's first dial and do not update that vCPU's existing
+dialer. Supplied cookie jars, proxy authenticators and custom dialers must support
+concurrent access;
+`new_simple_cookie_jar()` has no cross-vCPU synchronization.
 
 Authenticator-provided `Proxy-Authorization` overrides the fallback credentials,
 including when the field is explicitly empty. Connection pool route keys include

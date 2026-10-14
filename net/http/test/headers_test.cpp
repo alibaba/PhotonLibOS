@@ -65,10 +65,10 @@ TEST(headers, send_header_terminator) {
 
 TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     CommonHeaders<256> source, destination;
-    ASSERT_EQ(0, source.insert("Z-Last", "first", 1));
+    ASSERT_EQ(0, source.insert("A-First", "first", 1));
     ASSERT_EQ(0, source.insert("X-Repeated", "one", 1));
     ASSERT_EQ(0, source.insert("x-repeated", "two", 1));
-    ASSERT_EQ(0, source.insert("A-First", "last", 1));
+    ASSERT_EQ(0, source.insert("Z-Last", "last", 1));
     ASSERT_EQ(0, destination.insert("X-Repeated", "existing"));
     auto expected = std::string(destination.serialized()) + std::string(source.serialized());
     ASSERT_EQ(0, destination.merge(source, 1));
@@ -76,8 +76,13 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     auto duplicates = destination.equal_range("X-Repeated");
     EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
     ASSERT_TRUE(destination.value_append(" appended"));
-    EXPECT_EQ("last appended", destination["A-First"]);
-    EXPECT_EQ("first", destination["Z-Last"]);
+    EXPECT_EQ("last appended", destination["Z-Last"]);
+    EXPECT_EQ("first", destination["A-First"]);
+    auto unchanged = std::string(destination.serialized());
+    errno = 0;
+    EXPECT_EQ(-1, destination.merge(destination, 1));
+    EXPECT_EQ(EINVAL, errno);
+    EXPECT_EQ(unchanged, destination.serialized());
 
     CommonHeaders<64> tight;
     ASSERT_EQ(0, tight.insert("Keep", "retained"));
@@ -105,13 +110,15 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     Headers exact;
     ASSERT_EQ(0, exact.reset(exactBuffer.data(), exactBuffer.size()));
     ASSERT_EQ(0, exact.insert("X-Repeated", "existing"));
+    // This pins merge's aggregate capacity preflight, not kv_add's text/index
+    // boundary: merge publishes the appended text size after inserting its KVs.
     ASSERT_EQ(0, exact.merge(source, 1));
     EXPECT_EQ(expected, exact.serialized());
     EXPECT_EQ(0U, exact.space_remain());
     duplicates = exact.equal_range("X-Repeated");
     EXPECT_EQ(3, duplicates.second.i - duplicates.first.i);
-    EXPECT_EQ("last", exact["A-First"]);
-    EXPECT_EQ("first", exact["Z-Last"]);
+    EXPECT_EQ("last", exact["Z-Last"]);
+    EXPECT_EQ("first", exact["A-First"]);
 
     constexpr char parsedText[] = "X: value\r\n\r\n";
     char parsedExactBuffer[sizeof(parsedText) - 1 + sizeof(HeadersBase::KV)];
@@ -123,6 +130,14 @@ TEST(headers, merge_duplicates_keeps_wire_order_and_bounds) {
     EXPECT_EQ("X: value\r\n", parsedExact.serialized());
     EXPECT_EQ("value", parsedExact["X"]);
     EXPECT_EQ(0U, parsedExact.space_remain());
+
+    char parsedShortBuffer[sizeof(parsedExactBuffer) - 1];
+    memcpy(parsedShortBuffer, parsedText, sizeof(parsedText) - 1);
+    Headers parsedShort;
+    errno = 0;
+    EXPECT_EQ(-1, parsedShort.reset(parsedShortBuffer, sizeof(parsedShortBuffer),
+                                   sizeof(parsedText) - 1));
+    EXPECT_EQ(ENOBUFS, errno);
 }
 
 TEST(headers, serialized_excludes_terminator_and_partial_body) {

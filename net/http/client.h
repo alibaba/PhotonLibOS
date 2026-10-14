@@ -56,8 +56,10 @@ public:
 
     class Operation {
     public:
-        // Request configuration is retained across calls, retries and redirects.
-        // The client composes a separate outgoing header buffer for each hop.
+        // Caller headers are not overwritten with common/default fields: each
+        // hop uses a separate outgoing buffer and restores configuration after
+        // body transmission. Following a redirect rewrites req's request line,
+        // target and Host; later calls use that redirected request.
         // Proxy-Authorization here is proxy input, never an origin header.
         // During body_writer, req exposes the actual outgoing message.
         Request req;
@@ -198,6 +200,14 @@ public:
     // outlive the client, and must be safe for concurrent use across vCPUs.
     void set_dialer(IDialer* dialer) { m_dialer = dialer; }
 
+    // Concurrent calls may use this client from different vCPUs, with a separate
+    // Operation per call. Configure before use: setters and mutation through
+    // common_headers()/get_proxy() must not race calls, except
+    // set_resolver. Built-in dialers capture bind IPs on each vCPU's first dial
+    // and later changes do not update an existing dialer. Supplied cookie jars,
+    // proxy authenticators and custom dialers must support concurrent access;
+    // new_simple_cookie_jar() does not provide cross-vCPU synchronization.
+    //
     // Inject a DNS resolver, replacing the process-wide default one that the
     // built-in dialers of this client would otherwise share. It may be replaced
     // while requests are in flight. The resolver must support concurrent calls;

@@ -320,12 +320,13 @@ public:
         // caller's request: a redirect may turn a forwarded request into a tunneled
         // one, and only the former is read by the proxy -- inside a tunnel it is
         // the origin that reads them.
-        ProxyAuth pa;
+        std::unique_ptr<ProxyAuth> pa;
         if (t.via_proxy()) {
-            if (m_proxy_authenticator && m_proxy_authenticator(t, pa) < 0)
+            pa.reset(new ProxyAuth);
+            if (m_proxy_authenticator && m_proxy_authenticator(t, *pa) < 0)
                 LOG_ERROR_RETURN(0, ROUNDTRIP_FAILED, "the proxy authenticator failed");
-            t.proxy_headers = &pa.headers;
-            t.proxy_pool_key = pa.pool_key;
+            t.proxy_headers = &pa->headers;
+            t.proxy_pool_key = pa->pool_key;
         }
         // Declared before outgoing: its borrowed body wrapper must die first.
         SocketStream_ptr sock;
@@ -334,11 +335,11 @@ public:
         const HeadersBase* proxy_headers = nullptr;
         if (t.via_proxy() && !t.need_tunnel()) {
             if (!proxy_auth.empty()) {
-                auto ret = pa.headers.insert("Proxy-Authorization", proxy_auth);
+                auto ret = pa->headers.insert("Proxy-Authorization", proxy_auth);
                 if (ret < 0 && ret != -EEXIST)   // the authenticator's own one wins
                     LOG_ERROR_RETURN(0, ROUNDTRIP_FAILED, "failed to set Proxy-Authorization");
             }
-            proxy_headers = &pa.headers;
+            proxy_headers = &pa->headers;
         }
 
         // Use configuration's unused buffer region for the outgoing Message.

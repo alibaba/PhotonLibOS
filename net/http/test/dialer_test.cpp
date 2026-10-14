@@ -25,6 +25,7 @@ limitations under the License.
 #include <photon/net/security-context/tls-stream.h>
 #include <photon/photon.h>
 #include <photon/thread/thread.h>
+#include <photon/thread/thread11.h>
 
 #include "../../../test/gtest.h"
 
@@ -214,6 +215,42 @@ TEST(dialer, conditional_layers_passthrough) {
     stream = uds_tls->dial(uds);
     ASSERT_EQ(uds_underlay.last, stream);
     delete stream;
+}
+
+TEST(dialer, tunnel_handshake_fits_the_minimum_coroutine_stack) {
+    StreamDialer transport;
+    transport.input = "HTTP/1.1 200 Connection Established\r\n\r\n";
+    std::unique_ptr<IDialer> tunnel(new_connect_tunnel_dialer(&transport));
+    DialTarget target;
+    target.host = "example.test";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.test";
+    target.proxy_port = 80;
+    int result = -1;
+    auto th = photon::thread_create11(16 * 1024, [&] {
+        std::unique_ptr<ISocketStream> stream(tunnel->dial(target));
+        if (stream) result = 0;
+    });
+    ASSERT_NE(nullptr, th);
+    photon::thread_enable_join(th);
+    photon::thread_join((photon::join_handle*)th);
+    EXPECT_EQ(0, result);
+}
+
+TEST(dialer, tunnel_response_keeps_its_4096_byte_limit) {
+    StreamDialer transport;
+    transport.input = "HTTP/1.1 200 OK\r\nX: " + std::string(4096, 'a') + "\r\n\r\n";
+    std::unique_ptr<IDialer> tunnel(new_connect_tunnel_dialer(&transport));
+    DialTarget target;
+    target.host = "example.test";
+    target.port = 443;
+    target.secure = true;
+    target.proxy_host = "proxy.test";
+    target.proxy_port = 80;
+    errno = 0;
+    EXPECT_EQ(nullptr, tunnel->dial(target));
+    EXPECT_EQ(ENOBUFS, errno);
 }
 
 TEST(dialer, tunnel_precedes_origin_tls) {
