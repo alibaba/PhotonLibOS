@@ -109,6 +109,11 @@ namespace photon
             return 0;
         }
 
+        // The empty name, meaning no engine at all. init() installs a master
+        // engine only when the request names one, and fd_events_fini() puts this
+        // back, so this covers both the window before that install and after it.
+        std::string_view get_engine_name() const override { return {}; }
+
         __attribute__((noinline))
         ssize_t wait_and_fire_events(uint64_t timeout) override {
             DEFER(notify.store(false, std::memory_order_release));

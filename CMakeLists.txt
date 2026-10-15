@@ -45,7 +45,7 @@ photon_source(AIO_SOURCE        "https://codeberg.org/jmoyer/libaio/releases/dow
 photon_source(ZLIB_SOURCE       "https://github.com/madler/zlib/releases/download/v1.2.13/zlib-1.2.13.tar.gz")
 photon_source(OPENSSL_SOURCE    "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz")
 photon_source(CURL_SOURCE       "https://github.com/curl/curl/releases/download/curl-7_88_1/curl-7.88.1.tar.gz")
-photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.3.tar.gz")
+photon_source(URING_SOURCE      "https://github.com/axboe/liburing/archive/refs/tags/liburing-2.15.tar.gz")
 photon_source(FUSE_SOURCE       "")
 photon_source(GSASL_SOURCE      "")
 photon_source(DPDK_SOURCE       "https://github.com/DPDK/dpdk/archive/refs/tags/v20.11.6.tar.gz")
@@ -219,6 +219,25 @@ photon_module(ecosystem
         REQUIRES http
         SOURCES  ecosystem/*.cpp
         OBJ_LINK ecosystem_deps)
+photon_module(blk
+        SOURCES blk/nbd.cpp)
+photon_module(blk_utils
+        SOURCES blk/utils.cpp)   # shared blk internals: the portable leaf helpers
+                                 # (needed by all-platform nbd.cpp) plus, under
+                                 # #ifdef __linux__, the genetlink client and the
+                                 # virtio-blk core of vduse/vhost-user
+photon_module(blk_vhost_user
+        ENABLE  LINUX   # eventfd + SCM_RIGHTS fd passing + memfd guest memory
+        SOURCES blk/vhost-user.cpp)
+photon_module(blk_tcmu
+        ENABLE  LINUX
+        SOURCES blk/tcmu.cpp)
+photon_module(blk_ublk
+        ENABLE  LINUX AND PHOTON_ENABLE_URING   # ublk's rings go through the iouring engine
+        SOURCES blk/ublk.cpp)
+photon_module(blk_vduse
+        ENABLE  LINUX
+        SOURCES blk/vduse.cpp)
 photon_module(testing
         OPTION    PHOTON_BUILD_TESTING
         FETCH     gflags googletest)
@@ -353,6 +372,54 @@ if (WIN32 AND PHOTON_BUILD_DEPENDENCIES)
     target_compile_definitions(photon_obj PRIVATE CURL_STATICLIB)
 endif ()
 
+# Operator-facing tools, built beside the blk transports they drive instead of
+# under PHOTON_BUILD_TESTING because they are useful in production, not only in
+# tests: vduse-cli diagnoses and unwedges a live vduse device, and vhost-user-cli
+# serves an image so an independent frontend can be pointed at blk/vhost-user.cpp.
+# Static, so either binary can be copied onto a wedged machine with no
+# libphoton.so and no rpath to satisfy. Not registered with CTest -- both need
+# arguments, vduse-cli needs root, and neither is a test.
+#
+# Each tool is gated on ITS OWN TRANSPORT's enable state, not on a condition
+# restated here: if photon's build carries the transport, it carries the tool that
+# drives it, and if that transport's gate ever narrows or widens the tool follows
+# without this block being edited. PHOTON_MODULE_<name>_ENABLED is the property
+# photon_module() records and the same one photon_module_targets() and
+# photon_module_link_into() gate on, so "this transport is in the build" has one
+# meaning rather than two that can drift. Both transports' ENABLE is LINUX today,
+# so the effective condition is unchanged -- but the reason each tool needs Linux
+# is not the transport's reason. vhost-user-cli draws blk_vhost_user's symbols
+# (new_vhost_user_controller, VhostUserController::Config); vduse-cli draws no
+# symbol from blk/vduse.cpp and needs it for <linux/virtio_blk.h> and
+# <linux/virtio_config.h>. Restating LINUX here would have been a third
+# independent gate for two tools that each have their own.
+#
+# Both keep .cc even though they ARE build targets, an exception to AGENTS.md's
+# ".cc is for assistant programs not included in normal compilation". Here the
+# extension is doing work rather than marking neglect: it keeps them out of any
+# `blk/*.cpp` source glob, as net/http/huffman/gen_tree.cc stays out of the real
+# net/http/huffman/*.cpp glob in photon_module(http). blk has no such glob today --
+# every photon_module(blk*) names its single file -- so here the extension is
+# insurance against one being added rather than a live need.
+#
+# Placement is load-bearing. CMAKE_RUNTIME_OUTPUT_DIRECTORY is captured at
+# add_executable time, and the PHOTON_BUILD_TESTING block below repoints it at
+# examples-output before pointing it back at output. Declaring these two above that
+# block is what lands both binaries in <build-dir>/output/ beside every other
+# executable; declaring them between those two set() calls would put them in
+# examples-output instead, and nothing in the build would say so.
+get_property(_blk_vduse_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vduse_ENABLED)
+if (_blk_vduse_enabled)
+    add_executable(vduse-cli blk/vduse-cli.cc)
+    target_link_libraries(vduse-cli PRIVATE photon_static)
+endif ()
+
+get_property(_blk_vhost_user_enabled GLOBAL PROPERTY PHOTON_MODULE_blk_vhost_user_ENABLED)
+if (_blk_vhost_user_enabled)
+    add_executable(vhost-user-cli blk/vhost-user-cli.cc)
+    target_link_libraries(vhost-user-cli PRIVATE photon_static)
+endif ()
+
 # Build examples and test cases
 if (PHOTON_BUILD_TESTING)
     include(photon-test-helpers)
@@ -381,6 +448,7 @@ if (PHOTON_BUILD_TESTING)
     add_subdirectory(net/http/test)
     add_subdirectory(rpc/test)
     add_subdirectory(thread/test)
+    add_subdirectory(blk/test)
     add_subdirectory(net/security-context/test)
     if (NOT APPLE)
         add_subdirectory(fs/cache/test)

@@ -563,6 +563,8 @@ public:
         return 0;
     }
 
+    std::string_view get_engine_name() const override { return "iocp"; }
+
     virtual int wait_for_fd(int fd, uint32_t interest, Timeout timeout) override {
         if (fd < 0)
             LOG_ERROR_RETURN(EINVAL, -1, "invalid fd");
