@@ -235,6 +235,18 @@ struct BlkDevInfo {
 // on a listener vcpu of its own, and whatever that costs is paid inside tcmu rather
 // than by this contract.
 //
+// That hop is best-effort, and it REFUSES rather than races. photon moves only a
+// thread that is READY and already on the caller's vcpu, and creating the coroutine
+// to move can fail on its own, so a teardown that cannot reach the serving vcpu
+// leaves the queue or device ALIVE -- ring mapped, serving coroutines running -- and
+// answers -1, instead of tearing down across vcpus, which is the race the hop exists
+// to avoid. This leaks by design, and the leak outlives the device: the survivors
+// are coroutines on the pool's vcpus, a vcpu does not shut down while one is left on
+// it, and ~WorkPool joins its worker threads -- so a pool holding a refused queue
+// never finishes being destroyed. What a caller gets for that is a retry: the object
+// is still there, still consistent, and a later teardown issued from the control
+// vcpu can still succeed.
+//
 // Identity and geometry are FIXED AT CONSTRUCTION: every new_xxx_device() takes
 // its transport's config and validates it, so a constructed object is always
 // config-valid and a bad config yields no object at all (nullptr + errno). A

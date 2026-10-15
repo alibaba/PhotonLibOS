@@ -559,7 +559,7 @@ struct UblkDeviceImpl : IBlkDevice {
         std::atomic<uint32_t> in_flight{0};   // serving (fetched-not-yet-committed)
         uint16_t qid = 0;
         bool stopping = false;       // tags: exit at the next checkpoint
-        bool pump_stop = false;      // pump: exit -- set only AFTER all tags are joined
+        bool pump_stop = false;      // pump: exit -- set FIRST; see queue_teardown
 
         char* buf(uint16_t tag) { return bufs + (size_t)tag * d->max_io_buf_bytes; }
     };
@@ -568,6 +568,23 @@ struct UblkDeviceImpl : IBlkDevice {
     bool own_backend = false;
     bool started = false;
     bool created = false;         // we ADD_DEV'd it (vs re-attached a quiesced one)
+    // Set when a teardown had to be REFUSED, which leaves a queue being served on its own
+    // vcpu with its ring still mapped. That queue, its ring and cdev_fd are leaked on
+    // purpose (see stop_serving), and so then is the backend: deleting it would free the
+    // IFile the surviving tags still call into. Read only by the destructor, which is the
+    // one caller with nobody to report a refusal to.
+    //
+    // The leak also OUTLIVES this object, which is the part a caller has to plan around:
+    // the surviving pump and tags are coroutines on BlkConfig::pool's vcpus, and a vcpu
+    // does not shut down while one is left on it -- photon::fini() ends in vcpu_fini(),
+    // which spins in wait_all() until the run queue holds only the idler and the caller
+    // and both the sleep and the standby queue are empty (thread/thread.cpp:2156). A
+    // pool holding a refused queue therefore never finishes destroying itself, because
+    // ~WorkPool joins its worker threads (thread/workerpool.cpp:64). Measured rather
+    // than argued: deleting run_queue_teardown's thread_migrate -- mutate-blk.py's
+    // `nohome` -- makes every teardown refuse, and the suite logs the two refusals from
+    // stop_serving and then hangs inside UblkTest.pool_placement_n_less_than_m.
+    bool serving_leaked = false;
     bool read_only = false;
     // An ordinary WRITE -- and a WRITE_ZEROES, which lands zeroes the same way -- has to
     // be on stable storage before its completion is published. The exact complement of
@@ -660,7 +677,12 @@ struct UblkDeviceImpl : IBlkDevice {
         // outlive this object. devlock_release() is a no-op on -1, so the paths
         // that did release it are unaffected.
         release_lock();
-        release_backend();
+        // Not unconditional: a REFUSED teardown left tags serving through this backend on
+        // another vcpu, and deleting it would be a use-after-free against them. Leaking it
+        // is the rest of the same deliberate leak. The refusal was logged where it happened
+        // -- this is the one caller with nobody left to report it to.
+        if (!serving_leaked)
+            release_backend();
         ctrl.fini();
     }
 
@@ -1025,55 +1047,110 @@ struct UblkDeviceImpl : IBlkDevice {
     // submission-queue rule that put them on one vcpu in the first place. The
     // migration target is photon's own API rather than WorkPool's: WorkPool cannot
     // name a vcpu it already handed out, but the owner coroutine recorded it.
+    //
+    // It migrates a HELPER coroutine rather than the caller, and that is not a
+    // stylistic choice: photon::thread_migrate does accept CURRENT, but from the vcpu's
+    // main coroutine -- which is what a caller's detach(), shutdown() or destructor
+    // usually is -- it returns 0 and DOES NOT MOVE, because defer_migrate_current
+    // returns 0 unconditionally and the deferred move's own result is discarded by a
+    // void callback. Measured, not reasoned: a probe that self-migrated the main
+    // coroutine into a pool vcpu read back its own vcpu unchanged after a 0 return,
+    // and the process then died in std::thread::join with "Resource deadlock avoided".
+    // The same call from a spawned coroutine works, which is why every self-migration
+    // in this repo is inside one.
     struct TeardownArg {
         UblkDeviceImpl* d;
         Queue* q;
         photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+        bool torn_down = false;
     };
 
     static void* queue_teardown_thunk(void* a) {
         auto* ta = (TeardownArg*)a;
-        ta->d->queue_teardown(ta->q);
+        // The refusal lives HERE, not in the caller, because this coroutine is the only
+        // thing that can observe where it actually landed. A migration refused after a
+        // successful create leaves it READY on the creator's vcpu, and it runs the
+        // instant run_queue_teardown yields in its wait below -- so by the time that
+        // function could react, the teardown would already have started in the wrong
+        // place. Checking here means the wrong place never runs it at all.
+        if (photon::get_vcpu() == ta->q->home) {
+            ta->d->queue_teardown(ta->q);
+            ta->torn_down = true;
+        }
         ta->done.signal(1);
         return nullptr;
     }
 
-    void run_queue_teardown(Queue* q) {
+    // Tear one queue down. Returns false, with errno set and the queue LEFT ALIVE, when
+    // the hop onto q->home could not be honoured. Leaving it alive is the safe direction
+    // and is deliberate: its pump and tags are still running on their own vcpu and its
+    // ring is still mapped, so tearing it down from here would write the plain
+    // q->pump_stop from a second OS thread, and it is the only condition either of the
+    // pump's two exit tests reads -- a pump that missed the write re-parks in
+    // wait_for_events and queue_teardown's join then waits on it forever. photon's
+    // thread_interrupt and thread_join are both safe
+    // across vcpus, and iouring_abandon is a single m_generation++, so that hang and
+    // not a use-after-free is what the hop exists to prevent. Mutant `nohome` in
+    // test/mutate-blk.py carries the same accounting and the runs behind it.
+    bool run_queue_teardown(Queue* q) {
         if (!q->home || q->home == photon::get_vcpu()) {
             queue_teardown(q);   // no pool, or the cursor put it right here
-            return;
+            return true;
         }
         TeardownArg ta{this, q};
-        auto th = photon::thread_create(&UblkDeviceImpl::queue_teardown_thunk, &ta);
-        if (!th) {
-            // Cannot honour the vcpu rule, but leaving the queue up is worse: the
-            // device is being torn down and the ring is about to be unmapped.
-            LOG_ERROR("ublk: cannot create the teardown coroutine of queue `, tearing down in place",
-                      q->qid);
-            queue_teardown(q);
-            return;
+        // A create failure is an allocation failure, and one yield is often enough to
+        // get past it, so it is retried before a queue is abandoned.
+        photon::thread* th = nullptr;
+        for (int tries = 0; tries < 3 && !th; tries++) {
+            th = photon::thread_create(&UblkDeviceImpl::queue_teardown_thunk, &ta);
+            if (!th && tries < 2)
+                photon::thread_yield();
         }
+        if (!th)
+            LOG_ERROR_RETURN(ENOMEM, false, "ublk: cannot create the teardown coroutine of queue `, dev `; leaving the queue UP with its ring mapped and its pump and tags still running",
+                             q->qid, dev_id);
         photon::thread_enable_join(th);
-        if (photon::thread_migrate(th, q->home) < 0) {
-            LOG_WARN("ublk: cannot move the teardown of queue ` back to its vcpu, ", q->qid, ERRNO());
-        }
+        if (photon::thread_migrate(th, q->home) < 0)
+            LOG_ERROR("ublk: cannot move the teardown of queue `, dev ` onto its own vcpu, so the teardown coroutine will refuse to run it, ", q->qid, dev_id, ERRNO());
         ta.done.wait(1);
+        // Always joined, whichever way the thunk decided: enable_join above made it
+        // joinable, and skipping this would leak the coroutine and its stack.
         photon::thread_join((photon::join_handle*)th);
+        if (!ta.torn_down)
+            LOG_ERROR_RETURN(EAGAIN, false, "ublk: queue ` of dev ` was left UP because its teardown could not reach its own vcpu", q->qid, dev_id);
+        return true;
     }
 
-    void stop_serving(bool flush) {
+    // Returns 0, or -1 with errno=EAGAIN when at least one queue had to be LEFT ALIVE
+    // because its teardown could not reach its own vcpu -- see run_queue_teardown, whose
+    // comment gives the reason refusing beats racing. Queues that were torn down are
+    // deleted here; a survivor is deliberately leaked, because deleting a Queue whose
+    // pump and tags still run on another vcpu frees the engine, the descriptor mapping
+    // and the IO buffers out from under them. cdev_fd is left open for the same reason:
+    // every parked FETCH uring_cmd of a surviving tag was submitted on it, and closing it
+    // is what would turn a leak into a use-after-free. So a refused teardown leaks a
+    // queue, its ring and one fd, all of it logged at the point of refusal.
+    int stop_serving(bool flush) {
         if (flush)
             while (in_flight_all())
                 photon::thread_usleep(1000);
+        int left_up = 0;
         for (auto q : queues)
-            run_queue_teardown(q);
-        for (auto q : queues)
-            delete q;
+            if (run_queue_teardown(q))
+                delete q;
+            else
+                left_up++;
         queues.clear();
-        if (cdev_fd >= 0) {
+        if (cdev_fd >= 0 && !left_up) {
             ::close(cdev_fd);   // releases UB_STATE_OPEN; the device quiesces
             cdev_fd = -1;
         }
+        if (left_up) {
+            serving_leaked = true;   // the destructor reads this; see its declaration
+            LOG_ERROR_RETURN(EAGAIN, -1, "ublk: dev ` stopped serving with ` queue(s) left alive, their ring and cdev_fd leaked with them",
+                             dev_id, left_up);
+        }
+        return 0;
     }
 
     // ----- flock (the orphan-detection liveness key, shared namespace) -----
@@ -1442,7 +1519,12 @@ struct UblkDeviceImpl : IBlkDevice {
     int detach(bool wait_pending) override {
         if (!started)
             return 0;
-        stop_serving(wait_pending);
+        // A refused teardown means a queue is still being served on its own vcpu, so the
+        // flock is still an honest claim and `started` is still true. Releasing either
+        // here would advertise a free device that this object is still serving, and the
+        // caller can retry once the allocation pressure that caused the refusal passes.
+        if (stop_serving(wait_pending) < 0)
+            return -1;   // errno and the log are stop_serving's
         release_lock();
         started = false;
         // the flock was the ownership claim: once released, a later start()
@@ -1552,7 +1634,12 @@ struct UblkDeviceImpl : IBlkDevice {
             }
         }
         if (started) {
-            stop_serving(true);
+            // A refused teardown leaves a queue being served on its own vcpu, so the
+            // DEL_DEV below would destroy the registration out from under a live pump
+            // and its tags. Report the refusal instead; the caller can retry once
+            // whatever made the allocation fail has passed.
+            if (stop_serving(true) < 0)
+                return -1;   // errno and the log are stop_serving's
             started = false;   // before any early return below can skip it
         }
         if (dev_id >= 0 && ctrl.del_dev((uint32_t)dev_id) < 0 && errno != ENODEV)

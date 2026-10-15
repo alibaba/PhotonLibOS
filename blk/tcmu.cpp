@@ -506,6 +506,21 @@ struct TcmuUio {
         parse_pos = 0;
     }
 
+    // Forget the mapping and the fd WITHOUT releasing them, so that close() -- which
+    // ~TcmuUio calls -- becomes a no-op and everything stays valid for whoever is still
+    // using it. Only ~TcmuServer calls this, and only after a stop was REFUSED: at that
+    // point the pump and the handle_cmd coroutines are still reading this ring on their
+    // own vcpu, and unmapping it under them trades a leak for a SIGSEGV. The leak is
+    // permanent and is logged there.
+    void leak() {
+        done = nullptr;
+        map = nullptr;
+        mb = nullptr;
+        ring = nullptr;
+        map_size = 0;
+        fd = -1;
+    }
+
     bool has_work() { return parse_pos != mb_head(mb); }
 
     // clear the uio interrupt (non-blocking; EAGAIN when none is pending)
@@ -643,7 +658,17 @@ struct TcmuServer {
         return nullptr;
     }
 
-    ~TcmuServer() { run_serve_stop(false); }
+    ~TcmuServer() {
+        if (run_serve_stop(false))
+            return;
+        // REFUSED, and this is the one caller with nobody left to report it to. The pump
+        // and the handle_cmd coroutines are still reading this ring on the serving vcpu,
+        // so ~TcmuUio's munmap would pull it out from under them: leak the mapping and
+        // its fd instead. Permanent, and the pool those coroutines sit on can never be
+        // destroyed either -- blk.h's WHICH VCPU CALLS has the chain.
+        LOG_ERROR("tcmu: a stop was refused at destruction, so the ring mapping and its uio fd are leaked rather than unmapped under a live pump");
+        uio.leak();
+    }
 
     // `stack` lands in the stack_size member rather than being threaded through
     // serve_start() as well; it has no default so that every caller has to say
@@ -707,11 +732,23 @@ struct TcmuServer {
         TcmuServer* s;
         bool flush;
         photon::semaphore done{0};   // NSDMI, not {}: semaphore's ctor is explicit
+        bool stopped = false;
     };
 
     static void* serve_stop_thunk(void* a) {
         auto* sa = (StopArg*)a;
-        sa->s->serve_stop(sa->flush);
+        // The refusal lives HERE, not in the caller, because this coroutine is the only
+        // thing that can observe where it actually landed. A migration refused after a
+        // successful create leaves it READY on the creator's vcpu, and it runs the instant
+        // run_serve_stop yields in its wait below -- so by the time that function could
+        // react, serve_stop would already have written the mailbox tail that the live
+        // handle_cmd coroutines are writing, from a second OS thread. Checking here means
+        // the wrong place never runs it at all: the ring stays mapped, the pump stays
+        // alive, and the caller is told.
+        if (photon::get_vcpu() == sa->s->home) {
+            sa->s->serve_stop(sa->flush);
+            sa->stopped = true;
+        }
         sa->done.signal(1);
         return nullptr;
     }
@@ -719,51 +756,75 @@ struct TcmuServer {
     // serve_stop must run where pump ran: its flush path calls drain_ring, which
     // writes the mailbox tail that the still-running handle_cmd coroutines also
     // write, and it polls the non-atomic in_flight their DEFERs decrement. Both
-    // are single-vcpu invariants. thread_migrate only takes a READY thread, so
-    // the caller cannot move itself -- hand the work to a coroutine that can be
-    // moved, which is what ublk's run_queue_teardown does for the same reason.
-    void run_serve_stop(bool flush) {
+    // are single-vcpu invariants. thread_migrate only takes a READY thread -- but
+    // that is NOT why the work goes to a coroutine. It goes to one because the caller
+    // cannot be moved itself: photon does accept th == CURRENT, yet from the vcpu's
+    // main coroutine, which is what a detach(), a shutdown() or a destructor usually
+    // is, thread_migrate(CURRENT, v) returns 0 and DOES NOT MOVE, and the caller then
+    // dies in std::thread::join with "Resource deadlock avoided". Measured, not
+    // reasoned; every self-migration in this repo is inside a spawned coroutine.
+    //
+    // Returns false, with errno set and serving LEFT RUNNING, when the hop could not be
+    // honoured. Refusing beats racing: a stop that ran here would write the mailbox tail
+    // from a second OS thread and poll the plain in_flight across one. What is left
+    // behind is the ring mapping, the pump and `home` itself -- kept, not cleared, so a
+    // retry can still find the vcpu to hop to. The survivors are coroutines on the
+    // pool's vcpus, and that is what makes the leak outlive this object: the chain is in
+    // blk.h's WHICH VCPU CALLS, with the photon internals cited at ublk's serving_leaked.
+    // ~TcmuServer is the one caller that cannot retry, and it leaks the mapping too
+    // rather than unmapping it under the pump.
+    bool run_serve_stop(bool flush) {
         // Cleared here and not at the end of serve_stop: under the hop serve_stop
         // runs on the serving vcpu, and `home` is written only on this one. A DEFER
-        // because this function has three exits -- the in-place return below, the
-        // create failure after it, and the thunk path at the end -- and clearing it
-        // on only some of them is how a stale vcpu survives into the next start.
+        // because this function has two exits, and clearing it on only one of them is
+        // how a stale vcpu survives into the next start. CONDITIONAL on success: a
+        // refused stop leaves the pump running on `home`, and nulling it would send
+        // the next run_serve_stop down the in-place branch -- straight into the race
+        // this function exists to avoid.
         // Once the pump is gone nothing owns the ring any more, so a repeated
         // run_serve_stop degrades to the in-place branch, and the next serve_start
         // records the landing vcpu of the pump it just created.
-        DEFER(home = nullptr);
+        bool stopped = false;
+        DEFER(if (stopped) home = nullptr);
         if (!home || home == photon::get_vcpu()) {
-            // !home means there is no pump on another vcpu, and nothing else. The
-            // in-place stop below rests on exactly that: whenever this branch reads
-            // a null `home`, no pump is running on a different vcpu. Arrivals with a
-            // null include serve_start never having run, a serve_start that returned
-            // before it recorded home, a previous run_serve_stop having cleared home
-            // on the way out -- which it does whether or not it found a pump to join
-            // -- and a migration that was refused, so a pump exists but is on this
-            // vcpu. Only a refused migration puts a live pump behind a null, and it
-            // puts it here: serve_start records home itself, in the same stretch that
-            // creates the pump, and that stretch yields only where a refused
-            // migration logs -- which leaves the pump on this vcpu, where stopping in
-            // place is what the no-pool case does anyway. So this is never the "pump
-            // exists on another vcpu but has not been recorded yet" window, the one
-            // where stopping in place would race the coroutines pump dispatched.
+            // !home means there is no pump at all, on this vcpu or on any other, and
+            // the in-place stop below rests on exactly that. It holds because home is
+            // written in one place: serve_start reads it back off the pump right after
+            // migrate_to_pool, in a stretch with no failure return and no yield between
+            // creating the pump and recording it. So a null is only ever a serve_start
+            // that never ran, one that failed before the pump existed -- uio.open or
+            // thread_create -- or a previous run_serve_stop that SUCCEEDED, whose DEFER
+            // cleared it. Two cases that could once have left a live pump behind a null
+            // cannot: a pool migration serve_start could not honour reads back as this
+            // vcpu and so takes the second disjunct instead, where stopping in place is
+            // what the no-pool case does anyway; and a stop refused on the hop path
+            // below keeps home, so its retry arrives there again rather than here.
             serve_stop(flush);   // no pool, or this IS the serving vcpu
-            return;
+            stopped = true;
+            return true;
         }
         StopArg sa{this, flush};
-        auto th = photon::thread_create(&TcmuServer::serve_stop_thunk, &sa);
-        if (!th) {
-            // Cannot honour the vcpu rule, but leaving the ring up is worse: the
-            // caller is tearing the device down and uio is about to be closed.
-            LOG_ERROR("tcmu: cannot create the teardown coroutine, stopping in place");
-            serve_stop(flush);
-            return;
+        // A create failure is an allocation failure, and one yield is often enough to
+        // get past it, so it is retried before serving is abandoned.
+        photon::thread* th = nullptr;
+        for (int tries = 0; tries < 3 && !th; tries++) {
+            th = photon::thread_create(&TcmuServer::serve_stop_thunk, &sa);
+            if (!th && tries < 2)
+                photon::thread_yield();
         }
+        if (!th)
+            LOG_ERROR_RETURN(ENOMEM, false, "tcmu: cannot create the teardown coroutine; leaving the ring mapped and the pump running");
         photon::thread_enable_join(th);
         if (photon::thread_migrate(th, home) < 0)
-            LOG_WARN("tcmu: cannot move the teardown back to the serving vcpu, ", ERRNO());
+            LOG_ERROR("tcmu: cannot move the teardown onto the serving vcpu, so the teardown coroutine will refuse to run it, ", ERRNO());
         sa.done.wait(1);
+        // Always joined, whichever way the thunk decided: enable_join above made it
+        // joinable, and skipping this would leak the coroutine and its stack.
         photon::thread_join((photon::join_handle*)th);
+        if (!sa.stopped)
+            LOG_ERROR_RETURN(EAGAIN, false, "tcmu: serving was left running because its teardown could not reach the serving vcpu");
+        stopped = true;
+        return true;
     }
 
     // the serving loop: wait for the uio interrupt per BlkConfig::spin_us, then
@@ -2210,8 +2271,13 @@ struct TcmuDeviceImpl : IBlkDevice {
         if (!started)
             return 0;
         // stop serving but KEEP the configfs registration + LUN so a later
-        // start() (possibly another process) takes over and harvests the ring
-        server.run_serve_stop(/*flush=*/wait_pending);
+        // start() (possibly another process) takes over and harvests the ring.
+        // A REFUSED stop leaves the pump and the handle_cmd coroutines running on
+        // the serving vcpu, so the flock is still an honest claim and `started` is
+        // still true: releasing either would advertise a device this object is
+        // still serving. The caller can retry once the allocation pressure passes.
+        if (!server.run_serve_stop(/*flush=*/wait_pending))
+            return -1;   // errno and the log are run_serve_stop's
         release_lock();
         started = false;
         link.serving = false;
@@ -2252,8 +2318,22 @@ struct TcmuDeviceImpl : IBlkDevice {
         // is destroying it; the LUN is already gone, since the kernel refuses to
         // remove a backstore a LUN still references).
         if (uint32_t id = link.removed_id.exchange(0)) {
+            if (started && !server.run_serve_stop(/*flush=*/true)) {
+                // REFUSED: the pump and the handle_cmd coroutines are still running on the
+                // serving vcpu. Answering REMOVED_DEVICE_DONE would tell the kernel the
+                // device is gone while this object is still serving it, and releasing the
+                // claim would hand the identity to a second server -- so the id goes BACK
+                // and the operator's rmdir/enable=0 stays blocked inside the kernel. That
+                // block is the deliberate, honest outcome of a refusal: it happens only
+                // when the teardown coroutine cannot be allocated at all, run_serve_stop
+                // has already logged the refusal itself, and a retry once the allocation
+                // pressure passes answers the removal. This adds the part only this site
+                // knows -- that the kernel is still waiting.
+                link.removed_id = id;
+                LOG_ERROR_RETURN(EAGAIN, -1, "tcmu: removal of ` was refused while it is still being served; the kernel's rmdir stays blocked and the removal id is kept for a retry",
+                                 bs_name);
+            }
             if (started) {
-                server.run_serve_stop(/*flush=*/true);
                 release_lock();
                 started = false;
             }
@@ -2292,7 +2372,14 @@ struct TcmuDeviceImpl : IBlkDevice {
         // commands the initiator may send, then stop the ring
         if (lun_attached)
             detach_lun();
-        server.run_serve_stop(/*flush=*/true);
+        // A REFUSED stop leaves the pump and the handle_cmd coroutines running on the
+        // serving vcpu, so destroy_backstore() below would pull the registration out from
+        // under live serving and `started = false` would lie. `started` stays true, which
+        // also keeps the DEFER above from answering a pending REMOVED -- the same ruling
+        // as the operator-removal branch: the kernel keeps waiting rather than being told
+        // the device is gone while it is not.
+        if (!server.run_serve_stop(/*flush=*/true))
+            return -1;   // errno and the log are run_serve_stop's
         started = false;
         // BEFORE destroy_backstore(): our own disable/rmdir fires a REMOVED that
         // the listener must answer for us, since this vcpu is inside that write
@@ -2656,8 +2743,14 @@ struct TcmuDeviceImpl : IBlkDevice {
     void rollback() {
         if (lun_attached)
             detach_lun();
-        if (server.pump_th || server.uio.fd >= 0)
-            server.run_serve_stop(true);
+        // A REFUSED stop leaves the pump and the handle_cmd coroutines running on the
+        // serving vcpu, so nothing below may run: destroy_backstore() would pull the
+        // registration out from under live serving, and release_lock() would hand the
+        // identity to a second server. rollback() returns void and is itself a failure
+        // path, so there is nobody left to tell -- run_serve_stop already logged the
+        // refusal, and what stays behind is the deliberate leak its own comment names.
+        if ((server.pump_th || server.uio.fd >= 0) && !server.run_serve_stop(true))
+            return;
         if (created)
             destroy_backstore();
         release_lock();
