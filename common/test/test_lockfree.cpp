@@ -20,6 +20,7 @@ limitations under the License.
 #include <sched.h>
 
 #include <photon/common/lockfree_queue.h>
+#include <photon/photon.h>
 #include <photon/thread/thread.h>
 #include <pthread.h>
 
@@ -100,6 +101,9 @@ int test_queue(const char *name, QType &queue) {
     auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < receiver_num; i++) {
         receivers.emplace_back([i, &queue] {
+            ASSERT_EQ(0, photon::init(photon::INIT_EVENT_DEFAULT,
+                                      photon::INIT_IO_NONE));
+            DEFER(photon::fini());
             photon::set_cpu_affinity(i * 2);
             std::chrono::nanoseconds rspent(std::chrono::nanoseconds(0));
             for (size_t x = 0; x < items_num / receiver_num; x++) {
