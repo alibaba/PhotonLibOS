@@ -40,6 +40,7 @@ limitations under the License.
     ((type*)((char*)static_cast<const decltype(((type*)0)->member)*>(ptr) - offsetof(type,member)))
 
 namespace photon {
+namespace {
 
 constexpr static EventsMap<EVUnderlay<POLLIN | POLLRDHUP, POLLOUT, POLLERR>> evmap;
 
@@ -289,6 +290,9 @@ public:
                 errno = err_backup.no;
                 return -1;
             }
+            // Every final CQE must wake the drain waiter, including canceled
+            // I/O and linked timers that normally defer waking to another CQE.
+            io_ctx.draining = timer_ctx.draining = true;
             sqe = _get_sqe();
             if (sqe == nullptr) {
                 // Unable to cancel. Wait for the in-flight I/O (and its linked
@@ -301,6 +305,7 @@ public:
                 return -1;
             }
             ioCtx cancel_ctx(true, false);
+            cancel_ctx.draining = true;
             io_uring_prep_cancel(sqe, &io_ctx, 0);
             io_uring_sqe_set_data(sqe, &cancel_ctx);
             try_submit();
@@ -438,12 +443,12 @@ public:
                     // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
                     // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
                     ctx->res = -ETIMEDOUT;
-                    continue;
+                    if (!ctx->draining) continue;
                 } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
                     // The linked timer itself is also a canceller. The reasons it got cancelled could be:
                     // 1. I/O finished in time
                     // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                    continue;
+                    if (!ctx->draining) continue;
                 }
                 photon::thread_interrupt(ctx->th_id, EOK);
 
@@ -511,7 +516,7 @@ public:
         return 0;
     }
 
-private:
+public:
     struct ioCtx {
         ioCtx(bool canceller, bool event) : is_canceller(canceller), is_event(event) {}
         photon::thread* th_id = photon::CURRENT;
@@ -523,6 +528,8 @@ private:
         // before this flag turns true. No atomic needed, since a vCPU is
         // single OS thread and work stealing is paused during the wait.
         bool done = false;
+        // Cancellation cleanup waits for every final CQE, in any reap batch.
+        bool draining = false;
     };
 
     struct eventCtx {
@@ -648,6 +655,9 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
+} // namespace
+
+#ifndef PHOTON_IOURING_TEST_ENGINE_ONLY
 inline iouringEngine* get_ring(CascadingEventEngine* cee) {
     return cee ? static_cast<iouringEngine*>(cee) :
                  static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
@@ -766,6 +776,6 @@ void* new_iouring_event_engine(iouring_args args) {
     CascadingEventEngine* c = uring;
     return c;
 }
-
+#endif
 
 }
