@@ -153,6 +153,7 @@ protected:
 
     friend class HTTPServerImpl;
     friend class ClientImpl;
+    friend class ConnectTunnelDialer;   // sends the CONNECT of a tunnel
 };
 
 class URL;
@@ -209,6 +210,9 @@ public:
         return m_stream;
     }
 protected:
+    // Initialize a per-hop outgoing message from caller configuration. Headers
+    // are composed separately, after route and proxy authentication decisions.
+    int copy_request_line(const Request& source);
     int parse_request_line(Parser &p);
     int parse_start_line(Parser &p) override {
         return parse_request_line(p);
@@ -218,6 +222,7 @@ protected:
     rstring_view16 m_target, m_path, m_query;
     uint16_t m_port = 80;
     bool m_secure = false;
+    friend class ClientImpl;
 };
 
 class Response : public Message {
