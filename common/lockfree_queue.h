@@ -219,6 +219,10 @@ protected:
 
     explicit LockfreeMPMCRingQueue(size_t c) : Base(c) {}
 
+    struct NativeWait {
+        void operator()(uint64_t) const { ThreadPause::pause(); }
+    };
+
 public:
     using Base::empty;
 
@@ -269,9 +273,9 @@ public:
 
     // Claim only producer-reserved positions. Once claimed, a position cannot
     // be abandoned; other consumers can claim later positions while we wait.
-    // Waiting for publication requires a Photon-initialized consumer.
-    template <typename OnUnpublishedClaim>
-    bool pop(T& x, OnUnpublishedClaim on_unpublished_claim) {
+    // Inject waiting so raw pop() does not require a coroutine runtime.
+    template <typename OnUnpublishedClaim, typename Wait = NativeWait>
+    bool pop(T& x, OnUnpublishedClaim on_unpublished_claim, Wait wait = {}) {
         auto h = head.load(std::memory_order_acquire);
         for (;;) {
             auto t = tail.load(std::memory_order_acquire);
@@ -291,8 +295,7 @@ public:
             // notify us. Poll the mark instead of using empty-queue parking.
             for (uint64_t i = 0; ps.mark.load(std::memory_order_acquire) != expected; ++i) {
                 if (i < 64) CPUPause::pause();
-                else if (i < 128) photon::thread_yield();
-                else photon::thread_usleep(50);
+                else wait(i);
             }
         }
         x = ps.data;
@@ -901,6 +904,19 @@ struct SendBackoff {
     }
 };
 
+// After the queue's initial CPU pauses, let other coroutines make progress.
+struct ChannelPublicationWait {
+    void operator()(uint64_t i) const {
+        if (i < 128) photon::thread_yield();
+        else photon::thread_usleep(50);
+    }
+};
+
+// Probe the MPMC hooks with a callable type; no function pointer is created.
+template <typename Q, typename T>
+using ChannelPopResult = decltype(std::declval<Q&>().pop(
+    std::declval<T&>(), std::declval<void (*)()>(), ChannelPublicationWait{}));
+
 template <typename QueueType>
 class RingChannel : public QueueType {
 protected:
@@ -971,16 +987,9 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
-    struct WakeNextConsumer {
-        RingChannel* channel;
-        void operator()() const { channel->notify_recvers(); }
-    };
-
-    // Prefer the MPMC publication hook; SPSC and batch queues keep plain pop.
     template <typename Q = QueueType>
-    auto pop_with_baton(T& x, int)
-        -> decltype(std::declval<Q&>().pop(x, WakeNextConsumer{nullptr})) {
-        return QueueType::pop(x, WakeNextConsumer{this});
+    ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+        return QueueType::pop(x, [this] { notify_recvers(); }, ChannelPublicationWait{});
     }
     bool pop_with_baton(T& x, long) { return QueueType::pop(x); }
 
@@ -1120,16 +1129,9 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
-    struct WakeNextConsumer {
-        FlexRingChannel* channel;
-        void operator()() const { channel->notify_recvers(); }
-    };
-
-    // Flexible SPSC and batch queues retain the same fallback as RingChannel.
     template <typename Q = FlexQueueType>
-    auto pop_with_baton(T& x, int)
-        -> decltype(std::declval<Q&>().pop(x, WakeNextConsumer{nullptr})) {
-        return queue->pop(x, WakeNextConsumer{this});
+    ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+        return queue->pop(x, [this] { notify_recvers(); }, ChannelPublicationWait{});
     }
     bool pop_with_baton(T& x, long) { return queue->pop(x); }
 
