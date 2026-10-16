@@ -479,7 +479,12 @@ class FilteredResolver : public photon::net::Resolver {
   explicit FilteredResolver(Delegate<bool, photon::net::IPAddr> filter) : filter(filter) {}
 
   photon::net::IPAddr resolve(std::string_view host) override {
-    return inner.get()->resolve_filter(host, filter);
+    errno = 0;
+    auto* resolver = inner.get();
+    if (!resolver)
+      LOG_ERROR_RETURN(errno ? errno : ENOMEM, photon::net::IPAddr(),
+                       "failed to create the filtered OSS resolver");
+    return resolver->resolve_filter(host, filter);
   }
   // The HTTP client only calls resolve(); enforce the same filter here.
   photon::net::IPAddr resolve_filter(std::string_view host, Delegate<bool, photon::net::IPAddr>) override {
@@ -560,6 +565,7 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
 }
 
 OssClient::~OssClient() {
+  // Drop the borrowing client before member destruction releases m_resolver.
   delete m_client;
   delete m_authenticator;
 }
