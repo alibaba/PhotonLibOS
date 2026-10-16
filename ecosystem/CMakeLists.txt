@@ -14,7 +14,6 @@ FetchContent_Declare(
     GIT_SUBMODULES ""
     GIT_REPOSITORY ${PHOTON_RAPIDJSON_GIT}
     GIT_TAG v1.1.0
-    PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidjson.patch
     UPDATE_DISCONNECTED 1)
 # Pre-set rapidjson build option, prevent building docs, examples and tests
 set(RAPIDJSON_BUILD_DOC OFF CACHE BOOL "Build rapidjson documentation.")
@@ -29,7 +28,6 @@ FetchContent_Declare(
     GIT_SUBMODULES ""
     GIT_REPOSITORY ${PHOTON_RAPIDXML_SOURCE}
     GIT_TAG main
-    PATCH_COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/rapidxml.patch
     UPDATE_DISCONNECTED 1)
 FetchContent_MakeAvailable(rapidxml)
 message(STATUS "Rapidxml source dir: ${rapidxml_SOURCE_DIR}")
