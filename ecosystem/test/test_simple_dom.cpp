@@ -261,6 +261,29 @@ TEST(simple_dom, fix_trail) {
     }
 }
 
+TEST(simple_dom, leaf_children) {
+    // leaves and empty containers must have no children
+    char j0[] = R"({"s": "x", "i": 1, "t": true, "n": null, "o": {}, "a": []})";
+    auto doc = parse(j0, sizeof(j0) - 1, DOC_JSON);
+    EXPECT_TRUE(doc);
+    for (auto k: {"s", "i", "t", "n", "o", "a"}) {
+        auto x = doc[k];
+        EXPECT_TRUE(x);
+        EXPECT_EQ(x.num_children(), 0);
+        EXPECT_FALSE(x.get(0));
+        EXPECT_FALSE(x["k"]);
+    }
+
+    char x0[] = "<a k='v'><b>1</b><c/></a>";
+    doc = parse(x0, sizeof(x0) - 1, DOC_XML);
+    EXPECT_TRUE(doc);
+    for (auto x: {doc["a"]["b"], doc["a"]["c"], doc["a"].get_attributes()["k"]}) {
+        EXPECT_TRUE(x);
+        EXPECT_EQ(x.num_children(), 0);
+        EXPECT_FALSE(x.get(0));
+    }
+}
+
 TEST(simple_dom, yaml0) {
     static char yaml0[] = "{foo: 1, bar: [2, 3], john: doe}";
     auto doc = parse(yaml0, sizeof(yaml0)-1, DOC_YAML);

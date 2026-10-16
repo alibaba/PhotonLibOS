@@ -34,6 +34,7 @@ inline int NodeImpl::init_non_root(str key, str value,
     _root = root;
     assert(root);
     _flags = flags & ~FLAG_IS_ROOT;
+    _nchildren = 0;
 
     assert(key.length() <= MAX_KEY_LENGTH);
     assert(value.length() <= MAX_VALUE_LENGTH);
@@ -81,6 +82,7 @@ inline int NodeImpl::init_root(const char* text_begin,
     assert(node_size <= MAX_NODE_SIZE);
     _node_size = node_size;
     _refcnt = 0;
+    _nchildren = 0;
     return 0;
 }
 
