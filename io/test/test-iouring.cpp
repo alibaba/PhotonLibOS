@@ -784,7 +784,7 @@ TEST(iouring_completion, normal_all_completion_orders) {
             if (!returned)
                 fixture.complete(order[1], order[1] == 0 ? ioResult : timerResult);
             EXPECT_TRUE(returned);
-            if (!returned) photon::thread_interrupt(waiter, EINTR);
+            if (!returned) photon::thread_interrupt(waiter, EOK);
             photon::thread_join(join);
             EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
             if (ioResult < 0) {
@@ -837,7 +837,7 @@ TEST(iouring_completion, interrupted_after_partial_normal_completion) {
                     }
                 }
                 EXPECT_TRUE(returned);
-                if (!returned) photon::thread_interrupt(waiter, EINTR);
+                if (!returned) photon::thread_interrupt(waiter, EOK);
                 photon::thread_join(join);
                 EXPECT_EQ(-1, result);
                 EXPECT_EQ(EINTR, error);
@@ -865,7 +865,7 @@ TEST(iouring_completion, normal_untimed_completion) {
         EXPECT_EQ(1U, fixture.ring.sq.sqe_tail);
         fixture.complete(0, ioResult);
         EXPECT_TRUE(returned);
-        if (!returned) photon::thread_interrupt(waiter, EINTR);
+        if (!returned) photon::thread_interrupt(waiter, EOK);
         photon::thread_join(join);
         EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
         if (ioResult < 0) {
