@@ -416,17 +416,7 @@ public:
         return num;
     }
 
-    ssize_t wait_and_fire_events(uint64_t timeout) override {
-        // Prepare own timeout
-        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
-            timeout = std::numeric_limits<int64_t>::max();
-        }
-
-        auto ts = usec_to_timespec(timeout);
-        if (m_submit_wait_func(m_ring, &ts) != 0) {
-            return -1;
-        }
-
+    int reap_events() {
         uint32_t head = 0;
         unsigned i = 0;
         io_uring_cqe* cqe;
@@ -469,41 +459,35 @@ public:
                 // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
                 // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
                 ctx->res = -ETIMEDOUT;
-                continue;
+                if (!ctx->draining) continue;
             } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
                 // The linked timer itself is also a canceller. The reasons it got cancelled could be:
                 // 1. I/O finished in time
                 // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                continue;
+                if (!ctx->draining) continue;
             } else if (cqe->flags & IORING_CQE_F_MORE) {
                 continue;
             }
-<<<<<<< HEAD
-=======
-            // No F_MORE from here on, i.e., the final CQE of this request
-            ctx->done = true;
-            if (!ctx->is_event) {
-                if (!ctx->is_canceller && ctx->res == -ECANCELED) {
-                    // An I/O was canceled because of:
-                    // 1. IORING_OP_LINK_TIMEOUT. Leave the interrupt job to the linked timer later.
-                    // 2. IORING_OP_POLL_REMOVE. The I/O is actually a polling.
-                    // 3. IORING_OP_ASYNC_CANCEL. This OP is the superset of case 2.
-                    ctx->res = -ETIMEDOUT;
-                    if (!ctx->draining) continue;
-                } else if (ctx->is_canceller && ctx->res == -ECANCELED) {
-                    // The linked timer itself is also a canceller. The reasons it got cancelled could be:
-                    // 1. I/O finished in time
-                    // 2. I/O was cancelled by IORING_OP_ASYNC_CANCEL
-                    if (!ctx->draining) continue;
-                }
-                photon::thread_interrupt(ctx->th_id, EOK);
->>>>>>> af0324c (fix(io): wake io_uring cancellation drains on final CQEs (#1671))
 
             photon::thread_interrupt(ctx->th_id, EOK);
         }
 
         io_uring_cq_advance(m_ring, i);
         return 0;
+    }
+
+    ssize_t wait_and_fire_events(uint64_t timeout) override {
+        // Prepare own timeout
+        if (timeout > (uint64_t) std::numeric_limits<int64_t>::max()) {
+            timeout = std::numeric_limits<int64_t>::max();
+        }
+
+        auto ts = usec_to_timespec(timeout);
+        if (m_submit_wait_func(m_ring, &ts) != 0) {
+            return -1;
+        }
+
+        return reap_events();
     }
 
     int cancel_wait() override {
@@ -676,19 +660,13 @@ int iouringEngine::m_cooperative_task_flag = -1;
 
 iouringEngine::SubmitWaitFunc iouringEngine::m_submit_wait_func = nullptr;
 
-<<<<<<< HEAD
+} // namespace
+
+#ifndef PHOTON_IOURING_TEST_ENGINE_ONLY
 template<typename...Ts>
 inline size_t do_async_io(Ts...xs) {
     auto mee = (iouringEngine*) get_vcpu()->master_event_engine;
     return mee->async_io(xs...);
-=======
-} // namespace
-
-#ifndef PHOTON_IOURING_TEST_ENGINE_ONLY
-inline iouringEngine* get_ring(CascadingEventEngine* cee) {
-    return cee ? static_cast<iouringEngine*>(cee) :
-                 static_cast<iouringEngine*>(get_vcpu()->master_event_engine);
->>>>>>> af0324c (fix(io): wake io_uring cancellation drains on final CQEs (#1671))
 }
 
 ssize_t iouring_pread(int fd, void* buf, size_t count, off_t offset, uint64_t flags, Timeout timeout) {
