@@ -209,7 +209,46 @@ TEST(socket_pool_failure, collector_restarts_after_reentrant_destruction) {
     EXPECT_EQ(nullptr, pool._key_head);
 }
 
-TEST(socket_pool_failure, collector_detaches_batch_before_reentrant_heartbeat) {
+static size_t idle_count(TCPSocketPool& pool) {
+    size_t idle = 0;
+    for (auto node = pool._key_head->next(); node != pool._key_head;
+         node = node->next())
+        ++idle;
+    return idle;
+}
+
+static void put_two_idle(TCPSocketPool& pool, const char* key) {
+    auto first = pool.connect(key, []() -> ISocketStream* {
+        return new_string_socket_stream();
+    });
+    auto second = pool.connect(key, []() -> ISocketStream* {
+        return new_string_socket_stream();
+    });
+    ASSERT_NE(nullptr, first);
+    ASSERT_NE(nullptr, second);
+    delete first;
+    delete second;
+    ASSERT_EQ(2U, pool._key_head->_refcnt);
+}
+
+TEST(socket_pool_failure, heartbeat_round_visits_each_node_once) {
+    int heartbeats = 0;
+    // Fail after a bound so a non-terminating round still finishes.
+    auto heartbeater = [&](ISocketStream*) -> int {
+        return ++heartbeats > 16 ? -1 : 0;
+    };
+    SocketPoolArgs args;
+    args.heartbeater = heartbeater;
+    TCPSocketPool pool(args);
+    put_two_idle(pool, "heartbeat");
+    pool.check_expire_heartbeat();
+    EXPECT_EQ(2, heartbeats);
+    ASSERT_NE(nullptr, pool._key_head);
+    EXPECT_EQ(2U, pool._key_head->_refcnt);
+    EXPECT_EQ(2U, idle_count(pool));
+}
+
+TEST(socket_pool_failure, reentrant_heartbeat_reuses_remaining_node) {
     TCPSocketPool* poolPtr = nullptr;
     int heartbeats = 0;
     int connectors = 0;
@@ -220,38 +259,57 @@ TEST(socket_pool_failure, collector_detaches_batch_before_reentrant_heartbeat) {
             ++connectors;
             return nullptr;
         });
-        EXPECT_EQ(nullptr, grabbed);
-        if (grabbed) {
-            grabbed->close();
-            delete grabbed;
-        }
+        EXPECT_NE(nullptr, grabbed);
+        delete grabbed;
         return 0;
     };
     SocketPoolArgs args;
     args.heartbeater = heartbeater;
     TCPSocketPool pool(args);
     poolPtr = &pool;
-    auto first = pool.connect("heartbeat", []() -> ISocketStream* {
-        return new_string_socket_stream();
-    });
-    auto second = pool.connect("heartbeat", []() -> ISocketStream* {
-        return new_string_socket_stream();
-    });
-    ASSERT_NE(nullptr, first);
-    ASSERT_NE(nullptr, second);
-    delete first;
-    delete second;
+    put_two_idle(pool, "heartbeat");
     pool.check_expire_heartbeat();
     EXPECT_EQ(2, heartbeats);
-    EXPECT_EQ(1, connectors);
+    EXPECT_EQ(0, connectors);
     ASSERT_EQ(1U, pool.sockmap.size());
     ASSERT_NE(nullptr, pool._key_head);
     EXPECT_EQ(2U, pool._key_head->_refcnt);
-    size_t idle = 0;
-    for (auto node = pool._key_head->next(); node != pool._key_head;
-         node = node->next())
-        ++idle;
-    EXPECT_EQ(2U, idle);
+    EXPECT_EQ(2U, idle_count(pool));
+}
+
+TEST(socket_pool_failure, concurrent_connect_reuses_during_yielding_heartbeat) {
+    semaphore enter(0), leave(0);
+    bool fired = false;
+    int connectors = 0;
+    ISocketStream* grabbed = nullptr;
+    auto heartbeater = [&](ISocketStream*) -> int {
+        if (!fired) {
+            fired = true;
+            enter.signal(1);
+            leave.wait(1);
+        }
+        return 0;
+    };
+    SocketPoolArgs args;
+    args.heartbeater = heartbeater;
+    TCPSocketPool pool(args);
+    put_two_idle(pool, "heartbeat");
+    auto th = thread_enable_join(thread_create11([&] {
+        enter.wait(1);
+        grabbed = pool.connect("heartbeat", [&]() -> ISocketStream* {
+            ++connectors;
+            errno = ECONNREFUSED;
+            return nullptr;
+        });
+        leave.signal(1);
+    }));
+    pool.check_expire_heartbeat();
+    thread_join(th);
+    EXPECT_NE(nullptr, grabbed);
+    EXPECT_EQ(0, connectors);
+    delete grabbed;
+    EXPECT_EQ(2U, pool._key_head->_refcnt);
+    EXPECT_EQ(2U, idle_count(pool));
 }
 
 int main(int argc, char** argv) {

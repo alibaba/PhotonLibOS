@@ -297,6 +297,8 @@ public:
                     auto link = &_key_head;
                     while (*link != head) link = &(*link)->_key_next;
                     *link = head->_key_next;
+                    // Erase by key: a rehash during connector() invalidates
+                    // iterators. This builds a temporary key, as emplace() did.
                     sockmap.erase(head->key());
                     errno = err.no;
                 }
@@ -373,31 +375,28 @@ public:
                 }
                 ptr->remove_from_list();
                 rm_watch(ptr);
-                assert(h->_refcnt > 0);
+                assert(h->_refcnt > 1); // the node and the pin
                 h->_refcnt--;
                 delete ptr;
             }
             if (args.heartbeater) {
-                // Detach the whole heartbeat batch. A callback can then
-                // reenter connect(), but it cannot remove any node retained
-                // by this traversal.
-                StreamListNode pending(nullptr, h, 0);
-                while (!h->single()) {
+                // Take one node at a time and keep only the pinned head and a
+                // counter across the callback, so the remaining nodes stay
+                // reusable by connect(). Heartbeated nodes go to the tail; the
+                // budget bounds the round.
+                uint32_t budget = 0;
+                for (auto p = h->next(); p != h; p = p->next()) ++budget;
+                while (budget-- && !h->single()) {
                     auto ptr = h->next();
                     ptr->remove_from_list();
                     rm_watch(ptr);
-                    pending.insert_before(ptr);
-                }
-                while (!pending.single()) {
-                    auto ptr = pending.next();
-                    ptr->remove_from_list();
                     near_expire = std::min(near_expire, ptr->timeout);
                     if (args.heartbeater(ptr->stream.get()) == 0) {
                         h->insert_before(ptr);
                         add_watch(ptr->stream->get_underlay_fd(), ptr);
                         continue;
                     }
-                    assert(h->_refcnt > 0);
+                    assert(h->_refcnt > 1); // the node and the pin
                     h->_refcnt--;
                     delete ptr;
                 }
