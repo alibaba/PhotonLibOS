@@ -92,9 +92,6 @@ void check_unpublished_slot(Queue& queue) {
     std::promise<uint64_t> first_result;
     auto first_future = first_result.get_future();
     std::thread first([&] {
-        ASSERT_EQ(
-            0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-        DEFER(photon::fini());
         uint64_t value = 0;
         EXPECT_TRUE(queue.pop(value, [&] { claimed.set_value(); }));
         first_result.set_value(value);
@@ -143,9 +140,6 @@ TEST(mpmc_claim, several_holes_leave_later_work_available) {
     auto ready_b = claimed_b.get_future();
     std::array<uint64_t, 2> results{};
     std::thread first([&] {
-        ASSERT_EQ(
-            0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-        DEFER(photon::fini());
         EXPECT_TRUE(queue.pop(results[0], [&] { claimed_a.set_value(); }));
     });
     std::thread second;
@@ -162,9 +156,6 @@ TEST(mpmc_claim, several_holes_leave_later_work_available) {
     ASSERT_EQ(std::future_status::ready,
               ready_a.wait_for(std::chrono::seconds(5)));
     second = std::thread([&] {
-        ASSERT_EQ(
-            0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-        DEFER(photon::fini());
         EXPECT_TRUE(queue.pop(results[1], [&] { claimed_b.set_value(); }));
     });
     ASSERT_EQ(std::future_status::ready,
@@ -183,9 +174,6 @@ TEST(mpmc_claim, wraparound_does_not_reuse_a_claimed_slot) {
     std::promise<void> claimed;
     auto ready = claimed.get_future();
     std::thread first([&] {
-        ASSERT_EQ(
-            0, photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE));
-        DEFER(photon::fini());
         uint64_t value = 0;
         EXPECT_TRUE(queue.pop(value, [&] { claimed.set_value(); }));
         EXPECT_EQ(1U, value);
