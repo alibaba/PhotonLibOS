@@ -819,6 +819,46 @@ TEST_F(ExtfsTest, Statfs) {
     EXPECT_EQ(4096, stat.f_bsize);
 }
 
+// A superblock write only covers 1KB at offset 1024, so it bypasses the buffer,
+// while the group descriptors right next to it go through it. The buffered copy
+// must not be allowed to overwrite the superblock when it gets flushed, or every
+// field libext2fs updates at close time is silently rolled back.
+TEST(BufferFile, superblock_survives_a_buffered_session) {
+    std::string image_path = "/tmp/test_buffer_coherency.img";
+    auto image = photon::fs::open_localfile_adaptor(image_path.c_str(),
+                                                   O_RDWR | O_CREAT | O_TRUNC, 0644, 0);
+    ASSERT_NE(nullptr, image);
+    ASSERT_EQ(0, image->ftruncate(1UL << 30));
+    ASSERT_EQ(0, photon::fs::make_extfs(image));
+
+    auto buffered = photon::fs::new_extfs(image);  // buffered, as by default
+    ASSERT_NE(nullptr, buffered);
+    std::string data(1 << 20, 'x');
+    for (int i = 0; i < 5; i++) {
+        std::string path = "/buffered" + std::to_string(i);
+        auto file = buffered->creat(path.c_str(), 0644);
+        ASSERT_NE(nullptr, file);
+        EXPECT_EQ((ssize_t)data.size(), file->pwrite(data.data(), data.size(), 0));
+        delete file;
+    }
+    EXPECT_EQ(0, buffered->mkdir("/buffered_dir", 0755));
+    EXPECT_EQ(0, buffered->unlink("/buffered0"));
+    // statfs reports straight from the in-memory superblock
+    struct statfs in_memory = {0};
+    EXPECT_EQ(0, buffered->statfs("/", &in_memory));
+    delete buffered;  // flushes the buffer, and the superblock along with it
+
+    auto reopened = photon::fs::new_extfs(image);
+    ASSERT_NE(nullptr, reopened);
+    struct statfs on_disk = {0};
+    EXPECT_EQ(0, reopened->statfs("/", &on_disk));
+    delete reopened;
+    delete image;
+
+    EXPECT_EQ(in_memory.f_bfree, on_disk.f_bfree);
+    EXPECT_EQ(in_memory.f_ffree, on_disk.f_ffree);
+}
+
 TEST_F(ExtfsTest, Access) {
     auto file = fs->creat("/test_access", 0755);
     EXPECT_NE(nullptr, file);
