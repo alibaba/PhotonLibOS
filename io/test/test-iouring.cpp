@@ -660,6 +660,38 @@ struct CompletionRing {
     }
 };
 
+TEST(iouring_completion, timeout_queue_full_neutralizes_io_sqe) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    CompletionRing fixture;
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        auto sqe = fixture.engine._get_sqe();
+        ASSERT_NE(nullptr, sqe);
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data(sqe, nullptr);
+    }
+    auto sqe = fixture.engine._get_sqe();
+    ASSERT_NE(nullptr, sqe);
+    io_uring_prep_openat(sqe, AT_FDCWD, "/dev/null", O_CLOEXEC, 0);
+    auto result = fixture.engine._async_io(sqe, 1000000, IOSQE_ASYNC);
+    auto error = errno;
+    EXPECT_EQ(-1, result);
+    EXPECT_EQ(EBUSY, error);
+    EXPECT_EQ(unsigned(CompletionRing::CAPACITY), fixture.ring.sq.sqe_tail);
+    // The reserved entry will still be submitted, but it must neither retain
+    // operation-specific flags nor link the next request to this failed call.
+    EXPECT_EQ(IORING_OP_NOP, sqe->opcode);
+    EXPECT_EQ(0, sqe->flags);
+    EXPECT_EQ(0U, sqe->rw_flags);
+    EXPECT_EQ(0U, sqe->user_data);
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        EXPECT_EQ(IORING_OP_NOP, fixture.sqes[i].opcode);
+        EXPECT_EQ(0, fixture.sqes[i].flags);
+        EXPECT_EQ(0U, fixture.sqes[i].user_data);
+    }
+    fixture.complete(CompletionRing::CAPACITY - 1, 0);
+}
+
 static void interrupted_completion_order(const unsigned* order, unsigned count,
                                          int ioResult, int cancelResult,
                                          bool fullQueue = false, bool timed = true) {

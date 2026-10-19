@@ -249,8 +249,10 @@ public:
             if (sqe == nullptr) {
                 // The first SQE is already in the SQ ring and will be submitted
                 // sooner or later. Turn it into a harmless NOP without user data
-                // (prep_rw clears sqe->flags, including IOSQE_IO_LINK), so that
-                // its CQE won't reference the stack contexts after we return.
+                // so its CQE won't reference the stack contexts after return.
+                // Newer liburing prep helpers do not clear flags or other
+                // operation-specific state when reusing an acquired SQE.
+                *first_sqe = {};
                 io_uring_prep_nop(first_sqe);
                 io_uring_sqe_set_data(first_sqe, nullptr);
                 return -1;      // errno was set to EBUSY by _get_sqe
