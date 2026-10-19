@@ -660,6 +660,38 @@ struct CompletionRing {
     }
 };
 
+TEST(iouring_completion, timeout_queue_full_neutralizes_io_sqe) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    CompletionRing fixture;
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        auto sqe = fixture.engine._get_sqe();
+        ASSERT_NE(nullptr, sqe);
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data(sqe, nullptr);
+    }
+    auto sqe = fixture.engine._get_sqe();
+    ASSERT_NE(nullptr, sqe);
+    io_uring_prep_openat(sqe, AT_FDCWD, "/dev/null", O_CLOEXEC, 0);
+    auto result = fixture.engine._async_io(sqe, 1000000, IOSQE_ASYNC);
+    auto error = errno;
+    EXPECT_EQ(-1, result);
+    EXPECT_EQ(EBUSY, error);
+    EXPECT_EQ(unsigned(CompletionRing::CAPACITY), fixture.ring.sq.sqe_tail);
+    // The reserved entry will still be submitted, but it must neither retain
+    // operation-specific flags nor link the next request to this failed call.
+    EXPECT_EQ(IORING_OP_NOP, sqe->opcode);
+    EXPECT_EQ(0, sqe->flags);
+    EXPECT_EQ(0U, sqe->rw_flags);
+    EXPECT_EQ(0U, sqe->user_data);
+    for (unsigned i = 0; i + 1 < CompletionRing::CAPACITY; ++i) {
+        EXPECT_EQ(IORING_OP_NOP, fixture.sqes[i].opcode);
+        EXPECT_EQ(0, fixture.sqes[i].flags);
+        EXPECT_EQ(0U, fixture.sqes[i].user_data);
+    }
+    fixture.complete(CompletionRing::CAPACITY - 1, 0);
+}
+
 static void interrupted_completion_order(const unsigned* order, unsigned count,
                                          int ioResult, int cancelResult,
                                          bool fullQueue = false, bool timed = true) {
@@ -756,34 +788,161 @@ TEST(iouring_completion, full_submission_queue_completion_orders) {
     }
 }
 
-TEST(iouring_completion, normal_success_and_timeout_wakeup) {
+TEST(iouring_completion, normal_all_completion_orders) {
     ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
     DEFER(photon::fini());
-    for (bool timeout : {false, true}) {
+    for (int ioResult : {1, -EIO, -ECANCELED}) {
+        unsigned order[] = {0, 1};
+        do {
+            SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                << " order=" << order[0] << order[1]);
+            CompletionRing fixture;
+            bool returned = false;
+            int result = 0, error = 0;
+            auto waiter = photon::thread_create11([&] {
+                auto sqe = fixture.engine._get_sqe();
+                io_uring_prep_poll_add(sqe, 0, POLLIN);
+                result = fixture.engine._async_io(sqe, 1000000, 0);
+                error = errno;
+                returned = true;
+            });
+            auto join = photon::thread_enable_join(waiter);
+            photon::thread_yield();
+            int timerResult = ioResult == -ECANCELED ? -ETIME : -ECANCELED;
+            fixture.complete(order[0], order[0] == 0 ? ioResult : timerResult);
+            EXPECT_FALSE(returned);
+            // Avoid delivering a CQE to an expired stack if this regression fails
+            // with break_on_failure disabled.
+            if (!returned)
+                fixture.complete(order[1], order[1] == 0 ? ioResult : timerResult);
+            EXPECT_TRUE(returned);
+            if (!returned) photon::thread_interrupt(waiter, EOK);
+            photon::thread_join(join);
+            EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
+            if (ioResult < 0) {
+                EXPECT_EQ(ioResult == -ECANCELED ? ETIMEDOUT : EIO, error);
+            }
+        } while (std::next_permutation(order, order + 2));
+    }
+}
+
+TEST(iouring_completion, interrupted_after_partial_normal_completion) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -EIO, -ECANCELED}) {
+        for (unsigned first : {0U, 1U}) {
+            unsigned order[] = {1U - first, 2};
+            do {
+                SCOPED_TRACE(testing::Message() << "io=" << ioResult
+                    << " first=" << first << " remaining=" << order[0] << order[1]);
+                CompletionRing fixture;
+                bool returned = false;
+                int result = 0, error = 0;
+                auto waiter = photon::thread_create11([&] {
+                    auto sqe = fixture.engine._get_sqe();
+                    io_uring_prep_poll_add(sqe, 0, POLLIN);
+                    result = fixture.engine._async_io(sqe, 1000000, 0);
+                    error = errno;
+                    returned = true;
+                });
+                auto join = photon::thread_enable_join(waiter);
+                photon::thread_yield();
+                int timerResult = ioResult == -ECANCELED ? -ETIME : -ECANCELED;
+                fixture.complete(first, first == 0 ? ioResult : timerResult);
+                EXPECT_FALSE(returned);
+                if (returned) {
+                    photon::thread_join(join);
+                    continue; // do not deliver CQEs to expired stack contexts
+                }
+                photon::thread_interrupt(waiter, EINTR);
+                photon::thread_yield();
+                EXPECT_EQ(3U, fixture.ring.sq.sqe_tail);
+                EXPECT_FALSE(returned);
+                for (unsigned index : order) {
+                    fixture.complete(index, index == 0 ? ioResult :
+                        (index == 1 ? timerResult : -ENOENT));
+                    if (index == order[0]) {
+                        EXPECT_FALSE(returned);
+                        photon::thread_interrupt(waiter, ESHUTDOWN);
+                        photon::thread_yield();
+                        EXPECT_FALSE(returned);
+                    }
+                }
+                EXPECT_TRUE(returned);
+                if (!returned) photon::thread_interrupt(waiter, EOK);
+                photon::thread_join(join);
+                EXPECT_EQ(-1, result);
+                EXPECT_EQ(EINTR, error);
+            } while (std::next_permutation(order, order + 2));
+        }
+    }
+}
+
+TEST(iouring_completion, normal_untimed_completion) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    for (int ioResult : {1, -EIO}) {
         CompletionRing fixture;
         bool returned = false;
         int result = 0, error = 0;
         auto waiter = photon::thread_create11([&] {
             auto sqe = fixture.engine._get_sqe();
-            io_uring_prep_nop(sqe);
-            result = fixture.engine._async_io(sqe, 1000000, 0);
+            io_uring_prep_poll_add(sqe, 0, POLLIN);
+            result = fixture.engine._async_io(sqe, photon::Timeout(), 0);
             error = errno;
             returned = true;
         });
         auto join = photon::thread_enable_join(waiter);
         photon::thread_yield();
-        // A canceled I/O defers to its timeout; a canceled timeout defers to
-        // successful I/O. Neither may wake a normal waiter on its own.
-        fixture.complete(timeout ? 0 : 1, -ECANCELED);
-        EXPECT_FALSE(returned);
-        fixture.complete(timeout ? 1 : 0, timeout ? -ETIME : 1);
+        EXPECT_EQ(1U, fixture.ring.sq.sqe_tail);
+        fixture.complete(0, ioResult);
         EXPECT_TRUE(returned);
-        if (!returned) photon::thread_interrupt(waiter, EINTR);
+        if (!returned) photon::thread_interrupt(waiter, EOK);
         photon::thread_join(join);
-        EXPECT_EQ(timeout ? -1 : 1, result);
-        if (timeout) {
-            EXPECT_EQ(ETIMEDOUT, error);
+        EXPECT_EQ(ioResult < 0 ? -1 : ioResult, result);
+        if (ioResult < 0) {
+            EXPECT_EQ(EIO, error);
         }
+    }
+}
+
+TEST(iouring_completion, eager_normal_completion_on_kernel_ring) {
+    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
+    DEFER(photon::fini());
+    photon::iouringEngine engine;
+    photon::iouring_args args;
+    args.is_master = false;
+    args.eager_submit = true;
+    ASSERT_EQ(0, engine.init(args));
+    bool stop = false;
+    auto pump = photon::thread_create11([&] {
+        void* data[1];
+        while (!stop)
+            engine.wait_for_events(data, 1, 1000);
+    });
+    ASSERT_NE(nullptr, pump);
+    auto join = photon::thread_enable_join(pump);
+    DEFER({
+        stop = true;
+        photon::thread_interrupt(pump);
+        photon::thread_join(join);
+    });
+    int fds[2];
+    ASSERT_EQ(0, ::pipe(fds));
+    DEFER({ ::close(fds[0]); ::close(fds[1]); });
+    char buf = 0;
+    for (int i = 0; i < 32; ++i) {
+        int result = engine.async_io(&io_uring_prep_poll_add, 1000, 0, fds[0], POLLIN);
+        int error = errno;
+        ASSERT_EQ(-1, result);
+        ASSERT_EQ(ETIMEDOUT, error);
+        ASSERT_EQ(1, ::write(fds[1], &buf, 1));
+        ASSERT_GT(engine.async_io(&io_uring_prep_poll_add, 1000000, 0, fds[0], POLLIN), 0);
+        ASSERT_EQ(1, ::read(fds[0], &buf, 1));
+        result = engine.async_io(&io_uring_prep_read, 1000000, 0, -1, &buf, 1, 0);
+        error = errno;
+        ASSERT_EQ(-1, result);
+        ASSERT_EQ(EBADF, error);
     }
 }
 

@@ -231,6 +231,9 @@ public:
     int32_t _async_io(io_uring_sqe* sqe, Timeout timeout, uint32_t ring_flags) {
         auto* first_sqe = sqe;
         auto gen = m_generation;
+        // Every wait below belongs to this ring's vCPU, including the waits
+        // for trailing completions after success or interruption.
+        SCOPED_PAUSE_WORK_STEALING;
         sqe->flags |= (uint8_t) (ring_flags & 0xff);
         ioCtx io_ctx(false, false);
         io_uring_sqe_set_data(sqe, &io_ctx);
@@ -246,8 +249,10 @@ public:
             if (sqe == nullptr) {
                 // The first SQE is already in the SQ ring and will be submitted
                 // sooner or later. Turn it into a harmless NOP without user data
-                // (prep_rw clears sqe->flags, including IOSQE_IO_LINK), so that
-                // its CQE won't reference the stack contexts after we return.
+                // so its CQE won't reference the stack contexts after return.
+                // Newer liburing prep helpers do not clear flags or other
+                // operation-specific state when reusing an acquired SQE.
+                *first_sqe = {};
                 io_uring_prep_nop(first_sqe);
                 io_uring_sqe_set_data(first_sqe, nullptr);
                 return -1;      // errno was set to EBUSY by _get_sqe
@@ -256,19 +261,23 @@ public:
             io_uring_sqe_set_data(sqe, &timer_ctx);
         }
 
+        // Normal completion also drains both stack contexts: the timeout can
+        // arrive before the I/O it cancels, or after a successful I/O. Wake
+        // for every final CQE so either order can finish the wait below.
+        io_ctx.draining = timer_ctx.draining = true;
         if (try_submit() < 0) return -1;
         if (m_args.eager_submit) {
             reap_events();
-            if (io_ctx.done) {
+            if (io_ctx.done && (!has_timer || timer_ctx.done)) {
                 thread_yield(); // to avoid starvation
                 goto eager_done;
             }
         }
 
-        {
-        SCOPED_PAUSE_WORK_STEALING;
-        photon::thread_sleep(-1);
-        }
+        do {
+            photon::thread_sleep(-1);
+        } while (errno == EOK &&
+                 (!io_ctx.done || (has_timer && !timer_ctx.done)));
 
         if (likely(errno == EOK)) {
         eager_done:
@@ -290,9 +299,6 @@ public:
                 errno = err_backup.no;
                 return -1;
             }
-            // Every final CQE must wake the drain waiter, including canceled
-            // I/O and linked timers that normally defer waking to another CQE.
-            io_ctx.draining = timer_ctx.draining = true;
             sqe = _get_sqe();
             if (sqe == nullptr) {
                 // Unable to cancel. Wait for the in-flight I/O (and its linked
@@ -528,7 +534,7 @@ public:
         // before this flag turns true. No atomic needed, since a vCPU is
         // single OS thread and work stealing is paused during the wait.
         bool done = false;
-        // Cancellation cleanup waits for every final CQE, in any reap batch.
+        // A waiter draining stack contexts needs every final CQE to wake it.
         bool draining = false;
     };
 
