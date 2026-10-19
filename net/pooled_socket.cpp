@@ -107,8 +107,31 @@ struct StreamListNode : public intrusive_list_node<StreamListNode> {
     int fd;
     Timeout timeout;
 
+<<<<<<< HEAD
     StreamListNode(const EndPoint& key, ISocketStream* stream, int fd, uint64_t TTL_us)
         : key(key), stream(stream), fd(fd), timeout(TTL_us) {
+=======
+struct StreamListHead : public StreamListNode {
+    StreamListHead* _key_next = this;
+    // References from idle/checked-out streams, connectors and collector pins.
+    uint32_t _refcnt = 0;
+    uint16_t _key_len;
+    char _key[0];
+
+    StreamListHead(std::string_view k) : StreamListNode(0, 0, 0) {
+        assert(k.size() < UINT16_MAX);
+        memcpy(_key, k.data(), k.size());
+        _key[_key_len = k.size()] = '\0';
+    }
+    std::string_view key() const { return {_key, _key_len}; }
+    static StreamListHead* create(std::string_view key) {
+        auto buf = malloc(sizeof(StreamListHead) + key.size() + 1);
+        return new (buf) StreamListHead(key);
+    }
+    void destroy() {
+        this->~StreamListHead();
+        free(this);
+>>>>>>> 7a5a1ea (fix(net): reclaim failed pool routes safely across reentrant callbacks (#1681))
     }
 };
 
@@ -200,6 +223,7 @@ public:
             delete stream;
             goto again;
         }
+<<<<<<< HEAD
         return new PooledTCPSocketStream(stream, this, remote);
     }
     uint64_t evict() {
@@ -218,6 +242,26 @@ public:
             } else {
                 near_expire = std::min(near_expire, exp);
                 it++;
+=======
+        ISocketStream* stream;
+        if (head->single()) {
+            head->_refcnt++;
+            stream = connector();
+            if (!stream) {
+                if (--head->_refcnt == 0) {
+                    // Connectors may yield and other calls can prepend keys or
+                    // pin this head. Unlink only after its final reference drops.
+                    ERRNO err;
+                    auto link = &_key_head;
+                    while (*link != head) link = &(*link)->_key_next;
+                    *link = head->_key_next;
+                    // Erase by key: a rehash during connector() invalidates
+                    // iterators. This builds a temporary key, as emplace() did.
+                    sockmap.erase(head->key());
+                    errno = err.no;
+                }
+                return nullptr;
+>>>>>>> 7a5a1ea (fix(net): reclaim failed pool routes safely across reentrant callbacks (#1681))
             }
         }
         for (auto node : freelist) {
@@ -235,7 +279,91 @@ public:
         auto node = new StreamListNode(ep, stream, fd, TTL_us);
         push_into_pool(node);
         errno = err.no;
+<<<<<<< HEAD
         return true;
+=======
+    }
+
+    Timeout check_expire_heartbeat() {
+        Timeout near_expire(args.expiration);
+        for (auto h = _key_head; h; h = h->_key_next) {
+            // Stream destructors and heartbeats can yield or reenter connect().
+            // Pin the head and always restart expiration from its first node,
+            // so a destructor may remove another node without invalidating a
+            // retained traversal pointer.
+            ++h->_refcnt;
+            while (!h->single()) {
+                auto ptr = h->next();
+                if (now < ptr->timeout.expiration()) {
+                    near_expire = std::min(near_expire, ptr->timeout);
+                    break;
+                }
+                ptr->remove_from_list();
+                rm_watch(ptr);
+                assert(h->_refcnt > 1); // the node and the pin
+                h->_refcnt--;
+                delete ptr;
+            }
+            if (args.heartbeater) {
+                // Take one node at a time and keep only the pinned head and a
+                // counter across the callback, so the remaining nodes stay
+                // reusable by connect(). Heartbeated nodes go to the tail; the
+                // budget bounds the round.
+                uint32_t budget = 0;
+                for (auto p = h->next(); p != h; p = p->next()) ++budget;
+                while (budget-- && !h->single()) {
+                    auto ptr = h->next();
+                    ptr->remove_from_list();
+                    rm_watch(ptr);
+                    near_expire = std::min(near_expire, ptr->timeout);
+                    if (args.heartbeater(ptr->stream.get()) == 0) {
+                        h->insert_before(ptr);
+                        add_watch(ptr->stream->get_underlay_fd(), ptr);
+                        continue;
+                    }
+                    assert(h->_refcnt > 1); // the node and the pin
+                    h->_refcnt--;
+                    delete ptr;
+                }
+            }
+            --h->_refcnt;
+        }
+        // Erase empty entries, unlinking from key list as we go
+        auto *prev_next = &_key_head;
+        for (auto h = _key_head; h; ) {
+            if (h->_refcnt) {
+                prev_next = &h->_key_next;
+                h = h->_key_next;
+            } else {
+                auto next = h->_key_next;
+                *prev_next = next;
+                sockmap.erase(h->key()); // frees h via StreamList destructor
+                h = next;
+            }
+        }
+        assert(near_expire.expiration() > now);
+        return near_expire;
+    }
+
+    void check_fd_state(Timeout timeout) {
+    again:
+        StreamListNode* nodes[16];
+        auto ret = ev->wait_for_events((void**)nodes, 16, timeout);
+        for (int i = 0; i < ret; i++) {
+            // since destructed socket should never become readable before
+            // it have been acquired again
+            // if it is readable or RDHUP, both condition should treat as
+            // socket shutdown
+            assert(!nodes[i]->single());
+            assert(nodes[i] != nodes[i]->head);
+            assert(nodes[i]->head->_refcnt > 0);
+            nodes[i]->head->_refcnt--;
+            nodes[i]->remove_from_list();
+            rm_watch(nodes[i]);
+        }
+        for (int i = 0; i < ret; i++) delete nodes[i];
+        if (ret == (int)LEN(nodes)) goto again; // may have more
+>>>>>>> 7a5a1ea (fix(net): reclaim failed pool routes safely across reentrant callbacks (#1681))
     }
 
     void collect() {
