@@ -101,10 +101,10 @@ TEST(http_client, DISABLED_SNI) {
 }
 #endif
 
-// HTTP-level test: verify set_ca_cert works through the HTTP client.
-// Must run in a separate std::thread because the thread_local PooledDialer
-// caches the TLS context from previous tests; reusing it after the context
-// is freed would be a use-after-free.
+// HTTP-level test: verify set_ca_cert works through the HTTP client. Runs in
+// its own std::thread with a dedicated photon runtime so the client and its
+// per-client dialer (and the TLS context they hold) are created and torn down
+// in isolation from the other tests.
 //
 // The certificate must carry DNS:localhost, since loading a CA turns on peer
 // verification and the client now also checks the name in the URL against the
@@ -168,9 +168,8 @@ TEST(client_tls, http_with_ca_cert) {
     EXPECT_EQ("test", test_handle);
 }
 
-// Verify HTTP clients with different CA configs are isolated across OS threads.
-// Each client runs in its own std::thread to get an independent PooledDialer,
-// avoiding use-after-free on the thread_local dialer's cached TLS context.
+// Exercise clients with different CA configurations on separate runtimes. The
+// same-vCPU case below separately checks per-client pool/TLS isolation.
 TEST(client_tls, http_client_cross_thread_isolation) {
     // Reached over https://127.0.0.1, so the certificate needs IP:127.0.0.1.
     auto chain = generate_ca_signed_cert({"DNS:localhost", "IP:127.0.0.1"}, "localhost");
@@ -190,7 +189,7 @@ TEST(client_tls, http_client_cross_thread_isolation) {
 
     auto port = tcpserver->getsockname().port;
 
-    // Client A with correct CA (separate thread for fresh PooledDialer)
+    // Client A with correct CA on its own runtime.
     int thread_a_result = -1;
     int thread_a_status = 0;
     photon::semaphore sem_a;
@@ -218,7 +217,7 @@ TEST(client_tls, http_client_cross_thread_isolation) {
     ASSERT_EQ(0, thread_a_result);
     EXPECT_EQ(200, thread_a_status);
 
-    // Client B with wrong CA (separate thread)
+    // Client B with wrong CA on a separate runtime.
     auto wrong_ca_pem = generate_different_self_signed_cert();
     int thread_b_result = 0;
     photon::semaphore sem_b;
@@ -242,6 +241,60 @@ TEST(client_tls, http_client_cross_thread_isolation) {
     tb.detach();
     sem_b.wait(1);
     EXPECT_NE(0, thread_b_result);
+}
+
+TEST(client_tls, http_clients_with_different_cas_are_isolated_on_one_vcpu) {
+    auto chain = generate_ca_signed_cert({"IP:127.0.0.1"}, "localhost");
+    auto serverCtx = net::new_tls_context(chain.cert_pem.c_str(), chain.key_pem.c_str(), nullptr);
+    DEFER(delete serverCtx);
+    auto tcpServer = net::new_tls_server(serverCtx, net::new_tcp_socket_server(), true);
+    DEFER(delete tcpServer);
+    tcpServer->timeout(1'000'000);
+    ASSERT_EQ(0, tcpServer->bind_v4localhost());
+    ASSERT_EQ(0, tcpServer->listen());
+    auto server = net::http::new_http_server();
+    DEFER(delete server);
+    server->add_handler({nullptr, &idiot_handler});
+    tcpServer->set_handler(server->get_connection_handler());
+    ASSERT_EQ(0, tcpServer->start_loop());
+    auto url = estring().appends("https://127.0.0.1:", tcpServer->getsockname().port, "/test");
+    auto wrongCa = generate_different_self_signed_cert();
+    photon::semaphore done;
+    std::thread worker([&] {
+        DEFER(done.signal(1));
+        ASSERT_EQ(0, photon::init(INIT_EVENT_DEFAULT, INIT_IO_NONE));
+        DEFER(photon::fini());
+        auto goodCtx = net::new_tls_context();
+        DEFER(delete goodCtx);
+        auto badCtx = net::new_tls_context();
+        DEFER(delete badCtx);
+        ASSERT_EQ(0, goodCtx->set_ca_cert(chain.ca_pem.c_str()));
+        ASSERT_EQ(0, badCtx->set_ca_cert(wrongCa.c_str()));
+        auto good = net::http::new_http_client(nullptr, goodCtx);
+        DEFER(delete good);
+        auto bad = net::http::new_http_client(nullptr, badCtx);
+        DEFER(delete bad);
+        auto call = [&](net::http::Client* client, bool accepted) {
+            auto op = client->new_operation(net::http::Verb::GET, url);
+            DEFER(client->destroy_operation(op));
+            op->retry = 0;
+            op->timeout = 3'000'000;
+            op->req.headers.range(0, 19);
+            if (accepted) {
+                ASSERT_EQ(0, op->call());
+                EXPECT_EQ(200, op->resp.status_code());
+                char body[20];
+                EXPECT_EQ(20, op->resp.read(body, sizeof(body)));
+            } else {
+                EXPECT_NE(0, op->call());
+            }
+        };
+        call(good, true);
+        call(bad, false);   // would reuse the first client's CA under a shared dialer
+        call(good, true);
+    });
+    EXPECT_EQ(0, done.wait(1, 10'000'000));
+    worker.join();
 }
 
 // The connection pool must not let one hostname's verified connection serve a

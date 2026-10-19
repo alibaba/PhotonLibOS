@@ -17,6 +17,7 @@ limitations under the License.
 #pragma once
 
 #include <memory>
+#include <photon/net/http/dialer.h>
 #include <photon/net/http/verb.h>
 #include <photon/net/http/message.h>
 #include <photon/net/http/url.h>
@@ -25,12 +26,11 @@ limitations under the License.
 #include <photon/common/stream.h>
 #include <photon/common/timeout.h>
 #include <photon/net/socket.h>
+#include <photon/thread/thread.h>
 #include <vector>
 
 namespace photon {
 namespace net {
-class TLSContext;
-class Resolver;
 namespace http {
 
 class IWebSocketStream;  // Forward declaration for websocket_connect
@@ -56,7 +56,13 @@ public:
 
     class Operation {
     public:
-        Request req;                              // request
+        // Caller headers are not overwritten with common/default fields: each
+        // hop uses a separate outgoing buffer and restores configuration after
+        // body transmission. Following a redirect rewrites req's request line,
+        // target and Host; later calls use that redirected request.
+        // Proxy-Authorization here is proxy input, never an origin header.
+        // During body_writer, req exposes the actual outgoing message.
+        Request req;
         Timeout timeout = {-1ULL};                 // default timeout: unlimited
         uint16_t follow = 8;                      // default follow: 8 at most
         uint16_t retry = 5;                       // default retry: 5 at most
@@ -162,15 +168,16 @@ public:
     virtual Headers* common_headers() = 0;
 
     void set_proxy(std::string_view proxy);
+    // Take over the headers sent to the proxy, and the pooling of the connections
+    // they authenticate. Not owned. See ProxyAuthenticator above.
+    void set_proxy_authenticator(ProxyAuthenticator authenticator) {
+        m_proxy_authenticator = authenticator;
+    }
     void set_user_agent(std::string_view user_agent) {
         m_user_agent = std::string(user_agent);
     }
     void set_bind_ips(std::vector<IPAddr> &ips) {
         m_bind_ips = ips;
-    }
-    void set_resolver(Resolver* resolver, bool ownership = false) {
-        m_resolver = resolver;
-        m_resolver_ownership = ownership;
     }
     StoredURL* get_proxy() {
         return &m_proxy_url;
@@ -188,6 +195,32 @@ public:
     void timeout_ms(uint64_t tmo) { timeout(tmo * 1000ULL); }
     void timeout_s(uint64_t tmo) { timeout(tmo * 1000ULL * 1000ULL); }
 
+    // Inject a dialer to take over connection establishment (and pooling, if
+    // any), replacing the built-in per-vCPU pooled dialer. Not owned; must
+    // outlive the client, and must be safe for concurrent use across vCPUs.
+    void set_dialer(IDialer* dialer) { m_dialer = dialer; }
+
+    // Concurrent calls may use this client from different vCPUs, with a separate
+    // Operation per call. Configure before use: setters and mutation through
+    // common_headers()/get_proxy() must not race calls, except
+    // set_resolver. Built-in dialers capture bind IPs on each vCPU's first dial
+    // and later changes do not update an existing dialer. Supplied cookie jars,
+    // proxy authenticators and custom dialers must support concurrent access;
+    // new_simple_cookie_jar() does not provide cross-vCPU synchronization.
+    //
+    // Inject a DNS resolver, replacing the process-wide default one that the
+    // built-in dialers of this client would otherwise share. It may be replaced
+    // while requests are in flight. The resolver must support concurrent calls;
+    // a borrowed resolver must outlive the client. Reinstalling the currently
+    // configured pointer is a no-op and preserves its original ownership. No
+    // effect on a dialer set by set_dialer(). Register an owned vCPU-bound
+    // resolver on its creating vCPU: final reclamation is dispatched there, and
+    // that vCPU's fini waits for all client/request leases to be released. With
+    // no Photon context at registration, an owned resolver must support
+    // destruction on any thread. With no Photon context at final release,
+    // vCPU-bound reclamation is deferred until its owner's fini.
+    void set_resolver(Resolver* resolver, bool ownership = false);
+
     virtual ISocketStream* native_connect(std::string_view host, uint16_t port,
                                           bool secure = false, uint64_t timeout = -1ULL) = 0;
 
@@ -203,17 +236,22 @@ public:
 protected:
     StoredURL m_proxy_url;
     std::string m_proxy_auth;
+    ProxyAuthenticator m_proxy_authenticator;
     std::string m_user_agent;
     uint64_t m_timeout = -1ULL;
     bool m_proxy = false;
     std::vector<IPAddr> m_bind_ips;
-    Resolver* m_resolver = nullptr;
-    bool m_resolver_ownership = false;
+    IDialer* m_dialer = nullptr;
+    std::shared_ptr<Resolver> m_resolver;
+    photon::spinlock m_resolver_lock;
 };
 
 // Create an HTTP client. Without cookie_jar, "Set-Cookies" headers are ignored.
-// Note: HTTP clients within the same std::thread share TLS config and connection pool.
-// Use separate std::threads for different TLS configurations.
+// Each client owns its connection pools (created lazily, one per vCPU used),
+// which retire with the client or at the respective vCPU's fini. Returned
+// responses, native connections and WebSockets keep their pool alive until
+// released; use/release them on their creating vCPU before its fini. A borrowed
+// tls_ctx must outlive them too. DNS caches are shared by the whole process.
 Client* new_http_client(ICookieJar *cookie_jar = nullptr, TLSContext *tls_ctx = nullptr);
 
 ICookieJar* new_simple_cookie_jar();

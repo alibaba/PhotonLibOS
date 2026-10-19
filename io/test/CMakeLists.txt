@@ -16,6 +16,10 @@ if (LINUX)
     photon_add_test(test-iouring test-iouring.cpp
         DEFS $<$<BOOL:${PHOTON_ENABLE_URING}>:PHOTON_URING=on>)
     photon_add_test(test-iouring-uaf test-iouring-uaf.cpp)
+    if (PHOTON_ENABLE_URING)
+        target_link_libraries(test-iouring PRIVATE Photon::uring)
+        target_compile_definitions(test-iouring PRIVATE PHOTON_URING=on)
+    endif ()
 endif ()
 
 if (PHOTON_ENABLE_SPDK)

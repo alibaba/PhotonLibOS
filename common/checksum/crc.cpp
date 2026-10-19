@@ -728,7 +728,7 @@ v512 fold512(v512 a, v512 b, const v512* c) {
 PHOTON_CRC512_INLINE
 __m128i crc64ecma_hw_big_avx512(const uint8_t*& data, size_t& nbytes, uint64_t crc) {
     assert(nbytes >= 256);
-    v512 crc0 = _mm512_set1_epi64((long long)crc);
+    v512 crc0 = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0, (long long)crc);
     auto& ptr = (const v512*&)data;
     auto zmm0 = _mm512_loadu_si512(ptr++); zmm0 ^= crc0;
     auto zmm4 = _mm512_loadu_si512(ptr++);
@@ -782,7 +782,9 @@ uint64_t crc64ecma_hw(const uint8_t *buffer, size_t nbytes, uint64_t crc) {
 // Pop the basic SSE/PCLMUL pragma that was pushed at the beginning of this file
 #if defined(__x86_64__)
 #ifdef __clang__
+#ifdef __APPLE__ // otherwise it has been popped before the avx-512 code
 #pragma clang attribute pop
+#endif
 #else // __GNUC__
 #pragma GCC pop_options
 #endif

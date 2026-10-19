@@ -28,6 +28,7 @@ limitations under the License.
 #include <photon/net/http/client.h>
 #include <photon/net/http/url.h>
 #include <photon/net/utils.h>
+#include <photon/thread/vcpu-local.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -448,6 +449,7 @@ class OssClientImpl : public Client {
 
   ClientOptions m_oss_options;
   photon::net::http::Client* m_client = nullptr;
+  std::unique_ptr<photon::net::Resolver> m_resolver;
   Authenticator* m_authenticator = nullptr;
 };
 
@@ -463,24 +465,33 @@ static bool oss_resolve_filter_ipv6(void*, photon::net::IPAddr addr) {
 }
 
 // Resolver decorator enforcing a single address family: wraps a private
-// DefaultResolver, keeping only addresses that pass `filter`. Each OSS client
-// owns one, so its DNS cache is private and the filter is never bypassed.
+// DefaultResolver, keeping only addresses that pass `filter`. Caches are private
+// to each client/vCPU and retire at that vCPU's fini, even if the OSS client lives
+// longer. The wrapper itself owns no timer and can outlive the Photon runtime.
 class FilteredResolver : public photon::net::Resolver {
  public:
-  std::unique_ptr<photon::net::Resolver> inner{photon::net::new_default_resolver()};
+  static photon::net::Resolver* make_resolver(void*) {
+    return photon::net::new_default_resolver();
+  }
+  photon::VCPULocal<photon::net::Resolver> inner{{nullptr, &make_resolver}};
   Delegate<bool, photon::net::IPAddr> filter;
 
   explicit FilteredResolver(Delegate<bool, photon::net::IPAddr> filter) : filter(filter) {}
 
   photon::net::IPAddr resolve(std::string_view host) override {
-    return inner->resolve_filter(host, filter);
+    errno = 0;
+    auto* resolver = inner.get();
+    if (!resolver)
+      LOG_ERROR_RETURN(errno ? errno : ENOMEM, photon::net::IPAddr(),
+                       "failed to create the filtered OSS resolver");
+    return resolver->resolve_filter(host, filter);
   }
   // The HTTP client only calls resolve(); enforce the same filter here.
   photon::net::IPAddr resolve_filter(std::string_view host, Delegate<bool, photon::net::IPAddr>) override {
-    return inner->resolve_filter(host, filter);
+    return resolve(host);
   }
   void discard_cache(std::string_view host, photon::net::IPAddr ip) override {
-    inner->discard_cache(host, ip);
+    if (auto* resolver = inner.get_if()) resolver->discard_cache(host, ip);
   }
 };
 
@@ -512,7 +523,8 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
       auto filter = m_oss_options.ip_version == IPVersion::kIPv4Only
                         ? Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv4}
                         : Delegate<bool, photon::net::IPAddr>{nullptr, &oss_resolve_filter_ipv6};
-      m_client->set_resolver(new FilteredResolver(filter), true);
+      m_resolver.reset(new FilteredResolver(filter));
+      m_client->set_resolver(m_resolver.get(), false);
       break;
     }
     case IPVersion::kBoth:
@@ -553,6 +565,7 @@ OssClient::OssClient(const ClientOptions& options, Authenticator* authenticator)
 }
 
 OssClient::~OssClient() {
+  // Drop the borrowing client before member destruction releases m_resolver.
   delete m_client;
   delete m_authenticator;
 }

@@ -8,6 +8,14 @@
 #include <photon/thread/thread.h>
 
 #include <string>
+#include <chrono>
+#include <thread>
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern char** environ;
 
 #include "../oss.h"
 
@@ -16,6 +24,8 @@ using namespace photon::net;
 using namespace photon::net::http;
 
 namespace {
+
+std::string self_executable;
 
 // Set when a request actually reaches the proxy server.
 bool g_server_reached = false;
@@ -39,6 +49,66 @@ class NoopAuthenticator : public Authenticator {
   int sign(Headers&, const SignParameters&) override { return 0; }
   void set_credentials(CredentialParameters&&) override {}
 };
+
+// A fresh executable makes the old unbounded fini wait observable with a
+// parent-side deadline, without leaving a hung Photon thread in this test.
+int resolver_lifetime_child(IPVersion version) {
+  if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) != 0) return 1;
+  auto tcp = new_tcp_socket_server();
+  if (!tcp || tcp->bind_v4localhost() != 0 || tcp->listen() != 0) return 2;
+  tcp->timeout(1'000'000);
+  auto http = new_http_server();
+  http->add_handler({nullptr, &capture_handler});
+  tcp->set_handler(http->get_connection_handler());
+  if (tcp->start_loop() != 0) return 3;
+  ClientOptions opts;
+  opts.endpoint = "http://oss-test.example.com";
+  opts.bucket = "test-bucket";
+  opts.proxy = estring().appends("http://127.0.0.1:", tcp->getsockname().port);
+  opts.ip_version = version;
+  opts.retry_times = 0;
+  opts.request_timeout_us = 1'000'000;
+  auto client = new_oss_client(opts, new NoopAuthenticator());
+  if (!client) return 4;
+  ObjectHeaderMeta meta;
+  // Both outcomes go through the actual FilteredResolver and create its cache:
+  // IPv4 accepts the proxy, IPv6 rejects its IPv4 address.
+  auto result = client->head_object("test-obj", meta);
+  if ((version == IPVersion::kIPv4Only) != (result == 0)) return 5;
+  delete tcp;
+  delete http;
+  if (photon::fini() != 0) return 6;   // client deliberately still owns its filter
+  if (photon::init(photon::INIT_EVENT_DEFAULT, photon::INIT_IO_NONE) != 0) return 7;
+  client->head_object("test-obj", meta);   // retired cache is recreated on a new vCPU
+  if (photon::fini() != 0) return 8;
+  delete client;   // wrapper destruction also works after the runtime is gone
+  return 0;
+}
+
+TEST(OssResolverLifetime, client_can_outlive_runtime_after_filtered_resolution) {
+  for (const char* version : {"ipv4", "ipv6"}) {
+    char* args[] = {const_cast<char*>(self_executable.c_str()),
+                    const_cast<char*>("--oss-resolver-lifetime"),
+                    const_cast<char*>(version), nullptr};
+    pid_t pid = -1;
+    ASSERT_EQ(0, posix_spawnp(&pid, args[0], nullptr, nullptr, args, environ));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, WNOHANG);
+      if (waited == pid || (waited < 0 && errno != EINTR)) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+    if (waited != pid) {
+      kill(pid, SIGKILL);
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+    ASSERT_EQ(pid, waited) << version << " resolver held photon::fini() past the deadline";
+    ASSERT_TRUE(WIFEXITED(status)) << version;
+    EXPECT_EQ(0, WEXITSTATUS(status)) << version;
+  }
+}
 
 class OssIPVersionTest : public ::testing::Test {
  protected:
@@ -218,6 +288,10 @@ TEST_F(OssIPVersionV6Test, ipv4_only_rejects_ipv6_loopback) {
 
 int main(int argc, char** argv) {
   set_log_output_level(ALOG_INFO);
+  if (argc == 3 && std::string(argv[1]) == "--oss-resolver-lifetime")
+    return resolver_lifetime_child(std::string(argv[2]) == "ipv4"
+                                      ? IPVersion::kIPv4Only : IPVersion::kIPv6Only);
+  self_executable = argv[0];
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

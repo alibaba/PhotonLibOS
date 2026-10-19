@@ -65,6 +65,23 @@ std::string get_cookie(SimpleCookieJar *jar, std::string host) {
     return string(cookie);
 }
 
+TEST(cookie_jar, preserves_existing_cookie_and_other_headers) {
+    SimpleCookieJar jar;
+    std::unique_ptr<ResponseHeaderAdaptor> response(new_resp("fresh=value; Path=/"));
+    ASSERT_EQ(0, jar.get_cookies_from_headers("host", response.get()));
+    for (auto value : {"manual=value", ""}) {
+        char buffer[1024];
+        Request request(buffer, sizeof(buffer), Verb::GET, "http://host/");
+        ASSERT_EQ(0, request.headers.insert("cOoKiE", value));
+        ASSERT_EQ(0, request.headers.insert("Connection", "keep-alive"));
+        auto before = std::string(request.headers.serialized());
+        ASSERT_EQ(0, jar.set_cookies_to_headers(&request));
+        EXPECT_EQ(before, request.headers.serialized());
+        EXPECT_EQ(value, request.headers["Cookie"]);
+        EXPECT_EQ("keep-alive", request.headers["Connection"]);
+    }
+}
+
 TEST(cookie_jar, basic) {
     SimpleCookieJar c;
     auto resp1 = new_resp("key=value; para1; para2");
