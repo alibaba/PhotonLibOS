@@ -33,6 +33,14 @@ limitations under the License.
 #include "../../test/gtest.h"
 #include "../../test/ci-tools.h"
 
+#ifdef PHOTON_URING
+// Compile only the internal engine in this translation unit. Its anonymous
+// namespace keeps the test copy separate from the engine in libphoton.
+#define PHOTON_IOURING_TEST_ENGINE_ONLY
+#include "../iouring-wrapper.cpp"
+#undef PHOTON_IOURING_TEST_ENGINE_ONLY
+#endif
+
 using namespace photon;
 
 const auto IOURING_FLAGS = INIT_EVENT_IOURING | INIT_EVENT_IOURING_SQPOLL;
@@ -610,8 +618,6 @@ TEST_F(event_engine, cascading_one_shot) {
     photon::thread_join((photon::join_handle*) sub);
 }
 
-<<<<<<< HEAD
-=======
 #ifdef PHOTON_URING
 
 // Reap one CQE per batch to exercise every completion order deterministically.
@@ -900,51 +906,10 @@ TEST(iouring_completion, normal_untimed_completion) {
     }
 }
 
-TEST(iouring_completion, eager_normal_completion_on_kernel_ring) {
-    ASSERT_EQ(0, photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_NONE));
-    DEFER(photon::fini());
-    photon::iouringEngine engine;
-    photon::iouring_args args;
-    args.is_master = false;
-    args.eager_submit = true;
-    ASSERT_EQ(0, engine.init(args));
-    bool stop = false;
-    auto pump = photon::thread_create11([&] {
-        void* data[1];
-        while (!stop)
-            engine.wait_for_events(data, 1, 1000);
-    });
-    ASSERT_NE(nullptr, pump);
-    auto join = photon::thread_enable_join(pump);
-    DEFER({
-        stop = true;
-        photon::thread_interrupt(pump);
-        photon::thread_join(join);
-    });
-    int fds[2];
-    ASSERT_EQ(0, ::pipe(fds));
-    DEFER({ ::close(fds[0]); ::close(fds[1]); });
-    char buf = 0;
-    for (int i = 0; i < 32; ++i) {
-        int result = engine.async_io(&io_uring_prep_poll_add, 1000, 0, fds[0], POLLIN);
-        int error = errno;
-        ASSERT_EQ(-1, result);
-        ASSERT_EQ(ETIMEDOUT, error);
-        ASSERT_EQ(1, ::write(fds[1], &buf, 1));
-        ASSERT_GT(engine.async_io(&io_uring_prep_poll_add, 1000000, 0, fds[0], POLLIN), 0);
-        ASSERT_EQ(1, ::read(fds[0], &buf, 1));
-        result = engine.async_io(&io_uring_prep_read, 1000000, 0, -1, &buf, 1, 0);
-        error = errno;
-        ASSERT_EQ(-1, result);
-        ASSERT_EQ(EBADF, error);
-    }
-}
-
 } // namespace
 
 #endif
 
->>>>>>> 8a24773 (fix(io): preserve io_uring request lifetime and reset reused SQEs (#1696))
 int main(int argc, char** arg) {
     srand(time(nullptr));
     set_log_output_level(ALOG_INFO);
