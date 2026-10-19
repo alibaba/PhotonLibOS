@@ -904,6 +904,8 @@ struct SendBackoff {
     }
 };
 
+namespace detail {
+
 // After the queue's initial CPU pauses, let other coroutines make progress.
 struct ChannelPublicationWait {
     void operator()(uint64_t i) const {
@@ -916,6 +918,8 @@ struct ChannelPublicationWait {
 template <typename Q, typename T>
 using ChannelPopResult = decltype(std::declval<Q&>().pop(
     std::declval<T&>(), std::declval<void (*)()>(), ChannelPublicationWait{}));
+
+}  // namespace detail
 
 template <typename QueueType>
 class RingChannel : public QueueType {
@@ -988,8 +992,8 @@ public:
 
 protected:
     template <typename Q = QueueType>
-    ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
-        return QueueType::pop(x, [this] { notify_recvers(); }, ChannelPublicationWait{});
+    detail::ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+        return QueueType::pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
     }
     bool pop_with_baton(T& x, long) { return QueueType::pop(x); }
 
@@ -1130,8 +1134,8 @@ public:
 
 protected:
     template <typename Q = FlexQueueType>
-    ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
-        return queue->pop(x, [this] { notify_recvers(); }, ChannelPublicationWait{});
+    detail::ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+        return queue->pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
     }
     bool pop_with_baton(T& x, long) { return queue->pop(x); }
 
