@@ -263,13 +263,15 @@ int do_get_name(int fd, Getter getter, char* path, size_t count) {
 }
 
 int fill_uds_path(struct sockaddr_un& name, const char* path, size_t count) {
-    const int LEN = sizeof(name.sun_path) - 1;
+    const size_t LEN = sizeof(name.sun_path) - 1;
     if (count == 0) count = strlen(path);
     if (count > LEN)
         LOG_ERROR_RETURN(ENAMETOOLONG, -1, "pathname is too long (`>`)", count, LEN);
 
     memset(&name, 0, sizeof(name));
-    memcpy(name.sun_path, path, count + 1);
+    // The source may contain exactly count bytes without a terminator.
+    memcpy(name.sun_path, path, count);
+    name.sun_path[count] = '\0';
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     name.sun_len = 0;
 #endif
