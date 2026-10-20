@@ -261,6 +261,96 @@ TEST(simple_dom, fix_trail) {
     }
 }
 
+TEST(simple_dom, not_null_terminated) {
+    // texts are bounded by size, while the following chars must not be touched
+    char j0[] = R"({"t": true, "f" : false, "s": "x"}{"t":)";
+    auto n = estring_view(j0).find('}') + 1;
+    auto doc = parse(j0, n, DOC_JSON);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc, {{"t", "true"}, {"f", "false"}, {"s", "x"}});
+    using TYPE = Node::TYPE;
+    expect_types(doc, {{"t", TYPE::BOOLEAN}, {"f", TYPE::BOOLEAN}, {"s", TYPE::STRING}});
+    EXPECT_TRUE(doc["t"].to_bool());
+    EXPECT_FALSE(doc["f"].to_bool());
+    EXPECT_EQ(estring_view(j0 + n), R"({"t":)");
+
+    char j1[] = R"({"a":"}xxxxxxxx)";
+    n = estring_view(j1).find('}') + 1;
+    EXPECT_FALSE(parse(j1, n, DOC_JSON));
+    EXPECT_EQ(estring_view(j1 + n), "xxxxxxxx");
+
+    char x0[] = "<a><b k='v'>1</b><c>2</c></a><a>";
+    n = estring_view(x0).find("</a>") + 4;
+    doc = parse(x0, n, DOC_XML);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc["a"], {{"b", "1"}, {"c", "2"}});
+    EXPECT_EQ(doc["a"]["b"].get_attributes()["k"], "v");
+    EXPECT_EQ(estring_view(x0 + n), "<a>");
+
+    char x1[] = "<a><b>1</b></a  >";
+    doc = parse(x1, sizeof(x1) - 1, DOC_XML);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc["a"], {{"b", "1"}});
+
+    std::vector<std::string> xmls = {"<a/>", "<a></>", "<a></a><!-- -->", "<a></a><b>"};
+    for (auto& s : xmls)
+        EXPECT_FALSE(parse((char*)s.data(), s.size(), DOC_XML));
+}
+
+// all keys and values must refer to the input text in-situ, without copying
+static void expect_in_situ(Node node, const char* begin, const char* end) {
+    for (auto x = node.get(0); x; x = x.next()) {
+        for (auto s: {x.key(), x.value()}) {
+            if (s.empty()) continue;
+            EXPECT_GE(s.data(), begin);
+            EXPECT_LE(s.data() + s.size(), end);
+        }
+        expect_in_situ(x, begin, end);
+    }
+}
+
+TEST(simple_dom, in_situ) {
+    char j0[] = R"({"t": true, "f": false, "n": null, "i": -12, "pi": 3.14,
+        "e": "a\"b\\c", "a": [true, 1, "x", {"k": false}]})";
+    auto doc = parse(j0, sizeof(j0) - 1, DOC_JSON);
+    EXPECT_TRUE(doc);
+    expect_eq_kvs(doc, {{"t", "true"}, {"f", "false"}, {"i", "-12"},
+                        {"pi", "3.14"}, {"e", "a\"b\\c"}});
+    expect_eq_vals(doc["a"], {"true", "1", "x", ""});
+    EXPECT_EQ(doc["a"][3]["k"], "false");
+    expect_in_situ(doc, j0, j0 + sizeof(j0) - 1);
+
+    char x0[] = "<a k='v'><b>1</b><c d=\"e\">2</c></a>";
+    doc = parse(x0, sizeof(x0) - 1, DOC_XML);
+    EXPECT_TRUE(doc);
+    expect_in_situ(doc, x0, x0 + sizeof(x0) - 1);
+    expect_in_situ(doc["a"].get_attributes(), x0, x0 + sizeof(x0) - 1);
+    expect_in_situ(doc["a"]["c"].get_attributes(), x0, x0 + sizeof(x0) - 1);
+}
+
+TEST(simple_dom, leaf_children) {
+    // leaves and empty containers must have no children
+    char j0[] = R"({"s": "x", "i": 1, "t": true, "n": null, "o": {}, "a": []})";
+    auto doc = parse(j0, sizeof(j0) - 1, DOC_JSON);
+    EXPECT_TRUE(doc);
+    for (auto k: {"s", "i", "t", "n", "o", "a"}) {
+        auto x = doc[k];
+        EXPECT_TRUE(x);
+        EXPECT_EQ(x.num_children(), 0);
+        EXPECT_FALSE(x.get(0));
+        EXPECT_FALSE(x["k"]);
+    }
+
+    char x0[] = "<a k='v'><b>1</b><c/></a>";
+    doc = parse(x0, sizeof(x0) - 1, DOC_XML);
+    EXPECT_TRUE(doc);
+    for (auto x: {doc["a"]["b"], doc["a"]["c"], doc["a"].get_attributes()["k"]}) {
+        EXPECT_TRUE(x);
+        EXPECT_EQ(x.num_children(), 0);
+        EXPECT_FALSE(x.get(0));
+    }
+}
+
 TEST(simple_dom, yaml0) {
     static char yaml0[] = "{foo: 1, bar: [2, 3], john: doe}";
     auto doc = parse(yaml0, sizeof(yaml0)-1, DOC_YAML);
