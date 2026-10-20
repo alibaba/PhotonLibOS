@@ -8,11 +8,7 @@ on:
 
 jobs:
   centos8-gcc921-epoll-release:
-    runs-on: [self-hosted, Linux, X64]
-
-    container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+    runs-on: arc-acs-runner-set
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -48,11 +44,7 @@ jobs:
           ctest --timeout 3600 -V
 
   centos8-gcc921-epoll-debug:
-    runs-on: [self-hosted, Linux, X64]
-
-    container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
-      options: --cpus 4
+    runs-on: arc-acs-runner-set
 
     steps:
       - uses: szenius/set-timezone@v1.2
@@ -88,12 +80,7 @@ jobs:
           ctest --timeout 3600 -V
 
   centos8-gcc921-iouring-release:
-    runs-on: [self-hosted, Linux, X64]
-
-    container:
-      image: ghcr.io/coldwings/photon-ut-base:latest
-      # In order to run io_uring, the docker daemon should add --default-ulimit memlock=-1:-1
-      options: --cpus 4
+    runs-on: arc-acs-runner-set
 
     steps:
       - uses: szenius/set-timezone@v1.2
