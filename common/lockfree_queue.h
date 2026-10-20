@@ -914,10 +914,21 @@ struct ChannelPublicationWait {
     }
 };
 
-// Probe the MPMC hooks with a callable type; no function pointer is created.
+template <typename...>
+struct make_void {
+    using type = void;
+};
+
+// Only queues with publication hooks receive the Channel's wake/wait policy.
+template <typename Q, typename T, typename = void>
+struct has_publication_hook : std::false_type {};
+
 template <typename Q, typename T>
-using ChannelPopResult = decltype(std::declval<Q&>().pop(
-    std::declval<T&>(), std::declval<void (*)()>(), ChannelPublicationWait{}));
+struct has_publication_hook<
+    Q, T,
+    typename make_void<decltype(std::declval<Q&>().pop(
+        std::declval<T&>(), std::declval<void (*)()>(), ChannelPublicationWait{}))>::type>
+    : std::true_type {};
 
 }  // namespace detail
 
@@ -936,6 +947,7 @@ protected:
     uint64_t default_park_usec = 100UL * 1000;
 
     using T = decltype(std::declval<QueueType>().recv());
+    using PublicationHook = detail::has_publication_hook<QueueType, T>;
 
 public:
     using QueueType::empty;
@@ -959,7 +971,7 @@ public:
     }
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (pop_with_baton(x, 0)) {
+        if (pop_with_baton(x, PublicationHook{})) {
             after_recv();
             return x;
         }
@@ -967,7 +979,7 @@ public:
         photon::thread_yield();
         Timeout yield_timeout(max_yield_usec);
         uint64_t yield_turn = max_yield_turn;
-        while (!pop_with_baton(x, 0)) {
+        while (!pop_with_baton(x, PublicationHook{})) {
             if (yield_turn > 0 && !yield_timeout.expired()) {
                 yield_turn--;
                 photon::thread_yield();
@@ -991,11 +1003,10 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
-    template <typename Q = QueueType>
-    detail::ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+    bool pop_with_baton(T& x, std::true_type) {
         return QueueType::pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
     }
-    bool pop_with_baton(T& x, long) { return QueueType::pop(x); }
+    bool pop_with_baton(T& x, std::false_type) { return QueueType::pop(x); }
 
     void unpark_if_ready() { if (!empty()) idlers.unpark_one(); }
 
@@ -1063,6 +1074,7 @@ class FlexRingChannel {
     uint64_t default_park_usec = 100UL * 1000;   // safety net, see RingChannel
 
     using T = decltype(std::declval<FlexQueueType>().recv());
+    using PublicationHook = detail::has_publication_hook<FlexQueueType, T>;
 
     FlexRingChannel(FlexQueueType* q, uint64_t yield_turn, uint64_t yield_usec)
         : queue(q), default_yield_turn(yield_turn),
@@ -1098,7 +1110,7 @@ public:
 
     T recv(uint64_t max_yield_turn, uint64_t max_yield_usec) {
         T x;
-        if (pop_with_baton(x, 0)) {
+        if (pop_with_baton(x, PublicationHook{})) {
             after_recv();
             return x;
         }
@@ -1106,7 +1118,7 @@ public:
         photon::thread_yield();
         Timeout yield_timeout(max_yield_usec);
         uint64_t yield_turn = max_yield_turn;
-        while (!pop_with_baton(x, 0)) {
+        while (!pop_with_baton(x, PublicationHook{})) {
             if (yield_turn > 0 && !yield_timeout.expired()) {
                 yield_turn--;
                 photon::thread_yield();
@@ -1133,11 +1145,10 @@ public:
     uint64_t notification_pending() const { return idlers.inflight(); }
 
 protected:
-    template <typename Q = FlexQueueType>
-    detail::ChannelPopResult<Q, T> pop_with_baton(T& x, int) {
+    bool pop_with_baton(T& x, std::true_type) {
         return queue->pop(x, [this] { notify_recvers(); }, detail::ChannelPublicationWait{});
     }
-    bool pop_with_baton(T& x, long) { return queue->pop(x); }
+    bool pop_with_baton(T& x, std::false_type) { return queue->pop(x); }
 
     void unpark_if_ready() { if (!queue->empty()) idlers.unpark_one(); }
 
